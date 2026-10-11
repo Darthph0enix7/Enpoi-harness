@@ -76,10 +76,22 @@ export interface ApplyPipelineResult {
   baseArchive: { path: string; bytes: number; files: number; omitted: string[] } | null
   /** Why the base archive was not retained; null when it was or was not requested. */
   baseArchiveError: string | null
-  /** Per-update scan/snapshot statistics (one full-content scan per update). */
+  /** Per-update scan/snapshot/base statistics. */
   stats: {
     localScan: { files: number; bytes: number; ms: number }
     snapshotPaths: number
+    base: {
+      mode: 'none' | 'selective' | 'full'
+      candidates: number
+      members: number
+      extracted: number
+      missing: string[]
+      bytes: number
+      expectedBytes: number
+      ms: number
+      reused: boolean
+      dir: string
+    } | null
   }
 }
 
@@ -117,6 +129,14 @@ export interface RunApplyPipelineOptions {
   progressEverySteps?: number
   /** Wall-clock cap between stage ticks in ms (engine default 3000). */
   progressEveryMs?: number
+  /** Verified base archive; when set, the merge base is materialized selectively. */
+  baseArchivePath?: string
+  /** Checksum of the base archive (already verified by the caller). */
+  archiveSha?: string
+  /** Candidate-count cap above which the full archive is extracted. Default 2000. */
+  candidateCap?: number
+  /** Extraction tick interval in ms. Default 3000. */
+  tickMs?: number
 }
 
 /** Outcome of the apply pipeline. */
@@ -277,6 +297,72 @@ export function synthesizePristineArchive(options: {
  * @returns short human form
  */
 export function formatBytes(bytes: number): string
+
+/**
+ * Base members the plan can read, derived from the three manifests.
+ * @param previous - Installed release manifest.
+ * @param next - Target release manifest.
+ * @param local - Local tree manifest.
+ * @returns Sorted candidate paths (package.json included as sentinel).
+ */
+export function baseCandidates(
+  previous: CanonicalManifest,
+  next: CanonicalManifest,
+  local: CanonicalManifest,
+): string[]
+
+/**
+ * Materialize the merge base into a keyed, reusable work directory.
+ * @param options - Archive, work dir, manifests, cap and progress.
+ * @returns Materialization result.
+ */
+export function materializeBase(options: {
+  archivePath: string
+  baseDir: string
+  previous: CanonicalManifest
+  next: CanonicalManifest
+  local: CanonicalManifest
+  archiveSha?: string
+  candidates?: string[]
+  cap?: number
+  tickMs?: number
+  toVersion?: string
+  fromVersion?: string | null
+  progress?: (line: string) => void
+}): Promise<{
+  mode: 'none' | 'selective' | 'full'
+  candidates: number
+  members: number
+  extracted: number
+  missing: string[]
+  bytes: number
+  expectedBytes: number
+  ms: number
+  reused: boolean
+  dir: string
+}>
+
+/**
+ * Parse `tar -tv` long-format output into member names and sizes.
+ * @param output - Listing text.
+ * @returns Members in listing order.
+ */
+export function parseBaseListing(output: string): { name: string; size: number; directory: boolean }[]
+
+/**
+ * Map a member name to its tree-relative path under a detected layout.
+ * @param name - Member name.
+ * @param layout - Detected layout.
+ * @returns Relative path or null for directory entries.
+ */
+export function memberRelPath(name: string, layout: { prefixed: boolean; prefix?: string }): string | null
+
+/**
+ * sha256 of a UTF-8 string.
+ * @param text - Input text.
+ * @returns Lowercase hex digest.
+ */
+export function sha256Text(text: string): string
 
 /**
  * One 'applying' progress line for the completed prefix of a plan.

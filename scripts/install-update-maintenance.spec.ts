@@ -301,6 +301,42 @@ setup_pnpm; printf 'rc=%s PNPM=[%s] STORE=[%s] ENV=[%s]\n' "$?" "$PNPM" "$PNPM_S
   })
 })
 
+describe.skipIf(win32)('merge base work lifecycle', () => {
+  it('keeps materialized bases with their version, reaps orphans and stale transients', async () => {
+    const root = scratch()
+    const prefix = join(root, 'prefix')
+    const home = join(root, 'home')
+    mkdirSync(home, { recursive: true })
+    write(join(prefix, 'harness/2'), '.dsh-install-complete', '{"version": "2"}\n')
+    write(join(prefix, 'harness/.bases/work/2'), 'merge/file.txt', 'base bytes\n')
+    write(join(prefix, 'harness/.bases/work/ghost'), 'merge/stale.txt', 'stale\n')
+    const dead = spawn('sleep', ['30'])
+    const deadPid = dead.pid
+    dead.kill('SIGKILL')
+    await new Promise<void>((resolve) => { dead.on('exit', () => { resolve() }) })
+    write(join(prefix, `harness/.bases/work/3.full-${deadPid}`), 'bulk/file.txt', 'partial\n')
+
+    const reap = runLib(String.raw`
+PREFIX="$PREFIX_DIR"; DSH_HOME="$HOME_DIR"; NODE="$NODE_BIN"; PROFILE=web
+prune_orphaned_bases
+`, { PREFIX_DIR: prefix, HOME_DIR: home, NODE_BIN: process.execPath })
+    expect(reap.status).toBe(0)
+    expect(existsSync(join(prefix, 'harness/.bases/work/2/merge/file.txt'))).toBe(true)
+    expect(existsSync(join(prefix, 'harness/.bases/work/ghost'))).toBe(false)
+    expect(existsSync(join(prefix, `harness/.bases/work/3.full-${deadPid}`))).toBe(false)
+
+    const logFile = join(prefix, 'harness/lifecycle.log')
+    const prune = runLib(String.raw`
+PREFIX="$PREFIX_DIR"; DSH_HOME="$HOME_DIR"; NODE="$NODE_BIN"; PROFILE=web
+LOG_FILE="$LOG_PATH"
+prune_version_bases 2
+`, { PREFIX_DIR: prefix, HOME_DIR: home, NODE_BIN: process.execPath, LOG_PATH: logFile })
+    expect(prune.status).toBe(0)
+    expect(existsSync(join(prefix, 'harness/.bases/work/2'))).toBe(false)
+    expect(readFileSync(logFile, 'utf8')).toContain('pruned merge base for 2')
+  })
+})
+
 describe.skipIf(win32)('step numbering helpers', () => {
   it('prints N numbered steps with matching totals, and banners consume no step', () => {
     const result = runLib(String.raw`

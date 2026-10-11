@@ -488,6 +488,46 @@ export function supplementReleaseView(options) {
 // ── progress ────────────────────────────────────────────────────────────────
 
 /**
+ * sha256 of a UTF-8 string.
+ * @param text - Input text.
+ * @returns Lowercase hex digest.
+ */
+export function sha256Text(text) {
+  return crypto.createHash('sha256').update(text).digest('hex')
+}
+
+/**
+ * Cheap layout probe: read the first member name and stop the tar stream
+ * (SIGTERM once the first line is in hand), so a release-sized archive is not
+ * scanned twice just to learn its top-level layout.
+ */
+function probeBasePrefixed(archivePath) {
+  return new Promise((resolve) => {
+    const child = spawn('tar', [archivePath.endsWith('.gz') ? '-tzf' : '-tf', archivePath])
+    let first = ''
+    let done = false
+    const finish = (value) => {
+      if (done) return
+      done = true
+      try {
+        child.kill('SIGTERM')
+      } catch {
+        // already gone
+      }
+      resolve(value)
+    }
+    child.stdout?.on('data', chunk => {
+      if (first === '') {
+        first = chunk.toString().split('\n')[0] ?? ''
+        if (first !== '') finish(first)
+      }
+    })
+    child.once('error', () => finish(''))
+    child.once('close', () => finish(first))
+  })
+}
+
+/**
  * Human byte size for progress lines.
  * @param bytes - byte count
  * @returns short human form (e.g. "1.1 GiB")
@@ -558,6 +598,393 @@ function resolveProgressWriter(options) {
       // A closed or unwritable progress fd must never fail an update.
     }
   }
+}
+
+// ── merge base materialization ──────────────────────────────────────────────
+// A release base archive holds the whole installed tree (node_modules and
+// all). Extracting it in full on every delta update is minutes of silent I/O
+// for bytes the plan will almost never read. The engine consumes base bytes
+// only for: (a) merge candidates — release changed the path AND the local copy
+// diverges from the installed release; (b) supplement candidates — release
+// content unchanged but the mode changed or the local copy is missing, where
+// the local bytes cannot serve. Only those members are extracted; everything
+// else is never materialized. A missing member degrades exactly like today's
+// no-base path (keep-local + shipped sidecar), never a wrong merge.
+
+/**
+ * Base members the plan can need, derived from the three manifests before the
+ * plan exists: file merges (release changed, local diverged) plus supplement
+ * restores (release content unchanged, mode-only or locally missing).
+ * `package.json` is always included as the layout sentinel.
+ * @param previous - Installed release manifest.
+ * @param next - Target release manifest.
+ * @param local - Local tree manifest.
+ * @returns Sorted relative paths (always including `package.json` when known).
+ */
+export function baseCandidates(previous, next, local) {
+  const candidates = []
+  for (const [relPath, shipped] of Object.entries(next)) {
+    if (shipped.type !== 'file') continue
+    const prev = previous[relPath]
+    const localEntry = local[relPath]
+    if (prev !== undefined && prev.type === 'file') {
+      if (!contentEqual(prev, shipped)) {
+        // Release changed it: base bytes are needed only when the local copy
+        // also diverges from the installed release (both-changed merge).
+        if (localEntry !== undefined && localEntry.type === 'file' && !contentEqual(localEntry, prev)) candidates.push(relPath)
+      } else {
+        // Release content unchanged: supplement reads base only for mode-only
+        // changes and locally missing files.
+        const modeOnly = (prev.mode ?? 0) !== (shipped.mode ?? 0)
+        const locallyMissing = localEntry === undefined
+        if (modeOnly || locallyMissing) candidates.push(relPath)
+      }
+    }
+  }
+  if (previous['package.json']?.type === 'file' || next['package.json']?.type === 'file') candidates.push('package.json')
+  return [...new Set(candidates)].sort()
+}
+
+function baseMarkerPath(baseDir) {
+  return path.join(baseDir, '.dsh-base-manifest.json')
+}
+
+function readBaseMarker(baseDir) {
+  try {
+    const doc = JSON.parse(fs.readFileSync(baseMarkerPath(baseDir), 'utf8'))
+    return doc !== null && typeof doc === 'object' ? doc : null
+  } catch {
+    return null
+  }
+}
+
+function writeBaseMarker(baseDir, marker) {
+  const file = baseMarkerPath(baseDir)
+  const tmp = `${file}.tmp-${process.pid}`
+  fs.writeFileSync(tmp, `${JSON.stringify(marker, null, 2)}\n`)
+  fs.renameSync(tmp, file)
+}
+
+function wipeBaseDir(baseDir) {
+  for (const entry of fs.readdirSync(baseDir)) {
+    fs.rmSync(path.join(baseDir, entry), { recursive: true, force: true })
+  }
+}
+
+/** A safe archive member name (contains no traversal or control characters). */
+function assertSafeBaseMember(name) {
+  if (name.startsWith('/') || name.includes('\\') || /[\u0000-\u001f\u007f]/u.test(name)) {
+    throw new Error(`unsafe base archive member: ${JSON.stringify(name)}`)
+  }
+  const segments = name.split('/')
+  if (segments.some(segment => segment === '..')) throw new Error(`unsafe base archive member: ${JSON.stringify(name)}`)
+}
+
+/**
+ * Parse `tar -tv` long-format output into member names and sizes.
+ * @param output - Listing text.
+ * @returns Members in listing order.
+ */
+export function parseBaseListing(output) {
+  const members = []
+  // GNU long format: `perm user/group size YYYY-MM-DD HH:MM name`;
+  // bsdtar prints the owner and group as separate columns and its own time
+  // (month-day forms on some versions). The date anchor keeps the owner
+  // count tolerant while the size stays the numeric field before it.
+  const tail = '(?:\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}|\\S+\\s+\\d+\\s+\\d{2}:\\d{2}|\\S+\\s+\\d+\\s+\\d{4})'
+  const pattern = new RegExp(`^(\\S+)\\s+(?:\\S+\\s+){1,2}(\\d+)\\s+${tail}\\s+(.+)$`, 'u')
+  for (const raw of output.split('\n')) {
+    if (raw.trim() === '') continue
+    const match = pattern.exec(raw)
+    if (match === null) continue
+    const perm = match[1] ?? ''
+    const size = Number.parseInt(match[2] ?? '0', 10)
+    const rest = match[3] ?? ''
+    const name = rest.split(' -> ')[0] ?? ''
+    if (name === '') continue
+    assertSafeBaseMember(name)
+    members.push({ name, size, directory: perm.startsWith('d') })
+  }
+  return members
+}
+
+/**
+ * Strip a single top-level directory (or `./`) and return the relative path,
+ * or null when the member cannot map to a tree path.
+ * @param name - Member name.
+ * @param layout - Detected layout.
+ * @returns Relative path or null for directory entries.
+ */
+export function memberRelPath(name, layout) {
+  let rel = name
+  if (rel.endsWith('/')) rel = rel.slice(0, -1)
+  if (layout.prefixed) {
+    const slash = rel.indexOf('/')
+    if (slash === -1) return null
+    rel = rel.slice(slash + 1)
+  }
+  while (rel.startsWith('./')) rel = rel.slice(2)
+  if (rel === '' || rel === '.') return null
+  return rel
+}
+
+function detectBaseLayout(members) {
+  const names = members.map(member => member.name).filter(name => !name.endsWith('/') || true)
+  if (names.length === 0) return { prefixed: false }
+  let prefix = null
+  for (const name of names) {
+    const first = name.replace(/^\.\//u, '').split('/')[0] ?? ''
+    if (first === '' || first === '.') return { prefixed: false }
+    if (prefix === null) prefix = first
+    else if (prefix !== first) return { prefixed: false }
+  }
+  return { prefixed: true, prefix }
+}
+
+/**
+ * Verify the materialized candidate files against the installed release
+ * hashes. Mismatching files are removed (their path degrades to the no-base
+ * behavior) and reported.
+ */
+function verifyMaterialized(baseDir, expected, previous) {
+  const missing = []
+  let present = 0
+  let bytes = 0
+  for (const item of expected) {
+    const file = joinRel(baseDir, item.rel)
+    let stats = null
+    try {
+      stats = fs.lstatSync(file)
+    } catch {
+      stats = null
+    }
+    if (stats === null || !stats.isFile()) {
+      missing.push(item.rel)
+      continue
+    }
+    const expectedSha = previous[item.rel]?.sha256 ?? null
+    if (expectedSha !== null && sha256FileSync(file) !== expectedSha) {
+      fs.rmSync(file, { force: true })
+      missing.push(item.rel)
+      continue
+    }
+    present += 1
+    bytes += stats.size
+  }
+  return { present, bytes, missing }
+}
+
+/**
+ * Extract members (or the whole archive) with a ticked heartbeat. Plain
+ * progress lines every `tickMs`; the tar child is killed on failure.
+ */
+async function runBaseExtract(options) {
+  const { archivePath, baseDir, tickMs, emit } = options
+  const args = ['-x', '-f', archivePath, '-C', baseDir]
+  if (archivePath.endsWith('.gz')) args.splice(1, 0, '-z')
+  if (options.prefixed) args.push('--strip-components=1')
+  args.push('-v')
+  let listFile = null
+  if (options.members !== undefined) {
+    listFile = `${baseDir}.members-${process.pid}.txt`
+    fs.writeFileSync(listFile, `${options.members.join('\n')}\n`)
+    args.push('-T', listFile)
+  }
+  const startedAt = Date.now()
+  let files = 0
+  let output = ''
+  const child = spawn('tar', args)
+  const ticker = setInterval(() => {
+    const elapsed = Math.max(1, Math.round((Date.now() - startedAt) / 1000))
+    if (options.expectedBytes !== undefined && options.candidateRels !== undefined) {
+      let written = 0
+      for (const rel of options.candidateRels) {
+        try {
+          written += fs.statSync(joinRel(baseDir, rel)).size
+        } catch {
+          // not extracted yet
+        }
+      }
+      emit?.(`${options.label} ${formatBytes(written)} / ${formatBytes(options.expectedBytes)} (${elapsed}s)`)
+    } else {
+      emit?.(`${options.label} ${files.toLocaleString('en-US')} file(s) (${elapsed}s)`)
+    }
+  }, tickMs)
+  child.stdout?.on('data', chunk => {
+    output += chunk.toString()
+    // Each -v line is one extracted member; keep the count cheap.
+    files = output.split('\n').length - 1
+  })
+  let stderr = ''
+  child.stderr?.on('data', chunk => { stderr += chunk.toString() })
+  try {
+    const code = await new Promise((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', resolve)
+    })
+    if (code !== 0) throw new Error(`tar failed (${code}): ${stderr.trim() || 'no stderr'}`)
+  } finally {
+    clearInterval(ticker)
+    if (listFile !== null) fs.rmSync(listFile, { force: true })
+  }
+  return files
+}
+
+/**
+ * Materialize the merge base for one installed version. Selective extraction
+ * into the keyed, reusable work directory; above `cap` candidates (or when
+ * member listing/extraction fails) a full extraction into a transient sibling
+ * runs instead, and the caller removes it afterwards.
+ * @param options - Archive, work dir, manifests, cap and progress.
+ * @returns Materialization result (mode, counts, missing paths, timing).
+ */
+export async function materializeBase(options) {
+  const baseDir = options.baseDir
+  const emit = typeof options.progress === 'function' ? options.progress : null
+  const cap = options.cap ?? 2000
+  const tickMs = options.tickMs ?? 3000
+  const result = {
+    mode: 'none',
+    candidates: 0,
+    members: 0,
+    extracted: 0,
+    missing: [],
+    bytes: 0,
+    expectedBytes: 0,
+    ms: 0,
+    reused: false,
+    dir: baseDir,
+  }
+  fs.mkdirSync(baseDir, { recursive: true })
+  const archivePath = options.archivePath
+  if (archivePath === undefined || archivePath === '' || !fs.existsSync(archivePath)) return result
+  const startedAt = Date.now()
+  const candidates = [...(options.candidates ?? baseCandidates(options.previous, options.next, options.local))].sort()
+  result.candidates = candidates.length
+  const archiveSha = options.archiveSha ?? sha256FileSync(archivePath)
+
+  // Full fallback: too many candidates to bother with, or unusable metadata.
+  if (candidates.length > cap) {
+    const fullDir = `${baseDir}.full-${process.pid}`
+    fs.rmSync(fullDir, { recursive: true, force: true })
+    fs.mkdirSync(fullDir, { recursive: true })
+    emit?.(`merge base: ${candidates.length} candidate(s) exceed the cap ${cap}; extracting the full archive…`)
+    // A cheap first-member probe gives the layout without a full listing.
+    const firstMember = await probeBasePrefixed(archivePath)
+    const firstSegment = (firstMember.trim().replace(/^\.\//u, '').split('/')[0] ?? '')
+    const prefixed = firstSegment !== '' && firstSegment !== '.'
+    await runBaseExtract({ archivePath, baseDir: fullDir, prefixed, tickMs, emit, label: 'merge base: extracting' })
+    result.mode = 'full'
+    result.dir = fullDir
+    result.ms = Date.now() - startedAt
+    emit?.(`merge base: full archive materialized at ${fullDir} in ${result.ms}ms`)
+    return result
+  }
+
+  // Reuse check: a matching marker plus verified files skips extraction.
+  const fingerprint = sha256Text(`${archiveSha}\n${candidates.join('\n')}`)
+  const marker = readBaseMarker(baseDir)
+  if (marker !== null && marker.fingerprint === fingerprint) {
+    const expected = candidates
+      .filter(rel => !(marker.missing ?? []).includes(rel))
+      .map(rel => ({ rel }))
+    const verified = verifyMaterialized(baseDir, expected, options.previous)
+    if (verified.missing.length === 0) {
+      result.mode = 'selective'
+      result.reused = true
+      result.extracted = verified.present
+      result.bytes = verified.bytes
+      result.expectedBytes = verified.bytes
+      result.missing = [...(marker.missing ?? [])].sort()
+      result.members = expected.length
+      result.ms = Date.now() - startedAt
+      emit?.(`merge base: reusing the materialized base (${verified.present} file(s), ${formatBytes(verified.bytes)})`)
+      return result
+    }
+    // A previously materialized file is gone or corrupted: rebuild cleanly.
+    wipeBaseDir(baseDir)
+  }
+
+  // Selective path: list members, map the candidates, extract only those.
+  let listing = []
+  try {
+    const listed = spawnSync('tar', [archivePath.endsWith('.gz') ? '-tvzf' : '-tvf', archivePath], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })
+    if (listed.error) throw listed.error
+    if (listed.status !== 0) throw new Error(`tar listing failed (${listed.status})`)
+    listing = parseBaseListing(listed.stdout ?? '')
+  } catch (error) {
+    emit?.(`merge base: member listing failed (${error instanceof Error ? error.message : String(error)}); extracting the full archive…`)
+    const fullDir = `${baseDir}.full-${process.pid}`
+    fs.rmSync(fullDir, { recursive: true, force: true })
+    fs.mkdirSync(fullDir, { recursive: true })
+    await runBaseExtract({ archivePath, baseDir: fullDir, prefixed: false, tickMs, emit, label: 'merge base: extracting' })
+    result.mode = 'full'
+    result.dir = fullDir
+    result.ms = Date.now() - startedAt
+    return result
+  }
+  const layout = detectBaseLayout(listing)
+  const membersByRel = new Map()
+  for (const member of listing) {
+    const rel = memberRelPath(member.name, layout)
+    if (rel === null) continue
+    membersByRel.set(rel, member)
+  }
+  const expected = []
+  const missing = []
+  let expectedBytes = 0
+  for (const rel of candidates) {
+    const member = membersByRel.get(rel)
+    if (member === undefined) {
+      missing.push(rel)
+      continue
+    }
+    expected.push({ rel, member: member.name, size: member.size })
+    expectedBytes += member.size
+  }
+  result.expectedBytes = expectedBytes
+  result.members = expected.length
+  if (expected.length === 0) {
+    writeBaseMarker(baseDir, { schema: 'dsh-update-base/1', archive: path.basename(archivePath), archiveSha256: archiveSha, fingerprint, layout: layout.prefixed ? 'prefixed' : 'flat', members: 0, missing, extractedAt: new Date().toISOString() })
+    result.mode = 'selective'
+    result.missing = missing.sort()
+    result.ms = Date.now() - startedAt
+    return result
+  }
+  for (const entry of fs.readdirSync(baseDir)) {
+    if (entry === '.dsh-base-manifest.json') continue
+    fs.rmSync(path.join(baseDir, entry), { recursive: true, force: true })
+  }
+  emit?.(`merge base: extracting ${formatBytes(expectedBytes)} from ${path.basename(archivePath)} (${expected.length} of ${candidates.length} member(s))…`)
+  await runBaseExtract({
+    archivePath,
+    baseDir,
+    prefixed: layout.prefixed,
+    members: expected.map(item => item.member),
+    expectedBytes,
+    candidateRels: expected.map(item => item.rel),
+    tickMs,
+    emit,
+    label: 'merge base: extracting',
+  })
+  const verified = verifyMaterialized(baseDir, expected, options.previous)
+  result.mode = 'selective'
+  result.extracted = verified.present
+  result.bytes = verified.bytes
+  result.missing = [...new Set([...missing, ...verified.missing])].sort()
+  writeBaseMarker(baseDir, {
+    schema: 'dsh-update-base/1',
+    archive: path.basename(archivePath),
+    archiveSha256: archiveSha,
+    fingerprint,
+    layout: layout.prefixed ? 'prefixed' : 'flat',
+    members: expected.length,
+    missing: result.missing,
+    extractedAt: new Date().toISOString(),
+  })
+  result.ms = Date.now() - startedAt
+  emit?.(`merge base: extracted ${result.extracted} file(s), ${formatBytes(result.bytes)} in ${result.ms}ms${result.missing.length > 0 ? ` (${result.missing.length} missing; they keep local bytes with shipped sidecars)` : ''}`)
+  return result
 }
 
 // ── retained pristine base archive ──────────────────────────────────────────
@@ -693,15 +1120,6 @@ export async function runApplyPipeline(options) {
       to: options.toVersion,
       platform: options.platform ?? null,
     })
-    const supplemented = supplementReleaseView({
-      viewDir: options.releaseRoot,
-      previous,
-      next,
-      localRoot: options.localRoot,
-      baseRoot: options.baseRoot,
-    })
-    transport.supplemented = supplemented.supplemented.length
-    transport.unresolved = supplemented.unresolved.length
   }
 
   const progress = resolveProgressWriter(options)
@@ -719,6 +1137,41 @@ export async function runApplyPipeline(options) {
   })
   const localScanCompletedAt = Date.now()
   const localScanMs = localScanCompletedAt - scanStartedAt
+
+  // Materialize only the base members the plan can read (§ merge base). Runs
+  // after the local scan (candidates need it) and before the release-view
+  // supplement (which resolves some paths against the base).
+  let baseInfo = null
+  if (typeof options.baseArchivePath === 'string' && options.baseArchivePath !== '') {
+    baseInfo = await materializeBase({
+      archivePath: options.baseArchivePath,
+      baseDir: options.baseRoot,
+      previous,
+      next,
+      local,
+      ...(options.archiveSha === undefined ? {} : { archiveSha: options.archiveSha }),
+      ...(options.candidateCap === undefined ? {} : { cap: options.candidateCap }),
+      ...(options.tickMs === undefined ? {} : { tickMs: options.tickMs }),
+      toVersion: options.toVersion,
+      fromVersion: options.fromVersion ?? null,
+      ...(progress === null ? {} : { progress }),
+    })
+    if (baseInfo.mode === 'full') transport.base = 'full-temporary'
+    if (baseInfo.missing.length > 0) transport.baseMissing = baseInfo.missing.length
+  }
+
+  if (archives.length > 0) {
+    const supplemented = supplementReleaseView({
+      viewDir: options.releaseRoot,
+      previous,
+      next,
+      localRoot: options.localRoot,
+      baseRoot: options.baseRoot,
+    })
+    transport.supplemented = supplemented.supplemented.length
+    transport.unresolved = supplemented.unresolved.length
+  }
+
   const pins = options.pinsPath ? await engine.loadPins(options.pinsPath) : []
   const tombstones = options.tombstonesPath ? await engine.loadTombstones(options.tombstonesPath) : []
   const plan = await engine.buildPlan({
@@ -812,6 +1265,10 @@ export async function runApplyPipeline(options) {
       process.stderr.write(`update-delta: merge base not retained (${baseArchiveError})\n`)
     }
   }
+  // A full-fallback extraction is transient: it is large and never reused.
+  if (baseInfo !== null && baseInfo.mode === 'full' && baseInfo.dir !== options.baseRoot) {
+    fs.rmSync(baseInfo.dir, { recursive: true, force: true })
+  }
   const result = {
     schema: 'dsh-update-apply/1',
     fromVersion: options.fromVersion ?? null,
@@ -841,6 +1298,7 @@ export async function runApplyPipeline(options) {
     stats: {
       localScan: { files: localScanFiles, bytes: localScanBytes, ms: localScanMs },
       snapshotPaths,
+      base: baseInfo,
     },
   }
   return { status: applied.status, exitCode, result, plan, transport, view }
@@ -872,7 +1330,9 @@ const USAGE = `usage: update-delta.mjs apply --engine <bundle.js> --local <dir> 
        --journal <file> --to-version <v> [--from-version <v>] [--diff <archive>]...
        [--backup <dir>] [--pins <file>] [--tombstones <file>]
        [--stop-after-actions <n>] [--timestamp <iso>] [--platform <os-arch>]
-       [--base-mode <retained|cache|empty>] [--persist-base <archive.tar>]
+       [--base-mode <retained|cache|empty>] [--base-archive <archive>]
+       [--base-archive-sha <hex>] [--base-candidate-cap <n>] [--base-tick-ms <ms>]
+       [--persist-base <archive.tar>]
        [--progress-fd <n>] [--progress-every-actions <n>]
        [--progress-every-bytes <n>] [--progress-every-steps <n>]
        [--progress-every-ms <n>] [--out <result.json>]
@@ -919,6 +1379,10 @@ export async function main(argv) {
     ...(args['progress-every-bytes'] === undefined ? {} : { progressEveryBytes: Number.parseInt(args['progress-every-bytes'], 10) }),
     ...(args['progress-every-steps'] === undefined ? {} : { progressEverySteps: Number.parseInt(args['progress-every-steps'], 10) }),
     ...(args['progress-every-ms'] === undefined ? {} : { progressEveryMs: Number.parseInt(args['progress-every-ms'], 10) }),
+    ...(args['base-archive'] === undefined ? {} : { baseArchivePath: args['base-archive'] }),
+    ...(args['base-archive-sha'] === undefined ? {} : { archiveSha: args['base-archive-sha'] }),
+    ...(args['base-candidate-cap'] === undefined ? {} : { candidateCap: Number.parseInt(args['base-candidate-cap'], 10) }),
+    ...(args['base-tick-ms'] === undefined ? {} : { tickMs: Number.parseInt(args['base-tick-ms'], 10) }),
   }
   const outcome = await runApplyPipeline(options)
   if (args.out !== undefined) fs.writeFileSync(args.out, `${JSON.stringify(outcome.result, null, 2)}\n`)

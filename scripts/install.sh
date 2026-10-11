@@ -5240,12 +5240,17 @@ delta_fetch_asset() { # name url dir required [label] -> 0 ok
 # Every candidate is checksum-verified; when none verifies the base stays
 # empty and the engine keeps both-changed files locally with a shipped sidecar
 # (reported). Sets DELTA_BASE_MODE to retained|cache|empty.
-delta_prepare_base() { # from base_dir -> 0 full base, 1 empty fallback
-  local from="$1" base_dir="$2" candidate="" expected actual
+delta_prepare_base() { # from -> 0 candidate archive found, 1 empty fallback
+  # Selection and checksum verification only: the archive stays untouched here.
+  # Materialization happens in the apply module (scripts/update-delta.mjs),
+  # which extracts just the members the plan can read — a full release archive
+  # is 100K+ files and minutes of I/O the merge almost never needs.
+  local from="$1" candidate="" expected actual
   local slot_gz="$PREFIX/harness/.bases/$from.tar.gz" slot_tar="$PREFIX/harness/.bases/$from.tar"
   local cache_archive="$PREFIX/harness/.cache/dsh-harness-$from-$OS-$ARCH.tar.gz"
   DELTA_BASE_MODE="empty"
-  mkdir -p "$base_dir" || return 1
+  DELTA_BASE_ARCHIVE=""
+  DELTA_BASE_ARCHIVE_SHA=""
   if [ -s "$slot_gz" ] && [ -s "$slot_gz.sha256" ]; then candidate="$slot_gz"
   elif [ -s "$slot_tar" ] && [ -s "$slot_tar.sha256" ]; then candidate="$slot_tar"
   elif [ -s "$cache_archive" ] && [ -s "$cache_archive.sha256" ]; then candidate="$cache_archive"
@@ -5254,35 +5259,16 @@ delta_prepare_base() { # from base_dir -> 0 full base, 1 empty fallback
     expected="$(awk 'NR==1 {print $1}' "$candidate.sha256" 2>/dev/null || true)"
     actual="$(sha256_of "$candidate" 2>/dev/null || true)"
     if [ -n "$actual" ] && [ "$actual" = "$expected" ]; then
-      local extracted=0 extract_started
-      # A release-sized base archive is hundreds of megabytes: say what is
-      # happening and how long it took (this used to be a silent 30-40 s gap).
-      substep_info "merge base: extracting $(human_bytes "$(file_size "$candidate")") from $(basename "$candidate")…"
-      extract_started="$(date +%s)"
+      DELTA_BASE_ARCHIVE="$candidate"
+      DELTA_BASE_ARCHIVE_SHA="$actual"
       case "$candidate" in
-        *.tar.gz) tar -xzf "$candidate" -C "$base_dir" 2>/dev/null || extracted=1;;
-        *.tar) tar -xf "$candidate" -C "$base_dir" 2>/dev/null || extracted=1;;
-        *) extracted=1;;
+        "$PREFIX/harness/.bases/"*) DELTA_BASE_MODE="retained"; log "delta: pristine merge base archive: $candidate";;
+        *) DELTA_BASE_MODE="cache"; log "delta: pristine merge base from the legacy cached release archive ($from)";;
       esac
-      log "merge base: extraction finished in $(( $(date +%s) - extract_started ))s (exit $extracted)"
-      if [ "$extracted" = 0 ]; then
-        flatten_stage "$base_dir"
-        if [ -f "$base_dir/package.json" ]; then
-          case "$candidate" in
-            "$PREFIX/harness/.bases/"*) DELTA_BASE_MODE="retained"; log "delta: pristine merge base from the retained per-version archive ($candidate)";;
-            *) DELTA_BASE_MODE="cache"; log "delta: pristine merge base from the legacy cached release archive ($from)";;
-          esac
-          return 0
-        fi
-        warn "delta: merge base archive $candidate carries no package.json; merge base unavailable"
-      else
-        warn "delta: could not extract the merge base archive $candidate"
-      fi
-    else
-      warn "delta: merge base archive $candidate failed its checksum; merge base unavailable"
+      return 0
     fi
+    warn "delta: merge base archive $candidate failed its checksum; merge base unavailable"
   fi
-  find "$base_dir" -mindepth 1 -delete 2>/dev/null || rm -rf "$base_dir"/* 2>/dev/null || true
   log "delta: no pristine merge base for $from; both-changed files will keep local bytes with shipped sidecars"
   return 1
 }
@@ -5326,9 +5312,16 @@ delta_discard_staging() {
 
 delta_cleanup_scratch() {
   local path=""
-  for path in "$DELTA_RUN_DIR" "$DELTA_RELEASE_DIR" "$DELTA_BASE_DIR"; do
+  for path in "$DELTA_RUN_DIR" "$DELTA_RELEASE_DIR"; do
     [ -n "$path" ] && rm -rf "$path"
   done
+  # The keyed work directory is reused across runs; its lifecycle is version
+  # retention (prune_version_bases). Only a transient empty-base scratch dir
+  # is removed here.
+  case "$DELTA_BASE_DIR" in
+    "$PREFIX/harness/.bases/work/"*) : ;;
+    *) [ -n "$DELTA_BASE_DIR" ] && rm -rf "$DELTA_BASE_DIR";;
+  esac
   DELTA_RUN_DIR=""; DELTA_RELEASE_DIR=""; DELTA_BASE_DIR=""
 }
 
@@ -5438,6 +5431,10 @@ process.stdout.write(JSON.stringify({
   downloadedBytes: Number(process.argv[4] || 0),
   fullTarballBytes: process.argv[5] === "" ? null : Number(process.argv[5]),
   base: result.transport?.base ?? null,
+  baseCandidates: result.stats?.base?.candidates ?? null,
+  baseExtracted: result.stats?.base?.extracted ?? null,
+  baseReused: result.stats?.base?.reused ?? null,
+  baseMissing: Array.isArray(result.stats?.base?.missing) ? result.stats.base.missing.length : null,
   baseArchive: process.argv[6] === "" ? null : { path: process.argv[6], bytes: Number(process.argv[7] || 0) },
   counts: { replaced: counts.replace ?? 0, added: counts.add ?? 0, merged: counts.merge ?? 0, keptLocal: counts["keep-local"] ?? 0, untracked: counts["keep-untracked"] ?? 0, pinned: counts["pin-skip"] ?? 0, deleted: counts.delete ?? 0, restored: counts.restore ?? 0, conflicts: result.plan?.conflicts ?? 0 },
   preserved: Array.isArray(result.report?.preserved) ? result.report.preserved.length : 0,
@@ -5458,13 +5455,24 @@ delta_apply_delta() { # backup_dir [retry]
   DELTA_STAGING_DIR="$PREFIX/harness/.staging-$to"
   DELTA_RUN_DIR="$PREFIX/harness/.update-$to-$$"
   DELTA_RELEASE_DIR="$PREFIX/harness/.release-$to-$$"
-  DELTA_BASE_DIR="$PREFIX/harness/.base-$from-$$"
   engine="$(update_engine_bundle "$PREFIX/harness/$current" 2>/dev/null || true)"
   if [ -z "$engine" ]; then
     warn "delta: the active tree carries no update engine; using the full path"
     return 2
   fi
-  mkdir -p "$cache" "$DELTA_RUN_DIR" "$DELTA_RELEASE_DIR" "$DELTA_BASE_DIR" || { warn "delta: could not create scratch directories"; return 1; }
+  mkdir -p "$cache" "$DELTA_RUN_DIR" "$DELTA_RELEASE_DIR" || { warn "delta: could not create scratch directories"; return 1; }
+  # The pristine base is materialized selectively from the verified archive
+  # into a per-version work directory (reused across runs); without an archive
+  # the engine runs with an empty base and degrades per path.
+  if delta_prepare_base "$from"; then
+    base_mode="$DELTA_BASE_MODE"
+    DELTA_BASE_DIR="$PREFIX/harness/.bases/work/$from"
+    mkdir -p "$DELTA_BASE_DIR" || { warn "delta: could not create the merge base work directory"; return 1; }
+  else
+    base_mode="empty"
+    DELTA_BASE_DIR="$PREFIX/harness/.base-$from-$$"
+    mkdir -p "$DELTA_BASE_DIR" || { warn "delta: could not create scratch directories"; return 1; }
+  fi
   printf '%s' "$$" > "$DELTA_STAGING_DIR.owner" 2>/dev/null || true
   chain_total="$(grep -c . "$DELTA_CHAIN_FILE" 2>/dev/null || printf '0')"
   prev_asset="manifest-$platform-$from.json.gz"
@@ -5479,8 +5487,6 @@ delta_apply_delta() { # backup_dir [retry]
     delta_cleanup_scratch; return 2
   fi
   DELTA_DOWNLOAD_BYTES=$((DELTA_DOWNLOAD_BYTES + $(file_size "$DELTA_RUN_DIR/$next_asset")))
-  delta_prepare_base "$from" "$DELTA_BASE_DIR"
-  base_mode="$DELTA_BASE_MODE"
   while IFS=$'\t' read -r name tag; do
     [ -n "$name" ] || continue
     chain_count=$((chain_count + 1))
@@ -5512,6 +5518,11 @@ delta_apply_delta() { # backup_dir [retry]
     --out "$DELTA_RUN_DIR/result.json"
     "${apply_args[@]}"
   )
+  if [ -n "$DELTA_BASE_ARCHIVE" ]; then
+    apply_args+=(--base-archive "$DELTA_BASE_ARCHIVE" --base-archive-sha "$DELTA_BASE_ARCHIVE_SHA")
+    [ -n "${DSH_BASE_CANDIDATE_CAP:-}" ] && apply_args+=(--base-candidate-cap "$DSH_BASE_CANDIDATE_CAP")
+    [ -n "${DSH_BASE_TICK_MS:-}" ] && apply_args+=(--base-tick-ms "$DSH_BASE_TICK_MS")
+  fi
   if [ -f "$DSH_HOME/update/pins.yaml" ]; then apply_args+=(--pins "$DSH_HOME/update/pins.yaml"); fi
   local tombstone_file=""
   for tombstone_file in "$DSH_HOME/update/tombstones.txt" "$DSH_HOME/update/tombstones.yaml"; do
@@ -5629,13 +5640,21 @@ delta_apply_full() { # release_tree [retry]
   DELTA_STAGING_DIR="$PREFIX/harness/.staging-$to"
   DELTA_RUN_DIR="$PREFIX/harness/.update-$to-$$"
   DELTA_RELEASE_DIR=""
-  DELTA_BASE_DIR="$PREFIX/harness/.base-$from-$$"
   engine="$(update_engine_bundle "$PREFIX/harness/$current" "$release" 2>/dev/null || true)"
   if [ -z "$engine" ]; then
     log "full update: no preservation engine available in either tree; using the legacy install path"
     return 1
   fi
-  mkdir -p "$DELTA_RUN_DIR" "$DELTA_BASE_DIR" || return 1
+  if delta_prepare_base "$from"; then
+    base_mode="$DELTA_BASE_MODE"
+    DELTA_BASE_DIR="$PREFIX/harness/.bases/work/$from"
+    mkdir -p "$DELTA_BASE_DIR" || return 1
+  else
+    base_mode="empty"
+    DELTA_BASE_DIR="$PREFIX/harness/.base-$from-$$"
+    mkdir -p "$DELTA_BASE_DIR" || return 1
+  fi
+  mkdir -p "$DELTA_RUN_DIR" || return 1
   printf '%s' "$$" > "$DELTA_STAGING_DIR.owner" 2>/dev/null || true
   # The numbered transport step was printed once by the caller; a delta
   # fallback adds an un-numbered banner so the count stays 1..N.
@@ -5650,8 +5669,6 @@ delta_apply_full() { # release_tree [retry]
     delta_cleanup_scratch
     return 1
   fi
-  delta_prepare_base "$from" "$DELTA_BASE_DIR"
-  base_mode="$DELTA_BASE_MODE"
   apply_args=(
     apply
     --engine "$engine"
@@ -5675,6 +5692,11 @@ delta_apply_full() { # release_tree [retry]
   done
   if [ -n "${DSH_UPDATE_STOP_AFTER_ACTIONS:-}" ]; then apply_args+=(--stop-after-actions "$DSH_UPDATE_STOP_AFTER_ACTIONS"); fi
   if [ -n "$backup" ] && [ -d "$backup" ]; then apply_args+=(--backup "$PREFIX/harness/.backup-$(date +%Y%m%d-%H%M%S)-tree"); fi
+  if [ -n "$DELTA_BASE_ARCHIVE" ]; then
+    apply_args+=(--base-archive "$DELTA_BASE_ARCHIVE" --base-archive-sha "$DELTA_BASE_ARCHIVE_SHA")
+    [ -n "${DSH_BASE_CANDIDATE_CAP:-}" ] && apply_args+=(--base-candidate-cap "$DSH_BASE_CANDIDATE_CAP")
+    [ -n "${DSH_BASE_TICK_MS:-}" ] && apply_args+=(--base-tick-ms "$DSH_BASE_TICK_MS")
+  fi
   if [ "$QUIET" != 1 ] && [ "$JSON_OUT" != 1 ]; then
     apply_args+=(--progress-fd 3)
     if [ -n "${DSH_UPDATE_PROGRESS_EVERY_ACTIONS:-}" ]; then apply_args+=(--progress-every-actions "$DSH_UPDATE_PROGRESS_EVERY_ACTIONS"); fi
@@ -5976,6 +5998,13 @@ prune_version_bases() { # version
     [ -n "$sz" ] && freed="${freed}${freed:+, }$sz"
     rm -f "$f"
   done
+  # The selectively materialized base follows its version too (it is useless
+  # once the tree leaves retention).
+  if [ -d "$bases/work/$name" ]; then
+    sz="$(du -sh "$bases/work/$name" 2>/dev/null | awk '{print $1}')"
+    [ -n "$sz" ] && freed="${freed}${freed:+, }$sz"
+    rm -rf "$bases/work/$name"
+  fi
   [ -n "$freed" ] && log "pruned merge base for $name (freed $freed)"
   return 0
 }
@@ -6058,6 +6087,28 @@ prune_orphaned_bases() {
       if rm -rf -- "$b"; then removed=$((removed + 1)); else warn "could not prune merge base $bname"; fi
     fi
   done
+  # Materialized work dirs follow their version tree; transient full/tmp
+  # extraction dirs are pid-suffixed and reaped once their owner is gone.
+  local work_root="$PREFIX/harness/.bases/work" w wname wpid
+  if [ -d "$work_root" ]; then
+    for w in "$work_root"/*; do
+      [ -e "$w" ] || continue
+      wname="$(basename "$w")"
+      case "$wname" in
+        *.full-*|*.tmp-*)
+          wpid="${wname##*-}"
+          case "$wpid" in ''|*[!0-9]*) : ;; *) kill -0 "$wpid" 2>/dev/null && continue;; esac
+          rm -rf -- "$w" 2>/dev/null && removed=$((removed + 1))
+          continue
+          ;;
+      esac
+      if [ ! -d "$PREFIX/harness/$wname" ] || [ ! -f "$PREFIX/harness/$wname/.dsh-install-complete" ]; then
+        sz="$(du -sh "$w" 2>/dev/null | awk '{print $1}')"
+        log "pruning orphaned materialized merge base $wname${sz:+ (freed $sz)}"
+        if rm -rf -- "$w"; then removed=$((removed + 1)); else warn "could not prune materialized base $wname"; fi
+      fi
+    done
+  fi
   [ "$removed" -gt 0 ] && log "pruned $removed orphaned merge-base/stale-synthesis artifact(s)"
   return 0
 }

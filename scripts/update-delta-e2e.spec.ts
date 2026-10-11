@@ -581,6 +581,17 @@ async function runUpdateUntilLine(
   })
 }
 
+/** Recursive file count below a directory (small bases only). */
+function baseFileCount(dir: string): number {
+  let count = 0
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.name.startsWith('.')) continue
+    if (entry.isDirectory()) count += baseFileCount(join(dir, entry.name))
+    else count += 1
+  }
+  return count
+}
+
 function currentTarget(prefix: string): string {
   return readlinkSync(join(prefix, 'harness/current'))
 }
@@ -708,6 +719,15 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     // Retention K=3: v2, v1, and exactly one older complete tree survive.
     const kept = completeVersions(fixture.prefix)
     expect(kept).toEqual(['1', '2', 'old-a'])
+
+    // The merge base was materialized selectively: the work directory holds
+    // only the plan's candidates (plus the marker), not the release tree.
+    const baseWork = join(fixture.prefix, 'harness/.bases/work/1')
+    expect(existsSync(join(baseWork, '.dsh-base-manifest.json'))).toBe(true)
+    expect(baseFileCount(baseWork)).toBeLessThanOrEqual(8)
+    expect(update.baseCandidates).toBeGreaterThan(0)
+    expect(update.baseExtracted).toBeGreaterThan(0)
+    expect(update.baseReused).toBe(false)
 
     // Engine report on disk (stable path, survives scratch cleanup).
     const reportFile = join(fixture.prefix, 'harness', '.last-update-2.json')
@@ -897,6 +917,8 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(delta.stderr).toContain('apply: seeding ')
     expect(delta.stderr).toMatch(/apply: \d+\/\d+ actions — /u)
     expect(delta.stderr).toContain('verify: checking the staged tree')
+    expect(delta.stderr).toContain('merge base: extracting')
+    expect(delta.stderr).toContain('merge base: extracted ')
     expect(delta.stderr).toContain('merge base: retaining the pristine merge base')
     expect(delta.stderr).toContain('merge base: retained ')
     expect(delta.stderr).toContain('switch: current → 2')
@@ -948,11 +970,15 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(stateField(fixture.prefix, 'version')).toBe('1')
     expect(existsSync(join(fixture.prefix, 'harness', '.staging-2.owner')) || existsSync(join(fixture.prefix, 'harness', '.staging-2'))).toBe(true)
     // The next run continues from whatever staging/journal state it finds.
-    const resumed = await runUpdate(fixture)
+    const resumed = await runUpdate(fixture, {}, [], { json: false })
     expect(resumed.status, resumed.stderr).toBe(0)
     expect(currentTarget(fixture.prefix)).toBe('2')
     expect(markerVersion(fixture.prefix)).toBe('2')
     expect(stateField(fixture.prefix, 'version')).toBe('2')
+    // The materialized base survives the interrupt: the resume reuses it
+    // instead of extracting the archive again.
+    expect(resumed.stderr).toContain('merge base: reusing the materialized base')
+    expect(resumed.stderr).not.toContain('merge base: extracting')
   }, 240_000)
 
   it.skipIf(!ptyAvailable)('renders TTY progress for the delta path through a pty', async () => {
