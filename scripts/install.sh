@@ -6934,10 +6934,12 @@ do_update() {
   if [ "$WRITE_RC" = 1 ]; then write_rc; fi
   prune_versions "$TREE_DIR_NAME" "$current"
   prune_update_artifacts
-  # Restamp both retained trees' scan indexes after all hardlink churn
-  # (staging discard, patches, prune): the next update scans stat-only.
+  # Restamp the NEW active tree's scan index after all hardlink churn
+  # (staging discard, patches, prune): the next update scans it stat-only.
+  # The superseded tree is deliberately not refreshed (~5s saved per update):
+  # the next update never scans it; only a rollback-then-re-update would
+  # cold-scan it once.
   update_delta_refresh_index "$PREFIX/harness/$TREE_DIR_NAME" "$(update_engine_bundle "$PREFIX/harness/$TREE_DIR_NAME" 2>/dev/null || true)" "$TREE_DIR_NAME"
-  [ "$current" != "$TREE_DIR_NAME" ] && update_delta_refresh_index "$PREFIX/harness/$current" "$(update_engine_bundle "$PREFIX/harness/$current" 2>/dev/null || true)" "$current"
   # Planner scratch files served this run only; their PID suffix keeps a
   # concurrent invocation's files while the matching install-time cleanup
   # reaps leftovers from crashed runs.
