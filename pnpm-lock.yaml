@@ -9395,6 +9395,8 @@ importers:
         specifier: workspace:*
         version: link:../../test-support/loader-smoke
 
+  packages/host/update-engine: {}
+
   packages/host/webserver:
     dependencies:
       '@deepseek-ai/schemastery':

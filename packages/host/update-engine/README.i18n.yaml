@@ -1,0 +1,61 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/host/update-engine/README.md
+/:
+  en: 325a35d37b7ab1a0
+  zh: 525d93f9ff8c6b46
+/deepseek-ai-dsh-host-update-engine:
+  en: 398787cd535a155e
+  zh: 661e0d1a5e13d350
+/deepseek-ai-dsh-host-update-engine/summary:
+  en: f645392c19144a67
+  zh: ff122824313b0dc6
+/deepseek-ai-dsh-host-update-engine/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: a6b8c103b0922d67
+/deepseek-ai-dsh-host-update-engine/use-this-package:
+  en: bbff250eba0f1b89
+  zh: 0a618f05cc88ee2b
+/deepseek-ai-dsh-host-update-engine/use-this-package/cli:
+  en: 9097a91d9cbe569c
+  zh: 0733df8c4ba5f90c
+/deepseek-ai-dsh-host-update-engine/use-this-package/programmatic-api:
+  en: b12d07332df26fe1
+  zh: 61cb81f6d0bb4fc0
+/deepseek-ai-dsh-host-update-engine/understand-the-implementation:
+  en: ee4615a04fa6503d
+  zh: ee4615a04fa6503d
+/deepseek-ai-dsh-host-update-engine/understand-the-implementation/manifest-rules:
+  en: 6168da34313bd161
+  zh: e3d2f1e626090c8a
+/deepseek-ai-dsh-host-update-engine/understand-the-implementation/decision-matrix:
+  en: 46f11e1c8ac5dd4e
+  zh: d87043cf817fa50a
+/deepseek-ai-dsh-host-update-engine/understand-the-implementation/merge-engine:
+  en: f24867e59d188734
+  zh: 11a736b19420e670
+/deepseek-ai-dsh-host-update-engine/understand-the-implementation/conflict-severity:
+  en: 8446af4ad641314c
+  zh: 4e573505f3c56039
+/deepseek-ai-dsh-host-update-engine/understand-the-implementation/staged-apply-and-verification:
+  en: 64d1276ce5171e04
+  zh: cb56cc940fe8ac70
+/deepseek-ai-dsh-host-update-engine/understand-the-implementation/source-map:
+  en: 50ab045a22900239
+  zh: be802fa83c34a452
+/deepseek-ai-dsh-host-update-engine/further-exploration:
+  en: 956e1da476e8e08a
+  zh: 09ad48fbb30eefd2
+/deepseek-ai-dsh-host-update-engine/model-experience:
+  en: 68ca9cada87b5fbc
+  zh: 41d8c7157ae07831
+/deepseek-ai-dsh-host-update-engine/model-experience/kv-cache-effect:
+  en: ca75c51c89c2c9b0
+  zh: bacec35330ccc487
+/deepseek-ai-dsh-host-update-engine/known-limitations-and-deferred-work:
+  en: e3615b3f24eabbbb
+  zh: b7d908061ef47f0e
+/deepseek-ai-dsh-host-update-engine/known-limitations-and-deferred-work/dev-note:
+  en: 9cb9b7645273d660
+  zh: 60d6468be3388791
