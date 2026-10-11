@@ -475,6 +475,112 @@ async function runUpdate(
   return { status: result.status, stdout: result.stdout, stderr: result.stderr, json }
 }
 
+interface TimedLine {
+  at: number
+  text: string
+}
+
+/** Like runUpdate, but timestamps every stderr line for gap analysis. */
+async function runUpdateTimed(
+  fixture: Fixture,
+  extraEnv: Record<string, string> = {},
+  extraArgs: string[] = [],
+): Promise<{ status: number | null; stderr: string; lines: TimedLine[] }> {
+  return await new Promise((resolve) => {
+    const child = spawn('bash', [
+      installSh,
+      '--update',
+      '--prefix', fixture.prefix,
+      '--dsh-home', fixture.home,
+      '--bin-dir', fixture.binDir,
+      '--channel', 'stable',
+      ...extraArgs,
+    ], {
+      env: {
+        ...process.env,
+        DSH_GITHUB_URL: fixture.server.base,
+        DSH_GITHUB_REPO: 'fixture/repo',
+        DSH_NO_TAILNET: '1',
+        DSH_DELTA_FETCH_TIMEOUT: '30',
+        DSH_PREBUILT_TIMEOUT: '60',
+        DSH_PROGRESS_INTERVAL: '60',
+        ...extraEnv,
+      },
+    })
+    const lines: TimedLine[] = []
+    let stderr = ''
+    let buffered = ''
+    const take = (chunk: Buffer): void => {
+      stderr += chunk.toString()
+      buffered += chunk.toString()
+      let index = buffered.indexOf('\n')
+      while (index !== -1) {
+        const text = buffered.slice(0, index)
+        buffered = buffered.slice(index + 1)
+        if (text.trim() !== '') lines.push({ at: Date.now(), text })
+        index = buffered.indexOf('\n')
+      }
+    }
+    child.stderr.on('data', take)
+    child.stdout.on('data', () => { /* stdout is the JSON object; not timed */ })
+    child.on('close', (status) => {
+      if (buffered.trim() !== '') lines.push({ at: Date.now(), text: buffered })
+      resolve({ status, stderr, lines })
+    })
+  })
+}
+
+/** Spawn an update, wait for a stderr line, then SIGINT the whole group. */
+async function runUpdateUntilLine(
+  fixture: Fixture,
+  needle: string,
+  extraEnv: Record<string, string> = {},
+): Promise<{ status: number | null; stderr: string; signalled: boolean }> {
+  return await new Promise((resolve) => {
+    const child = spawn('bash', [
+      installSh,
+      '--update',
+      '--prefix', fixture.prefix,
+      '--dsh-home', fixture.home,
+      '--bin-dir', fixture.binDir,
+      '--channel', 'stable',
+    ], {
+      detached: true,
+      env: {
+        ...process.env,
+        DSH_GITHUB_URL: fixture.server.base,
+        DSH_GITHUB_REPO: 'fixture/repo',
+        DSH_NO_TAILNET: '1',
+        DSH_DELTA_FETCH_TIMEOUT: '30',
+        DSH_PREBUILT_TIMEOUT: '60',
+        DSH_PROGRESS_INTERVAL: '60',
+        ...extraEnv,
+      },
+    })
+    let stderr = ''
+    let signalled = false
+    let buffered = ''
+    const killTimer = setTimeout(() => {
+      // The needle never appeared; end the run so the test can report.
+      if (!signalled) { try { process.kill(-child.pid!, 'SIGKILL') } catch { /* gone */ } }
+    }, 60_000)
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+      buffered += chunk.toString()
+      if (!signalled && buffered.includes(needle)) {
+        signalled = true
+        try { process.kill(-child.pid!, 'SIGINT') } catch { /* already gone */ }
+      }
+      buffered = buffered.slice(-4096)
+    })
+    child.stdout.on('data', () => { /* ignored */ })
+    child.on('close', (status) => {
+      clearTimeout(killTimer)
+      resolve({ status, stderr, signalled })
+    })
+  })
+}
+
 function currentTarget(prefix: string): string {
   return readlinkSync(join(prefix, 'harness/current'))
 }
@@ -786,6 +892,9 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(new Set(deltaSteps.map(step => step.total))).toEqual(new Set([9]))
     expect(deltaSteps[4]?.title).toContain('delta transport (rung 1')
     expect(delta.stderr).toContain('apply: plan ')
+    expect(delta.stderr).toContain('apply: working — snapshot')
+    expect(delta.stderr).toContain('apply: snapshot ')
+    expect(delta.stderr).toContain('apply: seeding ')
     expect(delta.stderr).toMatch(/apply: \d+\/\d+ actions — /u)
     expect(delta.stderr).toContain('verify: checking the staged tree')
     expect(delta.stderr).toContain('merge base: retaining the pristine merge base')
@@ -800,6 +909,50 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(jsonRun.json?.ok).toBe(1)
     expect(jsonRun.stderr).not.toContain('apply: plan')
     expect(jsonRun.stderr).not.toContain('merge base: retaining')
+  }, 240_000)
+
+  it('keeps a live non-TTY timeline with no silent interval beyond the bound', async () => {
+    const fixture = await buildFixture()
+    const run = await runUpdateTimed(fixture, { DSH_UPDATE_PROGRESS_EVERY_ACTIONS: '3' })
+    expect(run.status, run.stderr).toBe(0)
+    const texts = run.lines.map(line => line.text)
+    const indexOf = (needle: string): number => texts.findIndex(text => text.includes(needle))
+    const scan = indexOf('scan: hashing the installed tree')
+    const plan = indexOf('apply: plan ')
+    const working = indexOf('apply: working — snapshot')
+    const snapshot = indexOf('apply: snapshot ')
+    const seeding = indexOf('apply: seeding ')
+    const verifying = indexOf('verify: checking the staged tree')
+    expect(scan).toBeGreaterThanOrEqual(0)
+    expect(plan).toBeGreaterThan(scan)
+    expect(working).toBeGreaterThan(plan)
+    expect(snapshot).toBeGreaterThan(working)
+    expect(seeding).toBeGreaterThan(snapshot)
+    expect(verifying).toBeGreaterThan(seeding)
+    // No silent interval beyond 10 s (fixture-scale; structural bound).
+    for (let index = 1; index < run.lines.length; index += 1) {
+      const gap = run.lines[index]!.at - run.lines[index - 1]!.at
+      expect(gap, `gap before: ${run.lines[index]!.text}`).toBeLessThan(10_000)
+    }
+    expect(currentTarget(fixture.prefix)).toBe('2')
+  }, 240_000)
+
+  it('interrupting inside the staging seed leaves the live tree untouched and resumes', async () => {
+    const fixture = await buildFixture()
+    const run = await runUpdateUntilLine(fixture, 'apply: seeding ', { DSH_UPDATE_PROGRESS_EVERY_ACTIONS: '2' })
+    expect(run.signalled).toBe(true)
+    expect(run.status).not.toBe(0)
+    // Live identity is untouched and the staging survives for the resume.
+    expect(currentTarget(fixture.prefix)).toBe('1')
+    expect(markerVersionAt(fixture.prefix, '1')).toBe('1')
+    expect(stateField(fixture.prefix, 'version')).toBe('1')
+    expect(existsSync(join(fixture.prefix, 'harness', '.staging-2.owner')) || existsSync(join(fixture.prefix, 'harness', '.staging-2'))).toBe(true)
+    // The next run continues from whatever staging/journal state it finds.
+    const resumed = await runUpdate(fixture)
+    expect(resumed.status, resumed.stderr).toBe(0)
+    expect(currentTarget(fixture.prefix)).toBe('2')
+    expect(markerVersion(fixture.prefix)).toBe('2')
+    expect(stateField(fixture.prefix, 'version')).toBe('2')
   }, 240_000)
 
   it.skipIf(!ptyAvailable)('renders TTY progress for the delta path through a pty', async () => {

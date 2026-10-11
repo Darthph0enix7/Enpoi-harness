@@ -705,7 +705,20 @@ export async function runApplyPipeline(options) {
   }
 
   const progress = resolveProgressWriter(options)
-  const local = await engine.scanTree(options.localRoot)
+  // The one full-content walk of the update: emit ticks so the shell never
+  // sits silent while a large local tree is hashed, and record its stats.
+  let localScanFiles = 0
+  let localScanBytes = 0
+  const scanStartedAt = Date.now()
+  const local = await engine.scanTree(options.localRoot, progress === null ? {} : {
+    onProgress: (tick) => {
+      localScanFiles = tick.files
+      localScanBytes = tick.bytes
+      progress(`scan: hashing the installed tree — ${tick.files} files, ${formatBytes(tick.bytes)} read`)
+    },
+  })
+  const localScanCompletedAt = Date.now()
+  const localScanMs = localScanCompletedAt - scanStartedAt
   const pins = options.pinsPath ? await engine.loadPins(options.pinsPath) : []
   const tombstones = options.tombstonesPath ? await engine.loadTombstones(options.tombstonesPath) : []
   const plan = await engine.buildPlan({
@@ -721,6 +734,7 @@ export async function runApplyPipeline(options) {
     tombstones,
   })
   progress?.(`apply: plan ${plan.actions.length} actions (switch ${plan.switchDecision})${plan.conflicts.length > 0 ? ` — ${plan.conflicts.length} conflict(s)` : ''}`)
+  const snapshotPaths = typeof engine.mutationTouchedPaths === 'function' ? engine.mutationTouchedPaths(plan).length : plan.actions.length
   const applied = await engine.applyPlan({
     plan,
     localRoot: options.localRoot,
@@ -734,11 +748,23 @@ export async function runApplyPipeline(options) {
     ...(progress === null ? {} : {
       progress: update => {
         if (update.phase === 'starting') {
-          progress('apply: seeding the staging tree from the installed version…')
+          progress(`apply: working — snapshot ${snapshotPaths} guarded path(s), then seed the staging tree…`)
+          return
+        }
+        if (update.phase === 'snapshot') {
+          progress(`apply: snapshot ${update.processed}/${update.total} guarded paths — ${formatBytes(update.bytesWritten)} read`)
+          return
+        }
+        if (update.phase === 'seeding') {
+          progress(`apply: seeding ${update.processed}/${update.total} entries — ${formatBytes(update.bytesWritten)} linked`)
           return
         }
         if (update.phase === 'verifying') {
-          progress(`verify: checking the staged tree against ${options.toVersion}…`)
+          if (update.processed === 0) {
+            progress(`verify: checking the staged tree against ${options.toVersion}…`)
+          } else {
+            progress(`verify: re-reading ${update.processed} file(s) not carried by hardlink seeds — ${formatBytes(update.bytesWritten)}`)
+          }
           return
         }
         progress(formatApplyProgress(plan, update.processed, update.bytesWritten))
@@ -746,6 +772,10 @@ export async function runApplyPipeline(options) {
     }),
     ...(options.progressEveryActions === undefined ? {} : { progressEveryActions: options.progressEveryActions }),
     ...(options.progressEveryBytes === undefined ? {} : { progressEveryBytes: options.progressEveryBytes }),
+    ...(options.progressEverySteps === undefined ? {} : { progressEverySteps: options.progressEverySteps }),
+    ...(options.progressEveryMs === undefined ? {} : { progressEveryMs: options.progressEveryMs }),
+    localManifest: local,
+    localScanCompletedAt,
   })
   if (progress !== null) {
     const verification = applied.verification
@@ -808,6 +838,10 @@ export async function runApplyPipeline(options) {
     journalPath: applied.journalPath,
     baseArchive,
     baseArchiveError,
+    stats: {
+      localScan: { files: localScanFiles, bytes: localScanBytes, ms: localScanMs },
+      snapshotPaths,
+    },
   }
   return { status: applied.status, exitCode, result, plan, transport, view }
 }
@@ -840,7 +874,8 @@ const USAGE = `usage: update-delta.mjs apply --engine <bundle.js> --local <dir> 
        [--stop-after-actions <n>] [--timestamp <iso>] [--platform <os-arch>]
        [--base-mode <retained|cache|empty>] [--persist-base <archive.tar>]
        [--progress-fd <n>] [--progress-every-actions <n>]
-       [--progress-every-bytes <n>] [--out <result.json>]
+       [--progress-every-bytes <n>] [--progress-every-steps <n>]
+       [--progress-every-ms <n>] [--out <result.json>]
 
 Progress lines (plain stderr-style text) go to <n> when a descriptor >= 3 is
 open; without it nothing is emitted and behavior is unchanged.`
@@ -882,6 +917,8 @@ export async function main(argv) {
     ...(args['progress-fd'] === undefined ? {} : { progressFd: Number.parseInt(args['progress-fd'], 10) }),
     ...(args['progress-every-actions'] === undefined ? {} : { progressEveryActions: Number.parseInt(args['progress-every-actions'], 10) }),
     ...(args['progress-every-bytes'] === undefined ? {} : { progressEveryBytes: Number.parseInt(args['progress-every-bytes'], 10) }),
+    ...(args['progress-every-steps'] === undefined ? {} : { progressEverySteps: Number.parseInt(args['progress-every-steps'], 10) }),
+    ...(args['progress-every-ms'] === undefined ? {} : { progressEveryMs: Number.parseInt(args['progress-every-ms'], 10) }),
   }
   const outcome = await runApplyPipeline(options)
   if (args.out !== undefined) fs.writeFileSync(args.out, `${JSON.stringify(outcome.result, null, 2)}\n`)

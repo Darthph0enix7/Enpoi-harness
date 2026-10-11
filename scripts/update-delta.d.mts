@@ -76,6 +76,11 @@ export interface ApplyPipelineResult {
   baseArchive: { path: string; bytes: number; files: number; omitted: string[] } | null
   /** Why the base archive was not retained; null when it was or was not requested. */
   baseArchiveError: string | null
+  /** Per-update scan/snapshot statistics (one full-content scan per update). */
+  stats: {
+    localScan: { files: number; bytes: number; ms: number }
+    snapshotPaths: number
+  }
 }
 
 /** Options for {@link runApplyPipeline}. */
@@ -108,6 +113,10 @@ export interface RunApplyPipelineOptions {
   progressEveryActions?: number
   /** 'applying' progress interval in written bytes (engine default 64 MiB). */
   progressEveryBytes?: number
+  /** Stage progress interval (snapshot/seed) in entries (engine default 2000). */
+  progressEverySteps?: number
+  /** Wall-clock cap between stage ticks in ms (engine default 3000). */
+  progressEveryMs?: number
 }
 
 /** Outcome of the apply pipeline. */

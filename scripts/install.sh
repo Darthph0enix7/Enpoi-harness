@@ -5151,12 +5151,16 @@ delta_plan_init() { # installed_version -> populates DELTA_* / UPDATE_TAG; never
   esac
   DELTA_PLAN_FILE="$PREFIX/harness/.update-plan-$$.json"
   DELTA_CHAIN_FILE="$PREFIX/harness/.update-chain-$$.txt"
+  progress_note "delta: inspecting the release ladder (read-only)…"
+  local plan_started_at
+  plan_started_at="$(date +%s)"
   if ! delta_evaluate_plan "$UPDATE_TAG" "$from"; then
     log "delta: release inspection unavailable; using the full path"
     rm -f "$DELTA_PLAN_FILE" "$DELTA_CHAIN_FILE"
     DELTA_PLAN_FILE=""
     return 0
   fi
+  log "delta: planner finished in $(( $(date +%s) - plan_started_at ))s"
   DELTA_RUNG="$(json_pick "$DELTA_PLAN_FILE" ladder rung 2>/dev/null || true)"
   DELTA_KIND="$(json_pick "$DELTA_PLAN_FILE" ladder kind 2>/dev/null || true)"
   DELTA_TARGET_VERSION="$(json_pick "$DELTA_PLAN_FILE" target version 2>/dev/null || true)"
@@ -5250,12 +5254,17 @@ delta_prepare_base() { # from base_dir -> 0 full base, 1 empty fallback
     expected="$(awk 'NR==1 {print $1}' "$candidate.sha256" 2>/dev/null || true)"
     actual="$(sha256_of "$candidate" 2>/dev/null || true)"
     if [ -n "$actual" ] && [ "$actual" = "$expected" ]; then
-      local extracted=0
+      local extracted=0 extract_started
+      # A release-sized base archive is hundreds of megabytes: say what is
+      # happening and how long it took (this used to be a silent 30-40 s gap).
+      substep_info "merge base: extracting $(human_bytes "$(file_size "$candidate")") from $(basename "$candidate")…"
+      extract_started="$(date +%s)"
       case "$candidate" in
         *.tar.gz) tar -xzf "$candidate" -C "$base_dir" 2>/dev/null || extracted=1;;
         *.tar) tar -xf "$candidate" -C "$base_dir" 2>/dev/null || extracted=1;;
         *) extracted=1;;
       esac
+      log "merge base: extraction finished in $(( $(date +%s) - extract_started ))s (exit $extracted)"
       if [ "$extracted" = 0 ]; then
         flatten_stage "$base_dir"
         if [ -f "$base_dir/package.json" ]; then

@@ -197,6 +197,16 @@ export interface VerificationResult {
   untrackedPresent: number
   /** Sidecars verified present with the recorded hash. */
   sidecarsPresent: number
+  /**
+   * Files whose content hash was carried over from the local scan through a
+   * hardlink-seeded inode instead of re-read (performance, bounded by the
+   * scan completion time).
+   */
+  contentReused: number
+  /** Files whose bytes this verification actually read. */
+  filesHashed: number
+  /** Bytes read by this verification. */
+  bytesHashed: number
   /** All mismatches found. */
   mismatches: VerificationMismatch[]
 }

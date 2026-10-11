@@ -16,15 +16,17 @@ import { chmod, link, lstat, mkdir, readlink, rm, rmdir, symlink, unlink } from 
 import { dirname, relative } from 'node:path'
 import { writeBufferAtomic, writeBufferUnlinked, writeSymlinkUnlinked } from './atomic.ts'
 import { createBackup } from './backup.ts'
-import { hashBytes, hashFile, manifestPaths, readTreeBytes, resolveTreePath, scanTree } from './manifest.ts'
+import { hashBytes, hashFile, manifestPaths, readTreeBytes, resolveTreePath, walkTree } from './manifest.ts'
 import { merge3 } from './diff3.ts'
 import { journalFor, readJournal, writeJournal } from './journal.ts'
 import { planFingerprint } from './plan.ts'
 import { buildUpdateReport } from './report.ts'
 import { verifyStagedTree } from './verify.ts'
+import type { VerifyOptions } from './verify.ts'
 import type {
   ApplyJournal,
   ApplyResult,
+  Manifest,
   ApplyStatus,
   BackupResult,
   JournalPhase,
@@ -40,12 +42,16 @@ import type {
  */
 export interface ApplyProgressUpdate {
   /** Pass phase the update describes. */
-  phase: 'starting' | 'applying' | 'verifying'
-  /** Actions completed so far (results recorded). */
+  phase: 'starting' | 'snapshot' | 'seeding' | 'applying' | 'verifying'
+  /**
+   * Work units completed in this phase: actions for `applying`, snapshot paths
+   * for `snapshot`, seeded entries for `seeding`, and files re-read for
+   * `verifying` (0 marks the phase start).
+   */
   processed: number
-  /** Total planned actions. */
+  /** Total for `processed` where known (planned action count otherwise). */
   total: number
-  /** Bytes written so far (content and sidecars). */
+  /** Bytes read (snapshot), linked (seeding), or written (applying/verifying). */
   bytesWritten: number
 }
 
@@ -78,6 +84,18 @@ export interface ApplyOptions {
   backupDir?: string
   /** Opt-in coarse progress callback; nothing is emitted when omitted. */
   progress?: (update: ApplyProgressUpdate) => void
+  /**
+   * The plan's local manifest (from this run's scan). Lets the staging seed
+   * skip its own walk and lets verification carry hashes across hardlink
+   * seeds instead of re-reading the tree.
+   */
+  localManifest?: Manifest
+  /** Completion time (epoch ms) of the local scan the manifest came from. */
+  localScanCompletedAt?: number
+  /** Interval between stage progress ticks, in entries. Default 2000. */
+  progressEverySteps?: number
+  /** Wall-clock cap between stage progress ticks, in ms. Default 3000. */
+  progressEveryMs?: number
   /**
    * 'applying' callback interval in actions; the final action always reports.
    * Default 200. Ignored without {@link progress}.
@@ -133,7 +151,7 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
     })
   }
   if (journal !== null && journal.phase === 'complete') {
-    const verification = await verifyStagedTree({ plan, stagingRoot: options.stagingRoot })
+    const verification = await verifyStagedTree(verifyOptions(options))
     if (verification.ok) return makeResult(options, journalPath, false, 'noop', { verification, results })
     return makeResult(options, journalPath, false, 'failed', {
       detail: 'completed staging no longer verifies; staging must be discarded and rebuilt',
@@ -141,6 +159,21 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
       results,
     })
   }
+
+  // First line of work: emitted before ANY filesystem walk (the previous
+  // order hashed the whole tree inside snapshotHostPaths and the staging seed
+  // before this point, which is what left the terminal silent for minutes).
+  const progressEverySteps = options.progressEverySteps ?? 2000
+  const progressEveryMs = options.progressEveryMs ?? 3000
+  let lastStageTickAt = Date.now()
+  const stageTick = (phase: ApplyProgressUpdate['phase'], processed: number, total: number, bytes: number, force: boolean): void => {
+    if (options.progress === undefined) return
+    const now = Date.now()
+    if (!force && processed !== total && processed % progressEverySteps !== 0 && now - lastStageTickAt < progressEveryMs) return
+    lastStageTickAt = now
+    options.progress({ phase, processed, total, bytesWritten: bytes })
+  }
+  options.progress?.({ phase: 'starting', processed: 0, total: plan.actions.length, bytesWritten: 0 })
 
   let preflight: Preflight
   try {
@@ -159,12 +192,20 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
     })
   }
 
-  const touched = [...new Set(plan.actions.map(action => action.path))]
-  const before = await snapshotHostPaths(options.localRoot, touched)
+  // Only paths this plan can actually change are guarded: `skip` and
+  // `keep-untracked` actions write nothing, and snapshotting them meant
+  // hashing the entire live tree (108K files) before the first workspace
+  // write — and before any progress line.
+  const touched = mutationTouchedPaths(plan)
+  const before = await snapshotHostPaths(options.localRoot, touched, (processed, total, bytes) => {
+    stageTick('snapshot', processed, total, bytes, processed === total)
+  })
 
-  options.progress?.({ phase: 'starting', processed: 0, total: plan.actions.length, bytesWritten: 0 })
+  stageTick('seeding', 0, plan.actions.length, 0, true)
   try {
-    await seedStaging(options.localRoot, options.stagingRoot)
+    await seedStaging(options.localRoot, options.stagingRoot, options.localManifest, (processed, total, bytes) => {
+      stageTick('seeding', processed, total, bytes, processed === total)
+    })
   } catch (error) {
     return makeResult(options, journalPath, resumed, 'failed', { detail: `staging seed failed: ${message(error)}`, results })
   }
@@ -230,8 +271,8 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
   }
 
   await persist(journalPath, plan, timestamp, 'verifying', completed, null)
-  options.progress?.({ phase: 'verifying', processed, total: plan.actions.length, bytesWritten })
-  const verification = await verifyStagedTree({ plan, stagingRoot: options.stagingRoot })
+  options.progress?.({ phase: 'verifying', processed: 0, total: plan.actions.length, bytesWritten })
+  const verification = await verifyStagedTree(verifyOptions(options))
   const liveTreeIntact = sameSnapshot(before, await snapshotHostPaths(options.localRoot, touched))
   const status: ApplyStatus = verification.ok && liveTreeIntact ? 'applied' : 'failed'
   const detail = verification.ok
@@ -489,10 +530,21 @@ async function stagedHash(staged: string): Promise<StagedHash | null> {
   return { sha256: null, mode: stats.mode & 0o7777 }
 }
 
-async function seedStaging(localRoot: string, stagingRoot: string): Promise<void> {
-  const local = await scanTree(localRoot)
+async function seedStaging(
+  localRoot: string,
+  stagingRoot: string,
+  manifest?: Manifest,
+  onTick?: (processed: number, total: number, bytes: number) => void,
+): Promise<void> {
+  // The caller's scanned manifest is exact and free; without it an lstat-only
+  // walk suffices (seeding only needs kind/mode/target, never content), so
+  // this pass never reads file bytes.
+  const local = manifest ?? await walkTree(localRoot)
   await mkdir(stagingRoot, { recursive: true })
-  for (const path of manifestPaths(local)) {
+  const paths = manifestPaths(local)
+  let processed = 0
+  let bytes = 0
+  for (const path of paths) {
     const entry = local[path]
     if (entry === undefined) continue
     const source = resolveTreePath(localRoot, path)
@@ -519,35 +571,88 @@ async function seedStaging(localRoot: string, stagingRoot: string): Promise<void
     const existing = await lstat(destination).catch(() => null)
     if (existing?.isFile()) {
       const sourceStats = await lstat(source)
-      if (existing.dev === sourceStats.dev && existing.ino === sourceStats.ino) continue
+      if (existing.dev === sourceStats.dev && existing.ino === sourceStats.ino) {
+        processed += 1
+        bytes += entry.size
+        onTick?.(processed, paths.length, bytes)
+        continue
+      }
       await rm(destination, { force: true })
     } else if (existing !== null) {
       await removeStagedTarget(destination)
     }
     await mkdir(dirname(destination), { recursive: true })
     await link(source, destination)
+    processed += 1
+    bytes += entry.size
+    onTick?.(processed, paths.length, bytes)
+  }
+  if (paths.length === 0) onTick?.(0, 0, 0)
+}
+
+/**
+ * Paths an apply pass can actually mutate in the live tree. `skip` and
+ * `keep-untracked` write nothing (the staged file keeps the live inode), so
+ * they are excluded from the integrity snapshot — snapshotting every planned
+ * path was a full-tree hash before the first progress line.
+ * @param plan - Plan to derive the guarded set from.
+ * @returns Deduplicated, order-preserving mutated paths.
+ */
+export function mutationTouchedPaths(plan: UpdatePlan): string[] {
+  const paths: string[] = []
+  const seen = new Set<string>()
+  for (const action of plan.actions) {
+    if (action.kind === 'skip' || action.kind === 'keep-untracked') continue
+    if (seen.has(action.path)) continue
+    seen.add(action.path)
+    paths.push(action.path)
+  }
+  return paths
+}
+
+/** Verification options carrying the local scan for hardlink hash reuse. */
+function verifyOptions(options: ApplyOptions): VerifyOptions {
+  return {
+    plan: options.plan,
+    stagingRoot: options.stagingRoot,
+    localRoot: options.localRoot,
+    ...(options.localManifest === undefined ? {} : { localManifest: options.localManifest }),
+    ...(options.localScanCompletedAt === undefined ? {} : { localScanCompletedAt: options.localScanCompletedAt }),
+    ...(options.progress === undefined ? {} : {
+      onProgress: (progress) => {
+        options.progress?.({ phase: 'verifying', processed: progress.filesHashed, total: options.plan.actions.length, bytesWritten: progress.bytesHashed })
+      },
+    }),
   }
 }
 
 /** Snapshot the live tree state of touched paths to prove no in-place write occurred. */
-async function snapshotHostPaths(root: string, paths: readonly string[]): Promise<Map<string, string>> {
+async function snapshotHostPaths(
+  root: string,
+  paths: readonly string[],
+  onTick?: (processed: number, total: number, bytes: number) => void,
+): Promise<Map<string, string>> {
   const snapshot = new Map<string, string>()
+  let processed = 0
+  let bytes = 0
   for (const path of paths) {
     const absolute = resolveTreePath(root, path)
     const stats = await lstat(absolute).catch(() => null)
     if (stats === null) {
       snapshot.set(path, 'absent')
-      continue
-    }
-    if (stats.isFile()) {
+    } else if (stats.isFile()) {
       const hashed = await hashFile(absolute)
+      bytes += hashed.size
       snapshot.set(path, `file:${stats.ino}:${stats.mode & 0o7777}:${hashed.sha256}`)
     } else if (stats.isSymbolicLink()) {
       snapshot.set(path, `symlink:${stats.ino}:${await readlink(absolute)}`)
     } else {
       snapshot.set(path, `dir:${stats.ino}:${stats.mode & 0o7777}`)
     }
+    processed += 1
+    onTick?.(processed, paths.length, bytes)
   }
+  if (paths.length === 0) onTick?.(0, 0, 0)
   return snapshot
 }
 

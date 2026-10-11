@@ -10,7 +10,10 @@
  * so nothing appears without a decision.
  */
 
-import { scanTree } from './manifest.ts'
+import { lstat } from 'node:fs/promises'
+import { join } from 'node:path'
+import { hashFile } from './manifest.ts'
+import { walkTree } from './manifest.ts'
 import type { Manifest, ManifestEntry, UpdatePlan, VerificationMismatch, VerificationResult } from './types.ts'
 
 /** Options for {@link verifyStagedTree}. */
@@ -19,8 +22,22 @@ export interface VerifyOptions {
   plan: UpdatePlan
   /** Staging directory to verify. */
   stagingRoot: string
-  /** Extra ignore patterns for the staging scan. */
+  /** Extra ignore patterns for the staging walk. */
   ignore?: readonly string[]
+  /**
+   * Live tree root. With {@link localManifest} and
+   * {@link localScanCompletedAt}, staged files that share an inode with the
+   * live file (hardlink-seeded, never rewritten) reuse the manifest's content
+   * hash instead of re-reading the bytes — the same inode proves the same
+   * content, and the scan time bounds when that was verified.
+   */
+  localRoot?: string
+  /** The plan's local manifest (from the run's scan) for hash reuse. */
+  localManifest?: Manifest
+  /** Completion time (epoch ms) of the local scan the manifest came from. */
+  localScanCompletedAt?: number
+  /** Opt-in progress over files that actually needed hashing. */
+  onProgress?: (progress: { filesHashed: number; bytesHashed: number }) => void
 }
 
 /**
@@ -31,7 +48,50 @@ export interface VerifyOptions {
  */
 export async function verifyStagedTree(options: VerifyOptions): Promise<VerificationResult> {
   const { plan, stagingRoot } = options
-  const scan = await scanTree(stagingRoot, options.ignore === undefined ? {} : { ignore: options.ignore })
+  // A lightweight walk first (lstat only); file contents are hashed lazily,
+  // and only when a trusted hash cannot be carried over from the local scan
+  // through the hardlink-seeded inodes.
+  const scan = await walkTree(stagingRoot, options.ignore === undefined ? {} : { ignore: options.ignore })
+  const resolved = new Map<string, ManifestEntry | undefined>()
+  let contentReused = 0
+  let filesHashed = 0
+  let bytesHashed = 0
+  let lastHashTickAt = 0
+  const resolveActual = async (rel: string): Promise<ManifestEntry | undefined> => {
+    if (resolved.has(rel)) return resolved.get(rel)
+    const entry = scan[rel]
+    let result = entry
+    if (entry !== undefined && entry.type === 'file') {
+      const stagedPath = join(stagingRoot, ...rel.split('/'))
+      const stagedStats = await lstat(stagedPath).catch(() => null)
+      if (stagedStats !== null && stagedStats.isFile()) {
+        let trusted: string | null = null
+        if (options.localRoot !== undefined && options.localManifest !== undefined && options.localScanCompletedAt !== undefined
+          && stagedStats.mtimeMs <= options.localScanCompletedAt) {
+          const liveStats = await lstat(join(options.localRoot, ...rel.split('/'))).catch(() => null)
+          if (liveStats !== null && liveStats.isFile() && liveStats.dev === stagedStats.dev && liveStats.ino === stagedStats.ino) {
+            trusted = options.localManifest[rel]?.sha256 ?? null
+          }
+        }
+        if (trusted !== null) {
+          result = { ...entry, sha256: trusted, size: stagedStats.size }
+          contentReused += 1
+        } else {
+          const hashed = await hashFile(stagedPath)
+          result = { ...entry, sha256: hashed.sha256, size: hashed.size, binary: hashed.binary }
+          filesHashed += 1
+          bytesHashed += hashed.size
+          const now = Date.now()
+          if (filesHashed % 50 === 0 || now - lastHashTickAt >= 3000) {
+            lastHashTickAt = now
+            options.onProgress?.({ filesHashed, bytesHashed })
+          }
+        }
+      }
+    }
+    resolved.set(rel, result)
+    return result
+  }
   const expected = new Set<string>()
   const mismatches: VerificationMismatch[] = []
   let manifestChecked = 0
@@ -42,7 +102,7 @@ export async function verifyStagedTree(options: VerifyOptions): Promise<Verifica
 
   for (const action of plan.actions) {
     expected.add(action.path)
-    const actual = scan[action.path]
+    const actual = await resolveActual(action.path)
     switch (action.outcome.disposition) {
       case 'absent': {
         if (actual !== undefined && !(actual.type === 'dir' && hasRetainedDirectoryContent(scan, action.path))) {
@@ -95,7 +155,7 @@ export async function verifyStagedTree(options: VerifyOptions): Promise<Verifica
     }
     for (const [sidecar, sha256] of Object.entries(action.outcome.sidecars)) {
       expected.add(sidecar)
-      const actualSidecar = scan[sidecar]
+      const actualSidecar = await resolveActual(sidecar)
       if (actualSidecar === undefined) {
         mismatches.push(mismatch(sidecar, 'sidecar-missing', sha256, 'absent'))
         continue
@@ -113,6 +173,7 @@ export async function verifyStagedTree(options: VerifyOptions): Promise<Verifica
     mismatches.push(mismatch(path, 'unexpected-untracked', 'listed untracked or sidecar', describe(entry)))
   }
 
+  options.onProgress?.({ filesHashed, bytesHashed })
   return {
     ok: mismatches.length === 0,
     manifestChecked,
@@ -120,6 +181,9 @@ export async function verifyStagedTree(options: VerifyOptions): Promise<Verifica
     tombstonesAbsent,
     untrackedPresent,
     sidecarsPresent,
+    contentReused,
+    filesHashed,
+    bytesHashed,
     mismatches,
   }
 }

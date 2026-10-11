@@ -124,6 +124,8 @@ export interface RunUpdateOptions {
   timestamp?: string
   progress?: (update: ApplyProgressUpdate) => void
   progressEveryActions?: number
+  progressEverySteps?: number
+  progressEveryMs?: number
 }
 
 /** Plan + apply result bundle. */
@@ -163,6 +165,12 @@ export async function runUpdate(fixture: UpdateFixture, options: RunUpdateOption
     ...(options.stopAfterActions === undefined ? {} : { stopAfterActions: options.stopAfterActions }),
     ...(options.progress === undefined ? {} : { progress: options.progress }),
     ...(options.progressEveryActions === undefined ? {} : { progressEveryActions: options.progressEveryActions }),
+    ...(options.progressEverySteps === undefined ? {} : { progressEverySteps: options.progressEverySteps }),
+    ...(options.progressEveryMs === undefined ? {} : { progressEveryMs: options.progressEveryMs }),
+    localManifest: fixture.local,
+    // The fixture's local manifest was scanned by makeUpdateFixture before
+    // this call; apply time is its (conservative) completion bound.
+    localScanCompletedAt: Date.now(),
   })
   let staging: Manifest = {}
   try {

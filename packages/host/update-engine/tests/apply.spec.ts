@@ -8,7 +8,8 @@
 import { lstat, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { applyPlan, discardStaging } from '../src/apply.ts'
+import { applyPlan, discardStaging, mutationTouchedPaths } from '../src/apply.ts'
+import { verifyStagedTree } from '../src/verify.ts'
 import { readJournal, writeJournal } from '../src/journal.ts'
 import { buildPlan } from '../src/plan.ts'
 import { makeUpdateFixture, readStaged, runUpdate, writeTreeFile, type UpdateFixture } from './fixture.ts'
@@ -104,6 +105,135 @@ describe('staged apply mechanics', () => {
     // Same fixture without the callback: same result, no observable progress.
     const silent = await runUpdate(f, { timestamp: '2030-01-01T00:00:00.000Z' })
     expect(silent.result.status).toBe('noop')
+  })
+
+  it('scopes the mutation snapshot to non-skip actions, even at 100K skips', async () => {
+    // Pure plan shape: 100K watched-but-untouched paths + 30 real mutations.
+    const actions = [] as { kind: string; path: string }[]
+    for (let index = 0; index < 100_000; index += 1) actions.push({ kind: 'skip', path: `skip/${String(index).padStart(6, '0')}` })
+    for (let index = 0; index < 20; index += 1) actions.push({ kind: 'replace', path: `real/${index}` })
+    for (let index = 0; index < 5; index += 1) actions.push({ kind: 'merge', path: `real/merge-${index}` })
+    for (let index = 0; index < 5; index += 1) actions.push({ kind: 'add', path: `real/new-${index}` })
+    actions.push({ kind: 'keep-untracked', path: 'untracked/notes' })
+    const touched = mutationTouchedPaths({ actions } as unknown as Parameters<typeof mutationTouchedPaths>[0])
+    expect(touched).toHaveLength(30)
+    expect(touched.every(path => path.startsWith('real/'))).toBe(true)
+    expect(new Set(touched).size).toBe(30)
+
+    // And through a real apply: the snapshot progress total is the mutated set.
+    const base: Record<string, string> = {}
+    const release: Record<string, string> = {}
+    for (let index = 0; index < 120; index += 1) {
+      base[`static/${String(index).padStart(3, '0')}.txt`] = `same ${index}\n`
+      release[`static/${String(index).padStart(3, '0')}.txt`] = `same ${index}\n`
+    }
+    for (let index = 0; index < 6; index += 1) release[`changed/${index}.txt`] = `new ${index}\n`
+    const f = await fixture('scoped-snapshot', base, release)
+    const events: { phase: string; processed: number; total: number }[] = []
+    const { plan, result } = await runUpdate(f, {
+      progress: update => events.push({ phase: update.phase, processed: update.processed, total: update.total }),
+    })
+    expect(result.status).toBe('applied')
+    const mutated = mutationTouchedPaths(plan)
+    expect(mutated.length).toBeLessThan(plan.actions.length)
+    const snapshotEvents = events.filter(event => event.phase === 'snapshot')
+    expect(snapshotEvents.length).toBeGreaterThan(0)
+    expect(snapshotEvents.at(-1)?.total).toBe(mutated.length)
+    expect(snapshotEvents.at(-1)?.processed).toBe(mutated.length)
+  })
+
+  it('emits the first progress line before any tree work and ticks every phase', async () => {
+    const base: Record<string, string> = {}
+    const release: Record<string, string> = {}
+    for (let index = 0; index < 400; index += 1) {
+      base[`bulk/${String(index).padStart(4, '0')}.txt`] = `same ${index}\n`
+      release[`bulk/${String(index).padStart(4, '0')}.txt`] = `same ${index}\n`
+    }
+    for (let index = 0; index < 10; index += 1) release[`edit/${index}.txt`] = `edited ${index}\n`
+    const f = await fixture('liveness', base, release)
+    const startedAt = Date.now()
+    const events: { phase: string; at: number; processed: number }[] = []
+    const { result } = await runUpdate(f, {
+      progress: update => events.push({ phase: update.phase, at: Date.now(), processed: update.processed }),
+      progressEverySteps: 25,
+      progressEveryMs: 25,
+    })
+    expect(result.status).toBe('applied')
+    expect(events[0]?.phase).toBe('starting')
+    expect(events[0]!.at - startedAt).toBeLessThan(500)
+    const phases = new Set(events.map(event => event.phase))
+    expect(phases.has('snapshot')).toBe(true)
+    expect(phases.has('seeding')).toBe(true)
+    expect(phases.has('applying')).toBe(true)
+    expect(phases.has('verifying')).toBe(true)
+    // Every stage tick keeps moving; gaps between ticks stay small.
+    let previous = events[0]!.at
+    for (const event of events) {
+      expect(event.at - previous).toBeLessThan(2000)
+      previous = event.at
+    }
+  })
+
+  it('resumes cleanly when the staging seed is interrupted', async () => {
+    const f = await fixture(
+      'seed-interrupt',
+      { 'keep.txt': 'keep\n', 'edit.txt': 'one\n' },
+      { 'keep.txt': 'keep\n', 'edit.txt': 'two\n', 'added.txt': 'new\n' },
+    )
+    let thrown = false
+    const crashed = await runUpdate(f, {
+      progress: (update) => {
+        if (update.phase === 'seeding' && update.processed > 0 && !thrown) {
+          thrown = true
+          throw new Error('simulated interrupt inside seedStaging')
+        }
+      },
+      progressEverySteps: 1,
+      progressEveryMs: 0,
+    })
+    expect(thrown).toBe(true)
+    expect(crashed.result.status).toBe('failed')
+    // Nothing was switched; the live tree is untouched.
+    expect(await readFile(join(f.localRoot, 'edit.txt'), 'utf8')).toBe('one\n')
+    // The next pass completes from whichever staging state it finds.
+    const resumed = await runUpdate(f)
+    expect(resumed.result.status).toBe('applied')
+    expect(resumed.result.verification?.ok).toBe(true)
+    expect(resumed.result.verification?.mismatches).toEqual([])
+  })
+
+  it('reuses local hashes across hardlink seeds and still catches real corruption', async () => {
+    const base: Record<string, string> = {}
+    const release: Record<string, string> = {}
+    for (let index = 0; index < 200; index += 1) {
+      base[`bulk/${String(index).padStart(3, '0')}.txt`] = `same ${index}\n`
+      release[`bulk/${String(index).padStart(3, '0')}.txt`] = `same ${index}\n`
+    }
+    release['changed.txt'] = 'changed\n'
+    const f = await fixture('verify-reuse', base, release)
+    const { plan, result } = await runUpdate(f)
+    expect(result.verification?.ok).toBe(true)
+    // The 200 untouched files are hardlink seeds: no bytes re-read for them.
+    expect(result.verification?.contentReused).toBeGreaterThanOrEqual(200)
+    expect(result.verification?.filesHashed).toBeLessThan(20)
+
+    // Corrupt a skipped live file in place AFTER its scan: the mtime bound
+    // rejects the carried hash and the fresh read catches the mismatch.
+    const victim = join(f.localRoot, 'bulk', '000.txt')
+    const bound = Date.now()
+    // Ensure the tamper lands strictly after the bound (filesystem mtimes are
+    // millisecond-granular; a same-millisecond write would keep the fast path).
+    await new Promise(resolve => setTimeout(resolve, 10))
+    await writeFile(victim, 'tampered\n')
+    const verification = await verifyStagedTree({
+      plan,
+      stagingRoot: f.stagingRoot,
+      localRoot: f.localRoot,
+      localManifest: f.local,
+      localScanCompletedAt: bound,
+    })
+    expect(verification.ok).toBe(false)
+    expect(verification.mismatches.some(entry => entry.path === 'bulk/000.txt' && entry.reason === 'hash')).toBe(true)
   })
 
   it('detects a foreign journal and requires rollback before rebuilding', async () => {

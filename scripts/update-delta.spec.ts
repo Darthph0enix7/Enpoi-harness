@@ -445,8 +445,15 @@ describe('apply pipeline', () => {
       persistBasePath: join(f.dir, 'progress-base.tar'),
     }))
     expect(outcome.status).toBe('applied')
-    expect(lines[0]).toContain('apply: plan')
-    expect(lines.some(line => line.startsWith('apply: seeding the staging tree'))).toBe(true)
+    // One full-content scan for the whole update, recorded in the stats.
+    expect(outcome.result.stats?.localScan.files).toBeGreaterThan(0)
+    expect(outcome.result.stats?.localScan.ms).toBeGreaterThanOrEqual(0)
+    expect(outcome.result.stats?.snapshotPaths).toBeLessThanOrEqual(outcome.plan.actions.length)
+    expect(lines[0]).toContain('scan: hashing')
+    expect(lines.some(line => line.startsWith('scan: hashing the installed tree'))).toBe(true)
+    expect(lines.some(line => line.startsWith('apply: working — snapshot'))).toBe(true)
+    expect(lines.some(line => line.startsWith('apply: snapshot '))).toBe(true)
+    expect(lines.some(line => line.startsWith('apply: seeding '))).toBe(true)
     expect(lines.some(line => line.startsWith('verify: checking the staged tree'))).toBe(true)
     expect(lines.some(line => /^apply: \d+\/\d+ actions — .* written/u.test(line))).toBe(true)
     expect(lines.some(line => line.startsWith('merge base: retaining the pristine merge base'))).toBe(true)
@@ -601,6 +608,7 @@ describe('apply pipeline', () => {
     })
     expect(result.code).toBe(0)
     expect(result.fd3).toContain('apply: plan')
+    expect(result.fd3).toContain('apply: snapshot ')
     expect(result.fd3).toMatch(/apply: \d+\/\d+ actions/u)
     // The interval fires mid-apply, not only on the final action.
     const ticks = result.fd3.split('\n').filter(line => /^apply: \d+\/\d+ actions/u.test(line))

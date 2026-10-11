@@ -27,6 +27,13 @@ export const BINARY_PROBE_BYTES = 8192
 export interface ScanTreeOptions {
   /** Glob patterns; a matching path (and any directory's subtree) is skipped. */
   ignore?: readonly string[]
+  /** Opt-in progress over regular files (count and bytes read). */
+  onProgress?: (progress: { files: number; bytes: number }) => void
+  /**
+   * File interval between `onProgress` calls (a 3 s cap also applies).
+   * Default 2000.
+   */
+  progressEvery?: number
 }
 
 /** File hashing result. */
@@ -136,11 +143,49 @@ export async function readTreeBytes(root: string, relPath: string): Promise<Buff
 export async function scanTree(root: string, options: ScanTreeOptions = {}): Promise<Manifest> {
   const manifest: Manifest = {}
   const ignore = options.ignore ?? []
-  await walk(root, '', manifest, ignore)
+  const onProgress = options.onProgress
+  const every = options.progressEvery ?? 2000
+  let files = 0
+  let bytes = 0
+  let lastAt = 0
+  await walk(root, '', manifest, ignore, true, onProgress === undefined ? undefined : (size) => {
+    files += 1
+    bytes += size
+    const now = Date.now()
+    if (files % every === 0 || now - lastAt >= 3000) {
+      lastAt = now
+      onProgress({ files, bytes })
+    }
+  })
+  onProgress?.({ files, bytes })
   return manifest
 }
 
-async function walk(root: string, rel: string, manifest: Manifest, ignore: readonly string[]): Promise<void> {
+/**
+ * Index a tree without hashing file contents: the same walk as {@link scanTree}
+ * with `sha256: null` on regular files (the `size` is still the lstat size).
+ * For consumers that only need kind/mode/target/size (staging seeds, the
+ * staged-tree walk before selective hashing) this avoids a full content read.
+ * The result is NOT a verified manifest; never feed it to comparison logic
+ * that trusts hashes.
+ * @param root - Absolute tree root.
+ * @param options - Scan options (ignore patterns).
+ * @returns Deterministic path → entry index with null file hashes.
+ */
+export async function walkTree(root: string, options: ScanTreeOptions = {}): Promise<Manifest> {
+  const manifest: Manifest = {}
+  await walk(root, '', manifest, options.ignore ?? [], false)
+  return manifest
+}
+
+async function walk(
+  root: string,
+  rel: string,
+  manifest: Manifest,
+  ignore: readonly string[],
+  hashFiles: boolean,
+  onFile?: (size: number) => void,
+): Promise<void> {
   const directory = rel === '' ? root : resolveTreePath(root, rel)
   const entries = await readdir(directory, { withFileTypes: true })
   entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
@@ -150,7 +195,7 @@ async function walk(root: string, rel: string, manifest: Manifest, ignore: reado
     const stats = await lstat(join(directory, dirent.name))
     if (stats.isDirectory()) {
       manifest[childRel] = { sha256: null, size: 0, type: 'dir', mode: stats.mode & 0o7777, target: null, binary: false }
-      await walk(root, childRel, manifest, ignore)
+      await walk(root, childRel, manifest, ignore, hashFiles, onFile)
     } else if (stats.isSymbolicLink()) {
       const target = await readlink(join(directory, dirent.name))
       manifest[childRel] = {
@@ -162,6 +207,18 @@ async function walk(root: string, rel: string, manifest: Manifest, ignore: reado
         binary: false,
       }
     } else if (stats.isFile()) {
+      if (!hashFiles) {
+        manifest[childRel] = {
+          sha256: null,
+          size: stats.size,
+          type: 'file',
+          mode: stats.mode & 0o7777,
+          target: null,
+          binary: false,
+        }
+        onFile?.(0)
+        continue
+      }
       const hashed = await hashFile(join(directory, dirent.name))
       manifest[childRel] = {
         sha256: hashed.sha256,
@@ -171,6 +228,7 @@ async function walk(root: string, rel: string, manifest: Manifest, ignore: reado
         target: null,
         binary: hashed.binary,
       }
+      onFile?.(hashed.size)
     } else {
       throw new Error(`unsupported filesystem object in tree: ${childRel}`)
     }
