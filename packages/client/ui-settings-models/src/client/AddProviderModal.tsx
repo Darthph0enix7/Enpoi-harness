@@ -8,6 +8,8 @@ import { useHeavyManifestState } from './heavy-manifest-source.ts'
 import { resolveHeavyInstall, type HeavyProviderManifest } from './heavy-providers.ts'
 import { deriveKeyRef, messageOf, type ModelsWire } from './store.ts'
 import { applyFenced, fencedFailureText } from './fenced-mutate.ts'
+import { refreshRouteViaPlugin } from './provider-sync-rpc.ts'
+import { applyRefreshedModels, type RefreshedCurrentRow } from './provider-sync-apply.ts'
 import { OPENAI_BASE_URL_EXAMPLE } from './endpoint-defaults.ts'
 import { heavyApi, pollHeavyJob, type HeavyJobView, type HeavyStatusView } from './heavy-rpc.ts'
 import { HeavyPreflightNote } from './HeavyProviderStatus.tsx'
@@ -100,7 +102,7 @@ type DiscoveredModel = {
  * @param model - one row of a discovery answer.
  * @returns the settings `models` entry for that row.
  */
-function adoptedModel(model: DiscoveredModel): Record<string, unknown> {
+function adoptedModel(model: DiscoveredModel): RefreshedCurrentRow & Record<string, unknown> {
   return {
     id: model.id,
     ...model.name !== undefined && model.name !== model.id ? { name: model.name } : {},
@@ -428,6 +430,38 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   }
 
   /**
+   * Converge a freshly stored route onto the provider-sync plugin's canonical
+   * membership. The add's discovery lists the endpoint's raw live catalog;
+   * the plugin owns the authoritative membership (catalog confirmation,
+   * protections, shrink guards) and its `providerSync.refreshRoute` RPC
+   * returns the same plan the hourly pass computes. Applying that plan through
+   * the Models page's replace semantics (the detail panel's catalog refresh,
+   * shared in provider-sync-apply) leaves the stored route at canonical
+   * membership from its first render.
+   *
+   * Best-effort by design: the plugin is optional, so an RPC that is
+   * unavailable, refused, malformed, or degraded — or a rejected convergence
+   * write — keeps the discovered list exactly as stored, silently and without
+   * failing the add.
+   * @param id - the route key just stored.
+   * @param discovered - the discovered records just persisted; a row the plan
+   *   omits but never reports removed survives with its own fields.
+   */
+  const convergeStoredRoute = async (id: string, discovered: readonly RefreshedCurrentRow[]): Promise<void> => {
+    const answer = await refreshRouteViaPlugin(id)
+    if (!answer.ok || answer.value.degraded) return
+    const merged = applyRefreshedModels(discovered, answer.value.models, answer.value.removed)
+    try {
+      await applyFenced(api, 'llm-pi-ai', () => ({
+        ops: [{ op: 'set', path: ['providers', id, 'models'], value: merged as unknown as JsonValue }],
+      }))
+    } catch {
+      // A rejected convergence write keeps the discovered list: the optional
+      // plugin must never fail an otherwise successful add.
+    }
+  }
+
+  /**
    * Whether this route still needs models listed: an adapter that knows the
    * route only because configuration declared it (llm-pi-ai's `declared`
    * flag) resolves nothing without a model list, and a stored route carrying a
@@ -463,7 +497,10 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       if ('models' in answer && answer.models.length > 0) {
         // The full profile is rewritten: a rejected first write left no route,
         // so a models-only write would store a partial profile.
-        if (await storeProfile(id, [], answer.models)) await onClose(true)
+        if (await storeProfile(id, [], answer.models)) {
+          await convergeStoredRoute(id, answer.models.map(adoptedModel))
+          await onClose(true)
+        }
         return
       }
       enterRecovery('models' in answer ? t('addNoModelsFound') : answer.message)
@@ -565,6 +602,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         // closing here would hide the route's missing models behind a
         // refresh that cannot resolve them.
         if (!await storeDiscovered(id, answer.models)) return
+        await convergeStoredRoute(id, answer.models.map(adoptedModel))
         await onClose(true)
         return
       }

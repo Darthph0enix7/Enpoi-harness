@@ -19,6 +19,7 @@ import {
 import { idCapabilityHints } from './capability-hints.ts'
 import { deriveKeyRef, messageOf, protocolChoices, type ProviderRow, type ModelsWire } from './store.ts'
 import { refreshRouteViaPlugin, type ProviderSyncRefreshView } from './provider-sync-rpc.ts'
+import { applyRefreshedModels } from './provider-sync-apply.ts'
 import { applyFenced, fencedFailureText } from './fenced-mutate.ts'
 import { HeavyProviderCard } from './HeavyProviderCard.tsx'
 import { resolveHeavyManifest } from './heavy-manifest-source.ts'
@@ -202,30 +203,6 @@ export function mergeRefreshedModels(
     })
   }
   return merged
-}
-
-/**
- * Apply one host refresh answer to the route's current models with replace
- * semantics: the answer is the base, and a current row absent from it is kept
- * unless the host named its id in `removed`. The host's removal list is the
- * sole deletion gate, so an omitted row the host never reported — a row the
- * panel is still drafting, or one another writer added mid-refresh — survives
- * with its own fields and stamp, while a `source: 'manual'` row keeps its
- * stamp either way.
- * @param current - the route's models as the panel currently holds them.
- * @param answer - the host pipeline's planned records.
- * @param removed - the ids the host reported as removed.
- * @returns the list to persist (the answer, plus surviving current rows).
- */
-export function applyRefreshedModels(
-  current: readonly ModelItem[],
-  answer: readonly Record<string, unknown>[],
-  removed: readonly string[],
-): Array<Record<string, unknown>> {
-  const answerIds = new Set(answer.map(model => (typeof model.id === 'string' ? model.id : '')))
-  const removedIds = new Set(removed)
-  const survivors = current.filter(model => !answerIds.has(model.id) && !removedIds.has(model.id))
-  return [...answer, ...survivors]
 }
 
 /**

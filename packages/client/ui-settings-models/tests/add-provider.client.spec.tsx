@@ -11,7 +11,15 @@ import type { ModelsLlm, ModelsWire } from '../src/client/store.ts'
 import { en } from '../src/client/locales.ts'
 import { translateEn } from './translate.client.ts'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
+
+/** One successful provider-sync RPC envelope around `value`. */
+function syncAnswer(value: unknown) {
+  return { ok: true, json: async () => ({ result: { ok: true, value } }) }
+}
 
 /** A discovery refusal as the Remote face delivers it: a real RemoteError. */
 function discoveryRefused(message: string): RemoteError<'llm/model-discovery-rejected'> {
@@ -91,6 +99,171 @@ it('discovers and stores the new provider models before closing', async () => {
       { id: 'm-2' },
     ],
   }], undefined)
+})
+
+it('converges the discovered list onto the provider-sync membership before closing', async () => {
+  const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({
+    ok: true as const,
+    value: [
+      { id: 'kept', name: 'Kept' },
+      { id: 'outdated', name: 'Outdated' },
+    ],
+  }))
+  const fetchMock = vi.fn(async () => syncAnswer({
+    route: 'provider',
+    models: [
+      { id: 'kept', name: 'Kept Fresh' },
+      { id: 'canonical', name: 'Canonical' },
+    ],
+    removed: ['outdated'],
+    deprecated: [],
+    degraded: false,
+    source: 'live',
+    authority: 'catalog',
+    fetchedAt: 42,
+  }))
+  vi.stubGlobal('fetch', fetchMock)
+  const onClose = vi.fn()
+  render(<AddProviderModal
+    open
+    taken={[]}
+    protocols={['openai-completions']}
+    api={wire(discoverModels, mutate)}
+    t={translateEn}
+    readOnly={false}
+    onClose={onClose}
+  />)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Empty Provider' }))
+  fireEvent.change(screen.getByPlaceholderText('https://api.openai.com/v1'), { target: { value: 'https://api.example/v1' } })
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
+  expect(fetchMock).toHaveBeenCalledWith('/api/providerSync.refreshRoute', expect.objectContaining({ method: 'POST' }))
+  // Profile write, discovered write, then the sync's canonical membership:
+  // the raw list never remains the stored one.
+  expect(mutate).toHaveBeenCalledTimes(3)
+  expect(mutate).toHaveBeenLastCalledWith('llm-pi-ai', [{
+    op: 'set',
+    path: ['providers', 'provider', 'models'],
+    value: [
+      { id: 'kept', name: 'Kept Fresh' },
+      { id: 'canonical', name: 'Canonical' },
+    ],
+  }], undefined)
+})
+
+it('keeps the discovered list when the provider-sync RPC is unavailable', async () => {
+  const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({
+    ok: true as const,
+    value: [{ id: 'raw-1', name: 'Raw One' }],
+  }))
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) })))
+  const onClose = vi.fn()
+  render(<AddProviderModal
+    open
+    taken={[]}
+    protocols={['openai-completions']}
+    api={wire(discoverModels, mutate)}
+    t={translateEn}
+    readOnly={false}
+    onClose={onClose}
+  />)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Empty Provider' }))
+  fireEvent.change(screen.getByPlaceholderText('https://api.openai.com/v1'), { target: { value: 'https://api.example/v1' } })
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
+  // The fallback keeps the discovered write as the last stored list.
+  expect(mutate).toHaveBeenCalledTimes(2)
+  expect(mutate).toHaveBeenLastCalledWith('llm-pi-ai', [{
+    op: 'set',
+    path: ['providers', 'provider', 'models'],
+    value: [{ id: 'raw-1', name: 'Raw One' }],
+  }], undefined)
+})
+
+it('keeps the discovered list when the provider-sync pass degraded', async () => {
+  const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({
+    ok: true as const,
+    value: [{ id: 'raw-1' }, { id: 'raw-2' }],
+  }))
+  vi.stubGlobal('fetch', vi.fn(async () => syncAnswer({
+    models: [{ id: 'raw-1' }],
+    removed: [],
+    deprecated: [],
+    degraded: true,
+    degradedReason: 'the models.dev catalogue is stale',
+    source: 'none',
+    authority: 'catalog',
+    fetchedAt: 7,
+  })))
+  const onClose = vi.fn()
+  render(<AddProviderModal
+    open
+    taken={[]}
+    protocols={['openai-completions']}
+    api={wire(discoverModels, mutate)}
+    t={translateEn}
+    readOnly={false}
+    onClose={onClose}
+  />)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Empty Provider' }))
+  fireEvent.change(screen.getByPlaceholderText('https://api.openai.com/v1'), { target: { value: 'https://api.example/v1' } })
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
+  // A degraded answer withholds removals: the discovered list stays whole.
+  expect(mutate).toHaveBeenCalledTimes(2)
+  expect(mutate).toHaveBeenLastCalledWith('llm-pi-ai', [{
+    op: 'set',
+    path: ['providers', 'provider', 'models'],
+    value: [{ id: 'raw-1' }, { id: 'raw-2' }],
+  }], undefined)
+})
+
+it('closes with the discovered list when the convergence write rejects', async () => {
+  const mutate = vi.fn()
+    .mockResolvedValueOnce({ ok: true as const, value: {} })
+    .mockResolvedValueOnce({ ok: true as const, value: {} })
+    .mockRejectedValue(new Error('transport down'))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({
+    ok: true as const,
+    value: [{ id: 'raw-1' }],
+  }))
+  vi.stubGlobal('fetch', vi.fn(async () => syncAnswer({
+    models: [{ id: 'canonical' }],
+    removed: ['raw-1'],
+    deprecated: [],
+    degraded: false,
+    source: 'live',
+    authority: 'catalog',
+    fetchedAt: 9,
+  })))
+  const onClose = vi.fn()
+  render(<AddProviderModal
+    open
+    taken={[]}
+    protocols={['openai-completions']}
+    api={wire(discoverModels, mutate)}
+    t={translateEn}
+    readOnly={false}
+    onClose={onClose}
+  />)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Empty Provider' }))
+  fireEvent.change(screen.getByPlaceholderText('https://api.openai.com/v1'), { target: { value: 'https://api.example/v1' } })
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  // A rejected convergence write is swallowed: the route keeps the discovered
+  // list and the add still closes successfully.
+  await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
+  expect(mutate).toHaveBeenCalledTimes(3)
 })
 
 it('adopts every capability field a discovery discloses onto the stored route', async () => {
