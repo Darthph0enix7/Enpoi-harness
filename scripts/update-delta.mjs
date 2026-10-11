@@ -1399,6 +1399,23 @@ export async function main(argv) {
     process.stdout.write(`${USAGE}\n`)
     return 0
   }
+  if (command === 'refresh-index') {
+    // Post-update index refresh (install.sh, after staging discard/prune):
+    // hardlink churn bumps shared inode ctimes, so the tree that will be
+    // scanned next needs its index restamped.
+    const args = parseArgs(rest)
+    const engine = await import(pathToFileURL(requireArg(args, 'engine')).href)
+    const tree = requireArg(args, 'tree')
+    if (typeof engine.refreshScanIndex !== 'function') {
+      process.stdout.write('scan index: refresh unavailable in this engine\n')
+      return 0
+    }
+    const refreshed = await engine.refreshScanIndex(tree)
+    process.stdout.write(refreshed === null
+      ? 'scan index: no index to refresh\n'
+      : `scan index: refreshed ${refreshed.entries} entries (${refreshed.carried} carried, ${refreshed.rehashed} rehashed)\n`)
+    return 0
+  }
   if (command !== 'apply') throw new Error(`unknown command: ${command}`)
   const args = parseArgs(rest)
   const stopAfter = args['stop-after-actions']

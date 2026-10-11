@@ -336,9 +336,10 @@ describe('§3.3 preservation suite', () => {
     const first = await runUpdate(interrupted, { stopAfterActions: 2 })
     expect(first.result.status).toBe('interrupted')
     expect(first.result.liveTreeIntact).toBe(true)
-    const journal = JSON.parse(await readFile(interrupted.journalPath, 'utf8')) as { phase: string; completed: string[] }
-    expect(journal.phase).toBe('applying')
-    expect(journal.completed).toHaveLength(2)
+    const { readJournalState } = await import('../src/journal.ts')
+    const journal = await readJournalState(interrupted.journalPath)
+    expect(journal?.head.phase).toBe('applying')
+    expect(journal?.completed).toHaveLength(2)
 
     const second = await runUpdate(interrupted)
     expect(second.result.status).toBe('applied')

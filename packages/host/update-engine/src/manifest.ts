@@ -214,6 +214,28 @@ export async function scanTree(root: string, options: ScanTreeOptions = {}): Pro
 }
 
 /**
+ * Refresh the scan index of a tree whose inode metadata moved but whose
+ * contents did not: hardlink seeding a new staging tree increments the source
+ * files' link counts, which bumps their ctime and would otherwise make the
+ * whole index untrusted on the next update (a full re-hash). Carries hashes
+ * forward when type/size/mode/inode/device and mtime still match, records the
+ * new ctime, and re-hashes anything else. Returns null when the tree has no
+ * index (nothing to refresh). Best-effort: callers treat failures as absent.
+ * @param root - Absolute tree root.
+ * @returns Refresh counts or null.
+ */
+export async function refreshScanIndex(root: string): Promise<{ entries: number; carried: number; rehashed: number } | null> {
+  const index = await readScanIndex(root)
+  if (index === null) return null
+  const manifest: Manifest = {}
+  const stats = new Map<string, ScanIndexEntry>()
+  const counters = { trusted: 0, hashed: 0 }
+  await walk(root, '', manifest, { ignore: [], index, stats, counters, refreshCtimes: true })
+  await writeScanIndex(root, stats)
+  return { entries: stats.size, carried: counters.trusted, rehashed: counters.hashed }
+}
+
+/**
  * Index a tree without hashing file contents: the same walk as {@link scanTree}
  * with `sha256: null` on regular files (the `size` is still the lstat size).
  * For consumers that only need kind/mode/target/size (staging seeds, the
@@ -241,6 +263,7 @@ async function walk(root: string, rel: string, manifest: Manifest, context: {
   stats: Map<string, ScanIndexEntry>
   counters: { trusted: number; hashed: number }
   onFile?: (size: number) => void
+  refreshCtimes?: boolean
 }): Promise<void> {
   const directory = rel === '' ? root : resolveTreePath(root, rel)
   const entries = await readdir(directory, { withFileTypes: true })
@@ -281,7 +304,7 @@ async function walk(root: string, rel: string, manifest: Manifest, context: {
         ino: stats.ino,
         dev: stats.dev,
         mode,
-      })
+      }, context.refreshCtimes === true)
       if (trusted !== null) {
         sha256 = trusted
         binary = context.index?.entries.get(childRel)?.binary ?? false

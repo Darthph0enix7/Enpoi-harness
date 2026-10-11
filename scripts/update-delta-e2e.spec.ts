@@ -847,13 +847,12 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(update.mode).toBe('delta')
     expect(update.base).toBe('retained')
     expect(update.verificationOk).toBe(true)
-    // Steady state: the whole scan is stat-bound. The only content hashes are
-    // installer/user mutations that happened AFTER the index was seeded —
-    // the restamped install marker plus the two user-patched files (the
-    // fixture's patchedDependencies). Every plan path is trusted from the index.
-    expect(update.scanHashed).toBe(3)
+    // Steady state: the whole scan is stat-bound. The end-of-update index
+    // refresh restamped the marker and the user-patched files, so this hop
+    // hashes nothing at all.
+    expect(update.scanHashed).toBe(0)
     expect(Number(update.scanTrusted)).toBeGreaterThan(0)
-    expect(update.scanIndex).toBe('rebuilt')
+    expect(update.scanIndex).toBe('reused')
     expect(existsSync(join(fixture.prefix, 'harness/2/.dsh-scan-index'))).toBe(true)
     expect(readFileSync(join(fixture.prefix, 'harness/3/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\nFOUR\nFIVE\n')
     expect(readFileSync(join(fixture.prefix, 'harness/3/cfg/both.yaml'), 'utf8')).toBe('x: LOCAL\ny: 2\nz: 3\n')
@@ -876,10 +875,9 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     const hop2 = await runUpdate(fixture)
     expect(hop2.status, hop2.stderr).toBe(0)
     const update = hop2.json?.update as Record<string, unknown>
-    // Exactly the edited path plus the three post-index installer mutations
-    // (restamped marker, two user-patched files) are re-hashed; everything
-    // else is trusted from the index.
-    expect(update.scanHashed).toBe(4)
+    // Exactly the edited path is re-hashed; the end-of-update refresh
+    // restamped everything else, so the scan stays stat-bound.
+    expect(update.scanHashed).toBe(1)
     expect(Number(update.scanTrusted)).toBeGreaterThan(0)
     expect(update.scanIndex).toBe('rebuilt')
     // The edit survives (untracked file kept verbatim).

@@ -212,7 +212,7 @@ export interface VerificationResult {
 }
 
 /** Apply journal phase. */
-export type JournalPhase = 'seeded' | 'applying' | 'verifying' | 'complete' | 'aborted' | 'failed'
+export type JournalPhase = 'planned' | 'seeded' | 'applying' | 'verifying' | 'complete' | 'aborted' | 'failed'
 
 /** Interruption-recovery journal stored next to the staging directory. */
 export interface ApplyJournal {

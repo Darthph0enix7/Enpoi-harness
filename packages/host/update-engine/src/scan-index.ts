@@ -200,7 +200,7 @@ export interface StatIdentity {
  * @param writtenAtNs - The index file's own mtime in nanoseconds.
  * @returns True when the indexed hash can be trusted.
  */
-export function scanIndexEntryTrusted(entry: ScanIndexEntry, stat: StatIdentity, writtenAtNs: bigint): boolean {
+export function scanIndexEntryTrusted(entry: ScanIndexEntry, stat: StatIdentity, writtenAtNs: bigint, allowCtimeDrift = false): boolean {
   if (entry.type !== stat.type) return false
   if (entry.size !== stat.size) return false
   if (entry.mode !== stat.mode) return false
@@ -208,8 +208,11 @@ export function scanIndexEntryTrusted(entry: ScanIndexEntry, stat: StatIdentity,
   const entryCtime = BigInt(entry.ctimeNs)
   // Stat hit: the current timestamps must be exactly the recorded ones. A
   // file edited after the index keeps its inode/size but moves mtime/ctime,
-  // so equality is what makes the recorded hash still true.
-  if (stat.mtimeNs !== entryMtime || stat.ctimeNs !== entryCtime) return false
+  // so equality is what makes the recorded hash still true. The refresh pass
+  // (allowCtimeDrift) carries the hash when only the ctime moved — exactly
+  // what hardlink seeding does to the source tree's inodes (nlink change).
+  if (stat.mtimeNs !== entryMtime) return false
+  if (!allowCtimeDrift && stat.ctimeNs !== entryCtime) return false
   // Racy rule: both recorded times must be strictly older than the index
   // file's own mtime (ctime closes the utimes bypass).
   if (!(entryMtime < writtenAtNs && entryCtime < writtenAtNs)) return false
@@ -227,11 +230,11 @@ export function scanIndexEntryTrusted(entry: ScanIndexEntry, stat: StatIdentity,
  * @param stat - Fresh bigint stat identity of the path.
  * @returns Trusted hash (files) or symlink target hash, or null.
  */
-export function trustedHash(index: ScanIndex | null, relPath: string, stat: StatIdentity): string | null {
+export function trustedHash(index: ScanIndex | null, relPath: string, stat: StatIdentity, allowCtimeDrift = false): string | null {
   if (index === null) return null
   const entry = index.entries.get(relPath)
   if (entry === undefined) return null
-  if (!scanIndexEntryTrusted(entry, stat, index.writtenAtNs)) return null
+  if (!scanIndexEntryTrusted(entry, stat, index.writtenAtNs, allowCtimeDrift)) return null
   if (entry.type === 'symlink') return entry.sha256 ?? hashBytes(entry.target ?? '')
   return entry.sha256
 }

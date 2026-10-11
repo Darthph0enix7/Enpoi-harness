@@ -10,7 +10,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { applyPlan, discardStaging, mutationTouchedPaths } from '../src/apply.ts'
 import { verifyStagedTree } from '../src/verify.ts'
-import { readJournal, writeJournal } from '../src/journal.ts'
+import { readJournalState, writeJournal, writeJournalHead, writeJournalPlan } from '../src/journal.ts'
 import { buildPlan } from '../src/plan.ts'
 import { makeUpdateFixture, readStaged, runUpdate, writeTreeFile, type UpdateFixture } from './fixture.ts'
 
@@ -76,10 +76,11 @@ describe('staged apply mechanics', () => {
     // Verification saw the shipped outcome for the replaced path.
     expect(result.verification?.ok).toBe(true)
     expect(result.verification?.manifestChecked).toBe(2)
-    // The journal records the plan fingerprint and completion.
-    const journal = await readJournal(f.journalPath)
-    expect(journal?.fingerprint).toBe(result.planFingerprint)
-    expect(journal?.phase).toBe('complete')
+    // The v2 journal records the plan fingerprint and completion in its head.
+    const state = await readJournalState(f.journalPath)
+    expect(state?.head.fingerprint).toBe(result.planFingerprint)
+    expect(state?.head.phase).toBe('complete')
+    expect(state?.completed.length).toBe(2)
     void staging
   })
 
@@ -239,14 +240,19 @@ describe('staged apply mechanics', () => {
   it('detects a foreign journal and requires rollback before rebuilding', async () => {
     const f = await fixture('foreign-journal', { 'a.txt': 'a\n' }, { 'a.txt': 'b\n' })
     const plan = await build(f)
-    await writeJournal(f.journalPath, {
-      schema: 1,
+    await writeJournalPlan(f.journalPath, plan, '2026-01-01T00:00:00.000Z')
+    await writeJournalHead(f.journalPath, {
+      schema: 2,
       toVersion: '9.9.9',
       fingerprint: 'deadbeef',
       createdAt: '2026-01-01T00:00:00.000Z',
       phase: 'applying',
-      completed: [],
       detail: null,
+      planFile: 'staging.journal.json.plan.json',
+      progressFile: 'staging.journal.json.progress.ndjson',
+      batches: 0,
+      completedCount: 0,
+      updatedAt: '2026-01-01T00:00:00.000Z',
     })
     const result = await applyPlan({ plan, ...applyOptions(f) })
     expect(result.status).toBe('rollback-required')
@@ -256,6 +262,27 @@ describe('staged apply mechanics', () => {
     await expect(lstat(f.journalPath)).rejects.toThrow()
     const retry = await applyPlan({ plan, ...applyOptions(f) })
     expect(retry.status).toBe('applied')
+  })
+
+  it('fails open to a fresh apply when the journal is a legacy v1 document', async () => {
+    const f = await fixture('legacy-journal', { 'a.txt': 'a\n' }, { 'a.txt': 'b\n' })
+    const plan = await build(f)
+    await writeJournal(f.journalPath, {
+      schema: 1,
+      toVersion: plan.toVersion,
+      fingerprint: plan.fingerprint,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      phase: 'applying',
+      completed: ['a.txt'],
+      detail: null,
+    })
+    const result = await applyPlan({ plan, ...applyOptions(f) })
+    expect(result.status).toBe('applied')
+    expect(result.verification?.ok).toBe(true)
+    // The legacy document is replaced by the v2 split journal.
+    const state = await readJournalState(f.journalPath)
+    expect(state?.head.schema).toBe(2)
+    expect(state?.head.phase).toBe('complete')
   })
 
   it('runs deletions last and resumes an interrupted apply', async () => {

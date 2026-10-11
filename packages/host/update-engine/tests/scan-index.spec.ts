@@ -6,11 +6,11 @@
  * zero-hash steady-state invariant.
  */
 
-import { lstat, mkdir, mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises'
+import { link, lstat, mkdir, mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { scanTree, walkTree } from '../src/manifest.ts'
+import { refreshScanIndex, scanTree, walkTree } from '../src/manifest.ts'
 import { SCAN_INDEX_NAME } from '../src/scan-index.ts'
 import { verifyStagedTree } from '../src/verify.ts'
 import { makeUpdateFixture, runUpdate } from './fixture.ts'
@@ -219,6 +219,30 @@ describe('scan index trust model', () => {
     expect(result.result.verification?.filesHashed).toBeGreaterThan(0)
     const staged = await lstat(join(fixture.stagingRoot, 'a.txt'))
     expect(staged.nlink).toBe(1)
+  })
+
+  it('refreshes ctimes after a hardlink seeding pass so the next scan stays stat-bound', async () => {
+    const root = await tree({ 'a.txt': 'one\n', 'b.txt': 'two\n', 'sub/c.txt': 'three\n' })
+    await scanTree(root, {})
+    // Simulate seeding a staging tree: hardlink every file (nlink+1 bumps ctime).
+    const scratch = join(root, '..', `seed-${Date.now()}`)
+    roots.push(scratch)
+    await mkdir(scratch, { recursive: true })
+    for (const rel of ['a.txt', 'b.txt', 'sub/c.txt']) {
+      await link(join(root, rel), join(scratch, rel.replace('/', '_')))
+    }
+    // Let the bumped ctimes settle strictly before the refresh writes the
+    // index: the trust rule is strict (`entry.ctime < writtenAt`), and a
+    // same-tick collision would make exactly one entry untrusted.
+    await new Promise(resolve => setTimeout(resolve, 5))
+    const refreshed = await refreshScanIndex(root)
+    expect(refreshed).not.toBeNull()
+    expect(refreshed?.carried).toBe(3)
+    expect(refreshed?.rehashed).toBe(0)
+    const info: { state: string; trusted: number; hashed: number }[] = []
+    await scanTree(root, { onIndex: entry => info.push(entry) })
+    expect(info[0]?.hashed).toBe(0)
+    expect(info[0]?.trusted).toBe(3)
   })
 
   it('budgets: the indexed scan does no content hashing and beats the cold scan', async () => {

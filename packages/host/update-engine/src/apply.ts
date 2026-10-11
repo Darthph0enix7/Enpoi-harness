@@ -13,12 +13,13 @@
  */
 
 import { chmod, copyFile, link, lstat, mkdir, readlink, rm, rmdir, symlink, unlink } from 'node:fs/promises'
-import { dirname, join, relative } from 'node:path'
+import { basename, dirname, join, relative } from 'node:path'
 import { writeBufferAtomic, writeBufferUnlinked, writeSymlinkUnlinked } from './atomic.ts'
 import { createBackup } from './backup.ts'
 import { hashBytes, hashFile, manifestPaths, readTreeBytes, resolveTreePath, walkTree } from './manifest.ts'
 import { merge3 } from './diff3.ts'
-import { journalFor, readJournal, writeJournal } from './journal.ts'
+import { appendJournalProgress, journalPlanPath, journalProgressPath, readJournalState, removeJournal, writeJournalHead, writeJournalPlan } from './journal.ts'
+import type { JournalHead } from './journal.ts'
 import { planFingerprint } from './plan.ts'
 import { buildUpdateReport } from './report.ts'
 import { verifyStagedTree } from './verify.ts'
@@ -26,7 +27,6 @@ import { SCAN_INDEX_NAME, writeScanIndex } from './scan-index.ts'
 import type { ScanIndexEntry } from './scan-index.ts'
 import type { VerifyOptions } from './verify.ts'
 import type {
-  ApplyJournal,
   ApplyResult,
   Manifest,
   ApplyStatus,
@@ -109,6 +109,14 @@ export interface ApplyOptions {
    */
   linkFile?: (source: string, destination: string) => Promise<void>
   /**
+   * Progress-batch journal cadence in actions (default 2000). The journal is
+   * never written per action: phase boundaries + this cadence + T seconds,
+   * whichever comes first (see `journalEveryMs`).
+   */
+  journalEveryActions?: number
+  /** Wall-clock journal cadence in ms (default 5000). */
+  journalEveryMs?: number
+  /**
    * 'applying' callback interval in actions; the final action always reports.
    * Default 200. Ignored without {@link progress}.
    */
@@ -142,27 +150,51 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
     })
   }
 
-  let journal: ApplyJournal | null
-  try {
-    journal = await readJournal(journalPath)
-  } catch (error) {
-    return makeResult(options, journalPath, false, 'failed', { detail: message(error), results })
-  }
-  if (journal !== null && journal.fingerprint !== plan.fingerprint) {
+  const journalState = await readJournalState(journalPath)
+  if (journalState !== null && journalState.head.fingerprint !== plan.fingerprint) {
     return makeResult(options, journalPath, false, 'rollback-required', {
-      detail: `staging journal belongs to a different plan (${journal.fingerprint}); discard staging before retrying`,
+      detail: `staging journal belongs to a different plan (${journalState.head.fingerprint}); discard staging before retrying`,
       results,
     })
   }
-  const resumed = journal !== null && journal.phase !== 'complete'
-  if (journal !== null && journal.phase === 'aborted') {
+  const resumed = journalState !== null && journalState.head.phase !== 'complete'
+  // v2 journal: immutable plan written once; the head is rewritten only at
+  // phase boundaries and the bounded cadence below (never per action).
+  const journalEveryActions = options.journalEveryActions ?? 2000
+  const journalEveryMs = options.journalEveryMs ?? 5000
+  let journalBatches = journalState?.head.batches ?? 0
+  const writeHead = async (phase: JournalPhase, detail: string | null): Promise<void> => {
+    const head: JournalHead = {
+      schema: 2,
+      toVersion: plan.toVersion,
+      fingerprint: plan.fingerprint,
+      createdAt: timestamp,
+      phase,
+      detail,
+      planFile: basename(journalPlanPath(journalPath)),
+      progressFile: basename(journalProgressPath(journalPath)),
+      batches: journalBatches,
+      completedCount: completed.length,
+      updatedAt: new Date().toISOString(),
+    }
+    await writeJournalHead(journalPath, head)
+  }
+  if (journalState === null) {
+    try {
+      await writeJournalPlan(journalPath, plan, timestamp)
+      await writeHead('planned', null)
+    } catch (error) {
+      return makeResult(options, journalPath, false, 'failed', { detail: `journal write failed: ${message(error)}`, results })
+    }
+  }
+  if (journalState !== null && journalState.head.phase === 'aborted') {
     // A matching abort journal means inspection sidecars are already in place.
     return makeResult(options, journalPath, true, 'aborted', {
-      detail: journal.detail ?? 'runtime-code merge conflict; current version stays active',
+      detail: journalState.head.detail ?? 'runtime-code merge conflict; current version stays active',
       results,
     })
   }
-  if (journal !== null && journal.phase === 'complete') {
+  if (journalState !== null && journalState.head.phase === 'complete') {
     const stagedStats = options.useIndex === false ? undefined : new Map<string, ScanIndexEntry>()
     const verification = await verifyStagedTree(verifyOptions(options, stagedStats))
     if (verification.ok) {
@@ -197,12 +229,13 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
   try {
     preflight = await preflightPlan(options)
   } catch (error) {
+    await writeHead('failed', message(error))
     return makeResult(options, journalPath, resumed, 'failed', { detail: message(error), results })
   }
 
   if (plan.switchDecision === 'abort') {
     const conflicts = await writeAbortSidecars(plan, options, preflight)
-    await persist(journalPath, plan, timestamp, 'aborted', completed, 'runtime-code conflict; switch aborted')
+    await writeHead('aborted', 'runtime-code conflict; switch aborted')
     return makeResult(options, journalPath, resumed, 'aborted', {
       conflicts,
       detail: 'runtime-code merge conflict; current version stays active',
@@ -225,9 +258,13 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
       stageTick('seeding', processed, total, bytes, processed === total)
     }, options.linkFile)
   } catch (error) {
+    await writeHead('failed', `staging seed failed: ${message(error)}`)
     return makeResult(options, journalPath, resumed, 'failed', { detail: `staging seed failed: ${message(error)}`, results })
   }
-  await persist(journalPath, plan, timestamp, 'seeded', completed, null)
+  // The live tree's index is refreshed at the END of the update by the
+  // installer (after staging discard/prune, whose unlink storms bump shared
+  // inode ctimes); refreshing here would be invalidated by those steps.
+  await writeHead('seeded', null)
 
   let backup: BackupResult | null = null
   if (options.backupDir !== undefined) {
@@ -245,6 +282,17 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
   let processed = 0
   let lastProgressActions = 0
   let lastProgressBytes = 0
+  let batchStart = 0
+  let lastJournalAt = Date.now()
+  const flushJournalBatch = async (phase: JournalPhase, detail: string | null): Promise<void> => {
+    if (processed > batchStart) {
+      await appendJournalProgress(journalPath, journalBatches, completed.slice(batchStart, processed))
+      journalBatches += 1
+      batchStart = processed
+    }
+    lastJournalAt = Date.now()
+    await writeHead(phase, detail)
+  }
   for (const action of plan.actions) {
     try {
       const outcome = await executeAction(action, context)
@@ -255,7 +303,7 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
       }
       completed.push(action.path)
     } catch (error) {
-      await persist(journalPath, plan, timestamp, 'failed', completed, message(error))
+      await flushJournalBatch('failed', message(error))
       return makeResult(options, journalPath, resumed, 'failed', {
         detail: `action failed at ${action.path}: ${message(error)}`,
         bytesWritten,
@@ -264,7 +312,6 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
         results,
       })
     }
-    await persist(journalPath, plan, timestamp, 'applying', completed, null)
     processed++
     if (options.progress !== undefined
       && (processed === plan.actions.length
@@ -274,8 +321,12 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
       lastProgressBytes = bytesWritten
       options.progress({ phase: 'applying', processed, total: plan.actions.length, bytesWritten })
     }
+    // Bounded journal cadence: every N actions or T seconds, whichever first.
+    if (processed - batchStart >= journalEveryActions || Date.now() - lastJournalAt >= journalEveryMs) {
+      await flushJournalBatch('applying', null)
+    }
     if (options.stopAfterActions !== undefined && processed >= options.stopAfterActions) {
-      await persist(journalPath, plan, timestamp, 'applying', completed, `interrupted after ${processed} actions`)
+      await flushJournalBatch('applying', `interrupted after ${processed} actions`)
       const liveTreeIntact = sameSnapshot(before, await snapshotHostPaths(options.localRoot, touched))
       return makeResult(options, journalPath, resumed, 'interrupted', {
         detail: `stopped after ${processed} actions`,
@@ -288,7 +339,7 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
     }
   }
 
-  await persist(journalPath, plan, timestamp, 'verifying', completed, null)
+  await flushJournalBatch('verifying', null)
   options.progress?.({ phase: 'verifying', processed: 0, total: plan.actions.length, bytesWritten })
   const stagedStats = options.useIndex === false ? undefined : new Map<string, ScanIndexEntry>()
   const verification = await verifyStagedTree(verifyOptions(options, stagedStats))
@@ -303,7 +354,7 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
   const detail = verification.ok
     ? liveTreeIntact ? null : 'live tree changed during staging pass; rollback required'
     : `${verification.mismatches.length} verification mismatch(es); staging must not be switched`
-  await persist(journalPath, plan, timestamp, status === 'applied' ? 'complete' : 'failed', completed, detail)
+  await flushJournalBatch(status === 'applied' ? 'complete' : 'failed', detail)
   return makeResult(options, journalPath, resumed, status, {
     detail,
     bytesWritten,
@@ -322,7 +373,7 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
  */
 export async function discardStaging(stagingRoot: string, journalPath?: string): Promise<void> {
   await rm(stagingRoot, { recursive: true, force: true })
-  if (journalPath !== undefined) await rm(journalPath, { force: true })
+  if (journalPath !== undefined) await removeJournal(journalPath)
 }
 
 interface ApplyContext {
@@ -343,6 +394,7 @@ interface ResultExtras {
   bytesWritten?: number
   wroteActions?: number
   liveTreeIntact?: boolean
+  indexRefresh?: { entries: number; carried: number; rehashed: number } | null
   verification?: VerificationResult | null
   conflicts?: PlanConflict[]
   backup?: BackupResult | null
@@ -739,17 +791,6 @@ async function uniqueSidecarPath(target: string): Promise<string> {
     if (await lstat(candidate).catch(() => null) === null) return candidate
   }
   throw new Error(`cannot find a free sidecar path for ${target}`)
-}
-
-async function persist(
-  journalPath: string,
-  plan: UpdatePlan,
-  timestamp: string,
-  phase: JournalPhase,
-  completed: readonly string[],
-  detail: string | null,
-): Promise<void> {
-  await writeJournal(journalPath, journalFor(plan, timestamp, phase, completed, detail))
 }
 
 function message(error: unknown): string {

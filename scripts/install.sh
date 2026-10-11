@@ -1976,10 +1976,18 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
       fast_dl="$(resolve_fast_downloader "$cache_dir")"
       if [ -n "$fast_dl" ] && [ -f "$fast_dl" ]; then
         log "prebuilt: downloading with parallel chunk engine (Node.js)"
+        local dl_log_start=""
+        [ -f "$LOG_FILE" ] && dl_log_start="$(wc -l < "$LOG_FILE" 2>/dev/null | tr -d '[:space:]')"
         if run_logged "Fetching prebuilt release ($OS-$ARCH, parallel)" "${DSH_PREBUILT_TIMEOUT:-1800}" "$PREFIX" "$NODE" "$fast_dl" "$url" "$asset_file" "${DSH_DOWNLOAD_CONCURRENCY:-6}" "$expected"; then
           dl_ok=1
         else
           dl_rc=$?
+          # Surface the engine's own last lines: a silent exit-1 (e.g. node
+          # failing before its first output) must not look like a mystery.
+          local dl_tail=""
+          if [ -n "$dl_log_start" ] && [ -f "$LOG_FILE" ]; then
+            dl_tail="$(tail -n +"$((dl_log_start + 1))" "$LOG_FILE" 2>/dev/null | grep -v '^[[:space:]]*$' | grep -v '^---' | tail -n 2 | tr '\n' '; ')"
+          fi
           if [ "$dl_rc" -eq 130 ]; then
             warn "prebuilt: download interrupted by user; completed chunks preserved for resume"
             exit 130
@@ -1989,7 +1997,7 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
             warn "prebuilt: checksum verification failed; falling back to single-stream curl"
             rm -f "$asset_file" "$asset_file.download"
           else
-            log "prebuilt: parallel chunk download failed (exit $dl_rc); falling back to single-stream curl"
+            log "prebuilt: parallel chunk download failed (exit $dl_rc)${dl_tail:+: $dl_tail}; falling back to single-stream curl"
           fi
         fi
       fi
@@ -5307,7 +5315,9 @@ delta_base_retained_check() { # version
 }
 
 delta_discard_staging() {
-  rm -rf "$DELTA_STAGING_DIR" "$DELTA_STAGING_DIR.journal.json" "$DELTA_STAGING_DIR.owner"
+  # The v2 journal is split (head + plan + progress), so the glob covers all
+  # three documents alongside the staging directory and its owner marker.
+  rm -rf "$DELTA_STAGING_DIR" "$DELTA_STAGING_DIR".journal.json* "$DELTA_STAGING_DIR.owner"
 }
 
 delta_cleanup_scratch() {
@@ -5340,7 +5350,7 @@ delta_finalize_tree() { # staging to
         # from an aborted (never-switched) run or an earlier finalize; reusing
         # it is coherent and keeps the verified staging result.
         log "delta: version $to is already installed at $target (reusing)"
-        rm -rf "$staging" "$staging.journal.json" "$staging.owner"
+        rm -rf "$staging" "$staging".journal.json* "$staging.owner"
         TREE_DIR_NAME="$to"
         HARNESS="$target"
         return 0
@@ -5607,7 +5617,14 @@ delta_apply_delta() { # backup_dir [retry]
       return 2
       ;;
     *)
-      warn "delta apply failed${DELTA_RUN_DIR:+: $(tail -n 1 "$DELTA_RUN_DIR/stderr.txt" 2>/dev/null || printf 'see the update log')}"
+      local delta_err=""
+      if [ -s "$DELTA_RUN_DIR/stderr.txt" ]; then
+        delta_err="$(grep -v '^[[:space:]]*$' "$DELTA_RUN_DIR/stderr.txt" 2>/dev/null | tail -n 2 | tr '\n' '; ')"
+      fi
+      if [ -z "$delta_err" ] && [ "$rc" = 124 ]; then
+        delta_err="killed by the ${DSH_DELTA_TIMEOUT:-1800}s delta timeout"
+      fi
+      warn "delta apply failed (exit $rc)${delta_err:+: $delta_err}"
       delta_discard_staging
       delta_cleanup_scratch
       return 1
@@ -5755,12 +5772,30 @@ delta_apply_full() { # release_tree [retry]
       return 1
       ;;
     *)
-      warn "full update apply failed${DELTA_RUN_DIR:+: $(tail -n 1 "$DELTA_RUN_DIR/stderr.txt" 2>/dev/null || printf 'see the update log')}"
+      local full_err=""
+      if [ -s "$DELTA_RUN_DIR/stderr.txt" ]; then
+        full_err="$(grep -v '^[[:space:]]*$' "$DELTA_RUN_DIR/stderr.txt" 2>/dev/null | tail -n 2 | tr '\n' '; ')"
+      fi
+      warn "full update apply failed (exit $rc)${full_err:+: $full_err}"
       delta_discard_staging
       delta_cleanup_scratch
       return 1
       ;;
   esac
+}
+
+# Refresh a tree's scan index after the update's hardlink churn (staging
+# discard, prune) so the tree that will be scanned next stays stat-bound.
+# Best-effort: an absent engine/index is a no-op, never an update failure.
+update_delta_refresh_index() { # tree engine label
+  local tree="$1" engine="$2" label="$3" out=""
+  [ -d "$tree" ] || return 0
+  [ -n "$engine" ] && [ -f "$engine" ] || return 0
+  out="$(update_delta_run refresh-index --engine "$engine" --tree "$tree" 2>/dev/null || true)"
+  case "$out" in
+    *refreshed*) log "scan index: $label — $out";;
+  esac
+  return 0
 }
 
 # Apply the user's declared pnpm patches to the freshly installed tree. The
@@ -6770,7 +6805,13 @@ do_update() {
         if [ "$delta_rc" = 2 ]; then
           log "delta: continuing with the full release"
         else
-          warn "delta: apply failed; retrying with the full release"
+          warn "delta: apply failed (exit $delta_rc); retrying with the full release"
+        fi
+        # A killed/failed delta attempt can leave a multi-GB partial staging;
+        # the full path re-seeds idempotently, so discard it first.
+        if [ -e "$DELTA_STAGING_DIR" ] || [ -e "$DELTA_STAGING_DIR.journal.json" ]; then
+          log "delta: discarding the partial staging before the full fallback"
+          delta_discard_staging
         fi
         if ! delta_prepare_full_fallback; then
           warn "could not fetch the full release; no changes were made to \$DSH_HOME"
@@ -6893,6 +6934,10 @@ do_update() {
   if [ "$WRITE_RC" = 1 ]; then write_rc; fi
   prune_versions "$TREE_DIR_NAME" "$current"
   prune_update_artifacts
+  # Restamp both retained trees' scan indexes after all hardlink churn
+  # (staging discard, patches, prune): the next update scans stat-only.
+  update_delta_refresh_index "$PREFIX/harness/$TREE_DIR_NAME" "$(update_engine_bundle "$PREFIX/harness/$TREE_DIR_NAME" 2>/dev/null || true)" "$TREE_DIR_NAME"
+  [ "$current" != "$TREE_DIR_NAME" ] && update_delta_refresh_index "$PREFIX/harness/$current" "$(update_engine_bundle "$PREFIX/harness/$current" 2>/dev/null || true)" "$current"
   # Planner scratch files served this run only; their PID suffix keeps a
   # concurrent invocation's files while the matching install-time cleanup
   # reaps leftovers from crashed runs.
