@@ -1,0 +1,35 @@
+diff --git a/lib/client.js b/lib/client.js
+index c794079..d76fff1 100644
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -613,7 +613,7 @@ window.__ModuleLoader__.load({
+ 		* persisted selection and the card-driven descriptor resolution.
+ 		*/
+ 		var WallpaperController = class {
+-			enabledValue = true;
++			enabledValue = false;
+ 			selectionValue = "";
+ 			modeValue = "live";
+ 			fitValue = "cover";
+@@ -959,7 +959,7 @@ window.__ModuleLoader__.load({
+ 			}
+ 			readAll() {
+ 				const value = this.scope.getSnapshot().value ?? {};
+-				this.enabledValue = typeof value.enabled === "boolean" ? value.enabled : true;
++				this.enabledValue = typeof value.enabled === "boolean" ? value.enabled : false;
+ 				this.selectionValue = typeof value.selection === "string" ? value.selection : "";
+ 				this.modeValue = value.mode === "frame" ? "frame" : "live";
+ 				const rawFit = value.fit;
+diff --git a/lib/index.js b/lib/index.js
+index 9affcbf..5ed4e58 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -9395,7 +9395,7 @@ const SkinBackgroundConfigSchema = z.object({
+ const SKIN_WALLPAPER_NAMESPACE = "skin-wallpaper";
+ /** Runtime schema for SkinWallpaperConfig. */
+ const SkinWallpaperConfigSchema = z.object({
+-	enabled: z.boolean().default(true),
++	enabled: z.boolean().default(false),
+ 	weLibraryDirs: z.array(z.string()).default([]),
+ 	selection: z.string().default(""),
+ 	mode: z.union(["live", "frame"]).default("live"),

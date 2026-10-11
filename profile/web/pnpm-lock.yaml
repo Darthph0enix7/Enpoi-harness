@@ -5,6 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
+  '@linxin666/dsh-client-ui-skin-center@0.3.21': 71c88f1af5d9a84de09945cddf23573809feafcc3d3a4aa626fa59d352d8de9e
   dsh-compressor@0.1.0: 4afd979922c95ae4e811abdd299f11b76d25afa72ddebc6609506d11be42a5d0
   dsh-fast@0.2.14: 1c83147d84bee58c1512878f7f669131aac1710890138724a76b4df68d344ba6
 
@@ -17,7 +18,7 @@ importers:
         version: 0.85.1(ws@8.22.0)(zod@4.6.5)
       '@linxin666/dsh-client-ui-skin-center':
         specifier: ^0.3.21
-        version: 0.3.21
+        version: 0.3.21(patch_hash=71c88f1af5d9a84de09945cddf23573809feafcc3d3a4aa626fa59d352d8de9e)
       '@xterm/addon-fit':
         specifier: ^0.11.0
         version: 0.11.0
@@ -1862,7 +1863,7 @@ snapshots:
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
-  '@linxin666/dsh-client-ui-skin-center@0.3.21':
+  '@linxin666/dsh-client-ui-skin-center@0.3.21(patch_hash=71c88f1af5d9a84de09945cddf23573809feafcc3d3a4aa626fa59d352d8de9e)':
     dependencies:
       jpeg-js: 0.4.4
       lightningcss: 1.33.0

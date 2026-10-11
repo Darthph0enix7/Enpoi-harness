@@ -67,6 +67,12 @@ Also part of a rebuild: `pnpm run -s verify-cordis-catalog` (generated docs) and
 - Fix: rebuild the owning package, harvest the client bundle, then `dsh restart --after-turn`. The fork's registration call is a no-op on the merged engine and only bootstraps pre-0.1.7 engines (`$PROFILE/packages/enpoi-capabilities/src/index.ts:191-204`).
 - Gate: open the page after restart; `settings.describe` must list the namespace.
 
+### Wallpaper Engine feature starts enabled / `skin-wallpaper` edits do not stick
+- Symptom: the skin center's Wallpaper Engine card starts ON, or its toggle and edits revert after reload.
+- Cause: the skin center still registers `skin-background` / `skin-wallpaper` / `skin-custom-theme` through the removed `installSection` / `settings.get(ns)` seam, so those namespaces never persist on 0.1.7 (`skin-wallpaper` is not a profile entry id; the `fresh-settings.yaml` row is reported `was not imported`) and the client falls back to the package defaults — upstream defaults `enabled` to true.
+- Fix: the profile pins the WE bridge off with the committed pnpm patch `$PROFILE/patches/@linxin666__dsh-client-ui-skin-center@0.3.21.patch` (host schema + client fallback → `false`, explicit user values untouched), declared in `pnpm-workspace.yaml`. After editing it: `cd $PROFILE && pnpm install && dsh restart --after-turn`.
+- Gate: `$PROFILE/tests/wallpaper-default.spec.ts` pins the seed row, the patch hunks and application, the lockfile hash, and the no-executable payload; the static skin background is unaffected, so `dsh-skin-guard.mjs` and `scripts/glass-seam-probe.mjs` stay green.
+
 ### Provider 401 / quota / gated
 - Symptom: turn fails with an auth rejection, `QUOTA` / `ACCOUNT_QUOTA`, an entitlement refusal, or a 402/429 that surfaces as a tool error; or a model is dimmed in the picker.
 - Cause: missing/invalid credential; keyless route whose selected model needs sign-in (`gated: true`, `gateReason: sign-in required`); pool identity cooling after 401/403; an identity-specific entitlement gate; free-tier quota exhausted.

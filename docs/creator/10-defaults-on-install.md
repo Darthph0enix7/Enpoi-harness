@@ -62,7 +62,8 @@ Two layers:
 ## Default skin
 
 - Active skin: `summer-liquid-glass` (frozen `1.0.0-frozen`); guard default `DSH_GUARD_SKIN=summer-liquid-glass` restores it only when `skin-center-active.json` says `active: null` (`$PROFILE/scripts/dsh-skin-guard.mjs:20-40`).
-- Seed settings: dark preference, background enabled (80% opacity, blur 15/20/8), `skin-wallpaper` off (`$PROFILE/fresh-settings.yaml:8-17`).
+- Seed settings: dark preference, background enabled (80% opacity, blur 15/20/8), `skin-wallpaper` off (`$PROFILE/fresh-settings.yaml:10-19`).
+- **Wallpaper-Engine bridge is off by default, and the patch is the operative default.** The skin center's WE feature ships disabled twice: the seed row above (documents intent for engines that still import settings sections), and the committed pnpm patch `$PROFILE/patches/@linxin666__dsh-client-ui-skin-center@0.3.21.patch` (registered in `pnpm-workspace.yaml`, hashed in `pnpm-lock.yaml`), which flips the package's `SkinWallpaperConfigSchema.enabled` default and the client's absent-value fallback to `false`. On 0.1.7 the plugin's `installSection` / `settings.get(ns)` seam is gone, and `skin-wallpaper` is not a profile entry id, so the seed row can never persist (`settings: section … was not imported`); the patch is what reaches the runtime. An explicit user ON is never rewritten. The static background is unaffected: the seed's `skin-background` block and the active skin's `backgroundMedia` stay on.
 - The skin is a right-rail/console-wide surface; contrast and rebrand gates in doc 11 are the acceptance test.
 
 ## Default seats (fleet)
