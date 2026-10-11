@@ -94,7 +94,7 @@ export function sha256FileSync(file: string): string
  * @param treeDir - tree root
  * @returns path -> entry skeleton
  */
-export function statTree(treeDir: string): Map<string, { type: string; mode: string; target?: string; size?: number }>
+export function statTree(treeDir: string): Map<string, { type: string; mode: string; target?: string; size?: number; sha256?: string }>
 
 /**
  * Classify the installed tree against a baseline manifest.
@@ -105,8 +105,9 @@ export function statTree(treeDir: string): Map<string, { type: string; mode: str
  */
 export function classifyLocal(
   treeDir: string,
-  tree: Map<string, { type: string; mode: string; target?: string; size?: number }>,
+  tree: Map<string, { type: string; mode: string; target?: string; size?: number; sha256?: string }>,
   baselineEntries: ReleaseManifestEntry[],
+  options?: { hash?: (file: string) => string },
 ): {
   modified: { path: string; reason: string }[]
   missing: string[]

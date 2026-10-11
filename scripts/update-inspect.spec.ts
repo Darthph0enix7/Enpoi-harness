@@ -173,6 +173,80 @@ describe('manifest reading', () => {
   })
 })
 
+describe('scan-index-backed classification', () => {
+  type SimpleManifest = Record<string, { type: string; mode: number; size: number; sha256: string | null; target: string | null }>
+
+  function manifestEntries(manifest: SimpleManifest): ReleaseManifestEntry[] {
+    return Object.entries(manifest).map(([path, entry]) => ({
+      path,
+      type: entry.type as ReleaseManifestEntry['type'],
+      mode: (entry.mode & 0o7777).toString(8).padStart(4, '0'),
+      size: entry.size,
+      sha256: entry.sha256,
+      target: entry.target,
+      binary: false,
+    }))
+  }
+
+  it.skipIf(win32)('classifies a clean indexed tree without hashing anything', async () => {
+    const dir = scratch()
+    write(dir, 'keep.txt', 'keep\n')
+    write(dir, 'sub/nested.txt', 'nested\n')
+    write(dir, 'exec.sh', '#!/bin/sh\n', 0o755)
+    const { scanTree } = await import('../packages/host/update-engine/src/index.ts')
+    const manifest = await scanTree(dir) as SimpleManifest
+    const entries = manifestEntries(manifest)
+    const tree = statTree(dir)
+    const hashed: string[] = []
+    const result = classifyLocal(dir, tree, entries, {
+      hash: (file: string) => {
+        hashed.push(file)
+        return 'unused'
+      },
+    })
+    expect(hashed).toEqual([])
+    expect(result.modified).toEqual([])
+    expect(result.untracked).toEqual([])
+    expect(result.installerState).toContain('.dsh-scan-index')
+  })
+
+  it.skipIf(win32)('falls back to hashing when the index is corrupt', async () => {
+    const dir = scratch()
+    write(dir, 'keep.txt', 'keep\n')
+    const { scanTree } = await import('../packages/host/update-engine/src/index.ts')
+    const manifest = await scanTree(dir) as SimpleManifest
+    const entries = manifestEntries(manifest)
+    writeFileSync(join(dir, '.dsh-scan-index'), '{"schema":"dsh-scan-index/1","entr')
+    const hashed: string[] = []
+    const result = classifyLocal(dir, statTree(dir), entries, {
+      hash: (file: string) => {
+        hashed.push(file)
+        return manifest['keep.txt']?.sha256 ?? ''
+      },
+    })
+    expect(hashed.length).toBe(1)
+    expect(result.modified).toEqual([])
+  })
+
+  it.skipIf(win32)('detects a same-size late edit despite a trusted-looking index', async () => {
+    const dir = scratch()
+    write(dir, 'keep.txt', 'AAAA\n')
+    const { scanTree } = await import('../packages/host/update-engine/src/index.ts')
+    const manifest = await scanTree(dir) as SimpleManifest
+    const entries = manifestEntries(manifest)
+    writeFileSync(join(dir, 'keep.txt'), 'ZZZZ\n')
+    const hashed: string[] = []
+    const result = classifyLocal(dir, statTree(dir), entries, {
+      hash: (file: string) => {
+        hashed.push(file)
+        return '0000000000000000000000000000000000000000000000000000000000000000'
+      },
+    })
+    expect(hashed.length).toBe(1)
+    expect(result.modified.map(entry => entry.path)).toEqual(['keep.txt'])
+  })
+})
+
 describe('local classification', () => {
   it.skipIf(win32)('separates modified, mode-only, missing, untracked, and installer state', () => {
     const dir = scratch()

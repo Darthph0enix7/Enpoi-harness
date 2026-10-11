@@ -15,6 +15,8 @@
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { lstat, mkdir, readFile, readdir, readlink } from 'node:fs/promises'
+import { isScanIndexPath, readScanIndex, scanIndexEntryFromStats, writeScanIndex, trustedHash } from './scan-index.ts'
+import type { ScanIndex, ScanIndexEntry } from './scan-index.ts'
 import { dirname, join } from 'node:path'
 import { writeBufferAtomic } from './atomic.ts'
 import { matchesAnyGlob } from './glob.ts'
@@ -34,6 +36,16 @@ export interface ScanTreeOptions {
    * Default 2000.
    */
   progressEvery?: number
+  /**
+   * Consume and refresh the tree's `.dsh-scan-index` stat cache (default
+   * true). `false` forces a full content scan (the DSH_SCAN_INDEX=0 escape
+   * hatch, wired by the updater).
+   */
+  useIndex?: boolean
+  /** Collect bigint stat identities into this map while walking. */
+  collectStats?: Map<string, ScanIndexEntry>
+  /** Index outcome reporter: trusted/hashed counts and the index state. */
+  onIndex?: (info: { state: 'reused' | 'rebuilt' | 'absent' | 'disabled'; trusted: number; hashed: number }) => void
 }
 
 /** File hashing result. */
@@ -145,19 +157,59 @@ export async function scanTree(root: string, options: ScanTreeOptions = {}): Pro
   const ignore = options.ignore ?? []
   const onProgress = options.onProgress
   const every = options.progressEvery ?? 2000
+  const useIndex = options.useIndex ?? true
+  const index: ScanIndex | null = useIndex ? await readScanIndex(root) : null
+  const stats = options.collectStats ?? new Map<string, ScanIndexEntry>()
   let files = 0
   let bytes = 0
   let lastAt = 0
-  await walk(root, '', manifest, ignore, true, onProgress === undefined ? undefined : (size) => {
-    files += 1
-    bytes += size
-    const now = Date.now()
-    if (files % every === 0 || now - lastAt >= 3000) {
-      lastAt = now
-      onProgress({ files, bytes })
-    }
+  const counters = { trusted: 0, hashed: 0 }
+  await walk(root, '', manifest, {
+    ignore,
+    index,
+    stats,
+    counters,
+    ...(onProgress === undefined ? {} : {
+      onFile: (size: number) => {
+        files += 1
+        bytes += size
+        const now = Date.now()
+        if (files % every === 0 || now - lastAt >= 3000) {
+          lastAt = now
+          onProgress({ files, bytes })
+        }
+      },
+    }),
   })
   onProgress?.({ files, bytes })
+  let state: 'reused' | 'rebuilt' | 'absent' | 'disabled' = 'disabled'
+  if (useIndex) {
+    // Rebuild when there was no index or the walk had to re-hash/see new paths;
+    // otherwise the existing file stays (its older writtenAt only tightens the
+    // racy rule, so a stale index is always safe).
+    let added = 0
+    let dropped = 0
+    if (index !== null) {
+      for (const path of stats.keys()) {
+        if (!index.entries.has(path)) added += 1
+      }
+      for (const path of index.entries.keys()) {
+        if (!stats.has(path)) dropped += 1
+      }
+    }
+    const needsRebuild = index === null || counters.hashed > 0 || added > 0 || dropped > 0
+    if (needsRebuild) {
+      try {
+        await writeScanIndex(root, stats)
+        state = 'rebuilt'
+      } catch {
+        state = 'absent'
+      }
+    } else {
+      state = 'reused'
+    }
+  }
+  options.onIndex?.({ state, trusted: counters.trusted, hashed: counters.hashed })
   return manifest
 }
 
@@ -174,61 +226,82 @@ export async function scanTree(root: string, options: ScanTreeOptions = {}): Pro
  */
 export async function walkTree(root: string, options: ScanTreeOptions = {}): Promise<Manifest> {
   const manifest: Manifest = {}
-  await walk(root, '', manifest, options.ignore ?? [], false)
+  await walk(root, '', manifest, {
+    ignore: options.ignore ?? [],
+    index: null,
+    stats: options.collectStats ?? new Map<string, ScanIndexEntry>(),
+    counters: { trusted: 0, hashed: 0 },
+  })
   return manifest
 }
 
-async function walk(
-  root: string,
-  rel: string,
-  manifest: Manifest,
-  ignore: readonly string[],
-  hashFiles: boolean,
-  onFile?: (size: number) => void,
-): Promise<void> {
+async function walk(root: string, rel: string, manifest: Manifest, context: {
+  ignore: readonly string[]
+  index: ScanIndex | null
+  stats: Map<string, ScanIndexEntry>
+  counters: { trusted: number; hashed: number }
+  onFile?: (size: number) => void
+}): Promise<void> {
   const directory = rel === '' ? root : resolveTreePath(root, rel)
   const entries = await readdir(directory, { withFileTypes: true })
   entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
   for (const dirent of entries) {
     const childRel = rel === '' ? dirent.name : `${rel}/${dirent.name}`
-    if (matchesAnyGlob(ignore, childRel)) continue
-    const stats = await lstat(join(directory, dirent.name))
+    // Reserved engine state (the scan index and its temp siblings) is invisible
+    // to every tree surface (AMD-01): not in manifests, classification, or
+    // verification.
+    if (isScanIndexPath(childRel)) continue
+    if (matchesAnyGlob(context.ignore, childRel)) continue
+    const absolute = join(directory, dirent.name)
+    const stats = await lstat(absolute, { bigint: true })
+    const mode = Number(stats.mode & 0o7777n)
     if (stats.isDirectory()) {
-      manifest[childRel] = { sha256: null, size: 0, type: 'dir', mode: stats.mode & 0o7777, target: null, binary: false }
-      await walk(root, childRel, manifest, ignore, hashFiles, onFile)
+      context.stats.set(childRel, scanIndexEntryFromStats(stats, null, false, null))
+      manifest[childRel] = { sha256: null, size: 0, type: 'dir', mode, target: null, binary: false }
+      await walk(root, childRel, manifest, context)
     } else if (stats.isSymbolicLink()) {
-      const target = await readlink(join(directory, dirent.name))
+      const target = await readlink(absolute)
+      context.stats.set(childRel, scanIndexEntryFromStats(stats, hashBytes(target), false, target))
       manifest[childRel] = {
         sha256: hashBytes(target),
         size: Buffer.byteLength(target),
         type: 'symlink',
-        mode: stats.mode & 0o7777,
+        mode,
         target,
         binary: false,
       }
     } else if (stats.isFile()) {
-      if (!hashFiles) {
-        manifest[childRel] = {
-          sha256: null,
-          size: stats.size,
-          type: 'file',
-          mode: stats.mode & 0o7777,
-          target: null,
-          binary: false,
-        }
-        onFile?.(0)
-        continue
-      }
-      const hashed = await hashFile(join(directory, dirent.name))
-      manifest[childRel] = {
-        sha256: hashed.sha256,
-        size: hashed.size,
+      let sha256: string | null = null
+      let binary = false
+      const trusted = trustedHash(context.index, childRel, {
         type: 'file',
-        mode: stats.mode & 0o7777,
-        target: null,
-        binary: hashed.binary,
+        size: Number(stats.size),
+        mtimeNs: stats.mtimeNs,
+        ctimeNs: stats.ctimeNs,
+        ino: stats.ino,
+        dev: stats.dev,
+        mode,
+      })
+      if (trusted !== null) {
+        sha256 = trusted
+        binary = context.index?.entries.get(childRel)?.binary ?? false
+        context.counters.trusted += 1
+      } else {
+        const hashed = await hashFile(absolute)
+        sha256 = hashed.sha256
+        binary = hashed.binary
+        context.counters.hashed += 1
+        context.onFile?.(hashed.size)
       }
-      onFile?.(hashed.size)
+      context.stats.set(childRel, scanIndexEntryFromStats(stats, sha256, binary, null))
+      manifest[childRel] = {
+        sha256,
+        size: Number(stats.size),
+        type: 'file',
+        mode,
+        target: null,
+        binary,
+      }
     } else {
       throw new Error(`unsupported filesystem object in tree: ${childRel}`)
     }

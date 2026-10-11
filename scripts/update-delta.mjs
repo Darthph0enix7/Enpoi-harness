@@ -31,6 +31,9 @@
  * The manifest validation below mirrors scripts/release-delta.mjs; the spec
  * suite proves both project the same document to the same engine manifest.
  *
+ * Scan index: on by default (doc 97 §3). `--no-index` or DSH_SCAN_INDEX=0
+ * forces full content scans (the escape hatch).
+ *
  * Progress: opt-in only. `--progress-fd <n>` (or an injected callback) emits
  * plain `apply:` / `verify:` / `merge base:` lines to an inherited descriptor;
  * without it the module stays silent and every result byte is unchanged. The
@@ -1005,58 +1008,45 @@ export async function materializeBase(options) {
 export async function synthesizePristineArchive(options) {
   const { plan, stagingRoot, releaseRoot, outPath } = options
   const emit = typeof options.progress === 'function' ? options.progress : null
-  const scratch = `${outPath}.tree-${process.pid}`
   const tmpArchive = `${outPath}.tmp-${process.pid}`
-  fs.rmSync(scratch, { recursive: true, force: true })
-  fs.mkdirSync(scratch, { recursive: true })
+  const listShipped = `${outPath}.shipped-${process.pid}.txt`
+  const listPreserved = `${outPath}.preserved-${process.pid}.txt`
   const omitted = []
-  let files = 0
   let estimateBytes = 0
   for (const action of plan.actions) {
     if (action.shipped?.type === 'file' && action.shipped.sha256 !== null) estimateBytes += action.shipped.size ?? 0
   }
   emit?.(`merge base: retaining the pristine merge base for ${options.toVersion ?? 'the installed version'} (≈ ${formatBytes(estimateBytes)})…`)
   try {
+    // Build the archive straight from the verified staging tree and the
+    // release view with member lists — no hardlink scratch tree. Hardlinking
+    // bumped the staged inodes' ctime, which invalidated the scan index that
+    // was just written (the next update would distrust every file).
+    const shipped = []
+    const preserved = []
     for (const action of plan.actions) {
-      const shipped = action.shipped
-      if (shipped === null || shipped === undefined) continue
-      const destination = joinRel(scratch, action.path)
-      if (shipped.type === 'dir') {
-        fs.mkdirSync(destination, { recursive: true })
-        try { fs.chmodSync(destination, shipped.mode) } catch { /* best effort mode */ }
-        continue
-      }
-      fs.mkdirSync(path.dirname(destination), { recursive: true })
-      if (shipped.type === 'symlink') {
-        fs.symlinkSync(shipped.target ?? '', destination)
+      const shippedEntry = action.shipped
+      if (shippedEntry === null || shippedEntry === undefined) continue
+      if (shippedEntry.type === 'dir') continue
+      if (shippedEntry.type === 'symlink') {
+        // Symlinks are recreated in the scratch fallback; the direct-tar path
+        // archives the staged symlink itself (same target, verified).
+        shipped.push(action.path)
         continue
       }
       if (action.outcome.disposition === 'shipped') {
-        const source = joinRel(stagingRoot, action.path)
-        try {
-          fs.linkSync(source, destination)
-        } catch {
-          fs.copyFileSync(source, destination)
-        }
-        files += 1
+        shipped.push(action.path)
         continue
       }
-      let stats = null
       const viewSource = joinRel(releaseRoot, action.path)
+      let stats = null
       try { stats = fs.lstatSync(viewSource) } catch { stats = null }
-      if (stats !== null && stats.isFile() && sha256FileSync(viewSource) === shipped.sha256) {
-        try {
-          fs.linkSync(viewSource, destination)
-        } catch {
-          fs.copyFileSync(viewSource, destination)
-        }
-        files += 1
+      if (stats !== null && stats.isFile() && sha256FileSync(viewSource) === shippedEntry.sha256) {
+        preserved.push(action.path)
         continue
       }
       omitted.push(action.path)
     }
-    // Long-running on real trees: the ticker keeps the phase visibly alive
-    // while tar writes the archive (plain lines, no frames).
     const startedAt = Date.now()
     const ticker = setInterval(() => {
       let written = 0
@@ -1067,28 +1057,62 @@ export async function synthesizePristineArchive(options) {
       }
       emit?.(`merge base: writing ${path.basename(outPath)} — ${formatBytes(written)} (${Math.round((Date.now() - startedAt) / 1000)}s)`)
     }, 5000)
-    let tarStderr = ''
     try {
-      const code = await new Promise((resolve, reject) => {
-        const child = spawn('tar', ['-cf', tmpArchive, '-C', scratch, '.'])
-        child.stderr?.on('data', chunk => { tarStderr += chunk.toString() })
-        child.once('error', reject)
-        child.once('close', resolve)
-      })
-      if (code !== 0) throw new Error(`tar failed (${code}): ${tarStderr.trim()}`)
+      const files = shipped.length + preserved.length
+      await runTarWrite(tmpArchive, stagingRoot, shipped, releaseRoot, preserved)
+      if (files === 0) {
+        // Nothing to archive: still produce a valid empty tar.
+        const empty = spawnSync('tar', ['-cf', tmpArchive, '--files-from', '/dev/null'], { encoding: 'utf8' })
+        if (empty.status !== 0) throw new Error(`tar failed (${empty.status}): ${(empty.stderr ?? '').trim()}`)
+      }
+      fs.mkdirSync(path.dirname(outPath), { recursive: true })
+      fs.renameSync(tmpArchive, outPath)
+      const digest = sha256FileSync(outPath)
+      fs.writeFileSync(`${outPath}.sha256`, `${digest}  ${path.basename(outPath)}\n`)
+      const bytes = fs.statSync(outPath).size
+      emit?.(`merge base: retained ${formatBytes(bytes)} at ${outPath}`)
+      return { path: outPath, bytes, files, omitted }
     } finally {
       clearInterval(ticker)
     }
-    fs.mkdirSync(path.dirname(outPath), { recursive: true })
-    fs.renameSync(tmpArchive, outPath)
-    const digest = sha256FileSync(outPath)
-    fs.writeFileSync(`${outPath}.sha256`, `${digest}  ${path.basename(outPath)}\n`)
-    const bytes = fs.statSync(outPath).size
-    emit?.(`merge base: retained ${formatBytes(bytes)} at ${outPath}`)
-    return { path: outPath, bytes, files, omitted }
   } finally {
     fs.rmSync(tmpArchive, { force: true })
-    fs.rmSync(scratch, { recursive: true, force: true })
+    fs.rmSync(listShipped, { force: true })
+    fs.rmSync(listPreserved, { force: true })
+  }
+}
+
+/** Create the archive from two member lists (create + append; no scratch tree). */
+async function runTarWrite(outFile, stagingRoot, shipped, releaseRoot, preserved) {
+  const writeList = (file, paths) => {
+    fs.writeFileSync(file, paths.length === 0 ? '' : `${paths.join('\n')}\n`)
+  }
+  const run = (args) => new Promise((resolve, reject) => {
+    let stderr = ''
+    const child = spawn('tar', args)
+    child.stderr?.on('data', chunk => { stderr += chunk.toString() })
+    child.once('error', reject)
+    child.once('close', code => {
+      if (code !== 0) reject(new Error(`tar failed (${code}): ${stderr.trim()}`))
+      else resolve(undefined)
+    })
+  })
+  const listShipped = `${outFile}.shipped-list.txt`
+  const listPreserved = `${outFile}.preserved-list.txt`
+  try {
+    if (shipped.length > 0) {
+      writeList(listShipped, shipped)
+      await run(['-cf', outFile, '-C', stagingRoot, '-T', listShipped])
+    } else {
+      await run(['-cf', outFile, '--files-from', '/dev/null'])
+    }
+    if (preserved.length > 0) {
+      writeList(listPreserved, preserved)
+      await run(['-rf', outFile, '-C', releaseRoot, '-T', listPreserved])
+    }
+  } finally {
+    fs.rmSync(listShipped, { force: true })
+    fs.rmSync(listPreserved, { force: true })
   }
 }
 
@@ -1128,11 +1152,23 @@ export async function runApplyPipeline(options) {
   let localScanFiles = 0
   let localScanBytes = 0
   const scanStartedAt = Date.now()
-  const local = await engine.scanTree(options.localRoot, progress === null ? {} : {
-    onProgress: (tick) => {
-      localScanFiles = tick.files
-      localScanBytes = tick.bytes
-      progress(`scan: hashing the installed tree — ${tick.files} files, ${formatBytes(tick.bytes)} read`)
+  const useIndex = options.useIndex ?? process.env.DSH_SCAN_INDEX !== '0'
+  let scanIndexState = 'disabled'
+  let scanTrusted = 0
+  let scanHashed = 0
+  const local = await engine.scanTree(options.localRoot, {
+    useIndex,
+    ...(progress === null ? {} : {
+      onProgress: (tick) => {
+        localScanFiles = tick.files
+        localScanBytes = tick.bytes
+        progress(`scan: hashing the installed tree — ${tick.files} files, ${formatBytes(tick.bytes)} read`)
+      },
+    }),
+    onIndex: (info) => {
+      scanIndexState = info.state
+      scanTrusted = info.trusted
+      scanHashed = info.hashed
     },
   })
   const localScanCompletedAt = Date.now()
@@ -1229,6 +1265,7 @@ export async function runApplyPipeline(options) {
     ...(options.progressEveryMs === undefined ? {} : { progressEveryMs: options.progressEveryMs }),
     localManifest: local,
     localScanCompletedAt,
+    useIndex,
   })
   if (progress !== null) {
     const verification = applied.verification
@@ -1296,7 +1333,14 @@ export async function runApplyPipeline(options) {
     baseArchive,
     baseArchiveError,
     stats: {
-      localScan: { files: localScanFiles, bytes: localScanBytes, ms: localScanMs },
+      localScan: {
+        files: localScanFiles,
+        bytes: localScanBytes,
+        ms: localScanMs,
+        trusted: scanTrusted,
+        hashed: scanHashed,
+        index: scanIndexState,
+      },
       snapshotPaths,
       base: baseInfo,
     },
@@ -1311,6 +1355,10 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
     if (!arg.startsWith('--')) throw new Error(`unexpected argument: ${arg}`)
+    if (arg === '--no-index') {
+      args['no-index'] = true
+      continue
+    }
     const value = argv[i + 1]
     if (value === undefined || value.startsWith('--')) throw new Error(`missing value for ${arg}`)
     if (arg === '--diff') args.diff.push(value)
@@ -1335,7 +1383,7 @@ const USAGE = `usage: update-delta.mjs apply --engine <bundle.js> --local <dir> 
        [--persist-base <archive.tar>]
        [--progress-fd <n>] [--progress-every-actions <n>]
        [--progress-every-bytes <n>] [--progress-every-steps <n>]
-       [--progress-every-ms <n>] [--out <result.json>]
+       [--progress-every-ms <n>] [--no-index] [--out <result.json>]
 
 Progress lines (plain stderr-style text) go to <n> when a descriptor >= 3 is
 open; without it nothing is emitted and behavior is unchanged.`
@@ -1383,6 +1431,7 @@ export async function main(argv) {
     ...(args['base-archive-sha'] === undefined ? {} : { archiveSha: args['base-archive-sha'] }),
     ...(args['base-candidate-cap'] === undefined ? {} : { candidateCap: Number.parseInt(args['base-candidate-cap'], 10) }),
     ...(args['base-tick-ms'] === undefined ? {} : { tickMs: Number.parseInt(args['base-tick-ms'], 10) }),
+    ...(args['no-index'] === true ? { useIndex: false } : {}),
   }
   const outcome = await runApplyPipeline(options)
   if (args.out !== undefined) fs.writeFileSync(args.out, `${JSON.stringify(outcome.result, null, 2)}\n`)

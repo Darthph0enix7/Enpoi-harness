@@ -12,8 +12,8 @@
  * sidecars next to the conflicted live files for inspection.
  */
 
-import { chmod, link, lstat, mkdir, readlink, rm, rmdir, symlink, unlink } from 'node:fs/promises'
-import { dirname, relative } from 'node:path'
+import { chmod, copyFile, link, lstat, mkdir, readlink, rm, rmdir, symlink, unlink } from 'node:fs/promises'
+import { dirname, join, relative } from 'node:path'
 import { writeBufferAtomic, writeBufferUnlinked, writeSymlinkUnlinked } from './atomic.ts'
 import { createBackup } from './backup.ts'
 import { hashBytes, hashFile, manifestPaths, readTreeBytes, resolveTreePath, walkTree } from './manifest.ts'
@@ -22,6 +22,8 @@ import { journalFor, readJournal, writeJournal } from './journal.ts'
 import { planFingerprint } from './plan.ts'
 import { buildUpdateReport } from './report.ts'
 import { verifyStagedTree } from './verify.ts'
+import { SCAN_INDEX_NAME, writeScanIndex } from './scan-index.ts'
+import type { ScanIndexEntry } from './scan-index.ts'
 import type { VerifyOptions } from './verify.ts'
 import type {
   ApplyJournal,
@@ -97,6 +99,16 @@ export interface ApplyOptions {
   /** Wall-clock cap between stage progress ticks, in ms. Default 3000. */
   progressEveryMs?: number
   /**
+   * Consume/seed the scan index (default true): the staged tree gets a fresh
+   * `.dsh-scan-index` on successful verification, before the directory rename.
+   */
+  useIndex?: boolean
+  /**
+   * Hardlink primitive override (tests simulate no-hardlink filesystems that
+   * force the copy fallback).
+   */
+  linkFile?: (source: string, destination: string) => Promise<void>
+  /**
    * 'applying' callback interval in actions; the final action always reports.
    * Default 200. Ignored without {@link progress}.
    */
@@ -151,8 +163,14 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
     })
   }
   if (journal !== null && journal.phase === 'complete') {
-    const verification = await verifyStagedTree(verifyOptions(options))
-    if (verification.ok) return makeResult(options, journalPath, false, 'noop', { verification, results })
+    const stagedStats = options.useIndex === false ? undefined : new Map<string, ScanIndexEntry>()
+    const verification = await verifyStagedTree(verifyOptions(options, stagedStats))
+    if (verification.ok) {
+      if (stagedStats !== undefined && !(await hasScanIndex(options.stagingRoot))) {
+        await seedScanIndex(options, stagedStats)
+      }
+      return makeResult(options, journalPath, false, 'noop', { verification, results })
+    }
     return makeResult(options, journalPath, false, 'failed', {
       detail: 'completed staging no longer verifies; staging must be discarded and rebuilt',
       verification,
@@ -205,7 +223,7 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
   try {
     await seedStaging(options.localRoot, options.stagingRoot, options.localManifest, (processed, total, bytes) => {
       stageTick('seeding', processed, total, bytes, processed === total)
-    })
+    }, options.linkFile)
   } catch (error) {
     return makeResult(options, journalPath, resumed, 'failed', { detail: `staging seed failed: ${message(error)}`, results })
   }
@@ -272,7 +290,14 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
 
   await persist(journalPath, plan, timestamp, 'verifying', completed, null)
   options.progress?.({ phase: 'verifying', processed: 0, total: plan.actions.length, bytesWritten })
-  const verification = await verifyStagedTree(verifyOptions(options))
+  const stagedStats = options.useIndex === false ? undefined : new Map<string, ScanIndexEntry>()
+  const verification = await verifyStagedTree(verifyOptions(options, stagedStats))
+  // Seed the new tree's scan index from the verification walk (AMD-05): it is
+  // written into the staging directory before the rename, so the index commits
+  // atomically with the tree and an aborted run leaves none.
+  if (verification.ok && stagedStats !== undefined) {
+    await seedScanIndex(options, stagedStats)
+  }
   const liveTreeIntact = sameSnapshot(before, await snapshotHostPaths(options.localRoot, touched))
   const status: ApplyStatus = verification.ok && liveTreeIntact ? 'applied' : 'failed'
   const detail = verification.ok
@@ -535,6 +560,7 @@ async function seedStaging(
   stagingRoot: string,
   manifest?: Manifest,
   onTick?: (processed: number, total: number, bytes: number) => void,
+  linkFile?: (source: string, destination: string) => Promise<void>,
 ): Promise<void> {
   // The caller's scanned manifest is exact and free; without it an lstat-only
   // walk suffices (seeding only needs kind/mode/target, never content), so
@@ -582,7 +608,17 @@ async function seedStaging(
       await removeStagedTarget(destination)
     }
     await mkdir(dirname(destination), { recursive: true })
-    await link(source, destination)
+    try {
+      await (linkFile ?? link)(source, destination)
+    } catch (error) {
+      // No-hardlink filesystems (FAT/exFAT targets, restricted mounts) fall
+      // back to a copy (AMD-06); verify then hashes instead of trusting the
+      // inode.
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'ENOTSUP' && code !== 'EOPNOTSUPP' && code !== 'EACCES' && code !== 'EPERM' && code !== 'EXDEV' && code !== 'EMLINK') throw error
+      await copyFile(source, destination)
+      await chmod(destination, entry.mode)
+    }
     processed += 1
     bytes += entry.size
     onTick?.(processed, paths.length, bytes)
@@ -611,10 +647,11 @@ export function mutationTouchedPaths(plan: UpdatePlan): string[] {
 }
 
 /** Verification options carrying the local scan for hardlink hash reuse. */
-function verifyOptions(options: ApplyOptions): VerifyOptions {
+function verifyOptions(options: ApplyOptions, collectStats?: Map<string, ScanIndexEntry>): VerifyOptions {
   return {
     plan: options.plan,
     stagingRoot: options.stagingRoot,
+    ...(collectStats === undefined ? {} : { collectStats }),
     localRoot: options.localRoot,
     ...(options.localManifest === undefined ? {} : { localManifest: options.localManifest }),
     ...(options.localScanCompletedAt === undefined ? {} : { localScanCompletedAt: options.localScanCompletedAt }),
@@ -623,6 +660,20 @@ function verifyOptions(options: ApplyOptions): VerifyOptions {
         options.progress?.({ phase: 'verifying', processed: progress.filesHashed, total: options.plan.actions.length, bytesWritten: progress.bytesHashed })
       },
     }),
+  }
+}
+
+async function hasScanIndex(root: string): Promise<boolean> {
+  return await lstat(join(root, SCAN_INDEX_NAME)).then(() => true).catch(() => false)
+}
+
+/** Best-effort index seed: an optional optimization must never fail an apply. */
+async function seedScanIndex(options: ApplyOptions, stats: Map<string, ScanIndexEntry>): Promise<void> {
+  try {
+    await writeScanIndex(options.stagingRoot, stats)
+  } catch (error) {
+    options.progress?.({ phase: 'verifying', processed: 0, total: options.plan.actions.length, bytesWritten: 0 })
+    void error
   }
 }
 

@@ -13,6 +13,7 @@ import { readTreeBytes } from './manifest.ts'
 import { hashText, hashBytes } from './manifest.ts'
 import { merge3 } from './diff3.ts'
 import { matchesAnyGlob } from './glob.ts'
+import { isScanIndexPath } from './scan-index.ts'
 import type {
   ConflictSeverity,
   Manifest,
@@ -33,6 +34,20 @@ export const RUNTIME_CODE_EXTENSIONS: ReadonlySet<string> = new Set([
 ])
 
 /** Options for {@link buildPlan}. */
+/**
+ * Drop reserved engine paths (the scan index) from a manifest copy.
+ * @param manifest - Source manifest.
+ * @returns The manifest without reserved paths (the same object when clean).
+ */
+function withoutReserved(manifest: Manifest): Manifest {
+  if (!Object.keys(manifest).some(isScanIndexPath)) return manifest
+  const filtered: Manifest = {}
+  for (const [path, entry] of Object.entries(manifest)) {
+    if (!isScanIndexPath(path)) filtered[path] = entry
+  }
+  return filtered
+}
+
 export interface BuildPlanOptions {
   /** Installed version the plan is computed against; null for a cold start. */
   fromVersion: string | null
@@ -78,6 +93,14 @@ export function isRuntimeCodePath(path: string): boolean {
  * @returns Plan with actions, conflicts, counts, switch decision, and fingerprint.
  */
 export async function buildPlan(options: BuildPlanOptions): Promise<UpdatePlan> {
+  // Reserved engine state never participates in classification (AMD-01); the
+  // scan already excludes it, and this guards manifests from other sources.
+  options = {
+    ...options,
+    previous: withoutReserved(options.previous),
+    next: withoutReserved(options.next),
+    local: withoutReserved(options.local),
+  }
   const pins = options.pins ?? []
   const tombstones = options.tombstones ?? []
   const actions: PlanAction[] = []

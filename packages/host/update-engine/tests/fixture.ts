@@ -126,6 +126,8 @@ export interface RunUpdateOptions {
   progressEveryActions?: number
   progressEverySteps?: number
   progressEveryMs?: number
+  /** Hardlink primitive override (no-hardlink filesystem drills). */
+  linkFile?: (source: string, destination: string) => Promise<void>
 }
 
 /** Plan + apply result bundle. */
@@ -167,6 +169,7 @@ export async function runUpdate(fixture: UpdateFixture, options: RunUpdateOption
     ...(options.progressEveryActions === undefined ? {} : { progressEveryActions: options.progressEveryActions }),
     ...(options.progressEverySteps === undefined ? {} : { progressEverySteps: options.progressEverySteps }),
     ...(options.progressEveryMs === undefined ? {} : { progressEveryMs: options.progressEveryMs }),
+    ...(options.linkFile === undefined ? {} : { linkFile: options.linkFile }),
     localManifest: fixture.local,
     // The fixture's local manifest was scanned by makeUpdateFixture before
     // this call; apply time is its (conservative) completion bound.

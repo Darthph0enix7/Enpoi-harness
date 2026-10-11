@@ -8,6 +8,7 @@
 export * from './types.ts'
 export * from './atomic.ts'
 export * from './manifest.ts'
+export * from './scan-index.ts'
 export * from './glob.ts'
 export * from './pins.ts'
 export * from './diff3.ts'

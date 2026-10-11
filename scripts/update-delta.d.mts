@@ -78,7 +78,14 @@ export interface ApplyPipelineResult {
   baseArchiveError: string | null
   /** Per-update scan/snapshot/base statistics. */
   stats: {
-    localScan: { files: number; bytes: number; ms: number }
+    localScan: {
+      files: number
+      bytes: number
+      ms: number
+      trusted: number
+      hashed: number
+      index: 'reused' | 'rebuilt' | 'absent' | 'disabled'
+    }
     snapshotPaths: number
     base: {
       mode: 'none' | 'selective' | 'full'
@@ -137,6 +144,8 @@ export interface RunApplyPipelineOptions {
   candidateCap?: number
   /** Extraction tick interval in ms. Default 3000. */
   tickMs?: number
+  /** Consume/seed the scan index (default true; DSH_SCAN_INDEX=0 disables). */
+  useIndex?: boolean
 }
 
 /** Outcome of the apply pipeline. */

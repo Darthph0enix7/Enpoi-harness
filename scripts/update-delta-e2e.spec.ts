@@ -728,6 +728,12 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(update.baseCandidates).toBeGreaterThan(0)
     expect(update.baseExtracted).toBeGreaterThan(0)
     expect(update.baseReused).toBe(false)
+    // First-ever update: one full content scan, then the index is written into
+    // the installed tree and seeded into the new tree before its rename.
+    expect(update.scanIndex).toBe('rebuilt')
+    expect(Number(update.scanHashed)).toBeGreaterThan(0)
+    expect(existsSync(join(fixture.prefix, 'harness/1/.dsh-scan-index'))).toBe(true)
+    expect(existsSync(join(fixture.prefix, 'harness/2/.dsh-scan-index'))).toBe(true)
 
     // Engine report on disk (stable path, survives scratch cleanup).
     const reportFile = join(fixture.prefix, 'harness', '.last-update-2.json')
@@ -841,10 +847,44 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(update.mode).toBe('delta')
     expect(update.base).toBe('retained')
     expect(update.verificationOk).toBe(true)
+    // Steady state: the whole scan is stat-bound. The only content hashes are
+    // installer/user mutations that happened AFTER the index was seeded —
+    // the restamped install marker plus the two user-patched files (the
+    // fixture's patchedDependencies). Every plan path is trusted from the index.
+    expect(update.scanHashed).toBe(3)
+    expect(Number(update.scanTrusted)).toBeGreaterThan(0)
+    expect(update.scanIndex).toBe('rebuilt')
+    expect(existsSync(join(fixture.prefix, 'harness/2/.dsh-scan-index'))).toBe(true)
     expect(readFileSync(join(fixture.prefix, 'harness/3/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\nFOUR\nFIVE\n')
     expect(readFileSync(join(fixture.prefix, 'harness/3/cfg/both.yaml'), 'utf8')).toBe('x: LOCAL\ny: 2\nz: 3\n')
     expect(existsSync(join(fixture.prefix, 'harness/.bases/3.tar'))).toBe(true)
     console.log(`[e2e] second hop: base=${String(update.base)} mode=${String(update.mode)} downloaded ${String(update.downloadedBytes)} B vs full ${String(update.fullTarballBytes)} B, merged ${String((update.counts as Record<string, number>).merged)}`)
+  }, 240_000)
+
+  it('detects a same-size local edit through the index on the next hop', async () => {
+    const fixture = await buildFixture({ versions: ['1', '2', '3'], installed: '1', visible: ['1', '2'] })
+    const hop1 = await runUpdate(fixture)
+    expect(hop1.status, hop1.stderr).toBe(0)
+    expect(currentTarget(fixture.prefix)).toBe('2')
+    // Same-size content change on an untracked file: only mtime/ctime move.
+    const victim = join(fixture.prefix, 'harness/2/user/notes.txt')
+    const before = readFileSync(victim)
+    const edited = Buffer.concat([before.subarray(0, before.length - 1), Buffer.from('X')])
+    writeFileSync(victim, edited)
+
+    fixture.server.publish('3')
+    const hop2 = await runUpdate(fixture)
+    expect(hop2.status, hop2.stderr).toBe(0)
+    const update = hop2.json?.update as Record<string, unknown>
+    // Exactly the edited path plus the three post-index installer mutations
+    // (restamped marker, two user-patched files) are re-hashed; everything
+    // else is trusted from the index.
+    expect(update.scanHashed).toBe(4)
+    expect(Number(update.scanTrusted)).toBeGreaterThan(0)
+    expect(update.scanIndex).toBe('rebuilt')
+    // The edit survives (untracked file kept verbatim).
+    expect(readFileSync(join(fixture.prefix, 'harness/3/user/notes.txt'))).toEqual(edited)
+    expect(currentTarget(fixture.prefix)).toBe('3')
   }, 240_000)
 
   it('degrades a both-changed config when the retained base is missing', async () => {

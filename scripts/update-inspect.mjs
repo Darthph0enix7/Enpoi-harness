@@ -55,7 +55,54 @@ const REQUEST_TIMEOUT_MS = 20000
 const LADDER_MAX_HOPS = 3
 
 /** Installer-written state inside a version tree that is not a shipped path. */
-const INSTALLER_STATE_PATHS = new Set(['.dsh-install-complete'])
+const INSTALLER_STATE_PATHS = new Set(['.dsh-install-complete', '.dsh-scan-index'])
+const SCAN_INDEX_NAME = '.dsh-scan-index'
+const SCAN_INDEX_SCHEMA = 'dsh-scan-index/1'
+
+function isScanIndexPath(relPath) {
+  return relPath === SCAN_INDEX_NAME || relPath.startsWith(`${SCAN_INDEX_NAME}.`)
+}
+
+/**
+ * Read the engine's scan index for a tree, with the same trust anchor the
+ * engine uses (the index file's own mtimeNs; future timestamps invalidate).
+ * Returns null for a missing/corrupt/future index — classification then
+ * falls back to hashing, exactly as before the index existed.
+ */
+function readScanIndex(treeDir) {
+  try {
+    const indexPath = path.join(treeDir, SCAN_INDEX_NAME)
+    const stats = fs.lstatSync(indexPath, { bigint: true })
+    if (!stats.isFile()) return null
+    const writtenAtNs = stats.mtimeNs
+    if (writtenAtNs > BigInt(Date.now()) * 1000000n + 5000000000n) return null
+    const doc = JSON.parse(fs.readFileSync(indexPath, 'utf8'))
+    if (doc === null || typeof doc !== 'object' || doc.schema !== SCAN_INDEX_SCHEMA) return null
+    if (doc.entries === null || typeof doc.entries !== 'object' || Array.isArray(doc.entries)) return null
+    return { writtenAtNs, entries: doc.entries }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The engine's trust rule (AMD-02/06): the current stat must equal the entry
+ * (times included) and both times must be strictly older than the index file.
+ */
+function trustedIndexHash(index, relPath, identity) {
+  if (index === null) return undefined
+  const tuple = index.entries[relPath]
+  if (!Array.isArray(tuple) || tuple.length !== 10) return undefined
+  const [typeCode, size, mtimeNs, ctimeNs, ino, dev, mode, , , sha256] = tuple
+  if (typeCode !== 0 || typeof sha256 !== 'string') return undefined
+  if (size !== identity.size || mode !== identity.mode) return undefined
+  if (typeof mtimeNs !== 'string' || typeof ctimeNs !== 'string' || typeof ino !== 'string' || typeof dev !== 'string') return undefined
+  if (identity.mtimeNs !== mtimeNs || identity.ctimeNs !== ctimeNs) return undefined
+  if (!(BigInt(mtimeNs) < index.writtenAtNs && BigInt(ctimeNs) < index.writtenAtNs)) return undefined
+  if (ino !== '0' && identity.ino !== '0' && ino !== identity.ino) return undefined
+  if (dev !== '0' && identity.dev !== '0' && dev !== identity.dev) return undefined
+  return sha256
+}
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -179,23 +226,38 @@ export function sha256FileSync(file) {
 /** Lstat-only tree index: no file content is read. */
 export function statTree(treeDir) {
   const tree = new Map()
+  // The engine's scan index (doc 97 §3) turns the classification below from a
+  // content-hash walk into a stat walk: trusted entries carry their hash.
+  const index = readScanIndex(treeDir)
   const walk = (rel) => {
     const dir = rel ? path.join(treeDir, rel) : treeDir
     for (const name of fs.readdirSync(dir).sort(pathCompare)) {
       const relPath = rel ? `${rel}/${name}` : name
       const abs = path.join(treeDir, relPath)
-      const st = fs.lstatSync(abs)
+      const st = fs.lstatSync(abs, { bigint: true })
+      const mode = (st.mode & 0o7777n).toString(8).padStart(4, '0')
       if (st.isSymbolicLink()) {
         tree.set(relPath, {
           type: 'symlink',
-          mode: (st.mode & 0o7777).toString(8).padStart(4, '0'),
+          mode,
           target: fs.readlinkSync(abs),
         })
       } else if (st.isDirectory()) {
-        tree.set(relPath, { type: 'dir', mode: (st.mode & 0o7777).toString(8).padStart(4, '0') })
+        tree.set(relPath, { type: 'dir', mode })
         walk(relPath)
       } else if (st.isFile()) {
-        tree.set(relPath, { type: 'file', mode: (st.mode & 0o7777).toString(8).padStart(4, '0'), size: st.size })
+        const identity = {
+          size: Number(st.size),
+          mtimeNs: st.mtimeNs.toString(),
+          ctimeNs: st.ctimeNs.toString(),
+          ino: st.ino.toString(),
+          dev: st.dev.toString(),
+          mode: Number(st.mode & 0o7777n),
+        }
+        const entry = { type: 'file', mode, size: identity.size }
+        const trusted = trustedIndexHash(index, relPath, identity)
+        if (trusted !== undefined) entry.sha256 = trusted
+        tree.set(relPath, entry)
       }
     }
   }
@@ -210,7 +272,8 @@ export function statTree(treeDir) {
  * absent from the manifest; installer-written state is separated.
  * @returns {{modified: object[], missing: string[], modeOnly: object[], untracked: string[], installerState: string[]}}
  */
-export function classifyLocal(treeDir, tree, baselineEntries) {
+export function classifyLocal(treeDir, tree, baselineEntries, options = {}) {
+  const hashFile = options.hash ?? sha256FileSync
   const baseline = new Map(baselineEntries.map(entry => [entry.path, entry]))
   const modified = []
   const missing = []
@@ -229,11 +292,17 @@ export function classifyLocal(treeDir, tree, baselineEntries) {
       continue
     }
     if (base.type === 'file') {
-      if (local.size !== base.size) {
-        modified.push({ path: relPath, reason: 'content (size differs)' })
-        continue
+      // A trusted index hash needs no read; otherwise size-then-hash exactly
+      // as before the index existed.
+      let actualSha256 = local.sha256
+      if (actualSha256 === undefined) {
+        if (local.size !== base.size) {
+          modified.push({ path: relPath, reason: 'content (size differs)' })
+          continue
+        }
+        actualSha256 = hashFile(path.join(treeDir, relPath))
       }
-      if (sha256FileSync(path.join(treeDir, relPath)) !== base.sha256) {
+      if (actualSha256 !== base.sha256) {
         modified.push({ path: relPath, reason: 'content' })
         continue
       }
@@ -248,7 +317,7 @@ export function classifyLocal(treeDir, tree, baselineEntries) {
 
   for (const [relPath, local] of tree) {
     if (baseline.has(relPath)) continue
-    if (INSTALLER_STATE_PATHS.has(relPath)) {
+    if (INSTALLER_STATE_PATHS.has(relPath) || isScanIndexPath(relPath)) {
       installerState.push(relPath)
       continue
     }

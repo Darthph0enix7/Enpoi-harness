@@ -11,6 +11,7 @@
  */
 
 import { lstat } from 'node:fs/promises'
+import type { ScanIndexEntry } from './scan-index.ts'
 import { join } from 'node:path'
 import { hashFile } from './manifest.ts'
 import { walkTree } from './manifest.ts'
@@ -38,6 +39,12 @@ export interface VerifyOptions {
   localScanCompletedAt?: number
   /** Opt-in progress over files that actually needed hashing. */
   onProgress?: (progress: { filesHashed: number; bytesHashed: number }) => void
+  /**
+   * When provided, the staged walk retains full bigint stat identities and the
+   * resolved content hashes in this map, so the caller can seed the new
+   * tree's scan index without another scan (AMD-05).
+   */
+  collectStats?: Map<string, ScanIndexEntry>
 }
 
 /**
@@ -51,7 +58,10 @@ export async function verifyStagedTree(options: VerifyOptions): Promise<Verifica
   // A lightweight walk first (lstat only); file contents are hashed lazily,
   // and only when a trusted hash cannot be carried over from the local scan
   // through the hardlink-seeded inodes.
-  const scan = await walkTree(stagingRoot, options.ignore === undefined ? {} : { ignore: options.ignore })
+  const scan = await walkTree(stagingRoot, {
+    ...(options.ignore === undefined ? {} : { ignore: options.ignore }),
+    ...(options.collectStats === undefined ? {} : { collectStats: options.collectStats }),
+  })
   const resolved = new Map<string, ManifestEntry | undefined>()
   let contentReused = 0
   let filesHashed = 0
@@ -63,18 +73,21 @@ export async function verifyStagedTree(options: VerifyOptions): Promise<Verifica
     let result = entry
     if (entry !== undefined && entry.type === 'file') {
       const stagedPath = join(stagingRoot, ...rel.split('/'))
-      const stagedStats = await lstat(stagedPath).catch(() => null)
+      const stagedStats = await lstat(stagedPath, { bigint: true }).catch(() => null)
       if (stagedStats !== null && stagedStats.isFile()) {
         let trusted: string | null = null
+        // Inode trust is disabled when the filesystem reports no stable inode
+        // (AMD-06, e.g. some FAT/exFAT mounts): hash instead.
         if (options.localRoot !== undefined && options.localManifest !== undefined && options.localScanCompletedAt !== undefined
-          && stagedStats.mtimeMs <= options.localScanCompletedAt) {
-          const liveStats = await lstat(join(options.localRoot, ...rel.split('/'))).catch(() => null)
-          if (liveStats !== null && liveStats.isFile() && liveStats.dev === stagedStats.dev && liveStats.ino === stagedStats.ino) {
+          && stagedStats.ino !== 0n && stagedStats.mtimeMs <= options.localScanCompletedAt) {
+          const liveStats = await lstat(join(options.localRoot, ...rel.split('/')), { bigint: true }).catch(() => null)
+          if (liveStats !== null && liveStats.isFile() && liveStats.ino !== 0n
+            && liveStats.dev === stagedStats.dev && liveStats.ino === stagedStats.ino) {
             trusted = options.localManifest[rel]?.sha256 ?? null
           }
         }
         if (trusted !== null) {
-          result = { ...entry, sha256: trusted, size: stagedStats.size }
+          result = { ...entry, sha256: trusted, size: Number(stagedStats.size) }
           contentReused += 1
         } else {
           const hashed = await hashFile(stagedPath)
@@ -90,6 +103,15 @@ export async function verifyStagedTree(options: VerifyOptions): Promise<Verifica
       }
     }
     resolved.set(rel, result)
+    // Retain the resolved hash for index seeding (AMD-05); the walk recorded
+    // the stat identity, this fills the content column.
+    if (result !== undefined) {
+      const collected = options.collectStats?.get(rel)
+      if (collected !== undefined) {
+        collected.sha256 = result.sha256
+        collected.binary = result.binary
+      }
+    }
     return result
   }
   const expected = new Set<string>()
