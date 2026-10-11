@@ -152,6 +152,14 @@ PRE_SWITCH_RESTORE=""
 UPDATE_LOCK_DIR=""
 FORGET_PATHS=""
 ACCEPT_SHIPPED_PATHS=""
+SWITCH_DONE=0
+INSTALLED_LINK_DIR=""
+INSTALLED_VERSION=""
+INSTALLED_MISMATCH=""
+INSTALLED_HEALED=0
+PNPM_STORE_DIR=""
+PNPM_PIN=""
+COREPACK_BIN=""
 FORGOT_RESULTS=""
 ACCEPTED_RESULTS=""
 UPDATE_ACTIONS_JSON=""
@@ -245,6 +253,14 @@ step() { # label
   else
     printf "\n${C_BOLD}${C_CYAN}▸${C_RESET} ${C_BOLD}%s${C_RESET}\n" "$*" >&2
   fi
+}
+
+# An un-numbered phase header inside a numbered step (fallbacks and sub-phases
+# must not perturb the 1..N step count).
+banner() { # label
+  [ "$QUIET" = 1 ] && return 0
+  progress_clear
+  printf "\n  ${C_BOLD}${C_CYAN}▸${C_RESET} ${C_BOLD}%s${C_RESET}\n" "$*" >&2
 }
 
 substep_ok() {
@@ -456,16 +472,16 @@ run_logged() { # desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL
   fi
 
   if [ "$QUIET" = 1 ]; then
-    ( cd "$workdir" && run_limited "$timeout" "$@" ) >> "$LOG_FILE" 2>&1
+    ( cd "$workdir" && run_limited "$timeout" "$@" ) >> "${LOG_FILE:-/dev/null}" 2>&1
     return $?
   fi
 
   local init_desc="$desc"
   if [ -t 2 ]; then init_desc="$(fit_text "$desc" "$(( $(text_limit) - 8 ))")"; fi
   printf "  ${C_CYAN}⏳${C_RESET} %s..." "$init_desc" >&2
-  printf '\n--- START: %s (dir: %s) ---\n' "$desc" "$workdir" >> "$LOG_FILE" 2>/dev/null || true
+  printf '\n--- START: %s (dir: %s) ---\n' "$desc" "$workdir" >> "${LOG_FILE:-/dev/null}" 2>/dev/null || true
 
-  ( exec 9>&-; cd "$workdir" && run_limited "$timeout" "$@" ) >> "$LOG_FILE" 2>&1 &
+  ( exec 9>&-; cd "$workdir" && run_limited "$timeout" "$@" ) >> "${LOG_FILE:-/dev/null}" 2>&1 &
   local pid=$!
   CURRENT_RUN_LOGGED_PID="$pid"
 
@@ -518,7 +534,7 @@ run_logged() { # desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL
 
   CURRENT_RUN_LOGGED_PID=""
   wait "$pid" 2>/dev/null || rc=$?
-  printf '\n--- END: %s (exit: %d) ---\n' "$desc" "$rc" >> "$LOG_FILE" 2>/dev/null || true
+  printf '\n--- END: %s (exit: %d) ---\n' "$desc" "$rc" >> "${LOG_FILE:-/dev/null}" 2>/dev/null || true
 
   local elapsed=$(( $(date +%s) - start_t ))
   [ "$elapsed" -ge 0 ] || elapsed=0
@@ -534,7 +550,7 @@ run_logged() { # desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL
     local fail_desc="$desc"
     if [ -t 2 ]; then fail_desc="$(fit_text "$desc" "$(( $(text_limit) - 44 ))")"; fi
     printf "  ${C_RED}✗${C_RESET} ${C_BOLD}%s${C_RESET} ${C_RED}failed${C_RESET} ${C_DIM}(exit code %d, %ds)${C_RESET}\n" "$fail_desc" "$rc" "$elapsed" >&2
-    if [ -f "$LOG_FILE" ] && [ "$LOG_FILE" != "/dev/null" ]; then
+    if [ -f "$LOG_FILE" ] && [ "$LOG_FILE" != "/dev/null" ] && [ "${DSH_RUN_LOG_NO_FAILURE_TAIL:-0}" != 1 ]; then
       printf "\n${C_RED}Last 15 lines of log (${LOG_FILE}):${C_RESET}\n" >&2
       printf "${C_DIM}─────────────────────────────────────────────────────────────────${C_RESET}\n" >&2
       tail -n 15 "$LOG_FILE" >&2
@@ -768,10 +784,10 @@ switch_current() { # target -> 0
   local target="$1" link="$PREFIX/harness/current" tmp="$PREFIX/harness/.current.tmp.$$"
   rm -f "$tmp" 2>/dev/null || true
   ln -sfn "$target" "$tmp" || return 1
-  if mv -Tf "$tmp" "$link" 2>/dev/null; then return 0; fi
-  if mv -hf "$tmp" "$link" 2>/dev/null; then return 0; fi
+  if mv -Tf "$tmp" "$link" 2>/dev/null; then SWITCH_DONE=1; return 0; fi
+  if mv -hf "$tmp" "$link" 2>/dev/null; then SWITCH_DONE=1; return 0; fi
   if [ -n "${NODE:-}" ] && [ -x "$NODE" ]; then
-    "$NODE" -e 'require("fs").renameSync(process.argv[1], process.argv[2])' "$tmp" "$link" 2>/dev/null && return 0
+    "$NODE" -e 'require("fs").renameSync(process.argv[1], process.argv[2])' "$tmp" "$link" 2>/dev/null && { SWITCH_DONE=1; return 0; }
   fi
   warn "could not atomically replace $link"
   return 1
@@ -967,25 +983,85 @@ resolve_node() { # $1=1 allow fetch
   return 0
 }
 
+# The pnpm version this install must use: the profile's packageManager when it
+# declares one, then the active/staged harness pin (the release pins the pnpm
+# its engine is built with). Empty when nothing declares one.
+resolve_pnpm_pin() {
+  local file pm
+  local profile_dir="${PROFILE_DIR:-${DSH_HOME:-}/profiles/${PROFILE:-web}}"
+  # shellcheck disable=SC2086  # the prefixes are intentionally literal
+  for file in "$profile_dir/package.json" "${HARNESS:-}/package.json" "$PREFIX/harness/${current:-}/package.json"; do
+    [ -n "$file" ] && [ "$file" != "/package.json" ] || continue
+    [ -f "$file" ] || continue
+    pm="$(json_field "$file" packageManager 2>/dev/null || true)"
+    case "$pm" in
+      pnpm@*) printf '%s' "${pm#pnpm@}"; return 0;;
+    esac
+  done
+  return 1
+}
+
+# Corepack's shim resolves its version from the nearest packageManager field.
+# A profile without one (the PC's web profile, whose pin lives only on the
+# harness) fell through to corepack's default-to-latest and drifted pnpm
+# 11 -> 12 across majors. `prepare --activate` makes the pinned version the
+# shim default even for a project without its own pin. Best-effort but loud: a
+# failed activation warns instead of failing the update, and the pin never
+# drifts silently across majors during a run.
+activate_pnpm_pin() {
+  local pin="" nbin=""
+  [ "${DSH_PNPM_PIN:-1}" = 1 ] || return 0
+  pin="$(resolve_pnpm_pin 2>/dev/null || true)"
+  [ -n "$pin" ] || return 0
+  PNPM_PIN="$pin"
+  if [ -z "$COREPACK_BIN" ] || [ ! -x "$COREPACK_BIN" ]; then
+    nbin="$(dirname "$NODE")"
+    [ -x "$nbin/corepack" ] && COREPACK_BIN="$nbin/corepack"
+  fi
+  if [ -z "$COREPACK_BIN" ] || [ ! -x "$COREPACK_BIN" ]; then
+    warn "pnpm pin $pin is declared but no corepack binary was found; using the ambient pnpm"
+    return 1
+  fi
+  if run_logged "Pinning pnpm $pin (corepack)" 300 "$PREFIX" "$COREPACK_BIN" prepare "pnpm@$pin" --activate; then
+    substep_ok "pnpm pinned to $pin"
+    log "pnpm pin: activated $pin through corepack (profile/harness packageManager)"
+    return 0
+  fi
+  warn "could not activate the pnpm pin $pin; the next pnpm run may use a different major"
+  return 1
+}
+
 setup_pnpm() {
-  local nbin corepack_bin cc_dir
+  local nbin cc_dir
   nbin="$(dirname "$NODE")"
   COREPACK_HOME="$PREFIX/runtime/corepack"
   COREPACK_ENABLE_DOWNLOAD_PROMPT=0
-  export COREPACK_HOME COREPACK_ENABLE_DOWNLOAD_PROMPT
-  if [ -x "$PREFIX/bin/pnpm" ]; then PNPM="$PREFIX/bin/pnpm"; return 0; fi
+  # Every installer-driven pnpm run keeps its content-addressable store inside
+  # the prefix: agent sandboxes allow $PREFIX but deny the default store under
+  # ~/.local/share (EROFS on the store operation lock), and the store lives
+  # beside the harness trees, so it survives version switches. Exported as
+  # npm_config_store_dir so nested profile scripts inherit it too.
+  PNPM_STORE_DIR="$PREFIX/.pnpm-store"
+  npm_config_store_dir="$PNPM_STORE_DIR"
+  export COREPACK_HOME COREPACK_ENABLE_DOWNLOAD_PROMPT npm_config_store_dir
+  if [ -x "$PREFIX/bin/pnpm" ]; then
+    PNPM="$PREFIX/bin/pnpm"
+    activate_pnpm_pin || true
+    return 0
+  fi
   mkdir -p "$PREFIX/bin" || return 1
-  corepack_bin="$nbin/corepack"
-  if [ ! -x "$corepack_bin" ] && [ -x "$nbin/npm" ]; then
+  COREPACK_BIN="$nbin/corepack"
+  if [ ! -x "$COREPACK_BIN" ] && [ -x "$nbin/npm" ]; then
     log "corepack not bundled with this Node; installing it with npm (user prefix)"
     cc_dir="$PREFIX/runtime/corepack-cli"
     run_logged "Installing corepack CLI" 300 "$PREFIX" "$nbin/npm" install --global --prefix "$cc_dir" corepack@latest || return 1
-    corepack_bin="$cc_dir/bin/corepack"
+    COREPACK_BIN="$cc_dir/bin/corepack"
   fi
-  [ -x "$corepack_bin" ] || { warn "no corepack available next to $NODE"; return 1; }
-  run_logged "Enabling pnpm via corepack" 120 "$PREFIX" "$corepack_bin" enable --install-directory "$PREFIX/bin" pnpm || return 1
+  [ -x "$COREPACK_BIN" ] || { warn "no corepack available next to $NODE"; return 1; }
+  run_logged "Enabling pnpm via corepack" 120 "$PREFIX" "$COREPACK_BIN" enable --install-directory "$PREFIX/bin" pnpm || return 1
   [ -x "$PREFIX/bin/pnpm" ] || { warn "corepack did not produce $PREFIX/bin/pnpm"; return 1; }
   PNPM="$PREFIX/bin/pnpm"
+  activate_pnpm_pin || true
   return 0
 }
 
@@ -1026,6 +1102,171 @@ installed_tree_commit() { # tree -> the build commit the tree recorded, empty wh
   fi
   case "$commit" in *[!0-9a-fA-F]*|'') commit="";; esac
   printf '%s' "$commit"
+}
+
+tree_env_commit() { # tree -> the commit in the tree's own build environment, empty when unknown
+  local tree="$1" commit=""
+  if [ -f "$tree/.dsh-build/client-build-environment.json" ]; then
+    commit="$("$NODE" -e 'const fs=require("fs");try{const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.stdout.write(String(o.environment?.DSH_CLIENT_COMMIT_HASH??""))}catch{process.exit(1)}' "$tree/.dsh-build/client-build-environment.json" 2>/dev/null || true)"
+  fi
+  case "$commit" in *[!0-9a-fA-F]*|'') commit="";; esac
+  printf '%s' "$commit"
+}
+
+# ── Installed identity (symlink = truth) ────────────────────────────────────
+# Identity is split across three sources: the `current` symlink's directory
+# name, the tree's .dsh-install-complete marker, and install-state.json. The
+# symlink decides WHICH tree is active; the other sources are cross-checked
+# against it and (on heal) rewritten to it, so a stale marker — e.g. a 2.60
+# marker left inside the active 2.59 tree by an aborted apply — can never make
+# the updater believe a different version is installed. Resolution is
+# read-only; healing is a separate explicit step so `--dry-run` and
+# `repair --check` write nothing.
+installed_identity_resolve() { # no args; sets INSTALLED_LINK_DIR/VERSION/COMMIT/MISMATCH
+  local link_target tree marker_version package_version state_version state_dir state_commit env_commit
+  local mismatches=""
+  INSTALLED_LINK_DIR=""
+  INSTALLED_VERSION=""
+  INSTALLED_COMMIT=""
+  INSTALLED_MISMATCH=""
+  link_target="$(readlink "$PREFIX/harness/current" 2>/dev/null || true)"
+  if [ -n "$link_target" ]; then
+    INSTALLED_LINK_DIR="$(basename "$link_target")"
+  else
+    # No symlink: the recorded state names the tree (a repair recreates the
+    # link); never invent an identity beyond what state records.
+    INSTALLED_LINK_DIR="$(json_field "$PREFIX/harness/install-state.json" harnessDir 2>/dev/null || true)"
+    [ -n "$INSTALLED_LINK_DIR" ] || INSTALLED_LINK_DIR="$(json_field "$PREFIX/harness/install-state.json" version 2>/dev/null || true)"
+  fi
+  [ -n "$INSTALLED_LINK_DIR" ] || return 1
+  tree="$PREFIX/harness/$INSTALLED_LINK_DIR"
+  state_version="$(json_field "$PREFIX/harness/install-state.json" version 2>/dev/null || true)"
+  state_dir="$(json_field "$PREFIX/harness/install-state.json" harnessDir 2>/dev/null || true)"
+  state_commit="$(json_field "$PREFIX/harness/install-state.json" commit 2>/dev/null || true)"
+  marker_version=""
+  if [ -f "$tree/.dsh-install-complete" ]; then
+    marker_version="$(json_field "$tree/.dsh-install-complete" version 2>/dev/null || true)"
+  fi
+  package_version=""
+  if [ -n "$NODE" ] && [ -x "$NODE" ]; then
+    package_version="$(read_version "$tree/package.json" 2>/dev/null || true)"
+  fi
+  # A source rebuild appends -<short-sha> to the directory while its marker
+  # records the base version; that one shape is consistent, not a conflict.
+  if [ -n "$marker_version" ] && [ "$marker_version" != "$INSTALLED_LINK_DIR" ]; then
+    case "$INSTALLED_LINK_DIR" in
+      "$marker_version"-*) : ;;
+      *) mismatches="${mismatches}current -> $INSTALLED_LINK_DIR but its .dsh-install-complete says '$marker_version'; " ;;
+    esac
+  fi
+  if [ -n "$state_dir" ] && [ "$state_dir" != "$INSTALLED_LINK_DIR" ]; then
+    mismatches="${mismatches}install-state.json harnessDir '$state_dir' != current -> $INSTALLED_LINK_DIR; "
+  fi
+  if [ -n "$state_version" ] && [ "$state_version" != "$INSTALLED_LINK_DIR" ] && [ "$state_version" != "$marker_version" ]; then
+    case "$INSTALLED_LINK_DIR" in
+      "$state_version"-*) : ;;
+      *) mismatches="${mismatches}install-state.json version '$state_version' != current -> $INSTALLED_LINK_DIR; " ;;
+    esac
+  fi
+  # The tree's package.json keeps the BASE version by design (a prebuilt
+  # release layers the run number on top: package 0.1.7-enpoi.2, marker
+  # 0.1.7-enpoi.2.59). It is a conflict only when the marker claims a release
+  # that does not descend from that base.
+  if [ -n "$package_version" ] && [ -n "$marker_version" ]; then
+    case "$marker_version" in
+      "$package_version"|"$package_version".*|"$package_version"-*) : ;;
+      *) mismatches="${mismatches}$INSTALLED_LINK_DIR/package.json base '$package_version' does not prefix its marker '$marker_version'; " ;;
+    esac
+  fi
+  INSTALLED_MISMATCH="$mismatches"
+  # Version used for comparisons: the symlink directory, in base form when the
+  # directory carries a source-build suffix.
+  INSTALLED_VERSION="$INSTALLED_LINK_DIR"
+  if [ -n "$marker_version" ]; then
+    case "$INSTALLED_LINK_DIR" in
+      "$marker_version"-*) INSTALLED_VERSION="$marker_version" ;;
+    esac
+  elif [ -n "$package_version" ]; then
+    case "$INSTALLED_LINK_DIR" in
+      "$package_version"-*) INSTALLED_VERSION="$package_version" ;;
+    esac
+  fi
+  # Commit: the tree's own records; when the marker is inconsistent, the
+  # poisoned commit is ignored in favour of the tree's build environment, then
+  # the state (which still names the symlink's identity).
+  env_commit="$(tree_env_commit "$tree")"
+  if [ -z "$mismatches" ]; then
+    INSTALLED_COMMIT="$(installed_tree_commit "$tree")"
+  else
+    INSTALLED_COMMIT="$env_commit"
+    [ -n "$INSTALLED_COMMIT" ] || { [ "$state_dir" = "$INSTALLED_LINK_DIR" ] && INSTALLED_COMMIT="$state_commit"; }
+  fi
+  return 0
+}
+
+# Rewrite the marker and install-state.json to the symlink truth. Called only
+# by writers (update/repair self-heal), never by --dry-run/--check paths.
+installed_identity_heal() {
+  [ -n "$INSTALLED_MISMATCH" ] || return 0
+  local tree="$PREFIX/harness/$INSTALLED_LINK_DIR" old_version=""
+  local marker="$tree/.dsh-install-complete"
+  local state="$PREFIX/harness/install-state.json" tmp marker_tmp now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  warn "identity mismatch: ${INSTALLED_MISMATCH%; }"
+  warn "self-healing from the current symlink (the truth): $INSTALLED_LINK_DIR"
+  [ -f "$marker" ] && old_version="$(json_field "$marker" version 2>/dev/null || true)"
+  marker_tmp="$marker.tmp.$$"
+  if printf '{"version": "%s", "commit": "%s", "installedAt": "%s", "healedFrom": "%s"}\n' \
+    "$INSTALLED_VERSION" "$INSTALLED_COMMIT" "$now" "$old_version" > "$marker_tmp" && mv "$marker_tmp" "$marker"; then
+    log "identity healed: re-stamped $marker (version=$INSTALLED_VERSION commit=${INSTALLED_COMMIT:-unknown} was='${old_version:-none}')"
+  else
+    rm -f "$marker_tmp"
+    warn "could not re-stamp $marker; the update continues from the symlink truth ($INSTALLED_LINK_DIR)"
+  fi
+  if [ -f "$state" ]; then
+    tmp="$state.tmp.$$"
+    if sed -e "s|\"version\": \".*\"|\"version\": \"$INSTALLED_VERSION\"|" \
+        -e "s|\"harnessDir\": \".*\"|\"harnessDir\": \"$INSTALLED_LINK_DIR\"|" \
+        -e "s|\"commit\": \".*\"|\"commit\": \"$INSTALLED_COMMIT\"|" \
+        -e "s|\"updatedAt\": \".*\"|\"updatedAt\": \"$now\"|" \
+        "$state" > "$tmp" && mv "$tmp" "$state"; then
+      log "identity healed: reconciled $state (version=$INSTALLED_VERSION harnessDir=$INSTALLED_LINK_DIR)"
+    else
+      rm -f "$tmp"
+      warn "could not reconcile $state; the update continues from the symlink truth"
+    fi
+  fi
+  INSTALLED_MISMATCH=""
+  INSTALLED_HEALED=1
+  return 0
+}
+
+# Stamp a tree's install marker. A pre-switch stamp must never write a
+# different identity onto the ACTIVE tree (the 2.59/2.60 split: a live tree's
+# marker rewritten by an aborted apply made every later run believe a newer
+# version was installed): only the active identity itself (or its
+# base-<short> source-rebuild form) may be stamped onto it before the switch.
+stamp_install_complete() { # tree version commit -> 0 stamped, 1 refused/write failed
+  local tree="$1" version="$2" commit="$3" active="" tmp
+  active="$(readlink "$PREFIX/harness/current" 2>/dev/null || true)"
+  active="$(basename "$active")"
+  if [ "$SWITCH_DONE" != 1 ] && [ -n "$active" ] && [ "$(basename "$tree")" = "$active" ] && [ "$version" != "$active" ]; then
+    case "$active" in
+      "$version"-*) : ;;
+      *)
+        warn "refusing to stamp the active tree $tree with version '$version' (active identity is '$active'); nothing was written"
+        return 1
+        ;;
+    esac
+  fi
+  # Temp + rename, never `>`: the engine seeds the staging tree by hardlinking
+  # the live tree's installer state, so an in-place truncate would rewrite the
+  # ACTIVE tree's marker through the shared inode (the PC's 2.60-in-2.59 split).
+  # Renaming installs a fresh inode in this tree and leaves the live one alone.
+  tmp="$tree/.dsh-install-complete.tmp.$$"
+  printf '{"version": "%s", "commit": "%s", "installedAt": "%s"}\n' "$version" "$commit" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$tree/.dsh-install-complete" || { rm -f "$tmp"; return 1; }
+  return 0
 }
 
 resolve_target_commit() { # ref url -> target commit SHA, empty when unresolvable
@@ -1839,6 +2080,15 @@ prepare_source() {
             VERSION="$(json_field "$d/.dsh-install-complete" version 2>/dev/null || true)"
             [ -n "$VERSION" ] || VERSION="$(read_version "$d/package.json" 2>/dev/null || true)"
             if [ -n "$VERSION" ]; then
+              # The marker must belong to the directory it sits in (dir name =
+              # release version, or base-<short> for a rolling source build).
+              case "$name" in
+                "$VERSION"|"$VERSION"-*) : ;;
+                *)
+                  warn "ignoring complete tree $d: its marker claims '$VERSION' but the directory is '$name' (identity split)"
+                  continue
+                  ;;
+              esac
               TREE_DIR_NAME="$name"
               REUSED_TREE_DIR="$name"
               HARNESS="$d"
@@ -1881,7 +2131,22 @@ install_tree() { # installs $VERSION into $PREFIX/harness/${TREE_DIR_NAME:-$VERS
   HARNESS="$PREFIX/harness/${TREE_DIR_NAME:-$VERSION}"
   mkdir -p "$PREFIX/harness" || return 1
   if [ -e "$HARNESS" ]; then
+    local existing_marker=""
     if [ -f "$HARNESS/.dsh-install-complete" ]; then
+      existing_marker="$(json_field "$HARNESS/.dsh-install-complete" version 2>/dev/null || true)"
+    fi
+    if [ -n "$existing_marker" ] && [ "$existing_marker" != "$VERSION" ]; then
+      # A marker whose version disagrees with the tree it sits in is a stale
+      # identity (the 2.59/2.60 split): never reuse it as this version.
+      case "$(basename "$HARNESS")" in
+        "$existing_marker"|"$existing_marker"-*) : ;;
+        *)
+          warn "tree $HARNESS carries a foreign identity ('$existing_marker' != '$VERSION'); pruning the stale tree"
+          existing_marker=""
+          ;;
+      esac
+    fi
+    if [ -n "$existing_marker" ]; then
       if [ "$FORCE" = 1 ]; then
         log "force reinstall: replacing $HARNESS"
         displaced="$HARNESS.replaced-$$"
@@ -1893,7 +2158,7 @@ install_tree() { # installs $VERSION into $PREFIX/harness/${TREE_DIR_NAME:-$VERS
         return 0
       fi
     else
-      log "removing incomplete install at $HARNESS"
+      log "removing incomplete or stale install at $HARNESS"
       rm -rf "$HARNESS" || return 1
     fi
   fi
@@ -1919,12 +2184,12 @@ install_tree() { # installs $VERSION into $PREFIX/harness/${TREE_DIR_NAME:-$VERS
     # The release tag's own commit is the build identity when it resolved.
     BUILD_COMMIT="${RELEASE_COMMIT:-${TARGET_COMMIT:-}}"
     [ -n "$BUILD_COMMIT" ] || resolve_build_commit
-    printf '{"version": "%s", "commit": "%s", "installedAt": "%s"}\n' "$VERSION" "$BUILD_COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HARNESS/.dsh-install-complete" || return 1
+    stamp_install_complete "$HARNESS" "$VERSION" "$BUILD_COMMIT" || return 1
     if [ -n "$displaced" ]; then rm -rf "$displaced" || true; fi
     substep_ok "Prebuilt tree installed (no build required)"
     return 0
   fi
-  if ! run_logged "Installing workspace dependencies" "$INSTALL_TIMEOUT" "$HARNESS" "$PNPM" install --frozen-lockfile; then
+  if ! run_logged "Installing workspace dependencies" "$INSTALL_TIMEOUT" "$HARNESS" "$PNPM" install --frozen-lockfile --store-dir "${PNPM_STORE_DIR:-$PREFIX/.pnpm-store}"; then
     warn "pnpm install failed"
     if [ -n "$displaced" ]; then rm -rf "$HARNESS"; mv "$displaced" "$HARNESS" 2>/dev/null || true; fi
     return 1
@@ -1938,7 +2203,7 @@ install_tree() { # installs $VERSION into $PREFIX/harness/${TREE_DIR_NAME:-$VERS
     if [ -n "$displaced" ]; then rm -rf "$HARNESS"; mv "$displaced" "$HARNESS" 2>/dev/null || true; fi
     return 1
   fi
-  printf '{"version": "%s", "commit": "%s", "installedAt": "%s"}\n' "$VERSION" "$BUILD_COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HARNESS/.dsh-install-complete" || return 1
+  stamp_install_complete "$HARNESS" "$VERSION" "$BUILD_COMMIT" || return 1
   if [ -n "$displaced" ]; then rm -rf "$displaced" || true; fi
   return 0
 }
@@ -2989,7 +3254,8 @@ profile_install() {
     fi
   fi
 
-  if ! run_logged "Installing Enpoi profile dependencies" "$PROFILE_INSTALL_TIMEOUT" "$PROFILE_DIR" "$PNPM" install --prefer-offline; then
+  if ! DSH_PROGRESS_INTERVAL="${DSH_PROFILE_PROGRESS_INTERVAL:-15}" \
+    run_logged "Installing Enpoi profile dependencies (pnpm install)" "$PROFILE_INSTALL_TIMEOUT" "$PROFILE_DIR" "$PNPM" install --prefer-offline --store-dir "${PNPM_STORE_DIR:-$PREFIX/.pnpm-store}"; then
     warn "profile pnpm install failed"
     return 1
   fi
@@ -4006,9 +4272,11 @@ run_backfill() {
   b="$(find_backfill)"
   if [ -z "$b" ]; then
     BACKFILL="skipped (not present)"
+    substep_info "projection backfill: no script present; skipping"
     log "projection backfill: not present; skipping"
     return 0
   fi
+  substep_info "projection backfill: $(basename "$b")"
   # The backfill reads through the web API. The service was just (re)started,
   # so give it a bounded moment before reading; an immediate read reports a
   # failure that is only startup latency.
@@ -4916,13 +5184,18 @@ delta_plan_init() { # installed_version -> populates DELTA_* / UPDATE_TAG; never
 # Fetch one release asset into a directory, verified against its sha256sum
 # sidecar when one is published. required=1 refuses an unverifiable artifact
 # (diff archives); required=0 logs and continues (manifests, older releases).
-delta_fetch_asset() { # name url dir required -> 0 ok
-  local name="$1" url="$2" dir="$3" required="${4:-0}" dest fallback_expected expected actual tmp
+delta_fetch_asset() { # name url dir required [label] -> 0 ok
+  local name="$1" url="$2" dir="$3" required="${4:-0}" label="${5:-Fetching $1}" dest expected actual tmp
   dest="$dir/$name"
   if [ ! -s "$dest" ]; then
     tmp="$dest.download-$$"
     rm -f "$tmp"
-    if ! curl -fsSL --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 20 --max-time "${DSH_DELTA_FETCH_TIMEOUT:-600}" "$url" -o "$tmp" 2>/dev/null; then
+    # run_logged renders the fetch (TTY frame; non-TTY heartbeat) from the
+    # growing .download file; a failed attempt is a normal fallback trigger,
+    # so the failure log tail is suppressed.
+    if ! DSH_RUN_LOG_PROGRESS_FILE="$tmp" DSH_RUN_LOG_NO_FAILURE_TAIL=1 \
+      run_logged "$label" "${DSH_DELTA_FETCH_TIMEOUT:-600}" "$dir" \
+      curl -fsSL --retry 3 --retry-delay 1 --retry-all-errors --connect-timeout 20 --max-time "${DSH_DELTA_FETCH_TIMEOUT:-600}" "$url" -o "$tmp"; then
       rm -f "$tmp"
       return 1
     fi
@@ -5016,8 +5289,10 @@ delta_retain_full_base() { # version platform
   [ -s "$src" ] && [ -s "$src.sha256" ] || { log "merge base: no cached full archive for $to; nothing retained"; return 0; }
   [ -e "$dest" ] && return 0
   mkdir -p "$PREFIX/harness/.bases" || return 0
+  substep_info "merge base: retaining the release archive for $to ($(human_bytes "$(file_size "$src")"))…"
   if cp -f "$src" "$dest.tmp-$$" 2>/dev/null && cp -f "$src.sha256" "$dest.sha256.tmp-$$" 2>/dev/null \
     && mv -f "$dest.tmp-$$" "$dest" 2>/dev/null && mv -f "$dest.sha256.tmp-$$" "$dest.sha256" 2>/dev/null; then
+    substep_ok "merge base retained: $dest ($(human_bytes "$(file_size "$dest")"))"
     log "merge base retained for $to: $dest ($(human_bytes "$(file_size "$dest")"))"
   else
     rm -f "$dest.tmp-$$" "$dest.sha256.tmp-$$"
@@ -5053,14 +5328,26 @@ delta_finalize_tree() { # staging to
   local staging="$1" to="$2" displaced=""
   local target="$PREFIX/harness/$to"
   if [ -e "$target" ]; then
-    if [ -f "$target/.dsh-install-complete" ] && [ "${FORCE:-0}" != 1 ]; then
-      log "delta: version $to is already installed at $target (reusing)"
-      rm -rf "$staging" "$staging.journal.json" "$staging.owner"
-      TREE_DIR_NAME="$to"
-      HARNESS="$target"
-      return 0
+    local target_identity=""
+    if [ -f "$target/.dsh-install-complete" ]; then
+      target_identity="$(json_field "$target/.dsh-install-complete" version 2>/dev/null || true)"
     fi
-    displaced="$target.replaced-$$"
+    if [ -n "$target_identity" ] && [ "${FORCE:-0}" != 1 ]; then
+      if [ "$target_identity" = "$to" ]; then
+        # A complete tree whose identity is exactly this version is a leftover
+        # from an aborted (never-switched) run or an earlier finalize; reusing
+        # it is coherent and keeps the verified staging result.
+        log "delta: version $to is already installed at $target (reusing)"
+        rm -rf "$staging" "$staging.journal.json" "$staging.owner"
+        TREE_DIR_NAME="$to"
+        HARNESS="$target"
+        return 0
+      fi
+      warn "delta: pruning stale unswitched tree $target (identity '${target_identity:-none}' != '$to')"
+      displaced="$target.stale-$$"
+    else
+      displaced="$target.replaced-$$"
+    fi
     rm -rf "$displaced"
     if ! mv "$target" "$displaced" 2>/dev/null; then
       warn "delta: could not move the existing $target aside"
@@ -5077,7 +5364,7 @@ delta_finalize_tree() { # staging to
   HARNESS="$target"
   BUILD_COMMIT="${RELEASE_COMMIT:-${TARGET_COMMIT:-}}"
   [ -n "$BUILD_COMMIT" ] || resolve_build_commit
-  printf '{"version": "%s", "commit": "%s", "installedAt": "%s"}\n' "$to" "$BUILD_COMMIT" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$HARNESS/.dsh-install-complete" || return 1
+  stamp_install_complete "$HARNESS" "$to" "$BUILD_COMMIT" || return 1
   return 0
 }
 
@@ -5156,7 +5443,7 @@ process.stdout.write(JSON.stringify({
 delta_apply_delta() { # backup_dir [retry]
   local backup="$1" retry="${2:-0}"
   local to="$DELTA_TARGET_VERSION" from="$installed_version" platform="$OS-$ARCH"
-  local cache="$PREFIX/harness/.cache" engine rc status prev_asset next_asset name tag base_mode="" chain_count=0 persist_base=""
+  local cache="$PREFIX/harness/.cache" engine rc status prev_asset next_asset name tag base_mode="" chain_count=0 chain_total=0 persist_base=""
   local -a apply_args=()
   DELTA_DOWNLOAD_BYTES=0
   DELTA_STAGING_DIR="$PREFIX/harness/.staging-$to"
@@ -5170,15 +5457,15 @@ delta_apply_delta() { # backup_dir [retry]
   fi
   mkdir -p "$cache" "$DELTA_RUN_DIR" "$DELTA_RELEASE_DIR" "$DELTA_BASE_DIR" || { warn "delta: could not create scratch directories"; return 1; }
   printf '%s' "$$" > "$DELTA_STAGING_DIR.owner" 2>/dev/null || true
-  step "delta transport (rung $DELTA_RUNG, $(grep -c . "$DELTA_CHAIN_FILE" 2>/dev/null || printf '?' ) artifact(s))"
+  chain_total="$(grep -c . "$DELTA_CHAIN_FILE" 2>/dev/null || printf '0')"
   prev_asset="manifest-$platform-$from.json.gz"
   next_asset="manifest-$platform-$to.json.gz"
-  if ! delta_fetch_asset "$prev_asset" "$DSH_GITHUB_URL/releases/download/v$from/$prev_asset" "$DELTA_RUN_DIR" 0; then
+  if ! delta_fetch_asset "$prev_asset" "$DSH_GITHUB_URL/releases/download/v$from/$prev_asset" "$DELTA_RUN_DIR" 0 "Fetching release manifest for $from"; then
     warn "delta: the installed version's release manifest is unavailable ($prev_asset); using the full path"
     delta_cleanup_scratch; return 2
   fi
   DELTA_DOWNLOAD_BYTES=$((DELTA_DOWNLOAD_BYTES + $(file_size "$DELTA_RUN_DIR/$prev_asset")))
-  if ! delta_fetch_asset "$next_asset" "$DSH_GITHUB_URL/releases/download/v$to/$next_asset" "$DELTA_RUN_DIR" 0; then
+  if ! delta_fetch_asset "$next_asset" "$DSH_GITHUB_URL/releases/download/v$to/$next_asset" "$DELTA_RUN_DIR" 0 "Fetching release manifest for $to"; then
     warn "delta: the target release manifest is unavailable ($next_asset); using the full path"
     delta_cleanup_scratch; return 2
   fi
@@ -5187,13 +5474,13 @@ delta_apply_delta() { # backup_dir [retry]
   base_mode="$DELTA_BASE_MODE"
   while IFS=$'\t' read -r name tag; do
     [ -n "$name" ] || continue
-    if ! delta_fetch_asset "$name" "$DSH_GITHUB_URL/releases/download/v$tag/$name" "$cache" 1; then
+    chain_count=$((chain_count + 1))
+    if ! delta_fetch_asset "$name" "$DSH_GITHUB_URL/releases/download/v$tag/$name" "$cache" 1 "Fetching diff $chain_count/$chain_total ($name)"; then
       warn "delta: could not fetch a verified $name from release v$tag; using the full path"
       delta_cleanup_scratch; return 2
     fi
     DELTA_DOWNLOAD_BYTES=$((DELTA_DOWNLOAD_BYTES + $(file_size "$cache/$name")))
     apply_args+=(--diff "$cache/$name")
-    chain_count=$((chain_count + 1))
   done < "$DELTA_CHAIN_FILE"
   if [ "$chain_count" = 0 ]; then
     warn "delta: the planner returned no diff chain; using the full path"
@@ -5223,6 +5510,10 @@ delta_apply_delta() { # backup_dir [retry]
   done
   if [ -n "${DSH_UPDATE_STOP_AFTER_ACTIONS:-}" ]; then apply_args+=(--stop-after-actions "$DSH_UPDATE_STOP_AFTER_ACTIONS"); fi
   if [ -n "${backup:-}" ] && [ -d "$backup" ]; then apply_args+=(--backup "$PREFIX/harness/.backup-$(date +%Y%m%d-%H%M%S)-tree"); fi
+  if [ "$QUIET" != 1 ] && [ "$JSON_OUT" != 1 ]; then
+    apply_args+=(--progress-fd 3)
+    if [ -n "${DSH_UPDATE_PROGRESS_EVERY_ACTIONS:-}" ]; then apply_args+=(--progress-every-actions "$DSH_UPDATE_PROGRESS_EVERY_ACTIONS"); fi
+  fi
   # Retain this version's pristine merge base for the next update. A cached
   # full release is copied afterwards; otherwise the module synthesizes one
   # from the verified staging tree as an uncompressed tar (no compression cost).
@@ -5231,7 +5522,9 @@ delta_apply_delta() { # backup_dir [retry]
     persist_base="$PREFIX/harness/.bases/$to.tar"
   fi
   if [ -n "$persist_base" ]; then apply_args+=(--persist-base "$persist_base"); fi
-  update_delta_run "${apply_args[@]}" > "$DELTA_RUN_DIR/human.txt" 2> "$DELTA_RUN_DIR/stderr.txt"
+  # fd 3 carries live progress straight to the terminal/caller while stdout and
+  # stderr stay reserved for the report and captured diagnostics.
+  update_delta_run "${apply_args[@]}" 3>&2 > "$DELTA_RUN_DIR/human.txt" 2> "$DELTA_RUN_DIR/stderr.txt"
   rc=$?
   status="$(json_pick "$DELTA_RUN_DIR/result.json" status 2>/dev/null || true)"
   case "$rc" in
@@ -5335,11 +5628,15 @@ delta_apply_full() { # release_tree [retry]
   fi
   mkdir -p "$DELTA_RUN_DIR" "$DELTA_BASE_DIR" || return 1
   printf '%s' "$$" > "$DELTA_STAGING_DIR.owner" 2>/dev/null || true
-  step "full release apply (preservation engine)"
+  # The numbered transport step was printed once by the caller; a delta
+  # fallback adds an un-numbered banner so the count stays 1..N.
+  if [ "$DELTA_MODE" = "delta" ]; then
+    banner "delta fallback: applying the full release (preservation engine)"
+  fi
   prev_asset="manifest-$platform-$from.json.gz"
   next_asset="manifest-$platform-$to.json.gz"
-  if ! delta_fetch_asset "$prev_asset" "$DSH_GITHUB_URL/releases/download/v$from/$prev_asset" "$DELTA_RUN_DIR" 0 \
-    || ! delta_fetch_asset "$next_asset" "$DSH_GITHUB_URL/releases/download/v$to/$next_asset" "$DELTA_RUN_DIR" 0; then
+  if ! delta_fetch_asset "$prev_asset" "$DSH_GITHUB_URL/releases/download/v$from/$prev_asset" "$DELTA_RUN_DIR" 0 "Fetching release manifest for $from" \
+    || ! delta_fetch_asset "$next_asset" "$DSH_GITHUB_URL/releases/download/v$to/$next_asset" "$DELTA_RUN_DIR" 0 "Fetching release manifest for $to"; then
     warn "full update: release manifests unavailable; using the legacy install path"
     delta_cleanup_scratch
     return 1
@@ -5369,7 +5666,11 @@ delta_apply_full() { # release_tree [retry]
   done
   if [ -n "${DSH_UPDATE_STOP_AFTER_ACTIONS:-}" ]; then apply_args+=(--stop-after-actions "$DSH_UPDATE_STOP_AFTER_ACTIONS"); fi
   if [ -n "$backup" ] && [ -d "$backup" ]; then apply_args+=(--backup "$PREFIX/harness/.backup-$(date +%Y%m%d-%H%M%S)-tree"); fi
-  update_delta_run "${apply_args[@]}" > "$DELTA_RUN_DIR/human.txt" 2> "$DELTA_RUN_DIR/stderr.txt"
+  if [ "$QUIET" != 1 ] && [ "$JSON_OUT" != 1 ]; then
+    apply_args+=(--progress-fd 3)
+    if [ -n "${DSH_UPDATE_PROGRESS_EVERY_ACTIONS:-}" ]; then apply_args+=(--progress-every-actions "$DSH_UPDATE_PROGRESS_EVERY_ACTIONS"); fi
+  fi
+  update_delta_run "${apply_args[@]}" 3>&2 > "$DELTA_RUN_DIR/human.txt" 2> "$DELTA_RUN_DIR/stderr.txt"
   rc=$?
   status="$(json_pick "$DELTA_RUN_DIR/result.json" status 2>/dev/null || true)"
   case "$rc" in
@@ -6090,7 +6391,7 @@ acquire_update_lock() {
 }
 
 do_update() {
-  local state="$PREFIX/harness/install-state.json" current backup late_backup rc recorded_home recorded_bin installed_version deferred_restart
+  local state="$PREFIX/harness/install-state.json" current backup late_backup rc recorded_home recorded_bin installed_version deferred_restart transport_engine
   STEP_TOTAL=9
   [ -f "$state" ] || die "no install state at $state; run the installer first"
   acquire_update_lock
@@ -6128,20 +6429,28 @@ do_update() {
   if [ -n "$recorded_home" ] && [ "$recorded_home" != "$DSH_HOME" ]; then
     die "DSH_HOME mismatch: $state records dshHome='$recorded_home' but this invocation resolves DSH_HOME='$DSH_HOME'. Nothing was changed. Remedy: export DSH_HOME='$recorded_home' and re-run (or: DSH_HOME='$recorded_home' dsh update). To deliberately move the home, re-run the installer with --dsh-home '$DSH_HOME' --prefix '$PREFIX'."
   fi
-  current="$(readlink "$PREFIX/harness/current" 2>/dev/null || true)"
-  if [ -z "$current" ]; then current="$(json_field "$state" version)"; fi
+  # Identity is resolved once, from the current symlink (the truth), and every
+  # other source is cross-checked against it. A split (a stale marker inside
+  # the active tree) is healed to the symlink identity before planning; the
+  # dry run only reports it, because dry runs write nothing.
+  installed_identity_resolve || die "cannot find the active version under $PREFIX/harness (current='$(readlink "$PREFIX/harness/current" 2>/dev/null || true)')"
+  current="$INSTALLED_LINK_DIR"
   [ -n "$current" ] && [ -d "$PREFIX/harness/$current" ] || die "cannot find the active version under $PREFIX/harness (current='$current')"
+  if [ -n "$INSTALLED_MISMATCH" ]; then
+    if [ "$DRY_RUN" = 1 ]; then
+      warn "identity mismatch (dry run; nothing was changed): ${INSTALLED_MISMATCH%; }"
+      warn "re-run without --dry-run to self-heal it from the current symlink ($current)"
+    else
+      installed_identity_heal
+    fi
+  fi
   PREV_VERSION="$current"
-  # The active tree's build identity and recorded build commit. A prebuilt
-  # release tree records the release version (`0.1.7-enpoi.2.42`) in
-  # .dsh-install-complete while its package.json keeps the base version
-  # (`0.1.7-enpoi.2`); the marker wins so build-to-build updates compare
-  # release versions. The directory name may carry a short-SHA suffix after a
-  # rolling source rebuild; neither it nor the manifest is the identity.
-  installed_version="$(json_field "$PREFIX/harness/$current/.dsh-install-complete" version 2>/dev/null || true)"
-  [ -n "$installed_version" ] || installed_version="$(read_version "$PREFIX/harness/$current/package.json" 2>/dev/null || true)"
-  [ -n "$installed_version" ] || installed_version="$(json_field "$state" version)"
-  INSTALLED_COMMIT="$(installed_tree_commit "$PREFIX/harness/$current")"
+  # The release identity for comparison: the symlink directory in base form
+  # (a rolling source rebuild appends -<short-sha>; the marker records the
+  # base there). The commit is the tree's own, with an inconsistent marker's
+  # poisoned commit ignored in favour of the tree build env and the state.
+  installed_version="$INSTALLED_VERSION"
+  INSTALLED_COMMIT="$INSTALLED_COMMIT"
   update_request_flags_apply
   if [ "$DRY_RUN" = 1 ]; then
     local target_value="" dry_target_commit=""
@@ -6283,6 +6592,7 @@ do_update() {
     if [ -n "$STAGED" ]; then rm -rf "$STAGED"; STAGED=""; fi
     step "pnpm: present (nothing to rebuild)"
     step "dependencies and build: already up to date at $VERSION"
+    step "delta transport: nothing to do — already at $VERSION"
     step "profile: $PROFILE (refresh)"
     substep_info "refreshing profile: fetch → copy → merges → pairings"
     # The refresh merges the profile patch and package.json; arm the same
@@ -6300,7 +6610,9 @@ do_update() {
     ensure_service
     ensure_tailnet_exposure
     step "switch, service and backfill: $VERSION already active"
+    substep_info "switch: nothing to switch — $VERSION is already current"
     step "self-check"
+    substep_info "self-check: CLI version/help, profile smoke, error audit"
     if ! selfcheck; then
       warn "self-check of the active tree failed"
       restore_pre_switch "$backup" "already up to date self-check"
@@ -6308,6 +6620,7 @@ do_update() {
       exit 1
     fi
     PRE_SWITCH_RESTORE=""
+    substep_ok "self-check passed"
     # Regenerate the shim even when no new tree was built: a shim fix in the
     # installer must reach an already-current install through `dsh update`.
     write_shim || warn "could not refresh the dsh shim in $BIN_DIR"
@@ -6354,7 +6667,30 @@ do_update() {
   PRE_SWITCH_RESTORE="$backup"
   log "user-file backups: $backup"
 
-  step "dependencies and build (this takes a few minutes)"
+  # Every path prints the same nine numbered phases. The engine is resolved
+  # before the transport header so the label names what will actually run;
+  # fallbacks inside the transport print un-numbered banners (step count stays
+  # 1..9).
+  transport_engine=""
+  if [ "$DELTA_MODE" = "delta" ]; then
+    transport_engine="$(update_engine_bundle "$PREFIX/harness/$current" 2>/dev/null || true)"
+  elif [ "${PREBUILT:-0}" = 1 ] && [ -z "${REUSED_TREE_DIR:-}" ]; then
+    transport_engine="$(update_engine_bundle "$PREFIX/harness/$current" "${STAGED:-}" 2>/dev/null || true)"
+  fi
+  if [ "$DELTA_MODE" = "delta" ]; then
+    step "dependencies and build: delta update (no local build)"
+    step "delta transport (rung $DELTA_RUNG, $(grep -c . "$DELTA_CHAIN_FILE" 2>/dev/null || printf '0') artifact(s))"
+  elif [ "${PREBUILT:-0}" = 1 ] && [ -z "${REUSED_TREE_DIR:-}" ]; then
+    step "dependencies and build: prebuilt release (no local build)"
+    if [ -n "$transport_engine" ]; then
+      step "full release apply (preservation engine)"
+    else
+      step "transport: full release install (legacy path; preservation engine unavailable)"
+    fi
+  else
+    step "dependencies and build (this takes a few minutes)"
+    step "transport: source build install (legacy path; no release manifests)"
+  fi
   # Three ways to produce the new tree, in order of preference:
   #   1. delta rungs 1-2: the verified diff chain applied over a staging seed;
   #   2. full tarball through the preservation engine (rung 3 and delta
@@ -6394,6 +6730,9 @@ do_update() {
     esac
   fi
   if [ "$update_tree_ok" = 0 ]; then
+    if [ -n "$transport_engine" ] || [ "$DELTA_MODE" = "delta" ]; then
+      banner "preservation engine path unavailable; falling back to the legacy install"
+    fi
     if ! install_tree; then
       warn "update failed before switching; $current remains active"
       restore_pre_switch "$backup" "the build"
@@ -6450,7 +6789,9 @@ do_update() {
     warn "could not create the pre-switch backup dir; the early backup remains the restore source"
     late_backup=""
   fi
+  substep_info "switch: current → $TREE_DIR_NAME (atomic symlink replace)"
   switch_current "$TREE_DIR_NAME" || die "could not switch $PREFIX/harness/current to $TREE_DIR_NAME"
+  substep_ok "current → $TREE_DIR_NAME"
   # Past the switch, rollback owns restoration from the pristine snapshot.
   PRE_SWITCH_RESTORE=""
   log "switched current -> $TREE_DIR_NAME"
@@ -6461,12 +6802,19 @@ do_update() {
   # always receives it. A plain out-of-session `dsh update` restarts as before.
   deferred_restart=0
   if running_under_service; then deferred_restart=1; fi
-  if [ "$deferred_restart" = 0 ]; then restart_service; fi
+  if [ "$deferred_restart" = 0 ]; then
+    [ -n "$SERVICE_UNIT" ] && substep_info "service: restarting $SERVICE_UNIT"
+    restart_service
+  else
+    substep_info "service: restart deferred to after the current turn"
+  fi
   ensure_service
   ensure_tailnet_exposure
+  substep_info "backfill: projection status and run"
   run_backfill
 
   step "self-check"
+  substep_info "self-check: CLI version/help, profile smoke, error audit"
   if ! selfcheck; then
     # Restore the pre-migration snapshot (or the pristine early backup when no
     # snapshot exists): both predate the migrations, so nothing migrated for the
@@ -6475,6 +6823,7 @@ do_update() {
     rollback "$current" "${PRE_MIGRATION_BACKUP:-$backup}" "$TREE_DIR_NAME"
     exit 1
   fi
+  substep_ok "self-check passed"
   write_shim || warn "could not refresh the dsh shim in $BIN_DIR"
   write_peer_cli || warn "could not refresh the peer CLI in $BIN_DIR"
   write_state || warn "could not write $state"
@@ -6587,6 +6936,23 @@ do_repair() {
   [ -n "$PROFILE" ] || PROFILE=web
   [ -n "$BIN_DIR" ] || BIN_DIR="$HOME/.local/bin"
   resolve_home
+  # Identity reconciliation (symlink = truth) before any tree/state fixups:
+  # --check reports the split read-only, self-heal rewrites the marker and the
+  # state to the symlink identity (the 2.59/2.60 stale-marker class).
+  installed_identity_resolve || true
+  if [ -n "$INSTALLED_MISMATCH" ]; then
+    if [ "$CHECK_ONLY" = 1 ]; then
+      repair_fail "identity split: ${INSTALLED_MISMATCH%; }" "re-run without --check to self-heal from the current symlink: install.sh --repair --prefix '$PREFIX'"
+    elif repair_fixable "identity split: ${INSTALLED_MISMATCH%; }"; then
+      if installed_identity_heal; then
+        repair_fixed "identity reconciled to $INSTALLED_LINK_DIR (marker + install-state.json)"
+      else
+        repair_fail "could not reconcile the identity" "inspect $PREFIX/harness/$INSTALLED_LINK_DIR and $PREFIX/harness/install-state.json"
+      fi
+    fi
+  elif [ -n "$INSTALLED_LINK_DIR" ]; then
+    repair_note "identity consistent: $INSTALLED_LINK_DIR (current, marker, install-state.json agree)"
+  fi
   HARNESS=""
 
   # ── version dirs + the current symlink ──

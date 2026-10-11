@@ -8,6 +8,7 @@ import { chmod, cp, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { applyPlan } from '../src/apply.ts'
+import type { ApplyProgressUpdate } from '../src/apply.ts'
 import { scanTree } from '../src/manifest.ts'
 import { buildPlan } from '../src/plan.ts'
 import type { Manifest, ManifestEntry, UpdatePlan } from '../src/types.ts'
@@ -121,6 +122,8 @@ export interface RunUpdateOptions {
   pins?: readonly string[]
   stopAfterActions?: number
   timestamp?: string
+  progress?: (update: ApplyProgressUpdate) => void
+  progressEveryActions?: number
 }
 
 /** Plan + apply result bundle. */
@@ -158,6 +161,8 @@ export async function runUpdate(fixture: UpdateFixture, options: RunUpdateOption
     journalPath: fixture.journalPath,
     timestamp: options.timestamp ?? '2026-01-01T00:00:00.000Z',
     ...(options.stopAfterActions === undefined ? {} : { stopAfterActions: options.stopAfterActions }),
+    ...(options.progress === undefined ? {} : { progress: options.progress }),
+    ...(options.progressEveryActions === undefined ? {} : { progressEveryActions: options.progressEveryActions }),
   })
   let staging: Manifest = {}
   try {

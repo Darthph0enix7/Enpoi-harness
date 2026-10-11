@@ -1749,7 +1749,7 @@ WantedBy=default.target
     expect(install.match(/\n\s*ensure_tailnet_exposure$/gm)).toHaveLength(3)
     expect(install).toMatch(/ensure_service\n  ensure_tailnet_exposure\n  write_state/)
     expect(install).toMatch(/ensure_service\n    ensure_tailnet_exposure\n    step "switch/)
-    expect(install).toMatch(/ensure_service\n  ensure_tailnet_exposure\n  run_backfill/)
+    expect(install).toMatch(/ensure_service\n  ensure_tailnet_exposure\n  substep_info "backfill:[^\n]*\n  run_backfill/)
     const syntax = spawnSync('bash', ['-n', installSh], { encoding: 'utf8' })
     expect(syntax.status).toBe(0)
   })

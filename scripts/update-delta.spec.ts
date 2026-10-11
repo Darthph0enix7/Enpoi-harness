@@ -10,7 +10,7 @@
  * scripts/update-delta-e2e.spec.ts.
  */
 
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { chmodSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -26,6 +26,8 @@ import {
   canonicalManifest,
   contentEqual,
   extractDiffChain,
+  formatApplyProgress,
+  formatBytes,
   listArchiveMembers,
   readManifestDocument,
   runApplyPipeline,
@@ -320,6 +322,21 @@ describe('release view supplementation', () => {
   })
 })
 
+describe('progress formatting', () => {
+  it('formats bytes and apply ticks deterministically', () => {
+    expect(formatBytes(0)).toBe('0 B')
+    expect(formatBytes(999)).toBe('999 B')
+    expect(formatBytes(1024)).toBe('1.0 KiB')
+    expect(formatBytes(15 * 1024)).toBe('15.0 KiB')
+    expect(formatBytes(200 * 1024)).toBe('200 KiB')
+    expect(formatBytes(3 * 1024 * 1024 * 1024)).toBe('3.0 GiB')
+    const plan = { actions: [{ kind: 'replace' }, { kind: 'replace' }, { kind: 'skip' }, { kind: 'add' }, { kind: 'delete' }] }
+    expect(formatApplyProgress(plan, 0, 0)).toBe('apply: 0/5 actions — 0 B written')
+    expect(formatApplyProgress(plan, 4, 2048)).toBe('apply: 4/5 actions — 2.0 KiB written — replaced 2, added 1')
+    expect(formatApplyProgress(plan, 99, 0)).toBe('apply: 99/5 actions — 0 B written — replaced 2, added 1, deleted 1')
+  })
+})
+
 describe('apply pipeline', () => {
   interface PipelineFixture {
     dir: string
@@ -417,6 +434,26 @@ describe('apply pipeline', () => {
     expect(existsSync(join(extracted, 'core/app.js.new-v3'))).toBe(false)
     expect(readFileSync(join(extracted, 'mode/mode.txt'), 'utf8')).toBe('same\n')
     expect(readFileSync(join(extracted, 'docs/readme.txt'), 'utf8')).toBe('v3\n')
+  })
+
+  it('emits opt-in progress lines and stays silent without a writer', async () => {
+    const f = pipelineFixture()
+    const lines: string[] = []
+    const outcome = await runApplyPipeline(pipelineOptions(f, {
+      progress: line => lines.push(line),
+      progressEveryActions: 2,
+      persistBasePath: join(f.dir, 'progress-base.tar'),
+    }))
+    expect(outcome.status).toBe('applied')
+    expect(lines[0]).toContain('apply: plan')
+    expect(lines.some(line => line.startsWith('apply: seeding the staging tree'))).toBe(true)
+    expect(lines.some(line => line.startsWith('verify: checking the staged tree'))).toBe(true)
+    expect(lines.some(line => /^apply: \d+\/\d+ actions — .* written/u.test(line))).toBe(true)
+    expect(lines.some(line => line.startsWith('merge base: retaining the pristine merge base'))).toBe(true)
+    expect(lines.some(line => line.startsWith('merge base: retained '))).toBe(true)
+    expect(lines.some(line => line.startsWith('apply: applied'))).toBe(true)
+    // One plain line per event, no frames or ANSI escapes.
+    expect(lines.every(line => !line.includes('\r') && !line.includes('\u001b'))).toBe(true)
   })
 
   it('resolves a clean merge on a later hop from a synthesized base', async () => {
@@ -526,6 +563,53 @@ describe('apply pipeline', () => {
     expect(parsed.verification.ok).toBe(true)
     expect(parsed.baseArchive?.path).toBe(join(f.dir, 'cli-retained.tar'))
     expect(existsSync(join(f.dir, 'cli-retained.tar'))).toBe(true)
+    // Without --progress-fd the module stays silent on both streams.
+    expect(result.stdout).not.toContain('apply: plan')
+    expect(result.stderr).not.toContain('apply: plan')
+  })
+
+  it('writes progress to an inherited descriptor with --progress-fd', async () => {
+    const f = pipelineFixture()
+    const cli = join(root, 'scripts/update-delta.mjs')
+    const result = await new Promise<{ code: number | null; stdout: string; stderr: string; fd3: string }>((resolve) => {
+      const child = spawn(process.execPath, [
+        cli, 'apply',
+        '--engine', enginePath,
+        '--local', f.local,
+        '--base', f.base,
+        '--release', f.view,
+        '--previous', f.previous,
+        '--next', f.next,
+        '--staging', f.staging,
+        '--journal', f.journal,
+        '--to-version', 'v3',
+        '--from-version', 'v1',
+        '--platform', 'linux-x64',
+        '--diff', join(f.dir, 'diff-linux-x64-v1-v2.tar.gz'),
+        '--diff', join(f.dir, 'diff-linux-x64-v2-v3.tar.gz'),
+        '--progress-fd', '3',
+        '--progress-every-actions', '2',
+        '--out', f.result,
+      ], { cwd: root, stdio: ['ignore', 'pipe', 'pipe', 'pipe'] })
+      let stdout = ''
+      let stderr = ''
+      let fd3 = ''
+      child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+      child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+      child.stdio[3]?.on('data', (chunk: Buffer) => { fd3 += chunk.toString() })
+      child.on('close', (code) => { resolve({ code, stdout, stderr, fd3 }) })
+    })
+    expect(result.code).toBe(0)
+    expect(result.fd3).toContain('apply: plan')
+    expect(result.fd3).toMatch(/apply: \d+\/\d+ actions/u)
+    // The interval fires mid-apply, not only on the final action.
+    const ticks = result.fd3.split('\n').filter(line => /^apply: \d+\/\d+ actions/u.test(line))
+    expect(ticks.length).toBeGreaterThanOrEqual(2)
+    expect(ticks[0]).not.toBe(ticks[ticks.length - 1])
+    expect(result.fd3).toContain('verify: checking the staged tree')
+    // Progress never contaminates stdout (the human report) or stderr (errors).
+    expect(result.stdout).not.toContain('apply: plan')
+    expect(result.stderr).not.toContain('apply: plan')
   })
 
   it('reports a corrupt gzip through the CLI as exit 2', () => {

@@ -517,11 +517,12 @@ describe('update wiring and the non-session path', () => {
     const directRestart = [
       'deferred_restart=0',
       '  if running_under_service; then deferred_restart=1; fi',
-      '  if [ "$deferred_restart" = 0 ]; then restart_service; fi',
+      '  if [ "$deferred_restart" = 0 ]; then',
     ].join('\n')
     expect(install).toContain(directRestart)
+    expect(install).toMatch(/if \[ "\$deferred_restart" = 0 \]; then\n(?:.*\n)*?    restart_service\n/)
     // The durable sequence keeps its exact order for the direct path.
-    expect(install).toMatch(/\n  ensure_service\n  ensure_tailnet_exposure\n  run_backfill\n/)
+    expect(install).toMatch(/\n  ensure_service\n  ensure_tailnet_exposure\n  substep_info "backfill:[^\n]*\n  run_backfill\n/)
     // The delegated restart is the last action, after the result is reported.
     const delegatedRestart = [
       'print_summary update',

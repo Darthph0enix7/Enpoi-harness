@@ -31,6 +31,11 @@
  * The manifest validation below mirrors scripts/release-delta.mjs; the spec
  * suite proves both project the same document to the same engine manifest.
  *
+ * Progress: opt-in only. `--progress-fd <n>` (or an injected callback) emits
+ * plain `apply:` / `verify:` / `merge base:` lines to an inherited descriptor;
+ * without it the module stays silent and every result byte is unchanged. The
+ * engine's own progress callback is likewise opt-in.
+ *
  * Path safety: diff archives are listed with `tar -tzf` and every member name
  * is validated (absolute paths, `..`, backslashes, control characters, and
  * unknown `.dsh-diff/` metadata members are rejected) before extraction, and
@@ -47,7 +52,7 @@
  *     [--platform <os-arch>] [--out <result.json>]
  */
 
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -480,6 +485,81 @@ export function supplementReleaseView(options) {
   return { supplemented, unresolved }
 }
 
+// ── progress ────────────────────────────────────────────────────────────────
+
+/**
+ * Human byte size for progress lines.
+ * @param bytes - byte count
+ * @returns short human form (e.g. "1.1 GiB")
+ */
+export function formatBytes(bytes) {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+  let value = Number(bytes) || 0
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  const shown = value >= 100 || unit === 0 ? Math.round(value) : value.toFixed(1)
+  return `${shown} ${units[unit]}`
+}
+
+/**
+ * One 'applying' progress line: counts of the kinds completed so far plus the
+ * bytes written. Kinds with zero completions are omitted.
+ * @param plan - engine plan (actions in apply order)
+ * @param processed - actions completed
+ * @param bytesWritten - bytes written so far
+ * @returns progress line
+ */
+export function formatApplyProgress(plan, processed, bytesWritten) {
+  const tally = {}
+  const upto = Math.min(processed, plan.actions.length)
+  for (let index = 0; index < upto; index += 1) {
+    const kind = plan.actions[index].kind
+    tally[kind] = (tally[kind] ?? 0) + 1
+  }
+  const labels = {
+    replace: 'replaced',
+    add: 'added',
+    restore: 'restored',
+    merge: 'merged',
+    'keep-local': 'kept-local',
+    'keep-local-sidecar': 'kept-local',
+    'keep-untracked': 'untracked',
+    delete: 'deleted',
+    tombstone: 'tombstoned',
+    'pin-skip': 'pinned',
+  }
+  const parts = []
+  for (const [kind, label] of Object.entries(labels)) {
+    if ((tally[kind] ?? 0) > 0) parts.push(`${label} ${tally[kind]}`)
+  }
+  return `apply: ${processed}/${plan.actions.length} actions — ${formatBytes(bytesWritten)} written${parts.length > 0 ? ` — ${parts.join(', ')}` : ''}`
+}
+
+/**
+ * Resolve the progress writer: an injected function wins; otherwise the
+ * module writes plain lines to `--progress-fd` (or DSH_UPDATE_PROGRESS_FD)
+ * when it is a valid descriptor >= 3. Every write is best-effort.
+ * @param options - pipeline options
+ * @returns writer, or null when progress is off
+ */
+function resolveProgressWriter(options) {
+  if (typeof options.progress === 'function') return options.progress
+  const raw = options.progressFd ?? process.env.DSH_UPDATE_PROGRESS_FD
+  if (raw === undefined || raw === null || raw === '') return null
+  const fd = Number.parseInt(String(raw), 10)
+  if (!Number.isInteger(fd) || fd < 3) return null
+  return line => {
+    try {
+      fs.writeSync(fd, `${line}\n`)
+    } catch {
+      // A closed or unwritable progress fd must never fail an update.
+    }
+  }
+}
+
 // ── retained pristine base archive ──────────────────────────────────────────
 
 /**
@@ -495,14 +575,20 @@ export function supplementReleaseView(options) {
  * @param {{plan: object, stagingRoot: string, releaseRoot: string, outPath: string}} options synthesis inputs
  * @returns {{path: string, bytes: number, files: number, omitted: string[]}}
  */
-export function synthesizePristineArchive(options) {
+export async function synthesizePristineArchive(options) {
   const { plan, stagingRoot, releaseRoot, outPath } = options
+  const emit = typeof options.progress === 'function' ? options.progress : null
   const scratch = `${outPath}.tree-${process.pid}`
   const tmpArchive = `${outPath}.tmp-${process.pid}`
   fs.rmSync(scratch, { recursive: true, force: true })
   fs.mkdirSync(scratch, { recursive: true })
   const omitted = []
   let files = 0
+  let estimateBytes = 0
+  for (const action of plan.actions) {
+    if (action.shipped?.type === 'file' && action.shipped.sha256 !== null) estimateBytes += action.shipped.size ?? 0
+  }
+  emit?.(`merge base: retaining the pristine merge base for ${options.toVersion ?? 'the installed version'} (≈ ${formatBytes(estimateBytes)})…`)
   try {
     for (const action of plan.actions) {
       const shipped = action.shipped
@@ -542,14 +628,37 @@ export function synthesizePristineArchive(options) {
       }
       omitted.push(action.path)
     }
-    const tarred = spawnSync('tar', ['-cf', tmpArchive, '-C', scratch, '.'], { encoding: 'utf8' })
-    if (tarred.error) throw tarred.error
-    if (tarred.status !== 0) throw new Error(`tar failed (${tarred.status}): ${String(tarred.stderr ?? '').trim()}`)
+    // Long-running on real trees: the ticker keeps the phase visibly alive
+    // while tar writes the archive (plain lines, no frames).
+    const startedAt = Date.now()
+    const ticker = setInterval(() => {
+      let written = 0
+      try {
+        written = fs.statSync(tmpArchive).size
+      } catch {
+        written = 0
+      }
+      emit?.(`merge base: writing ${path.basename(outPath)} — ${formatBytes(written)} (${Math.round((Date.now() - startedAt) / 1000)}s)`)
+    }, 5000)
+    let tarStderr = ''
+    try {
+      const code = await new Promise((resolve, reject) => {
+        const child = spawn('tar', ['-cf', tmpArchive, '-C', scratch, '.'])
+        child.stderr?.on('data', chunk => { tarStderr += chunk.toString() })
+        child.once('error', reject)
+        child.once('close', resolve)
+      })
+      if (code !== 0) throw new Error(`tar failed (${code}): ${tarStderr.trim()}`)
+    } finally {
+      clearInterval(ticker)
+    }
     fs.mkdirSync(path.dirname(outPath), { recursive: true })
     fs.renameSync(tmpArchive, outPath)
     const digest = sha256FileSync(outPath)
     fs.writeFileSync(`${outPath}.sha256`, `${digest}  ${path.basename(outPath)}\n`)
-    return { path: outPath, bytes: fs.statSync(outPath).size, files, omitted }
+    const bytes = fs.statSync(outPath).size
+    emit?.(`merge base: retained ${formatBytes(bytes)} at ${outPath}`)
+    return { path: outPath, bytes, files, omitted }
   } finally {
     fs.rmSync(tmpArchive, { force: true })
     fs.rmSync(scratch, { recursive: true, force: true })
@@ -595,6 +704,7 @@ export async function runApplyPipeline(options) {
     transport.unresolved = supplemented.unresolved.length
   }
 
+  const progress = resolveProgressWriter(options)
   const local = await engine.scanTree(options.localRoot)
   const pins = options.pinsPath ? await engine.loadPins(options.pinsPath) : []
   const tombstones = options.tombstonesPath ? await engine.loadTombstones(options.tombstonesPath) : []
@@ -610,6 +720,7 @@ export async function runApplyPipeline(options) {
     pins,
     tombstones,
   })
+  progress?.(`apply: plan ${plan.actions.length} actions (switch ${plan.switchDecision})${plan.conflicts.length > 0 ? ` — ${plan.conflicts.length} conflict(s)` : ''}`)
   const applied = await engine.applyPlan({
     plan,
     localRoot: options.localRoot,
@@ -620,7 +731,31 @@ export async function runApplyPipeline(options) {
     ...(options.timestamp === undefined ? {} : { timestamp: options.timestamp }),
     ...(options.backupDir === undefined ? {} : { backupDir: options.backupDir }),
     ...(options.stopAfterActions === undefined ? {} : { stopAfterActions: options.stopAfterActions }),
+    ...(progress === null ? {} : {
+      progress: update => {
+        if (update.phase === 'starting') {
+          progress('apply: seeding the staging tree from the installed version…')
+          return
+        }
+        if (update.phase === 'verifying') {
+          progress(`verify: checking the staged tree against ${options.toVersion}…`)
+          return
+        }
+        progress(formatApplyProgress(plan, update.processed, update.bytesWritten))
+      },
+    }),
+    ...(options.progressEveryActions === undefined ? {} : { progressEveryActions: options.progressEveryActions }),
+    ...(options.progressEveryBytes === undefined ? {} : { progressEveryBytes: options.progressEveryBytes }),
   })
+  if (progress !== null) {
+    const verification = applied.verification
+    progress(
+      `apply: ${applied.status}`
+      + (verification === null
+        ? ''
+        : ` — verification ${verification.ok ? 'ok' : 'failed'} (${verification.manifestChecked + verification.preservedChecked} paths checked)`),
+    )
+  }
   const exitCode = applied.status === 'aborted'
     ? 3
     : applied.status === 'rollback-required'
@@ -632,11 +767,13 @@ export async function runApplyPipeline(options) {
   let baseArchiveError = null
   if (options.persistBasePath !== undefined && exitCode === 0) {
     try {
-      baseArchive = synthesizePristineArchive({
+      baseArchive = await synthesizePristineArchive({
         plan,
         stagingRoot: options.stagingRoot,
         releaseRoot: options.releaseRoot,
         outPath: options.persistBasePath,
+        toVersion: options.toVersion,
+        ...(progress === null ? {} : { progress }),
       })
     } catch (error) {
       // Never fail the update over a missing base: the next update degrades to
@@ -702,7 +839,11 @@ const USAGE = `usage: update-delta.mjs apply --engine <bundle.js> --local <dir> 
        [--backup <dir>] [--pins <file>] [--tombstones <file>]
        [--stop-after-actions <n>] [--timestamp <iso>] [--platform <os-arch>]
        [--base-mode <retained|cache|empty>] [--persist-base <archive.tar>]
-       [--out <result.json>]`
+       [--progress-fd <n>] [--progress-every-actions <n>]
+       [--progress-every-bytes <n>] [--out <result.json>]
+
+Progress lines (plain stderr-style text) go to <n> when a descriptor >= 3 is
+open; without it nothing is emitted and behavior is unchanged.`
 
 /**
  * Run the CLI.
@@ -738,6 +879,9 @@ export async function main(argv) {
     ...(args.timestamp === undefined ? {} : { timestamp: args.timestamp }),
     ...(stopAfter === undefined ? {} : { stopAfterActions: Number.parseInt(stopAfter, 10) }),
     ...(args['persist-base'] === undefined ? {} : { persistBasePath: args['persist-base'] }),
+    ...(args['progress-fd'] === undefined ? {} : { progressFd: Number.parseInt(args['progress-fd'], 10) }),
+    ...(args['progress-every-actions'] === undefined ? {} : { progressEveryActions: Number.parseInt(args['progress-every-actions'], 10) }),
+    ...(args['progress-every-bytes'] === undefined ? {} : { progressEveryBytes: Number.parseInt(args['progress-every-bytes'], 10) }),
   }
   const outcome = await runApplyPipeline(options)
   if (args.out !== undefined) fs.writeFileSync(args.out, `${JSON.stringify(outcome.result, null, 2)}\n`)

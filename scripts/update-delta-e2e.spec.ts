@@ -16,7 +16,7 @@
 
 import { spawn, spawnSync } from 'node:child_process'
 import crypto from 'node:crypto'
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -31,8 +31,20 @@ const platform = `${process.platform}-${process.arch}`
 const installSh = join(repoRoot, 'scripts', 'install.sh')
 
 const STUB_CLI = `#!/usr/bin/env node
+const fs = require('fs')
+const path = require('path')
 const args = process.argv.slice(2)
-if (args.includes('--version')) { console.log('0.0.0-fixture'); process.exit(0) }
+if (args.includes('--version')) {
+  // The real CLI reports the active tree's recorded identity; mirror that so
+  // tests can compare dsh --version with the updater's resolver.
+  let version = 'unknown'
+  try {
+    const root = path.resolve(__dirname, '..', '..', '..')
+    version = JSON.parse(fs.readFileSync(path.join(root, '.dsh-install-complete'), 'utf8')).version
+  } catch {}
+  console.log(version)
+  process.exit(0)
+}
 process.exit(0)
 `
 
@@ -411,7 +423,12 @@ interface UpdateResult {
   json: Record<string, unknown> | null
 }
 
-async function runUpdate(fixture: Fixture, extraEnv: Record<string, string> = {}, extraArgs: string[] = []): Promise<UpdateResult> {
+async function runUpdate(
+  fixture: Fixture,
+  extraEnv: Record<string, string> = {},
+  extraArgs: string[] = [],
+  options: { json?: boolean } = {},
+): Promise<UpdateResult> {
   // The fixture server lives in this process, so the updater must run
   // asynchronously: a blocking spawnSync would starve the event loop and every
   // HTTP request would time out.
@@ -423,7 +440,7 @@ async function runUpdate(fixture: Fixture, extraEnv: Record<string, string> = {}
       '--dsh-home', fixture.home,
       '--bin-dir', fixture.binDir,
       '--channel', 'stable',
-      '--json',
+      ...(options.json === false ? [] : ['--json']),
       ...extraArgs,
     ], {
       env: {
@@ -461,6 +478,45 @@ async function runUpdate(fixture: Fixture, extraEnv: Record<string, string> = {}
 function currentTarget(prefix: string): string {
   return readlinkSync(join(prefix, 'harness/current'))
 }
+
+function markerVersionAt(prefix: string, version: string): string {
+  return (JSON.parse(readFileSync(join(prefix, 'harness', version, '.dsh-install-complete'), 'utf8')) as { version: string }).version
+}
+
+function markerVersion(prefix: string): string {
+  return markerVersionAt(prefix, currentTarget(prefix))
+}
+
+function stateField(prefix: string, key: string): string {
+  return (JSON.parse(readFileSync(join(prefix, 'harness', 'install-state.json'), 'utf8')) as Record<string, string>)[key] ?? ''
+}
+
+function writeStateField(prefix: string, key: string, value: unknown): void {
+  const file = join(prefix, 'harness', 'install-state.json')
+  const doc = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
+  doc[key] = value
+  writeFileSync(file, `${JSON.stringify(doc, null, 2)}\n`)
+}
+
+/** `dsh --version` through the generated shim (active tree identity). */
+function dshVersion(fixture: Fixture): string {
+  const result = spawnSync(join(fixture.binDir, 'dsh'), ['--version'], { encoding: 'utf8' })
+  return (result.stdout ?? '').trim()
+}
+
+/** Numbered step headers parsed from update output (`[k/N] title`). */
+function stepSequence(output: string): { index: number; total: number; title: string }[] {
+  const steps: { index: number; total: number; title: string }[] = []
+  for (const raw of output.split('\n')) {
+    const match = /^\[(\d+)\/(\d+)\]\s+(.*)$/u.exec(raw.trim())
+    if (match !== null) steps.push({ index: Number(match[1]), total: Number(match[2]), title: match[3] ?? '' })
+  }
+  return steps
+}
+
+/** util-linux `script` gives the child a pty (same probe as install-progress.spec). */
+const ptyAvailable = process.platform !== 'win32'
+  && spawnSync('script', ['-qec', 'true', '/dev/null'], { encoding: 'utf8', timeout: 10_000 }).status === 0
 
 function completeVersions(prefix: string): string[] {
   return readdirSync(join(prefix, 'harness'))
@@ -508,9 +564,12 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(counts.restored).toBeGreaterThanOrEqual(1)
     expect(counts.conflicts).toBeGreaterThanOrEqual(1)
 
-    // Atomic switch and marker.
+    // Atomic switch and marker; symlink, marker, state and the CLI agree.
     expect(currentTarget(fixture.prefix)).toBe('2')
-    expect((JSON.parse(readFileSync(join(fixture.prefix, 'harness/2/.dsh-install-complete'), 'utf8')) as { version: string }).version).toBe('2')
+    expect(markerVersion(fixture.prefix)).toBe('2')
+    expect(stateField(fixture.prefix, 'version')).toBe('2')
+    expect(stateField(fixture.prefix, 'harnessDir')).toBe('2')
+    expect(dshVersion(fixture)).toBe('2')
 
     // Preservation: merged core edit, untracked file/plugin/skill, pinned and
     // tombstoned paths, collision sidecar, restored deletion.
@@ -572,11 +631,15 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(first.status).not.toBe(0)
     expect(first.stderr).toContain('interrupted')
     expect(currentTarget(fixture.prefix)).toBe('1')
+    // An interrupted apply never stamps the live tree.
+    expect(markerVersionAt(fixture.prefix, '1')).toBe('1')
+    expect(stateField(fixture.prefix, 'version')).toBe('1')
     expect(existsSync(join(fixture.prefix, 'harness', '.staging-2'))).toBe(true)
     expect(existsSync(join(fixture.prefix, 'harness', '.staging-2.journal.json'))).toBe(true)
     const second = await runUpdate(fixture)
     expect(second.status, second.stderr).toBe(0)
     expect(currentTarget(fixture.prefix)).toBe('2')
+    expect(markerVersion(fixture.prefix)).toBe('2')
     expect(readFileSync(join(fixture.prefix, 'harness/2/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\nFOUR\n')
     expect(existsSync(join(fixture.prefix, 'harness', '.staging-2'))).toBe(false)
   }, 240_000)
@@ -703,6 +766,153 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(existsSync(join(bases, '2.tar'))).toBe(true)
   }, 240_000)
 
+  it('prints nine coherent numbered steps on the no-op and delta paths', async () => {
+    // Rung 0: the up-to-date path must show the transport step it never runs.
+    const noopFixture = await buildFixture({ visible: ['1'] })
+    const noop = await runUpdate(noopFixture)
+    expect(noop.status, noop.stderr).toBe(0)
+    const noopSteps = stepSequence(noop.stderr)
+    expect(noopSteps.map(step => step.index)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+    expect(new Set(noopSteps.map(step => step.total))).toEqual(new Set([9]))
+    expect(noopSteps[4]?.title).toContain('delta transport: nothing to do — already at 1')
+    expect(noop.stderr).toContain('self-check passed')
+
+    // Rung 1 without --json: numbered steps plus live progress on stderr.
+    const deltaFixture = await buildFixture()
+    const delta = await runUpdate(deltaFixture, { DSH_UPDATE_PROGRESS_EVERY_ACTIONS: '3' }, [], { json: false })
+    expect(delta.status, delta.stderr).toBe(0)
+    const deltaSteps = stepSequence(delta.stderr)
+    expect(deltaSteps.map(step => step.index)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+    expect(new Set(deltaSteps.map(step => step.total))).toEqual(new Set([9]))
+    expect(deltaSteps[4]?.title).toContain('delta transport (rung 1')
+    expect(delta.stderr).toContain('apply: plan ')
+    expect(delta.stderr).toMatch(/apply: \d+\/\d+ actions — /u)
+    expect(delta.stderr).toContain('verify: checking the staged tree')
+    expect(delta.stderr).toContain('merge base: retaining the pristine merge base')
+    expect(delta.stderr).toContain('merge base: retained ')
+    expect(delta.stderr).toContain('switch: current → 2')
+    expect(currentTarget(deltaFixture.prefix)).toBe('2')
+
+    // --json: the machine object stays on stdout and progress is suppressed.
+    const jsonFixture = await buildFixture()
+    const jsonRun = await runUpdate(jsonFixture, { DSH_UPDATE_PROGRESS_EVERY_ACTIONS: '3' })
+    expect(jsonRun.status, jsonRun.stderr).toBe(0)
+    expect(jsonRun.json?.ok).toBe(1)
+    expect(jsonRun.stderr).not.toContain('apply: plan')
+    expect(jsonRun.stderr).not.toContain('merge base: retaining')
+  }, 240_000)
+
+  it.skipIf(!ptyAvailable)('renders TTY progress for the delta path through a pty', async () => {
+    const fixture = await buildFixture()
+    const command = [
+      'env',
+      `DSH_GITHUB_URL=${fixture.server.base}`,
+      'DSH_GITHUB_REPO=fixture/repo',
+      'DSH_NO_TAILNET=1',
+      'DSH_DELTA_FETCH_TIMEOUT=30',
+      'DSH_PREBUILT_TIMEOUT=60',
+      'DSH_PROGRESS_INTERVAL=60',
+      'DSH_UPDATE_PROGRESS_EVERY_ACTIONS=3',
+      'TERM=xterm',
+      'bash', installSh,
+      '--update',
+      '--prefix', fixture.prefix,
+      '--dsh-home', fixture.home,
+      '--bin-dir', fixture.binDir,
+      '--channel', 'stable',
+    ].join(' ')
+    // Async spawn: the fixture server lives in this process, so a blocking
+    // spawnSync would starve the event loop and every request would time out.
+    const result = await new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve) => {
+      const child = spawn('script', ['-qec', command, '/dev/null'], { cwd: repoRoot })
+      let stdout = ''
+      let stderr = ''
+      child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+      child.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+      child.on('close', (status) => { resolve({ status, stdout, stderr }) })
+    })
+    expect(result.status, result.stderr).toBe(0)
+    const output = result.stdout ?? ''
+    expect(output).toContain('[1/9]')
+    expect(output).toContain('[5/9]')
+    expect(output).toContain('delta transport (rung 1')
+    expect(output).toContain('[9/9]')
+    expect(output).toContain('⏳')
+    expect(output).toContain('apply: plan')
+    expect(output).toContain('\u001b[')
+    expect(currentTarget(fixture.prefix)).toBe('2')
+  }, 240_000)
+
+  it('reconciles a split identity from the symlink and completes the switch', async () => {
+    const fixture = await buildFixture()
+    // The PC state: a complete but never-switched 2 tree, and the ACTIVE 1
+    // tree's marker poisoned with the 2 identity.
+    cpSync(fixture.trees.get('2')!, join(fixture.prefix, 'harness', '2'), { recursive: true })
+    write(join(fixture.prefix, 'harness', '2'), '.dsh-install-complete', '{"version": "2", "commit": "aa58eaf20bace6b3c082d40472bf07c175e9b460", "installedAt": "2026-10-11T14:54:50Z"}\n')
+    write(join(fixture.prefix, 'harness', '1'), '.dsh-install-complete', '{"version": "2", "commit": "aa58eaf20bace6b3c082d40472bf07c175e9b460", "installedAt": "2026-10-11T14:54:50Z"}\n')
+
+    // A dry run reports the split and writes nothing (the poison survives).
+    const dry = await runUpdate(fixture, {}, ['--dry-run'])
+    expect(dry.status, dry.stderr).toBe(0)
+    expect(dry.stderr).toContain('identity mismatch (dry run; nothing was changed)')
+    expect(markerVersionAt(fixture.prefix, '1')).toBe('2')
+
+    const result = await runUpdate(fixture)
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).toContain('identity mismatch:')
+    expect(result.stderr).toContain("its .dsh-install-complete says '2'")
+    expect(result.stderr).toContain('self-healing from the current symlink (the truth): 1')
+    // The real update ran (not a false "already up to date at 2").
+    const update = result.json?.update as Record<string, unknown>
+    expect(update.rung).toBe(1)
+    expect(update.mode).toBe('delta')
+    expect(currentTarget(fixture.prefix)).toBe('2')
+    // Every identity source agrees afterwards, including dsh --version.
+    expect(markerVersion(fixture.prefix)).toBe('2')
+    expect(stateField(fixture.prefix, 'version')).toBe('2')
+    expect(stateField(fixture.prefix, 'harnessDir')).toBe('2')
+    expect(dshVersion(fixture)).toBe('2')
+    // The leftover tree was reused, not rebuilt, and retention stays at K=3.
+    const log = readFileSync(join(fixture.prefix, 'logs/install.log'), 'utf8')
+    expect(log).toMatch(/delta: version 2 is already installed at .* \(reusing\)/)
+    expect(completeVersions(fixture.prefix)).toEqual(['1', '2', 'old-a'])
+    // The healed marker keeps its forensic origin.
+    const healed = JSON.parse(readFileSync(join(fixture.prefix, 'harness', '1', '.dsh-install-complete'), 'utf8')) as { healedFrom?: string }
+    expect(healed.healedFrom).toBe('2')
+  }, 240_000)
+
+  it('never stamps the live tree when the profile refresh fails pre-switch, and resumes from the leftover', async () => {
+    const fixture = await buildFixture()
+    // Force a pre-switch failure after the tree work: a fresh home plus a
+    // missing profile source makes prepare_profile die before the switch.
+    writeStateField(fixture.prefix, 'profileSource', '/nonexistent-profile-source')
+    const failed = await runUpdate(fixture)
+    expect(failed.status).not.toBe(0)
+    expect(failed.stderr).toContain('profile fetch failed')
+    // Active identity untouched; the staged tree is complete but unswitched.
+    expect(currentTarget(fixture.prefix)).toBe('1')
+    expect(markerVersionAt(fixture.prefix, '1')).toBe('1')
+    expect(stateField(fixture.prefix, 'version')).toBe('1')
+    expect(markerVersionAt(fixture.prefix, '2')).toBe('2')
+    // The staged tree's marker is its own inode: the engine's hardlink seed of
+    // installer state must never be written through into the live tree.
+    expect(statSync(join(fixture.prefix, 'harness', '2', '.dsh-install-complete')).ino)
+      .not.toBe(statSync(join(fixture.prefix, 'harness', '1', '.dsh-install-complete')).ino)
+
+    // Resume: the leftover verified tree is reused and the switch completes.
+    writeStateField(fixture.prefix, 'profileSource', '')
+    const resumed = await runUpdate(fixture)
+    expect(resumed.status, resumed.stderr).toBe(0)
+    expect(currentTarget(fixture.prefix)).toBe('2')
+    expect(markerVersion(fixture.prefix)).toBe('2')
+    expect(stateField(fixture.prefix, 'version')).toBe('2')
+    expect(stateField(fixture.prefix, 'harnessDir')).toBe('2')
+    expect(dshVersion(fixture)).toBe('2')
+    expect(completeVersions(fixture.prefix)).toEqual(['1', '2', 'old-a'])
+    const log = readFileSync(join(fixture.prefix, 'logs/install.log'), 'utf8')
+    expect(log).toMatch(/delta: version 2 is already installed at .* \(reusing\)/)
+  }, 240_000)
+
   it('records --forget tombstones before planning, idempotently', async () => {
     const fixture = await buildFixture()
     const result = await runUpdate(fixture, {}, ['--forget', 'docs/lost.txt'])
@@ -821,6 +1031,13 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(update.mode).toBe('full')
     expect(update.verificationOk).toBe(true)
     expect(currentTarget(fixture.prefix)).toBe('5')
+    expect(markerVersion(fixture.prefix)).toBe('5')
+    expect(stateField(fixture.prefix, 'version')).toBe('5')
+    // The full path prints the same nine numbered phases.
+    const fullSteps = stepSequence(result.stderr)
+    expect(fullSteps.map(step => step.index)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
+    expect(new Set(fullSteps.map(step => step.total))).toEqual(new Set([9]))
+    expect(fullSteps[4]?.title).toContain('full release apply (preservation engine)')
     expect(readFileSync(join(fixture.prefix, 'harness/5/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\nFOUR\nFIVE\nSIX\nSEVEN\n')
     // A full update retains the downloaded archive verbatim as the base.
     expect(existsSync(join(fixture.prefix, 'harness/.bases/5.tar.gz'))).toBe(true)
@@ -832,6 +1049,9 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(result.status).not.toBe(0)
     expect(currentTarget(fixture.prefix)).toBe('1')
     expect(result.json?.rolledBack).toBe(1)
+    // The restored live tree carries its own identity, not the failed one.
+    expect(markerVersionAt(fixture.prefix, '1')).toBe('1')
+    expect(stateField(fixture.prefix, 'version')).toBe('1')
     const failed = readdirSync(join(fixture.prefix, 'harness')).filter(name => name.startsWith('2.failed-'))
     expect(failed.length).toBe(1)
     expect(readFileSync(join(fixture.prefix, 'harness/1/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\n')

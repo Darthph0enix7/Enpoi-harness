@@ -82,6 +82,30 @@ describe('staged apply mechanics', () => {
     void staging
   })
 
+  it('emits opt-in progress updates and stays silent without a callback', async () => {
+    const f = await fixture(
+      'progress',
+      { 'a.txt': 'one\n', 'b.txt': 'two\n', 'c.txt': 'three\n', 'd.txt': 'four\n' },
+      { 'a.txt': 'one v2\n', 'b.txt': 'two v2\n', 'c.txt': 'three v2\n', 'd.txt': 'four v2\n', 'e.txt': 'new\n' },
+    )
+    const updates: { phase: string; processed: number; total: number }[] = []
+    const { plan, result } = await runUpdate(f, {
+      progress: update => updates.push({ phase: update.phase, processed: update.processed, total: update.total }),
+      progressEveryActions: 2,
+    })
+    expect(result.status).toBe('applied')
+    expect(updates[0]?.phase).toBe('starting')
+    expect(updates.some(update => update.phase === 'verifying')).toBe(true)
+    const applying = updates.filter(update => update.phase === 'applying')
+    expect(applying.length).toBeGreaterThanOrEqual(2)
+    // The final action always reports, so the last tick equals the plan size.
+    expect(applying.at(-1)?.processed).toBe(applying.at(-1)?.total)
+    expect(applying.at(-1)?.total).toBe(plan.actions.length)
+    // Same fixture without the callback: same result, no observable progress.
+    const silent = await runUpdate(f, { timestamp: '2030-01-01T00:00:00.000Z' })
+    expect(silent.result.status).toBe('noop')
+  })
+
   it('detects a foreign journal and requires rollback before rebuilding', async () => {
     const f = await fixture('foreign-journal', { 'a.txt': 'a\n' }, { 'a.txt': 'b\n' })
     const plan = await build(f)

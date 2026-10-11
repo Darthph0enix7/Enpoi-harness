@@ -34,6 +34,21 @@ import type {
   VerificationResult,
 } from './types.ts'
 
+/**
+ * Coarse apply progress. Emitted only when {@link ApplyOptions.progress} is
+ * provided; the default (no callback) keeps apply behavior byte-identical.
+ */
+export interface ApplyProgressUpdate {
+  /** Pass phase the update describes. */
+  phase: 'starting' | 'applying' | 'verifying'
+  /** Actions completed so far (results recorded). */
+  processed: number
+  /** Total planned actions. */
+  total: number
+  /** Bytes written so far (content and sidecars). */
+  bytesWritten: number
+}
+
 /** Options for {@link applyPlan}. */
 export interface ApplyOptions {
   /** Plan to execute. */
@@ -61,6 +76,18 @@ export interface ApplyOptions {
   stopAfterActions?: number
   /** When set, copy modified and untracked files here before apply (§3.5). */
   backupDir?: string
+  /** Opt-in coarse progress callback; nothing is emitted when omitted. */
+  progress?: (update: ApplyProgressUpdate) => void
+  /**
+   * 'applying' callback interval in actions; the final action always reports.
+   * Default 200. Ignored without {@link progress}.
+   */
+  progressEveryActions?: number
+  /**
+   * 'applying' callback interval in written bytes. Default 64 MiB. Ignored
+   * without {@link progress}.
+   */
+  progressEveryBytes?: number
 }
 
 /**
@@ -135,6 +162,7 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
   const touched = [...new Set(plan.actions.map(action => action.path))]
   const before = await snapshotHostPaths(options.localRoot, touched)
 
+  options.progress?.({ phase: 'starting', processed: 0, total: plan.actions.length, bytesWritten: 0 })
   try {
     await seedStaging(options.localRoot, options.stagingRoot)
   } catch (error) {
@@ -156,6 +184,8 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
 
   const context: ApplyContext = { stagingRoot: options.stagingRoot, releaseRoot: options.releaseRoot, preflight }
   let processed = 0
+  let lastProgressActions = 0
+  let lastProgressBytes = 0
   for (const action of plan.actions) {
     try {
       const outcome = await executeAction(action, context)
@@ -177,6 +207,14 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
     }
     await persist(journalPath, plan, timestamp, 'applying', completed, null)
     processed++
+    if (options.progress !== undefined
+      && (processed === plan.actions.length
+        || processed - lastProgressActions >= (options.progressEveryActions ?? 200)
+        || bytesWritten - lastProgressBytes >= (options.progressEveryBytes ?? 64 * 1024 * 1024))) {
+      lastProgressActions = processed
+      lastProgressBytes = bytesWritten
+      options.progress({ phase: 'applying', processed, total: plan.actions.length, bytesWritten })
+    }
     if (options.stopAfterActions !== undefined && processed >= options.stopAfterActions) {
       await persist(journalPath, plan, timestamp, 'applying', completed, `interrupted after ${processed} actions`)
       const liveTreeIntact = sameSnapshot(before, await snapshotHostPaths(options.localRoot, touched))
@@ -192,6 +230,7 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
   }
 
   await persist(journalPath, plan, timestamp, 'verifying', completed, null)
+  options.progress?.({ phase: 'verifying', processed, total: plan.actions.length, bytesWritten })
   const verification = await verifyStagedTree({ plan, stagingRoot: options.stagingRoot })
   const liveTreeIntact = sameSnapshot(before, await snapshotHostPaths(options.localRoot, touched))
   const status: ApplyStatus = verification.ok && liveTreeIntact ? 'applied' : 'failed'

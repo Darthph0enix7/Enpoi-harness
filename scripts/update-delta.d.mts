@@ -100,6 +100,14 @@ export interface RunApplyPipelineOptions {
   stopAfterActions?: number
   /** When set, synthesize the pristine base archive for the installed version. */
   persistBasePath?: string
+  /** Injected progress writer (plain lines); wins over progressFd. */
+  progress?: (line: string) => void
+  /** Inherited descriptor for progress lines (>= 3); default DSH_UPDATE_PROGRESS_FD. */
+  progressFd?: number
+  /** 'applying' progress interval in actions (engine default 200). */
+  progressEveryActions?: number
+  /** 'applying' progress interval in written bytes (engine default 64 MiB). */
+  progressEveryBytes?: number
 }
 
 /** Outcome of the apply pipeline. */
@@ -250,7 +258,29 @@ export function synthesizePristineArchive(options: {
   stagingRoot: string
   releaseRoot: string
   outPath: string
-}): { path: string; bytes: number; files: number; omitted: string[] }
+  toVersion?: string
+  progress?: (line: string) => void
+}): Promise<{ path: string; bytes: number; files: number; omitted: string[] }>
+
+/**
+ * Human byte size for progress lines.
+ * @param bytes - byte count
+ * @returns short human form
+ */
+export function formatBytes(bytes: number): string
+
+/**
+ * One 'applying' progress line for the completed prefix of a plan.
+ * @param plan - engine plan in apply order
+ * @param processed - actions completed
+ * @param bytesWritten - bytes written so far
+ * @returns progress line
+ */
+export function formatApplyProgress(
+  plan: { actions: { kind: string }[] },
+  processed: number,
+  bytesWritten: number,
+): string
 
 /**
  * Run the CLI.
