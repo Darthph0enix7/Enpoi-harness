@@ -6934,6 +6934,12 @@ do_update() {
   if [ "$WRITE_RC" = 1 ]; then write_rc; fi
   prune_versions "$TREE_DIR_NAME" "$current"
   prune_update_artifacts
+  # The v2 apply journal is resume state only: once the switch succeeded it is
+  # consumed. Sweep this run's trio (head/plan/progress) plus any stale trio
+  # from older runs — the update lock guarantees no concurrent consumer.
+  rm -f "$PREFIX/harness"/.staging-*.journal.json \
+        "$PREFIX/harness"/.staging-*.journal.json.plan.json \
+        "$PREFIX/harness"/.staging-*.journal.json.progress.ndjson 2>/dev/null || true
   # Restamp the NEW active tree's scan index after all hardlink churn
   # (staging discard, patches, prune): the next update scans it stat-only.
   # The superseded tree is deliberately not refreshed (~5s saved per update):
