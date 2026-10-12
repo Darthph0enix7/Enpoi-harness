@@ -1493,6 +1493,7 @@ verify_checksum_ticked() { # file label
   substep_info "$label: verifying checksum ($(human_bytes "$(file_size "$file" 2>/dev/null || printf 0)"))…"
   actual="$(sha256_of "$file" 2>/dev/null || true)"
   log "$label: checksum computed in $(( $(date +%s) - started ))s"
+  [ -n "$actual" ] && substep_ok "$label: checksum verified ($(( $(date +%s) - started ))s)"
   printf '%s' "$actual"
 }
 
@@ -5909,7 +5910,9 @@ sweep_experimental_residue() {
   fi
   RESIDUE_BYTES=0
   RESIDUE_ITEMS=0
-  local h="$PREFIX/harness" d name p f b
+  local h="$PREFIX/harness" d name p f b sweep_started sweep_seconds
+  sweep_started="$(date +%s)"
+  substep_info "cleanup: sweeping experimental updater residue…"
   # 1. Retained merge bases (tar/tar.gz/sha sidecars and work dirs).
   residue_remove "$h/.bases" ".bases (retained merge bases + work dirs)"
   # 2. Scan indexes inside every retained version tree.
@@ -5943,10 +5946,12 @@ sweep_experimental_residue() {
   #    here and once at the end of the update (the run's own backups only
   #    exist then, which is what makes an old tree-backup unambiguously old).
   sweep_old_tree_backups
+  sweep_seconds=$(( $(date +%s) - sweep_started ))
   if [ "$RESIDUE_ITEMS" -gt 0 ]; then
-    say "  cleanup: removed experimental updater residue — $(human_bytes "$RESIDUE_BYTES") ($RESIDUE_ITEMS item(s): merge bases, scan indexes, scratch)"
+    say "  cleanup: removed experimental updater residue — $(human_bytes "$RESIDUE_BYTES") ($RESIDUE_ITEMS item(s): merge bases, scan indexes, scratch) (${sweep_seconds}s)"
     log "cleanup: residue sweep freed $RESIDUE_BYTES bytes across $RESIDUE_ITEMS item(s)"
   else
+    say "  cleanup: no experimental updater residue (${sweep_seconds}s)"
     log "cleanup: no experimental updater residue found"
   fi
   RESIDUE_JSON="{\"bytes\": $RESIDUE_BYTES, \"items\": $RESIDUE_ITEMS}"
@@ -7099,6 +7104,7 @@ do_update() {
     if [ -n "$transport_engine" ] || [ "$DELTA_MODE" = "delta" ]; then
       banner "preservation engine path unavailable; falling back to the legacy install"
     fi
+    substep_info "installing the prebuilt tree (finalize + atomic switch prep)…"
     if ! install_tree; then
       warn "update failed before switching; $current remains active"
       restore_pre_switch "$backup" "the build"
