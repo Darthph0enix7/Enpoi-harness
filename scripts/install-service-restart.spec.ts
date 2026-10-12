@@ -144,7 +144,7 @@ describe('installer restart_service on macOS', () => {
     // The fast-path kickstart precedes the fallback; the reload's own
     // kickstart follows the bootstrap.
     const lines = result.log.split('\n')
-    const kickAfterBootstrap = lines.findIndex((line, index) => index > at.bootstrap && line.startsWith('kickstart '))
+    const kickAfterBootstrap = lines.findIndex((line, index) => index > (at.bootstrap ?? -1) && line.startsWith('kickstart '))
     expect(kickAfterBootstrap).toBeGreaterThan(at.bootstrap ?? -1)
     expect(result.output).toContain('reloaded')
   }, 20_000)
