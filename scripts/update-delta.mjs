@@ -56,6 +56,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
+import { isatty } from 'node:tty'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -594,13 +595,60 @@ function resolveProgressWriter(options) {
   if (raw === undefined || raw === null || raw === '') return null
   const fd = Number.parseInt(String(raw), 10)
   if (!Number.isInteger(fd) || fd < 3) return null
-  return line => {
+  let tty = options.progressTty === true
+  if (!tty) {
     try {
-      fs.writeSync(fd, `${line}\n`)
+      tty = isatty(fd)
+    } catch {
+      tty = false
+    }
+  }
+  const write = (text) => {
+    try {
+      fs.writeSync(fd, text)
     } catch {
       // A closed or unwritable progress fd must never fail an update.
     }
   }
+  const width = () => {
+    const columns = process.stdout.columns ?? process.stderr.columns ?? 100
+    return Math.max(24, Math.min(500, columns)) - 1
+  }
+  const clip = (text) => {
+    if (text.length <= width()) return text
+    return `${text.slice(0, Math.max(1, width() - 1))}…`
+  }
+  let tickActive = false
+  let lastPlainTickAt = 0
+  const writer = (line) => {
+    if (tickActive) {
+      write('\r\u001b[K')
+      tickActive = false
+    }
+    write(`${line}\n`)
+  }
+  // A tick is a single rewriting frame on a TTY; on a non-TTY (logs) it is
+  // throttled to one plain line every 5 s so the operator gets the shape
+  // without line spam.
+  writer.tick = (line) => {
+    if (tty) {
+      write(`\r\u001b[K${clip(line)}`)
+      tickActive = true
+      return
+    }
+    const now = Date.now()
+    if (now - lastPlainTickAt < 5000) return
+    lastPlainTickAt = now
+    write(`${line}\n`)
+  }
+  writer.finish = () => {
+    if (tickActive) {
+      write('\r\u001b[K')
+      tickActive = false
+    }
+  }
+  writer.tty = tty
+  return writer
 }
 
 // ── merge base materialization ──────────────────────────────────────────────
@@ -1156,13 +1204,17 @@ export async function runApplyPipeline(options) {
   let scanIndexState = 'disabled'
   let scanTrusted = 0
   let scanHashed = 0
+  const localStats = new Map()
   const local = await engine.scanTree(options.localRoot, {
     useIndex,
+    collectStats: localStats,
     ...(progress === null ? {} : {
       onProgress: (tick) => {
         localScanFiles = tick.files
         localScanBytes = tick.bytes
-        progress(`scan: hashing the installed tree — ${tick.files} files, ${formatBytes(tick.bytes)} read`)
+        const text = `scan: hashing the installed tree — ${tick.files.toLocaleString('en-US')} files, ${formatBytes(tick.bytes)} read`
+        if (typeof progress.tick === 'function') progress.tick(text)
+        else progress(text)
       },
     }),
     onIndex: (info) => {
@@ -1224,6 +1276,10 @@ export async function runApplyPipeline(options) {
   })
   progress?.(`apply: plan ${plan.actions.length} actions (switch ${plan.switchDecision})${plan.conflicts.length > 0 ? ` — ${plan.conflicts.length} conflict(s)` : ''}`)
   const snapshotPaths = typeof engine.mutationTouchedPaths === 'function' ? engine.mutationTouchedPaths(plan).length : plan.actions.length
+  const phaseAt = {}
+  const stamp = (name) => {
+    if (phaseAt[name] === undefined) phaseAt[name] = Date.now()
+  }
   const applied = await engine.applyPlan({
     plan,
     localRoot: options.localRoot,
@@ -1236,27 +1292,42 @@ export async function runApplyPipeline(options) {
     ...(options.stopAfterActions === undefined ? {} : { stopAfterActions: options.stopAfterActions }),
     ...(progress === null ? {} : {
       progress: update => {
+        const tick = typeof progress.tick === 'function' ? progress.tick : progress
         if (update.phase === 'starting') {
           progress(`apply: working — snapshot ${snapshotPaths} guarded path(s), then seed the staging tree…`)
           return
         }
         if (update.phase === 'snapshot') {
-          progress(`apply: snapshot ${update.processed}/${update.total} guarded paths — ${formatBytes(update.bytesWritten)} read`)
+          if (update.processed === 0) stamp('snapshotStart')
+          if (update.processed >= update.total) stamp('snapshotEnd')
+          const text = `apply: snapshot ${update.processed}/${update.total} guarded paths — ${formatBytes(update.bytesWritten)} read`
+          // Phase start and completion are permanent lines; only in-flight
+          // ticks rewrite (TTY) or throttle (logs).
+          if (update.processed === 0 || update.processed >= update.total) progress(text)
+          else tick(text)
           return
         }
         if (update.phase === 'seeding') {
-          progress(`apply: seeding ${update.processed}/${update.total} entries — ${formatBytes(update.bytesWritten)} linked`)
+          if (update.processed === 0) stamp('seedStart')
+          if (update.processed >= update.total) stamp('seedEnd')
+          const text = `apply: seeding ${update.processed}/${update.total} entries — ${formatBytes(update.bytesWritten)} linked`
+          if (update.processed === 0 || update.processed >= update.total) progress(text)
+          else tick(text)
           return
         }
         if (update.phase === 'verifying') {
           if (update.processed === 0) {
+            stamp('verifyStart')
             progress(`verify: checking the staged tree against ${options.toVersion}…`)
           } else {
-            progress(`verify: re-reading ${update.processed} file(s) not carried by hardlink seeds — ${formatBytes(update.bytesWritten)}`)
+            tick(`verify: re-reading ${update.processed} file(s) not carried by hardlink seeds — ${formatBytes(update.bytesWritten)}`)
           }
           return
         }
-        progress(formatApplyProgress(plan, update.processed, update.bytesWritten))
+        if (update.phase === 'applying' && update.processed >= update.total) stamp('applyEnd')
+        const text = formatApplyProgress(plan, update.processed, update.bytesWritten)
+        if (update.processed >= update.total) progress(text)
+        else tick(text)
       },
     }),
     ...(options.progressEveryActions === undefined ? {} : { progressEveryActions: options.progressEveryActions }),
@@ -1266,6 +1337,7 @@ export async function runApplyPipeline(options) {
     localManifest: local,
     localScanCompletedAt,
     useIndex,
+    localStats,
   })
   if (progress !== null) {
     const verification = applied.verification
@@ -1301,6 +1373,12 @@ export async function runApplyPipeline(options) {
       baseArchiveError = error instanceof Error ? error.message : String(error)
       process.stderr.write(`update-delta: merge base not retained (${baseArchiveError})\n`)
     }
+  }
+  const phaseEnd = Date.now()
+  const phases = {
+    seedMs: phaseAt.seedStart !== undefined && phaseAt.seedEnd !== undefined ? phaseAt.seedEnd - phaseAt.seedStart : null,
+    applyMs: phaseAt.seedEnd !== undefined && phaseAt.applyEnd !== undefined ? phaseAt.applyEnd - phaseAt.seedEnd : null,
+    verifyMs: phaseAt.verifyStart !== undefined ? phaseEnd - phaseAt.verifyStart : null,
   }
   // A full-fallback extraction is transient: it is large and never reused.
   if (baseInfo !== null && baseInfo.mode === 'full' && baseInfo.dir !== options.baseRoot) {
@@ -1343,6 +1421,7 @@ export async function runApplyPipeline(options) {
       },
       snapshotPaths,
       base: baseInfo,
+      phases,
     },
   }
   return { status: applied.status, exitCode, result, plan, transport, view }
@@ -1381,7 +1460,7 @@ const USAGE = `usage: update-delta.mjs apply --engine <bundle.js> --local <dir> 
        [--base-mode <retained|cache|empty>] [--base-archive <archive>]
        [--base-archive-sha <hex>] [--base-candidate-cap <n>] [--base-tick-ms <ms>]
        [--persist-base <archive.tar>]
-       [--progress-fd <n>] [--progress-every-actions <n>]
+       [--progress-fd <n>] [--progress-tty 1] [--progress-every-actions <n>]
        [--progress-every-bytes <n>] [--progress-every-steps <n>]
        [--progress-every-ms <n>] [--no-index] [--out <result.json>]
 
@@ -1410,10 +1489,12 @@ export async function main(argv) {
       process.stdout.write('scan index: refresh unavailable in this engine\n')
       return 0
     }
+    const startedAt = Date.now()
     const refreshed = await engine.refreshScanIndex(tree)
+    const ms = Date.now() - startedAt
     process.stdout.write(refreshed === null
       ? 'scan index: no index to refresh\n'
-      : `scan index: refreshed ${refreshed.entries} entries (${refreshed.carried} carried, ${refreshed.rehashed} rehashed)\n`)
+      : `scan index: refreshed ${refreshed.entries} entries (${refreshed.carried} carried, ${refreshed.rehashed} rehashed) in ${ms}ms\n`)
     return 0
   }
   if (command !== 'apply') throw new Error(`unknown command: ${command}`)
@@ -1440,6 +1521,7 @@ export async function main(argv) {
     ...(stopAfter === undefined ? {} : { stopAfterActions: Number.parseInt(stopAfter, 10) }),
     ...(args['persist-base'] === undefined ? {} : { persistBasePath: args['persist-base'] }),
     ...(args['progress-fd'] === undefined ? {} : { progressFd: Number.parseInt(args['progress-fd'], 10) }),
+    ...(args['progress-tty'] === '1' ? { progressTty: true } : {}),
     ...(args['progress-every-actions'] === undefined ? {} : { progressEveryActions: Number.parseInt(args['progress-every-actions'], 10) }),
     ...(args['progress-every-bytes'] === undefined ? {} : { progressEveryBytes: Number.parseInt(args['progress-every-bytes'], 10) }),
     ...(args['progress-every-steps'] === undefined ? {} : { progressEverySteps: Number.parseInt(args['progress-every-steps'], 10) }),

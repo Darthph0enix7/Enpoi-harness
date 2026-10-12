@@ -885,6 +885,52 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(currentTarget(fixture.prefix)).toBe('3')
   }, 240_000)
 
+  it('applies a six-hop consecutive chain (raised cap) with per-hop verification', async () => {
+    const fixture = await buildFixture({ versions: ['1', '2', '3', '4', '5', '6', '7'], installed: '1', target: '7' })
+    const result = await runUpdate(fixture)
+    expect(result.status, result.stderr).toBe(0)
+    const update = result.json?.update as Record<string, unknown>
+    expect(update.rung).toBe(2)
+    expect(update.kind).toBe('diff-chain')
+    expect(update.mode).toBe('delta')
+    expect(update.verificationOk).toBe(true)
+    expect(currentTarget(fixture.prefix)).toBe('7')
+    expect(markerVersion(fixture.prefix)).toBe('7')
+    // All six hops came from their own release and were each validated.
+    const diffCount = readdirSync(join(fixture.prefix, 'harness/.cache')).filter(name => name.startsWith('diff-')).length
+    expect(diffCount).toBeGreaterThanOrEqual(6)
+    expect(readFileSync(join(fixture.prefix, 'harness/7/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\nFOUR\nFIVE\nSIX\nSEVEN\nEIGHT\n')
+  }, 240_000)
+
+  it('falls back to the full tarball when a mid-chain hop is corrupt, without a partial switch', async () => {
+    const fixture = await buildFixture({ versions: ['1', '2', '3', '4', '5', '6', '7'], installed: '1', target: '7' })
+    fixture.server.failures.set(fixture.diffName('3', '4'), 'corrupt-bytes')
+    const result = await runUpdate(fixture)
+    expect(result.status, result.stderr).toBe(0)
+    const update = result.json?.update as Record<string, unknown>
+    expect(update.mode).toBe('full')
+    expect(result.stderr).toContain('checksum mismatch')
+    const installLog = readFileSync(join(fixture.prefix, 'logs/install.log'), 'utf8')
+    expect(installLog).toMatch(/continuing with the full release|retrying with the full release/u)
+    // Nothing partial was switched: the final identity is the full target.
+    expect(currentTarget(fixture.prefix)).toBe('7')
+    expect(markerVersion(fixture.prefix)).toBe('7')
+    expect(stateField(fixture.prefix, 'version')).toBe('7')
+    expect(dshVersion(fixture)).toBe('7')
+    expect(existsSync(join(fixture.prefix, 'harness/.staging-7'))).toBe(false)
+  }, 240_000)
+
+  it('uses the full tarball for a seven-hop chain under the default cap', async () => {
+    const fixture = await buildFixture({ versions: ['1', '2', '3', '4', '5', '6', '7', '8'], installed: '1', target: '8' })
+    const result = await runUpdate(fixture)
+    if (result.status !== 0 || result.json === null) console.log(`[seven-hop] status=${result.status} stdout tail:\n${result.stdout.split('\n').slice(-12).join('\n')}\nstderr tail:\n${result.stderr.split('\n').slice(-14).join('\n')}`)
+    expect(result.status, result.stderr).toBe(0)
+    const update = result.json?.update as Record<string, unknown>
+    expect(update.rung).toBe(3)
+    expect(update.mode).toBe('full')
+    expect(currentTarget(fixture.prefix)).toBe('8')
+  }, 240_000)
+
   it('degrades a both-changed config when the retained base is missing', async () => {
     const fixture = await buildFixture({ versions: ['1', '2', '3'], installed: '1', visible: ['1', '2'] })
     const hop1 = await runUpdate(fixture)
@@ -1238,26 +1284,27 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(readFileSync(join(fixture.prefix, 'harness/1/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\n')
   }, 240_000)
 
-  it('uses the full tarball beyond three hops', async () => {
+  it('applies a four-hop chain under the raised cap (was rung 3 at cap 3)', async () => {
     const versions = ['1', '2', '3', '4', '5']
     const fixture = await buildFixture({ versions, installed: '1', target: '5' })
     const result = await runUpdate(fixture)
     expect(result.status, result.stderr).toBe(0)
     const update = result.json?.update as Record<string, unknown>
-    expect(update.rung).toBe(3)
-    expect(update.mode).toBe('full')
+    expect(update.rung).toBe(2)
+    expect(update.kind).toBe('diff-chain')
+    expect(update.mode).toBe('delta')
     expect(update.verificationOk).toBe(true)
     expect(currentTarget(fixture.prefix)).toBe('5')
     expect(markerVersion(fixture.prefix)).toBe('5')
     expect(stateField(fixture.prefix, 'version')).toBe('5')
-    // The full path prints the same nine numbered phases.
+    // The same nine numbered phases run on the delta path.
     const fullSteps = stepSequence(result.stderr)
     expect(fullSteps.map(step => step.index)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9])
     expect(new Set(fullSteps.map(step => step.total))).toEqual(new Set([9]))
-    expect(fullSteps[4]?.title).toContain('full release apply (preservation engine)')
+    expect(fullSteps[4]?.title).toContain('delta transport')
     expect(readFileSync(join(fixture.prefix, 'harness/5/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\nFOUR\nFIVE\nSIX\nSEVEN\n')
-    // A full update retains the downloaded archive verbatim as the base.
-    expect(existsSync(join(fixture.prefix, 'harness/.bases/5.tar.gz'))).toBe(true)
+    // A delta update synthesizes its pristine base for the new version.
+    expect(existsSync(join(fixture.prefix, 'harness/.bases/5.tar'))).toBe(true)
   }, 240_000)
 
   it('rolls back to the previous tree and restores user files when the self-check fails after the switch', async () => {

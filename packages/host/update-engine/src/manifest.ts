@@ -14,8 +14,10 @@
 
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
+import type { BigIntStats } from 'node:fs'
 import { lstat, mkdir, readFile, readdir, readlink } from 'node:fs/promises'
 import { isScanIndexPath, readScanIndex, scanIndexEntryFromStats, writeScanIndex, trustedHash } from './scan-index.ts'
+import { defaultParallelism, mapLimit } from './pool.ts'
 import type { ScanIndex, ScanIndexEntry } from './scan-index.ts'
 import { dirname, join } from 'node:path'
 import { writeBufferAtomic } from './atomic.ts'
@@ -44,6 +46,11 @@ export interface ScanTreeOptions {
   useIndex?: boolean
   /** Collect bigint stat identities into this map while walking. */
   collectStats?: Map<string, ScanIndexEntry>
+  /**
+   * Worker count for the content-hash phase. Default: 1 for small trees, a
+   * bounded pool (<= 8) above ~20K files; `DSH_WALK_JOBS` overrides.
+   */
+  parallelism?: number
   /** Index outcome reporter: trusted/hashed counts and the index state. */
   onIndex?: (info: { state: 'reused' | 'rebuilt' | 'absent' | 'disabled'; trusted: number; hashed: number }) => void
 }
@@ -146,6 +153,15 @@ export async function readTreeBytes(root: string, relPath: string): Promise<Buff
   return readFile(resolveTreePath(root, relPath))
 }
 
+/** Rebuild a manifest with byte-sorted keys (the walk inserts files after dirs). */
+function sortedManifest(manifest: Manifest): Manifest {
+  const keys = Object.keys(manifest)
+  keys.sort((left, right) => (left < right ? -1 : left > right ? 1 : 0))
+  const sorted: Manifest = {}
+  for (const key of keys) sorted[key] = manifest[key] as ManifestEntry
+  return sorted
+}
+
 /**
  * Scan a tree into a manifest (§2.1).
  * @param root - Absolute tree root.
@@ -169,6 +185,7 @@ export async function scanTree(root: string, options: ScanTreeOptions = {}): Pro
     index,
     stats,
     counters,
+    ...(options.parallelism === undefined ? {} : { parallelism: options.parallelism }),
     ...(onProgress === undefined ? {} : {
       onFile: (size: number) => {
         files += 1
@@ -210,7 +227,7 @@ export async function scanTree(root: string, options: ScanTreeOptions = {}): Pro
     }
   }
   options.onIndex?.({ state, trusted: counters.trusted, hashed: counters.hashed })
-  return manifest
+  return sortedManifest(manifest)
 }
 
 /**
@@ -253,8 +270,9 @@ export async function walkTree(root: string, options: ScanTreeOptions = {}): Pro
     index: null,
     stats: options.collectStats ?? new Map<string, ScanIndexEntry>(),
     counters: { trusted: 0, hashed: 0 },
+    ...(options.parallelism === undefined ? {} : { parallelism: options.parallelism }),
   })
-  return manifest
+  return sortedManifest(manifest)
 }
 
 async function walk(root: string, rel: string, manifest: Manifest, context: {
@@ -264,24 +282,82 @@ async function walk(root: string, rel: string, manifest: Manifest, context: {
   counters: { trusted: number; hashed: number }
   onFile?: (size: number) => void
   refreshCtimes?: boolean
+  parallelism?: number
 }): Promise<void> {
+  // Phase 1: enumerate the tree (readdir + lstat), recording dirs and symlinks
+  // immediately and collecting regular files for the hash phase.
+  const files: { rel: string; absolute: string; stats: BigIntStats }[] = []
+  await enumerateTree(root, rel, manifest, context, files)
+  // Phase 2: hash/trust the files with a bounded pool (sequential below the
+  // size threshold). Results are written back by input order, so the manifest
+  // and the index are identical to a sequential walk.
+  const limit = context.parallelism ?? defaultParallelism(files.length)
+  await mapLimit(files, limit, async (file) => {
+    const stats = file.stats
+    const mode = Number(stats.mode & 0o7777n)
+    let sha256: string | null = null
+    let binary = false
+    const trusted = trustedHash(context.index, file.rel, {
+      type: 'file',
+      size: Number(stats.size),
+      mtimeNs: stats.mtimeNs,
+      ctimeNs: stats.ctimeNs,
+      ino: stats.ino,
+      dev: stats.dev,
+      mode,
+    }, context.refreshCtimes === true)
+    if (trusted !== null) {
+      sha256 = trusted
+      binary = context.index?.entries.get(file.rel)?.binary ?? false
+      context.counters.trusted += 1
+    } else {
+      const hashed = await hashFile(file.absolute)
+      sha256 = hashed.sha256
+      binary = hashed.binary
+      context.counters.hashed += 1
+      context.onFile?.(hashed.size)
+    }
+    context.stats.set(file.rel, scanIndexEntryFromStats(stats, sha256, binary, null))
+    manifest[file.rel] = {
+      sha256,
+      size: Number(stats.size),
+      type: 'file',
+      mode,
+      target: null,
+      binary,
+    }
+  })
+}
+
+async function enumerateTree(root: string, rel: string, manifest: Manifest, context: {
+  ignore: readonly string[]
+  stats: Map<string, ScanIndexEntry>
+  parallelism?: number
+}, files: { rel: string; absolute: string; stats: BigIntStats }[]): Promise<void> {
   const directory = rel === '' ? root : resolveTreePath(root, rel)
   const entries = await readdir(directory, { withFileTypes: true })
   entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
-  for (const dirent of entries) {
+  // Parallel lstat within a directory: the enumeration is stat-bound and this
+  // is where a 100K-file tree spends its walk time.
+  const limit = context.parallelism ?? defaultParallelism(25_000)
+  const resolved = await mapLimit(entries, limit, async (dirent) => {
     const childRel = rel === '' ? dirent.name : `${rel}/${dirent.name}`
     // Reserved engine state (the scan index and its temp siblings) is invisible
-    // to every tree surface (AMD-01): not in manifests, classification, or
-    // verification.
-    if (isScanIndexPath(childRel)) continue
-    if (matchesAnyGlob(context.ignore, childRel)) continue
+    // to every tree surface (AMD-01).
+    if (isScanIndexPath(childRel)) return null
+    if (matchesAnyGlob(context.ignore, childRel)) return null
     const absolute = join(directory, dirent.name)
     const stats = await lstat(absolute, { bigint: true })
+    return { childRel, absolute, stats }
+  })
+  for (const item of resolved) {
+    if (item === null) continue
+    const { childRel, absolute, stats } = item
     const mode = Number(stats.mode & 0o7777n)
     if (stats.isDirectory()) {
       context.stats.set(childRel, scanIndexEntryFromStats(stats, null, false, null))
       manifest[childRel] = { sha256: null, size: 0, type: 'dir', mode, target: null, binary: false }
-      await walk(root, childRel, manifest, context)
+      await enumerateTree(root, childRel, manifest, context, files)
     } else if (stats.isSymbolicLink()) {
       const target = await readlink(absolute)
       context.stats.set(childRel, scanIndexEntryFromStats(stats, hashBytes(target), false, target))
@@ -294,37 +370,7 @@ async function walk(root: string, rel: string, manifest: Manifest, context: {
         binary: false,
       }
     } else if (stats.isFile()) {
-      let sha256: string | null = null
-      let binary = false
-      const trusted = trustedHash(context.index, childRel, {
-        type: 'file',
-        size: Number(stats.size),
-        mtimeNs: stats.mtimeNs,
-        ctimeNs: stats.ctimeNs,
-        ino: stats.ino,
-        dev: stats.dev,
-        mode,
-      }, context.refreshCtimes === true)
-      if (trusted !== null) {
-        sha256 = trusted
-        binary = context.index?.entries.get(childRel)?.binary ?? false
-        context.counters.trusted += 1
-      } else {
-        const hashed = await hashFile(absolute)
-        sha256 = hashed.sha256
-        binary = hashed.binary
-        context.counters.hashed += 1
-        context.onFile?.(hashed.size)
-      }
-      context.stats.set(childRel, scanIndexEntryFromStats(stats, sha256, binary, null))
-      manifest[childRel] = {
-        sha256,
-        size: Number(stats.size),
-        type: 'file',
-        mode,
-        target: null,
-        binary,
-      }
+      files.push({ rel: childRel, absolute, stats })
     } else {
       throw new Error(`unsupported filesystem object in tree: ${childRel}`)
     }

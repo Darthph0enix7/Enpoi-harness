@@ -137,7 +137,7 @@ export function fullAsset(version: string, platform: string): string
  * @param options - releases, platform, from, to
  * @returns ladder plan
  */
-export function planLadder(options: { releases: InspectionRelease[]; platform: string; from?: string | null; to: string }): LadderPlan
+export function planLadder(options: { releases: InspectionRelease[]; platform: string; from?: string | null; to: string; maxHops?: number }): LadderPlan
 
 /**
  * Simple glob matcher (`**` crosses directories).
@@ -174,6 +174,7 @@ export function buildReport(options: {
   pinsPath?: string | null
   tombstonePaths?: string[]
   limit?: number
+  maxHops?: number
   treeExists?: boolean
 }): InspectionReport
 
@@ -202,4 +203,5 @@ export function inspectChannelUpdate(options: {
   tombstonePaths?: string[]
   channel?: string | null
   limit?: number
+  maxHops?: number
 }): Promise<InspectionReport>

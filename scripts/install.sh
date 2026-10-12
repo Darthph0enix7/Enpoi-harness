@@ -500,6 +500,13 @@ run_logged() { # desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL
     # The watched destination file (the download being written) is the live
     # truth and is rendered as the owned byte form; the *.progress content
     # above is the engine's side channel and is preferred while it fits.
+    if [ -n "${DSH_RUN_LOG_TICK_DIR:-}" ]; then
+      local tick_count
+      tick_count="$(find "$DSH_RUN_LOG_TICK_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')"
+      if [ -n "$tick_count" ] && [ "$tick_count" -gt 0 ]; then
+        alt="${tick_count} file(s) extracted${alt:+ — $alt}"
+      fi
+    fi
     if [ -n "$watch_file" ]; then
       bytes="$(file_size "$watch_file" 2>/dev/null || true)"
       if [ -n "$bytes" ] && [ "$bytes" -gt 0 ]; then
@@ -1455,7 +1462,8 @@ stage_remote() { # url
     archive="$cache_file"
   fi
 
-  run_logged "Extracting release archive" 60 "$PREFIX" tar -xzf "$archive" -C "$STAGED" --strip-components=1 || { warn "could not extract release archive"; [ "$archive" != "$cache_file" ] && rm -f "$archive"; return 1; }
+  DSH_RUN_LOG_TICK_DIR="$STAGED" DSH_HEARTBEAT_INTERVAL=5 \
+    run_logged "Extracting release archive ($(human_bytes "$(file_size "$archive" 2>/dev/null || printf 0)"))" 600 "$PREFIX" tar -xzf "$archive" -C "$STAGED" --strip-components=1 || { warn "could not extract release archive"; [ "$archive" != "$cache_file" ] && rm -f "$archive"; return 1; }
   [ "$archive" != "$cache_file" ] && rm -f "$archive"
   flatten_stage "$STAGED"
   return 0
@@ -1474,6 +1482,17 @@ sha256_of() { # file
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
   else printf ''; fi
+}
+
+# Verify a large artifact's checksum with a start line and a timed completion:
+# hashing 300 MB is seconds of silence the operator should not have to guess at.
+verify_checksum_ticked() { # file label
+  local file="$1" label="$2" started actual
+  started="$(date +%s)"
+  substep_info "$label: verifying checksum ($(human_bytes "$(file_size "$file" 2>/dev/null || printf 0)"))…"
+  actual="$(sha256_of "$file" 2>/dev/null || true)"
+  log "$label: checksum computed in $(( $(date +%s) - started ))s"
+  printf '%s' "$actual"
 }
 
 # Newest published release tag, from the `/releases/latest` redirect: anonymous,
@@ -1942,7 +1961,7 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
 
   # Verify existing cached archive if present
   if [ -s "$asset_file" ] && [ -n "$expected" ]; then
-    actual="$(sha256_of "$asset_file")"
+    actual="$(verify_checksum_ticked "$asset_file" "prebuilt")"
     if [ "$actual" = "$expected" ]; then
       log "prebuilt: reusing verified cached archive ($asset)"
     else
@@ -2026,7 +2045,7 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
     fi
   fi
   expected="$(awk 'NR==1 {print $1}' "$asset_file.sha256")"
-  actual="$(sha256_of "$asset_file")"
+  actual="$(verify_checksum_ticked "$asset_file" "prebuilt")"
   if [ -z "$actual" ] || [ "$actual" != "$expected" ]; then
     warn "prebuilt: checksum mismatch; falling back to the source build"
     rm -f "$asset_file" "$asset_file.sha256"
@@ -5072,10 +5091,13 @@ update_delta_raw_url() { # ref -> raw module URL on the selected channel
 update_delta_run() { # args...
   local module="" url=""
   module="$(update_delta_module 2>/dev/null || true)"
+  [ "${DSH_KEEP_SCRATCH:-0}" = 1 ] && log "debug: update_delta_run module='${module:-<none>}' node='${NODE:-<none>}' args=$*"
   if [ -n "$module" ]; then
     # run_limited exec()s, so it must run in a subshell (see its own contract).
     ( run_limited "${DSH_DELTA_TIMEOUT:-1800}" "$NODE" "$module" "$@" )
-    return $?
+    local rc=$?
+    [ "${DSH_KEEP_SCRATCH:-0}" = 1 ] && log "debug: update_delta_run rc=$rc"
+    return $rc
   fi
   url="$(update_delta_raw_url "${REF:-$CHANNEL}")"
   ( run_limited 30 curl -fsSL --connect-timeout 10 --max-time 30 -o /dev/null "$url" 2>/dev/null ) || return 2
@@ -5124,6 +5146,7 @@ delta_evaluate_plan() { # tag from -> 0 when a plan was produced
     --tombstones "$DSH_HOME/update/tombstones.txt"
     --tombstones "$DSH_HOME/update/tombstones.yaml"
     --limit 40
+    --cache-dir "$PREFIX/harness/.cache"
     --json
   )
   [ -n "$from" ] && args+=(--from "$from")
@@ -5322,6 +5345,8 @@ delta_discard_staging() {
 
 delta_cleanup_scratch() {
   local path=""
+  # DSH_KEEP_SCRATCH=1 preserves the run directory for post-mortems.
+  [ "${DSH_KEEP_SCRATCH:-0}" = 1 ] && return 0
   for path in "$DELTA_RUN_DIR" "$DELTA_RELEASE_DIR"; do
     [ -n "$path" ] && rm -rf "$path"
   done
@@ -5444,6 +5469,7 @@ process.stdout.write(JSON.stringify({
   scanHashed: result.stats?.localScan?.hashed ?? null,
   scanTrusted: result.stats?.localScan?.trusted ?? null,
   scanIndex: result.stats?.localScan?.index ?? null,
+  phases: result.stats?.phases ?? null,
   baseCandidates: result.stats?.base?.candidates ?? null,
   baseExtracted: result.stats?.base?.extracted ?? null,
   baseReused: result.stats?.base?.reused ?? null,
@@ -5490,16 +5516,21 @@ delta_apply_delta() { # backup_dir [retry]
   chain_total="$(grep -c . "$DELTA_CHAIN_FILE" 2>/dev/null || printf '0')"
   prev_asset="manifest-$platform-$from.json.gz"
   next_asset="manifest-$platform-$to.json.gz"
-  if ! delta_fetch_asset "$prev_asset" "$DSH_GITHUB_URL/releases/download/v$from/$prev_asset" "$DELTA_RUN_DIR" 0 "Fetching release manifest for $from"; then
+  # Manifests are cached across runs (the FROM manifest recurs on every
+  # update); only an actual download counts against the transport bytes.
+  local manifest_before=0
+  manifest_before="$(file_size "$cache/$prev_asset" 2>/dev/null || printf 0)"
+  if ! delta_fetch_asset "$prev_asset" "$DSH_GITHUB_URL/releases/download/v$from/$prev_asset" "$cache" 0 "Fetching release manifest for $from"; then
     warn "delta: the installed version's release manifest is unavailable ($prev_asset); using the full path"
     delta_cleanup_scratch; return 2
   fi
-  DELTA_DOWNLOAD_BYTES=$((DELTA_DOWNLOAD_BYTES + $(file_size "$DELTA_RUN_DIR/$prev_asset")))
-  if ! delta_fetch_asset "$next_asset" "$DSH_GITHUB_URL/releases/download/v$to/$next_asset" "$DELTA_RUN_DIR" 0 "Fetching release manifest for $to"; then
+  [ "$manifest_before" = 0 ] && DELTA_DOWNLOAD_BYTES=$((DELTA_DOWNLOAD_BYTES + $(file_size "$cache/$prev_asset")))
+  manifest_before="$(file_size "$cache/$next_asset" 2>/dev/null || printf 0)"
+  if ! delta_fetch_asset "$next_asset" "$DSH_GITHUB_URL/releases/download/v$to/$next_asset" "$cache" 0 "Fetching release manifest for $to"; then
     warn "delta: the target release manifest is unavailable ($next_asset); using the full path"
     delta_cleanup_scratch; return 2
   fi
-  DELTA_DOWNLOAD_BYTES=$((DELTA_DOWNLOAD_BYTES + $(file_size "$DELTA_RUN_DIR/$next_asset")))
+  [ "$manifest_before" = 0 ] && DELTA_DOWNLOAD_BYTES=$((DELTA_DOWNLOAD_BYTES + $(file_size "$cache/$next_asset")))
   while IFS=$'\t' read -r name tag; do
     [ -n "$name" ] || continue
     chain_count=$((chain_count + 1))
@@ -5520,8 +5551,8 @@ delta_apply_delta() { # backup_dir [retry]
     --local "$PREFIX/harness/$current"
     --base "$DELTA_BASE_DIR"
     --release "$DELTA_RELEASE_DIR"
-    --previous "$DELTA_RUN_DIR/$prev_asset"
-    --next "$DELTA_RUN_DIR/$next_asset"
+    --previous "$cache/$prev_asset"
+    --next "$cache/$next_asset"
     --staging "$DELTA_STAGING_DIR"
     --journal "$DELTA_STAGING_DIR.journal.json"
     --to-version "$to"
@@ -5545,6 +5576,7 @@ delta_apply_delta() { # backup_dir [retry]
   if [ -n "${backup:-}" ] && [ -d "$backup" ]; then apply_args+=(--backup "$PREFIX/harness/.backup-$(date +%Y%m%d-%H%M%S)-tree"); fi
   if [ "$QUIET" != 1 ] && [ "$JSON_OUT" != 1 ]; then
     apply_args+=(--progress-fd 3)
+    [ -t 2 ] && apply_args+=(--progress-tty 1)
     if [ -n "${DSH_UPDATE_PROGRESS_EVERY_ACTIONS:-}" ]; then apply_args+=(--progress-every-actions "$DSH_UPDATE_PROGRESS_EVERY_ACTIONS"); fi
   fi
   # Retain this version's pristine merge base for the next update. A cached
@@ -5625,6 +5657,7 @@ delta_apply_delta() { # backup_dir [retry]
         delta_err="killed by the ${DSH_DELTA_TIMEOUT:-1800}s delta timeout"
       fi
       warn "delta apply failed (exit $rc)${delta_err:+: $delta_err}"
+      [ -s "$DELTA_RUN_DIR/stderr.txt" ] && cp -f "$DELTA_RUN_DIR/stderr.txt" "$PREFIX/harness/.last-apply-error.txt" 2>/dev/null || true
       delta_discard_staging
       delta_cleanup_scratch
       return 1
@@ -5654,6 +5687,7 @@ delta_prepare_full_fallback() {
 delta_apply_full() { # release_tree [retry]
   local release="$1" retry="${2:-0}"
   local to="$VERSION" from="$installed_version" platform="$OS-$ARCH" engine rc status prev_asset next_asset base_mode=""
+  local cache="$PREFIX/harness/.cache"
   local -a apply_args=()
   DELTA_DOWNLOAD_BYTES="${DELTA_DOWNLOAD_BYTES:-0}"
   [ -n "$DELTA_RUNG" ] || DELTA_RUNG=3
@@ -5683,8 +5717,8 @@ delta_apply_full() { # release_tree [retry]
   fi
   prev_asset="manifest-$platform-$from.json.gz"
   next_asset="manifest-$platform-$to.json.gz"
-  if ! delta_fetch_asset "$prev_asset" "$DSH_GITHUB_URL/releases/download/v$from/$prev_asset" "$DELTA_RUN_DIR" 0 "Fetching release manifest for $from" \
-    || ! delta_fetch_asset "$next_asset" "$DSH_GITHUB_URL/releases/download/v$to/$next_asset" "$DELTA_RUN_DIR" 0 "Fetching release manifest for $to"; then
+  if ! delta_fetch_asset "$prev_asset" "$DSH_GITHUB_URL/releases/download/v$from/$prev_asset" "$cache" 0 "Fetching release manifest for $from" \
+    || ! delta_fetch_asset "$next_asset" "$DSH_GITHUB_URL/releases/download/v$to/$next_asset" "$cache" 0 "Fetching release manifest for $to"; then
     warn "full update: release manifests unavailable; using the legacy install path"
     delta_cleanup_scratch
     return 1
@@ -5695,8 +5729,8 @@ delta_apply_full() { # release_tree [retry]
     --local "$PREFIX/harness/$current"
     --base "$DELTA_BASE_DIR"
     --release "$release"
-    --previous "$DELTA_RUN_DIR/$prev_asset"
-    --next "$DELTA_RUN_DIR/$next_asset"
+    --previous "$cache/$prev_asset"
+    --next "$cache/$next_asset"
     --staging "$DELTA_STAGING_DIR"
     --journal "$DELTA_STAGING_DIR.journal.json"
     --to-version "$to"
@@ -5719,6 +5753,7 @@ delta_apply_full() { # release_tree [retry]
   fi
   if [ "$QUIET" != 1 ] && [ "$JSON_OUT" != 1 ]; then
     apply_args+=(--progress-fd 3)
+    [ -t 2 ] && apply_args+=(--progress-tty 1)
     if [ -n "${DSH_UPDATE_PROGRESS_EVERY_ACTIONS:-}" ]; then apply_args+=(--progress-every-actions "$DSH_UPDATE_PROGRESS_EVERY_ACTIONS"); fi
   fi
   update_delta_run "${apply_args[@]}" 3>&2 > "$DELTA_RUN_DIR/human.txt" 2> "$DELTA_RUN_DIR/stderr.txt"
@@ -5777,6 +5812,8 @@ delta_apply_full() { # release_tree [retry]
         full_err="$(grep -v '^[[:space:]]*$' "$DELTA_RUN_DIR/stderr.txt" 2>/dev/null | tail -n 2 | tr '\n' '; ')"
       fi
       warn "full update apply failed (exit $rc)${full_err:+: $full_err}"
+      # Keep the engine's own error output for diagnosis (scratch is cleaned).
+      [ -s "$DELTA_RUN_DIR/stderr.txt" ] && cp -f "$DELTA_RUN_DIR/stderr.txt" "$PREFIX/harness/.last-apply-error.txt" 2>/dev/null || true
       delta_discard_staging
       delta_cleanup_scratch
       return 1

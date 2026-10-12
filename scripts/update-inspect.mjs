@@ -43,6 +43,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import zlib from 'node:zlib'
 
@@ -52,7 +53,7 @@ const DEFAULT_LIMIT = 40
 const MAX_LIMIT = 10000
 const MAX_MANIFEST_BYTES = 128 * 1024 * 1024
 const REQUEST_TIMEOUT_MS = 20000
-const LADDER_MAX_HOPS = 3
+const LADDER_MAX_HOPS = 6
 
 /** Installer-written state inside a version tree that is not a shipped path. */
 const INSTALLER_STATE_PATHS = new Set(['.dsh-install-complete', '.dsh-scan-index'])
@@ -399,7 +400,8 @@ function assetSize(release, name) {
  * or missing chain is never assumed -- it degrades to rung 3 with a reason.
  * @returns {{rung: number, kind: string, chain: string[], chainTags: string[], downloadBytes: number|null, full: {name: string|null, bytes: number|null}, reason: string}}
  */
-export function planLadder({ releases, platform, from, to }) {
+export function planLadder({ releases, platform, from, to, maxHops }) {
+  const hopCap = Number.isInteger(maxHops) && maxHops > 0 ? maxHops : LADDER_MAX_HOPS
   const targetIndex = releases.findIndex(release => release.version === to)
   const target = targetIndex === -1 ? null : releases[targetIndex]
   const fullName = target ? fullAsset(to, platform) : null
@@ -435,7 +437,7 @@ export function planLadder({ releases, platform, from, to }) {
   // the carrying release per hop; chainTags runs parallel to chain.
   const chainTags = []
   let bytes = 0
-  for (let i = targetIndex; i < releases.length && chain.length < LADDER_MAX_HOPS; i += 1) {
+  for (let i = targetIndex; i < releases.length && chain.length < hopCap; i += 1) {
     const newer = releases[i]
     const older = releases[i + 1]
     if (!older) break
@@ -470,7 +472,7 @@ export function planLadder({ releases, platform, from, to }) {
     }
   }
   const reason = from
-    ? `no diff chain reaches installed ${from} within ${LADDER_MAX_HOPS} hops; full tarball is the safe rung`
+    ? `no diff chain reaches installed ${from} within ${hopCap} hops; full tarball is the safe rung`
     : 'no installed release version recorded; full tarball is the safe rung'
   return { rung: 3, kind: 'full-tarball', chain: [], chainTags: [], downloadBytes: fullBytes, full, reason }
 }
@@ -551,10 +553,11 @@ export function buildReport({
   pinsPath,
   tombstonePaths = [],
   limit = DEFAULT_LIMIT,
+  maxHops,
   treeExists = true,
 }) {
   const notes = []
-  const ladder = planLadder({ releases, platform, from: fromVersion, to: toVersion })
+  const ladder = planLadder({ releases, platform, from: fromVersion, to: toVersion, maxHops })
 
   let changed = null
   if (targetManifest && baselineManifest) {
@@ -857,8 +860,42 @@ function assetUrl(release, name, tag, baseUrl) {
   return release?.urls?.get(name) ?? `${baseUrl}/releases/download/${tag}/${name}`
 }
 
-async function fetchAsset(release, name, tag, baseUrl, token) {
-  return fetchBuffer(assetUrl(release, name, tag, baseUrl), token)
+/**
+ * Fetch a release asset through the shared cache directory when one is given:
+ * `manifest-<platform>-<version>.json.gz` recurs on every update (it is the
+ * FROM or TO manifest of the next one), and the sidecar checksum guards
+ * reuse. A cached file whose checksum no longer matches is refetched once.
+ */
+async function fetchAsset(release, name, tag, baseUrl, token, cacheDir) {
+  const url = assetUrl(release, name, tag, baseUrl)
+  if (!cacheDir) return fetchBuffer(url, token)
+  const file = path.join(cacheDir, name)
+  const sidecar = `${file}.sha256`
+  const expected = await (async () => {
+    try {
+      const digest = fs.readFileSync(sidecar, 'utf8').trim().split(/\s+/u)[0]?.toLowerCase() ?? ''
+      return /^[0-9a-f]{64}$/u.test(digest) ? digest : ''
+    } catch {
+      return ''
+    }
+  })()
+  if (fs.existsSync(file) && expected !== '') {
+    const actual = createHash('sha256').update(fs.readFileSync(file)).digest('hex')
+    if (actual === expected) return fs.readFileSync(file)
+    fs.rmSync(file, { force: true })
+    fs.rmSync(sidecar, { force: true })
+  }
+  const buffer = await fetchBuffer(url, token)
+  try {
+    fs.mkdirSync(cacheDir, { recursive: true })
+    const digest = createHash('sha256').update(buffer).digest('hex')
+    fs.writeFileSync(`${file}.tmp-${process.pid}`, buffer)
+    fs.renameSync(`${file}.tmp-${process.pid}`, file)
+    fs.writeFileSync(sidecar, `${digest}  ${name}\n`)
+  } catch {
+    // A read-only cache must never fail the inspection.
+  }
+  return buffer
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
@@ -898,6 +935,8 @@ export async function inspectChannelUpdate(options) {
     tombstonePaths,
     channel,
     limit,
+    maxHops,
+    cacheDir,
   } = options
   const token = tokenFromEnv()
   const version = tag.replace(/^v/, '')
@@ -912,7 +951,7 @@ export async function inspectChannelUpdate(options) {
   let targetManifestNote = null
   const targetManifestName = manifestAsset(platform, version)
   try {
-    targetManifest = parseManifestBuffer(await fetchAsset(target, targetManifestName, tag, baseUrl, token))
+    targetManifest = parseManifestBuffer(await fetchAsset(target, targetManifestName, tag, baseUrl, token, cacheDir))
   } catch (error) {
     targetManifestNote = `target manifest ${targetManifestName} unavailable (${error.message}); the release predates manifest emission`
   }
@@ -925,7 +964,7 @@ export async function inspectChannelUpdate(options) {
     const baselineRelease = releases.find(release => release.tag === baselineTag) ?? null
     baselineAsset = manifestAsset(platform, fromVersion)
     try {
-      baselineManifest = parseManifestBuffer(await fetchAsset(baselineRelease, baselineAsset, baselineTag, baseUrl, token))
+      baselineManifest = parseManifestBuffer(await fetchAsset(baselineRelease, baselineAsset, baselineTag, baseUrl, token, cacheDir))
     } catch (error) {
       baselineManifest = null
       baselineNote = `baseline manifest ${baselineAsset}@${baselineTag} unavailable (${error.message})`
@@ -951,12 +990,15 @@ export async function inspectChannelUpdate(options) {
     pinsPath,
     tombstonePaths,
     limit,
+    maxHops,
     treeExists,
   })
 }
 
 async function main(argv) {
   const args = parseArgs(argv)
+  const hopsRaw = Number.parseInt(args['max-hops'] ?? process.env.DSH_MAX_HOPS ?? '', 10)
+  const maxHops = Number.isInteger(hopsRaw) && hopsRaw > 0 ? hopsRaw : undefined
   const limitRaw = Number.parseInt(args.limit ?? `${DEFAULT_LIMIT}`, 10)
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), MAX_LIMIT) : DEFAULT_LIMIT
   const report = await inspectChannelUpdate({
@@ -971,6 +1013,8 @@ async function main(argv) {
     tombstonePaths: Array.isArray(args.tombstones) ? args.tombstones : [],
     channel: args.channel ?? null,
     limit,
+    maxHops,
+    cacheDir: args['cache-dir'] ?? process.env.DSH_MANIFEST_CACHE ?? null,
   })
   process.stdout.write(formatReport(report, { json: args.json === true }))
   return 0

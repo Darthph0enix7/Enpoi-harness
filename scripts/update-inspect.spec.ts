@@ -100,6 +100,24 @@ describe('planLadder', () => {
     expect(ladder.chainTags).toEqual(['...97', '...96', '...95'])
   })
 
+  it('honours a raised hop cap and defaults to six', () => {
+    const releases = [] as ReturnType<typeof release>[]
+    for (let index = 8; index >= 1; index -= 1) releases.push(release(String(index), {}))
+    for (let index = 1; index < 8; index += 1) {
+      const newer = releases.find(candidate => candidate.version === String(index + 1))!
+      newer.assets.set(diffAsset('linux-x64', String(index), String(index + 1)), 10)
+    }
+    const capped = planLadder({ releases, platform: 'linux-x64', from: '1', to: '8' })
+    expect(capped.rung).toBe(3)
+    expect(capped.reason).toContain('within 6 hops')
+    const raised = planLadder({ releases, platform: 'linux-x64', from: '1', to: '8', maxHops: 7 })
+    expect(raised.rung).toBe(2)
+    expect(raised.chain).toHaveLength(7)
+    const six = planLadder({ releases, platform: 'linux-x64', from: '2', to: '8' })
+    expect(six.rung).toBe(2)
+    expect(six.chain).toHaveLength(6)
+  })
+
   it('names the target release for a direct diff', () => {
     const ladder = planLadder({
       releases: [release('b', { [diffAsset('linux-x64', 'a', 'b')]: 10 })],
@@ -126,22 +144,22 @@ describe('planLadder', () => {
     expect(ladder.downloadBytes).toBe(9000)
   })
 
-  it('falls back to rung 3 beyond three hops', () => {
+  it('applies a four-hop chain under the raised default cap and caps on request', () => {
     const diff = (from: string, to: string) => ({ [diffAsset(platform, from, to)]: 1000 })
-    const ladder = planLadder({
-      releases: [
-        release('...99', { ...diff('...98', '...99'), [fullAsset('...99', platform)]: 9000 }),
-        release('...98', { ...diff('...97', '...98') }),
-        release('...97', { ...diff('...96', '...97') }),
-        release('...96', { ...diff('...95', '...96') }),
-        release('...95', {}),
-      ],
-      platform,
-      from: '...95',
-      to: '...99',
-    })
-    expect(ladder.rung).toBe(3)
-    expect(ladder.reason).toContain('within 3 hops')
+    const releases = [
+      release('...99', { ...diff('...98', '...99'), [fullAsset('...99', platform)]: 9000 }),
+      release('...98', { ...diff('...97', '...98') }),
+      release('...97', { ...diff('...96', '...97') }),
+      release('...96', { ...diff('...95', '...96') }),
+      release('...95', {}),
+    ]
+    const ladder = planLadder({ releases, platform, from: '...95', to: '...99' })
+    expect(ladder.rung).toBe(2)
+    expect(ladder.chain).toHaveLength(4)
+    // A caller can cap the chain lower (three hops here) and get the full rung.
+    const capped = planLadder({ releases, platform, from: '...95', to: '...99', maxHops: 3 })
+    expect(capped.rung).toBe(3)
+    expect(capped.reason).toContain('within 3 hops')
   })
 
   it('reports rung 0 for an installed version that is the newest release', () => {

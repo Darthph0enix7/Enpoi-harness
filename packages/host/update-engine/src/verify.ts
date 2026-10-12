@@ -42,9 +42,16 @@ export interface VerifyOptions {
   /**
    * When provided, the staged walk retains full bigint stat identities and the
    * resolved content hashes in this map, so the caller can seed the new
-   * tree's scan index without another scan (AMD-05).
+   * tree's scan index without another scan (AMD-05). It also supplies the
+   * staged stat identity for the inode-reuse check (no second lstat).
    */
   collectStats?: Map<string, ScanIndexEntry>
+  /**
+   * The local scan's stat identities (same map the scanner filled). Lets the
+   * inode-reuse check compare against the scan's stats instead of an extra
+   * lstat per file; the staged mtime bound still rejects mid-update edits.
+   */
+  localStats?: Map<string, ScanIndexEntry>
 }
 
 /**
@@ -73,14 +80,28 @@ export async function verifyStagedTree(options: VerifyOptions): Promise<Verifica
     let result = entry
     if (entry !== undefined && entry.type === 'file') {
       const stagedPath = join(stagingRoot, ...rel.split('/'))
-      const stagedStats = await lstat(stagedPath, { bigint: true }).catch(() => null)
+      // The staged walk already recorded this file's bigint stat identity;
+      // reuse it instead of a second lstat per file.
+      const collected = options.collectStats?.get(rel)
+      const stagedStats = collected !== undefined && collected.type === 'file'
+        ? {
+          ino: BigInt(collected.ino),
+          dev: BigInt(collected.dev),
+          size: BigInt(collected.size),
+          mtimeMs: Number(BigInt(collected.mtimeNs) / 1_000_000n),
+          isFile: () => true,
+        }
+        : await lstat(stagedPath, { bigint: true }).catch(() => null)
       if (stagedStats !== null && stagedStats.isFile()) {
         let trusted: string | null = null
         // Inode trust is disabled when the filesystem reports no stable inode
         // (AMD-06, e.g. some FAT/exFAT mounts): hash instead.
         if (options.localRoot !== undefined && options.localManifest !== undefined && options.localScanCompletedAt !== undefined
           && stagedStats.ino !== 0n && stagedStats.mtimeMs <= options.localScanCompletedAt) {
-          const liveStats = await lstat(join(options.localRoot, ...rel.split('/')), { bigint: true }).catch(() => null)
+          const scannedLive = options.localStats?.get(rel)
+          const liveStats = scannedLive !== undefined && scannedLive.type === 'file'
+            ? { ino: BigInt(scannedLive.ino), dev: BigInt(scannedLive.dev), isFile: () => true }
+            : await lstat(join(options.localRoot, ...rel.split('/')), { bigint: true }).catch(() => null)
           if (liveStats !== null && liveStats.isFile() && liveStats.ino !== 0n
             && liveStats.dev === stagedStats.dev && liveStats.ino === stagedStats.ino) {
             trusted = options.localManifest[rel]?.sha256 ?? null

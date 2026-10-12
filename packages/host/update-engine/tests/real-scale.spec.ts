@@ -139,6 +139,7 @@ describe('real-scale apply (100K actions)', () => {
     expect(mutated).toBeLessThan(50)
 
     const started = Date.now()
+    const events: { phase: string; processed: number; at: number }[] = []
     const result = await applyPlan({
       plan,
       localRoot: fixture.localRoot,
@@ -150,11 +151,25 @@ describe('real-scale apply (100K actions)', () => {
       localScanCompletedAt: Date.now(),
       journalEveryActions: 2000,
       journalEveryMs: 5000,
+      progressEverySteps: 5000,
+      progressEveryMs: 100,
+      progress: update => events.push({ phase: update.phase, processed: update.processed, at: Date.now() }),
     })
     const wallMs = Date.now() - started
     if (result.status !== 'applied') {
       console.log(`[real-scale] detail=${result.detail} mismatches=${JSON.stringify(result.verification?.mismatches.slice(0, 3))}`)
     }
+    const at = (phase: string, last = false): number | null => {
+      const hits = events.filter(event => event.phase === phase)
+      const event = last ? hits.at(-1) : hits[0]
+      return event === undefined ? null : event.at
+    }
+    const seedEnd = at('seeding', true)
+    const loopEnd = at('verifying', false)
+    const seedMs = seedEnd === null ? -1 : seedEnd - started
+    const loopMs = seedEnd === null || loopEnd === null ? -1 : loopEnd - seedEnd
+    // eslint-disable-next-line no-console
+    console.log(`[real-scale] phases: seed=${seedMs}ms applyLoop=${loopMs}ms (per-action ${(loopMs / plan.actions.length * 1000).toFixed(1)}µs) verifyTotal=${Date.now() - started - seedMs - loopMs}ms`)
     expect(result.status).toBe('applied')
     expect(result.verification?.ok).toBe(true)
     expect(result.verification?.mismatches).toEqual([])

@@ -610,10 +610,12 @@ describe('apply pipeline', () => {
     expect(result.fd3).toContain('apply: plan')
     expect(result.fd3).toContain('apply: snapshot ')
     expect(result.fd3).toMatch(/apply: \d+\/\d+ actions/u)
-    // The interval fires mid-apply, not only on the final action.
+    // Non-TTY ticks are throttled to one plain line every 5 s (the operator
+    // asked for no line spam), so a sub-second fixture yields the completion
+    // line; the mid-apply rewriting frames are covered by the pty test.
     const ticks = result.fd3.split('\n').filter(line => /^apply: \d+\/\d+ actions/u.test(line))
-    expect(ticks.length).toBeGreaterThanOrEqual(2)
-    expect(ticks[0]).not.toBe(ticks[ticks.length - 1])
+    expect(ticks.length).toBeGreaterThanOrEqual(1)
+    expect(ticks[ticks.length - 1]).toMatch(/^apply: \d+\/\d+ actions/u)
     expect(result.fd3).toContain('verify: checking the staged tree')
     // Progress never contaminates stdout (the human report) or stderr (errors).
     expect(result.stdout).not.toContain('apply: plan')

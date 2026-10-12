@@ -13,7 +13,7 @@
  */
 
 import { chmod, copyFile, link, lstat, mkdir, readlink, rm, rmdir, symlink, unlink } from 'node:fs/promises'
-import { basename, dirname, join, relative } from 'node:path'
+import { basename, join, relative } from 'node:path'
 import { writeBufferAtomic, writeBufferUnlinked, writeSymlinkUnlinked } from './atomic.ts'
 import { createBackup } from './backup.ts'
 import { hashBytes, hashFile, manifestPaths, readTreeBytes, resolveTreePath, walkTree } from './manifest.ts'
@@ -24,11 +24,13 @@ import { planFingerprint } from './plan.ts'
 import { buildUpdateReport } from './report.ts'
 import { verifyStagedTree } from './verify.ts'
 import { SCAN_INDEX_NAME, writeScanIndex } from './scan-index.ts'
+import { defaultParallelism, mapLimit } from './pool.ts'
 import type { ScanIndexEntry } from './scan-index.ts'
 import type { VerifyOptions } from './verify.ts'
 import type {
   ApplyResult,
   Manifest,
+  ManifestEntry,
   ApplyStatus,
   BackupResult,
   JournalPhase,
@@ -116,6 +118,13 @@ export interface ApplyOptions {
   journalEveryActions?: number
   /** Wall-clock journal cadence in ms (default 5000). */
   journalEveryMs?: number
+  /**
+   * Worker count for the seeding and hash phases. Default: 1 for small trees,
+   * a bounded pool above ~20K files; `DSH_WALK_JOBS` overrides.
+   */
+  parallelism?: number
+  /** The local scan's stat identities (avoids a live lstat per verified file). */
+  localStats?: Map<string, ScanIndexEntry>
   /**
    * 'applying' callback interval in actions; the final action always reports.
    * Default 200. Ignored without {@link progress}.
@@ -256,7 +265,7 @@ export async function applyPlan(options: ApplyOptions): Promise<ApplyResult> {
   try {
     await seedStaging(options.localRoot, options.stagingRoot, options.localManifest, (processed, total, bytes) => {
       stageTick('seeding', processed, total, bytes, processed === total)
-    }, options.linkFile)
+    }, options.linkFile, { resume: resumed, ...(options.parallelism === undefined ? {} : { parallelism: options.parallelism }) })
   } catch (error) {
     await writeHead('failed', `staging seed failed: ${message(error)}`)
     return makeResult(options, journalPath, resumed, 'failed', { detail: `staging seed failed: ${message(error)}`, results })
@@ -483,10 +492,23 @@ async function recomputeMergedBytes(action: PlanAction, options: ApplyOptions): 
 async function executeAction(action: PlanAction, context: ApplyContext): Promise<{ result: ApplyResult['results'][number]; bytes: number }> {
   const staged = resolveTreePath(context.stagingRoot, action.path)
   switch (action.kind) {
+    case 'skip': {
+      // The seed already carries the live bytes (hardlink) and classification
+      // proved local == shipped at scan time. Skip must be a NO-OP: zero
+      // syscalls, zero reads. Re-hashing every skipped file was the dominant
+      // per-action cost at 107K actions, and rewriting a mid-update user edit
+      // back to the shipped bytes would clobber it (verification now fails
+      // safely instead).
+      const shipped = action.shipped
+      if (shipped === null) {
+        const removed = await removeStagedTarget(staged)
+        return { result: { path: action.path, kind: action.kind, status: removed, bytesWritten: 0 }, bytes: 0 }
+      }
+      return { result: { path: action.path, kind: action.kind, status: 'verified', bytesWritten: 0 }, bytes: 0 }
+    }
     case 'replace':
     case 'add':
-    case 'restore':
-    case 'skip': {
+    case 'restore': {
       const shipped = action.shipped
       if (shipped === null) {
         const removed = await removeStagedTarget(staged)
@@ -613,53 +635,68 @@ async function seedStaging(
   manifest?: Manifest,
   onTick?: (processed: number, total: number, bytes: number) => void,
   linkFile?: (source: string, destination: string) => Promise<void>,
+  options: { resume?: boolean; parallelism?: number } = {},
 ): Promise<void> {
   // The caller's scanned manifest is exact and free; without it an lstat-only
   // walk suffices (seeding only needs kind/mode/target, never content), so
   // this pass never reads file bytes.
   const local = manifest ?? await walkTree(localRoot)
+  const existed = await lstat(stagingRoot).catch(() => null)
   await mkdir(stagingRoot, { recursive: true })
   const paths = manifestPaths(local)
+  const resume = options.resume === true || existed !== null
   let processed = 0
   let bytes = 0
+  const tick = (entrySize: number): void => {
+    processed += 1
+    bytes += entrySize
+    onTick?.(processed, paths.length, bytes)
+  }
+  // Directories first: every parent exists before any file lands, so the file
+  // phase needs no per-path mkdir (the dominant syscall cost at 100K files).
   for (const path of paths) {
     const entry = local[path]
-    if (entry === undefined) continue
-    const source = resolveTreePath(localRoot, path)
+    if (entry === undefined || entry.type !== 'dir') continue
     const destination = resolveTreePath(stagingRoot, path)
-    if (entry.type === 'dir') {
+    if (resume) {
       const existing = await lstat(destination).catch(() => null)
       if (existing !== null && !existing.isDirectory()) await removeStagedTarget(destination)
-      await mkdir(destination, { recursive: true })
-      await chmod(destination, entry.mode)
-      continue
     }
-    if (entry.type === 'symlink') {
-      const existing = await lstat(destination).catch(() => null)
-      if (existing?.isSymbolicLink()) {
-        if (await readlink(destination) === entry.target) continue
-        await rm(destination, { force: true })
-      } else if (existing !== null) {
-        await removeStagedTarget(destination)
-      }
-      await mkdir(dirname(destination), { recursive: true })
-      await symlink(entry.target ?? '', destination)
-      continue
-    }
+    await mkdir(destination, { recursive: true })
+    await chmod(destination, entry.mode)
+  }
+  for (const path of paths) {
+    const entry = local[path]
+    if (entry === undefined || entry.type !== 'symlink') continue
+    const destination = resolveTreePath(stagingRoot, path)
     const existing = await lstat(destination).catch(() => null)
-    if (existing?.isFile()) {
-      const sourceStats = await lstat(source)
-      if (existing.dev === sourceStats.dev && existing.ino === sourceStats.ino) {
-        processed += 1
-        bytes += entry.size
-        onTick?.(processed, paths.length, bytes)
-        continue
-      }
+    if (existing?.isSymbolicLink()) {
+      if (await readlink(destination) === entry.target) continue
       await rm(destination, { force: true })
     } else if (existing !== null) {
       await removeStagedTarget(destination)
     }
-    await mkdir(dirname(destination), { recursive: true })
+    await symlink(entry.target ?? '', destination)
+  }
+  const filePaths = paths.filter(path => local[path]?.type === 'file')
+  const limit = options.parallelism ?? defaultParallelism(filePaths.length)
+  await mapLimit(filePaths, limit, async (path) => {
+    const entry = local[path] as ManifestEntry
+    const source = resolveTreePath(localRoot, path)
+    const destination = resolveTreePath(stagingRoot, path)
+    if (resume) {
+      const existing = await lstat(destination).catch(() => null)
+      if (existing?.isFile()) {
+        const sourceStats = await lstat(source)
+        if (existing.dev === sourceStats.dev && existing.ino === sourceStats.ino) {
+          tick(entry.size)
+          return
+        }
+        await rm(destination, { force: true })
+      } else if (existing !== null) {
+        await removeStagedTarget(destination)
+      }
+    }
     try {
       await (linkFile ?? link)(source, destination)
     } catch (error) {
@@ -671,11 +708,12 @@ async function seedStaging(
       await copyFile(source, destination)
       await chmod(destination, entry.mode)
     }
-    processed += 1
-    bytes += entry.size
-    onTick?.(processed, paths.length, bytes)
-  }
-  if (paths.length === 0) onTick?.(0, 0, 0)
+    tick(entry.size)
+  })
+  // Completion tick with the full manifest count (dirs/symlinks included) so
+  // the progress writer can close the phase (start + completion are permanent
+  // lines; in-flight ticks rewrite).
+  onTick?.(paths.length, paths.length, bytes)
 }
 
 /**
@@ -707,6 +745,7 @@ function verifyOptions(options: ApplyOptions, collectStats?: Map<string, ScanInd
     localRoot: options.localRoot,
     ...(options.localManifest === undefined ? {} : { localManifest: options.localManifest }),
     ...(options.localScanCompletedAt === undefined ? {} : { localScanCompletedAt: options.localScanCompletedAt }),
+    ...(options.localStats === undefined ? {} : { localStats: options.localStats }),
     ...(options.progress === undefined ? {} : {
       onProgress: (progress) => {
         options.progress?.({ phase: 'verifying', processed: progress.filesHashed, total: options.plan.actions.length, bytesWritten: progress.bytesHashed })
