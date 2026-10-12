@@ -1737,9 +1737,16 @@ WantedBy=default.target
       '',
     ].join('\n'), { mode: 0o755 })
     const launchctlLog = join(home, 'launchctl.log')
+    // Model launchd teardown: once bootout has run, the job is gone (print
+    // fails) so the reload's bounded wait exits immediately instead of
+    // sleeping out its full window.
     writeFileSync(join(bin, 'launchctl'), [
       '#!/bin/sh',
       'printf \'%s\\n\' "$*" >> "$LAUNCHCTL_LOG"',
+      'case "$1" in',
+      '  print) if [ -f "$LAUNCHCTL_LOG.bootout" ]; then exit 1; fi; exit 0;;',
+      '  bootout) : > "$LAUNCHCTL_LOG.bootout"; exit 0;;',
+      'esac',
       'exit 0',
       '',
     ].join('\n'), { mode: 0o755 })

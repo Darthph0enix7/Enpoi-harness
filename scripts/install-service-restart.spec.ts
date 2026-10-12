@@ -75,7 +75,12 @@ case "$1" in
     ;;
   bootout) exit "\${BOOTOUT_EXIT:-0}";;
   kickstart) exit "\${KICKSTART_EXIT:-0}";;
-  bootstrap) exit "\${BOOTSTRAP_EXIT:-0}";;
+  bootstrap)
+    if [ "\${BOOTSTRAP_FAIL_FIRST:-0}" = 1 ] && [ ! -f "\${LAUNCHCTL_LOG}.first" ]; then
+      : > "\${LAUNCHCTL_LOG}.first"
+      exit 1
+    fi
+    exit "\${BOOTSTRAP_EXIT:-0}";;
 esac
 exit 1
 `
@@ -120,16 +125,47 @@ describe('installer restart_service on macOS', () => {
     }
   }
 
-  it('fully reloads a loaded unit (bootout -> bootstrap -> kickstart) so a changed plist takes effect', () => {
+  it('kickstarts a loaded unit (fast path; no unload, no race)', () => {
     const result = restart({ PRINT_UNIT_EXIT: '0' })
+    expect(result.status).toBe(0)
+    expect(result.log).toContain('kickstart -k gui/')
+    expect(result.log).not.toContain('bootout')
+    expect(result.log).not.toContain('bootstrap')
+    expect(result.output).toContain('kickstart')
+    expect(result.output).not.toContain('service restart failed')
+  })
+
+  it('falls back to the full reload when the kickstart fails', () => {
+    const result = restart({ PRINT_UNIT_EXIT: '0', KICKSTART_EXIT: '1' })
     expect(result.status).toBe(0)
     const at = order(result.log)
     expect(at.bootout).toBeGreaterThanOrEqual(0)
     expect(at.bootstrap ?? -1).toBeGreaterThan(at.bootout ?? -1)
-    expect(at.kickstart ?? -1).toBeGreaterThan(at.bootstrap ?? -1)
-    expect(result.log).toContain(`${UNIT}.plist`)
+    // The fast-path kickstart precedes the fallback; the reload's own
+    // kickstart follows the bootstrap.
+    const lines = result.log.split('\n')
+    const kickAfterBootstrap = lines.findIndex((line, index) => index > at.bootstrap && line.startsWith('kickstart '))
+    expect(kickAfterBootstrap).toBeGreaterThan(at.bootstrap ?? -1)
     expect(result.output).toContain('reloaded')
-    expect(result.output).not.toContain('service restart failed')
+  }, 20_000)
+
+  it('waits out launchd async teardown and retries bootstrap until it lands', () => {
+    const root = tempRoot()
+    const home = join(root, 'home')
+    const { binDir, log } = fakeLaunchctl(root)
+    const plistDir = join(home, 'Library', 'LaunchAgents')
+    mkdirSync(plistDir, { recursive: true })
+    writeFileSync(join(plistDir, `${UNIT}.plist`), '<plist/>')
+    const call = `OS=darwin; SERVICE_UNIT=${UNIT}; launchagent_reload ${UNIT} "$HOME/Library/LaunchAgents/${UNIT}.plist"; printf 'rc=%s\n' "$?"`
+    const result = runBash(call, {
+      home,
+      path: `${binDir}:${process.env.PATH ?? ''}`,
+      env: { LAUNCHCTL_LOG: log, PRINT_UNIT_EXIT: '1', BOOTSTRAP_FAIL_FIRST: '1' },
+    })
+    const lines = (existsSync(log) ? readFileSync(log, 'utf8') : '').split('\n')
+    const bootstraps = lines.filter(line => line.startsWith('bootstrap '))
+    expect(bootstraps.length).toBe(2)
+    expect(result.output).toContain('rc=0')
   })
 
   it('bootstraps a present-but-unloaded unit through the same reload instead of failing', () => {

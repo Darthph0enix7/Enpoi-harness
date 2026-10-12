@@ -1039,7 +1039,14 @@ activate_pnpm_pin() {
     [ -x "$nbin/corepack" ] && COREPACK_BIN="$nbin/corepack"
   fi
   if [ -z "$COREPACK_BIN" ] || [ ! -x "$COREPACK_BIN" ]; then
-    warn "pnpm pin $pin is declared but no corepack binary was found; using the ambient pnpm"
+    # No corepack on this machine (common on Macs with a system Node): the
+    # ambient pnpm keeps working, so this is information, not a warning. Only
+    # an absent/unusable ambient pnpm is worth a warning.
+    if [ -n "${PNPM:-}" ] && [ -x "$PNPM" ]; then
+      log "pnpm pin: $pin is declared but no corepack binary was found; using the ambient pnpm at $PNPM"
+    else
+      warn "pnpm pin $pin is declared but neither corepack nor a usable ambient pnpm was found"
+    fi
     return 1
   fi
   if run_logged "Pinning pnpm $pin (corepack)" 300 "$PREFIX" "$COREPACK_BIN" prepare "pnpm@$pin" --activate; then
@@ -3546,13 +3553,27 @@ detect_service_unit() {
 # Returns 0 loaded+kicked, 1 bootstrap failed with a GUI domain present,
 # 2 no GUI login session (headless/SSH-only Mac; the job loads at next login).
 launchagent_reload() { # label plist
-  local label="$1" plist="$2" uid
+  local label="$1" plist="$2" uid attempt waited
   uid="$(id -u)"
   launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
-  if launchctl bootstrap "gui/$uid" "$plist" >/dev/null 2>&1; then
-    launchctl kickstart -k "gui/$uid/$label" >/dev/null 2>&1 || true
-    return 0
-  fi
+  # launchd tears the old job down asynchronously: a bootstrap that lands
+  # while the job is still unloading fails (the real-device log showed the
+  # restart failing and the health retry succeeding seconds later). Wait
+  # bounded for the job to disappear, then retry bootstrap a few times.
+  waited=0
+  while [ "$waited" -lt 50 ] && launchctl print "gui/$uid/$label" >/dev/null 2>&1; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  attempt=1
+  while [ "$attempt" -le 3 ]; do
+    if launchctl bootstrap "gui/$uid" "$plist" >/dev/null 2>&1; then
+      launchctl kickstart -k "gui/$uid/$label" >/dev/null 2>&1 || true
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    [ "$attempt" -le 3 ] && sleep 0.7
+  done
   launchctl print "gui/$uid" >/dev/null 2>&1 || return 2
   return 1
 }
@@ -3584,6 +3605,14 @@ restart_service() {
         else
           warn "service restart failed: launchd unit $SERVICE_UNIT is not loaded and $plist does not exist; run 'dsh service install'"
         fi
+      elif launchctl print "gui/$uid/$SERVICE_UNIT" >/dev/null 2>&1 \
+        && launchctl kickstart -k "gui/$uid/$SERVICE_UNIT" >/dev/null 2>&1; then
+        # Loaded job: kickstart is fast and race-free. The tailnet write path
+        # performs its own full reload right after changing the plist, so the
+        # job definition is already current here; a kickstart that fails
+        # (mid-teardown, unloaded since the probe) falls back to the full
+        # reload below.
+        log "service: restarted $SERVICE_UNIT (kickstart)"
       else
         launchagent_reload "$SERVICE_UNIT" "$plist"
         rc=$?
@@ -6346,10 +6375,40 @@ do_install() {
 # Restore from the pristine pre-update backup (the early snapshot taken before
 # the profile merge and migrations ran); the late pre-switch backup is never
 # passed here. Called only after the switch.
+# Rewrite install-state.json for one version tree (rollback and any other
+# post-switch restore). Mirrors write_state's shape by overriding the identity
+# globals it reads; version is the tree's marker (base form for source
+# rebuilds), commit is the tree's recorded build commit.
+restore_state_for_tree() { # tree_dir_name
+  local dir="$1" tree="$PREFIX/harness/$1" version commit
+  [ -d "$tree" ] || return 0
+  version="$(json_field "$tree/.dsh-install-complete" version 2>/dev/null || true)"
+  [ -n "$version" ] || version="$(release_base_version "$dir")"
+  commit="$(installed_tree_commit "$tree")"
+  local saved_version="$VERSION" saved_dir="${TREE_DIR_NAME:-}" saved_commit="$BUILD_COMMIT"
+  VERSION="$version"
+  TREE_DIR_NAME="$dir"
+  BUILD_COMMIT="$commit"
+  if write_state; then
+    log "rollback: install-state.json rewritten for the restored tree ($version, $dir)"
+  else
+    warn "could not rewrite $PREFIX/harness/install-state.json for the restored tree $dir"
+  fi
+  VERSION="$saved_version"
+  TREE_DIR_NAME="$saved_dir"
+  BUILD_COMMIT="$saved_commit"
+  return 0
+}
+
 rollback() { # prev backup failed_version
   local prev="$1" backup="$2" failed="$3" restore_rc=0 in_session=0
   warn "rolling back to $prev"
   switch_current "$prev" || warn "could not repoint $PREFIX/harness/current"
+  # The failed run wrote install-state.json for the tree it switched to; left
+  # alone, the next update resolves a version that is not the active symlink
+  # (the real-device `identity mismatch` + self-heal). Rewrite it for the
+  # RESTORED tree now.
+  restore_state_for_tree "$prev"
   # The direct path restarted the unit onto the failed tree before the
   # self-check; restart it back so the live service runs the restored tree too.
   # A rollback running inside the managed unit must not restart it here: the

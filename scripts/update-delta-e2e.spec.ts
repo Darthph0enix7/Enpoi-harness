@@ -1462,4 +1462,24 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(readFileSync(join(fixture.prefix, 'harness/1/core/app.js'), 'utf8')).toBe('core\nUSER\nline2\nline3\n')
     expect(readFileSync(join(fixture.prefix, 'harness/1/user/notes.txt'), 'utf8')).toBe('notes\n')
   }, 240_000)
+
+  it('rewrites install-state for the restored tree on rollback, so the next run starts clean', async () => {
+    const fixture = await buildFixture()
+    // The health proof runs AFTER write_state, so this is the real-device path
+    // where state recorded the failed tree and the next update warned
+    // `identity mismatch` and self-healed.
+    const result = await runUpdate(fixture, { DSH_DELTA: '0', DSH_HEALTH_FORCE_FAIL: '1' })
+    expect(result.status).not.toBe(0)
+    expect(currentTarget(fixture.prefix)).toBe('1')
+    expect(markerVersionAt(fixture.prefix, '1')).toBe('1')
+    // The fix under test: state matches the RESTORED tree immediately.
+    expect(stateField(fixture.prefix, 'version')).toBe('1')
+    expect(stateField(fixture.prefix, 'harnessDir')).toBe('1')
+    expect(readFileSync(join(fixture.prefix, 'logs/install.log'), 'utf8')).toContain('install-state.json rewritten for the restored tree')
+    // A subsequent update resolves the identity without any self-heal.
+    const next = await runUpdate(fixture, { DSH_DELTA: '0' })
+    expect(next.status, next.stderr).toBe(0)
+    expect(next.stderr).not.toContain('identity mismatch')
+    expect(currentTarget(fixture.prefix)).toBe('2')
+  }, 240_000)
 })
