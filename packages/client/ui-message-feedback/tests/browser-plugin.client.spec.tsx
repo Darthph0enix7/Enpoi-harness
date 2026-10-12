@@ -190,7 +190,13 @@ describe('ui-message-feedback browser plugin', () => {
     dialog.edit({ category: 'service-stability', text: 'timed out' })
     await dialog.submit()
     expect(b.calls.filter(call => call.method === 'record')[0]?.request)
-      .toEqual({ sessionId: 's1', text: 'timed out', category: 'service-stability' })
+      .toEqual({
+        sessionId: 's1',
+        text: 'timed out',
+        category: 'service-stability',
+        share: { systemInfo: true, context: true, session: true, message: true },
+        submit: true,
+      })
     expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({ target: null, toast: 1 })
 
     message.openDialog(MSG, 'positive')
@@ -199,9 +205,38 @@ describe('ui-message-feedback browser plugin', () => {
     expect(b.calls.filter(call => call.method === 'put')[0]?.request).toMatchObject({
       sessionId: 's1', messageId: MSG, rating: 'positive', category: 'task-result', ifVersion: 'v1',
     })
+    // A message judgment stores its note locally and carries no share/payload
+    // contract, so those members never reach the put request.
+    const put = b.calls.filter(call => call.method === 'put')[0]?.request as Record<string, unknown>
+    expect(put).not.toHaveProperty('share')
+    expect(put).not.toHaveProperty('submit')
     expect(dialog.hooks.dialog.getSnapshot().toast).toBe(2)
     dialog.dismissToast(2)
     expect(dialog.hooks.dialog.getSnapshot().toast).toBe(0)
+  })
+
+  it('sends the toggled share flags and gates the message flag without dropping the typed text', async () => {
+    const b = await bench()
+    await b.fiber.await()
+
+    const dialog = b.dialogEntry()!.inject!(sid('s1'))
+    const decoration = b.decorations.get('feedback')
+    if (decoration?.ui.kind !== 'action') throw new Error('the /feedback decoration is not an action')
+    decoration.ui.run({ sessionId: sid('s1') })
+    expect(dialog.hooks.dialog.getSnapshot().share)
+      .toEqual({ systemInfo: true, context: true, session: true, message: true })
+
+    dialog.edit({ share: { systemInfo: false, context: false, session: true, message: false }, text: 'private' })
+    await dialog.submit()
+
+    // share.message only gates the Host payload: the record still carries the
+    // typed text so the Host decides its inclusion.
+    expect(b.calls.filter(call => call.method === 'record')[0]?.request).toEqual({
+      sessionId: 's1',
+      text: 'private',
+      share: { systemInfo: false, context: false, session: true, message: false },
+      submit: true,
+    })
   })
 
   it('keeps the dialog open with the carrier code when the record call itself fails', async () => {

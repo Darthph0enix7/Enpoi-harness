@@ -89,6 +89,42 @@
   font-weight: 500;
 }
 
+/* The sharing scope sits under the detail box as one compact group: a
+   caption-size legend, one wrapping checkbox row, and one hint line. */
+.share {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: -20px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.shareLegend {
+  padding: 0;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.shareRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+}
+
+.shareItem {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.shareHint {
+  margin: 0;
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  line-height: 18px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chip,
   .detail {

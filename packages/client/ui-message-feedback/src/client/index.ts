@@ -32,7 +32,9 @@ export type {
   MessageFeedbackActionFailure, MessageFeedbackActionResult, MessageFeedbackStatus,
   MessageFeedbackView,
 } from './controller.ts'
-export type { FeedbackDialogState, FeedbackDialogTarget, FeedbackSubmit } from './dialog.ts'
+export type {
+  FeedbackDialogEntry, FeedbackDialogState, FeedbackDialogTarget, FeedbackShareFlags, FeedbackSubmit,
+} from './dialog.ts'
 export type {
   FeedbackDialogInjected, FeedbackDialogProps, MessageFeedbackActionProps, MessageFeedbackInjected,
 } from './slots.ts'

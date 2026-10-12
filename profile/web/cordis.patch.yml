@@ -136,6 +136,35 @@
     - id: web-setup
       name: "@deepseek-ai/dsh-web-setup"
 
+# Feedback pipeline: the collector (payload + redaction), the endpoint client,
+# and the ephemeral triage session behind the sessionFeedback Remote. They
+# mount wherever `/feedback` is usable — the base bundle owns the command — so
+# the dialog gets non-null analysis/submission instead of the degraded path.
+# Submission is on by default with our endpoint; the collector takes no config.
+- insert:
+    - id: feedback-collect
+      name: "@deepseek-ai/dsh-feedback-collect"
+
+    - id: feedback-submit
+      name: "@deepseek-ai/dsh-feedback-submit"
+      config:
+        enabled: true
+        endpoint: https://enpoi.vip/feedback
+        timeoutMs: 15000
+        retryDelayMs: 500
+
+    # The service defaults mirror the first-run system-analysis route (keyless
+    # Kilo free tier, system-analysis preset/permission, five-minute bound,
+    # disposable session that is never archived); the route itself stays out of
+    # this template, where the first-run seed owns model routing. Only the
+    # non-routing knobs are restated here.
+    - id: feedback-triage
+      name: "@deepseek-ai/dsh-feedback-triage"
+      config:
+        preset: system-analysis
+        permissionPreset: system-analysis
+        timeoutMinutes: 5
+
 # ── agent presets (merged registry: declarations, not directories) ──────────
 # Our three presets, visible; the shipped standard/ptc/minimal/cordis rows are
 # disabled below. `config.plugins` is the old presets/<id>/agent.cordis.yml list.

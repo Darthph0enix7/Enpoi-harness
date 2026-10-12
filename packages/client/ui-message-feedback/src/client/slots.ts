@@ -61,10 +61,10 @@ export interface FeedbackDialogInjected {
     dialog: HostObservable<FeedbackDialogState>
   }
   /**
-   * Replace part of the draft: the category (null clears it) or the text.
+   * Replace part of the draft: the category (null clears it), the text, or the share flags.
    * @param draft - the members to replace.
    */
-  edit: (draft: Partial<Pick<FeedbackDialogState, 'category' | 'text'>>) => void
+  edit: (draft: Partial<Pick<FeedbackDialogState, 'category' | 'text' | 'share'>>) => void
   /** Submit the draft to the open target. */
   submit: () => Promise<void>
   /** Close the dialog and discard the draft. */

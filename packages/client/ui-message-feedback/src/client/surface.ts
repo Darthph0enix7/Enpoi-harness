@@ -8,9 +8,8 @@
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import type { FeedbackRecord } from '@deepseek-ai/dsh-command-feedback/types'
 import { MessageFeedbackController, describe, type MessageFeedbackActionResult } from './controller.ts'
-import { FeedbackDialogController } from './dialog.ts'
+import { FeedbackDialogController, type FeedbackDialogEntry } from './dialog.ts'
 
 /** The per-session pair behind every entry of one Session. */
 export class FeedbackSurface {
@@ -30,8 +29,13 @@ export class FeedbackSurface {
       : this.recordSession(entry))
   }
 
-  /** Record one Session-level remark through the sessionFeedback Remote. */
-  private async recordSession(entry: FeedbackRecord): Promise<MessageFeedbackActionResult> {
+  /**
+   * Record one Session-level remark through the sessionFeedback Remote. The
+   * request carries the record members plus the share/submit contract; the
+   * Host request type names the three collected share flags, and the client's
+   * fourth flag (the human's own message) rides the same `share` object.
+   */
+  private async recordSession(entry: FeedbackDialogEntry): Promise<MessageFeedbackActionResult> {
     const carried = await this.ctx.remote.sessionFeedback.record({ sessionId: this.sessionId, ...entry })
     if (!carried.ok) return { ok: false, error: { code: carried.error.code, message: carried.error.message } }
     if (carried.value.ok) return { ok: true }

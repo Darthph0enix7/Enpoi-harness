@@ -9,9 +9,10 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
-  Button, IconWarningOutlineRegular, Modal, Toast,
+  Button, Checkbox, IconWarningOutlineRegular, Modal, Toast,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { FeedbackCategory } from '@deepseek-ai/dsh-command-feedback/types'
+import type { FeedbackShareFlags } from './dialog.ts'
 import type { FeedbackDialogProps } from './slots.ts'
 import css from './FeedbackDialog.module.css'
 
@@ -30,6 +31,12 @@ const CATEGORY_CHIPS = {
   'other': true,
 } satisfies Record<FeedbackCategory, true>
 const CATEGORIES = Object.keys(CATEGORY_CHIPS) as FeedbackCategory[]
+
+/**
+ * Share checkboxes in presentation order. Each id is both the shared-data flag
+ * and its `share.<id>` copy key, so an id without either is a compile error.
+ */
+const SHARE_ITEMS: readonly (keyof FeedbackShareFlags)[] = ['systemInfo', 'context', 'session', 'message']
 
 /** Failure codes with their own copy; every other code reads the generic line. */
 const FAILURE_COPY: Partial<Record<string, 'error.conflict' | 'error.noteTooLarge'>> = {
@@ -122,6 +129,27 @@ export function FeedbackDialog({
           readOnly={state.submitting}
           onChange={(event) => { edit({ text: event.target.value }) }}
         />
+        {/* The share flags gate the Session submission only; a message-target
+            dialog stores its note locally and shares nothing, so it renders no
+            controls that could not take effect. */}
+        {state.target?.kind === 'session' && (
+          <fieldset className={css.share}>
+            <legend className={css.shareLegend}>{t('share.legend')}</legend>
+            <div className={css.shareRow}>
+              {SHARE_ITEMS.map(item => (
+                <Checkbox
+                  key={item}
+                  className={css.shareItem}
+                  checked={state.share[item]}
+                  disabled={state.submitting}
+                  label={t(`share.${item}`)}
+                  onChange={(next) => { edit({ share: { ...state.share, [item]: next } }) }}
+                />
+              ))}
+            </div>
+            <p className={css.shareHint}>{t('share.hint')}</p>
+          </fieldset>
+        )}
       </Modal>
     </>
   )

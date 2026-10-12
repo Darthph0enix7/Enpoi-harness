@@ -9,6 +9,14 @@
 
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 
+export type {
+  FeedbackEndpointPayload,
+  FeedbackPayloadSections,
+  FeedbackSeverity,
+  FeedbackShareFlags,
+  FeedbackTriage,
+} from '@deepseek-ai/dsh-feedback-collect/types'
+
 /** One of the fixed feedback categories; the ids are durable log vocabulary. */
 export type FeedbackCategory =
   | 'task-result'
@@ -49,12 +57,33 @@ export interface SessionFeedbackRecordRequest {
   readonly text?: string
   /** Category the human filed the remark under. */
   readonly category?: FeedbackCategory
+  /**
+   * Which optional payload sections the human shared; an absent member means
+   * true, so the defaults are all-on. Present only when a surface exposes the
+   * checkboxes.
+   */
+  readonly share?: {
+    readonly systemInfo?: boolean
+    readonly context?: boolean
+    readonly session?: boolean
+    /** The human's own message; false keeps it out of the endpoint payload. */
+    readonly message?: boolean
+  }
+  /**
+   * Whether the record pipeline submits to the endpoint after triage; absent
+   * means true. The local record always happens regardless.
+   */
+  readonly submit?: boolean
 }
 
-/** Stable postcondition of a recorded remark. */
+/** Stable postcondition of a recorded remark, plus what the pipeline did with it. */
 export interface SessionFeedbackRecordValue {
   /** The remark is appended to the Session log; flushing follows the Session's own schedule. */
   readonly recorded: true
+  /** The endpoint's id when the payload was submitted; null when submission was skipped or failed. */
+  readonly submitted: { readonly id: string } | null
+  /** The triage answer when the isolated session produced one; null otherwise. */
+  readonly analysis: import('@deepseek-ai/dsh-feedback-collect/types').FeedbackTriage | null
 }
 
 /** No live Session carries the requested id. */

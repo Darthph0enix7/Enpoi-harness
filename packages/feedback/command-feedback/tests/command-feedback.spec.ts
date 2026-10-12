@@ -122,9 +122,9 @@ describe('sessionFeedback Host Remote', () => {
     const test = await harness()
     await expect(test.ctx.sessionFeedback.record({
       sessionId: test.session.id, text: '  the diff view is unreadable ', category: 'product-interaction',
-    })).resolves.toEqual({ ok: true, value: { recorded: true } })
+    })).resolves.toEqual({ ok: true, value: { recorded: true, submitted: null, analysis: null } })
     await expect(test.ctx.sessionFeedback.record({ sessionId: test.session.id }))
-      .resolves.toEqual({ ok: true, value: { recorded: true } })
+      .resolves.toEqual({ ok: true, value: { recorded: true, submitted: null, analysis: null } })
     expect(test.session.snapshotEvents().map(event => event.type)).toEqual(['feedback/record', 'feedback/record'])
     expect(feedbackRecords(test.session)).toEqual([
       { text: 'the diff view is unreadable', category: 'product-interaction' },
@@ -256,5 +256,97 @@ describe('/feedback human command', () => {
     await expect(test.ctx.commands.execute(test.agent, '/feedback too late', [], controller.signal))
       .rejects.toThrow('user cancelled the command')
     expect(test.session.snapshotEvents()).toEqual([])
+  })
+})
+
+describe('sessionFeedback pipeline orchestration', () => {
+  interface Calls { collect: number; triage: number; submit: number; flags: unknown; payload: unknown }
+
+  function fakeServices(options: { triage?: 'ok' | 'null' | 'throw'; submit?: 'ok' | 'null' | 'throw'; enabled?: boolean } = {}): { calls: Calls; services: unknown[] } {
+    const calls: Calls = { collect: 0, triage: 0, submit: 0, flags: null, payload: null }
+    const collect = { name: 'fake-collect', apply: (ctx: Context) => { ctx.provide('feedbackCollect', {
+      collect: async (input: { share: unknown }) => {
+        calls.collect += 1
+        calls.flags = input.share
+        return { system: { platform: 'darwin' } }
+      },
+    }) } }
+    const triage = { name: 'fake-triage', apply: (ctx: Context) => { ctx.provide('feedbackTriage', {
+      triage: async () => {
+        calls.triage += 1
+        if (options.triage === 'throw') throw new Error('triage down')
+        if (options.triage === 'null') return null
+        return { category: 'product-interaction', severity: 'medium', summary: 'dialog friction' }
+      },
+    }) } }
+    const submit = { name: 'fake-submit', apply: (ctx: Context) => { ctx.provide('feedbackSubmit', {
+      enabled: () => options.enabled ?? true,
+      submit: async (payload: unknown) => {
+        calls.submit += 1
+        calls.payload = payload
+        if (options.submit === 'throw') throw new Error('endpoint down')
+        if (options.submit === 'null') return null
+        return { id: 'fb-1' }
+      },
+    }) } }
+    return { calls, services: [collect, triage, submit] }
+  }
+
+  async function piped(options: { triage?: 'ok' | 'null' | 'throw'; submit?: 'ok' | 'null' | 'throw'; enabled?: boolean } = {}): Promise<{ test: Harness; calls: Calls }> {
+    const test = await harness()
+    const { calls, services } = fakeServices(options)
+    for (const service of services) await test.ctx.plugin(service as never, {} as never)
+    return { test, calls }
+  }
+
+  it('runs collect -> triage -> submit and returns both results', async () => {
+    const { test, calls } = await piped()
+    const result = await test.ctx.sessionFeedback.record({ sessionId: test.session.id, text: 'broken' })
+    expect(result).toEqual({ ok: true, value: { recorded: true, submitted: { id: 'fb-1' }, analysis: { category: 'product-interaction', severity: 'medium', summary: 'dialog friction' } } })
+    expect(calls.collect).toBe(1)
+    expect(calls.triage).toBe(1)
+    expect(calls.submit).toBe(1)
+    expect(calls.flags).toEqual({ systemInfo: true, context: true, session: true, message: true })
+    expect(JSON.parse(JSON.stringify(calls.payload))).toMatchObject({ message: 'broken', analysis: { severity: 'medium' } })
+  })
+
+  it('degrades to nulls when triage or submit fail, and the record always succeeds', async () => {
+    const triageDown = await piped({ triage: 'throw', submit: 'ok' })
+    expect((await triageDown.test.ctx.sessionFeedback.record({ sessionId: triageDown.test.session.id, text: 'x' }))).toMatchObject({ ok: true, value: { recorded: true, submitted: { id: 'fb-1' }, analysis: null } })
+    const submitDown = await piped({ submit: 'null' })
+    expect((await submitDown.test.ctx.sessionFeedback.record({ sessionId: submitDown.test.session.id, text: 'x' }))).toMatchObject({ ok: true, value: { submitted: null, analysis: { severity: 'medium' } } })
+    const disabled = await piped({ enabled: false })
+    const disabledResult = await disabled.test.ctx.sessionFeedback.record({ sessionId: disabled.test.session.id, text: 'x' })
+    expect(disabledResult).toMatchObject({ ok: true, value: { submitted: null } })
+    expect(disabled.calls.submit).toBe(0)
+  })
+
+  it('omits the endpoint message when the message flag is off and keeps it on otherwise', async () => {
+    const off = await piped()
+    await off.test.ctx.sessionFeedback.record({
+      sessionId: off.test.session.id,
+      text: 'the secret remark',
+      share: { message: false },
+    })
+    expect(off.calls.submit).toBe(1)
+    expect(JSON.parse(JSON.stringify(off.calls.payload))).not.toHaveProperty('message')
+    // The local record still keeps the text: the record is the user's own log.
+    expect(feedbackRecords(off.test.session).some(record => record.text === 'the secret remark')).toBe(true)
+
+    const on = await piped()
+    await on.test.ctx.sessionFeedback.record({ sessionId: on.test.session.id, text: 'the shared remark' })
+    expect(JSON.parse(JSON.stringify(on.calls.payload))).toMatchObject({ message: 'the shared remark' })
+  })
+
+  it('honors share:false and submit:false from the request', async () => {
+    const { test, calls } = await piped()
+    await test.ctx.sessionFeedback.record({
+      sessionId: test.session.id,
+      text: 'private',
+      share: { context: false },
+      submit: false,
+    })
+    expect(calls.flags).toEqual({ systemInfo: true, context: false, session: true, message: true })
+    expect(calls.submit).toBe(0)
   })
 })

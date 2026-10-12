@@ -7,7 +7,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { MessageId } from '@deepseek-ai/dsh-api-remotes/client'
 import type { MessageFeedbackActionResult } from '../src/client/controller.ts'
-import { FeedbackDialogController, type FeedbackSubmit } from '../src/client/dialog.ts'
+import { FeedbackDialogController, ALL_SHARED, type FeedbackSubmit } from '../src/client/dialog.ts'
 
 const MSG = 'm-1' as MessageId
 const MESSAGE_TARGET = { kind: 'message', messageId: MSG, rating: 'positive' } as const
@@ -22,7 +22,7 @@ describe('FeedbackDialogController', () => {
     const { controller } = bench()
 
     expect(controller.state.getSnapshot()).toEqual({
-      target: null, category: null, text: '', submitting: false, failure: null, toast: 0,
+      target: null, category: null, text: '', share: ALL_SHARED, submitting: false, failure: null, toast: 0,
     })
   })
 
@@ -48,9 +48,10 @@ describe('FeedbackDialogController', () => {
 
     controller.edit({ category: 'other' })
     controller.edit({ text: 'x' })
+    controller.edit({ share: { ...ALL_SHARED, session: false } })
     await controller.submitDraft()
 
-    expect(controller.state.getSnapshot()).toMatchObject({ category: null, text: '', toast: 0 })
+    expect(controller.state.getSnapshot()).toMatchObject({ category: null, text: '', share: ALL_SHARED, toast: 0 })
     expect(submit).not.toHaveBeenCalled()
   })
 
@@ -62,7 +63,12 @@ describe('FeedbackDialogController', () => {
 
     await controller.submitDraft()
 
-    expect(submit).toHaveBeenCalledWith({ kind: 'session' }, { text: 'timed out twice', category: 'service-stability' })
+    expect(submit).toHaveBeenCalledWith({ kind: 'session' }, {
+      text: 'timed out twice',
+      category: 'service-stability',
+      share: ALL_SHARED,
+      submit: true,
+    })
     expect(controller.state.getSnapshot()).toMatchObject({ target: null, toast: 1 })
   })
 
@@ -73,7 +79,7 @@ describe('FeedbackDialogController', () => {
 
     await controller.submitDraft()
 
-    expect(submit).toHaveBeenCalledWith({ kind: 'session' }, {})
+    expect(submit).toHaveBeenCalledWith({ kind: 'session' }, { share: ALL_SHARED, submit: true })
   })
 
   it('submits the message target with the entry', async () => {
@@ -84,8 +90,43 @@ describe('FeedbackDialogController', () => {
 
     await controller.submitDraft()
 
-    expect(submit).toHaveBeenCalledWith(MESSAGE_TARGET, { text: 'wrong file', category: 'task-result' })
+    expect(submit).toHaveBeenCalledWith(MESSAGE_TARGET, {
+      text: 'wrong file',
+      category: 'task-result',
+      share: ALL_SHARED,
+      submit: true,
+    })
     expect(controller.state.getSnapshot()).toMatchObject({ target: null, toast: 1 })
+  })
+
+  it('starts every share flag on and resets them with each open', () => {
+    const { controller } = bench()
+
+    controller.open({ kind: 'session' })
+    expect(controller.state.getSnapshot().share).toEqual(ALL_SHARED)
+
+    controller.edit({ share: { ...ALL_SHARED, context: false, message: false } })
+    expect(controller.state.getSnapshot().share).toEqual({ ...ALL_SHARED, context: false, message: false })
+
+    controller.dismiss()
+    controller.open(MESSAGE_TARGET)
+    expect(controller.state.getSnapshot().share).toEqual(ALL_SHARED)
+  })
+
+  it('carries the toggled share flags and submit on the entry, keeping the typed text', async () => {
+    const { controller, submit } = bench()
+    controller.open({ kind: 'session' })
+    controller.edit({ share: { ...ALL_SHARED, message: false }, text: 'keep this private' })
+
+    await controller.submitDraft()
+
+    // share.message gates the Host payload only: the typed text is still the
+    // entry's record member, so the Host can decide its inclusion.
+    expect(submit).toHaveBeenCalledWith({ kind: 'session' }, {
+      text: 'keep this private',
+      share: { ...ALL_SHARED, message: false },
+      submit: true,
+    })
   })
 
   it('keeps the draft open with the failure code when the submission is rejected', async () => {
@@ -190,7 +231,7 @@ describe('FeedbackDialogController', () => {
     controller.open({ kind: 'session' })
     controller.dispose()
     expect(controller.state.getSnapshot()).toEqual({
-      target: null, category: null, text: '', submitting: false, failure: null, toast: 0,
+      target: null, category: null, text: '', share: ALL_SHARED, submitting: false, failure: null, toast: 0,
     })
   })
 })

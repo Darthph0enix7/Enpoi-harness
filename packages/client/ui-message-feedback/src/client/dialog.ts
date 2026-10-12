@@ -8,7 +8,9 @@
 
 import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { MessageId } from '@deepseek-ai/dsh-api-remotes/client'
-import type { FeedbackCategory, FeedbackRecord } from '@deepseek-ai/dsh-command-feedback/types'
+import type {
+  FeedbackCategory, FeedbackRecord, FeedbackShareFlags as CollectedShareFlags,
+} from '@deepseek-ai/dsh-command-feedback/types'
 import type { MessageFeedbackRating } from '@deepseek-ai/dsh-message-feedback/types'
 import type { MessageFeedbackActionResult } from './controller.ts'
 
@@ -17,12 +19,34 @@ export type FeedbackDialogTarget =
   | { readonly kind: 'session' }
   | { readonly kind: 'message'; readonly messageId: MessageId; readonly rating: MessageFeedbackRating }
 
+/**
+ * The data one Session submission is allowed to share: the Host's collected
+ * sections (system information, context, and session data) extended with the
+ * human's own message. Every flag defaults on; a flag the human unchecked is
+ * sent as false so the Host can drop that section from the payload (the
+ * frozen `sessionFeedback.record` contract).
+ */
+export interface FeedbackShareFlags extends CollectedShareFlags {
+  /** The human's own typed message. */
+  readonly message: boolean
+}
+
+/** The all-on sharing defaults: a fresh dialog shares every section. */
+export const ALL_SHARED: FeedbackShareFlags = Object.freeze({
+  systemInfo: true,
+  context: true,
+  session: true,
+  message: true,
+})
+
 /** Dialog and toast state the overlay view renders from. */
 export interface FeedbackDialogState {
   /** Target the dialog is open for; null while closed. */
   readonly target: FeedbackDialogTarget | null
   readonly category: FeedbackCategory | null
   readonly text: string
+  /** What the Session submission shares; every open resets it to all-on. */
+  readonly share: FeedbackShareFlags
   /** A submission is in flight; the form ignores edits and submits until it settles. */
   readonly submitting: boolean
   /** Failure code of the last submission from this open; null when none. */
@@ -32,14 +56,25 @@ export interface FeedbackDialogState {
 }
 
 /**
+ * One submission's entry. It carries the record members plus the frozen
+ * `share`/`submit` extension of `sessionFeedback.record`; the message target
+ * stores only the record members and ignores the extension.
+ */
+export type FeedbackDialogEntry = FeedbackRecord & {
+  readonly share: FeedbackShareFlags
+  /** Always true here: the dialog submits, and the settings switch gates it Host-side. */
+  readonly submit: true
+}
+
+/**
  * Record one submission against its target.
  * @param target - the open target.
- * @param entry - the trimmed text and the category, each present only when given.
+ * @param entry - the trimmed text, the category, and the share/submit contract.
  */
-export type FeedbackSubmit = (target: FeedbackDialogTarget, entry: FeedbackRecord) => Promise<MessageFeedbackActionResult>
+export type FeedbackSubmit = (target: FeedbackDialogTarget, entry: FeedbackDialogEntry) => Promise<MessageFeedbackActionResult>
 
 const CLOSED: Omit<FeedbackDialogState, 'toast'> = {
-  target: null, category: null, text: '', submitting: false, failure: null,
+  target: null, category: null, text: '', share: ALL_SHARED, submitting: false, failure: null,
 }
 
 /** Per-session dialog controller; one instance backs the overlay entry and every message control. */
@@ -72,9 +107,9 @@ export class FeedbackDialogController {
 
   /**
    * Replace part of the draft while it is editable.
-   * @param draft - the category (null clears it) or the text as typed.
+   * @param draft - the category (null clears it), the text as typed, or the share flags.
    */
-  edit(draft: Partial<Pick<FeedbackDialogState, 'category' | 'text'>>): void {
+  edit(draft: Partial<Pick<FeedbackDialogState, 'category' | 'text' | 'share'>>): void {
     const s = this.state.getSnapshot()
     if (s.target === null || s.submitting) return
     this.state.set({ ...s, ...draft })
@@ -95,6 +130,8 @@ export class FeedbackDialogController {
     const result = await this.submit(s.target, {
       ...(text.length === 0 ? {} : { text }),
       ...(s.category === null ? {} : { category: s.category }),
+      share: s.share,
+      submit: true,
     })
     if (result.ok) {
       // The remark is recorded whichever draft is on screen now, so the toast

@@ -10,11 +10,12 @@
 import { useSyncExternalStore } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
+import type { MessageId } from '@deepseek-ai/dsh-api-remotes/client'
 import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import { FEEDBACK_CATEGORIES } from '@deepseek-ai/dsh-command-feedback'
 import { FeedbackDialog } from '../src/client/FeedbackDialog.tsx'
-import type { FeedbackDialogState } from '../src/client/dialog.ts'
+import { ALL_SHARED, type FeedbackDialogState } from '../src/client/dialog.ts'
 import { en, zh } from '../src/client/locales.ts'
 
 afterEach(cleanup)
@@ -24,7 +25,7 @@ const t = makeTranslate(zh, commonZh)
 /** Render the entry over a fixed state and recording verbs. */
 function mount(overrides: Partial<FeedbackDialogState> = {}) {
   const state: FeedbackDialogState = {
-    target: { kind: 'session' }, category: null, text: '', submitting: false, failure: null, toast: 0,
+    target: { kind: 'session' }, category: null, text: '', share: ALL_SHARED, submitting: false, failure: null, toast: 0,
     ...overrides,
   }
   const verbs = {
@@ -68,6 +69,35 @@ describe('FeedbackDialog', () => {
     expect(ui.getByRole('button', { name: commonZh.submit }).hasAttribute('disabled')).toBe(false)
   })
 
+  it('shows the four share checkboxes, all checked, for a Session dialog', () => {
+    const ui = mount()
+
+    const boxes = ui.getAllByRole('checkbox') as HTMLInputElement[]
+    expect(boxes).toHaveLength(4)
+    expect(boxes.map(box => box.checked)).toEqual([true, true, true, true])
+    expect(ui.getByText(zh['share.legend'])).toBeTruthy()
+    expect(ui.getByText(zh['share.hint'])).toBeTruthy()
+    for (const label of [zh['share.systemInfo'], zh['share.context'], zh['share.session'], zh['share.message']]) {
+      expect(ui.getByRole('checkbox', { name: label })).toBeTruthy()
+    }
+  })
+
+  it('unchecks one share flag and edits only that flag', () => {
+    const ui = mount()
+
+    fireEvent.click(ui.getByRole('checkbox', { name: zh['share.message'] }))
+
+    expect(ui.edit).toHaveBeenLastCalledWith({ share: { ...ALL_SHARED, message: false } })
+    expect((ui.getByRole('checkbox', { name: zh['share.systemInfo'] }) as HTMLInputElement).checked).toBe(true)
+  })
+
+  it('hides the share controls on a message dialog, which shares nothing', () => {
+    const ui = mount({ target: { kind: 'message', messageId: 'm-1' as MessageId, rating: 'positive' } })
+
+    expect(ui.queryAllByRole('checkbox')).toHaveLength(0)
+    expect(ui.queryByText(zh['share.legend'])).toBeNull()
+  })
+
   it('selects a chip, and clears it when the selected chip is clicked again', () => {
     const ui = mount({ category: 'task-result' })
 
@@ -100,6 +130,7 @@ describe('FeedbackDialog', () => {
     expect(ui.getByRole('button', { name: commonZh.submitting }).hasAttribute('disabled')).toBe(true)
     const chips = ui.getByRole('group', { name: zh['dialog.categories'] }).querySelectorAll('button')
     expect([...chips].every(chip => chip.hasAttribute('disabled'))).toBe(true)
+    expect(ui.getAllByRole('checkbox').every(box => box.hasAttribute('disabled'))).toBe(true)
   })
 
   it('renders submission failures as toasts outside the dialog', () => {

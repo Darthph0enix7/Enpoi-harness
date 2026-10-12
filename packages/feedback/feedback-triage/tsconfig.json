@@ -1,0 +1,21 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../../../vendor/cordis" },
+    { "path": "../../../vendor/schemastery" },
+    { "path": "../../../vendor/cosmokit" },
+    { "path": "../../core/session" },
+    { "path": "../../core/agent" },
+    { "path": "../../session/session-title" },
+    { "path": "../../preset/agent-preset-registry" },
+    { "path": "../../util/brand" },
+    { "path": "../../util/home-paths" },
+    { "path": "../../llm/llm" },
+    { "path": "../feedback-collect" }
+  ]
+}

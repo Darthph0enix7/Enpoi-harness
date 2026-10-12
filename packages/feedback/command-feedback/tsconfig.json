@@ -25,6 +25,12 @@
     },
     {
       "path": "../../typert/protocol"
+    },
+    {
+      "path": "../../llm/llm"
+    },
+    {
+      "path": "../feedback-collect"
     }
   ]
 }

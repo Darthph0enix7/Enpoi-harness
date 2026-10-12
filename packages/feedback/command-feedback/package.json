@@ -48,7 +48,9 @@
     "@deepseek-ai/dsh-session": "workspace:*",
     "@deepseek-ai/dsh-anonymous-user-id": "workspace:*",
     "@deepseek-ai/cordis": "workspace:~",
-    "@deepseek-ai/dsh-typert-protocol": "workspace:*"
+    "@deepseek-ai/dsh-typert-protocol": "workspace:*",
+    "@deepseek-ai/dsh-feedback-collect": "workspace:*",
+    "@deepseek-ai/dsh-llm": "workspace:*"
   },
   "dependencies": {
     "zod": "^4.4.3"
@@ -63,6 +65,7 @@
     "@deepseek-ai/dsh-session": "workspace:*",
     "@deepseek-ai/dsh-anonymous-user-id": "workspace:*",
     "@deepseek-ai/cordis": "workspace:~",
-    "@deepseek-ai/dsh-typert-protocol": "workspace:*"
+    "@deepseek-ai/dsh-typert-protocol": "workspace:*",
+    "@deepseek-ai/dsh-feedback-collect": "workspace:*"
   }
 }
