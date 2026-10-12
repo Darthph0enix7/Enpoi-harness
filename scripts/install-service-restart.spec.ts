@@ -125,8 +125,8 @@ describe('installer restart_service on macOS', () => {
     expect(result.status).toBe(0)
     const at = order(result.log)
     expect(at.bootout).toBeGreaterThanOrEqual(0)
-    expect(at.bootstrap).toBeGreaterThan(at.bootout)
-    expect(at.kickstart).toBeGreaterThan(at.bootstrap)
+    expect(at.bootstrap ?? -1).toBeGreaterThan(at.bootout ?? -1)
+    expect(at.kickstart ?? -1).toBeGreaterThan(at.bootstrap ?? -1)
     expect(result.log).toContain(`${UNIT}.plist`)
     expect(result.output).toContain('reloaded')
     expect(result.output).not.toContain('service restart failed')
@@ -206,8 +206,8 @@ describe('installer tailnet trusted-hosts reload on macOS', () => {
       kickstart: lines.findIndex(line => line.startsWith('kickstart ')),
     }
     expect(at.bootout).toBeGreaterThanOrEqual(0)
-    expect(at.bootstrap).toBeGreaterThan(at.bootout)
-    expect(at.kickstart).toBeGreaterThan(at.bootstrap)
+    expect(at.bootstrap ?? -1).toBeGreaterThan(at.bootout ?? -1)
+    expect(at.kickstart ?? -1).toBeGreaterThan(at.bootstrap ?? -1)
     expect(result.output).toContain('reloaded')
     expect(result.output).not.toContain('load it with: launchctl bootstrap')
   })
