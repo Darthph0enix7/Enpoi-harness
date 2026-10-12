@@ -3538,6 +3538,25 @@ detect_service_unit() {
   return 0
 }
 
+# Reload a LaunchAgent after its plist changed (or to (re)load it at all).
+# kickstart alone keeps the OLD job definition when the file was rewritten —
+# the real-device incident where a tailnet trusted-hosts write made every
+# subsequent restart fail until the job was fully reloaded. bootout of a job
+# that is not loaded is not an error, so the sequence is idempotent.
+# Returns 0 loaded+kicked, 1 bootstrap failed with a GUI domain present,
+# 2 no GUI login session (headless/SSH-only Mac; the job loads at next login).
+launchagent_reload() { # label plist
+  local label="$1" plist="$2" uid
+  uid="$(id -u)"
+  launchctl bootout "gui/$uid/$label" >/dev/null 2>&1 || true
+  if launchctl bootstrap "gui/$uid" "$plist" >/dev/null 2>&1; then
+    launchctl kickstart -k "gui/$uid/$label" >/dev/null 2>&1 || true
+    return 0
+  fi
+  launchctl print "gui/$uid" >/dev/null 2>&1 || return 2
+  return 1
+}
+
 restart_service() {
   if [ -z "$SERVICE_UNIT" ]; then
     log "service: no unit recorded for this install; not restarting anything"
@@ -3547,24 +3566,32 @@ restart_service() {
   case "$OS" in
     linux) systemctl --user restart "$SERVICE_UNIT" || warn "service restart failed";;
     darwin)
-      # kickstart fails with `Could not find service ... in domain` when the
-      # unit file exists but was never loaded (or was unloaded since install).
-      # Load it first with the same probe/remedy the repair path uses; a
-      # headless/SSH-only Mac has no GUI domain, so the unit simply loads at
-      # the next desktop login and the update is not a failure.
-      local uid plist
+      # A plist rewrite (tailnet trusted hosts, profile refresh, a new tree's
+      # paths) is invisible to kickstart alone: macOS keeps the OLD job
+      # definition until the job is fully reloaded. Always go through
+      # bootout -> bootstrap -> kickstart, which is also the remedy for a unit
+      # that was never loaded. A headless/SSH-only Mac has no GUI domain, so
+      # the unit simply loads at the next desktop login and the update is not
+      # a failure.
+      local uid plist rc
       uid="$(id -u)"
       plist="$HOME/Library/LaunchAgents/$SERVICE_UNIT.plist"
-      if launchctl print "gui/$uid/$SERVICE_UNIT" >/dev/null 2>&1; then
-        launchctl kickstart -k "gui/$uid/$SERVICE_UNIT" || warn "service restart failed"
-      elif [ ! -f "$plist" ]; then
-        warn "service restart failed: launchd unit $SERVICE_UNIT is not loaded and $plist does not exist; run 'dsh service install'"
-      elif launchctl bootstrap "gui/$uid" "$plist" >/dev/null 2>&1; then
-        log "service: $SERVICE_UNIT was not loaded; bootstrapped it"
-      elif launchctl print "gui/$uid" >/dev/null 2>&1; then
-        warn "service restart failed: launchctl bootstrap gui/$uid '$plist'"
+      if [ ! -f "$plist" ]; then
+        if launchctl print "gui/$uid/$SERVICE_UNIT" >/dev/null 2>&1; then
+          launchctl kickstart -k "gui/$uid/$SERVICE_UNIT" >/dev/null 2>&1 \
+            && log "service: restarted $SERVICE_UNIT (job loaded; no plist on disk)" \
+            || warn "service restart failed"
+        else
+          warn "service restart failed: launchd unit $SERVICE_UNIT is not loaded and $plist does not exist; run 'dsh service install'"
+        fi
       else
-        log "service: no GUI login session for gui/$uid (headless or SSH-only Mac); $SERVICE_UNIT starts at the next desktop login"
+        launchagent_reload "$SERVICE_UNIT" "$plist"
+        rc=$?
+        case "$rc" in
+          0) log "service: reloaded $SERVICE_UNIT (bootout/bootstrap/kickstart)";;
+          2) log "service: no GUI login session for gui/$uid (headless or SSH-only Mac); $SERVICE_UNIT starts at the next desktop login";;
+          *) warn "service restart failed: launchctl bootstrap gui/$uid '$plist'";;
+        esac
       fi
       ;;
   esac
@@ -4276,8 +4303,15 @@ ensure_tailnet_darwin() { # ip host
         TAILNET_TRUST_STATUS="added to $unit"
         substep_ok "tailnet: added trusted hosts to $unit"
         if command -v launchctl >/dev/null 2>&1; then
-          launchctl bootout "gui/$(id -u)/$unit" >/dev/null 2>&1 || true
-          launchctl bootstrap "gui/$(id -u)" "$plist" >/dev/null 2>&1 || warn "tailnet: wrote the trusted hosts into $plist; load it with: launchctl bootstrap gui/$(id -u) $plist"
+          # The rewrite changed the job definition: reload it now instead of
+          # printing an instruction the operator must run by hand.
+          launchagent_reload "$unit" "$plist"
+          rc=$?
+          case "$rc" in
+            0) substep_ok "tailnet: reloaded $unit with the trusted hosts";;
+            2) log "tailnet: no GUI login session for gui/$(id -u); $unit loads with the new trusted hosts at the next desktop login";;
+            *) warn "tailnet: wrote the trusted hosts into $plist but could not reload it; load it with: launchctl bootstrap gui/$(id -u) $plist";;
+          esac
         fi
         ;;
       2)
@@ -6117,12 +6151,19 @@ health_proof_robust() { # 0 pass, 1 fail
   esac
   if [ -n "$SERVICE_UNIT" ]; then
     if command -v launchctl >/dev/null 2>&1; then
-      launchctl kickstart -k "gui/$(id -u)/$SERVICE_UNIT" >/dev/null 2>&1 || true
+      # Same full-reload requirement as restart_service: a changed plist
+      # (tailnet rewrite, new tree paths) never takes effect through kickstart.
+      local plist="$HOME/Library/LaunchAgents/$SERVICE_UNIT.plist"
+      if [ -f "$plist" ]; then
+        launchagent_reload "$SERVICE_UNIT" "$plist" >/dev/null 2>&1 || true
+      else
+        launchctl kickstart -k "gui/$(id -u)/$SERVICE_UNIT" >/dev/null 2>&1 || true
+      fi
     elif command -v systemctl >/dev/null 2>&1; then
       { systemctl --user restart "$SERVICE_UNIT" 2>/dev/null || systemctl restart "$SERVICE_UNIT" 2>/dev/null; } || true
     fi
     sleep 2
-    health_proof && { say "  health: service recovered (kickstart)"; return 0; }
+    health_proof && { say "  health: service recovered (reload)"; return 0; }
   fi
   HEALTH_SERVICE_ONLY=1
   return 1
@@ -6320,6 +6361,25 @@ rollback() { # prev backup failed_version
     restart_service
   fi
   restore_user_files "$backup" || restore_rc=1
+  # One more reload after the user-file restore (warn-only): the job may still
+  # carry the failed tree's paths or a rewritten plist, and the service must be
+  # left running the restored tree. The in-session path defers to the
+  # after-turn restart instead.
+  if [ "$in_session" != 1 ] && [ -n "$SERVICE_UNIT" ]; then
+    case "$OS" in
+      darwin)
+        local rb_plist="$HOME/Library/LaunchAgents/$SERVICE_UNIT.plist"
+        if [ -f "$rb_plist" ]; then
+          launchagent_reload "$SERVICE_UNIT" "$rb_plist" >/dev/null 2>&1 \
+            && log "rollback: service reloaded onto $prev" \
+            || warn "rollback: could not reload $SERVICE_UNIT; the service may still run the failed tree"
+        fi
+        ;;
+      linux)
+        systemctl --user restart "$SERVICE_UNIT" >/dev/null 2>&1 || warn "rollback: could not restart $SERVICE_UNIT"
+        ;;
+    esac
+  fi
   # Never archive the tree being restored, and never rename a pre-existing
   # reused tree away: a failed pin-back to a known-good build must leave it
   # reusable.
