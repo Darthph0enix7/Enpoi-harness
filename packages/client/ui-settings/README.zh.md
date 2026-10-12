@@ -43,7 +43,7 @@ kind: "package-reference"
 
 ### 可观察的成功与失败
 
-已提交的写入将应答合入共享镜像。被拒绝的写入刷新最新 Host 值。浏览器使用序列化的 Config schema 校验；Host 校验完整配置，包括无法序列化的检查。
+已提交的写入将应答合入共享镜像，并在写入过网期间乐观发布其分区（表单快照中为 `pending`）；被拒绝的写入通过刷新最新 Host 值回滚覆盖层。浏览器使用序列化的 Config schema 校验；Host 校验完整配置，包括无法序列化的检查。
 
 -----
 
@@ -59,11 +59,11 @@ kind: "package-reference"
 
 ### Describe 镜像
 
-`ui-settings` 条目的 Host Config 声明默认开启的 `enabled` 偏好。Client 插件注入 `remote` 及其 `settings` 命名空间，从固定的 `remote.$host` 事实一次性解析 Host 持久化模式，并持有浏览器中唯一的 `settings.describe` 读取方：一面共享镜像，在每次转发的 `settings/document-updated` 事件与 `connection/reset` 时刷新（首次连接也包含在内，关闭「提交落在急切读取与 SSE 订阅之间」的窗口）。跨命名空间表面通过 `ctx.configForms.describe()` 读它，这是一个读取/折叠面（`getSnapshot`/`subscribe`/`ensure`，另有把写应答折入的 `acceptView`）。
+`ui-settings` 条目的 Host Config 声明默认开启的 `enabled` 偏好。Client 插件注入 `remote` 及其 `settings` 命名空间，从固定的 `remote.$host` 事实一次性解析 Host 持久化模式，并持有浏览器中唯一的 `settings.describe` 读取方：一面共享镜像，在每次转发的 `settings/document-updated` 事件与 `connection/reset` 时刷新（首次连接也包含在内，关闭「提交落在急切读取与 SSE 订阅之间」的窗口）。公告会指明一个命名空间及其修订：由本客户端自己写应答折叠出的修订无需读取；在该写入在途期间公告的修订则让位于写应答，因此自回声绝不会重新抓取整个文档。wire 重读会复用每个修订与投影值都未变动的命名空间所持有的行，因此只有变动命名空间的 `subscribeNamespace` 监听者会被唤醒；`subscribe` 仍是整文档通道。跨命名空间表面通过 `ctx.configForms.describe()` 读它，这是一个读取/折叠面（`getSnapshot`/`subscribe`/`ensure`，另有把写应答折入的 `acceptView`）。
 
 ### 共享条目写入
 
-提供者为每个 Host 条目持有一个控制器，包括其订阅和写入队列；重复调用 `get(entryId)` 返回同一表单。消费者释放自己的视图订阅。不创建调用方作用域的配置绑定。启动 RPC 预算覆盖共享的 describe 读取。
+提供者为每个 Host 条目持有一个控制器，包括其命名空间切片订阅和写入队列；重复调用 `get(entryId)` 返回同一表单。表单只在其自身命名空间行被替换时重新派生，修订与值都未变动的行会被跳过，排队写入的操作在已接受分区上保留至其落定。消费者释放自己的视图订阅。不创建调用方作用域的配置绑定。启动 RPC 预算覆盖共享的 describe 读取。
 
 ### Schema 服务
 

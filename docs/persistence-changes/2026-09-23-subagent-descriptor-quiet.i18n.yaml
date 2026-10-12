@@ -1,6 +1,28 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-23-subagent-descriptor-quiet.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/persistence-changes/2026-09-23-subagent-descriptor-quiet.md
-2026-09-23-subagent-descriptor-quiet.md: 31fa299acc0a5c2bdcfd32d29834289de3c42469
-2026-09-23-subagent-descriptor-quiet.zh.md: c3547eeab1621e243f6677eddb1291b04d8228ea
+/:
+  en: 3d5a424ae7d7e46b
+  zh: c22a8e4a62d8cc1a
+/2026-09-23-subagent-descriptor-quiet:
+  en: 7b304f25ec916acd
+  zh: abfc7ae34491a02a
+/2026-09-23-subagent-descriptor-quiet/summary:
+  en: 23b499748cd528e4
+  zh: 02031387dd4ee178
+/2026-09-23-subagent-descriptor-quiet/table-of-contents:
+  en: 6cf314a069ceb451
+  zh: 9adff678e9ecab3b
+/2026-09-23-subagent-descriptor-quiet/declaration:
+  en: 6907136f28e48c90
+  zh: 02f8298485f3d8e7
+/2026-09-23-subagent-descriptor-quiet/compatibility:
+  en: 436bb2d9cad179ee
+  zh: 195af2c292a5b9f3
+/2026-09-23-subagent-descriptor-quiet/verification:
+  en: a3b648372a354183
+  zh: c5ae8814d9b0234f
+/2026-09-23-subagent-descriptor-quiet/dev-note:
+  en: b75c8458928b72b9
+  zh: 003ba4e17b4b5269

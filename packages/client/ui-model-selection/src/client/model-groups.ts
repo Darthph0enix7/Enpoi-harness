@@ -25,7 +25,6 @@ export const MODEL_GROUPS_STORAGE_KEY = 'dsh_model_groups_v1'
 export const MODEL_GROUPS_CHANGED_EVENT = 'dsh:model-groups-changed'
 
 let groups: readonly ModelGroup[] = []
-const listeners = new Set<() => void>()
 let inflight: Promise<void> | undefined
 let loaded = false
 
@@ -41,10 +40,6 @@ function sharedDescribe(): (() => Promise<{ namespaces?: readonly unknown[] } | 
     : undefined
 }
 
-function notify(): void {
-  for (const listener of listeners) listener()
-}
-
 function publish(next: readonly ModelGroup[]): void {
   groups = next
   loaded = true
@@ -53,7 +48,6 @@ function publish(next: readonly ModelGroup[]): void {
   } catch {
     // Storage disabled (private mode, quota): the in-memory cache still serves.
   }
-  notify()
 }
 
 /** Read the mirror a previous load wrote, for a first paint before the fetch. */
@@ -82,19 +76,6 @@ export function modelGroupById(id: string): ModelGroup | undefined {
   return getModelGroups().find(group => group.id === id)
 }
 
-/** Resolve a group's display label, or undefined for an unknown/dangling id. */
-export function modelGroupLabel(id: string): string | undefined {
-  return modelGroupById(id)?.label
-}
-
-/** Subscribe to registry replacements (returns the unsubscribe). */
-export function subscribeModelGroups(listener: () => void): () => void {
-  listeners.add(listener)
-  return () => {
-    listeners.delete(listener)
-  }
-}
-
 /**
  * Refresh unless one load already published; resolves once the cache is usable.
  * A picker mounted before the import-time fetch settled uses this to repaint.
@@ -106,7 +87,7 @@ export function ensureModelGroups(): Promise<void> {
 
 /**
  * Re-read `enpoi-orchestration.chains` through the live gateway.
- * @returns nothing; the cache and its subscribers carry the outcome.
+ * @returns nothing; the cache carries the outcome.
  */
 export function refreshModelGroups(): Promise<void> {
   if (inflight !== undefined) return inflight

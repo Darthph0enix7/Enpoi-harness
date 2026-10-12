@@ -54,6 +54,10 @@ Web 与桌面端的通用设置底部显示当前发布版本，使用构建注�
 -----
 
 <a id="understand-the-implementation"></a>
+### 从其他功能打开分区
+
+外壳发布 `ctx.settingsUi`（`SettingsUiService`）——面向其他功能的客户端入口：`openSection(id)` 直接在某一个已注册的 `settings.section` id 上打开设置面板（未知 id 仍会打开面板）。外壳组件在挂载时重新发布其实时处理器、在卸载时清除，因此该服务始终跟随当前渲染的实例。Enpoi capabilities 抽屉用它实现「在设置中管理」链接，权限摘要卡片也用它实现「编辑规则」操作。
+
 ## 理解实现
 
 外壳声明 settings.launcher，供账号功能提供侧边栏菜单，并以设置按钮作为回退。入口接收 settingsOpen，其 false→true 边沿代表一次进入设置页，因此注册方在每次进入时执行一次，而不是在同一次打开中的每次重渲染执行。关闭对话框后，焦点返回当前入口。

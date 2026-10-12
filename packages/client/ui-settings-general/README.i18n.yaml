@@ -21,11 +21,14 @@
   en: 8b8a7c6287bb303b
   zh: 19535112531aedd5
 /deepseek-ai-dsh-client-ui-settings-general/use-this-package/opening-the-configuration-file:
-  en: ca2b4f5ccfbe2705
+  en: f493159e7c2184eb
   zh: bd1dc1d9879d0f0e
 /deepseek-ai-dsh-client-ui-settings-general/use-this-package/onboarding-steps:
   en: 27f0f6ec55f00228
   zh: 69b47ff1efd81c17
+/deepseek-ai-dsh-client-ui-settings-general/use-this-package/opening-a-section-from-another-feature:
+  en: 00392a669ef1962b
+  zh: 7b2094fc225364ef
 /deepseek-ai-dsh-client-ui-settings-general/understand-the-implementation:
   en: 41726bcd4ae37c0a
   zh: d994b70ca7997da8
@@ -36,7 +39,7 @@
   en: e37fb7df883ea356
   zh: c972524e56c6d6c2
 /deepseek-ai-dsh-client-ui-settings-general/understand-the-implementation/document-availability:
-  en: 474168eef3339de0
+  en: bef44fd57e360a50
   zh: 254ea21415082dae
 /deepseek-ai-dsh-client-ui-settings-general/understand-the-implementation/host-half:
   en: 5d722d055516f905
@@ -54,5 +57,5 @@
   en: 97dd637a320ac334
   zh: faa5c512c56a128e
 /deepseek-ai-dsh-client-ui-settings-general/known-limitations-and-deferred-work/dev-note:
-  en: b36039e49a66b8e0
+  en: cc6c7599973c32c2
   zh: 306682cd90cce1db

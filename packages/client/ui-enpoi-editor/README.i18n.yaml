@@ -1,6 +1,49 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/client/ui-enpoi-editor/README.md
-README.md: 0441634a5b508cadbdf948bf8a23123e92bd7f2e
-README.zh.md: cb51269f43008d755b3a1ff32bc0521989cd1b13
+/:
+  en: 1832f09ab6b366c8
+  zh: 6bacb334992bf227
+/deepseek-ai-dsh-client-ui-enpoi-editor:
+  en: b72868d5633589cc
+  zh: 200fef05aaab2a5a
+/deepseek-ai-dsh-client-ui-enpoi-editor/summary:
+  en: 141fc5f6125a211c
+  zh: da0b608febdf2de1
+/deepseek-ai-dsh-client-ui-enpoi-editor/table-of-contents:
+  en: 3cbee1b70dfc45d4
+  zh: 09c3faf5c1ff58da
+/deepseek-ai-dsh-client-ui-enpoi-editor/what-it-registers:
+  en: b661e8b9ee02f340
+  zh: a3a32eb29d655d91
+/deepseek-ai-dsh-client-ui-enpoi-editor/editing-and-saving:
+  en: cfcf6256529b9812
+  zh: 16d9981cdc7c2dc2
+/deepseek-ai-dsh-client-ui-enpoi-editor/finding-and-navigating:
+  en: 21cf753c9f5402fb
+  zh: 2f7d68a57eb24ed4
+/deepseek-ai-dsh-client-ui-enpoi-editor/external-changes:
+  en: a84672ebe8d78c01
+  zh: aa53ce429e1d1589
+/deepseek-ai-dsh-client-ui-enpoi-editor/model-experience:
+  en: 215e7ba838619b7b
+  zh: a311da3843709f90
+/deepseek-ai-dsh-client-ui-enpoi-editor/model-experience/browser-side-editor:
+  en: f4c00b2746f19039
+  zh: ed7a37a55fe53055
+/deepseek-ai-dsh-client-ui-enpoi-editor/model-experience/browser-side-editor/what-the-model-sees:
+  en: 235d697545641010
+  zh: 79d18c3f2f0e4b9f
+/deepseek-ai-dsh-client-ui-enpoi-editor/model-experience/browser-side-editor/token-effect:
+  en: 61ea07d9840168dd
+  zh: c0de763d5b7874ba
+/deepseek-ai-dsh-client-ui-enpoi-editor/model-experience/browser-side-editor/kv-cache-effect:
+  en: ca75c51c89c2c9b0
+  zh: 6c9e01d76d7ff3c7
+/deepseek-ai-dsh-client-ui-enpoi-editor/known-limitations-and-deferred-work:
+  en: 1cd973a547eeed9e
+  zh: c50c03ecd7eae10b
+/deepseek-ai-dsh-client-ui-enpoi-editor/known-limitations-and-deferred-work/dev-note:
+  en: ba11b191b451b226
+  zh: 6af2beea56d251e9

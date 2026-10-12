@@ -1,5 +1,7 @@
 # dsh-enpoi-verify-gate
 
+English | [中文](README.zh.md)
+
 Turn-end verification gate. It closes a live-observed defect: an agent ends a
 turn claiming success while **its own last verification failed** (a session ran
 `pytest`, saw `assert [] == [7]`, then ended the turn as `completed` without

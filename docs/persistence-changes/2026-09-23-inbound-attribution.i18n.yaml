@@ -1,6 +1,28 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-23-inbound-attribution.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/persistence-changes/2026-09-23-inbound-attribution.md
-2026-09-23-inbound-attribution.md: 340c1c37eda561368f1a9b9300768591323f2636
-2026-09-23-inbound-attribution.zh.md: a5cd389eb620a6a2191adcdb71ce1a9c475233c7
+/:
+  en: 3d5a424ae7d7e46b
+  zh: c22a8e4a62d8cc1a
+/2026-09-23-inbound-attribution:
+  en: ba3900e1b0514725
+  zh: b4a4268f684775fb
+/2026-09-23-inbound-attribution/summary:
+  en: 315f909205cecf06
+  zh: aa869c036f5123f1
+/2026-09-23-inbound-attribution/table-of-contents:
+  en: 6cf314a069ceb451
+  zh: 9adff678e9ecab3b
+/2026-09-23-inbound-attribution/declaration:
+  en: 6907136f28e48c90
+  zh: 02f8298485f3d8e7
+/2026-09-23-inbound-attribution/compatibility:
+  en: 8d6cdd187ae07e8c
+  zh: 938e2739cfda21fa
+/2026-09-23-inbound-attribution/verification:
+  en: f7f4ab6e6cc71639
+  zh: 18d2b8a47760a8e2
+/2026-09-23-inbound-attribution/dev-note:
+  en: b75c8458928b72b9
+  zh: 003ba4e17b4b5269

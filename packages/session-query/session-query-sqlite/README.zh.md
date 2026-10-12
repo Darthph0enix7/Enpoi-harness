@@ -50,13 +50,14 @@ kind: "package-reference"
 | `snippetChars` | `240` | 按 Unicode 码点计算的最大 snippet 长度 |
 | `readWindowMax` | `50` | 继承的 `readEvent()` 的 `before`/`after` 原始事件数上限 |
 | `persistedReadConcurrency` | `4` | 继承批量读取的并发持久化日志读取数 |
-| `preparedSessionCacheSize` | `5` | 继承的 `observeSession` 读取器为复用保留的冷 prepared-Session 观察数 |
+| `preparedSessionCacheSize` | `5` | 继承的 `observeSession` 读取器为复用而保留的冷启动 prepared-Session 观察数 |
+| `firstSearchWaitMs` | `20000` | 跨会话搜索等待后台索引轮次的有界时长，超时后报告带编码的索引状态；上限 25000，以确保低于工具截止时间 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-session-query-sqlite)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
 ### 搜索行为
 
-`searchSessions` 搜索整个语料库，并按每个会话匹配最强的事件分组结果；`searchEvents` 搜索一个逻辑会话。查询是字面短语：首尾空白会被移除、内部空白会被规范化，引号、`OR`、`NEAR` 和 `*` 等 FTS5 语法被视为数据，绝不作为可执行查询语法。元数据过滤器（会话 id、cwd、创建时间、父级、可用性、事件 seq/时间/类型/表层）在排序前缩小结果。默认搜索全部 `current`、`shadowed` 与 `log-only` 事件；传入表层过滤器可缩小范围。
+`searchSessions` 搜索整个语料库，并按每个会话匹配最强的事件分组结果；`searchEvents` 搜索一个逻辑会话。索引维护绝不阻塞工具路径：事件搜索只为目标会话建索引并立即应答，而全语料库轮次在后台运行、每次提交一个会话。跨会话搜索最多等待 `firstSearchWaitMs`（每轮一次）让后台轮次推进，随后以 `SESSION_QUERY_INDEXING` 拒绝（原因中带 `indexed/total` 进度），而不是阻塞到调用方截止时间；`indexState` 报告该轮的状态与计数。重复搜索绝不重启该轮次。查询是字面短语：首尾空白会被移除、内部空白会被规范化，引号、`OR`、`NEAR` 和 `*` 等 FTS5 语法被视为数据，绝不作为可执行查询语法。元数据过滤器（会话 id、cwd、创建时间、父级、可用性、事件 seq/时间/类型/表层）在排序前缩小结果。默认搜索全部 `current`、`shadowed` 与 `log-only` 事件；传入表层过滤器可缩小范围。
 
 排序是确定性的：实际 FTS5 高亮匹配 span 更多的在前，然后文档更短的在前，事件时间、会话 id 与 seq 打破平局。结果携带按 `snippetChars` 个 Unicode 码点截断的纯文本摘录，没有提供方专用数值分数。分页通过不透明 `SessionSearchCursor` 延续，游标绑定到规范化后的确切请求；相关语料库变化时游标变为陈旧（`SESSION_QUERY_STALE_CURSOR`），会话内游标可在不相关会话变化后延续，跨会话游标则不能。
 
@@ -145,6 +146,7 @@ kind: "package-reference"
 - **同步查询执行**——`DatabaseSync` 在 MATCH 执行期间会阻塞 JavaScript 线程，且无法中断已运行的语句。
 - **Token 召回，而非任意子字符串**——`unicode61` tokenizer 不会匹配更大 token 中的子字符串；对字面扫描使用 `filterEvents()`。
 - **单一所有者的派生索引**——每个索引路径必须仅归一个进程中的一个服务所有；不支持外部写入者与多进程共享。
+- **首次全语料库轮次是后台工作**——在大存储上该轮次可能耗时数分钟；跨会话搜索在达到 `ready` 之前报告 `SESSION_QUERY_INDEXING`，而按会话的事件搜索与精确读取全程可用。该轮次不作为可恢复任务持久化；重启会在存储上开始新一轮（已是最新的会话会被跳过）。
 
 <a id="dev-note"></a>
 ### 开发备注

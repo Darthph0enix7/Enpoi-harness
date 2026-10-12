@@ -38,7 +38,9 @@ kind: "package-reference"
 <details>
 <summary>实现内部细节——点击展开</summary>
 
-[编辑器](src/index.ts) 在派生候选配置前应用外部更改，与其他 profile 操作共同锁定 profile manifest，并原子替换配置覆盖项。它保留替换值以外的 YAML 注释和 `!!js` 表达式。应用失败时恢复之前的文档并重新加载之前的 patch。
+[编辑器](src/index.ts) 在派生候选配置前应用外部更改，与其他 profile 操作共同锁定 profile manifest，并原子替换配置覆盖项。它保留替换值以外的 YAML 注释和 `!!js` 表达式。应用失败时恢复之前的文档并重新加载之前的 patch。与当前条目配置相同的候选会在 profile 重载前直接返回，因此无操作的编辑不产生持锁的对账、文档写入或重载；比较基准是内存中的实时状态，HMR 监视器则对带外文档变更做对账。
+
+每次写入都会丢弃可选 `modelChains` 注册表无法路由的 `chain` 引用——注册表缺失、组 id 未知或被禁用、id 为空——并给出警告，因为 LLM 运行时对这类引用会失败开放到请求自身的模型。该检查在写入内部执行，因此会把实时配置中携带的陈旧引用一并修复，而不是让它复活。
 
 此包不发布 invariant companion：编辑器不维护独立配置投影。Loader 和持久化的 profile patch 拥有配置状态。
 

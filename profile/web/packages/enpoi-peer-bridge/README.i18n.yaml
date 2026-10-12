@@ -1,0 +1,22 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write profile/web/packages/enpoi-peer-bridge/README.md
+/dsh-enpoi-peer-bridge:
+  en: fdc5f2d2056c0c2d
+  zh: 68a315c81cc6d88a
+/dsh-enpoi-peer-bridge/tools:
+  en: e56b4540a4f8da83
+  zh: def51648b11c9698
+/dsh-enpoi-peer-bridge/pairing-document:
+  en: 057a6aa47f2d5c78
+  zh: e9867647d533c32a
+/dsh-enpoi-peer-bridge/remote-asks:
+  en: 22328f17b1a41d3d
+  zh: 7611e136e4f058ac
+/dsh-enpoi-peer-bridge/follow-reliability:
+  en: fa1b82d991b4fe9c
+  zh: 5e9302b762151157
+/dsh-enpoi-peer-bridge/known-limitations-and-deferred-work:
+  en: 2ddbc84e2698760a
+  zh: 56062763f8e0d258

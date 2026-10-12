@@ -89,12 +89,14 @@ kind: "package-reference"
 |---|---|
 | [`src/index.ts`](src/index.ts) | 插件入口：工具注册、提示词区段、参数校验、升权、请求组装 |
 | [`src/background.ts`](src/background.ts) | 把已结算的进程映射为通用任务结果词汇，并把输出环读取渲染为进程读取 |
-| [`src/render.ts`](src/render.ts) | 模型侧结果文本：流、标记、截断通知（bash 孪生） |
+| [`src/render.ts`](src/render.ts) | 模型侧结果文本（流、标记、截断通知）以及工具自有的结果 `meta` 投影（bash 孪生） |
 | — | 不发布运行时不变式伴生入口；除所属 seam 强制执行的约定外，本包不公开独立的事件序列或可变数据关系。 |
 
 ### 渲染与退出标记
 
 渲染器共享 bash 工具的结构与来自 `dsh-shell` 的 `parseExitStatus` 标记约定：干净退出（0、无信号）不产生标记；UI 卡片把退出标记消费为退出状态 pill。Windows 强制终止以 exit 1 结算且没有信号，因此 `[killed by signal: …]` 仅适用于 POSIX。`tool:pwsh` 提示词区段（first-party 顺序 1010）教授退出标记约定与「中断后 exit 1」的 Windows 解读。
+
+已完成的前台结果还会以工具自有的 `tool/result` 元数据携带同一结果——`{ exitCode, signal?, timedOut? }`，与 bash 工具同形——因此收集器、对等 agent 或 UI 可以结构化地读取退出信息，而不必解析标记文本；后台确认则投影为 `{}`，因为调用点不存在进程退出。`isError` 不变：非零退出是文本与元数据中报告的命令失败，绝不是一次失败的工具调用。
 
 </details>
 

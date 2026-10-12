@@ -25,9 +25,6 @@ export interface CapabilityOverrideRecord {
 /** Which layer an edit targets. */
 export type ScopingMode = 'defaults' | 'session'
 
-/** The empty record (everything inherits). */
-export const EMPTY_OVERRIDES: CapabilityOverrideRecord = { skills: {}, tools: {}, mcp: {} }
-
 /**
  * Which layer the center edits.
  * @param sessionId - the tab's bound session, when any.

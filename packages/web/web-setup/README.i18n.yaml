@@ -10,7 +10,7 @@
   zh: bc894fe1e5030b08
 /deepseek-ai-dsh-web-setup/summary:
   en: f8dac1481348373b
-  zh: 9231177d7ca1677a
+  zh: 276c2be2f9e9211a
 /deepseek-ai-dsh-web-setup/table-of-contents:
   en: 8e295f78565ec141
   zh: 3d2416e5a21b3f36
@@ -62,3 +62,6 @@
 /deepseek-ai-dsh-web-setup/known-limitations-and-deferred-work:
   en: 1961036736fe3a6c
   zh: c38074bf19ee0674
+/deepseek-ai-dsh-web-setup/known-limitations-and-deferred-work/dev-note:
+  en: e67f633dc6fe7773
+  zh: 3bb0c20c93f16f98

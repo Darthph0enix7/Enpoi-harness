@@ -7,11 +7,11 @@ kind: "package-reference"
 
 [English](README.md) | 中文
 
-## Summary
+## 概述
 
 在两个发布版本之间计算并执行更新，同时不丢失用户添加或修改的任何内容。本包是最优安装/更新设计（`dsh-migration/95-optimal-install-update-design.md`）的 P2 部分：清单工具（§2.1）、完整决策矩阵（§3.2）、内嵌三方合并网（§3.1–§3.5），以及带中断日志与合格校验的分阶段 apply（§2.3）。它是不依赖任何外部依赖、不使用 Cordis、不调用宿主 `git`/`diff3` 的纯 Node/TypeScript 实现；它只接受显式传入的树根路径，绝不猜测任何前缀。`scripts/install.sh` 会在每次预构建更新中将它作为 CLI 调用。
 
-## Table of Contents
+## 目录
 
 - [使用本包](#use-this-package)
 - [理解实现](#understand-the-implementation)
@@ -63,6 +63,10 @@ dsh-update-engine discard --staging <dir> [--journal <file>]
 
 配置/数据冲突保留本地、写出 `.new-<version>` 检查边车，apply 继续执行。运行时代码冲突（`.js`、`.mjs`、`.cjs`、`.jsx`、`.ts`、`.tsx`、`.mts`、`.cts`、`.wasm`、`.node`）将计划标记为 `switchDecision: 'abort'`：apply 在活动文件旁写出检查边车并返回，完全不触碰 staging，因此当前版本保持活动。
 
+### 扫描索引
+
+`scanTree` 消费并刷新 `<tree>/.dsh-scan-index`（doc 97 §3）：一个紧凑的、按路径索引的 stat 缓存，字段 BigInt 安全（mtime/ctime 纳秒、inode、设备号），并以 tmp+rename 原子写入。信任锚点是索引文件自身的 mtime；仅当新 stat 完全匹配、且两个时间戳都严格早于索引文件时才信任条目（racy-git 规则，ctime 封堵 `utimes` 绕过）。缺失/损坏/未来时间戳的索引回退为一次带进度的完整扫描并重写；保留路径对每个遍历、分类与校验面都不可见，成功的 apply 会在目录改名之前为新树写入索引。
+
 ### 分阶段 apply 与校验
 
 播种阶段用硬链接把本地树链接进 staging；每次写入都先 unlink 目标，再经过固定名的临时文件加 rename，因此任何写入都不可能通过共享 inode 修改活动树。日志将 staging 目录绑定到计划指纹，记录每个完成的动作，并在每个阶段写入。指纹匹配的再次进入会幂等恢复（每个动作重新检查并修复其 staged 状态）；指纹不匹配会报告为 `rollback-required`，因为该 staging 目录属于另一个计划。`stopAfterActions` 是崩溃恢复测试使用的确定性中断点。合格校验只接受：随包路径等于清单哈希、保留路径等于记录的 merge-keep/merge-output 哈希、墓碑路径缺失、每个未跟踪路径存在且被列出；它还会报告任何计划未解释的 staged 路径。该过程最后重新哈希被触碰的活动路径，证明其 inode 与哈希未发生变化。
@@ -113,7 +117,7 @@ dsh-update-engine discard --staging <dir> [--journal <file>]
 - **大小写不敏感文件系统行为不在此处验证**（设计 §7.5）；它需要平台验收通道。
 
 <a id="dev-note"></a>
-### Dev Note
+### 开发备注
 
 <details>
 <summary>维护者工作上下文——点击展开</summary>

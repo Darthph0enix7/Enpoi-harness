@@ -39,7 +39,7 @@ kind: "package-reference"
 <details>
 <summary>实现细节——点击展开</summary>
 
-宿主半侧是一个空的 `apply`，只为让本包占一条 Loader 行，客户端模块系统据此送出浏览器半侧。浏览器半侧通过 `ctx.configForms.get` 分别绑定两个命名空间：`SubagentLimitsCardController` 用 `ui-primitives` 的共享 `SettingsFormModel` 暂存运行限制，字段规格只接受不低于各自下限的安全整数；`SubagentModelSelectionCardController` 自己维护草稿，因为它的两个字段要作为一次带修订栅栏的 `mutate` 保存，它把已存储的路由与 `remote.session.modelCatalog()` 合并，在 `llm/adapters-updated` 与 `settings/document-updated` 时重读目录，连接重置时丢弃草稿。`subagentCardFace` 把两者合成 `SubagentCard` 在共享 `SettingsForm` 里渲染的一个 face，保存时校验两部分并写入有改动的那些。页面通过 `ctx.configForms.whileServed` 监视两个命名空间，注册进插件页的 `plugins.item` slot。
+宿主半侧是一个空的 `apply`，只为让本包占一条 Loader 行，客户端模块系统据此送出浏览器半侧。浏览器半侧通过 `ctx.configForms.get` 分别绑定两个命名空间：`SubagentLimitsCardController` 用 `ui-primitives` 的共享 `SettingsFormModel` 暂存运行限制，字段规格只接受不低于各自下限的安全整数；`SubagentModelSelectionCardController` 自己维护草稿，因为它的两个字段要作为一次带修订栅栏的 `mutate` 保存，它把已存储的路由与 `remote.session.modelCatalog()` 合并，在 `llm/adapters-updated` 与模型输入命名空间（`llm-*` 或 `enpoi-orchestration`）的 `settings/document-updated` 时重读目录，连接重置时丢弃草稿。`subagentCardFace` 把两者合成 `SubagentCard` 在共享 `SettingsForm` 里渲染的一个 face，保存时校验两部分并写入有改动的那些。页面通过 `ctx.configForms.whileServed` 监视两个命名空间，注册进插件页的 `plugins.item` slot。
 
 </details>
 
@@ -68,7 +68,7 @@ kind: "package-reference"
 
 <a id="known-limitations-and-deferred-work"></a>
 
-- **目录只在三种信号下重读**——适配器变化、文档提交和重连；在这三者之外开始公布模型的提供方，要等下一次信号或点击**重试**才会出现。
+- **目录只在三种信号下重读**——适配器变化、提交到模型输入命名空间（`llm-*` 或 `enpoi-orchestration`）的文档、以及重连；在这三者之外开始公布模型的提供方，要等下一次信号或点击**重试**才会出现。
 - **运行时不变量：**不发布伴生。本页没有自己拥有的关系：它显示的内容派生自设置镜像与模型目录，它写入的内容由 Host 校验。
 
 <a id="dev-note"></a>

@@ -7,7 +7,7 @@ kind: "package-reference"
 
 [English](README.md) | 中文
 
-## 概要
+## 概述
 
 有了 `dsh-web-setup`，配置界面可以在 harness 运行期间开启或关闭网页搜索与页面阅读。欢迎向导无法对该步骤使用 `settings.mutate`：`web.searchProvider`/`fetchProvider`、`tool-web.search`/`fetch` 以及 provider 行要么是非易变字段，要么是结构性的，因此宿主改为通过 `ctx.configEditor` 执行行级修改，并把候选密钥存入凭证库。该包拥有 `webSetup` Remote 命名空间（`status`、`validateProvider`、`applySetup`）以及 v1 provider 目录，后者为每个 provider 命名其 id、凭证引用、资料行与探针方式。
 
@@ -142,3 +142,12 @@ result:  { ok: boolean, applied: string[], pendingRestart?: { ns: string, messag
 - **`deepseek-official` 的校验是凭证存在性检查**，不是实时搜索：真实探针会是一次完整的辅助模型请求，并消耗共享的模型密钥。
 - **`brave`、`tavily`、`searxng` 与 `jina` 的行名是目录假设**，直到对应适配器包发布；目录中针对未发布行的测试是它们的兼容点。
 - **`providers.md` §2.5 未说明 Tavily 的认证方式。** 探针同时发送文档所述的 bearer 头和旧的请求体密钥，以便两代实现都能应答；适配器应确认其中一种形式。
+
+### 开发备注
+
+<details>
+<summary>维护者的工作上下文——点击展开</summary>
+
+无。
+
+</details>

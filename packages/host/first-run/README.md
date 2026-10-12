@@ -124,3 +124,12 @@ The context text is stable between investigations, so the sysadmin prefix caches
 - The investigation session runs the shipped `system-analysis` preset (workspace-write sandbox, approval `never`) scoped to its own scratch workspace so the agent can drop the two artifacts; the host outside that directory stays read-only to it, and the prompt forbids every other mutation.
 - Enforcement depends on the deployment naming its permission presets; an unavailable `permissionPreset` logs a warning and continues with the prompt's read-only rule alone.
 - The investigation session is not attached to a Workspace, so it appears in history but not in a workspace's session list.
+
+### Dev Note
+
+<details>
+<summary>Working context for maintainers — click to expand</summary>
+
+None.
+
+</details>

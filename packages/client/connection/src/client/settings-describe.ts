@@ -184,14 +184,3 @@ export function installSettingsDescribe(send: SettingsDescribeFetch): () => Prom
   ;(globalThis as Record<string, unknown>)[SETTINGS_DESCRIBE_GLOBAL] = readSettingsDescribe
   return readSettingsDescribe
 }
-
-/**
- * The reader another bundle installed, if any.
- * @returns the shared reader, or undefined when no wire root has run.
- */
-export function sharedSettingsDescribe(): (() => Promise<SettingsDescribeValue | undefined>) | undefined {
-  const candidate = (globalThis as Record<string, unknown>)[SETTINGS_DESCRIBE_GLOBAL]
-  return typeof candidate === 'function'
-    ? candidate as () => Promise<SettingsDescribeValue | undefined>
-    : undefined
-}

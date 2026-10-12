@@ -751,6 +751,10 @@ describe('plugin registration', () => {
       session,
     } as never)
     ctx.provide('remote.session', session as never)
+    // ui-locale requires ctx.configForms and reads its durable preference
+    // through `get`; without a settings host the returned scope is absent and
+    // the locale service stays process-local, which is all this suite needs.
+    ctx.provide('configForms', { get: () => undefined } as never)
     await ctx.plugin({ inject: localeInject, apply: applyLocale }).await()
 
     const fiber = ctx.plugin({ inject: [...inject], apply })

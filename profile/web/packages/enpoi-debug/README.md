@@ -1,5 +1,7 @@
 # dsh-enpoi-debug
 
+English | [中文](README.zh.md)
+
 The agent-facing **debug/transparency read surface** (doc 69 §9.1, P3): one
 read-only tool, `session_debug`, that answers "what is this Session actually
 doing?" in a single bounded call.

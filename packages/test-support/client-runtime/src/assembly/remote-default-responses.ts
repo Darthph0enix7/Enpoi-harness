@@ -40,6 +40,11 @@ export const remoteDefaultResponses: RemoteTable = {
     // ui-settings-account bonus notice read and acknowledgement at signing in.
     'account/getUnnotifiedBonuses': ok(null),
     'account/ackBonusNotified': ok(true),
+    // ui-settings-models `ModelsPageStore.load()` when the settings mirror
+    // publishes and after `connection/reset` (the directory read is incidental
+    // to those flows, so assembled-renderer specs cover it with empty lists).
+    'llm/listProviders': ok([]),
+    'llm/listConfigurableProviders': ok([]),
   },
   // Stream endpoints the roster opens later than boot; declared so a spec that forgets the script gets a stream miss.
   streams: [

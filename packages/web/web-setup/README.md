@@ -137,3 +137,12 @@ Independent of the request prefix: rows are applied between turns, and a toggled
 - **`deepseek-official` validation is a credential-presence check**, not a live search: a real probe would be a full auxiliary model request and would spend the shared model key.
 - **Row names for `brave`, `tavily`, `searxng`, and `jina` are catalog assumptions** until those adapter packages ship; the catalog's unshipped-row test is their compatibility point.
 - **Tavily's auth mechanism is not stated in `providers.md` §2.5.** The canary sends the documented bearer header and the legacy body key so either generation answers; the adapter should confirm one form.
+
+### Dev Note
+
+<details>
+<summary>Working context for maintainers — click to expand</summary>
+
+None.
+
+</details>

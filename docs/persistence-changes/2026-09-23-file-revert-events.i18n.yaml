@@ -1,6 +1,28 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-23-file-revert-events.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/persistence-changes/2026-09-23-file-revert-events.md
-2026-09-23-file-revert-events.md: 6484877eb28fb74432dcb575e92e99231ddef1b1
-2026-09-23-file-revert-events.zh.md: 2870ffd66d6f7b7f2b420c5341525dd36c83202a
+/:
+  en: 3d5a424ae7d7e46b
+  zh: c22a8e4a62d8cc1a
+/2026-09-23-file-revert-events:
+  en: 7ec542620737bd4c
+  zh: 2fcae0eaaa6bd3ed
+/2026-09-23-file-revert-events/summary:
+  en: 42d43905dba585c1
+  zh: 3ebac20593d4b664
+/2026-09-23-file-revert-events/table-of-contents:
+  en: 6cf314a069ceb451
+  zh: 9adff678e9ecab3b
+/2026-09-23-file-revert-events/declaration:
+  en: 6907136f28e48c90
+  zh: 02f8298485f3d8e7
+/2026-09-23-file-revert-events/compatibility:
+  en: 5c404ffb454b13af
+  zh: d78b480facd903e3
+/2026-09-23-file-revert-events/verification:
+  en: a55a332823f2808d
+  zh: 9d0eb7040b82fc2a
+/2026-09-23-file-revert-events/dev-note:
+  en: b75c8458928b72b9
+  zh: 003ba4e17b4b5269

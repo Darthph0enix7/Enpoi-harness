@@ -1,5 +1,7 @@
 # dsh-enpoi-peer-bridge
 
+English | [中文](README.zh.md)
+
 Caller side of the device-to-device peer API (doc 69 P2, doc 70, doc 27's thin
 bridge). One harness drives a *remote* harness session: prompt it, follow it to
 a terminal state, read the answer, answer its asks, cancel it. The remote keeps

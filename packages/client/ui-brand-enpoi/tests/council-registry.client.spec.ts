@@ -7,6 +7,10 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+// These jsdom renders (with dynamic imports) exceed vitest's 5s default when the
+// full client suite runs in parallel; the observed worst is ~5.2s.
+vi.setConfig({ testTimeout: 20_000 })
+
 /** One `enpoiCouncil.list` envelope. */
 function councilResponse(councils: unknown[]): Response {
   return new Response(JSON.stringify({ result: { ok: true, value: { councils } } }), { status: 200 })

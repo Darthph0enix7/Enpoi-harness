@@ -2061,6 +2061,10 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
       "type": "string",
       "description": "The complete, self-contained task for the subagent. It does not share this conversation's context, so include everything it needs."
     },
+    "role": {
+      "type": "string",
+      "description": "Optional specialist role id for the child, naming a delegatable role in the operator role registry. Omit to infer the role from the description and prompt. An unknown or tool-only id is rejected and lists the configured roles."
+    },
     "run_in_background": {
       "type": "boolean",
       "description": "Run as a background job and return its id (collect with job_output, stop with job_kill). Defaults to false."
@@ -2104,7 +2108,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `list_agents`
 
-列出你启动的 subagent 及其 id、标签和状态。running 表示正在工作；inactive 表示当前未在工作。subagent 完成时你会收到通知，无需反复查看状态。使用 send_message 继续对话。
+列出你启动的 subagent 及其 id、标签和状态。running 表示正在工作；inactive 表示当前未在工作。运行中的子级排在最前，随后按最近创建时间排列非活动子级。结果最多显示 20 行（可设置 `limit`，上限 100），并在省略行时显示带总计的页脚。subagent 完成时你会收到通知，无需反复查看状态。使用 send_message 继续对话。
 
 ```json
 {
@@ -2117,6 +2121,10 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
         "children",
         "descendants"
       ]
+    },
+    "limit": {
+      "type": "number",
+      "description": "Maximum child rows to show (default 20, max 100). Running children are always shown first; omitted inactive rows are counted in the footer."
     }
   }
 }
@@ -2126,7 +2134,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `send_message`
 
-向某个 agent 发送消息。工作中的 agent 会在下一个 step 收到消息；空闲的 agent 会以该消息开始新一轮。返回投递确认，而不是该 agent 的答案。
+按 id 向已有子会话发送后续消息。仅用于恢复：当后台子级在给出最终结果前停止时，其结算通知会给出会话 id 与停止原因——先检查该会话，再在这里继续它，而不是重新向一个新子级交代任务。工作中的子级会在下一个 step 收到消息；空闲的子级会带着完整历史恢复。返回投递确认，而不是子级的答案。新工作始终是一次新的 subagent 派发。
 
 ```json
 {

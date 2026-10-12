@@ -1,5 +1,7 @@
 # dsh-enpoi-verify-gate
 
+[English](README.md) | 中文
+
 回合结束「验证门」。它修复一个实际观测到的缺陷：Agent 在**自己最后一次验证失败**的
 情况下，仍然把回合标记为成功结束（真实会话：跑 `pytest`，看到 `assert [] == [7]`，
 随后以 `completed` 结束回合，从未调用 `edit`/`write` —— harness 毫无察觉）。
@@ -63,8 +65,8 @@
 ```yaml
 parameters:
   verifyGate:
-    mode: record        # record（默认）| prompt
-    promptOnce: false   # prompt 模式：整个会话最多提示一次
+    mode: record        # record (default) | prompt
+    promptOnce: false   # prompt mode: cap to one prompt for the session
 ```
 
 - `record`：绝不注入任何内容。

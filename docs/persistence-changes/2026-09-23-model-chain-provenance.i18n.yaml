@@ -1,6 +1,28 @@
-# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
-# side as of the last confirmed-consistent state. Both languages carry equal authority;
-# after editing either side, bring the other along and re-record with:
+# Bilingual-pair consistency record for 2026-09-23-model-chain-provenance.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/persistence-changes/2026-09-23-model-chain-provenance.md
-2026-09-23-model-chain-provenance.md: deb708b30991e6b6627cad761d0d28bc3e770644
-2026-09-23-model-chain-provenance.zh.md: 49681abd0bc66e07505ead55db8f199f1ce4b8f0
+/:
+  en: 3d5a424ae7d7e46b
+  zh: c22a8e4a62d8cc1a
+/2026-09-23-model-chain-provenance:
+  en: bc83961861052407
+  zh: 4c499892e71559a6
+/2026-09-23-model-chain-provenance/summary:
+  en: 698e113f1619ede6
+  zh: 4b8848dd1489c1e7
+/2026-09-23-model-chain-provenance/table-of-contents:
+  en: 6cf314a069ceb451
+  zh: 9adff678e9ecab3b
+/2026-09-23-model-chain-provenance/declaration:
+  en: 6907136f28e48c90
+  zh: 02f8298485f3d8e7
+/2026-09-23-model-chain-provenance/compatibility:
+  en: 2c2f5439ac80ec99
+  zh: 3928bd9f5abcafbe
+/2026-09-23-model-chain-provenance/verification:
+  en: 7f34e916e1c4e29b
+  zh: c825ec711d8d917d
+/2026-09-23-model-chain-provenance/dev-note:
+  en: b75c8458928b72b9
+  zh: 003ba4e17b4b5269

@@ -36,6 +36,8 @@ Settings 启动后、Loader 完成所有条目的加载时，早期版本留在 
 
 重置恢复 profile 覆盖层以下的值，包括 schema 默认值。Home patch 和命令行 overlay 优先级更高；表单写入若会被它们覆盖，则被拒绝。
 
+`describeNamespace(ns)` 从 `describe()` 所服务的同一缓存代际中投影一个命名空间。非配置的派生值通过 `publishArtifact(key, value)` 发布、经 `readArtifact(key)` 读取：它们绝不进入 `describe()`，因此移动它们不产生文档修订、profile 写入、重载或转发的设置事件；同一序列化值的再次发布保持原修订——这正是具备修订感知的客户端读取的基础。
+
 每个表单报告 `autoGenerate`（默认开启），供按 schema 生成页面的客户端使用；目前没有已发布的客户端这样做。自带页面的插件在 `apply` 中于可选的 `ctx.inject(['settings'], ...)` 子级内以 effect 注册 `configure({ auto: false }, ctx.fiber)`：子级指明策略所属的插件 fiber，迟加载或被替换的 Settings 服务也会采用该策略，业务插件无需 Settings 即可运行。策略不移除配置读写。
 
 <a id="understand-the-implementation"></a>

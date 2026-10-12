@@ -48,7 +48,7 @@ Provider ID 是永久的，因为请求、已保存会话、模型默认值和�
 
 **Antigravity Proxy** 是一个 Anthropic 兼容代理，位于一个或多个 Google Antigravity OAuth 账户之前。在 Linux 和 macOS 上，harness 把 `antigravity-claude-proxy` npm 包安装到 `~/.local` 下（需要 Node.js 18 或更高版本；完全不需要 Docker），并让它作为用户服务持续运行：Linux 上是名为 `antigravity-proxy.service` 的 systemd 单元，macOS 上是名为 `dev.enpoi.antigravity-proxy` 的 launchd 代理。Windows 没有受支持的本地安装；请自行安装该包，或让路由指向其他地方运行的代理。
 
-代理在 `http://127.0.0.1:8082` 提供 Anthropic Messages 协议，健康检查为 `GET /health`。代理不需要客户端密钥，但路由会存储一个占位凭据引用，因为 Anthropic 协议要求有一个。不要给这条路由添加 DSH 密钥池身份：代理运行自己的粘性账户池并维护冷却，因此这条路由必须保持关闭 DSH 池。在代理的控制台 `http://127.0.0.1:8082` 中添加 Google 账户；控制台没有密码，请只在可信网络中访问。添加账户会打开浏览器 OAuth 流程并等待 localhost 回调，因此在无头主机上，打印出的 URL 需要在一台能到达该回调的机器上打开。配额是按账户和模型计的每周窗口，`RESOURCE_EXHAUSTED … resets after 46h` 是账户用尽时的正常提示。
+代理在 `http://127.0.0.1:8082` 提供 Anthropic Messages 协议，健康检查为 `GET /health`。代理不需要客户端密钥，因此该路由以 keyless 方式添加：不存储也不发送任何凭据。（更早的构建会在 `ANTIGRAVITY_API_KEY` 下存储一个 `placeholder` 值；该值在凭据存储中保持原样，没有任何代码读取它。）不要给这条路由添加 DSH 密钥池身份：代理运行自己的粘性账户池并维护冷却，因此这条路由必须保持关闭 DSH 池。在代理的控制台 `http://127.0.0.1:8082` 中添加 Google 账户；控制台没有密码，请只在可信网络中访问。添加账户会打开浏览器 OAuth 流程并等待 localhost 回调，因此在无头主机上，打印出的 URL 需要在一台能到达该回调的机器上打开。配额是按账户和模型计的每周窗口，`RESOURCE_EXHAUSTED … resets after 46h` 是账户用尽时的正常提示。
 
 **与另一个本地工具共用。** 任何使用 Anthropic Messages 的工具都可以指向 `http://127.0.0.1:8082` 并配任意占位密钥来使用已安装的代理。它随安装时创建的用户服务持续运行，并保留你在控制台中配置的账户池。
 

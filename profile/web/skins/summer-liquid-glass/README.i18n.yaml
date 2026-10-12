@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write profile/web/skins/summer-liquid-glass/README.md
+/summer-liquid-glass:
+  en: 25c3304b492421d9
+  zh: 20384da87fa463b6
+/summer-liquid-glass/palette:
+  en: 4ccd66cf9d2c4081
+  zh: 1ac6414230e4fa1d
+/summer-liquid-glass/structure:
+  en: 7a9a94313bb2ed61
+  zh: 6c340192edba96c0
+/summer-liquid-glass/frozen-2026-09-27:
+  en: 7e22966e73416cc2
+  zh: 9e95daf752c6dda9
+/summer-liquid-glass/license:
+  en: f10e9bdcd08393a9
+  zh: ee8600dd0603e144

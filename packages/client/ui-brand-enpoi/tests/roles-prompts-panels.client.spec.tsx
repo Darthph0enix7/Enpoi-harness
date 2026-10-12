@@ -180,7 +180,7 @@ describe('RolesPanel', () => {
         // The built-in fixer surface plus the child-keep whiteboard floor
         // (SHARED_CHILD_KEEP in tool-subagent).
         available: [
-          'bash', 'edit', 'glob', 'grep', 'memory_save', 'memory_search', 'read_image', 'skill',
+          'bash', 'compressor_retrieve', 'edit', 'glob', 'grep', 'memory_save', 'memory_search', 'read_image', 'skill',
           'todo_write', 'web_search',
           'whiteboard_pin', 'whiteboard_read', 'whiteboard_unpin', 'whiteboard_write', 'write',
         ],

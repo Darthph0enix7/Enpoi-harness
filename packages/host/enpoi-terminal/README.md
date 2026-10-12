@@ -5,7 +5,18 @@ kind: "package-reference"
 
 # @deepseek-ai/dsh-host-enpoi-terminal
 
+## Summary
+
 Fork-only host half of the browser terminals the Enpoi operator asked for: the right sidebar's `terminal` page and the collapsible bottom dock (both in [`@deepseek-ai/dsh-client-ui-brand-enpoi`](../../client/ui-brand-enpoi/README.md)) share one PTY registry behind two fenced endpoints.
+
+## Table of Contents
+
+- [Routes](#routes)
+- [Process lifetime](#process-lifetime)
+- [Configuration](#configuration)
+- [Composition](#composition)
+- [Known limits](#known-limits)
+- [Dev Note](#dev-note)
 
 ## Routes
 
@@ -43,3 +54,12 @@ The row lives in [`@deepseek-ai/dsh-web-app`](../../bundle/web-app/cordis.patch.
 
 - Sessions are process-local: they do not survive a harness restart.
 - The dock and the sidebar page keep separate terminal tabs (one registry, two surfaces); moving a tab between surfaces is deferred.
+
+### Dev Note
+
+<details>
+<summary>Working context for maintainers — click to expand</summary>
+
+None.
+
+</details>

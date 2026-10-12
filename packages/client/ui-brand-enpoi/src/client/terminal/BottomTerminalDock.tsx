@@ -1,8 +1,8 @@
 /**
- * enpoi: the collapsible bottom dock and its header toggle. The dock hosts
- * only terminals, spans the conversation column, and gives that column back
- * its space by squeezing it while open (a margin keyed on the marker this
- * component writes, never a change in another package's layout code).
+ * enpoi: the collapsible bottom dock. The dock hosts only terminals, spans the
+ * conversation column, and gives that column back its space by squeezing it
+ * while open (a margin keyed on the marker this component writes, never a
+ * change in another package's layout code).
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -12,7 +12,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { TerminalInjected } from './contract.ts'
 import { clampDockHeight } from './registry.ts'
 import type { TerminalTabState } from './registry.ts'
-import { BottomPanelIcon, TerminalIcon } from './icons.tsx'
+import { TerminalIcon } from './icons.tsx'
 import { TerminalStatusBanner, TerminalTabStrip } from './TerminalPanel.tsx'
 import { TerminalView } from './TerminalView.tsx'
 import css from './TerminalPanel.module.css'
@@ -219,34 +219,5 @@ export function BottomTerminalDock({
         </div>
       )}
     </div>
-  )
-}
-
-/** Composed props of the header's dock toggle. */
-export type BottomDockToggleProps =
-  & PropsRuntime<'conversation.session.header.actions'>
-  & PropsLocale<'brandEnpoi'>
-  & InjectFace<TerminalInjected>
-
-/**
- * The conversation header's terminal-panel toggle.
- * @param props - framework shares and the terminal inject face.
- * @returns the toggle button.
- */
-export function BottomDockToggle({ useTerminals, toggleTerminalDock, t }: BottomDockToggleProps): ReactNode {
-  const open = useTerminals(state => state.dock.open)
-  return (
-    <Tooltip label={t('terminalPanelLabel')} side="bottom" delayMs={500}>
-      <button
-        type="button"
-        className={css.headerToggle}
-        aria-label={t('terminalPanelLabel')}
-        aria-pressed={open}
-        data-enpoi-bottom-dock-toggle
-        onClick={toggleTerminalDock}
-      >
-        <BottomPanelIcon size={15} />
-      </button>
-    </Tooltip>
   )
 }

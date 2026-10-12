@@ -147,12 +147,6 @@ export function setProviderOrder(order: string[]): void {
   safeSetJson(KEY_PROVIDER_ORDER, order)
 }
 
-/** Check if a group is collapsed. */
-export function isGroupCollapsed(groupId: string): boolean {
-  const collapsed = safeGetJson<string[]>(KEY_COLLAPSED_GROUPS, [])
-  return collapsed.includes(groupId)
-}
-
 /** Toggle group collapse state. */
 export function toggleGroupCollapsed(groupId: string): boolean {
   const collapsed = safeGetJson<string[]>(KEY_COLLAPSED_GROUPS, [])
@@ -195,14 +189,6 @@ export function resolveContextTokens(model: ModelContextTarget): number {
   }
   if (id.includes('qwen') || id.includes('deepseek') || id.includes('gpt-4') || id.includes('mistral') || id.includes('llama')) {
     return 128_000
-  }
-  return 0
-}
-
-/** Resolve the per-request output cap in tokens (0 when unknown). */
-export function resolveOutputTokens(model: ModelContextTarget): number {
-  if (typeof model.maxTokens === 'number' && model.maxTokens > 0) {
-    return model.maxTokens
   }
   return 0
 }

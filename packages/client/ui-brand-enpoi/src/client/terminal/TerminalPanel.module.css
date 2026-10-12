@@ -305,31 +305,6 @@
   min-height: 0;
 }
 
-/* enpoi: the header action that opens and closes the dock. */
-.headerToggle {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 6px;
-  color: var(--dsw-alias-label-secondary);
-  background: transparent;
-  border: none;
-  border-radius: 28px;
-  cursor: pointer;
-}
-
-.headerToggle:hover {
-  color: var(--dsw-alias-label-primary);
-  background: var(--dsw-alias-interactive-bg-hover);
-}
-
-.headerToggle[aria-pressed='true'] {
-  color: var(--dsw-specific-sidebar-nav-item-active-accent);
-  background: var(--dsw-alias-interactive-bg-active);
-}
-
 /*
  * enpoi: while the dock is open, the conversation column gives up the dock's
  * height (margin, so the transcript squeezes rather than being covered). The

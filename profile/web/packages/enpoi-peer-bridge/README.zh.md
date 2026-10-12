@@ -1,5 +1,7 @@
 # dsh-enpoi-peer-bridge
 
+[English](README.md) | 中文
+
 设备到设备 peer API 的调用方（doc 69 P2、doc 70、doc 27 的"thin bridge"）。
 一个 harness 驱动**远端** harness 会话：发送提示、跟踪到终态、读取回答、
 应答远端询问、取消远端回合。远端仍使用自己的工具、工作区、审批与模型路由，
@@ -10,9 +12,10 @@
 | 工具 | 作用 |
 |---|---|
 | `peer_status {alias}` | 握手（对端身份、能力、协议）+ `peer.state`：暴露级别、目标会话、闩锁状态、子代理数、待决询问、当前模型。 |
-| `peer_ask {alias, message?, waitMs?, resume?}` | 必要时采纳/创建会话，以带归属的 peer 回合发送提示，带重连与 `peer.page` 修复地跟踪，直到会话真正静默（无活动子代理或询问且静默窗口结束）后返回**最终**回合；否则返回结构化 pending/失败结果。被跟踪回合进入 `waiting_approval` 时**提前**返回 `status: 'waiting_approval'` 与待决询问（`askId`、`kind`、`toolName`、`reason` 及提问选项）；`resume: <requestId>` 可续跟同一回合直到终态，不会重发消息。 |
+| `peer_sessions {alias?}` | 跨所有调用方配对发现：alias、对端、endpoint、绑定的远端会话 id（本地 `remoteSessionId` 固定或主机上报的会话）、暴露级别、闩锁摘要与最近活动；不可达主机即为该行的错误。只读。 |
+| `peer_ask {alias, message?, waitMs?, resume?}` | 必要时采纳/创建会话，以带归属的 peer 回合发送提示，带重连与 `peer.page` 修复地跟踪，直到会话真正静默（无活动子代理或询问且静默窗口结束）后返回**最终**回合；否则返回结构化 pending/失败结果。被跟踪回合进入 `waiting_approval` 时**提前**返回 `status: 'waiting_approval'` 与待决询问（`askId`、`kind`、`toolName`、`reason` 及提问选项）；`resume: <requestId>` 可续跟同一回合直到终态，不会重发消息。主机在跟踪中途停止应答时，在 `probeIntervalMs` 之后返回 `status: 'host_unreachable'`（绝不取消远端回合）。 |
 | `peer_asks {alias}` | 远端待决询问（审批与提问两种）。 |
-| `peer_answer {alias, askId, outcome}` | 解决审批询问（`allowed-once` \| `rejected`）。先到先得。传输失败时重读 `peer.state`：询问已消失则报告 `confirmation: 'lost'`，而不是诱使盲目重试的失败。 |
+| `peer_answer {alias, askId, outcome \| answers[]}` | 解决审批询问（`allowed-once` \| `rejected`）或提问询问（`answers: [{id, selected[], custom?}]`）。先到先得。非法选择在本地被拒绝并给出原因，绝不调用主机。传输失败时重读 `peer.state`：询问已消失则报告 `confirmation: 'lost'`，而不是诱使盲目重试的失败。 |
 | `peer_cancel {alias}` | 取消远端当前回合，归属为本调用方。传输失败时重读闩锁：无活动回合时报 `confirmation: 'lost'`。 |
 
 ## 配对文件
@@ -24,18 +27,18 @@ version: 1
 device: serverlocal
 pairings:
   - alias: co-dev
-    peer: laptop                  # 被调用的设备
-    exposure: debug               # 主机角色；主机解析器要求此字段
+    peer: laptop                  # device being called
+    exposure: debug               # host-role; required by the host parser
     endpoint: https://laptop.pike-acrux.ts.net:8443
-    remoteSessionId: sess-xyz     # 可选；省略则按 alias 寻址（创建/采纳）
-    token: null                   # 可选；以 Authorization: Bearer 发送
+    remoteSessionId: sess-xyz     # optional; omit to address the alias (create/adopt)
+    token: null                   # reserved; sent as Authorization: Bearer, not verified by the host yet
     create:
       cwd: /home/user/projects/thing
       agentPreset: standard
-      provider: antigravity            # 可选；固定新建会话的路由
-      model: gemini-3.8-flash-tiered   # 与 provider 成对
-      chain: loopback                  # 可选；仅在 provider+model 齐备时转发
-      reasoningEffort: high            # 可选；仅在 provider+model 齐备时转发
+      provider: antigravity            # optional; pins the created session's route
+      model: gemini-3.8-flash-tiered   # required with provider
+      chain: loopback                  # optional; forwarded only with provider+model
+      reasoningEffort: high            # optional; forwarded only with provider+model
 ```
 
 主机角色字段（`sessionId`、`exposure`）被调用方忽略；条目需要 `alias`、

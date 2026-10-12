@@ -10,10 +10,10 @@
   zh: 661e0d1a5e13d350
 /deepseek-ai-dsh-host-update-engine/summary:
   en: 19f1656954c3a918
-  zh: 4b618bc048a020f4
+  zh: 8e036098e1675814
 /deepseek-ai-dsh-host-update-engine/table-of-contents:
   en: d152484eb41ac6b4
-  zh: a6b8c103b0922d67
+  zh: a428d4173288a305
 /deepseek-ai-dsh-host-update-engine/use-this-package:
   en: bbff250eba0f1b89
   zh: 0a618f05cc88ee2b
@@ -38,6 +38,9 @@
 /deepseek-ai-dsh-host-update-engine/understand-the-implementation/conflict-severity:
   en: 8446af4ad641314c
   zh: 4e573505f3c56039
+/deepseek-ai-dsh-host-update-engine/understand-the-implementation/scan-index:
+  en: 4504792c38787e35
+  zh: b32d72e8efe48e20
 /deepseek-ai-dsh-host-update-engine/understand-the-implementation/staged-apply-and-verification:
   en: 64d1276ce5171e04
   zh: cb56cc940fe8ac70
@@ -58,4 +61,4 @@
   zh: 22a8e7d41cb47088
 /deepseek-ai-dsh-host-update-engine/known-limitations-and-deferred-work/dev-note:
   en: 9cb9b7645273d660
-  zh: 60d6468be3388791
+  zh: dd0b6c9d1bd391ae

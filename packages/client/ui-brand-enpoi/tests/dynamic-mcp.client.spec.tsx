@@ -11,6 +11,10 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { brandT } from './brand-i18n.client.ts'
 
+// These jsdom renders (with dynamic imports) exceed vitest's 5s default when the
+// full client suite runs in parallel; the observed worst is ~5.2s.
+vi.setConfig({ testTimeout: 20_000 })
+
 /** One parsed `settings.mutate` request body. */
 interface MutateBody {
   method: string

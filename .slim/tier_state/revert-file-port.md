@@ -1,5 +1,7 @@
 # Tier1: Revert + File-History Port — COMPLETE
 
+> **Historical journal — COMPLETE, kept as the fix record.** The revert/file-history port it documents landed (see the commit hashes in §2); no open work remains in this file except the noted conflict-UI scenario.
+
 ## 1. Goal
 Port the complete working-branch revert system onto post-merge `local/serverlocal` without duplication, message loss, or file clobber. Guarantees: FR1-5, surfaceOp shadowing, per-row restore/fork, affected-files tray with save-beside.
 

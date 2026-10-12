@@ -6,11 +6,16 @@
  * capability toggles unchanged, and locale-dictionary parity.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest'
+
 // Load the package's module augmentations (LocaleNamespaceMap) into this program.
 import type {} from '../src/client/index.ts'
 import type { LocaleKeysOf } from '@deepseek-ai/dsh-client-ui-slots'
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react'
 import { en, zh } from '../src/client/dynamic/skills-locales.ts'
+
+// These jsdom renders (with dynamic imports) exceed vitest's 5s default when the
+// full client suite runs in parallel; the observed worst is ~5.2s.
+vi.setConfig({ testTimeout: 20_000 })
 
 function jsonResponse(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })

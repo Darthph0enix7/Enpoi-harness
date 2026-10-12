@@ -7,7 +7,7 @@ kind: "package-reference"
 
 [English](README.md) | 中文
 
-## 概要
+## 概述
 
 全新 harness 主目录的两个首次运行事实。种子在全新设置文档首次完整启动时写入免密钥的 Kilo Gateway 路由，并把默认模型指向 `kilo-auto/free`；该路由位于用户层，因此 Models 页面可以移除它，标记会阻止之后的再次写入。系统分析是显式选择：用户从设置向导的智能体步骤或右下角小窗启动，随后一个有界的 sysadmin 智能体会话使用 harness 自身的工具只读地调查这台机器，覆盖六个清单阶段，并发布结构化 `system-profile.json` 与简短、概括的 `system-profile.md`，后者以 `## At a glance` 摘要开篇。文档只记录这台机器是什么类型、用于什么，并停在类别层面，不含确切版本、项目名、域名、地址或主机名，因此在机器变化后仍然有用。挂载在 sysadmin 预设中的提示上下文只贡献从该 JSON 读取的要点以及对文档的引用。没有任何机制会自行安排运行。
 
@@ -124,3 +124,12 @@ Confirm anything the document does not state with read-only commands.
 - 调查会话以随附的 `system-analysis` 预设运行（workspace-write 沙箱、审批 `never`），且仅限它自己的临时工作区，以便智能体写入两份产物；该目录之外的主机对它仍是只读的，提示禁止其他一切改动。
 - 强制程度取决于部署如何命名权限预设；`permissionPreset` 不可用时只记一条警告，并仅依靠提示中的只读规则继续。
 - 调查会话不挂载到 Workspace，因此会出现在历史中，但不在某个工作区的会话列表里。
+
+### 开发备注
+
+<details>
+<summary>维护者的工作上下文——点击展开</summary>
+
+无。
+
+</details>

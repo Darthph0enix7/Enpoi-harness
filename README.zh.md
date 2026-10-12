@@ -39,7 +39,7 @@ dsh update --channel beta     # switch to beta (then back with --channel stable)
 dsh update --dry-run          # show the plan without touching anything
 ```
 
-更新只传输发生变化的字节，并通过保留引擎应用 —— 用户修改、新增文件、固定路径与主动删除都会被保留 —— 失败时回滚到上一个版本化目录；`$DSH_HOME` 中的用户数据仅作增量初始化，绝不会被覆盖。服务重启请使用 `dsh restart --after-turn` 安全调度 —— 严禁在智能体运行回合内直接重启服务。
+`dsh update` 使用并行分块引擎下载最新平台压缩包（进度条、校验和播报、带计数解包），按标准流程安装、执行健康证明，失败时回滚到上一个版本化目录；`$DSH_HOME` 中的用户数据仅作增量初始化，绝不会被覆盖。旧的 delta/保留更新器已归档（git 分支与标签 `archive/delta-updater-v2`，tip `6d7c3d5bed`），仅在 `DSH_DELTA=1` 时运行；新发布只包含三个平台压缩包、对应 `.sha256` 与 `SHA256SUMS`。服务重启请使用 `dsh restart --after-turn` 安全调度 —— 严禁在智能体运行回合内直接重启服务。
 
 ## 自研组件与上游分工
 

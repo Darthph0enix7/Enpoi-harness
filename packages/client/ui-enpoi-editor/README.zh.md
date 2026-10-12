@@ -7,14 +7,15 @@ kind: "package-reference"
 
 [English](README.md) | 中文
 
-## Summary
+## 概述
 
 右侧边栏的可编辑工作台：以 `extension` 优先带注册的标签类型打开会话文件，在 CodeMirror 6 中编辑，并通过配置档案受围栏保护的 `/sidebar/fsops` JSON 路由保存。它只认领文本类会话文件——图片、PDF、办公文档和未知类别仍由只读预览处理——并在标签可见时轮询 `fs.stat`，使干净缓冲区下的磁盘变更就地替换，且绝不覆盖未保存的编辑。
 
-## Table of Contents
+## 目录
 
 - [注册内容](#what-it-registers)
 - [编辑与保存](#editing-and-saving)
+- [查找与导航](#finding-and-navigating)
 - [外部变更](#external-changes)
 - [模型体验](#model-experience)
 - [已知限制与后续工作](#known-limitations-and-deferred-work)
@@ -41,6 +42,15 @@ kind: "package-reference"
 
 I/O 为同源的 `POST /sidebar/fsops/<method>`，`content-type: application/json`，由注入的 `EditorFsOps` 面封装：`fs.read` → `{content, sha256, mtimeMs, size, truncated}`，`fs.write` → 新摘要/状态（或 `409 conflict`），`fs.stat` → `{mtimeMs, size}`。`not-found`（404）是一种状态，而不是错误。
 
+<a id="finding-and-navigating"></a>
+## 查找与导航
+
+**查找**（`Mod-F` 或工具栏控件）在编辑区上方打开主题化查找栏。输入查询时即高亮匹配项，`Enter`/`Shift-Enter`（以及箭头按钮）循环跳转，计数器显示 `index / total` 或安静的 **No matches** 状态。大小写（`Aa`）与正则（`.*`）开关就地重新查询；正则以查询自身的语法为锚，且除非大小写开关打开否则不区分大小写。正则模式关闭时转义序列永不展开——查找字段就是字面文本。非法模式（`(`）不是错误界面：查找栏报告 **No matches** 并清除标记，而不是抛错。
+
+`@codemirror/search` 自带的高亮器仅在其内置面板打开时装饰匹配项，因此本包自行维护覆盖层：`search.ts` 在 `StateField` 中收集查询范围，把每个匹配标为 `cm-searchMatch`、把当前揭示项标为 `cm-searchMatch-selected`，并在一次事务中派发覆盖层、选区与居中的 `EditorView.scrollIntoView`——首次查询与每次步进都会高亮并滚动到视野内。`CodeMirrorEditor.tsx` 通过 `--dsw-alias-state-warn-primary` 以两级强度为两个类名设样式，因此它们跟随当前皮肤与明暗方案；装饰会随文档变更映射，并在被替换的文档使范围失效时清除。
+
+**转到行**（`g` 或工具栏控件，且当前选中本渲染器）把光标移到 1 基行号、居中、聚焦编辑器，并短暂闪烁目标行（`cm-gotoFlash`，一个 1.4 秒后移除的行装饰，使重复跳转再次闪烁）。
+
 <a id="external-changes"></a>
 ## 外部变更
 
@@ -51,7 +61,7 @@ I/O 为同源的 `POST /sidebar/fsops/<method>`，`content-type: application/jso
 - **`not-found`** → 正文变为**文件不存在**状态并显示路径，提供重新载入；脏缓冲区仍留在 store 中，状态会说明其被保留。若文件重新出现，下一次轮询会在保留缓冲区的前提下采用新基线，而不是丢弃它。
 
 <a id="model-experience"></a>
-## Model Experience
+## 模型体验
 
 ### 浏览器端编辑器
 
@@ -67,7 +77,7 @@ I/O 为同源的 `POST /sidebar/fsops/<method>`，`content-type: application/jso
 
 无；本包既不组装也不发送提供方请求。
 
-## Known Limitations and Deferred Work
+## 已知限制与未竟事项
 
 <a id="known-limitations-and-deferred-work"></a>
 - **未知类别被拒绝。** `classifyFileType` 对无扩展名文件或 `.txt`/`.log` 没有文本类别，因此这些仍由只读预览处理；用文本扩展名白名单放宽 `canOpen` 是后续工作。
@@ -75,7 +85,7 @@ I/O 为同源的 `POST /sidebar/fsops/<method>`，`content-type: application/jso
 - **写入路由不报告摘要时 sha 基线会降级。** 写入回执没有摘要时回退到 WebCrypto；若 `crypto.subtle` 不可用，下一次保存可能冲突，需要覆盖保存。
 
 <a id="dev-note"></a>
-### Dev Note
+### 开发备注
 
 <details>
 <summary>维护者工作备注——点击展开</summary>

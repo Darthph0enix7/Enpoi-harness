@@ -547,7 +547,6 @@ export const en = {
   terminalNoOpen: 'No terminal open.',
   terminalCollapse: 'Collapse terminal panel',
   terminalNoBottom: 'No terminal in the bottom panel.',
-  terminalPanelLabel: 'Terminal panel',
 
   // The Mark task card.
   markStatusRunning: 'Running',
@@ -1143,7 +1142,6 @@ export const zh: { [Key in keyof typeof en]: string } = {
   terminalNoOpen: '没有打开的终端。',
   terminalCollapse: '收起终端面板',
   terminalNoBottom: '底部面板中没有终端。',
-  terminalPanelLabel: '终端面板',
 
   // The Mark task card.
   markStatusRunning: '运行中',

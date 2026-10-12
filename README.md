@@ -39,7 +39,7 @@ dsh update --channel beta     # switch to beta (then back with --channel stable)
 dsh update --dry-run          # show the plan without touching anything
 ```
 
-Updates ship only changed bytes and apply through the preservation engine — user edits, added files, pinned paths, and deliberate deletions survive — with rollback to the previous versioned directory on failure; `$DSH_HOME` is only ever seeded, never overwritten. A restart is scheduled safely with `dsh restart --after-turn` — never restart the service from inside an agent turn.
+`dsh update` downloads the newest platform tarball with a parallel chunk engine (progress bar, checksum announce, ticked unpack), installs it with the standard mechanics, proves health, and rolls back to the previous versioned directory on failure; `$DSH_HOME` is only ever seeded, never overwritten. The older delta/preservation updater is archived (git branch/tag `archive/delta-updater-v2`, tip `6d7c3d5bed`) and runs only with `DSH_DELTA=1`; new releases publish just the three platform tarballs, their `.sha256` sidecars, and `SHA256SUMS`. A restart is scheduled safely with `dsh restart --after-turn` — never restart the service from inside an agent turn.
 
 ## What is ours vs upstream
 

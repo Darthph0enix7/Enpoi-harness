@@ -1,5 +1,7 @@
 # dsh-enpoi-debug
 
+[English](README.md) | 中文
+
 面向 Agent 的**调试/透明化只读接口**（doc 69 §9.1，P3）：只有一个只读工具
 `session_debug`，一次调用回答"这个 Session 到底在做什么"。
 
