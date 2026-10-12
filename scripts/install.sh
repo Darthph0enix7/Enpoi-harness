@@ -6007,9 +6007,22 @@ health_proof() { # 0 pass, 1 fail (sets HEALTH_JSON)
   # Service: only when this install records one.
   if [ "${SERVICE_INSTALL:-0}" = 1 ] && [ -n "$SERVICE_UNIT" ]; then
     if command -v systemctl >/dev/null 2>&1; then
-      if systemctl is-active --quiet "$SERVICE_UNIT" 2>/dev/null; then service_state=PASS; else service_state=FAIL; service_ok=0; fi
+      if systemctl is-active --quiet "$SERVICE_UNIT" 2>/dev/null \
+        || systemctl --user is-active --quiet "$SERVICE_UNIT" 2>/dev/null; then
+        service_state=PASS
+      else
+        service_state=FAIL; service_ok=0
+      fi
     elif command -v launchctl >/dev/null 2>&1; then
-      if launchctl list "$SERVICE_UNIT" >/dev/null 2>&1; then service_state=PASS; else service_state=FAIL; service_ok=0; fi
+      # launchd is context-sensitive: `launchctl list <label>` fails from
+      # service-spawned sessions even while the agent runs (observed on the
+      # operator's Mac). The GUI-domain print works in both contexts.
+      if launchctl print "gui/$(id -u)/$SERVICE_UNIT" >/dev/null 2>&1 \
+        || launchctl list "$SERVICE_UNIT" >/dev/null 2>&1; then
+        service_state=PASS
+      else
+        service_state=FAIL; service_ok=0
+      fi
     fi
     [ "$service_ok" = 1 ] || failures="$failures service('$SERVICE_UNIT')"
   fi
@@ -6035,6 +6048,30 @@ health_proof() { # 0 pass, 1 fail (sets HEALTH_JSON)
   log "health: PASS (identity=$link_dir service=$service_state profile=$profile_state)"
   HEALTH_JSON="{\"status\": \"PASS\", \"identity\": \"PASS\", \"service\": \"$service_state\", \"profile\": \"$profile_state\", \"shim\": true}"
   return 0
+}
+
+# Run the health proof; when ONLY the service fails, try once to bring it up
+# (kickstart/restart) and re-probe. Sets HEALTH_SERVICE_ONLY=1 when the final
+# failure is service-only, so call sites can skip destructive restores that
+# cannot fix a service.
+HEALTH_SERVICE_ONLY=0
+health_proof_robust() { # 0 pass, 1 fail
+  HEALTH_SERVICE_ONLY=0
+  health_proof && return 0
+  case "$HEALTH_JSON" in
+    *'"identity": "FAIL"'*|*'"profile": "FAIL"'*|*'"shim": false'*) return 1;;
+  esac
+  if [ -n "$SERVICE_UNIT" ]; then
+    if command -v launchctl >/dev/null 2>&1; then
+      launchctl kickstart -k "gui/$(id -u)/$SERVICE_UNIT" >/dev/null 2>&1 || true
+    elif command -v systemctl >/dev/null 2>&1; then
+      { systemctl --user restart "$SERVICE_UNIT" 2>/dev/null || systemctl restart "$SERVICE_UNIT" 2>/dev/null; } || true
+    fi
+    sleep 2
+    health_proof && { say "  health: service recovered (kickstart)"; return 0; }
+  fi
+  HEALTH_SERVICE_ONLY=1
+  return 1
 }
 
 # Apply the user's declared pnpm patches to the freshly installed tree. The
@@ -6947,7 +6984,11 @@ do_update() {
     if [ -n "$STAGED" ]; then rm -rf "$STAGED"; STAGED=""; fi
     step "pnpm: present (nothing to rebuild)"
     step "dependencies and build: already up to date at $VERSION"
-    step "delta transport: nothing to do — already at $VERSION"
+    if [ "${DSH_DELTA:-0}" = 1 ]; then
+      step "delta transport: nothing to do — already at $VERSION"
+    else
+      step "transport: up to date — nothing to do ($VERSION)"
+    fi
     step "profile: $PROFILE (refresh)"
     substep_info "refreshing profile: fetch → copy → merges → pairings"
     # The refresh merges the profile patch and package.json; arm the same
@@ -6983,9 +7024,15 @@ do_update() {
     if [ "$WRITE_RC" = 1 ]; then write_rc; fi
     if [ "${DSH_DELTA:-0}" != 1 ]; then
       substep_info "health: post-update proof (identity, service, profile, shim)"
-      if ! health_proof; then
-        warn "post-update health proof failed; restoring the pristine snapshot"
-        restore_pre_switch "$backup" "health proof"
+      if ! health_proof_robust; then
+        if [ "$HEALTH_SERVICE_ONLY" = 1 ]; then
+          # Nothing was switched on this path; restoring user files cannot fix
+          # a service. Report and exit; the next run re-probes.
+          warn "post-update health proof failed (service only); no files restored — inspect the service (dsh doctor) and retry"
+        else
+          warn "post-update health proof failed; restoring the pristine snapshot"
+          restore_pre_switch "$backup" "health proof"
+        fi
         emit_json noop 0
         exit 1
       fi
@@ -7202,9 +7249,10 @@ do_update() {
   if [ "$WRITE_RC" = 1 ]; then write_rc; fi
   if [ "${DSH_DELTA:-0}" != 1 ]; then
     substep_info "health: post-update proof (identity, service, profile, shim)"
-    if ! health_proof; then
+    if ! health_proof_robust; then
       # Same post-switch semantics as a failed self-check: roll back to the
-      # previous tree and restore the pre-migration snapshot.
+      # previous tree and restore the pre-migration snapshot (service-only
+      # failures also roll back — a switched device must come up healthy).
       rollback "$current" "${PRE_MIGRATION_BACKUP:-$backup}" "$TREE_DIR_NAME"
       exit 1
     fi
