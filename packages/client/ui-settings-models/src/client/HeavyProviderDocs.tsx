@@ -48,9 +48,7 @@ export function HeavyProviderDocs({ manifest, platform, t }: HeavyProviderDocsPr
   const exact = variantFor(manifest, activePlatform)
   const authText = manifest.auth.kind === 'none'
     ? t('heavyAuthNone')
-    : manifest.auth.kind === 'unified'
-      ? t('heavyAuthUnified')
-      : t('heavyAuthPlaceholder').replace('{ref}', manifest.auth.apiKeyEnv ?? '')
+    : t('heavyAuthUnified')
   const platformName = (value: HeavyPlatform): string =>
     value === 'linux' ? t('heavyPlatformLinux') : value === 'darwin' ? t('heavyPlatformMacos') : t('heavyPlatformWindows')
 

@@ -1479,6 +1479,9 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
         stream: options => llm.stream!(options),
         provider,
         model,
+        // Routing-affinity: the ask's conversation identity travels with the
+        // one-shot so the adapter can stamp the provider's session header.
+        ...query.sessionId !== undefined && query.sessionId !== '' ? { sessionId: query.sessionId } : {},
         timeoutMs: RECOMMENDATION_TIMEOUT_MS,
         // One observable line per miss (this harness's logger drops debug);
         // the derived line is kept either way, so the card never suffers.

@@ -74,6 +74,13 @@ export interface HeavyDeps {
   credentials?: CredentialsSeam | undefined
   /** Route-namespace model discovery, when the owning adapter plugin is mounted. */
   llm?: ModelDiscoverySeam | undefined
+  /**
+   * The shared install-job manager, when one exists. Removal evicts the
+   * provider's snapshot (the in-memory view and its
+   * `$DSH_HOME/cache/heavy-jobs/<id>.json`) so a terminal job from an earlier
+   * install cannot resurrect once the route is gone.
+   */
+  jobs?: { evict(id: string): void } | undefined
   fetchImpl?: FetchLike | undefined
   /** Runs one shell step (the service wires this to `ctx.subprocess`). */
   runStep: (step: HeavyStep) => Promise<StepOutcome>
@@ -536,7 +543,7 @@ function overlayPool(value: unknown): HeavyManifestPool | null | undefined {
   const strategy = value.strategy
   if (strategy !== undefined && strategy !== 'priority-sticky' && strategy !== 'balanced') return undefined
   if (!Array.isArray(value.identities) || value.identities.length === 0) return undefined
-  const identities: HeavyManifestPool['identities'] = []
+  const identities: HeavyManifestPool['identities'][number][] = []
   const seen = new Set<string>()
   for (const raw of value.identities) {
     if (!isOverlayRecord(raw)) return undefined
@@ -702,12 +709,12 @@ export function overlayInjectionRow(dshHome: string): HeavyOverlayInjectionRow |
 
 /**
  * Build the route profile for one mode. Auth follows the manifest: `none`
- * writes `keyless`, `placeholder` writes the reference (llm-pi-ai refuses
- * keyless anthropic routes) and its credential value is staged by
- * `commitRoute`, and a manifest-declared `pool` is written as the route's
- * provider-native pool (identities only — secrets stay in the credentials
- * store). An llm-pi-ai route never declares a pool: the heavy
- * providers either have their own pool (antigravity) or a single key.
+ * writes `keyless`, `unified` writes the reference whose credential value
+ * `commitRoute` stages, and a manifest-declared `pool` is written as the
+ * route's provider-native pool (identities only — secrets stay in the
+ * credentials store). An llm-pi-ai route never declares a pool: these services
+ * front their own credential handling (a gateway key, or no client auth at
+ * all).
  *
  * An empty discovery with no `fallbackModel` writes `models: []`. llm-pi-ai
  * resolves an absent and an empty `models` list identically — the installed
@@ -1134,7 +1141,7 @@ export async function writeRoute(
 /**
  * Store the key the operator supplied with an add. A pooled manifest stores it
  * under its first identity's reference (the Keys card slot a fresh route
- * shows); otherwise the unified/placeholder auth reference is the target. No
+ * shows); otherwise the manifest's unified auth reference is the target. No
  * key means no credential.
  */
 export async function storeCredential(deps: HeavyDeps, manifest: HeavyProviderManifest, key: string | undefined): Promise<boolean> {
@@ -1147,24 +1154,13 @@ export async function storeCredential(deps: HeavyDeps, manifest: HeavyProviderMa
 }
 
 /**
- * The non-secret value staged for a `placeholder` auth route. The service
- * ignores client auth, but llm-pi-ai refuses a keyless anthropic route and its
- * discovery fails `MISSING_CREDENTIAL` while the named reference holds no
- * value, so a route without an operator key would answer no models.
- */
-export const PLACEHOLDER_CREDENTIAL = 'placeholder'
-
-/**
  * Write a route and its credential as one commit. The credential is stored
  * before the route, so a rejected store leaves no route behind; when the route
  * write then fails, the credential is rolled back to its previous value (unset
  * when it had none), so after any failure either both exist or neither. The
  * route namespace guard runs first: an unmounted namespace fails before any
  * credential is touched. A manifest with no reference, or a blank key, stores
- * no credential and the route write proceeds alone — except a `placeholder`
- * auth route, which stages {@link PLACEHOLDER_CREDENTIAL} under its reference
- * unless one already resolves (a typed or previously stored value always
- * wins), keeping the route resolvable for discovery with no operator input.
+ * no credential and the route write proceeds alone.
  * @param deps - host seams.
  * @param manifest - heavy manifest.
  * @param mode - detected instance or local install.
@@ -1188,17 +1184,12 @@ export async function commitRoute(
   if (pending !== undefined) throw new Error(pending.message)
   const credentials = deps.credentials
   const ref = manifest.pool?.identities[0]?.credentialRef ?? manifest.auth.apiKeyEnv
-  let value = key?.trim() ?? ''
-  let previous: { value?: string } | undefined
-  if (value === '' && ref !== undefined && manifest.auth.kind === 'placeholder') {
-    if (credentials === undefined) throw new Error('credentials seam absent — cannot store the placeholder credential')
-    previous = await credentials.resolve(ref)
-    if (previous?.value === undefined) value = PLACEHOLDER_CREDENTIAL
-  }
+  const value = key?.trim() ?? ''
   const store = value !== '' && ref !== undefined
+  let previous: { value?: string } | undefined
   if (store) {
     if (credentials === undefined) throw new Error('credentials seam absent — cannot store the key')
-    previous ??= await credentials.resolve(ref)
+    previous = await credentials.resolve(ref)
     await credentials.set(ref, value)
   }
   let route: HeavyRouteProfile
@@ -1436,10 +1427,11 @@ export function credentialRefInUse(deps: HeavyDeps, manifest: HeavyProviderManif
 
 /**
  * Remove every trace of a heavy provider: optional local teardown, then the
- * DSH route, credential reference, pool state, discovered-cache entry, and
- * chain links. Every sub-step is fail-soft and reported in the summary. The
- * credential reference is unset only when no other configured route resolves
- * it; a shared reference is left in place and named in `warnings`.
+ * DSH route, credential reference, pool state, discovered-cache entry, chain
+ * links, and the install-job snapshot. Every sub-step is fail-soft and
+ * reported in the summary. The credential reference is unset only when no
+ * other configured route resolves it; a shared reference is left in place and
+ * named in `warnings`.
  */
 export async function removeProvider(
   deps: HeavyDeps,
@@ -1513,6 +1505,11 @@ export async function removeProvider(
   } catch (error) {
     errors.push(`chains: ${error instanceof Error ? error.message : String(error)}`)
   }
+
+  // The job manager owns the snapshot's memory and file; eviction goes through
+  // it so a restart-persisted `succeeded` view cannot resurrect on status for
+  // a provider whose route no longer exists.
+  deps.jobs?.evict(manifest.id)
 
   return { routeRemoved, credentialRemoved, poolStateRemoved, cacheEntryRemoved, chainLinksRemoved, teardown, warnings, errors }
 }

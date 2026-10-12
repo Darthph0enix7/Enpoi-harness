@@ -26,6 +26,7 @@ function world(id: string, extraRoutes: Record<string, unknown> = {}): {
   mutations: Array<{ ns: string; ops: readonly Record<string, unknown>[] }>
   credentialUnsets: string[]
   stepped: string[]
+  evicted: string[]
 } {
   const home = mkdtempSync(join(tmpdir(), 'heavy-remove-'))
   scratch.push(home)
@@ -63,18 +64,20 @@ function world(id: string, extraRoutes: Record<string, unknown> = {}): {
     },
   }
   const stepped: string[] = []
+  const evicted: string[] = []
   const deps: HeavyDeps = {
     home,
     dshHome,
     settings,
     credentials: { resolve: async () => undefined, set: async () => {}, unset: async ref => { credentialUnsets.push(ref) } },
+    jobs: { evict: id => { evicted.push(id) } },
     runStep: async step => { stepped.push(step.label); return { exitCode: 0, output: `ran ${step.label}` } satisfies StepOutcome },
   }
-  return { deps, mutations, credentialUnsets, stepped }
+  return { deps, mutations, credentialUnsets, stepped, evicted }
 }
 
-it('removal runs the teardown and drops route, credential, pool, cache, and chain links', async () => {
-  const { deps, mutations, credentialUnsets, stepped } = world('freellmapi')
+it('removal runs the teardown and drops route, credential, pool, cache, chain links, and the job snapshot', async () => {
+  const { deps, mutations, credentialUnsets, stepped, evicted } = world('freellmapi')
   const summary = await removeProvider(deps, manifestById('freellmapi')!, { uninstall: true })
 
   expect(summary.teardown.ran).toBe(true)
@@ -97,6 +100,7 @@ it('removal runs the teardown and drops route, credential, pool, cache, and chai
   expect(summary.errors).toEqual([])
 
   expect(credentialUnsets).toEqual(['FREELLMAPI_API_KEY'])
+  expect(evicted).toEqual(['freellmapi'])
   const routeOps = mutations.find(entry => entry.ns === 'llm-pi-ai')?.ops ?? []
   expect(routeOps).toEqual([{ op: 'unset', path: ['providers', 'freellmapi'] }])
   const chainOps = mutations.find(entry => entry.ns === 'enpoi-orchestration')?.ops ?? []
@@ -111,12 +115,16 @@ it('removal runs the teardown and drops route, credential, pool, cache, and chai
 })
 
 it('removal without uninstall keeps the local install but still clears DSH state', async () => {
-  const { deps, stepped } = world('antigravity')
+  const { deps, stepped, credentialUnsets, evicted } = world('antigravity')
   const summary = await removeProvider(deps, manifestById('antigravity')!, {})
   expect(summary.teardown.ran).toBe(false)
   expect(stepped).toEqual([])
   expect(summary.routeRemoved).toBe(true)
   expect(summary.poolStateRemoved).toBe(true)
+  expect(evicted).toEqual(['antigravity'])
+  // The keyless manifest names no credential reference: a placeholder (or a
+  // real operator key) left under ANTIGRAVITY_API_KEY is never unset.
+  expect(credentialUnsets).toEqual([])
 })
 
 it('commandcode removal drops DSH state with no local teardown and no keypool script', async () => {

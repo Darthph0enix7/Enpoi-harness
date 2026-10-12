@@ -174,9 +174,8 @@
     "summary": "Multi-account Anthropic-compatible proxy for Google Antigravity OAuth accounts.",
     "protocol": "anthropic-messages",
     "auth": {
-      "kind": "placeholder",
-      "apiKeyEnv": "ANTIGRAVITY_API_KEY",
-      "keyless": false
+      "kind": "none",
+      "keyless": true
     },
     "dashboardUrl": "http://127.0.0.1:8082",
     "docsUrl": "https://www.npmjs.com/package/antigravity-claude-proxy",

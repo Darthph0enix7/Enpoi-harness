@@ -104,6 +104,7 @@ export function apply(ctx: Context): void {
       settings: ctx.get('settings') as SettingsSeam | undefined,
       credentials: ctx.get('credentials') as CredentialsSeam | undefined,
       llm: ctx.get('llm') as ModelDiscoverySeam | undefined,
+      jobs,
       fetchImpl: globalThis.fetch as unknown as FetchLike,
       runStep: step => runStep(ctx, step, home, dshHome),
     }),

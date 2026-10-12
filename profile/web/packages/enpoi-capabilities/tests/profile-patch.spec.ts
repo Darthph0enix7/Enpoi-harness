@@ -26,6 +26,8 @@ import { describe, expect, it } from 'vitest'
  */
 
 const PATCH = readFileSync(new URL('../../../cordis.patch.yml', import.meta.url), 'utf8')
+/** The provider-sync plugin's own bundle patch (composed into the profile at install). */
+const PROVIDER_SYNC_PATCH = readFileSync(new URL('../../enpoi-provider-sync/cordis.patch.yml', import.meta.url), 'utf8')
 
 /** Settings rows the config editor creates on a configured machine. */
 const STATE_ROWS = [
@@ -123,6 +125,18 @@ describe('web profile patch template guard', () => {
       expect(config).not.toContain('mode: native')
       expect(config).not.toContain('mode: ptc')
     }
+  })
+
+  it('ships the routing-affinity map for the opencode routes on the provider-sync row', () => {
+    // The plugin enforces these headers on every configured route, so a live
+    // provider block that predates the requirement converges on the next
+    // pass; the value is the header NAME (the adapter sends the session id).
+    const block = /sessionHeaders:\n((?: {10}[a-z0-9-]+: [A-Za-z0-9-]+\n)+)/.exec(PROVIDER_SYNC_PATCH)
+    expect(block, 'sessionHeaders map missing from the shipped provider-sync config').not.toBeNull()
+    expect(block![1]).toContain('opencode-go: x-opencode-session')
+    expect(block![1]).toContain('opencode: x-opencode-session')
+    // Still no provider routes in the shipped patch: only the plugin config.
+    expect(PATCH).not.toMatch(/^\s*providers:/m)
   })
 
   it('ships no settings/state rows', () => {

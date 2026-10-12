@@ -157,6 +157,37 @@ describe('additive profile patch merge', () => {
     expect(readdirSync(root).some(name => /cordis\.patch\.yml.*\.backup-\d{8}-\d{6}/.test(name))).toBe(true)
   })
 
+  it('cannot add nested keys to an existing same-id row: the live llm-pi-ai row wins', () => {
+    // Verified merge semantics (row-level, by top-level `- id:`): a shipped
+    // row whose id already exists in the live patch is skipped whole, so a
+    // nested key like providers.opencode-go.sessionHeader is NOT delivered by
+    // the profile merge. That is why the routing-affinity key is enforced by
+    // the shipped enpoi-provider-sync plugin at boot instead.
+    const shipped = fixture('affinity-shipped.patch.yml', `- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      opencode-go:
+        sessionHeader: x-opencode-session
+`)
+    const live = fixture('affinity-live.patch.yml', `- id: llm-pi-ai
+  name: "@deepseek-ai/dsh-llm-pi-ai"
+  config:
+    providers:
+      opencode-go:
+        displayName: OpenCode Go
+        api: openai-completions
+        baseURL: https://opencode.ai/zen/go/v1
+        apiKeyEnv: OPENCODE_ZEN_KEY
+`)
+    const result = runPatchMerge(shipped, live)
+    expect(result.status).toBe(0)
+    const merged = readFileSync(live, 'utf8')
+    expect(merged).toContain('apiKeyEnv: OPENCODE_ZEN_KEY')
+    expect(merged).not.toContain('sessionHeader')
+    expect(result.output).not.toContain('added row: llm-pi-ai')
+  })
+
   it('does not let a nested id mask a shipped top-level row', () => {
     const shipped = fixture('nested-shipped.patch.yml', `- id: research-verify
   name: "@deepseek-ai/dsh-research-verify"
@@ -1242,8 +1273,10 @@ describe('release-based prebuilt resolution', () => {
       'export DSH_INSTALL_LIB_ONLY=1',
       '. "$INSTALL_SH" 2>/dev/null',
       'printf "A=%s\\n" "$(release_base_version 0.1.7-enpoi.2.42)"',
-      'printf "B=%s\\n" "$(release_base_version 1.2.3)"',
+      'printf "B=%s\\n" "$(release_base_version 0.2.0.42)"',
       'printf "C=%s\\n" "$(release_base_version 1.2.3-rc.4)"',
+      'printf "D=%s\\n" "$(release_base_version 1.2.3)"',
+      'printf "E=%s\\n" "$(release_base_version 42)"',
     ].join('\n')
     const result = spawnSync('bash', ['-c', script], {
       env: { ...process.env, INSTALL_SH: installSh },
@@ -1251,10 +1284,68 @@ describe('release-based prebuilt resolution', () => {
     })
     expect(result.status).toBe(0)
     expect(result.stdout).toContain('A=0.1.7-enpoi.2')
-    expect(result.stdout).toContain('B=1.2.3')
+    // A standard (hyphen-free) versioning scheme strips the run number too:
+    // this was the P0 regression that forced a source build for 0.2.0.42.
+    expect(result.stdout).toContain('B=0.2.0')
     // A numeric prerelease tail strips one component; the staged check also
     // accepts the tag's own version, so a base ending in a number still passes.
     expect(result.stdout).toContain('C=1.2.3-rc')
+    // A base-shaped input strips its last numeric segment; the staged check's
+    // equality clause covers the real release-tag case either way.
+    expect(result.stdout).toContain('D=1.2')
+    expect(result.stdout).toContain('E=42')
+  })
+
+  it('orders four-part versions by numeric segment (the 0.2.0.41/0.2.0.42 regression)', () => {
+    const script = [
+      'export DSH_INSTALL_LIB_ONLY=1',
+      '. "$INSTALL_SH" 2>/dev/null',
+      'lt() { if ver_lt "$1" "$2"; then echo "lt"; else echo "ge"; fi }',
+      'printf "A=%s\n" "$(lt 0.2.0.41 0.2.0.42)"',
+      'printf "B=%s\n" "$(lt 0.2.0.42 0.2.0.41)"',
+      'printf "C=%s\n" "$(lt 0.1.7-enpoi.2.9 0.1.7-enpoi.2.10)"',
+      'printf "D=%s\n" "$(lt 0.2.0 0.2.0.42)"',
+      'printf "E=%s\n" "$(lt 1.2.3-rc.2 1.2.3-rc.10)"',
+      'printf "F=%s\n" "$(lt 1.2.3-rc.1 1.2.3)"',
+      'printf "G=%s\n" "$(lt 1.2.3 1.2.3)"',
+    ].join('\n')
+    const result = spawnSync('bash', ['-c', script], {
+      env: { ...process.env, INSTALL_SH: installSh },
+      encoding: 'utf8',
+    })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('A=lt')
+    expect(result.stdout).toContain('B=ge')
+    expect(result.stdout).toContain('C=lt')
+    expect(result.stdout).toContain('D=lt')
+    expect(result.stdout).toContain('E=lt')
+    expect(result.stdout).toContain('F=lt')
+    expect(result.stdout).toContain('G=ge')
+  })
+
+  it('flags a release/channel commit divergence only when both sides are known', () => {
+    const script = [
+      'export DSH_INSTALL_LIB_ONLY=1',
+      '. "$INSTALL_SH" 2>/dev/null',
+      'RELEASE_COMMIT=aaaaaaaaaaaaaaaa; TARGET_COMMIT=bbbbbbbbbbbbbbbb',
+      'if release_commit_diverges; then echo "A=diverges"; else echo "A=same"; fi',
+      'RELEASE_COMMIT=aaaaaaaaaaaaaaaa; TARGET_COMMIT=aaaaaaaaaaaaaaaa',
+      'if release_commit_diverges; then echo "B=diverges"; else echo "B=same"; fi',
+      'RELEASE_COMMIT=""; TARGET_COMMIT=bbbbbbbbbbbbbbbb',
+      'if release_commit_diverges; then echo "C=diverges"; else echo "C=same"; fi',
+      'RELEASE_COMMIT=aaaaaaaaaaaaaaaa; TARGET_COMMIT=""',
+      'if release_commit_diverges; then echo "D=diverges"; else echo "D=same"; fi',
+    ].join('\n')
+    const result = spawnSync('bash', ['-c', script], {
+      env: { ...process.env, INSTALL_SH: installSh },
+      encoding: 'utf8',
+    })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('A=diverges')
+    expect(result.stdout).toContain('B=same')
+    // An unresolved side (no git, no API) must never trigger the fallback.
+    expect(result.stdout).toContain('C=same')
+    expect(result.stdout).toContain('D=same')
   })
 
   it('stages the newest release, verifies it, and accepts the tree base version', () => {

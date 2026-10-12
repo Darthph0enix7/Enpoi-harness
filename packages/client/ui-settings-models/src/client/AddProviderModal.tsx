@@ -131,6 +131,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const [displayName, setDisplayName] = useState('')
   const [protocol, setProtocol] = useState<string>('openai-completions')
   const [baseURL, setBaseURL] = useState('')
+  const [sessionHeader, setSessionHeader] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [busy, setBusy] = useState(false)
   const [discovering, setDiscovering] = useState(false)
@@ -283,6 +284,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       setDisplayName(t('emptyProviderName'))
       setProtocol(protocols.includes('openai-completions') ? 'openai-completions' : protocols[0] || 'openai-completions')
       setBaseURL('')
+      setSessionHeader('')
       setApiKey('')
       return
     }
@@ -290,6 +292,9 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     setDisplayName(tpl.name)
     setProtocol(protocols.includes(tpl.protocol) ? tpl.protocol : protocols[0] || tpl.protocol)
     setBaseURL(tpl.baseURL)
+    // Routing-affinity routes (opencode Zen Go) need the session header on
+    // every request; the preset carries it so a picker-added route works.
+    setSessionHeader(tpl.sessionHeader ?? '')
     setApiKey('')
     if (tpl.heavy !== undefined && tpl.heavy.unsupported === undefined) refreshHeavyStatus(tpl.heavy)
   }
@@ -395,6 +400,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       displayName: displayName.trim() || id,
       api: protocol,
       baseURL: baseURL.trim(),
+      ...sessionHeader.length > 0 ? { sessionHeader } : {},
       // A keyless preset stores its reference too, so a key supplied later
       // authenticates the paid/BYOK path; without one the route serves
       // anonymously.
@@ -1047,12 +1053,13 @@ function HeavyProviderForm(props: {
               />
             </div>
           ) : (
-            <p className={styles['heavyModeNote']}>
-              {t('heavyPlaceholderAuth').replace('{ref}', manifest.auth.apiKeyEnv ?? '')}
-            </p>
+            <p className={styles['heavyModeNote']}>{t('heavyAuthNone')}</p>
           )}
 
-          {job !== null && (
+          {/* A succeeded run is never rendered as progress: the modal closes on
+              success, and a snapshot from an earlier install must not paint a
+              full track and its old log tail. */}
+          {job !== null && job.state !== 'succeeded' && (
             <div
               className={`${styles['heavyProgress']} ${modalStyles['heavyProgress']}`}
               data-heavy-progress

@@ -82,10 +82,10 @@ it('falls back to the default install path for an undeclared platform', () => {
   expect(screen.getAllByText('Generate ENCRYPTION_KEY').length).toBeGreaterThan(0)
 })
 
-it('renders the placeholder auth reference and the direct-vendor install/removal facts', () => {
+it('renders the keyless auth note and the direct-vendor install/removal facts', () => {
   const antigravity = fallbackHeavyManifest('antigravity')!
   render(<HeavyProviderDocs manifest={antigravity} platform="linux" t={t} />)
-  expect(screen.getByText(en.heavyAuthPlaceholder.replace('{ref}', 'ANTIGRAVITY_API_KEY'))).toBeTruthy()
+  expect(screen.getByText(en.heavyAuthNone)).toBeTruthy()
   // The one provider with a browser-bound account flow carries the badge.
   expect(screen.getAllByText(en.heavyBrowserBadge).length).toBeGreaterThan(0)
   // The platform selector swaps the service wrapper: launchd on macOS, refused on Windows.

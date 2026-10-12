@@ -195,14 +195,12 @@ export interface HeavyProviderManifest {
    */
   pool?: HeavyManifestPool
   /**
-   * Route auth. `none` writes `keyless: true` (openai only); `placeholder`
-   * stores an apiKeyEnv reference and the host stages a placeholder credential
-   * value under it unless one already exists (anthropic routes are refused
-   * keyless); `unified` stores one shared gateway key. A route served by its
-   * own adapter may additionally carry a `pool`.
+   * Route auth. `none` writes `keyless: true` (no credential is ever sent);
+   * `unified` stores one shared gateway key under `apiKeyEnv`. A route served
+   * by its own adapter may additionally carry a `pool`.
    */
   auth: {
-    kind: 'none' | 'placeholder' | 'unified'
+    kind: 'none' | 'unified'
     apiKeyEnv?: string
     keyless: boolean
   }
@@ -515,11 +513,9 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
     label: 'Antigravity Proxy',
     summary: 'Multi-account Anthropic-compatible proxy for Google Antigravity OAuth accounts.',
     protocol: 'anthropic-messages',
-    // The proxy itself needs no client key, but llm-pi-ai refuses
-    // keyless anthropic routes: the reference and a placeholder credential
-    // value are stored, and the route MUST NOT declare a DSH pool — the proxy
-    // runs its own sticky one.
-    auth: { kind: 'placeholder', apiKeyEnv: 'ANTIGRAVITY_API_KEY', keyless: false },
+    // The proxy needs no client key: the route is keyless, and it MUST NOT
+    // declare a DSH pool — the proxy runs its own sticky one.
+    auth: { kind: 'none', keyless: true },
     dashboardUrl: 'http://127.0.0.1:8082',
     docsUrl: 'https://www.npmjs.com/package/antigravity-claude-proxy',
     defaultPort: 8082,
@@ -766,9 +762,6 @@ export function heavyManifestProblems(value: unknown): string[] {
   const removal = isRecord(value.removal) ? value.removal : undefined
   if (!Array.isArray(removal?.warnings) || removal.warnings.length === 0) problems.push(`${where}: removal.warnings is empty`)
   const auth = isRecord(value.auth) ? value.auth : undefined
-  if (auth?.kind === 'none' && value.protocol === 'anthropic-messages') {
-    problems.push(`${where}: keyless anthropic routes are refused by llm-pi-ai`)
-  }
   if (auth?.kind !== 'none' && (typeof auth?.apiKeyEnv !== 'string' || !/^[A-Z_][A-Z0-9_]*$/.test(auth.apiKeyEnv))) {
     problems.push(`${where}: apiKeyEnv must be an uppercase credential reference`)
   }

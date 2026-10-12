@@ -329,10 +329,29 @@ describe('harness-release.yml wiring', () => {
     expect(names).not.toContain('Upload manifest and diff assets to the draft release')
     expect(names).toContain('Pack artifact')
     expect(names.some(name => String(name).startsWith('Upload to the draft release'))).toBe(true)
-    // The publish job still assembles every sidecar into SHA256SUMS.
+    // The publish job still assembles every sidecar into SHA256SUMS, and
+    // refuses to publish a partial set: exactly three platform sidecars.
     const workflow = yaml.load(readFileSync(join(root, '.github/workflows/harness-release.yml'), 'utf8')) as { jobs: Record<string, { steps: Record<string, unknown>[] }> }
     const publishRun = String(workflow.jobs['publish']!.steps.find(step => String(step.name).includes('SHA256SUMS'))?.run)
     expect(publishRun).toContain("--pattern '*.sha256'")
+    expect(publishRun).toContain('expected exactly 3 platform .sha256 sidecars')
+  })
+
+  it('creates the draft release idempotently across re-runs and keeps interpolations in env', () => {
+    const workflow = yaml.load(readFileSync(join(root, '.github/workflows/harness-release.yml'), 'utf8')) as { jobs: Record<string, { steps: Record<string, unknown>[] }> }
+    const steps = workflow.jobs['prepare']!.steps
+    const create = steps.find(step => String(step.name).startsWith('Create the draft release'))
+    expect(create).toBeDefined()
+    const run = String(create?.run)
+    // GITHUB_RUN_NUMBER is stable across re-runs: the existing draft (or
+    // release) must be reused instead of failing `gh release create` with 422.
+    expect(run).toContain('gh release view "$TAG"')
+    expect(run).toContain('gh release create "$TAG" --draft')
+    // Injection defense: the step's expressions live in env, never inline.
+    expect(run).not.toContain('${{')
+    const env = create?.env as Record<string, unknown> | undefined
+    expect(env?.RELEASE_VERSION).toBe('${{ steps.version.outputs.version }}')
+    expect(env?.BASE_VERSION).toBe('${{ steps.version.outputs.base }}')
   })
 })
 

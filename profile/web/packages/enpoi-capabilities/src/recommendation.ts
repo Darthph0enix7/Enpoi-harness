@@ -93,6 +93,12 @@ export interface RecommendationModelCall {
   model: string
   /** Deadline for this call; defaults to {@link RECOMMENDATION_TIMEOUT_MS}. */
   timeoutMs?: number
+  /**
+   * Routing-affinity session identity (opencode Zen Go requires the session id
+   * on its dedicated header); omitted only when the caller genuinely has none,
+   * in which case the adapter warns and the provider may reject the call.
+   */
+  sessionId?: string | undefined
   /** Upstream cancellation (the child's own tool signal), fused into the deadline. */
   signal?: AbortSignal | undefined
   /**
@@ -201,6 +207,7 @@ export async function requestRecommendation(
       system: prompt.system,
       maxTokens: RECOMMENDATION_MAX_TOKENS,
       temperature: 0,
+      ...call.sessionId !== undefined && call.sessionId !== '' ? { sessionId: call.sessionId } : {},
       signal: callDeadline.signal,
     })) {
       callDeadline.signal.throwIfAborted()

@@ -65,10 +65,10 @@ it('every heavy provider states its local dependency line, Docker never the gene
   expect(fallbackHeavyManifest('commandcode')?.quirks.join('\n')).toContain('Docker is never required')
 })
 
-it('antigravity never declares a DSH key pool and is not keyless', () => {
+it('antigravity never declares a DSH key pool and is keyless', () => {
   const manifest = fallbackHeavyManifest('antigravity')
   expect(JSON.stringify(manifest)).not.toContain('"pool"')
-  expect(manifest?.auth.keyless).toBe(false)
+  expect(manifest?.auth).toEqual({ kind: 'none', keyless: true })
   expect(manifest?.protocol).toBe('anthropic-messages')
 })
 

@@ -72,10 +72,15 @@ export function HeavyProviderCard({ providerId, t, modelIds = [], onAutoPopulate
   // A host snapshot (page reopened, or another surface started the job) is
   // adopted unless the locally polled copy is newer. A same-start terminal
   // snapshot still wins, so a finished run is never masked by a cached
-  // running status reply.
+  // running status reply. A configured route with no snapshot is the host
+  // reporting its terminal job as history (`visibleJobSnapshot`): a locally
+  // kept copy from an earlier install is cleared rather than left rendering.
   useEffect(() => {
     const snapshot = status?.job
-    if (snapshot === undefined) return
+    if (snapshot === undefined) {
+      if (status?.configured === true) setJob(null)
+      return
+    }
     setJob((previous) => {
       if (previous === null) return snapshot
       if (snapshot.startedAt > previous.startedAt) return snapshot

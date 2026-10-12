@@ -48,10 +48,10 @@ it('rejects a direct manifest that could only send anonymous requests', () => {
   expect(manifestProblems([broken]).join('\n')).toContain('a direct route must declare a key pool or a non-keyless auth kind')
 })
 
-it('antigravity is a loopback anthropic route with a placeholder ref, never keyless', () => {
+it('antigravity is a loopback keyless anthropic route (llm-pi-ai serves keyless anthropic)', () => {
   const manifest = manifestById('antigravity')
   expect(manifest?.protocol).toBe('anthropic-messages')
-  expect(manifest?.auth).toEqual({ kind: 'placeholder', apiKeyEnv: 'ANTIGRAVITY_API_KEY', keyless: false })
+  expect(manifest?.auth).toEqual({ kind: 'none', keyless: true })
   expect(manifest?.reuse.baseURL).toBe('http://127.0.0.1:8082')
   expect(manifest?.local.baseURL).toBe('http://127.0.0.1:8082')
   expect(manifest?.defaultPort).toBe(8082)

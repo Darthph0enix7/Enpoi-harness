@@ -21664,6 +21664,20 @@ function hasReasoningMaterial(args) {
   }
   return false;
 }
+function recommendationSessionId(input2, origin) {
+  if (origin.childSessionId !== "") return origin.childSessionId;
+  const live2 = input2.agent?.session?.header?.id;
+  if (typeof live2 === "string" && live2 !== "") return live2;
+  return `ask-${stableDigest(`${input2.toolName}|${String(input2.callId ?? "")}`)}`;
+}
+function stableDigest(text) {
+  let hash2 = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash2 ^= text.charCodeAt(index);
+    hash2 = Math.imul(hash2, 16777619) >>> 0;
+  }
+  return hash2.toString(16).padStart(8, "0");
+}
 function workspaceRelationOf(childCwd, parentCwd) {
   if (childCwd === void 0 && parentCwd === void 0) return "both workspace roots are unknown";
   if (childCwd === void 0) return `the child workspace is unknown; the root runs in ${parentCwd}`;
@@ -21816,6 +21830,7 @@ var ChildApprovalForwarder = class {
       workspaceRelation: workspaceRelationOf(origin.cwd, root.cwd),
       ...rail !== void 0 ? { rail } : {},
       decision: input2.decision,
+      sessionId: recommendationSessionId(input2, origin),
       ...input2.signal !== void 0 ? { signal: input2.signal } : {},
       ...applied === true ? { applied: true } : {}
     };
@@ -22496,6 +22511,7 @@ async function requestRecommendation(ask, call) {
         system: prompt.system,
         maxTokens: RECOMMENDATION_MAX_TOKENS,
         temperature: 0,
+        ...call.sessionId !== void 0 && call.sessionId !== "" ? { sessionId: call.sessionId } : {},
         signal: callDeadline.signal
       })) {
         callDeadline.signal.throwIfAborted();
@@ -23430,6 +23446,9 @@ ${rows.map(renderMountRow).join("\n")}`;
         stream: (options) => llm.stream(options),
         provider,
         model,
+        // Routing-affinity: the ask's conversation identity travels with the
+        // one-shot so the adapter can stamp the provider's session header.
+        ...query.sessionId !== void 0 && query.sessionId !== "" ? { sessionId: query.sessionId } : {},
         timeoutMs: RECOMMENDATION_TIMEOUT_MS,
         // One observable line per miss (this harness's logger drops debug);
         // the derived line is kept either way, so the card never suffers.

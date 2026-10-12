@@ -31,6 +31,29 @@ const KILO = (baseURL: string) => ({
   },
 })
 
+/** The Antigravity shape: a hand-declared Anthropic Messages route whose key is optional. */
+const ANTIGRAVITY = (baseURL: string) => ({
+  providers: {
+    antigravity: {
+      displayName: 'Antigravity Proxy',
+      api: 'anthropic-messages',
+      baseURL,
+      keyless: true,
+      models: [{ id: 'gemini-3.1-pro-high', contextWindow: 128000, maxTokens: 8192 }],
+    },
+  },
+})
+
+/** A minimal complete text generation in Anthropic Messages SSE framing. */
+const ANTHROPIC_EVENTS: string[] = [
+  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"gemini-3.1-pro-high","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":0}}}\n\n',
+  'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n',
+  'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+  'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}\n\n',
+  'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+]
+
 async function harness(baseURL: string): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
@@ -96,6 +119,44 @@ describe('keyless provider routes', () => {
 
     expect(result.finish).toEqual({ kind: 'stop' })
     expect(server.headers[0]?.authorization).toBe('Bearer paid-key')
+  })
+
+  it('serves a mocked Anthropic Messages turn with no x-api-key and no authorization', async () => {
+    vi.stubEnv('ANTIGRAVITY_API_KEY', 'bogus-probe-key')
+    const server = await mockServer([{ rawEvents: ANTHROPIC_EVENTS }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, ANTIGRAVITY(server.url))
+
+    const result = await assemble(ctx, { provider: 'antigravity', model: 'gemini-3.1-pro-high', messages: [] })
+
+    // The keyless attempt passes the SDK's placeholder key so the client is
+    // constructible, then clears the default x-api-key header; the stored env
+    // value never reaches the wire.
+    expect(result.finish).toEqual({ kind: 'stop' })
+    expect(result.message.content).toEqual([{ type: 'text', text: 'hello' }])
+    expect(server.requests).toHaveLength(1)
+    expect(server.headers[0]?.['x-api-key']).toBeUndefined()
+    expect(server.headers[0]?.authorization).toBeUndefined()
+  })
+
+  it('ends a keyless Anthropic Messages route terminally on 401, not with a missing-credential error', async () => {
+    const server = await mockServer([{
+      status: 401,
+      body: JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } }),
+    }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, ANTIGRAVITY(server.url))
+
+    const result = await assemble(ctx, { provider: 'antigravity', model: 'gemini-3.1-pro-high', messages: [] })
+
+    // The request was attempted anonymously (no pre-flight MISSING_CREDENTIAL)
+    // and the route's own 401 is surfaced as the AUTH failure it is.
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'AUTH' } })
+    expect(server.requests).toHaveLength(1)
+    expect(server.headers[0]?.['x-api-key']).toBeUndefined()
+    expect(server.headers[0]?.authorization).toBeUndefined()
   })
 
   it("carries the provider's own code and message through an AUTH failure", async () => {
@@ -184,16 +245,16 @@ describe('keyless provider routes', () => {
 
   it('refuses keyless over a protocol that cannot omit its auth header', () => {
     expect(() => resolveProfiles({
-      anthropic: {
-        api: 'anthropic-messages',
-        baseURL: 'https://api.anthropic.com',
+      google: {
+        api: 'google-generative-ai',
+        baseURL: 'https://generativelanguage.googleapis.com',
         keyless: true,
-        models: [{ id: 'claude-x' }],
+        models: [{ id: 'gemini-x' }],
       },
-    } as never)).toThrow(/keyless.*anthropic-messages/)
+    } as never)).toThrow(/keyless.*google-generative-ai/)
   })
 
-  it.each(['openai-completions', 'openai-responses'] as const)(
+  it.each(['anthropic-messages', 'openai-completions', 'openai-responses'] as const)(
     'accepts keyless over the anonymous-capable protocol %s',
     (api) => {
       const profiles = resolveProfiles({

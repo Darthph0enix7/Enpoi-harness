@@ -843,21 +843,27 @@ node_at_least() { # bin major minor
 }
 
 ver_lt() { # true when version $1 < $2 (semver order, prerelease identifiers included)
-  local a="$1" b="$2" abase apre bbase bpre a1 a2 a3 b1 b2 b3 ai bi an bn
+  local a="$1" b="$2" abase apre bbase bpre ai bi an bn i max
   abase="${a%%-*}"; apre=""; [ "$a" = "$abase" ] || apre="${a#*-}"
   bbase="${b%%-*}"; bpre=""; [ "$b" = "$bbase" ] || bpre="${b#*-}"
-  IFS=. read -r a1 a2 a3 _ <<EOF
+  # Positional numeric-segment comparison for any segment count (3-part,
+  # 4-part run-suffixed, …); a missing segment counts as 0.
+  local -a as=() bs=()
+  IFS=. read -r -a as <<EOF
 $abase
 EOF
-  IFS=. read -r b1 b2 b3 _ <<EOF
+  IFS=. read -r -a bs <<EOF
 $bbase
 EOF
-  a1="${a1:-0}"; a2="${a2:-0}"; a3="${a3:-0}"
-  b1="${b1:-0}"; b2="${b2:-0}"; b3="${b3:-0}"
-  case "$a1$a2$a3$b1$b2$b3" in *[!0-9]*) return 1;; esac
-  if [ "$a1" -ne "$b1" ]; then [ "$a1" -lt "$b1" ]; return; fi
-  if [ "$a2" -ne "$b2" ]; then [ "$a2" -lt "$b2" ]; return; fi
-  if [ "$a3" -ne "$b3" ]; then [ "$a3" -lt "$b3" ]; return; fi
+  max="${#as[@]}"
+  [ "${#bs[@]}" -gt "$max" ] && max="${#bs[@]}"
+  i=0
+  while [ "$i" -lt "$max" ]; do
+    ai="${as[i]:-0}"; bi="${bs[i]:-0}"
+    case "$ai$bi" in *[!0-9]*) return 1;; esac
+    if [ "$ai" -ne "$bi" ]; then [ "$ai" -lt "$bi" ]; return; fi
+    i=$((i + 1))
+  done
   [ -z "$apre" ] && [ -z "$bpre" ] && return 1   # identical releases
   [ -z "$apre" ] && return 1                     # release outranks prerelease
   [ -z "$bpre" ] && return 0                     # prerelease sorts below release
@@ -868,10 +874,12 @@ EOF
     [ -z "$bi" ] && return 1
     case "$ai" in *[!0-9]*) an=0;; *) an=1;; esac
     case "$bi" in *[!0-9]*) bn=0;; *) bn=1;; esac
-    if [ "$an" != "$bn" ]; then [ "$an" = 0 ] && return 0; return 1; fi
-    if [ "$ai" = "$bi" ]; then continue; fi
-    if [ "$an" = 1 ]; then [ "$ai" -lt "$bi" ]; return; fi
-    [ "$(printf '%s\n%s\n' "$ai" "$bi" | LC_ALL=C sort | head -n 1)" = "$ai" ]; return
+    if [ "$an" -ne "$bn" ]; then [ "$an" -lt "$bn" ]; return; fi
+    if [ "$an" = 1 ]; then
+      [ "$ai" -ne "$bi" ] && { [ "$ai" -lt "$bi" ]; return; }
+    else
+      [ "$ai" != "$bi" ] && { [ "$ai" \< "$bi" ] && return 0; return 1; }
+    fi
   done
   return 1
 }
@@ -1533,8 +1541,13 @@ latest_release_tag() { # -> `v<version>` or empty
 # so the staged-version check accepts it; a version without a prerelease marker
 # or with a non-numeric tail is its own base.
 release_base_version() { # release-version -> tree base version
+  # The release version is the tree's package version plus the workflow run
+  # number (`<base>.<run>`). The run number is the trailing numeric segment
+  # whenever it exists — no hyphen (prerelease) requirement: a plain versioning
+  # scheme like `0.2.0.42` must strip to `0.2.0` too. A version whose last
+  # segment is not numeric, or that has no dot at all, is returned as-is.
   local v="$1" tail
-  case "$v" in *-*) : ;; *) printf '%s' "$v"; return 0;; esac
+  case "$v" in *.*) : ;; *) printf '%s' "$v"; return 0;; esac
   tail="${v##*.}"
   case "$tail" in ''|*[!0-9]*) printf '%s' "$v"; return 0;; esac
   printf '%s' "${v%.*}"
@@ -2105,6 +2118,21 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
   commit_started="$(date +%s)"
   RELEASE_COMMIT="$(resolve_target_commit "$tag" "$DSH_GITHUB_URL")"
   substep_ok "release commit resolved ($(( $(date +%s) - commit_started ))s)"
+  if release_commit_diverges; then
+    warn "prebuilt: release $tag was built from ${RELEASE_COMMIT:0:12} but the $CHANNEL channel resolves to ${TARGET_COMMIT:0:12}; falling back to the source build to honor the requested channel"
+    rm -rf "$STAGED"; STAGED=""
+    return 1
+  fi
+  return 0
+}
+
+# True when the newest release and the requested channel name different
+# commits, both known. Installing the release then would silently give the
+# device the other channel's code while claiming the requested channel, so the
+# caller falls back to the source path for the channel's own commit.
+release_commit_diverges() {
+  [ -n "${RELEASE_COMMIT:-}" ] && [ -n "${TARGET_COMMIT:-}" ] || return 1
+  commit_same "$TARGET_COMMIT" "$RELEASE_COMMIT" && return 1
   return 0
 }
 

@@ -217,13 +217,12 @@ export interface HeavyProviderManifest {
    */
   pool?: HeavyManifestPool
   /**
-   * Route auth. `none` writes `keyless: true` (openai only); `placeholder`
-   * stores an apiKeyEnv reference and `commitRoute` stages a placeholder
-   * credential value under it unless one already exists (anthropic routes are
-   * refused keyless); `unified` stores one shared gateway key.
+   * Route auth. `none` writes `keyless: true` (no credential is ever sent);
+   * `unified` stores one shared gateway key under `apiKeyEnv`. A route served
+   * by its own adapter may additionally carry a `pool`.
    */
   auth: {
-    kind: 'none' | 'placeholder' | 'unified'
+    kind: 'none' | 'unified'
     apiKeyEnv?: string
     keyless: boolean
   }
@@ -583,11 +582,13 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
     label: 'Antigravity Proxy',
     summary: 'Multi-account Anthropic-compatible proxy for Google Antigravity OAuth accounts.',
     protocol: 'anthropic-messages',
-    // The proxy itself needs no client key, but llm-pi-ai refuses
-    // keyless anthropic routes: the reference and a placeholder credential
-    // value are stored, and the route MUST NOT declare a DSH pool — the proxy
-    // runs its own sticky one.
-    auth: { kind: 'placeholder', apiKeyEnv: 'ANTIGRAVITY_API_KEY', keyless: false },
+    // The proxy needs no client key and llm-pi-ai serves keyless anthropic
+    // routes, so the route is written keyless; it MUST NOT declare a DSH pool
+    // — the proxy runs its own sticky one. Earlier builds staged a non-secret
+    // 'placeholder' value under ANTIGRAVITY_API_KEY so discovery could
+    // resolve; such a stored value (or a real operator key from the same era)
+    // is intentionally left in the credentials store and nothing reads it.
+    auth: { kind: 'none', keyless: true },
     dashboardUrl: 'http://127.0.0.1:8082',
     docsUrl: 'https://www.npmjs.com/package/antigravity-claude-proxy',
     defaultPort: 8082,
@@ -884,14 +885,8 @@ export function manifestProblems(manifests: readonly HeavyProviderManifest[] = H
       }
     }
     if (manifest.removal.warnings.length === 0) problems.push(`${where}: removal.warnings is empty`)
-    if (manifest.auth.kind === 'none' && manifest.protocol === 'anthropic-messages') {
-      problems.push(`${where}: keyless anthropic routes are refused by llm-pi-ai`)
-    }
     if (manifest.auth.kind !== 'none' && (manifest.auth.apiKeyEnv === undefined || !/^[A-Z_][A-Z0-9_]*$/.test(manifest.auth.apiKeyEnv))) {
       problems.push(`${where}: apiKeyEnv must be an uppercase credential reference`)
-    }
-    if (manifest.auth.kind === 'placeholder' && manifest.auth.keyless) {
-      problems.push(`${where}: a placeholder-auth route cannot be keyless`)
     }
     for (const step of [...variants.flatMap(variant => variant?.steps ?? []), ...manifest.removal.steps]) {
       if (step.command.trim() === '') problems.push(`${where}: a step command is empty (${step.label})`)

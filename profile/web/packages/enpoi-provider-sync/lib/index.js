@@ -578,6 +578,7 @@ var Config = Schema.object({
   syncDelayMs: live(Schema.number().default(2e3)),
   endpoints: live(Schema.dict(String).default({})),
   capacityDefaults: live(Schema.any().default({})),
+  sessionHeaders: live(Schema.dict(String).default({})),
   modelsDevUrl: live(Schema.string().default(DEFAULT_MODELS_DEV_URL)),
   routeProviderMap: live(Schema.dict(Schema.array(String)).default({})),
   pinnedModels: live(Schema.dict(Schema.array(String)).default({})),
@@ -587,10 +588,40 @@ var Config = Schema.object({
 var SIGN_IN_REQUIRED = "sign-in required";
 var LLM_NS = "llm-pi-ai";
 var AGENT_DEFAULT_MODEL_NS = "agent-default-model";
+async function enforceSessionHeaders(settings, wanted, log) {
+  const written = [];
+  for (const [route, header] of Object.entries(wanted)) {
+    if (header === "") continue;
+    const profile = sectionOf(settings, LLM_NS)?.providers?.[route];
+    if (profile === void 0 || profile.sessionHeader === header) continue;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await settings.mutate(
+          LLM_NS,
+          [{ op: "set", path: ["providers", route, "sessionHeader"], value: header }],
+          revisionOf(settings, LLM_NS)
+        );
+        written.push(route);
+        log?.(`route ${route}: session header enforced (${header})`);
+        break;
+      } catch (error) {
+        const conflict = error;
+        if (conflict?.code !== "SETTINGS_CONFLICT" || attempt >= 2) {
+          log?.(`route ${route}: could not write the session header (${header}): ${error instanceof Error ? error.message : String(error)}`);
+          break;
+        }
+      }
+    }
+  }
+  return written;
+}
 function sectionOf(settings, ns) {
   const section = readSettingsDocument(settings, ns);
   if (section === null || typeof section !== "object") return void 0;
   return section;
+}
+function revisionOf(settings, ns) {
+  return settings.describe().find((entry) => entry.ns === ns)?.revision;
 }
 var modelsDevCache;
 var modelsDevTmpSeq = 0;
@@ -1527,6 +1558,7 @@ function stringifyComparable(models) {
 function apply(ctx, config) {
   const logger = ctx.logger("enpoi-provider-sync");
   const endpoints = value(config.endpoints) ?? {};
+  const sessionHeaders = value(config.sessionHeaders) ?? {};
   const capacities = value(config.capacityDefaults) ?? {};
   const modelsDevUrl = value(config.modelsDevUrl) ?? DEFAULT_MODELS_DEV_URL;
   const routeProviderMap = { ...DEFAULT_ROUTE_PROVIDER_MAP, ...value(config.routeProviderMap) };
@@ -1573,7 +1605,7 @@ function apply(ctx, config) {
     }
     return void 0;
   }
-  function revisionOf(settings, ns) {
+  function revisionOf2(settings, ns) {
     return settings.describe().find((entry) => entry.ns === ns)?.revision;
   }
   function authorityLabel(report) {
@@ -1700,7 +1732,7 @@ function apply(ctx, config) {
         await settings.mutate(
           current.ns,
           [{ op: "set", path: ["providers", current.route, "models"], value: current.models }],
-          revisionOf(settings, current.ns)
+          revisionOf2(settings, current.ns)
         );
         const removed = current.report.removed.length;
         logger.info(removed > 0 ? `route ${current.route}: catalog refresh \u2014 ${String(current.models.length)} models (${String(removed)} outdated pruned)` : current.live === void 0 ? `route ${current.route}: catalog overlay applied \u2014 ${String(current.models.length)} models` : `route ${current.route}: catalog merged & enriched from models.dev \u2014 ${String(current.advertisedCount ?? 0)} ${current.report.source} models (${String(current.unadvertised.length)} kept)`);
@@ -1745,7 +1777,7 @@ function apply(ctx, config) {
         }
         if (settingsOps.length === 0) return;
         try {
-          await settings.mutate(ORCHESTRATION_NAMESPACE, settingsOps, revisionOf(settings, ORCHESTRATION_NAMESPACE));
+          await settings.mutate(ORCHESTRATION_NAMESPACE, settingsOps, revisionOf2(settings, ORCHESTRATION_NAMESPACE));
           logger.info(`route ${route}: pruned ids cleaned from hidden models/favorites (${String(removed.length)} id(s))`);
           return;
         } catch (error) {
@@ -1808,6 +1840,13 @@ function apply(ctx, config) {
     if (settings === void 0) {
       logger.warn("settings seam absent \u2014 skipping sync pass");
       return;
+    }
+    const enforced = await enforceSessionHeaders(settings, sessionHeaders, (message) => {
+      logger.info(message);
+    });
+    for (const route of enforced) {
+      process.stderr.write(`[enpoi-provider-sync] route ${route}: session header written to the live provider block
+`);
     }
     const llmProviders = sectionOf(settings, LLM_NS)?.providers;
     const commandCode = sectionOf(settings, COMMANDCODE_NS)?.providers;
@@ -1927,6 +1966,7 @@ export {
   commandCodeCatalogPath,
   describeSyncFailure,
   discoveredCachePath,
+  enforceSessionHeaders,
   fetchModels,
   inject,
   isCatalogRoute,

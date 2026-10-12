@@ -22,6 +22,12 @@ export interface ProviderTemplate {
   protocol: string
   /** Base URL; may contain {env:VAR} placeholders substituted at runtime. */
   baseURL: string
+  /**
+   * Routing-affinity header the route requires (the adapter sends the
+   * conversation's session id as its value). Carried by the generated row for
+   * the opencode Zen routes; absent on every other provider.
+   */
+  sessionHeader?: string
   /** Docs URL for the provider. */
   doc?: string
   /**

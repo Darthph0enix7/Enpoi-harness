@@ -123,13 +123,27 @@ describe('requestRecommendation (bounded one-shot)', () => {
       yield { type: 'text-delta', index: 0, text: '{"text":"Safe once.","suggestion":"allow-once"}' }
       yield { type: 'finish', reason: { kind: 'stop' } }
     }
-    const answer = await requestRecommendation(ask(), { stream, ...model })
+    const answer = await requestRecommendation(ask(), { stream, ...model, sessionId: 'child-42' })
     expect(answer).toEqual({ text: 'Safe once.', suggestion: 'allow-once' })
     expect(seen[0].provider).toBe('freellmapi')
     expect(seen[0].model).toBe('auto')
     expect(seen[0].maxTokens).toBe(RECOMMENDATION_MAX_TOKENS)
+    // Routing-affinity: the conversation's session id travels into the call
+    // so the adapter can stamp the provider's session header.
+    expect(seen[0].sessionId).toBe('child-42')
     expect(seen[0].temperature).toBe(0)
     expect(seen[0].signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('omits the session id when the caller has none', async () => {
+    const seen: GenerateOptions[] = []
+    const stream = async function* (options: GenerateOptions): AsyncIterable<StreamChunk> {
+      seen.push(options)
+      yield { type: 'text-delta', index: 0, text: '{"text":"Safe once."}' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    await requestRecommendation(ask(), { stream, ...model })
+    expect(seen[0].sessionId).toBeUndefined()
   })
 
   it('times out tightly and returns undefined (caller keeps the derived line)', async () => {

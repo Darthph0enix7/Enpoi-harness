@@ -10,15 +10,22 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import {
-  ChildApprovalForwarder, DEFAULT_PARK_TTL_MS, FORWARDED_ASK_MARKER, MAX_PARKED_ASKS, PARENT_JUDGEMENT_BUDGET_PER_TURN, delegatedChildOf, derivedRiskOf,
+  ChildApprovalForwarder,
+  recommendationSessionId,
+  type ChildAskInput, DEFAULT_PARK_TTL_MS, FORWARDED_ASK_MARKER, MAX_PARKED_ASKS, PARENT_JUDGEMENT_BUDGET_PER_TURN, delegatedChildOf, derivedRiskOf,
   forwardedApprovalsSeam, hasReasoningMaterial, railHitOf,
   recommendationOf, workspaceRelationOf,
-  type ApprovalOutcome, type ChildAgentLike, type ForwardingDeps, type ParkJournal, type ParkedAskRecord,
+  type ApprovalOutcome, type ChildAgentLike, type ForwardingDeps, type ForwardingOrigin, type ParkJournal, type ParkedAskRecord,
   type RecommendationQuery, type RootAskQuery, type RootHandle, type RootMode,
 } from '../src/forwarding'
 import { advertisedToolNames, resolvePolicy, type PermissionPolicyConfig } from '../src/policy'
 
 const ROOT: RootHandle = { id: 'root-1', agent: { fake: 'root-agent' }, cwd: '/ws' }
+/** Minimal origin for the digest-fallback helper test (ids overridden there). */
+const ORIGIN_FOR_DIGEST: ForwardingOrigin = {
+  childSessionId: 'child-42', rootSessionId: 'root-1', parentSessionId: 'root-1',
+  depth: 1, label: 'fixer: repair', cwd: '/ws',
+}
 
 function childAgent(overrides: {
   id?: string
@@ -195,6 +202,8 @@ describe('Full access = applied parent judgement (doc 82 item 8)', () => {
     expect(f.asks).toHaveLength(0)
     expect(f.recQueries).toHaveLength(1)
     expect(f.recQueries[0].applied).toBe(true)
+    // Routing-affinity: the ask's conversation identity travels with the call.
+    expect(f.recQueries[0].sessionId).toBe('child-42')
     expect(f.reports.some(line => line.includes('audit: parent approved') && line.includes('— Full access'))).toBe(true)
   })
 
@@ -599,6 +608,20 @@ describe('root-side recommendation (advisory only)', () => {
     expect(query.origin.depth).toBe(1)
     expect(query.rail).toBeUndefined()
     expect(query.workspaceRelation).toContain("root's own workspace")
+    expect(query.sessionId).toBe('child-42')
+  })
+
+  it('falls back to a deterministic ask-identity digest when no session exists', () => {
+    const origin: ForwardingOrigin = { ...ORIGIN_FOR_DIGEST, childSessionId: '' }
+    const input = { agent: undefined, toolName: 'bash', callId: 7, decision: bashAsk('rm plain') } as unknown as ChildAskInput
+    const first = recommendationSessionId(input, origin)
+    const second = recommendationSessionId({ ...input }, origin)
+    expect(first).toBe(second)
+    expect(first).toMatch(/^ask-[0-9a-f]{8}$/u)
+    expect(recommendationSessionId({ ...input, toolName: 'edit' }, origin)).not.toBe(first)
+    // The live session header wins over the digest when the origin has none.
+    const live = { agent: { session: { header: { id: 'live-session' } } }, toolName: 'bash', callId: 7 } as unknown as ChildAskInput
+    expect(recommendationSessionId(live, origin)).toBe('live-session')
   })
 
   it('never lets the model suggestion answer the ask: a rejection still denies', async () => {

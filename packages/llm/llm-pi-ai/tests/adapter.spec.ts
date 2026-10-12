@@ -123,6 +123,33 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.headers[0]?.['user-agent']).toBe(userAgent())
   })
 
+  it('sends the routing-affinity session header when the route requires it', async () => {
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = await harness(server.url, { sessionHeader: 'x-opencode-session' })
+    await assemble(ctx, { model: 'deepseek-v4-flash', messages: [], sessionId: 'session-affinity' as never })
+    expect(server.headers[0]?.['x-opencode-session']).toBe('session-affinity')
+  })
+
+  it('omits the header without a session id and warns once per route', async () => {
+    const server = await mockServer([{ events: textEvents }, { events: textEvents }])
+    const log = vi.fn()
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['deepseek'], new PiAiAdapter({
+      profiles: () => resolveProfiles({ deepseek: { apiKeyEnv: 'PI_TEST_KEY', baseURL: server.url, sessionHeader: 'x-opencode-session' } }),
+      resolveApiKey: () => Promise.resolve('test-key'),
+      auth: memoryAuth(),
+      log,
+    }))
+    await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+    expect(server.headers[0]?.['x-opencode-session']).toBeUndefined()
+    expect(log).toHaveBeenCalledTimes(1)
+    expect(String(log.mock.calls[0]?.[0])).toContain('x-opencode-session')
+    // Deduplicated: the second session-less call on the same route stays quiet.
+    await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+    expect(log).toHaveBeenCalledTimes(1)
+  })
+
   it('forwards common stream options and profile reasoning', async () => {
     const server = await mockServer([{ events: textEvents }])
     const ctx = await harness(server.url, {

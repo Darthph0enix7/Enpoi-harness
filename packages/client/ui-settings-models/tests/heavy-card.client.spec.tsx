@@ -121,6 +121,29 @@ it('renders a persisted succeeded snapshot as one line, never the progress block
   expect(document.querySelector('[data-heavy-log]')).toBeNull()
 })
 
+it('clears a locally kept finished job once a configured status stops reporting it', async () => {
+  const answers: { status?: unknown; job?: unknown } = {
+    status: {
+      ...running,
+      configured: false,
+      job: {
+        id: 'freellmapi', kind: 'install', state: 'succeeded', stage: 'Finishing',
+        stageIndex: 3, stageCount: 4, pct: 100, logTail: 'done', startedAt: 1, finishedAt: 2,
+      },
+    },
+  }
+  stubFetch(answers)
+  render(<HeavyProviderCard providerId="freellmapi" t={t} />)
+
+  await waitFor(() => { expect(screen.getByText(en.heavyJobSucceeded)).toBeTruthy() })
+  // The route is configured now, so the host reports the terminal snapshot as
+  // history (no `job`); the locally kept copy must be cleared, not left
+  // rendering a finished run from an earlier install.
+  answers.status = { ...running, job: undefined }
+  fireEvent.click(screen.getByRole('button', { name: en.heavyCheck }))
+  await waitFor(() => { expect(screen.queryByText(en.heavyJobSucceeded)).toBeNull() })
+})
+
 it('keeps a failed persisted snapshot visible with its error and log tail', async () => {
   stubFetch({ status: {
     ...running,

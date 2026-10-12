@@ -633,6 +633,10 @@ async function classifyRisk(
       content: [{ type: 'text', text: reviewUserText(snapshot) }],
     }],
     temperature: 0,
+    // Routing-affinity routes (opencode Zen Go) require the owning session id
+    // on a dedicated header; the review call belongs to the agent's session
+    // even though its prompt never enters the session log.
+    sessionId: agent.session.id,
     signal,
   })
   return readDecision(ctx.llm.stream(options))

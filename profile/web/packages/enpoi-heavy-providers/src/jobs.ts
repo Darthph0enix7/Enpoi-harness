@@ -11,7 +11,7 @@
  * @module dsh-enpoi-heavy-providers/jobs
  */
 
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { HeavyStep } from './manifests.js'
 import type { StepOutcome } from './planner.js'
@@ -126,6 +126,22 @@ export class HeavyJobManager {
       return raw !== null && typeof raw === 'object' ? raw : undefined
     } catch {
       return undefined
+    }
+  }
+
+  /**
+   * Evict one provider's snapshot: the in-memory view and its persisted file.
+   * A removed provider's terminal job must not resurrect on the next status
+   * poll; a running job is not touched (its run still owns itself).
+   * @param id - provider id.
+   */
+  evict(id: string): void {
+    this.jobs.delete(id)
+    try {
+      rmSync(join(this.dir, `${id}.json`), { force: true })
+    } catch {
+      // Removing the file is best-effort: an unremovable file is recovered as
+      // failed on the next boot, and the in-memory view is already gone.
     }
   }
 

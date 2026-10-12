@@ -386,7 +386,10 @@ describe('native review request', () => {
       system: EXPECTED_REVIEW_POLICY,
       temperature: 0,
     })
-    expect(request).not.toHaveProperty('sessionId')
+    // The review call carries the owning session id (routing-affinity routes
+    // such as opencode Zen Go require it on a dedicated header); the prompt
+    // itself still never enters the session log.
+    expect(request.sessionId).toBe('native-sections')
     expect(request.maxTokens).toBeUndefined()
     expect(request.tools).toBeUndefined()
     expect(request.messages).toHaveLength(1)

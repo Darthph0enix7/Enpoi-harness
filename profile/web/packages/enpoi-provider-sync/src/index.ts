@@ -105,6 +105,13 @@ export interface Config {
   endpoints: Volatile<Record<string, string>>
   /** Capacity fallbacks for models the live endpoint does not describe. */
   capacityDefaults: Volatile<Record<string, RouteCapacity>>
+  /**
+   * Route → routing-affinity header name a configured route requires (for
+   * example `opencode-go: x-opencode-session`). The plugin enforces the header
+   * on every configured route in the map, so a live provider block that
+   * predates the requirement converges on the next pass without a manual edit.
+   */
+  sessionHeaders: Volatile<Record<string, string>>
   /** models.dev catalogue URL; a deployment may point it at a mirror. */
   modelsDevUrl: Volatile<string>
   /**
@@ -138,6 +145,7 @@ export const Config = Schema.object({
   syncDelayMs: live(Schema.number().default(2000)),
   endpoints: live(Schema.dict(String).default({})),
   capacityDefaults: live(Schema.any().default({})),
+  sessionHeaders: live(Schema.dict(String).default({})),
   modelsDevUrl: live(Schema.string().default(DEFAULT_MODELS_DEV_URL)),
   routeProviderMap: live(Schema.dict(Schema.array(String)).default({})),
   pinnedModels: live(Schema.dict(Schema.array(String)).default({})),
@@ -220,10 +228,58 @@ interface ProviderProfile {
   }
 }
 
+/**
+ * Enforce routing-affinity headers on configured routes. Idempotent: a route
+ * whose header already matches is skipped, a route that is not configured is
+ * never created, and a concurrent settings edit is retried like the model
+ * writes. The value is the header NAME (the adapter sends the session id as
+ * its value), so no per-device state is written.
+ * @param settings - the settings seam.
+ * @param wanted - route → required header name.
+ * @param log - optional line logger (the plugin's info channel).
+ * @returns the routes whose header this call wrote.
+ */
+export async function enforceSessionHeaders(
+  settings: SettingsSeam,
+  wanted: Record<string, string>,
+  log?: (message: string) => void,
+): Promise<string[]> {
+  const written: string[] = []
+  for (const [route, header] of Object.entries(wanted)) {
+    if (header === '') continue
+    const profile = sectionOf(settings, LLM_NS)?.providers?.[route] as { sessionHeader?: string } | undefined
+    if (profile === undefined || profile.sessionHeader === header) continue
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await settings.mutate(
+          LLM_NS as SettingsNamespace,
+          [{ op: 'set', path: ['providers', route, 'sessionHeader'], value: header }],
+          revisionOf(settings, LLM_NS),
+        )
+        written.push(route)
+        log?.(`route ${route}: session header enforced (${header})`)
+        break
+      } catch (error) {
+        const conflict = error as Partial<SettingsConflictError>
+        if (conflict?.code !== 'SETTINGS_CONFLICT' || attempt >= 2) {
+          log?.(`route ${route}: could not write the session header (${header}): ${error instanceof Error ? error.message : String(error)}`)
+          break
+        }
+      }
+    }
+  }
+  return written
+}
+
 function sectionOf(settings: SettingsSeam, ns: string): { providers?: Record<string, ProviderProfile> } | undefined {
   const section = readSettingsDocument(settings, ns) as { providers?: Record<string, ProviderProfile> } | undefined
   if (section === null || typeof section !== 'object') return undefined
   return section
+}
+
+/** The namespace's current revision, from the settings descriptors. */
+function revisionOf(settings: SettingsSeam, ns: string): number | undefined {
+  return settings.describe().find(entry => entry.ns === ns)?.revision
 }
 
 /** Models.dev schema definitions. */
@@ -2036,6 +2092,7 @@ function stringifyComparable(models: Array<Record<string, unknown>> | undefined)
 export function apply(ctx: Context, config: Config): void {
   const logger = ctx.logger('enpoi-provider-sync')
   const endpoints = value(config.endpoints) ?? {}
+  const sessionHeaders = value(config.sessionHeaders) ?? {}
   const capacities = (value(config.capacityDefaults) ?? {}) as Record<string, RouteCapacity>
   const modelsDevUrl = value(config.modelsDevUrl) ?? DEFAULT_MODELS_DEV_URL
   // The configured route map extends the shipped table key by key: a route the
@@ -2512,6 +2569,12 @@ export function apply(ctx: Context, config: Config): void {
     if (settings === undefined) {
       logger.warn('settings seam absent — skipping sync pass')
       return
+    }
+    // Routing-affinity headers first: an existing provider block that predates
+    // the requirement gets the key before any model sync runs.
+    const enforced = await enforceSessionHeaders(settings, sessionHeaders, message => { logger.info(message) })
+    for (const route of enforced) {
+      process.stderr.write(`[enpoi-provider-sync] route ${route}: session header written to the live provider block\n`)
     }
     const llmProviders = sectionOf(settings, LLM_NS)?.providers
     // Command Code lives in its own adapter settings namespace: a deployment

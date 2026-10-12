@@ -162,15 +162,14 @@ it('shows the refused platform reason in the heavy form instead of install steps
   expect(screen.queryByText('Install the proxy package')).toBeNull()
 })
 
-it('a placeholder-auth provider offers no key field: the route stores the placeholder credential', async () => {
+it('a keyless provider offers no key field and states the anonymous route', async () => {
   stubHeavyFetch({})
   render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={translateEn} readOnly={false} onClose={vi.fn()} />)
 
   fireEvent.click(screen.getByText('Antigravity Proxy'))
   await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
-  // The existing placeholder-auth copy says no key is needed and names the
-  // stored reference; the unified-key field is not offered at all.
-  expect(screen.getByText(en.heavyPlaceholderAuth.replace('{ref}', 'ANTIGRAVITY_API_KEY'))).toBeTruthy()
+  // The keyless note replaces the unified-key field for a `none` auth route.
+  expect(screen.getByText(en.heavyAuthNone)).toBeTruthy()
   expect(screen.queryByPlaceholderText(en.heavyKeyPlaceholder)).toBeNull()
 })
 
@@ -435,6 +434,35 @@ it('contains progress card and log tail as contained surfaces with ≤8 KB log w
   // Back and Installing buttons in the footer remain mounted and accessible.
   expect(screen.getByRole('button', { name: 'Back' })).toBeTruthy()
   expect(screen.getByRole('button', { name: en.heavyInstalling })).toBeTruthy()
+})
+
+it('never rerenders a succeeded install snapshot as a progress track with its old log', async () => {
+  const stale = {
+    id: 'freellmapi',
+    kind: 'install',
+    state: 'succeeded',
+    stage: 'Finishing',
+    stageIndex: 4,
+    stageCount: 4,
+    pct: 100,
+    logTail: 'old log from days ago',
+    startedAt: 1,
+    finishedAt: 2,
+  }
+  stubHeavyFetch({ install: { ok: true, job: stale }, job: { job: stale } })
+  const onClose = vi.fn()
+  render(<AddProviderModal open taken={[]} protocols={['openai-completions', 'anthropic-messages']} api={wire()} t={translateEn} readOnly={false} onClose={onClose} />)
+
+  fireEvent.click(screen.getByText('FreeLLMAPI'))
+  await waitFor(() => { expect(screen.getByText(en.heavyQuirks)).toBeTruthy() })
+  fireEvent.click(screen.getByRole('radio', { name: new RegExp(en.heavyLocal) }))
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  // The succeeded snapshot closes the modal but is never painted as progress.
+  await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
+  expect(document.querySelector('[data-heavy-progress]')).toBeNull()
+  expect(document.querySelector('[data-heavy-log]')).toBeNull()
+  expect(screen.queryByText('old log from days ago')).toBeNull()
 })
 
 it('pins the scrollbar rebind and token discipline contract in AddProviderModal.module.css', () => {

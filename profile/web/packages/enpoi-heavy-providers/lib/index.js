@@ -52,7 +52,7 @@ import { homedir } from "node:os";
 import { join as join3 } from "node:path";
 
 // src/jobs.ts
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 var LOG_CAP_BYTES = 8192;
 var HeavyJobManager = class {
@@ -132,6 +132,19 @@ var HeavyJobManager = class {
       return raw !== null && typeof raw === "object" ? raw : void 0;
     } catch {
       return void 0;
+    }
+  }
+  /**
+   * Evict one provider's snapshot: the in-memory view and its persisted file.
+   * A removed provider's terminal job must not resurrect on the next status
+   * poll; a running job is not touched (its run still owns itself).
+   * @param id - provider id.
+   */
+  evict(id) {
+    this.jobs.delete(id);
+    try {
+      rmSync(join(this.dir, `${id}.json`), { force: true });
+    } catch {
     }
   }
   appendLog(view, chunk) {
@@ -524,11 +537,13 @@ var HEAVY_MANIFESTS = [
     label: "Antigravity Proxy",
     summary: "Multi-account Anthropic-compatible proxy for Google Antigravity OAuth accounts.",
     protocol: "anthropic-messages",
-    // The proxy itself needs no client key, but llm-pi-ai refuses
-    // keyless anthropic routes: the reference and a placeholder credential
-    // value are stored, and the route MUST NOT declare a DSH pool — the proxy
-    // runs its own sticky one.
-    auth: { kind: "placeholder", apiKeyEnv: "ANTIGRAVITY_API_KEY", keyless: false },
+    // The proxy needs no client key and llm-pi-ai serves keyless anthropic
+    // routes, so the route is written keyless; it MUST NOT declare a DSH pool
+    // — the proxy runs its own sticky one. Earlier builds staged a non-secret
+    // 'placeholder' value under ANTIGRAVITY_API_KEY so discovery could
+    // resolve; such a stored value (or a real operator key from the same era)
+    // is intentionally left in the credentials store and nothing reads it.
+    auth: { kind: "none", keyless: true },
     dashboardUrl: "http://127.0.0.1:8082",
     docsUrl: "https://www.npmjs.com/package/antigravity-claude-proxy",
     defaultPort: 8082,
@@ -803,14 +818,8 @@ function manifestProblems(manifests = HEAVY_MANIFESTS) {
       }
     }
     if (manifest.removal.warnings.length === 0) problems.push(`${where}: removal.warnings is empty`);
-    if (manifest.auth.kind === "none" && manifest.protocol === "anthropic-messages") {
-      problems.push(`${where}: keyless anthropic routes are refused by llm-pi-ai`);
-    }
     if (manifest.auth.kind !== "none" && (manifest.auth.apiKeyEnv === void 0 || !/^[A-Z_][A-Z0-9_]*$/.test(manifest.auth.apiKeyEnv))) {
       problems.push(`${where}: apiKeyEnv must be an uppercase credential reference`);
-    }
-    if (manifest.auth.kind === "placeholder" && manifest.auth.keyless) {
-      problems.push(`${where}: a placeholder-auth route cannot be keyless`);
     }
     for (const step of [...variants.flatMap((variant) => variant?.steps ?? []), ...manifest.removal.steps]) {
       if (step.command.trim() === "") problems.push(`${where}: a step command is empty (${step.label})`);
@@ -820,7 +829,7 @@ function manifestProblems(manifests = HEAVY_MANIFESTS) {
 }
 
 // src/planner.ts
-import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { dirname, join as join2 } from "node:path";
 var LLM_NS = "llm-pi-ai";
 var ORCHESTRATION_NS = "enpoi-orchestration";
@@ -1352,24 +1361,18 @@ async function writeRoute(deps, manifest, mode, models, overrides = {}) {
   await settings.mutate(settingsNs, [{ op: "set", path: ["providers", manifest.id], value: profile }], revisionOf(settings, settingsNs));
   return profile;
 }
-var PLACEHOLDER_CREDENTIAL = "placeholder";
 async function commitRoute(deps, manifest, mode, models, key, overrides = {}) {
   if (deps.settings === void 0) throw new Error("settings seam absent \u2014 cannot write the route");
   const pending = pendingRestartForManifest(deps, manifest);
   if (pending !== void 0) throw new Error(pending.message);
   const credentials = deps.credentials;
   const ref = manifest.pool?.identities[0]?.credentialRef ?? manifest.auth.apiKeyEnv;
-  let value = key?.trim() ?? "";
-  let previous;
-  if (value === "" && ref !== void 0 && manifest.auth.kind === "placeholder") {
-    if (credentials === void 0) throw new Error("credentials seam absent \u2014 cannot store the placeholder credential");
-    previous = await credentials.resolve(ref);
-    if (previous?.value === void 0) value = PLACEHOLDER_CREDENTIAL;
-  }
+  const value = key?.trim() ?? "";
   const store = value !== "" && ref !== void 0;
+  let previous;
   if (store) {
     if (credentials === void 0) throw new Error("credentials seam absent \u2014 cannot store the key");
-    previous ??= await credentials.resolve(ref);
+    previous = await credentials.resolve(ref);
     await credentials.set(ref, value);
   }
   let route;
@@ -1441,7 +1444,7 @@ function removePoolState(deps, id) {
   const path = join2(deps.dshHome, "pools", `${id}.json`);
   if (!existsSync(path)) return false;
   try {
-    rmSync(path);
+    rmSync2(path);
     return true;
   } catch {
     return false;
@@ -1566,6 +1569,7 @@ ${outcome.output}
   } catch (error) {
     errors.push(`chains: ${error instanceof Error ? error.message : String(error)}`);
   }
+  deps.jobs?.evict(manifest.id);
   return { routeRemoved, credentialRemoved, poolStateRemoved, cacheEntryRemoved, chainLinksRemoved, teardown, warnings, errors };
 }
 
@@ -2030,6 +2034,7 @@ function apply(ctx) {
       settings: ctx.get("settings"),
       credentials: ctx.get("credentials"),
       llm: ctx.get("llm"),
+      jobs,
       fetchImpl: globalThis.fetch,
       runStep: (step) => runStep(ctx, step, home, dshHome)
     }),

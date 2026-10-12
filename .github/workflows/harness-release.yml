@@ -101,16 +101,34 @@ jobs:
           fi
           echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
 
-      - name: Create the draft release
+      - name: Create the draft release (idempotent across re-runs)
         if: steps.dedupe.outputs.skip != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          BASE_VERSION: ${{ steps.version.outputs.base }}
         run: |
           set -euo pipefail
-          TAG="v${{ steps.version.outputs.version }}"
-          gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TAG" \
-            --notes "Prebuilt Enpoi Harness ${{ steps.version.outputs.version }} (tree version ${{ steps.version.outputs.base }}, commit $GITHUB_SHA)."
+          TAG="v$RELEASE_VERSION"
+          # GITHUB_RUN_NUMBER is stable across re-runs, so a re-run finds the
+          # draft from its first attempt: reuse it instead of failing at
+          # `gh release create` with HTTP 422.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            STATE="$(gh release view "$TAG" --json isDraft,isPrerelease -q '[.isDraft, .isPrerelease] | @tsv')"
+            case "$STATE" in
+              *true*)
+                echo "release $TAG already exists (draft); reusing it for this attempt"
+                ;;
+              *)
+                echo "release $TAG already exists and is published; nothing to create"
+                exit 0
+                ;;
+            esac
+          else
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TAG" \
+              --notes "Prebuilt Enpoi Harness $RELEASE_VERSION (tree version $BASE_VERSION, commit $GITHUB_SHA)."
+          fi
 
   build:
     name: ${{ matrix.os }}-${{ matrix.arch }}
@@ -327,8 +345,16 @@ jobs:
           # Each platform sidecar already carries `<hash>  <asset>`; download
           # them all and concatenate into one manifest, then publish. A failed
           # build cell never reaches this job, so the release is never visible
-          # with a missing platform.
+          # with a missing platform. Assert the exact platform count anyway:
+          # a truncated upload set must fail here, not publish a partial sums
+          # file.
           gh release download "$TAG" --pattern '*.sha256' --dir "$SUMS"
+          SIDECARS="$(ls -1 "$SUMS"/*.sha256 2>/dev/null | wc -l | tr -d ' ')"
+          if [ "$SIDECARS" != "3" ]; then
+            echo "publish: expected exactly 3 platform .sha256 sidecars, found $SIDECARS" >&2
+            ls -la "$SUMS" >&2
+            exit 1
+          fi
           ( cd "$SUMS" && cat ./*.sha256 | LC_ALL=C sort -k2 > SHA256SUMS )
           cat "$SUMS/SHA256SUMS"
           gh release upload "$TAG" "$SUMS/SHA256SUMS" --clobber

@@ -83,12 +83,14 @@ export const DEFAULT_MAX_TOKENS = 32_768
 export const DEFAULT_INPUT: readonly PiAiModality[] = ['text']
 
 /**
- * Wire protocols that can serve an anonymous (keyless) route. Only these
- * clear the Authorization header outright; every other supported protocol
- * authenticates through a header with no omission, so a keyless profile on
- * one would send a placeholder credential instead of none.
+ * Wire protocols that can serve an anonymous (keyless) route. The OpenAI
+ * protocols clear the SDK's default Authorization header for a null header
+ * value, and Anthropic Messages clears its default `x-api-key` the same way;
+ * every other supported protocol authenticates through a header with no
+ * omission, so a keyless profile on one would send a placeholder credential
+ * instead of none.
  */
-const ANONYMOUS_CAPABLE_APIS: ReadonlySet<string> = new Set(['openai-completions', 'openai-responses'])
+const ANONYMOUS_CAPABLE_APIS: ReadonlySet<string> = new Set(['anthropic-messages', 'openai-completions', 'openai-responses'])
 
 export type {
   PiAiCompatProfile,
@@ -561,13 +563,12 @@ export function resolveProfiles(
     // itself on every configuration surface just because it gained a profile.
     const displayName = source.displayName ?? provider
     const { apiKeyEnv, keyless, retryPolicy, models: _models, displayName: _displayName, pool, ...rest } = source
-    // A keyless route reaches the wire with no Authorization header, which only
-    // the OpenAI-compatible protocols can express (their SDK clears the header
-    // for a null value); Anthropic Messages authenticates with `x-api-key`,
-    // which has no such omission, so a keyless profile there would send a
-    // placeholder key instead of none. An omitted `api` keeps its catalog
-    // protocol (and its existing resolution), so only an explicit protocol
-    // outside this set is refused.
+    // A keyless route reaches the wire with no auth header at all, which only
+    // the protocols whose SDK honors a null header as an explicit omission can
+    // express (OpenAI's Authorization and Anthropic Messages' `x-api-key`);
+    // every other protocol would send a placeholder key instead of none. An
+    // omitted `api` keeps its catalog protocol (and its existing resolution),
+    // so only an explicit protocol outside this set is refused.
     if (keyless === true && source.api !== undefined && !ANONYMOUS_CAPABLE_APIS.has(source.api)) {
       throw new Error(
         `llm-pi-ai: provider "${provider}" sets keyless, which this build cannot serve over ${source.api};`

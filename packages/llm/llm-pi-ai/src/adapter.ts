@@ -86,17 +86,18 @@ interface PiAiSnapshot {
 }
 
 /**
- * The non-empty placeholder key pi-ai's OpenAI-compatible APIs require before
- * they construct a client. A keyless attempt passes it and clears the
- * Authorization header the OpenAI SDK would derive from it (`null` is the
- * SDK's documented form for omitting a default header), so the request reaches
- * the wire with no Authorization header at all.
+ * The non-empty placeholder key pi-ai's APIs require before they construct a
+ * client. A keyless attempt passes it and clears the SDK's default auth header
+ * (`null` is each SDK's documented form for omitting a default header) —
+ * `authorization` for the OpenAI protocols, `x-api-key` for Anthropic
+ * Messages — so the request reaches the wire with no auth header at all.
  */
 const KEYLESS_REQUEST_KEY = 'unused'
 
-/** Whether deployment headers already carry a non-empty Authorization. */
-function hasAuthorizationHeader(headers: Readonly<Record<string, string>>): boolean {
-  return Object.entries(headers).some(([name, value]) => name.toLowerCase() === 'authorization' && value.length > 0)
+/** Whether deployment headers already carry a non-empty value for one header. */
+function hasHeader(headers: Readonly<Record<string, string>>, name: string): boolean {
+  const expected = name.toLowerCase()
+  return Object.entries(headers).some(([key, value]) => key.toLowerCase() === expected && value.length > 0)
 }
 
 /** Constructor options for {@link PiAiAdapter}: the two resolution hooks the plugin owns. */
@@ -275,6 +276,9 @@ function requestHeaders(headers: Readonly<Record<string, string>> | undefined): 
  * restart; model descriptors come from the collection those profiles built.
  */
 export class PiAiAdapter extends LlmAdapter {
+  /** Routes already warned about a required session header with no session id. */
+  private readonly warnedMissingSessionHeader = new Set<string>()
+
   private snapshot: PiAiSnapshot | undefined
 
   constructor(private readonly config: PiAiAdapterOptions) {
@@ -438,6 +442,19 @@ export class PiAiAdapter extends LlmAdapter {
       // Routing-affinity routes (opencode Zen Go) require the conversation's
       // session identity on a dedicated header; static deployment headers stay
       // deployment-owned and the Harness attribution still wins collisions.
+      if (profile.sessionHeader !== undefined && options.sessionId === undefined) {
+        // A required header silently skipped is a guaranteed provider 400
+        // (MissingSessionID): surface the session-less call path once per
+        // route so it can be threaded instead of failing mysteriously.
+        const key = `${options.provider}/${options.model}`
+        if (!this.warnedMissingSessionHeader.has(key)) {
+          this.warnedMissingSessionHeader.add(key)
+          this.config.log?.(
+            `llm-pi-ai: route "${key}" requires the session header "${profile.sessionHeader}"`
+            + ' but this request carries no session id; the header is omitted and the provider may reject it',
+          )
+        }
+      }
       const sessionHeader = profile.sessionHeader === undefined || options.sessionId === undefined
         ? {}
         : { [profile.sessionHeader]: String(options.sessionId) }
@@ -450,17 +467,21 @@ export class PiAiAdapter extends LlmAdapter {
       }
       /**
        * One attempt's stream options. A keyless attempt passes the placeholder
-       * key pi-ai requires and clears the Authorization header the SDK derives
-       * from it, unless deployment headers already carry their own
-       * authorization. A keyless route never receives a resolved key — stored,
-       * ambient, and env values are all suppressed before this point — so its
-       * only possible Authorization header is deployment-owned. Any supplied
-       * key on an authenticated route keeps the normal bearer header.
+       * key pi-ai requires and clears the SDK's default auth header, unless
+       * deployment headers already carry their own value: `authorization` for
+       * the OpenAI protocols, `x-api-key` for Anthropic Messages. A keyless
+       * route never receives a resolved key — stored, ambient, and env values
+       * are all suppressed before this point — so its only possible auth
+       * header is deployment-owned. Any supplied key on an authenticated route
+       * keeps the normal header.
        */
       const attemptOptions = (apiKeyOverride: string | undefined, identityId?: string): SimpleStreamOptions => {
         const keyless = profile.keyless && apiKeyOverride === undefined
         const headers: Record<string, string | null> = { ...commonHeaders }
-        if (keyless && !hasAuthorizationHeader(commonHeaders)) headers.authorization = null
+        if (keyless) {
+          if (!hasHeader(commonHeaders, 'authorization')) headers.authorization = null
+          if (!hasHeader(commonHeaders, 'x-api-key')) headers['x-api-key'] = null
+        }
         return {
           ...profileOptions(profile, reasoning, keyless ? KEYLESS_REQUEST_KEY : apiKeyOverride),
           ...commonOptions,
@@ -476,7 +497,7 @@ export class PiAiAdapter extends LlmAdapter {
               if (quota !== undefined) engine.recordQuota(options.provider, identityId, options.model, quota)
             },
           },
-          ...keyless ? { headers: headers as Record<string, string> } : {},
+          ...keyless ? { headers } : {},
         }
       }
       const makeAttempt = (
@@ -677,7 +698,7 @@ export class PiAiAdapter extends LlmAdapter {
           attemptController.abort('llm-pi-ai pool rotated to the next identity')
           this.config.log?.(
             `llm-pi-ai: provider "${options.provider}" identity "${identity.id}" failed (${failureClass});`
-            + `${rotating ? ' rotating' : ' no attempts left'}`,
+            + (rotating ? ' rotating' : ' no attempts left'),
           )
           if (failureClass === 'CAPACITY' && attempts < maxAttempts) {
             const peekOrder = engine.orderFor(options.provider, profile.pool.identities, options.model, profile.pool.strategy, true)

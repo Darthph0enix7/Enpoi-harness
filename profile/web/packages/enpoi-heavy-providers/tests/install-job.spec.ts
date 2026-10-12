@@ -3,7 +3,7 @@
  * successful run invokes the finalizer that writes them. Jobs are polled, so
  * the snapshot carries stage/pct/logTail while running.
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
@@ -159,4 +159,20 @@ it('a succeeded snapshot is history once the route is configured; running and fa
   // finalizer read before the settings reply settles) is still shown.
   expect(visibleJobSnapshot({ ...base, state: 'succeeded', finishedAt: 2 }, false)?.state).toBe('succeeded')
   expect(visibleJobSnapshot({ ...base, state: 'succeeded', finishedAt: 2 }, true)).toBeUndefined()
+})
+
+it('evict drops the in-memory snapshot and its persisted file', async () => {
+  const dir = join(scratchDir(), 'heavy-jobs')
+  const manager = new HeavyJobManager({ dir, run: async () => ({ exitCode: 0, output: 'ok' }) })
+  manager.start('antigravity', 'install', resolveHeavyInstall(manifestById('antigravity')!.local, '').steps, undefined)
+  await settled(manager, 'antigravity')
+  const file = join(dir, 'antigravity.json')
+  expect(existsSync(file)).toBe(true)
+
+  // Removal evicts the snapshot so a terminal job cannot resurrect on status.
+  manager.evict('antigravity')
+  expect(manager.snapshot('antigravity')).toBeUndefined()
+  expect(existsSync(file)).toBe(false)
+  // Evicting an already-absent snapshot is a no-op, never an error.
+  expect(() => manager.evict('antigravity')).not.toThrow()
 })

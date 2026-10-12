@@ -39,6 +39,19 @@
           openrouter: https://openrouter.ai/api/v1
           huggingface: https://router.huggingface.co/v1
           kilo: https://api.kilo.ai/api/gateway
+        # Routing-affinity routes: the adapter sends the conversation's
+        # session id as this header (opencode Zen Go rejects requests without
+        # it: 400 MissingSessionID). The plugin enforces the key on every
+        # configured route below, so a live provider block that predates the
+        # requirement converges on the next pass without a manual edit. The
+        # value is the header NAME; the session id is its per-request value.
+        # Operator-only state stays in the live provider block and is never
+        # shipped here: the multi-identity `pool` with credentialRefs, the
+        # apiKeyEnv credential reference, and the model list (the sync pass
+        # owns it). This map carries only the neutral route requirement.
+        sessionHeaders:
+          opencode-go: x-opencode-session
+          opencode: x-opencode-session
         # Capacity fallbacks for models the live /models endpoint does not
         # describe (most OpenAI-style listings carry only ids). Per-model
         # truth wins first: models.dev, the installed catalog, and the

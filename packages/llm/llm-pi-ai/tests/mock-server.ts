@@ -29,6 +29,12 @@ export const textEvents = [
 export async function mockServer(script: {
   status?: number
   events?: string[]
+  /**
+   * Raw SSE frames written verbatim (each line already carries its blank
+   * line). Anthropic's parser dispatches on the `event:` field, which the
+   * `events` shorthand does not emit.
+   */
+  rawEvents?: string[]
   body?: string
   delayMs?: number
   headers?: Record<string, string>
@@ -61,6 +67,11 @@ export async function mockServer(script: {
         return
       }
       response.writeHead(200, { 'content-type': 'text/event-stream', ...behavior.headers })
+      if (behavior.rawEvents !== undefined) {
+        for (const raw of behavior.rawEvents) response.write(raw)
+        response.end()
+        return
+      }
       let index = 0
       const writeNext = (): void => {
         const event = behavior.events?.[index++]

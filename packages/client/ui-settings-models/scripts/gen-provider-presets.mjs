@@ -13,7 +13,7 @@
  * `--out <path>`; a target without a `.ts` extension is written as plain JSON
  * (no generated header is possible there; the source metadata goes to stdout).
  * Shape per provider:
- *   { id, name, env: string[], protocol, baseURL, doc?, keyless?, popular? }
+ *   { id, name, env: string[], protocol, baseURL, doc?, keyless?, popular?, sessionHeader? }
  *   protocol: 'openai-completions' | 'openai-responses' | 'anthropic-messages'
  *   keyless: true for routes whose free tier serves anonymous requests
  *   popular: 1-based position in the Add-Provider picker's Popular group
@@ -169,6 +169,18 @@ const KEYLESS_PRESET_IDS = new Set(['kilo', 'ollama', 'lmstudio', 'llama-cpp', '
 /** Popular group order in the Add-Provider picker (1-based rank = position). */
 const POPULAR_PRESET_IDS = ['opencode', 'opencode-go', 'anthropic', 'github-copilot', 'openai', 'google', 'openrouter', 'vercel']
 
+/**
+ * Routing-affinity overlay: routes whose provider requires the conversation's
+ * session id on a dedicated header (opencode Zen Go rejects requests without
+ * it: 400 MissingSessionID). Shipped with the preset so a provider added from
+ * the picker carries the key; live provider blocks that predate it are
+ * converged by the enpoi-provider-sync plugin's `sessionHeaders` enforcement.
+ */
+const SESSION_HEADER_PRESET_IDS = {
+  'opencode-go': 'x-opencode-session',
+  'opencode': 'x-opencode-session',
+}
+
 // ── 5. Build presets ─────────────────────────────────────────────────────────
 const presets = []
 for (const id of providerIds) {
@@ -193,6 +205,7 @@ for (const id of providerIds) {
     env,
     protocol: protocolOf(p.npm),
     baseURL,
+    ...(SESSION_HEADER_PRESET_IDS[id] !== undefined ? { sessionHeader: SESSION_HEADER_PRESET_IDS[id] } : {}),
     ...(doc ? { doc } : {}),
     ...(KEYLESS_PRESET_IDS.has(id) ? { keyless: true } : {}),
     ...(popularRank > 0 ? { popular: popularRank } : {}),

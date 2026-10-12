@@ -182,6 +182,13 @@ export interface RecommendationQuery {
   readonly decision: AskDecision
   readonly signal?: AbortSignal | undefined
   /**
+   * Routing-affinity session identity for the model call (opencode Zen Go
+   * rejects requests without it on its dedicated header). The conversation's
+   * child session id — stable across every card of one conversation — so a
+   * provider can route all of a session's calls together.
+   */
+  readonly sessionId?: string | undefined
+  /**
    * True when this answer is APPLIED as the decision (the Full-access parent
    * judgement), not rendered as card advice; the prompt says so explicitly.
    */
@@ -657,6 +664,36 @@ export function hasReasoningMaterial(args: Record<string, unknown> | undefined):
  * @param parentCwd - the root session's workspace root, when known.
  * @returns a short human-readable relation line.
  */
+/**
+ * The session identity one recommendation call should carry.
+ *
+ * Source chain, in order: the forwarded ask's own conversation identity
+ * (`origin.childSessionId`, already derived from the child's session header),
+ * the live child session id when the origin predates it, then a deterministic
+ * digest of the ask's identity (tool + call id). The last resort is stable for
+ * a given ask — retries of the same call share it — and never a per-request
+ * random value, because provider routing affinity groups calls by this value.
+ * @param input - the child ask (live agent + call identity).
+ * @param origin - the forwarded origin (conversation ids).
+ * @returns the session id to send on the routing header.
+ */
+export function recommendationSessionId(input: ChildAskInput, origin: ForwardingOrigin): string {
+  if (origin.childSessionId !== '') return origin.childSessionId
+  const live = input.agent?.session?.header?.id
+  if (typeof live === 'string' && live !== '') return live
+  return `ask-${stableDigest(`${input.toolName}|${String(input.callId ?? '')}`)}`
+}
+
+/** FNV-1a (32-bit) as lowercase hex: deterministic, dependency-free. */
+function stableDigest(text: string): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, '0')
+}
+
 export function workspaceRelationOf(childCwd: string | undefined, parentCwd: string | undefined): string {
   if (childCwd === undefined && parentCwd === undefined) return 'both workspace roots are unknown'
   if (childCwd === undefined) return `the child workspace is unknown; the root runs in ${parentCwd}`
@@ -875,6 +912,7 @@ export class ChildApprovalForwarder {
       workspaceRelation: workspaceRelationOf(origin.cwd, root.cwd),
       ...rail !== undefined ? { rail } : {},
       decision: input.decision,
+      sessionId: recommendationSessionId(input, origin),
       ...input.signal !== undefined ? { signal: input.signal } : {},
       ...applied === true ? { applied: true } : {},
     }
