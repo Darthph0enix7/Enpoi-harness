@@ -19,8 +19,9 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statfsSync, statSync } from 'node:fs'
 import { arch, cpus, homedir, hostname, platform, release, uptime as osUptime } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import process from 'node:process'
+import { fileURLToPath } from 'node:url'
 
 const VERSION = '1.0.0'
 // A closed consumer (`| head`, a quit pager) is normal; exit like a SIGPIPE
@@ -53,13 +54,38 @@ const SEARCH_KEY_ENV = {
 }
 const WEB_KEY_NAMES = ['EXA_API_KEY', 'TAVILY_API_KEY', 'BRAVE_API_KEY', 'PERPLEXITY_API_KEY', 'JINA_API_KEY', 'SEARXNG_URL']
 
+/**
+ * The harness home recorded by the installer for the tree this script ships
+ * in (`<prefix>/harness/<version>/scripts/doctor.mjs` -> `install-state.json`
+ * next to the tree). Returns null for a source checkout or an unreadable
+ * record, so the standard `$DSH_HOME`/`~/.dsh` resolution still applies.
+ */
+function managedInstallHome() {
+  let directory = dirname(fileURLToPath(import.meta.url))
+  for (let depth = 0; depth < 12; depth += 1) {
+    if (basename(directory) === 'harness') {
+      try {
+        const parsed = JSON.parse(readFileSync(join(directory, 'install-state.json'), 'utf8'))
+        const home = parsed !== null && typeof parsed === 'object' ? parsed.dshHome : undefined
+        return typeof home === 'string' && home.trim().length > 0 ? home : null
+      } catch {
+        return null
+      }
+    }
+    const parent = dirname(directory)
+    if (parent === directory) return null
+    directory = parent
+  }
+  return null
+}
+
 function parseArgs(argv) {
   const options = {
     json: false,
     color: undefined,
     strict: false,
     help: false,
-    home: process.env.DSH_HOME ?? '',
+    home: process.env.DSH_HOME ?? managedInstallHome() ?? '',
     port: Number(process.env.DSH_PORT ?? 3080),
     service: process.env.DSH_SERVICE_UNIT ?? 'dsh-web.service',
     profile: process.env.DSH_PROFILE ?? 'web',

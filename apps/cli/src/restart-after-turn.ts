@@ -28,7 +28,7 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from '
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
-import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import { resolveCliHome } from './version-identity.ts'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 
@@ -109,12 +109,12 @@ export interface RestartMarker {
 }
 
 /** Absolute marker path for one harness home. */
-export function restartMarkerPath(home: string = resolveDshHome()): string {
+export function restartMarkerPath(home: string = resolveCliHome()): string {
   return join(home, RESTART_MARKER_RELATIVE)
 }
 
 /** Absolute failure-record path for one harness home. */
-export function restartFailurePath(home: string = resolveDshHome()): string {
+export function restartFailurePath(home: string = resolveCliHome()): string {
   return join(home, RESTART_FAILURE_RELATIVE)
 }
 
@@ -152,7 +152,7 @@ export function parseRestartMarker(raw: string): RestartMarker | undefined {
 }
 
 /** Write a marker atomically (temp file + rename); the directory is created on demand. */
-export function writeRestartMarker(marker: RestartMarker, home: string = resolveDshHome()): string {
+export function writeRestartMarker(marker: RestartMarker, home: string = resolveCliHome()): string {
   const path = restartMarkerPath(home)
   mkdirSync(dirname(path), { recursive: true })
   const temporary = `${path}.${String(process.pid)}.tmp`
@@ -162,7 +162,7 @@ export function writeRestartMarker(marker: RestartMarker, home: string = resolve
 }
 
 /** Read the marker without consuming it; malformed or absent markers read as `undefined`. */
-export function readRestartMarker(home: string = resolveDshHome()): RestartMarker | undefined {
+export function readRestartMarker(home: string = resolveCliHome()): RestartMarker | undefined {
   let raw: string
   try {
     raw = readFileSync(restartMarkerPath(home), 'utf8')
@@ -176,7 +176,7 @@ export function readRestartMarker(home: string = resolveDshHome()): RestartMarke
  * Atomically consume the marker: the process that wins the `unlink` is the one
  * that may fire it. Exactly one concurrent watcher observes the request.
  */
-export function consumeRestartMarker(home: string = resolveDshHome()): RestartMarker | undefined {
+export function consumeRestartMarker(home: string = resolveCliHome()): RestartMarker | undefined {
   const path = restartMarkerPath(home)
   let raw: string
   try {
@@ -193,7 +193,7 @@ export function consumeRestartMarker(home: string = resolveDshHome()): RestartMa
 }
 
 /** Delete a pending marker; `false` when none was pending. */
-export function clearRestartMarker(home: string = resolveDshHome()): boolean {
+export function clearRestartMarker(home: string = resolveCliHome()): boolean {
   try {
     unlinkSync(restartMarkerPath(home))
     return true
@@ -482,7 +482,7 @@ export function runRestart(
     io.stdout(RESTART_USAGE.trimEnd())
     return 0
   }
-  const home = deps.home ?? resolveDshHome()
+  const home = deps.home ?? resolveCliHome()
   if (request.action === 'cancel') {
     const pending = readRestartMarker(home)
     const cleared = clearRestartMarker(home)
@@ -590,7 +590,7 @@ export class RestartAfterTurnWatcher {
   private readonly warned = new Set<string>()
 
   constructor(private readonly options: RestartWatcherOptions) {
-    this.home = options.home ?? resolveDshHome()
+    this.home = options.home ?? resolveCliHome()
     this.now = options.now ?? Date.now
     this.read = options.read ?? readRestartMarker
     this.consume = options.consume ?? consumeRestartMarker

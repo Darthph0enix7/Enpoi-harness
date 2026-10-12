@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { resolveDshVersionLine } from '../src/version-identity.ts'
+import { managedDshHome, resolveCliHome, resolveDshVersionLine } from '../src/version-identity.ts'
 
 const gitAvailable = spawnSync('git', ['--version'], { stdio: 'ignore' }).status === 0
 
@@ -37,6 +37,48 @@ async function sourceCheckout(prefix: string): Promise<{ root: string; moduleUrl
   await writeFile(moduleFile, '')
   return { root, moduleUrl: pathToFileURL(moduleFile) }
 }
+
+describe('managed layout detection (installer prefix, separate DSH_HOME)', () => {
+  it('reports the release identity from the record next to the running tree', async () => {
+    const root = await tempDirectory('dsh-version-prefix-')
+    const tree = join(root, 'prefix', 'harness', '0.1.7-enpoi.2.68')
+    const moduleDirectory = join(tree, 'apps', 'cli', 'lib')
+    await mkdir(moduleDirectory, { recursive: true })
+    const moduleFile = join(moduleDirectory, 'bin.js')
+    await writeFile(moduleFile, '')
+    await writeFile(join(root, 'prefix', 'harness', 'install-state.json'), JSON.stringify({
+      version: '0.1.7-enpoi.2.68',
+      commit: '6d7c3d5bed7b05e0c4f2f8bd9b85f8b679d47487',
+      channel: 'beta',
+      dshHome: join(root, 'home'),
+      harnessDir: '0.1.7-enpoi.2.68',
+    }))
+    const moduleUrl = pathToFileURL(moduleFile)
+    // `home` deliberately points somewhere else: detection must not depend on it.
+    expect(resolveDshVersionLine({ packageVersion: '0.1.7-enpoi.2', home: join(root, 'unrelated'), moduleUrl }))
+      .toBe('0.1.7-enpoi.2.68 (beta, commit 6d7c3d5)')
+    expect(managedDshHome(moduleUrl)).toBe(join(root, 'home'))
+    expect(resolveCliHome(moduleUrl)).toBe(join(root, 'home'))
+  })
+
+  it('falls back to harness/current and the package version without a record', async () => {
+    const root = await tempDirectory('dsh-version-prefix-nostate-')
+    const tree = join(root, 'prefix', 'harness', '0.1.7-enpoi.2.42')
+    const moduleDirectory = join(tree, 'apps', 'cli', 'lib')
+    await mkdir(moduleDirectory, { recursive: true })
+    const moduleFile = join(moduleDirectory, 'bin.js')
+    await writeFile(moduleFile, '')
+    await writeFile(join(root, 'prefix', 'harness', 'install-state.json'), '{}')
+    await symlink(
+      join(root, 'prefix', 'harness', '0.1.7-enpoi.2.42'),
+      join(root, 'prefix', 'harness', 'current'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    )
+    const moduleUrl = pathToFileURL(moduleFile)
+    expect(resolveDshVersionLine({ packageVersion: '9.9.9', moduleUrl })).toBe('0.1.7-enpoi.2.42 (installed)')
+    expect(managedDshHome(moduleUrl)).toBeNull()
+  })
+})
 
 describe('resolveDshVersionLine', () => {
   it('reports the installed release identity from install-state.json', async () => {

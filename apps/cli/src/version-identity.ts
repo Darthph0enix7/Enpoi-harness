@@ -11,7 +11,7 @@
 
 import { spawnSync } from 'node:child_process'
 import { readFileSync, readlinkSync, realpathSync } from 'node:fs'
-import { basename, dirname, join, sep } from 'node:path'
+import { basename, dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 
@@ -20,6 +20,19 @@ interface InstalledRelease {
   version?: string | undefined
   commit?: string | undefined
   channel?: string | undefined
+  dshHome?: string | undefined
+}
+
+/** A managed install discovered from the running module's location. */
+export interface ManagedInstall {
+  /** Install prefix (the parent of the `harness` directory). */
+  prefix: string
+  /** Version-named tree the running module lives in. */
+  harnessDir: string
+  /** Harness home recorded by the installer, when present. */
+  home: string | undefined
+  /** Release identity fields from the installer's record. */
+  release: InstalledRelease
 }
 
 /** Inputs for {@link resolveDshVersionLine}. */
@@ -60,21 +73,84 @@ function isManagedInstall(moduleFile: string, home: string): boolean {
   return moduleDirectory === harnessRoot || moduleDirectory.startsWith(`${harnessRoot}${sep}`)
 }
 
+/** Project a parsed install-state record onto the release fields. */
+function releaseFromRecord(record: Record<string, unknown>): InstalledRelease {
+  return {
+    version: stringField(record.version),
+    commit: stringField(record.commit),
+    channel: stringField(record.channel),
+    dshHome: stringField(record.dshHome),
+  }
+}
+
 /** Read the installer's release record; a missing or malformed file yields no fields. */
 function readInstallState(home: string): InstalledRelease {
   try {
     const parsed: unknown = JSON.parse(readFileSync(join(home, 'harness', 'install-state.json'), 'utf8'))
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
-    const record = parsed as Record<string, unknown>
-    return {
-      version: stringField(record.version),
-      commit: stringField(record.commit),
-      channel: stringField(record.channel),
-    }
+    return releaseFromRecord(parsed as Record<string, unknown>)
   } catch {
     // Without the record, identity falls back to the current target and then the package version.
     return {}
   }
+}
+
+/**
+ * Detect a managed install from the running module's own location: walk up to
+ * the `harness` directory and require the installer's `install-state.json`
+ * next to it. This is the layout the installer produces
+ * (`<prefix>/harness/<version>/...` with `$DSH_HOME` as a separate directory),
+ * so detection never depends on the resolved home. Returns null for a source
+ * checkout or any tree without the record.
+ * @param moduleUrl - running module URL; defaults to this module.
+ * @returns the managed-install description, or null.
+ */
+export function resolveManagedInstall(moduleUrl?: string | URL): ManagedInstall | null {
+  const moduleFile = realpathOrSelf(fileURLToPath(moduleUrl ?? import.meta.url))
+  let directory = dirname(moduleFile)
+  for (let depth = 0; depth < 12; depth += 1) {
+    if (basename(directory) === 'harness') {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(readFileSync(join(directory, 'install-state.json'), 'utf8'))
+      } catch {
+        return null
+      }
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+      const prefix = dirname(directory)
+      const harnessDir = relative(directory, moduleFile).split(sep)[0] ?? ''
+      return {
+        prefix,
+        harnessDir,
+        home: stringField((parsed as Record<string, unknown>).dshHome),
+        release: releaseFromRecord(parsed as Record<string, unknown>),
+      }
+    }
+    const parent = dirname(directory)
+    if (parent === directory) return null
+    directory = parent
+  }
+  return null
+}
+
+/**
+ * The harness home recorded by the installer when the running module is a
+ * managed install; null for source checkouts.
+ * @param moduleUrl - running module URL; defaults to this module.
+ * @returns the recorded home path, or null.
+ */
+export function managedDshHome(moduleUrl?: string | URL): string | null {
+  return resolveManagedInstall(moduleUrl)?.home ?? null
+}
+
+/**
+ * The effective harness home for the running CLI: the installer's recorded
+ * home on a managed install, the standard resolution otherwise.
+ * @param moduleUrl - running module URL; defaults to this module.
+ * @returns the absolute harness home path.
+ */
+export function resolveCliHome(moduleUrl?: string | URL): string {
+  return managedDshHome(moduleUrl) ?? resolveDshHome()
 }
 
 /** Read the version-named target of `harness/current`, or undefined when the symlink is absent. */
@@ -86,6 +162,11 @@ function readCurrentTarget(home: string): string | undefined {
     // A missing or non-symlink `current` only drops the version fallback.
     return undefined
   }
+}
+
+/** Read the version-named target of `<prefix>/harness/current`. */
+function readCurrentTargetFromPrefix(prefix: string): string | undefined {
+  return readCurrentTarget(prefix)
 }
 
 /** Resolve the repository's short commit for `directory`, or undefined outside a repository or without git. */
@@ -106,8 +187,21 @@ function gitShortCommit(directory: string): string | undefined {
  * @returns the installed release identity, or the package version marked as a source checkout.
  */
 export function resolveDshVersionLine(options: DshVersionLineOptions): string {
-  const home = options.home ?? resolveDshHome()
   const moduleFile = fileURLToPath(options.moduleUrl ?? import.meta.url)
+  // Managed install first: the installer's layout puts the record next to the
+  // running tree (`<prefix>/harness/install-state.json`) while `$DSH_HOME` is
+  // a separate directory, so the resolved home alone cannot classify it.
+  const managed = resolveManagedInstall(options.moduleUrl)
+  if (managed !== null) {
+    const release = managed.release
+    const version = release.version ?? readCurrentTargetFromPrefix(managed.prefix) ?? options.packageVersion
+    const qualifiers = [
+      ...release.channel === undefined ? [] : [release.channel],
+      ...release.commit === undefined ? [] : [`commit ${release.commit.slice(0, SHORT_COMMIT_LENGTH)}`],
+    ]
+    return qualifiers.length === 0 ? `${version} (installed)` : `${version} (${qualifiers.join(', ')})`
+  }
+  const home = options.home ?? resolveDshHome()
   if (!isManagedInstall(moduleFile, home)) {
     const commit = gitShortCommit(dirname(moduleFile))
     return commit === undefined

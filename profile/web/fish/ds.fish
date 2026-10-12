@@ -1,3 +1,17 @@
+# One hostname resolution chain shared with the installer (scripts/install.sh
+# host_short_name): `hostname -s`, then `hostname`, then `uname -n`, trimmed to
+# the first label so an FQDN host still matches its `<short>.yaml` device patch.
+function __ds_short_host
+    set -l host (hostname -s 2>/dev/null; or hostname 2>/dev/null; or uname -n 2>/dev/null)
+    if test -n "$host"
+        set host (string replace -r '\..*$' '' -- $host)
+    end
+    if test -z "$host"
+        set host this-host
+    end
+    printf '%s' "$host"
+end
+
 function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Controller"
     set -g g_dsh_home "$HOME/.dsh"
     set -g g_local_url "http://127.0.0.1:3080"
@@ -409,7 +423,7 @@ process.stdin.on("end", () => {
                 git -C "$g_dotfiles" pull --ff-only 2>/dev/null; or true
             end
 
-            set -l host (hostname -s 2>/dev/null; or hostname)
+            set -l host (__ds_short_host)
             set -l sync_local "$HOME/.dsh/sync-local.yaml"
             if not test -f "$sync_local"
                 set sync_local /dev/null
@@ -666,7 +680,7 @@ case "pull"
             end
 
             # Settings (merged: baseline + device patch + sync-local)
-            set -l host (hostname -s 2>/dev/null; or hostname)
+            set -l host (__ds_short_host)
             set -l patch_file "$g_dotfiles/device-patches/$host.yaml"
             if not test -f "$patch_file"
                 set patch_file /dev/null

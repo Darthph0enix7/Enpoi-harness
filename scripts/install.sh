@@ -773,12 +773,16 @@ run_limited() {
 }
 
 host_short_name() {
-  # `hostname` is not POSIX; fall back to uname -n and a literal so the
-  # device-patch path and the summary never contain an empty segment. A
-  # successful-but-empty hostname must not win over the fallbacks.
+  # One resolution chain shared with the fish profile (profile/web/fish/ds.fish):
+  # `hostname -s`, then `hostname`, then `uname -n`, then a literal. A
+  # fully-qualified name is trimmed to its first label so an FQDN host still
+  # matches its `<short>.yaml` device patch. A successful-but-empty hostname
+  # must not win over the fallbacks.
   local h
-  h="$(hostname 2>/dev/null || true)"
+  h="$(hostname -s 2>/dev/null || true)"
+  [ -n "$h" ] || h="$(hostname 2>/dev/null || true)"
   [ -n "$h" ] || h="$(uname -n 2>/dev/null || true)"
+  case "$h" in *.*) h="${h%%.*}";; esac
   [ -n "$h" ] || h="this-host"
   printf '%s' "$h"
 }
@@ -4463,7 +4467,9 @@ run_migrations() {
     backup_dir="$PROFILE_DIR/.backup-$ts"
     mkdir -p "$backup_dir" 2>/dev/null || true
     patch="$PROFILE_DIR/device-patches/$(host_short_name).yaml"
-    [ -f "$patch" ] || patch="$DSH_HOME/sync-local.yaml"
+    # No device patch: merge with empty input rather than re-feeding
+    # sync-local.yaml as a third layer (idempotent but misleading).
+    [ -f "$patch" ] || patch="/dev/null"
     out="$PROFILE_DIR/settings.yaml"
     if [ -f "$out" ]; then cp -p "$out" "$backup_dir/settings.yaml" 2>/dev/null || true; fi
     tmp="$out.merge-$$.tmp"
@@ -5998,18 +6004,23 @@ health_proof() { # 0 pass, 1 fail (sets HEALTH_JSON)
     cli_version="${cli_version#dsh }"
   fi
   [ "$cli_rc" = 0 ] && [ -n "$cli_version" ] || shim_ok=0
-  local base_version="" cli_identity_ok=0
+  # Strict comparison: a CLI built with managed-layout detection resolves its
+  # identity from the installer's record and must name the active tree
+  # exactly. A tree whose CLI predates that fix (releases before it shipped)
+  # still self-reports "source checkout" with its base version; that legacy
+  # shape is tolerated with a note until the tree carrying the fix lands.
+  local base_version="" cli_identity_ok=0 cli_supports_managed=0
   [ -n "$link_dir" ] && base_version="$(read_version "$PREFIX/harness/$link_dir/package.json" 2>/dev/null || true)"
+  if [ -n "$link_dir" ] && [ -f "$PREFIX/harness/$link_dir/apps/cli/lib/bin.js" ] \
+    && grep -q "resolveManagedInstall" "$PREFIX/harness/$link_dir/apps/cli/lib/bin.js" 2>/dev/null; then
+    cli_supports_managed=1
+  fi
   if [ "$cli_rc" = 0 ] && [ -n "$cli_version" ]; then
     if [ "$cli_version" = "$link_dir" ]; then
       cli_identity_ok=1
-    else
-      # The CLI marks its own build "source checkout" when it cannot classify
-      # the layout as a managed install (its home model differs from the
-      # installer's); the release identity is then its base version. Any other
-      # mismatch is a real identity failure.
+    elif [ "$cli_supports_managed" != 1 ] && [ "$cli_version" = "$base_version" ]; then
       case "$cli_version_raw" in
-        *"(source checkout"*) [ "$cli_version" = "$base_version" ] && cli_identity_ok=1;;
+        *"(source checkout"*) cli_identity_ok=1; say "  health: identity note — the installed CLI predates managed-layout detection; base version accepted";;
       esac
     fi
   fi
@@ -7250,6 +7261,12 @@ do_update() {
   # does every durable step first — backfill and self-check included — and
   # delegates the restart only after the result is reported, so the caller
   # always receives it. A plain out-of-session `dsh update` restarts as before.
+  ensure_service
+  ensure_tailnet_exposure
+  substep_info "backfill: projection status and run"
+  run_backfill
+  # Restart AFTER the backfill: a service reboot mid-backfill produced a
+  # transient "projection backfill run failed" warning.
   deferred_restart=0
   if running_under_service; then deferred_restart=1; fi
   if [ "$deferred_restart" = 0 ]; then
@@ -7258,10 +7275,6 @@ do_update() {
   else
     substep_info "service: restart deferred to after the current turn"
   fi
-  ensure_service
-  ensure_tailnet_exposure
-  substep_info "backfill: projection status and run"
-  run_backfill
 
   step "self-check"
   substep_info "self-check: CLI version/help, profile smoke, error audit"

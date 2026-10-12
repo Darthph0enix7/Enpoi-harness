@@ -319,21 +319,16 @@ describe('harness-release.yml wiring', () => {
     return workflow.jobs['build']!.steps.filter(step => typeof step === 'object' && step !== null)
   }
 
-  it('emits the manifest and the consecutive diff before the metadata upload', () => {
+  it('publishes only the platform tarballs and SHA256SUMS (no delta-era assets)', () => {
     const steps = releaseSteps()
     const names = steps.map(step => step.name)
-    const manifest = steps.findIndex(step => step.name === 'Emit release manifest')
-    const diff = steps.findIndex(step => step.name === 'Emit consecutive diff')
-    const upload = steps.findIndex(step => step.name === 'Upload manifest and diff assets to the draft release')
-    expect(manifest).toBeGreaterThanOrEqual(0)
-    expect(diff).toBeGreaterThan(manifest)
-    expect(upload).toBeGreaterThan(diff)
-    expect(String(steps[manifest]?.run)).toMatch(/release-delta\.mjs" manifest/)
-    expect(String(steps[manifest]?.run)).toContain('manifest-$PLATFORM-$VERSION.json.gz')
-    expect(String(steps[diff]?.run)).toMatch(/release-delta\.mjs" diff/)
-    expect(String(steps[diff]?.run)).toContain('gh release download "$PREV_TAG"')
-    expect(String(steps[upload]?.run)).toContain('$MANIFEST.sha256')
+    // The retired delta updater's publication steps are gone: the default
+    // updater downloads the full tarball and needs no manifests or diffs.
+    expect(names).not.toContain('Emit release manifest')
+    expect(names).not.toContain('Emit consecutive diff')
+    expect(names).not.toContain('Upload manifest and diff assets to the draft release')
     expect(names).toContain('Pack artifact')
+    expect(names.some(name => String(name).startsWith('Upload to the draft release'))).toBe(true)
     // The publish job still assembles every sidecar into SHA256SUMS.
     const workflow = yaml.load(readFileSync(join(root, '.github/workflows/harness-release.yml'), 'utf8')) as { jobs: Record<string, { steps: Record<string, unknown>[] }> }
     const publishRun = String(workflow.jobs['publish']!.steps.find(step => String(step.name).includes('SHA256SUMS'))?.run)
