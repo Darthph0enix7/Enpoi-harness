@@ -678,7 +678,8 @@ describe('pre-switch failure restore', () => {
     const install = readFileSync(installSh, 'utf8')
     const doUpdate = /do_update\(\) \{[\s\S]*?\n\}/.exec(install)?.[0]
     expect(doUpdate).toBeDefined()
-    expect(doUpdate!.match(/restore_pre_switch "\$backup"/g)).toHaveLength(5)
+    expect(doUpdate!.match(/restore_pre_switch "\$backup"/g)).toHaveLength(6)
+    // (the sixth is the post-update health-proof failure on the no-op path)
     expect(doUpdate).toMatch(/if ! install_tree; then[\s\S]*?restore_pre_switch/)
     expect(doUpdate).toMatch(/if ! delta_prepare_full_fallback; then[\s\S]*?restore_pre_switch/)
     expect(doUpdate).toMatch(/if ! prepare_profile; then[\s\S]*?restore_pre_switch/)

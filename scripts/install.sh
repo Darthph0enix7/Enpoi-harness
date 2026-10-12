@@ -734,6 +734,7 @@ while [ "$#" -gt 0 ]; do
     --purge) PURGE=1; shift;;
     --check) CHECK_ONLY=1; shift;;
     --dry-run) DRY_RUN=1; shift;;
+    --delta) DSH_DELTA=1; shift;;
     --force) FORCE=1; shift;;
     --force-downgrade) FORCE_DOWNGRADE=1; shift;;
     --write-rc) WRITE_RC=1; shift;;
@@ -1911,18 +1912,21 @@ FAST_DL_EOF
   mv -f "$tmp" "$target" || return 1
 }
 
-resolve_fast_downloader() { # cache_dir -> prints path to fast downloader script
-  local cdir="$1" script_dir
-  script_dir="$(dirname "$0" 2>/dev/null || true)"
+resolve_fast_downloader() { # cache_dir -> prints ABSOLUTE path to the downloader
+  # Every candidate is absolutized: run_logged cd's into the workdir before
+  # exec, so a relative script path (the drill's silent exit-1: `bash
+  # scripts/install.sh` made script_dir='scripts') can never resolve there.
+  local cdir="$1" script_dir=""
+  script_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)" || script_dir=""
   if [ -n "${REPO_ROOT:-}" ] && [ -f "$REPO_ROOT/scripts/download-fast.mjs" ]; then
-    printf '%s\n' "$REPO_ROOT/scripts/download-fast.mjs"
+    printf '%s\n' "$(cd "$REPO_ROOT/scripts" && pwd -P)/download-fast.mjs"
     return 0
   fi
-  if [ -f "$script_dir/download-fast.mjs" ]; then
+  if [ -n "$script_dir" ] && [ -f "$script_dir/download-fast.mjs" ]; then
     printf '%s\n' "$script_dir/download-fast.mjs"
     return 0
   fi
-  if [ -f "$script_dir/scripts/download-fast.mjs" ]; then
+  if [ -n "$script_dir" ] && [ -f "$script_dir/scripts/download-fast.mjs" ]; then
     printf '%s\n' "$script_dir/scripts/download-fast.mjs"
     return 0
   fi
@@ -1993,6 +1997,10 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
     if [ -n "$NODE" ] && [ -x "$NODE" ]; then
       local fast_dl dl_rc=0
       fast_dl="$(resolve_fast_downloader "$cache_dir")"
+      case "$fast_dl" in
+        /*) : ;;
+        ?*) fast_dl="$(cd "$(dirname "$fast_dl")" 2>/dev/null && pwd -P)/$(basename "$fast_dl")" ;;
+      esac
       if [ -n "$fast_dl" ] && [ -f "$fast_dl" ]; then
         log "prebuilt: downloading with parallel chunk engine (Node.js)"
         local dl_log_start=""
@@ -2053,7 +2061,10 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
   fi
   STAGED="$PREFIX/harness/.staging-$$"
   mkdir -p "$STAGED" || return 1
-  if ! tar -C "$STAGED" -xzf "$asset_file" 2>/dev/null; then
+  # Unpacking 100K+ files is a multi-second span: announce it and tick the
+  # file count while tar runs (the [2/9] -> [5/9] silent gap in the drill).
+  if ! DSH_RUN_LOG_TICK_DIR="$STAGED" DSH_HEARTBEAT_INTERVAL=3 \
+    run_logged "Unpacking prebuilt release ($(human_bytes "$(file_size "$asset_file" 2>/dev/null || printf 0)"))" 600 "$PREFIX" tar -C "$STAGED" -xzf "$asset_file"; then
     warn "prebuilt: extraction failed; falling back to the source build"
     rm -rf "$STAGED"; STAGED=""
     return 1
@@ -4518,6 +4529,8 @@ emit_json() { # action ok
   [ -n "${DRY_INSPECTION_JSON:-}" ] && extra="$extra, \"inspection\": $DRY_INSPECTION_JSON"
   [ -n "${UPDATE_DETAIL_JSON:-}" ] && extra="$extra, \"update\": $UPDATE_DETAIL_JSON"
   [ -n "${UPDATE_ACTIONS_JSON:-}" ] && extra="$extra, \"updateActions\": $UPDATE_ACTIONS_JSON"
+  [ -n "${RESIDUE_JSON:-}" ] && extra="$extra, \"residueCleanup\": $RESIDUE_JSON"
+  [ -n "${HEALTH_JSON:-}" ] && extra="$extra, \"health\": $HEALTH_JSON"
   printf '{"ok": %s, "action": "%s", "dryRun": %s, "prefix": "%s", "version": "%s", "previousVersion": "%s", "channel": "%s", "source": "%s", "sourceUrl": "%s", "harnessDir": "%s", "currentLink": "%s", "node": "%s", "nodeOrigin": "%s", "pnpm": "%s", "dshHome": "%s", "profile": "%s", "profileSource": "%s", "profileRef": "%s", "serviceUnit": "%s", "backfill": "%s", "rolledBack": %s, "checks": {"version": %s, "help": %s, "smoke": %s, "audit": "%s"}%s}\n' \
     "$2" "$1" "$DRY_RUN" "$(json_escape "$PREFIX")" "$(json_escape "$VERSION")" "$(json_escape "${PREV_VERSION:-}")" \
     "$(json_escape "$CHANNEL")" "$(json_escape "$SOURCE")" "$(json_escape "$SOURCE_URL")" "$(json_escape "$HARNESS")" \
@@ -5170,6 +5183,13 @@ delta_plan_init() { # installed_version -> populates DELTA_* / UPDATE_TAG; never
   DELTA_MODE=""; DELTA_RUNG=""; DELTA_KIND=""; DELTA_UP_TO_DATE=0
   DELTA_TARGET_VERSION=""; DELTA_FULL_NAME=""; DELTA_FULL_BYTES=""; DELTA_CHAIN_COUNT=0
   UPDATE_TAG=""
+  if [ "${DSH_DELTA:-0}" != 1 ]; then
+    # Default: the simple full-prebuilt flow. The delta ladder, scan index,
+    # preservation engine, and diff chains stay in-tree but dormant.
+    log "update strategy: full prebuilt release (delta strategy disabled; set DSH_DELTA=1 or pass --delta to enable the archived delta path)"
+    return 0
+  fi
+  log "update strategy: delta ladder + preservation engine (DSH_DELTA=1)"
   [ -z "$SOURCE" ] || return 0
   [ "${NO_PREBUILT:-0}" != 1 ] || return 0
   [ "${DSH_NO_PREBUILT:-0}" != 1 ] || return 0
@@ -5832,6 +5852,183 @@ update_delta_refresh_index() { # tree engine label
   case "$out" in
     *refreshed*) log "scan index: $label — $out";;
   esac
+  return 0
+}
+
+# ── Experimental-updater residue sweep (one-time, idempotent) ──────────────
+# The delta/preservation updater is retired as the default. Its on-disk
+# residue is dead weight on every device that ever ran it: retained merge
+# bases, scan indexes, orphaned staging/journal scratch, cached manifests and
+# diff archives. The update lock is held here, so no live consumer exists; the
+# incoming staging ($STAGED) is never touched. DSH_DELTA=1 keeps the features
+# live and skips the sweep entirely.
+RESIDUE_BYTES=0
+RESIDUE_ITEMS=0
+RESIDUE_JSON=""
+
+residue_bytes_of() { # path -> bytes (du -sk is the portable form)
+  du -sk "$1" 2>/dev/null | awk 'NR==1 {printf "%d", $1 * 1024}' || printf 0
+}
+
+residue_remove() { # path label
+  local path="$1" label="$2" bytes
+  [ -e "$path" ] || return 0
+  bytes="$(residue_bytes_of "$path")"
+  case "$bytes" in ''|*[!0-9]*) bytes=0;; esac
+  if rm -rf -- "$path" 2>/dev/null; then
+    RESIDUE_BYTES=$((RESIDUE_BYTES + bytes))
+    RESIDUE_ITEMS=$((RESIDUE_ITEMS + 1))
+    log "cleanup: removed $label (${bytes} B)"
+  else
+    warn "cleanup: could not remove $label"
+  fi
+}
+
+sweep_old_tree_backups() { # keep the newest two .backup-* generations
+  local h="$PREFIX/harness" b idx=0
+  local -a backups=()
+  while IFS= read -r b; do
+    [ -n "$b" ] && backups+=("$b")
+  done <<EOF
+$(ls -1dt "$h"/.backup-* 2>/dev/null)
+EOF
+  for b in ${backups[@]+"${backups[@]}"}; do
+    idx=$((idx + 1))
+    [ "$idx" -le 2 ] && continue
+    case "$(basename "$b")" in
+      .backup-*-tree) residue_remove "$b" "$(basename "$b") (delta-era tree backup)";;
+    esac
+  done
+  return 0
+}
+
+sweep_experimental_residue() {
+  if [ "${DSH_DELTA:-0}" = 1 ]; then
+    log "cleanup: residue sweep skipped (DSH_DELTA=1; delta features stay live)"
+    return 0
+  fi
+  RESIDUE_BYTES=0
+  RESIDUE_ITEMS=0
+  local h="$PREFIX/harness" d name p f b
+  # 1. Retained merge bases (tar/tar.gz/sha sidecars and work dirs).
+  residue_remove "$h/.bases" ".bases (retained merge bases + work dirs)"
+  # 2. Scan indexes inside every retained version tree.
+  for d in "$h"/*/; do
+    [ -d "$d" ] || continue
+    name="$(basename "$d")"
+    case "$name" in .*|current) continue;; esac
+    [ -e "$d/.dsh-scan-index" ] && residue_remove "$d/.dsh-scan-index" "$name/.dsh-scan-index"
+    for f in "$d"/.dsh-scan-index.tmp-*; do
+      [ -e "$f" ] && residue_remove "$f" "$name/$(basename "$f")"
+    done
+  done
+  # 3. Orphaned delta scratch: staging (dead owner), journals, update/base
+  #    scratch, planner files. Live owners and the incoming staging are kept.
+  for p in "$h"/.staging-* "$h"/.update-* "$h"/.base-*; do
+    [ -e "$p" ] || continue
+    case "${STAGED:-}" in "$p") continue;; esac
+    scratch_owner_alive "$p" && continue
+    residue_remove "$p" "$(basename "$p")"
+  done
+  residue_remove "$h/.last-apply-error.txt" ".last-apply-error.txt"
+  # 4. Delta-era cached metadata (release manifests and diff archives).
+  for f in "$h/.cache"/manifest-*.json.gz "$h/.cache"/manifest-*.json.gz.sha256 \
+    "$h/.cache"/diff-*.tar.gz "$h/.cache"/diff-*.tar.gz.sha256; do
+    [ -e "$f" ] || continue
+    residue_remove "$f" ".cache/$(basename "$f")"
+  done
+  # 5. Backups: keep the newest two generations (forensic, tiny). Beyond that
+  #    only the delta-era engine tree-backup latch (*.backup-*-tree) is
+  #    unambiguously experimental and swept; everything else is kept. Run once
+  #    here and once at the end of the update (the run's own backups only
+  #    exist then, which is what makes an old tree-backup unambiguously old).
+  sweep_old_tree_backups
+  if [ "$RESIDUE_ITEMS" -gt 0 ]; then
+    say "  cleanup: removed experimental updater residue — $(human_bytes "$RESIDUE_BYTES") ($RESIDUE_ITEMS item(s): merge bases, scan indexes, scratch)"
+    log "cleanup: residue sweep freed $RESIDUE_BYTES bytes across $RESIDUE_ITEMS item(s)"
+  else
+    log "cleanup: no experimental updater residue found"
+  fi
+  RESIDUE_JSON="{\"bytes\": $RESIDUE_BYTES, \"items\": $RESIDUE_ITEMS}"
+  return 0
+}
+
+# ── Post-update health proof (default path) ─────────────────────────────────
+# Explicit final block: identity trio + CLI, service, profile, shim. FAIL
+# keeps the existing post-switch semantics (rollback + restore). The test hook
+# DSH_HEALTH_FORCE_FAIL=1 injects a failing check.
+HEALTH_JSON=""
+
+health_proof() { # 0 pass, 1 fail (sets HEALTH_JSON)
+  local failures="" identity=PASS service_state="skipped" service_ok=1 profile_state="skipped" profile_ok=1 shim_ok=1
+  local marker_version="" state_version="" state_dir="" cli_version="" cli_version_raw="" cli_rc=1 link_dir=""
+  installed_identity_resolve || true
+  link_dir="$INSTALLED_LINK_DIR"
+  [ -n "$link_dir" ] && [ -f "$PREFIX/harness/$link_dir/.dsh-install-complete" ] \
+    && marker_version="$(json_field "$PREFIX/harness/$link_dir/.dsh-install-complete" version 2>/dev/null || true)"
+  state_version="$(json_field "$PREFIX/harness/install-state.json" version 2>/dev/null || true)"
+  state_dir="$(json_field "$PREFIX/harness/install-state.json" harnessDir 2>/dev/null || true)"
+  if [ -x "$BIN_DIR/dsh" ]; then
+    # The CLI resolves its identity from $DSH_HOME (install-state.json), so the
+    # check must pass the install's home explicitly; the printed line may carry
+    # an origin/qualifier suffix ("(installed)", "(source checkout)").
+    cli_version_raw="$(DSH_HOME="$DSH_HOME" "$BIN_DIR/dsh" --version 2>/dev/null)"
+    cli_rc=$?
+    cli_version="${cli_version_raw%% (*}"
+    cli_version="${cli_version#dsh }"
+  fi
+  [ "$cli_rc" = 0 ] && [ -n "$cli_version" ] || shim_ok=0
+  local base_version="" cli_identity_ok=0
+  [ -n "$link_dir" ] && base_version="$(read_version "$PREFIX/harness/$link_dir/package.json" 2>/dev/null || true)"
+  if [ "$cli_rc" = 0 ] && [ -n "$cli_version" ]; then
+    if [ "$cli_version" = "$link_dir" ]; then
+      cli_identity_ok=1
+    else
+      # The CLI marks its own build "source checkout" when it cannot classify
+      # the layout as a managed install (its home model differs from the
+      # installer's); the release identity is then its base version. Any other
+      # mismatch is a real identity failure.
+      case "$cli_version_raw" in
+        *"(source checkout"*) [ "$cli_version" = "$base_version" ] && cli_identity_ok=1;;
+      esac
+    fi
+  fi
+  if [ -z "$link_dir" ] || [ "$marker_version" != "$link_dir" ] || [ "$state_version" != "$link_dir" ] \
+    || [ "$state_dir" != "$link_dir" ] || [ "$cli_identity_ok" != 1 ]; then
+    identity=FAIL
+    failures="$failures identity(current='$link_dir' marker='$marker_version' state='$state_version' stateDir='$state_dir' cli='$cli_version_raw')"
+  fi
+  say "  health: identity $identity — current=$link_dir marker=$marker_version state=$state_version cli=$cli_version_raw"
+  # Service: only when this install records one.
+  if [ "${SERVICE_INSTALL:-0}" = 1 ] && [ -n "$SERVICE_UNIT" ]; then
+    if command -v systemctl >/dev/null 2>&1; then
+      if systemctl is-active --quiet "$SERVICE_UNIT" 2>/dev/null; then service_state=PASS; else service_state=FAIL; service_ok=0; fi
+    elif command -v launchctl >/dev/null 2>&1; then
+      if launchctl list "$SERVICE_UNIT" >/dev/null 2>&1; then service_state=PASS; else service_state=FAIL; service_ok=0; fi
+    fi
+    [ "$service_ok" = 1 ] || failures="$failures service('$SERVICE_UNIT')"
+  fi
+  say "  health: service  $service_state${SERVICE_UNIT:+ ($SERVICE_UNIT)}"
+  # Profile: present with installed dependencies (the plugin smoke ran in the self-check).
+  if [ -n "$PROFILE_DIR" ] && [ -d "$PROFILE_DIR" ]; then
+    if [ -d "$PROFILE_DIR/node_modules" ]; then profile_state=PASS; else profile_state=FAIL; profile_ok=0; fi
+    [ "$profile_ok" = 1 ] || failures="$failures profile('$PROFILE_DIR')"
+  fi
+  say "  health: profile  $profile_state${PROFILE_DIR:+ ($PROFILE_DIR)}"
+  say "  health: shim     $( [ "$shim_ok" = 1 ] && printf 'PASS' || printf 'FAIL' ) ($BIN_DIR/dsh --version)"
+  [ "$shim_ok" = 1 ] || failures="$failures shim('$BIN_DIR/dsh')"
+  if [ "${DSH_HEALTH_FORCE_FAIL:-0}" = 1 ]; then
+    failures="$failures forced(test hook)"
+  fi
+  if [ -n "$failures" ]; then
+    say "  health: FAIL —$failures"
+    log "health: FAIL —$failures"
+    HEALTH_JSON="{\"status\": \"FAIL\", \"identity\": \"$identity\", \"service\": \"$service_state\", \"profile\": \"$profile_state\", \"shim\": $( [ "$shim_ok" = 1 ] && printf 'true' || printf 'false' )}"
+    return 1
+  fi
+  say "  health: PASS"
+  log "health: PASS (identity=$link_dir service=$service_state profile=$profile_state)"
+  HEALTH_JSON="{\"status\": \"PASS\", \"identity\": \"PASS\", \"service\": \"$service_state\", \"profile\": \"$profile_state\", \"shim\": true}"
   return 0
 }
 
@@ -6675,6 +6872,9 @@ do_update() {
   # Disk hygiene before fetching: failed trees are never keep-eligible, so
   # reclaim them before the new tree needs the space.
   prune_failed_versions
+  # One-time experimental-updater residue sweep (default path only; the lock
+  # is held, the incoming staging is untouched).
+  sweep_experimental_residue
   log "update: active $current on the $CHANNEL channel"
   # Ladder selection first: the read-only planner names the rung before any
   # artifact download (the apply path shares the dry-run planner's decision).
@@ -6694,21 +6894,36 @@ do_update() {
       log "delta: already up to date at $VERSION; no download"
     fi
   else
-    prepare_source
-    resolve_target_for_source
-    if [ "${PREBUILT:-0}" = 1 ]; then
-      log "update target: $VERSION (prebuilt release${RELEASE_COMMIT:+; commit ${RELEASE_COMMIT}})"
-    else
-      log "update target: $VERSION${TARGET_COMMIT:+ (commit $TARGET_COMMIT)}"
+    # Default flow: one cheap release-tag redirect decides "already current"
+    # before any 300 MB download (the full tarball is otherwise fetched and
+    # then discarded by the no-op check below).
+    local quick_current=0 quick_tag=""
+    if [ -z "$SOURCE" ] && [ "$FORCE" != 1 ]; then
+      quick_tag="$(latest_release_tag 2>/dev/null || true)"
+      [ -n "$quick_tag" ] && [ "${quick_tag#v}" = "$installed_version" ] && quick_current=1
     fi
-    # A complete tree found by prepare_source for this exact commit is reused
-    # as-is: resetting the name to $VERSION (or later to <version>-<short>) would
-    # point install_tree at a directory that does not exist while $STAGED is empty
-    # (nothing to extract), failing the update with a tar open error.
-    if [ -n "${REUSED_TREE_DIR:-}" ]; then
-      TREE_DIR_NAME="$REUSED_TREE_DIR"
+    if [ "$quick_current" = 1 ]; then
+      VERSION="$installed_version"
+      PREBUILT=1
+      TREE_DIR_NAME="$current"
+      log "already up to date at $VERSION; no download"
     else
-      TREE_DIR_NAME="$VERSION"
+      prepare_source
+      resolve_target_for_source
+      if [ "${PREBUILT:-0}" = 1 ]; then
+        log "update target: $VERSION (prebuilt release${RELEASE_COMMIT:+; commit ${RELEASE_COMMIT}})"
+      else
+        log "update target: $VERSION${TARGET_COMMIT:+ (commit $TARGET_COMMIT)}"
+      fi
+      # A complete tree found by prepare_source for this exact commit is reused
+      # as-is: resetting the name to $VERSION (or later to <version>-<short>) would
+      # point install_tree at a directory that does not exist while $STAGED is empty
+      # (nothing to extract), failing the update with a tar open error.
+      if [ -n "${REUSED_TREE_DIR:-}" ]; then
+        TREE_DIR_NAME="$REUSED_TREE_DIR"
+      else
+        TREE_DIR_NAME="$VERSION"
+      fi
     fi
   fi
 
@@ -6761,7 +6976,17 @@ do_update() {
     write_shim || warn "could not refresh the dsh shim in $BIN_DIR"
     write_peer_cli || warn "could not refresh the peer CLI in $BIN_DIR"
     if [ "$WRITE_RC" = 1 ]; then write_rc; fi
+    if [ "${DSH_DELTA:-0}" != 1 ]; then
+      substep_info "health: post-update proof (identity, service, profile, shim)"
+      if ! health_proof; then
+        warn "post-update health proof failed; restoring the pristine snapshot"
+        restore_pre_switch "$backup" "health proof"
+        emit_json noop 0
+        exit 1
+      fi
+    fi
     prune_update_artifacts
+    if [ "${DSH_DELTA:-0}" != 1 ]; then sweep_old_tree_backups; fi
     say "dsh is already up to date: $VERSION ($CHANNEL channel)"
     emit_json noop 1
     return 0
@@ -6809,7 +7034,7 @@ do_update() {
   transport_engine=""
   if [ "$DELTA_MODE" = "delta" ]; then
     transport_engine="$(update_engine_bundle "$PREFIX/harness/$current" 2>/dev/null || true)"
-  elif [ "${PREBUILT:-0}" = 1 ] && [ -z "${REUSED_TREE_DIR:-}" ]; then
+  elif [ "${DSH_DELTA:-0}" = 1 ] && [ "${PREBUILT:-0}" = 1 ] && [ -z "${REUSED_TREE_DIR:-}" ]; then
     transport_engine="$(update_engine_bundle "$PREFIX/harness/$current" "${STAGED:-}" 2>/dev/null || true)"
   fi
   if [ "$DELTA_MODE" = "delta" ]; then
@@ -6817,10 +7042,10 @@ do_update() {
     step "delta transport (rung $DELTA_RUNG, $(grep -c . "$DELTA_CHAIN_FILE" 2>/dev/null || printf '0') artifact(s))"
   elif [ "${PREBUILT:-0}" = 1 ] && [ -z "${REUSED_TREE_DIR:-}" ]; then
     step "dependencies and build: prebuilt release (no local build)"
-    if [ -n "$transport_engine" ]; then
+    if [ "${DSH_DELTA:-0}" = 1 ] && [ -n "$transport_engine" ]; then
       step "full release apply (preservation engine)"
     else
-      step "transport: full release install (legacy path; preservation engine unavailable)"
+      step "transport: full prebuilt install (unpack + atomic switch)"
     fi
   else
     step "dependencies and build (this takes a few minutes)"
@@ -6860,7 +7085,7 @@ do_update() {
         ;;
     esac
   fi
-  if [ "$update_tree_ok" = 0 ] && [ "${PREBUILT:-0}" = 1 ] && [ -z "${REUSED_TREE_DIR:-}" ] \
+  if [ "$update_tree_ok" = 0 ] && [ "${DSH_DELTA:-0}" = 1 ] && [ "${PREBUILT:-0}" = 1 ] && [ -z "${REUSED_TREE_DIR:-}" ] \
     && [ -n "${STAGED:-}" ] && [ -d "${STAGED:-}" ]; then
     delta_apply_full "$STAGED"
     delta_rc=$?
@@ -6969,20 +7194,29 @@ do_update() {
   write_peer_cli || warn "could not refresh the peer CLI in $BIN_DIR"
   write_state || warn "could not write $state"
   if [ "$WRITE_RC" = 1 ]; then write_rc; fi
+  if [ "${DSH_DELTA:-0}" != 1 ]; then
+    substep_info "health: post-update proof (identity, service, profile, shim)"
+    if ! health_proof; then
+      # Same post-switch semantics as a failed self-check: roll back to the
+      # previous tree and restore the pre-migration snapshot.
+      rollback "$current" "${PRE_MIGRATION_BACKUP:-$backup}" "$TREE_DIR_NAME"
+      exit 1
+    fi
+  fi
   prune_versions "$TREE_DIR_NAME" "$current"
   prune_update_artifacts
+  if [ "${DSH_DELTA:-0}" != 1 ]; then sweep_old_tree_backups; fi
   # The v2 apply journal is resume state only: once the switch succeeded it is
   # consumed. Sweep this run's trio (head/plan/progress) plus any stale trio
   # from older runs — the update lock guarantees no concurrent consumer.
   rm -f "$PREFIX/harness"/.staging-*.journal.json \
         "$PREFIX/harness"/.staging-*.journal.json.plan.json \
         "$PREFIX/harness"/.staging-*.journal.json.progress.ndjson 2>/dev/null || true
-  # Restamp the NEW active tree's scan index after all hardlink churn
-  # (staging discard, patches, prune): the next update scans it stat-only.
-  # The superseded tree is deliberately not refreshed (~5s saved per update):
-  # the next update never scans it; only a rollback-then-re-update would
-  # cold-scan it once.
-  update_delta_refresh_index "$PREFIX/harness/$TREE_DIR_NAME" "$(update_engine_bundle "$PREFIX/harness/$TREE_DIR_NAME" 2>/dev/null || true)" "$TREE_DIR_NAME"
+  # Restamp the NEW active tree's scan index after all hardlink churn (delta
+  # path only): the next delta update scans it stat-only.
+  if [ "${DSH_DELTA:-0}" = 1 ]; then
+    update_delta_refresh_index "$PREFIX/harness/$TREE_DIR_NAME" "$(update_engine_bundle "$PREFIX/harness/$TREE_DIR_NAME" 2>/dev/null || true)" "$TREE_DIR_NAME"
+  fi
   # Planner scratch files served this run only; their PID suffix keeps a
   # concurrent invocation's files while the matching install-time cleanup
   # reaps leftovers from crashed runs.

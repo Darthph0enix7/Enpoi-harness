@@ -448,6 +448,7 @@ async function runUpdate(
         DSH_GITHUB_URL: fixture.server.base,
         DSH_GITHUB_REPO: 'fixture/repo',
         DSH_NO_TAILNET: '1',
+        DSH_DELTA: '1',
         DSH_DELTA_FETCH_TIMEOUT: '30',
         DSH_PREBUILT_TIMEOUT: '60',
         DSH_PROGRESS_INTERVAL: '60',
@@ -501,6 +502,7 @@ async function runUpdateTimed(
         DSH_GITHUB_URL: fixture.server.base,
         DSH_GITHUB_REPO: 'fixture/repo',
         DSH_NO_TAILNET: '1',
+        DSH_DELTA: '1',
         DSH_DELTA_FETCH_TIMEOUT: '30',
         DSH_PREBUILT_TIMEOUT: '60',
         DSH_PROGRESS_INTERVAL: '60',
@@ -551,6 +553,7 @@ async function runUpdateUntilLine(
         DSH_GITHUB_URL: fixture.server.base,
         DSH_GITHUB_REPO: 'fixture/repo',
         DSH_NO_TAILNET: '1',
+        DSH_DELTA: '1',
         DSH_DELTA_FETCH_TIMEOUT: '30',
         DSH_PREBUILT_TIMEOUT: '60',
         DSH_PROGRESS_INTERVAL: '60',
@@ -885,6 +888,143 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
     expect(currentTarget(fixture.prefix)).toBe('3')
   }, 240_000)
 
+  it('default path installs the full prebuilt release: no manifests, no engine walks', async () => {
+    const fixture = await buildFixture()
+    const result = await runUpdate(fixture, { DSH_DELTA: '0' })
+    expect(result.status, result.stderr).toBe(0)
+    // The strategy choice is stated once (log file; stderr carries the steps).
+    expect(readFileSync(join(fixture.prefix, 'logs/install.log'), 'utf8')).toContain('update strategy: full prebuilt release')
+    // Full-prebuilt progress shape: download, checksum announce, unpack ticker.
+    expect(result.stderr).toContain('Fetching prebuilt release')
+    expect(result.stderr).toContain('verifying checksum')
+    expect(result.stderr).toContain('Unpacking prebuilt release')
+    // No delta-era artifacts: no manifest fetch, no planner, no engine apply,
+    // no scan/index work.
+    expect(result.stderr).not.toContain('manifest-')
+    expect(result.stderr).not.toContain('apply: plan')
+    expect(result.stderr).not.toContain('scan: hashing')
+    expect(result.stderr).not.toContain('delta: target')
+    expect(result.json?.update).toBeUndefined()
+    expect(result.json?.inspection).toBeUndefined()
+    // Install + switch with the normal mechanics.
+    expect(currentTarget(fixture.prefix)).toBe('2')
+    expect(markerVersion(fixture.prefix)).toBe('2')
+    expect(stateField(fixture.prefix, 'version')).toBe('2')
+    expect(dshVersion(fixture)).toBe('2')
+    // The simple path installs a pristine tree (the archived delta path is
+    // what preserved version-dir modifications).
+    expect(existsSync(join(fixture.prefix, 'harness/2/.dsh-install-complete'))).toBe(true)
+    // No scan index or journal was written by the simple path.
+    expect(existsSync(join(fixture.prefix, 'harness/2/.dsh-scan-index'))).toBe(false)
+    expect(existsSync(join(fixture.prefix, 'harness/.staging-2.journal.json'))).toBe(false)
+    // Health proof + residue report are part of the default-path contract.
+    expect(result.stderr).toContain('health: identity PASS')
+    expect(result.stderr).toContain('health: PASS')
+    const health = result.json?.health as Record<string, unknown>
+    expect(health?.status).toBe('PASS')
+    // The fixture seeds fake delta-era `.bases` slots, so the sweep reports
+    // them (and removes them) on this first run.
+    expect(existsSync(join(fixture.prefix, 'harness/.bases'))).toBe(false)
+    const residue = result.json?.residueCleanup as Record<string, unknown>
+    expect(Number(residue?.items)).toBeGreaterThanOrEqual(1)
+    expect(Number(residue?.bytes)).toBeGreaterThanOrEqual(0)
+  }, 240_000)
+
+  it('sweeps experimental updater residue on the default path and proves health', async () => {
+    const fixture = await buildFixture()
+    // Simulated delta-era residue on a device that ran the archived updater.
+    mkdirSync(join(fixture.prefix, 'harness/.bases/work/1'), { recursive: true })
+    writeFileSync(join(fixture.prefix, 'harness/.bases/1.tar'), Buffer.alloc(64 * 1024, 7))
+    writeFileSync(join(fixture.prefix, 'harness/.bases/1.tar.sha256'), `${'a'.repeat(64)}  1.tar\n`)
+    writeFileSync(join(fixture.prefix, 'harness/1/.dsh-scan-index'), '{"schema":"dsh-scan-index/1","entries":{}}\n')
+    writeFileSync(join(fixture.prefix, 'harness/1/.dsh-scan-index.tmp-1'), 'partial')
+    mkdirSync(join(fixture.prefix, 'harness/.staging-orphan'), { recursive: true })
+    writeFileSync(join(fixture.prefix, 'harness/.staging-orphan.journal.json'), '{"schema":2}\n')
+    writeFileSync(join(fixture.prefix, 'harness/.staging-orphan.journal.json.plan.json'), '{}')
+    mkdirSync(join(fixture.prefix, 'harness/.update-9-999999'), { recursive: true })
+    mkdirSync(join(fixture.prefix, 'harness/.base-1-999999'), { recursive: true })
+    writeFileSync(join(fixture.prefix, 'harness/.last-apply-error.txt'), 'stale error\n')
+    mkdirSync(join(fixture.prefix, 'harness/.backup-19990101-000000-tree'), { recursive: true })
+    writeFileSync(join(fixture.prefix, 'harness/.cache/manifest-linux-x64-1.json.gz'), 'stale manifest')
+    writeFileSync(join(fixture.prefix, 'harness/.cache/diff-linux-x64-1-2.tar.gz'), 'stale diff')
+
+    const result = await runUpdate(fixture, { DSH_DELTA: '0' })
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).toContain('cleanup: removed experimental updater residue')
+    const harness = join(fixture.prefix, 'harness')
+    expect(existsSync(join(harness, '.bases'))).toBe(false)
+    expect(existsSync(join(harness, '1/.dsh-scan-index'))).toBe(false)
+    expect(existsSync(join(harness, '1/.dsh-scan-index.tmp-1'))).toBe(false)
+    expect(existsSync(join(harness, '.staging-orphan'))).toBe(false)
+    expect(existsSync(join(harness, '.staging-orphan.journal.json'))).toBe(false)
+    expect(existsSync(join(harness, '.update-9-999999'))).toBe(false)
+    expect(existsSync(join(harness, '.base-1-999999'))).toBe(false)
+    expect(existsSync(join(harness, '.last-apply-error.txt'))).toBe(false)
+    expect(existsSync(join(harness, '.backup-19990101-000000-tree'))).toBe(false)
+    expect(existsSync(join(harness, '.cache/manifest-linux-x64-1.json.gz'))).toBe(false)
+    expect(existsSync(join(harness, '.cache/diff-linux-x64-1-2.tar.gz'))).toBe(false)
+    // The run's own backup trio (early, pre-migration, pre-switch) survives —
+    // all three are forensic and tiny; only the delta-era tree-backup latch
+    // beyond the newest two generations is swept.
+    const backups = readdirSync(harness).filter(name => name.startsWith('.backup-'))
+    expect(backups.length).toBeGreaterThanOrEqual(1)
+    expect(backups.length).toBeLessThanOrEqual(3)
+    const residue = result.json?.residueCleanup as Record<string, unknown>
+    expect(Number(residue?.bytes)).toBeGreaterThan(64 * 1024)
+    expect(Number(residue?.items)).toBeGreaterThanOrEqual(8)
+    expect((result.json?.health as Record<string, unknown>)?.status).toBe('PASS')
+  }, 240_000)
+
+  it('reports no residue on a clean rerun (idempotent) with health PASS', async () => {
+    const fixture = await buildFixture()
+    const first = await runUpdate(fixture, { DSH_DELTA: '0' })
+    expect(first.status, first.stderr).toBe(0)
+    const second = await runUpdate(fixture, { DSH_DELTA: '0' })
+    expect(second.status, second.stderr).toBe(0)
+    // Second run: already current -> no download, no residue, health proven.
+    expect(readFileSync(join(fixture.prefix, 'logs/install.log'), 'utf8')).toContain('cleanup: no experimental updater residue found')
+    expect(second.stderr).toContain('health: PASS')
+    const residue = second.json?.residueCleanup as Record<string, unknown>
+    expect(Number(residue?.items)).toBe(0)
+    expect(Number(residue?.bytes)).toBe(0)
+  }, 240_000)
+
+  it('keeps delta-era state alive under DSH_DELTA=1', async () => {
+    const fixture = await buildFixture()
+    writeFileSync(join(fixture.prefix, 'harness/.bases/1.tar'), Buffer.alloc(1024, 3))
+    writeFileSync(join(fixture.prefix, 'harness/1/.dsh-scan-index'), '{"schema":"dsh-scan-index/1","entries":{}}\n')
+    const result = await runUpdate(fixture, { DSH_DELTA: '1' })
+    expect(result.status, result.stderr).toBe(0)
+    expect(readFileSync(join(fixture.prefix, 'logs/install.log'), 'utf8')).toContain('cleanup: residue sweep skipped (DSH_DELTA=1')
+    expect(existsSync(join(fixture.prefix, 'harness/.bases/1.tar'))).toBe(true)
+    // The delta path itself maintains scan indexes in the new tree.
+    expect(existsSync(join(fixture.prefix, 'harness/2/.dsh-scan-index'))).toBe(true)
+    expect(result.json?.health).toBeUndefined()
+  }, 240_000)
+
+  it('rolls back when the post-update health proof fails', async () => {
+    const fixture = await buildFixture()
+    const result = await runUpdate(fixture, { DSH_DELTA: '0', DSH_HEALTH_FORCE_FAIL: '1' })
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toContain('health: FAIL')
+    expect(result.json?.rolledBack).toBe(1)
+    expect(currentTarget(fixture.prefix)).toBe('1')
+    const failed = readdirSync(join(fixture.prefix, 'harness')).filter(name => name.startsWith('2.failed-'))
+    expect(failed.length).toBe(1)
+  }, 240_000)
+
+  it('skips the full download when the newest release is already installed', async () => {
+    const fixture = await buildFixture()
+    // Seed the prefix as if 2 were already installed.
+    const hop = await runUpdate(fixture, { DSH_DELTA: '0' })
+    expect(hop.status, hop.stderr).toBe(0)
+    expect(currentTarget(fixture.prefix)).toBe('2')
+    const rerun = await runUpdate(fixture, { DSH_DELTA: '0' })
+    expect(rerun.status, rerun.stderr).toBe(0)
+    expect(readFileSync(join(fixture.prefix, 'logs/install.log'), 'utf8')).toContain('already up to date at 2; no download')
+    expect(rerun.stderr).not.toContain('Fetching prebuilt release')
+  }, 240_000)
+
   it('applies a six-hop consecutive chain (raised cap) with per-hop verification', async () => {
     const fixture = await buildFixture({ versions: ['1', '2', '3', '4', '5', '6', '7'], installed: '1', target: '7' })
     const result = await runUpdate(fixture)
@@ -1072,6 +1212,7 @@ describe.skipIf(win32)('scratch-prefix delta update', () => {
       `DSH_GITHUB_URL=${fixture.server.base}`,
       'DSH_GITHUB_REPO=fixture/repo',
       'DSH_NO_TAILNET=1',
+      'DSH_DELTA=1',
       'DSH_DELTA_FETCH_TIMEOUT=30',
       'DSH_PREBUILT_TIMEOUT=60',
       'DSH_PROGRESS_INTERVAL=60',
