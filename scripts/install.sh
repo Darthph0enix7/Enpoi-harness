@@ -1360,9 +1360,20 @@ flatten_stage() { # move a single top-level directory's contents up
     for entries in "$stage"/* "$stage"/.[!.]*; do
       [ -d "$entries" ] || continue
       if [ ! -f "$entries/package.json" ]; then continue; fi
+      # Fast path: hoist the single top-level directory's contents with
+      # same-directory renames — instant even for 100K-file trees (the tar
+      # pipe below rewrote the whole tree: the Mac's silent post-unpack gap).
+      if ( cd "$entries" && shopt -s dotglob nullglob && mv -- * "$stage"/ ) 2>/dev/null; then
+        rmdir "$entries" 2>/dev/null || rm -rf "$entries"
+        return 0
+      fi
+      local started
+      started="$(date +%s)"
+      substep_info "flattening the staged tree (fallback copy)…"
       ( cd "$entries" && tar -cf - . ) | tar -C "$stage" -xf -
       local top="$entries"
       if [ "$top" != "$stage" ]; then rm -rf "$top"; fi
+      substep_ok "staged tree flattened ($(( $(date +%s) - started ))s)"
       return 0
     done
   fi
@@ -2084,8 +2095,12 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
   PREBUILT=1
   # The tag's own commit is the recorded build identity; empty when git and
   # the GitHub API cannot resolve it (install_tree then falls back to the
-  # channel ref's commit).
+  # channel ref's commit). Network-bound and variable: announce + time it.
+  substep_info "resolving the release commit…"
+  local commit_started
+  commit_started="$(date +%s)"
   RELEASE_COMMIT="$(resolve_target_commit "$tag" "$DSH_GITHUB_URL")"
+  substep_ok "release commit resolved ($(( $(date +%s) - commit_started ))s)"
   return 0
 }
 
@@ -6360,10 +6375,18 @@ EOF
     for k in ${keep_set[@]+"${keep_set[@]}"}; do [ "$k" = "$name" ] && pinned=1; done
     if [ "$pinned" = 1 ]; then kept_n=$((kept_n + 1)); continue; fi
     if [ -d "$PREFIX/harness/$name" ]; then
+      local prune_started
+      substep_info "retention: pruning old version $name (K=$keep_k)…"
+      prune_started="$(date +%s)"
       size="$(du -sh "$PREFIX/harness/$name" 2>/dev/null | awk '{print $1}')"
       log "pruning old version $name (retention K=$keep_k${size:+; tree freed $size})"
       prune_version_bases "$name"
-      if rm -rf "$PREFIX/harness/$name"; then removed=$((removed + 1)); else warn "could not prune $name"; fi
+      if rm -rf "$PREFIX/harness/$name"; then
+        removed=$((removed + 1))
+        substep_ok "retention: pruned $name${size:+ (freed $size)} ($(( $(date +%s) - prune_started ))s)"
+      else
+        warn "could not prune $name"
+      fi
     fi
   done
   prune_orphaned_bases
@@ -6440,9 +6463,17 @@ prune_failed_versions() {
     i=$((i + 1))
     [ "$i" -le "$keep" ] && continue
     name="$(basename "$f")"
+    local fail_started
+    substep_info "retention: pruning failed tree $name…"
+    fail_started="$(date +%s)"
     size="$(du -sh "$f" 2>/dev/null | awk '{print $1}')"
     log "pruning failed tree $name${size:+ (freed $size)}"
-    if rm -rf "$f"; then removed=$((removed + 1)); else warn "could not prune failed tree $name"; fi
+    if rm -rf "$f"; then
+      removed=$((removed + 1))
+      substep_ok "retention: pruned failed tree $name${size:+ (freed $size)} ($(( $(date +%s) - fail_started ))s)"
+    else
+      warn "could not prune failed tree $name"
+    fi
   done < <(ls -1dt "$PREFIX/harness"/*.failed-* 2>/dev/null)
   [ "$removed" -gt 0 ] && log "pruned $removed failed tree(s); kept the newest $keep for diagnosis"
   return 0
