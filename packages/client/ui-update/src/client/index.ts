@@ -72,6 +72,7 @@ export function apply(ctx: ClientContext): void {
         retry: () => { controller.retry() },
         skip: () => { controller.skip() },
         cancel: () => { controller.cancel() },
+        checkNow: () => { controller.checkNow() },
         toastDone: () => { controller.toastDone() },
       },
     }),
@@ -90,6 +91,7 @@ export function apply(ctx: ClientContext): void {
       actions: {
         open: () => { controller.open() },
         apply: () => { controller.apply() },
+        checkNow: () => { controller.checkNow() },
       },
     }),
   }, UpdateSettingsRow))

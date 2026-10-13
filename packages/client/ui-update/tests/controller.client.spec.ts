@@ -377,6 +377,45 @@ describe('UpdateController actions and their exact wire args', () => {
   })
 })
 
+describe('UpdateController checkNow', () => {
+  it('runs one manual check, applies the shared status, and clears checking', async () => {
+    const checked = { ...availableStatus, checkedAt: '2026-10-13T18:00:00.000Z' }
+    const b = bench({ answers: { 'updateCheck.status': availableStatus, 'updateCheck.checkNow': checked } })
+    b.controller.mount()
+    await settle()
+    b.controller.checkNow()
+    expect(b.controller.store.getSnapshot()).toMatchObject({ checking: true, checkError: null })
+    await settle()
+    expect(b.calls.at(-1)).toEqual({ method: 'updateCheck.checkNow', args: {} })
+    expect(b.controller.store.getSnapshot()).toMatchObject({ checking: false, status: checked, checkError: null })
+    b.controller.dispose()
+  })
+
+  it('is single-flight while a manual check is in flight', async () => {
+    const b = bench({ answers: { 'updateCheck.status': availableStatus, 'updateCheck.checkNow': availableStatus } })
+    b.controller.mount()
+    await settle()
+    const before = b.calls.filter(call => call.method === 'updateCheck.checkNow').length
+    b.controller.checkNow()
+    b.controller.checkNow()
+    await settle()
+    expect(b.calls.filter(call => call.method === 'updateCheck.checkNow')).toHaveLength(before + 1)
+    b.controller.dispose()
+  })
+
+  it('records a quiet failure and clears it when the next check starts', async () => {
+    const b = bench({ rpcError: 'gateway responded 502' })
+    b.controller.mount()
+    await settle()
+    b.controller.checkNow()
+    await settle()
+    expect(b.controller.store.getSnapshot()).toMatchObject({ checking: false, checkError: 'gateway responded 502' })
+    b.controller.checkNow()
+    expect(b.controller.store.getSnapshot()).toMatchObject({ checking: true, checkError: null })
+    b.controller.dispose()
+  })
+})
+
 describe('UpdateController cancel', () => {
   it('relays a cancelled engine outcome into the record', async () => {
     const cancelled = runWire({ observed: true, launcher: 'external', phase: 'cancelled', result: 'cancelled', staged: true })

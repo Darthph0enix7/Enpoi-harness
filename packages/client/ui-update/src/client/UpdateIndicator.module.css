@@ -79,6 +79,42 @@
   min-height: 0;
 }
 
+.headMeta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* The manual check: a quiet inline text action beside the channel, never a
+   button-sized control; `disabled` while the single-flight check runs. */
+.checkAction {
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.checkAction:hover:not(:disabled) {
+  color: var(--dsw-alias-brand-primary-new-colorprimary-new-color);
+}
+
+.checkAction:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.checkError {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
 .head {
   display: flex;
   flex-direction: column;

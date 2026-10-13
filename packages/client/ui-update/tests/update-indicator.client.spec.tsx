@@ -6,7 +6,7 @@
  * failure surface, and the one-time toast.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { UpdateIndicator } from '../src/client/UpdateIndicator.tsx'
@@ -45,6 +45,8 @@ function mount(initial: Partial<UpdateUiState> = {}) {
     dialogOpen: false,
     busy: false,
     actionError: null,
+    checking: false,
+    checkError: null,
     toastVersion: null,
     ...initial,
   })
@@ -56,6 +58,7 @@ function mount(initial: Partial<UpdateUiState> = {}) {
     retry: vi.fn(),
     skip: vi.fn(),
     cancel: vi.fn(),
+    checkNow: vi.fn(),
     toastDone: vi.fn(),
   }
   const props = {
@@ -166,6 +169,28 @@ describe('UpdateIndicator dialog', () => {
     })
     expect(document.querySelector('[data-dsh-update-notes]')).toBeNull()
     expect(screen.getByText(en['dialog.notesEmpty'])).toBeTruthy()
+  })
+
+  it('offers a quiet manual check with its checking state and failure line', async () => {
+    const { actions, store } = mount({ status: availableStatus, dialogOpen: true })
+    const check = document.querySelector('[data-dsh-update-check]')
+    expect(check?.textContent).toBe(en['check.action'])
+    fireEvent.click(check!)
+    expect(actions.checkNow).toHaveBeenCalledTimes(1)
+    expect(document.querySelector('[data-dsh-update-check-error]')).toBeNull()
+
+    store.set({ ...store.getSnapshot(), checking: true })
+    await waitFor(() => {
+      const checking = document.querySelector('[data-dsh-update-check]')
+      expect(checking?.textContent).toBe(en['check.checking'])
+      expect(checking?.hasAttribute('disabled')).toBe(true)
+    })
+
+    store.set({ ...store.getSnapshot(), checking: false, checkError: 'offline' })
+    await waitFor(() => {
+      expect(document.querySelector('[data-dsh-update-check]')?.textContent).toBe(en['check.action'])
+      expect(document.querySelector('[data-dsh-update-check-error]')?.textContent).toBe('Check failed: offline')
+    })
   })
 
   it('keeps Update now enabled for a skipped version and shows the skip hint', () => {

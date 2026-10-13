@@ -4,7 +4,7 @@
  * the skipped (dismissed) release keeping its Update entry point.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { UpdateSettingsRow } from '../src/client/UpdateSettingsRow.tsx'
@@ -54,10 +54,12 @@ function mount(initial: Partial<UpdateUiState> = {}) {
     dialogOpen: false,
     busy: false,
     actionError: null,
+    checking: false,
+    checkError: null,
     toastVersion: null,
     ...initial,
   })
-  const actions = { open: vi.fn(), apply: vi.fn() }
+  const actions = { open: vi.fn(), apply: vi.fn(), checkNow: vi.fn() }
   const props = {
     actions,
     useUpdate: bindSnapshotSelector(store),
@@ -69,19 +71,57 @@ function mount(initial: Partial<UpdateUiState> = {}) {
 const rowState = (): string | null => document.querySelector('[data-dsh-update-settings]')?.getAttribute('data-dsh-update-settings') ?? null
 
 describe('UpdateSettingsRow', () => {
-  it('renders nothing before the first check result or while unknown', () => {
+  it('renders nothing before the first check result', () => {
     const empty = mount()
     expect(empty.container.firstChild).toBeNull()
-    empty.unmount()
-    mount({ status: { state: 'unknown', current: { version: '', commit: '', channel: 'stable' } } })
-    expect(document.querySelector('[data-dsh-update-settings]')).toBeNull()
   })
 
-  it('renders a quiet up-to-date line with no action while current', () => {
-    mount({ status: { ...availableStatus, state: 'current' } })
+  it('offers the quiet manual check while current, and none of the update actions', () => {
+    const { actions } = mount({ status: { ...availableStatus, state: 'current' } })
     expect(rowState()).toBe('current')
     expect(screen.getByText(en['settings.upToDate'])).toBeTruthy()
-    expect(screen.queryByRole('button')).toBeNull()
+    const check = document.querySelector('[data-dsh-update-check]')
+    expect(check?.textContent).toBe(en['check.action'])
+    fireEvent.click(check!)
+    expect(actions.checkNow).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: en['action.updateNow'] })).toBeNull()
+    expect(screen.queryByRole('button', { name: en['action.restart'] })).toBeNull()
+  })
+
+  it('offers the quiet manual check while unknown (never checked / offline)', () => {
+    const { actions } = mount({ status: { state: 'unknown', current: { version: '', commit: '', channel: 'stable' } } })
+    expect(rowState()).toBe('unknown')
+    expect(screen.getByText(en['settings.notChecked'])).toBeTruthy()
+    fireEvent.click(document.querySelector('[data-dsh-update-check]')!)
+    expect(actions.checkNow).toHaveBeenCalledTimes(1)
+  })
+
+  it('disables the check while one is in flight and shows its quiet failure line', async () => {
+    const { store } = mount({ status: { ...availableStatus, state: 'current' } })
+    store.set({ ...store.getSnapshot(), checking: true })
+    await waitFor(() => {
+      const checking = document.querySelector('[data-dsh-update-check]')
+      expect(checking?.textContent).toBe(en['check.checking'])
+      expect(checking?.hasAttribute('disabled')).toBe(true)
+    })
+    store.set({ ...store.getSnapshot(), checking: false, checkError: 'gateway responded 502' })
+    await waitFor(() => {
+      expect(screen.getByText('Check failed: gateway responded 502')).toBeTruthy()
+    })
+  })
+
+  it('keeps the primary actions (and no second check control) while an update is offered', () => {
+    mount({ status: availableStatus })
+    expect(screen.queryByRole('button', { name: en['action.updateNow'] })).toBeTruthy()
+    expect(document.querySelector('[data-dsh-update-check]')).toBeNull()
+    cleanup()
+    mount({ status: { ...availableStatus, state: 'dismissed' } })
+    expect(screen.queryByRole('button', { name: en['action.updateNow'] })).toBeTruthy()
+    expect(document.querySelector('[data-dsh-update-check]')).toBeNull()
+    cleanup()
+    mount({ status: availableStatus, run: run({ phase: 'prepared', step: 7, staged: true }) })
+    expect(screen.getByRole('button', { name: en['action.restart'] })).toBeTruthy()
+    expect(document.querySelector('[data-dsh-update-check]')).toBeNull()
   })
 
   it('offers Update (opening the shared dialog) while a release is available', () => {

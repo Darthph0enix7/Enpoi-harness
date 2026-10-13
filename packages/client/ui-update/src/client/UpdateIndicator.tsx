@@ -33,6 +33,7 @@ export interface UpdateIndicatorInjected {
     retry: () => void
     skip: () => void
     cancel: () => void
+    checkNow: () => void
     toastDone: () => void
   }
 }
@@ -157,13 +158,31 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
         footer={footer}
       >
         <div className={css.content}>
-          {status !== null && latest !== undefined && (
+          {status !== null && (
             <div className={css.head}>
-              <p className={css.versions} data-dsh-update-versions>
-                {t('dialog.versions', { current: status.current.version, latest: latest.version })}
-              </p>
-              <p className={css.channel}>{t('dialog.channel', { channel: status.current.channel })}</p>
+              {latest !== undefined && (
+                <p className={css.versions} data-dsh-update-versions>
+                  {t('dialog.versions', { current: status.current.version, latest: latest.version })}
+                </p>
+              )}
+              <div className={css.headMeta}>
+                <span className={css.channel}>{t('dialog.channel', { channel: status.current.channel })}</span>
+                <button
+                  type="button"
+                  className={css.checkAction}
+                  data-dsh-update-check
+                  disabled={state.checking}
+                  onClick={actions.checkNow}
+                >
+                  {state.checking ? t('check.checking') : t('check.action')}
+                </button>
+              </div>
             </div>
+          )}
+          {state.checkError !== null && (
+            <p className={css.checkError} role="status" data-dsh-update-check-error>
+              {t('check.failed', { message: state.checkError })}
+            </p>
           )}
           {activeRun !== null && (
             <section className={css.section} data-dsh-update-progress={activeRun.phase}>

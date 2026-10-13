@@ -52,7 +52,7 @@ describe('ui-update browser half', () => {
     expect(entry?.locale).toBe(NS)
     const face = (entry?.inject as unknown as (() => UpdateIndicatorInjected) | undefined)?.()
     expect(face?.hooks.update.getSnapshot()).toMatchObject({ status: null, run: null, dialogOpen: false })
-    expect(Object.keys(face?.actions ?? {}).sort()).toEqual(['apply', 'cancel', 'close', 'open', 'retry', 'skip', 'start', 'toastDone'])
+    expect(Object.keys(face?.actions ?? {}).sort()).toEqual(['apply', 'cancel', 'checkNow', 'close', 'open', 'retry', 'skip', 'start', 'toastDone'])
     face?.actions.open()
     expect(face?.hooks.update.getSnapshot().dialogOpen).toBe(true)
     face?.actions.close()
@@ -73,6 +73,7 @@ describe('ui-update browser half', () => {
     expect(face?.hooks.update).toBe(pillFace?.hooks.update)
     face?.actions.open()
     expect(face?.hooks.update.getSnapshot().dialogOpen).toBe(true)
+    expect(typeof face?.actions.checkNow).toBe('function')
   })
 
   it('registers both dictionaries under its own namespace and releases them with the fiber', async () => {

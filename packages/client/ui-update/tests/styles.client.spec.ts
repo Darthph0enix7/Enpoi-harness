@@ -35,6 +35,15 @@ describe('update pill copy', () => {
   })
 })
 
+describe('manual check styling', () => {
+  it('renders the check action as a quiet inline text action', () => {
+    const check = block('.checkAction')
+    expect(check).toContain('color: var(--dsw-alias-label-tertiary)')
+    expect(check).toContain('background: none')
+    expect(check).toContain('border: 0')
+  })
+})
+
 describe('update pill accent', () => {
   it('colors the available and prepared states with the single restrained accent token', () => {
     const accent = block(".pill[data-dsh-update-indicator='available'],\n.pill[data-dsh-update-indicator='prepared']")

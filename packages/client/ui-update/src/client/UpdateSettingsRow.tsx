@@ -24,6 +24,7 @@ export interface UpdateSettingsInjected {
   actions: {
     open: () => void
     apply: () => void
+    checkNow: () => void
   }
 }
 
@@ -34,7 +35,7 @@ export type UpdateSettingsRowProps =
   & InjectFace<UpdateSettingsInjected>
 
 /** One rendered state of the row. */
-type RowView = 'current' | 'available' | 'skipped' | 'updating' | 'prepared' | 'failed'
+type RowView = 'current' | 'unknown' | 'available' | 'skipped' | 'updating' | 'prepared' | 'failed'
 
 /**
  * Render the General-settings update row: a quiet current-state line, or the
@@ -57,6 +58,8 @@ export function UpdateSettingsRow({ useUpdate, actions, t }: UpdateSettingsRowPr
   let label: string
   let hint: string | undefined
   let action: { readonly label: string; readonly run: () => void; readonly primary: boolean } | undefined
+  // States with no update to act on still offer the quiet manual check.
+  let offerCheck = false
 
   if (activeRun !== null) {
     view = 'updating'
@@ -85,10 +88,18 @@ export function UpdateSettingsRow({ useUpdate, actions, t }: UpdateSettingsRowPr
   } else if (status.state === 'current') {
     view = 'current'
     label = t('settings.upToDate')
+    offerCheck = true
   } else {
-    // `unknown` (never checked / offline): the row stays out of the way.
-    return null
+    // `unknown` (never checked / offline): the quiet manual check is the one
+    // useful affordance.
+    view = 'unknown'
+    label = t('settings.notChecked')
+    offerCheck = true
   }
+
+  // A failed manual check reads as a quiet line under the label (the dialog
+  // carries the same message).
+  if (offerCheck && state.checkError !== null) hint = t('check.failed', { message: state.checkError })
 
   return (
     <div className={css.row} data-dsh-update-settings={view}>
@@ -96,15 +107,28 @@ export function UpdateSettingsRow({ useUpdate, actions, t }: UpdateSettingsRowPr
         <span className={css.label}>{label}</span>
         {hint !== undefined && <span className={css.hint}>{hint}</span>}
       </span>
-      {action !== undefined && (
-        <Button
-          {...(action.primary ? { variant: 'primary' as const } : {})}
-          disabled={state.busy}
-          onClick={action.run}
-        >
-          {action.label}
-        </Button>
-      )}
+      <span className={css.actions}>
+        {offerCheck && (
+          <button
+            type="button"
+            className={css.checkAction}
+            data-dsh-update-check
+            disabled={state.checking}
+            onClick={actions.checkNow}
+          >
+            {state.checking ? t('check.checking') : t('check.action')}
+          </button>
+        )}
+        {action !== undefined && (
+          <Button
+            {...(action.primary ? { variant: 'primary' as const } : {})}
+            disabled={state.busy}
+            onClick={action.run}
+          >
+            {action.label}
+          </Button>
+        )}
+      </span>
     </div>
   )
 }

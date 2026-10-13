@@ -58,6 +58,10 @@ export interface UpdateUiState {
   readonly busy: boolean
   /** Displayable failure of the last action, cleared by the next action. */
   readonly actionError: string | null
+  /** Whether a manual `checkNow` call is in flight. */
+  readonly checking: boolean
+  /** Quiet failure of the last manual check, cleared when the next one starts. */
+  readonly checkError: string | null
   /** Version to announce once after an update landed, or null. */
   readonly toastVersion: string | null
 }
@@ -113,6 +117,8 @@ const INITIAL: UpdateUiState = {
   dialogOpen: false,
   busy: false,
   actionError: null,
+  checking: false,
+  checkError: null,
   toastVersion: null,
 }
 
@@ -235,7 +241,7 @@ export class UpdateController {
 
   /** Open the dialog and make sure a run's state has been read once. */
   open(): void {
-    this.update({ dialogOpen: true, actionError: null })
+    this.update({ dialogOpen: true, actionError: null, checkError: null })
     void this.refreshRun()
   }
 
@@ -243,6 +249,25 @@ export class UpdateController {
   close(): void {
     this.update({ dialogOpen: false, actionError: null })
     this.stopRunPollIfIdle()
+  }
+
+  /**
+   * `[Check for updates]`: one manual `updateCheck/checkNow` (the host's
+   * single-flight read). The refreshed status replaces the shared store; a
+   * failure lands as the quiet inline check error, never a popup.
+   */
+  checkNow(): void {
+    if (this.store.getSnapshot().checking) return
+    this.update({ checking: true, checkError: null })
+    void this.rpc('updateCheck.checkNow', {}).then((result) => {
+      if (this.disposed) return
+      if (!result.ok) {
+        this.update({ checking: false, checkError: result.message })
+        return
+      }
+      this.update({ checking: false, status: result.value as UpdateCheckStatusWire })
+      this.maybeCompleteUpdate()
+    })
   }
 
   /** `[Update now]`: prepare the update (`updateCheck/start`). */
