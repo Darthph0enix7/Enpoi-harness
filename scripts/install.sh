@@ -7709,6 +7709,12 @@ do_apply_staged() { # prev_version
   [ -n "$channel" ] && CHANNEL="$channel"
 
   acquire_update_lock
+  # Re-validate under the lock: a plain update that ran between the first
+  # check and the lock acquisition discards the record (and may have pruned the
+  # staged tree), so the switch must never run on the earlier read alone.
+  if [ ! -f "$staged" ] || [ ! -d "$PREFIX/harness/$tree" ] || [ ! -f "$PREFIX/harness/$tree/.dsh-install-complete" ]; then
+    die "dsh update --apply: the staged record or its tree changed while waiting for the update lock; nothing was switched. Re-run 'dsh update --prepare'"
+  fi
   init_log_file
   log "apply: consuming staged $version ($tree, prepared ${prepared_at:-unknown}); switching from $prev"
   say "dsh update --apply: switching to $version (staged ${prepared_at:-unknown})"
