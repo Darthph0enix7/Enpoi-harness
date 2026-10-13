@@ -195,6 +195,7 @@ export {
   resolveRuntimePath,
   RUN_HOME_ENV,
   systemBinDirs,
+  UPDATE_MODE_ENV,
   wrapperArgs,
   type LaunchChild,
   type LaunchEnvironment,
@@ -207,6 +208,32 @@ export {
   type RuntimeProbe,
   type RuntimeSource,
 } from './launcher.js'
+export {
+  CANCEL_OUTPUT_CAP,
+  CANCEL_TIMEOUT_MS,
+  cancelEngineRun,
+  parseCancelJson,
+  type CancelChild,
+  type CancelEngineInput,
+  type CancelSpawn,
+  type EngineCancelOutcome,
+  type EngineCancelStatus,
+} from './cancel.js'
+export {
+  isMarkerLive,
+  isProcessLive,
+  modeFromMarker,
+  observedRecordFromMarker,
+  phaseFromMarker,
+  readRunMarker,
+  resultFromMarkerPhase,
+  RUN_MARKER_FILE,
+  runMarkerPath,
+  type EngineRunMarker,
+  type MarkerMode,
+  type MarkerPhase,
+  type ObservedRecordContext,
+} from './marker.js'
 export {
   ENGINE_PROBE_OUTPUT_CAP,
   ENGINE_PROBE_TIMEOUT_MS,
@@ -265,6 +292,7 @@ export {
   UpdateRunController,
   type RunRefusalReason,
   type RunTimers,
+  type UpdateCancelOutcome,
   type UpdateRunControllerOptions,
 } from './run-service.js'
 export {

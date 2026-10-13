@@ -32,6 +32,7 @@ export interface UpdateIndicatorInjected {
     apply: () => void
     retry: () => void
     skip: () => void
+    cancel: () => void
     toastDone: () => void
   }
 }
@@ -91,6 +92,10 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
   const showDisconnectWarning = activeRun !== null
     && activeRun.step >= APPLY_SWITCH_STEP
     && (activeRun.phase === 'applying' || activeRun.rung === 'one-shot')
+  // Cancel mirrors the engine's refusal window: past the switch (apply from
+  // its launch, a one-shot from step 8) the run cannot be interrupted safely.
+  const cancelPastSwitch = activeRun !== null
+    && (activeRun.phase === 'applying' || (activeRun.rung === 'one-shot' && activeRun.step >= APPLY_SWITCH_STEP))
 
   const footer: ReactNode = executing ? (
     <Button onClick={actions.close}>{t('action.later')}</Button>
@@ -175,6 +180,11 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
               {showDisconnectWarning && (
                 <p className={css.warning}>{t('progress.disconnectWarning')}</p>
               )}
+              {!cancelPastSwitch && (
+                <div className={css.progressActions}>
+                  <Button disabled={state.busy} onClick={actions.cancel}>{t('action.cancel')}</Button>
+                </div>
+              )}
             </section>
           )}
           {preparedRun !== null && (
@@ -185,7 +195,9 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
           {failedRun !== null && (
             <section className={css.section} data-dsh-update-failure={failedRun.result}>
               <p className={css.failureTitle}>
-                {failedRun.result === 'rolledback' ? t('result.rolledback') : t('result.failed')}
+                {failedRun.result === 'rolledback'
+                  ? t('result.rolledback')
+                  : failedRun.result === 'cancelled' ? t('result.cancelled') : t('result.failed')}
               </p>
               {failedRun.reason !== undefined && failedRun.reason !== '' && (
                 <p className={css.reason} data-dsh-update-reason>{failedRun.reason}</p>

@@ -21,7 +21,9 @@
  *   record does not change without a user action, so it is not polled.
  */
 import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
-import { isExecutingPhase, updateCheckRpc, type UpdateCheckStatusWire, type UpdateRunWire } from './rpc.ts'
+import {
+  isExecutingPhase, updateCheckRpc, type UpdateCancelOutcomeWire, type UpdateCheckStatusWire, type UpdateRunWire,
+} from './rpc.ts'
 
 /** Status poll interval while the tab is visible. */
 export const STATUS_POLL_MS = 60_000
@@ -31,6 +33,12 @@ export const RUN_POLL_MS = 2_000
 
 /** Minimum gap between trigger-driven status polls (focus / visibility). */
 export const TRIGGER_MIN_GAP_MS = 1_000
+
+/** How long the post-success identity watch keeps re-reading the status. */
+export const RELOAD_WATCH_MS = 60_000
+
+/** Identity poll cadence while the reload watch runs. */
+export const RELOAD_WATCH_TICK_MS = 2_000
 
 /** Session key holding `{ from, target }` while a run is in flight. */
 export const PENDING_KEY = 'dsh.update.pending.v1'
@@ -166,6 +174,8 @@ export class UpdateController {
   private runHandle: ReturnType<typeof setInterval> | null = null
   private statusInFlight: Promise<void> | null = null
   private runInFlight: Promise<void> | null = null
+  private reloadHandle: ReturnType<typeof setInterval> | null = null
+  private reloadDeadline = 0
   private lastTriggerAt = Number.NEGATIVE_INFINITY
   private disposed = false
   private pending: PendingMarker | undefined
@@ -216,6 +226,7 @@ export class UpdateController {
     this.disposed = true
     if (this.statusHandle !== null) this.timers.clearInterval(this.statusHandle)
     if (this.runHandle !== null) this.timers.clearInterval(this.runHandle)
+    this.stopReloadWatch()
     this.statusHandle = null
     this.runHandle = null
     this.doc?.removeEventListener('visibilitychange', this.onVisibility)
@@ -302,20 +313,54 @@ export class UpdateController {
     })
   }
 
+  /**
+   * `[Cancel]`: ask the host to stop the live run through the engine's own
+   * cancel. A `cancelled` outcome becomes the current record (the dialog then
+   * shows the cancelled state with Retry); `refused` surfaces the engine's
+   * message; `noop` re-reads the run.
+   */
+  cancel(): void {
+    if (this.store.getSnapshot().busy) return
+    this.update({ busy: true, actionError: null })
+    void this.rpc('updateCheck.cancel', {}).then((result) => {
+      if (this.disposed) return
+      if (!result.ok) {
+        this.update({ busy: false, actionError: result.message })
+        return
+      }
+      const outcome = result.value as UpdateCancelOutcomeWire
+      if (outcome.status === 'cancelled') {
+        this.update({ busy: false, run: outcome.record })
+        this.stopRunPollIfIdle()
+        return
+      }
+      if (outcome.status === 'refused' || outcome.status === 'failed') {
+        this.update({ busy: false, actionError: outcome.message })
+        return
+      }
+      // Nothing live any more: converge on the current host state.
+      this.update({ busy: false })
+      void this.refreshRun()
+    })
+  }
+
   /** Dismiss the one-time toast. */
   toastDone(): void {
     this.update({ toastVersion: null })
   }
 
   /**
-   * A connection generation was established: after the apply's switch this is
+   * A connection generation was established: after an update's switch this is
    * how the page learns the service is back. Completion is judged by the
    * install version changing, not by the reconnect itself, so this read
-   * bypasses the focus gap (a reconnect is a real event, not pointer chatter).
+   * bypasses the focus gap (a reconnect is a real event, not pointer chatter)
+   * and starts the bounded identity watch: a restarted service may need a few
+   * seconds before it serves the new identity.
    */
   onConnectionReset(): void {
     if (this.pending === undefined) return
     void this.refreshStatus(true, true)
+    this.startReloadWatch()
   }
 
   /**
@@ -349,6 +394,7 @@ export class UpdateController {
       this.maybeCompleteUpdate()
       if (run !== null && isExecutingPhase(run.phase)) this.ensureRunPoll()
       else this.stopRunPollIfIdle()
+      if (run !== null && run.result === 'success') this.startReloadWatch()
     }).finally(() => { this.runInFlight = null })
     return this.runInFlight
   }
@@ -378,6 +424,31 @@ export class UpdateController {
     this.writeMarker(PENDING_KEY, undefined)
     this.pending = undefined
     ;(this.options.reload ?? (() => { window.location.reload() }))()
+  }
+
+  /**
+   * Re-read the identity every {@link RELOAD_WATCH_TICK_MS} for at most
+   * {@link RELOAD_WATCH_MS} after a terminal success or a reconnect with a
+   * pending update. The status read feeds the existing completion check; the
+   * watch never extends itself and is disposed with the plugin.
+   */
+  private startReloadWatch(): void {
+    if (this.disposed || this.reloadHandle !== null) return
+    this.reloadDeadline = this.now() + RELOAD_WATCH_MS
+    this.reloadHandle = this.timers.setInterval(() => {
+      if (this.disposed || this.now() > this.reloadDeadline) {
+        this.stopReloadWatch()
+        return
+      }
+      void this.refreshStatus(true, true)
+    }, RELOAD_WATCH_TICK_MS)
+  }
+
+  private stopReloadWatch(): void {
+    if (this.reloadHandle !== null) {
+      this.timers.clearInterval(this.reloadHandle)
+      this.reloadHandle = null
+    }
   }
 
   private ensureRunPoll(): void {

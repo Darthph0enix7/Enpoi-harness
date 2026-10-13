@@ -50,9 +50,10 @@ export type UpdatePhase =
   | 'success'
   | 'failed'
   | 'rolledback'
+  | 'cancelled'
 
 /** Terminal outcomes of a run. */
-export type UpdateRunResult = 'success' | 'failed' | 'rolledback'
+export type UpdateRunResult = 'success' | 'failed' | 'rolledback' | 'cancelled'
 
 /** Engine step total the current updater prints. */
 export const RUN_STEP_TOTAL = 9
@@ -72,7 +73,7 @@ export function phaseForResult(result: UpdateRunResult): UpdatePhase {
 
 /** Whether a phase is terminal (`result` is set). */
 export function isTerminalPhase(phase: UpdatePhase): boolean {
-  return phase === 'success' || phase === 'failed' || phase === 'rolledback'
+  return phase === 'success' || phase === 'failed' || phase === 'rolledback' || phase === 'cancelled'
 }
 
 /** Whether a run is resting in the staged, restart-to-apply state. */
@@ -133,8 +134,10 @@ export interface UpdateRunRecord {
   readonly logTail: readonly string[]
   /** Completion time, ISO 8601; absent while the run is active or prepared. */
   readonly finishedAt?: string
-  /** Human-readable terminal explanation for a failed/rolled-back run. */
+  /** Human-readable terminal explanation for a failed/rolled-back/cancelled run. */
   readonly reason?: string
+  /** True when the record was synthesized from the engine marker (a run started outside the UI). */
+  readonly observed?: boolean
 }
 
 /** One parsed log tail. */
@@ -269,12 +272,12 @@ export function hasStagedApply(prefix: string): boolean {
 /** Whether a raw value is one of the reported phases. */
 function isUpdatePhase(value: unknown): value is UpdatePhase {
   return value === 'starting' || value === 'prepared' || value === 'preparing' || value === 'applying'
-    || value === 'success' || value === 'failed' || value === 'rolledback'
+    || value === 'success' || value === 'failed' || value === 'rolledback' || value === 'cancelled'
 }
 
 /** Whether a raw value is one of the terminal results. */
 function isUpdateResult(value: unknown): value is UpdateRunResult {
-  return value === 'success' || value === 'failed' || value === 'rolledback'
+  return value === 'success' || value === 'failed' || value === 'rolledback' || value === 'cancelled'
 }
 
 /**
@@ -312,6 +315,7 @@ function normalizeRunRecord(raw: Record<string, unknown>): UpdateRunRecord {
     result: isUpdateResult(raw.result) ? raw.result : null,
     staged: raw.staged === true,
     logTail: Array.isArray(raw.logTail) ? raw.logTail.filter((line): line is string => typeof line === 'string') : [],
+    ...(raw.observed === true ? { observed: true } : {}),
     ...(finishedAt === undefined ? {} : { finishedAt }),
     ...(reason === undefined ? {} : { reason }),
   }
@@ -326,7 +330,8 @@ function isRunRecordShape(value: unknown): value is Record<string, unknown> {
     && typeof record.phase === 'string'
     && typeof record.startedAt === 'string'
     && typeof record.logPath === 'string'
-    && (record.result === null || record.result === 'success' || record.result === 'failed' || record.result === 'rolledback')
+    && (record.result === null || record.result === 'success' || record.result === 'failed'
+      || record.result === 'rolledback' || record.result === 'cancelled')
 }
 
 /**

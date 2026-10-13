@@ -16,6 +16,7 @@
  * | `updateCheck.start`   | `start()`                          | `{}` |
  * | `updateCheck.apply`   | `apply()`                          | `{}` |
  * | `updateCheck.run`     | `run()`                            | `{}` |
+ * | `updateCheck.cancel`  | `cancel()`                         | `{}` |
  *
  * Every call is fail-soft: a transport or gatekeeper failure resolves to
  * `{ ok: false, message }` and never rejects.
@@ -54,9 +55,10 @@ export type UpdateRunPhase =
   | 'success'
   | 'failed'
   | 'rolledback'
+  | 'cancelled'
 
 /** Terminal run outcomes. */
-export type UpdateRunResult = 'success' | 'failed' | 'rolledback'
+export type UpdateRunResult = 'success' | 'failed' | 'rolledback' | 'cancelled'
 
 /** The engine invocation a run drives. */
 export type UpdateRunMode = 'prepare' | 'apply' | 'one-shot'
@@ -87,6 +89,18 @@ export interface UpdateRunWire {
   readonly logTail: readonly string[]
   readonly finishedAt?: string
   readonly reason?: string
+  /** True when the host synthesized this record from a run started outside the UI. */
+  readonly observed?: boolean
+}
+
+/** One engine-cancel attempt's outcome (`updateCheck/cancel`). */
+export interface UpdateCancelOutcomeWire {
+  /** `cancelled` (runner stopped) / `refused` (past the switch) / `noop` (nothing live) / `failed`. */
+  readonly status: 'cancelled' | 'refused' | 'noop' | 'failed'
+  /** Human message: the engine's own words, or the local failure reason. */
+  readonly message: string
+  /** The record after the attempt. */
+  readonly record: UpdateRunWire | null
 }
 
 /** One call's outcome: the business value, or a displayable failure message. */

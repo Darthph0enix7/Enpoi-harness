@@ -19,6 +19,7 @@ import {
   resolveRuntime,
   RUN_HOME_ENV,
   systemBinDirs,
+  UPDATE_MODE_ENV,
   wrapperArgs,
   type LaunchChild,
   type LaunchPlanInput,
@@ -141,6 +142,23 @@ describe('resolveLaunchEnvironment', () => {
     expect(environment.nodePath).toBe(join(runtimeBin, 'node'))
     expect(environment.env[RUN_HOME_ENV]).toBe(input(root).home)
     expect(environment.env.PREFIX).toBe(input(root).prefix)
+  })
+
+  it('labels the one-shot rung with DSH_UPDATE_MODE=one-shot and leaves the phase rungs unlabelled', () => {
+    const root = scratch()
+    fakeNode(join(root, 'prefix', 'runtime', 'node', 'current', 'bin'))
+    const oneShot = resolveLaunchEnvironment(input(root, { flag: 'one-shot' }))
+    expect(oneShot.env[UPDATE_MODE_ENV]).toBe('one-shot')
+    expect(resolveLaunchEnvironment(input(root, { flag: '--prepare' })).env[UPDATE_MODE_ENV]).toBeUndefined()
+    expect(resolveLaunchEnvironment(input(root, { flag: '--apply' })).env[UPDATE_MODE_ENV]).toBeUndefined()
+    const plan = launchPlan(input(root, { flag: 'one-shot', platform: 'linux', hasCommand: () => true }), oneShot)
+    expect(plan[0]!.args).toContain(`--setenv=${UPDATE_MODE_ENV}=one-shot`)
+    expect(plan[0]!.args.slice(-3)).toEqual(['update', '--channel', 'stable'])
+    const preparePlan = launchPlan(
+      input(root, { platform: 'linux', hasCommand: () => true }),
+      resolveLaunchEnvironment(input(root)),
+    )
+    expect(preparePlan[0]!.args.some(arg => arg.startsWith(`--setenv=${UPDATE_MODE_ENV}=`))).toBe(false)
   })
 
   it('throws LaunchEnvironmentError naming every probed location when nothing resolves', () => {

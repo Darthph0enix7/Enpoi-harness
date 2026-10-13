@@ -10,7 +10,9 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { InstallIdentity } from '../src/catalog.js'
+import type { EngineCancelOutcome } from '../src/cancel.js'
 import type { LaunchOutcome, LaunchUpdaterInput } from '../src/launcher.js'
+import { runMarkerPath, type EngineRunMarker } from '../src/marker.js'
 import { runLogPath, runPidPath, runRecordPath, stagedApplyPath, type UpdateRunRecord } from '../src/run.js'
 import {
   RunRefusedError,
@@ -83,6 +85,7 @@ function bench(options: {
   isAlive?: (pid: number) => boolean
   now?: () => Date
   probeCapability?: 'supported' | 'unsupported'
+  cancelEngine?: () => Promise<EngineCancelOutcome>
 } = {}): Bench {
   const home = options.home ?? scratch()
   const ticks = manualTimers()
@@ -105,6 +108,7 @@ function bench(options: {
     probe: async () => (options.probeCapability === 'unsupported'
       ? { capability: 'unsupported', reason: 'engine help does not list --prepare (exit 0)' }
       : { capability: 'supported' }),
+    ...(options.cancelEngine === undefined ? {} : { cancelEngine: options.cancelEngine }),
     ...(options.isAlive === undefined ? {} : { isAlive: options.isAlive }),
     ...(options.now === undefined ? {} : { now: options.now }),
   })
@@ -473,6 +477,144 @@ describe('UpdateRunController one-shot rung (engine without --prepare)', () => {
     expect(await controller.probe()).toEqual({ capability: 'supported' })
     expect(await controller.probe()).toEqual({ capability: 'supported' })
     expect(probe).toHaveBeenCalledTimes(1)
+    controller.dispose()
+  })
+})
+
+describe('UpdateRunController engine-marker observer', () => {
+  /** Write an engine marker document under `home` (home doubles as prefix). */
+  function writeMarker(home: string, overrides: Partial<EngineRunMarker> = {}): void {
+    const document: EngineRunMarker = {
+      runId: 'ext-1',
+      pid: process.pid,
+      mode: 'plain',
+      step: 5,
+      steps: 9,
+      phase: 'running',
+      startedAt: '2026-10-13T12:00:00Z',
+      logPath: join(home, 'install.log'),
+      version: '',
+      target: '0.1.7-enpoi.2.84',
+      ...overrides,
+    }
+    mkdirSync(join(home, 'harness'), { recursive: true })
+    writeFileSync(runMarkerPath(home), JSON.stringify(document))
+  }
+
+  it('surfaces a live terminal-started run and refuses start while it lives', async () => {
+    const home = scratch()
+    writeMarker(home)
+    const b = bench({ home })
+    const record = b.controller.run()
+    expect(record).toMatchObject({
+      runId: 'ext-1',
+      target: '0.1.7-enpoi.2.84',
+      mode: 'one-shot',
+      rung: 'one-shot',
+      phase: 'preparing',
+      step: 5,
+      pid: process.pid,
+      observed: true,
+    })
+    await expect(b.controller.start()).rejects.toThrowError(expect.objectContaining({ reason: 'already-running' }))
+    b.controller.dispose()
+  })
+
+  it('ignores a stale (dead-pid) marker and falls back to the persisted record', async () => {
+    const home = scratch()
+    writeMarker(home, { pid: await deadPid() })
+    const b = bench({ home })
+    expect(b.controller.run()).toBeNull()
+    b.controller.dispose()
+  })
+
+  it('lets the plugin’s own executing record win over the marker', async () => {
+    const home = scratch()
+    const b = bench({ home, isAlive: pid => pid === process.pid || pid === 4242 })
+    await b.controller.start()
+    writeMarker(home)
+    const record = b.controller.run()!
+    expect(record.observed).toBeUndefined()
+    expect(record.runId).toBe('run42')
+    b.controller.dispose()
+  })
+
+  it('reconciles a surviving plugin run with the marker pid and phase', () => {
+    const home = scratch()
+    const record = recordFixture({ home, record: { mode: 'one-shot', rung: 'one-shot', phase: 'preparing', step: 6, pid: process.pid } }).record
+    writeLiveRecord(home, record, null)
+    writeMarker(home, { mode: 'plain', phase: 'switching', step: 8, logPath: record.logPath })
+    const b = bench({ home })
+    const reconciled = b.controller.reconcile()!
+    expect(reconciled).toMatchObject({ phase: 'applying', step: 8, pid: process.pid })
+    b.controller.dispose()
+  })
+
+  it('relays an engine cancel of a terminal-started run into a persisted cancelled record', async () => {
+    const home = scratch()
+    writeMarker(home, {
+      phase: 'cancelled',
+      mode: 'plain',
+      logPath: join(home, 'install.log'),
+    })
+    const cancelEngine = vi.fn(async (): Promise<EngineCancelOutcome> => ({
+      status: 'cancelled',
+      message: 'Cancelled run ext-1: runner stopped',
+      runId: 'ext-1',
+      pid: process.pid,
+      phase: 'cancelled',
+    }))
+    const b = bench({ home, cancelEngine })
+    const outcome = await b.controller.cancel()
+    expect(cancelEngine).toHaveBeenCalledTimes(1)
+    expect(outcome).toMatchObject({ status: 'cancelled', message: expect.stringContaining('runner stopped') })
+    expect(outcome.record).toMatchObject({ result: 'cancelled', phase: 'cancelled', observed: true })
+    // Persisted: the next read still reports the cancelled state.
+    expect(b.controller.run()).toMatchObject({ result: 'cancelled' })
+    b.controller.dispose()
+  })
+
+  it('marks the plugin’s own record cancelled on a successful cancel', async () => {
+    const home = scratch()
+    const b = bench({
+      home,
+      isAlive: () => true,
+      cancelEngine: async () => ({ status: 'cancelled', message: 'stopped', runId: 'run42', pid: 4242, phase: 'cancelled' }),
+    })
+    await b.controller.start()
+    const outcome = await b.controller.cancel()
+    expect(outcome.record).toMatchObject({ runId: 'run42', result: 'cancelled', phase: 'cancelled' })
+    expect(outcome.record?.observed).toBeUndefined()
+    b.controller.dispose()
+  })
+
+  it('returns the engine refusal without changing the record', async () => {
+    const home = scratch()
+    writeMarker(home, { phase: 'applying', step: 8 })
+    const b = bench({
+      home,
+      cancelEngine: async () => ({ status: 'refused', message: 'refusing — the update is past the switch (phase applying)', runId: 'ext-1', pid: process.pid, phase: 'applying' }),
+    })
+    const before = b.controller.run()
+    const outcome = await b.controller.cancel()
+    expect(outcome.status).toBe('refused')
+    expect(outcome.message).toContain('past the switch')
+    expect(outcome.record).toEqual(before)
+    expect(b.controller.run()).toEqual(before)
+    b.controller.dispose()
+  })
+
+  it('refuses cancel when the shim is missing', async () => {
+    const home = scratch()
+    const controller = new UpdateRunController({
+      home,
+      readIdentity: () => ({ channel: 'stable', version: '0.1.7-enpoi.2.81', commit: 'abc1234' }),
+      readStatus: () => available(),
+      resolveShim: () => null,
+      resolvePrefix: () => home,
+      timers: manualTimers().timers,
+    })
+    await expect(controller.cancel()).rejects.toThrowError(expect.objectContaining({ reason: 'shim-missing' }))
     controller.dispose()
   })
 })

@@ -52,7 +52,7 @@ describe('ui-update browser half', () => {
     expect(entry?.locale).toBe(NS)
     const face = (entry?.inject as unknown as (() => UpdateIndicatorInjected) | undefined)?.()
     expect(face?.hooks.update.getSnapshot()).toMatchObject({ status: null, run: null, dialogOpen: false })
-    expect(Object.keys(face?.actions ?? {}).sort()).toEqual(['apply', 'close', 'open', 'retry', 'skip', 'start', 'toastDone'])
+    expect(Object.keys(face?.actions ?? {}).sort()).toEqual(['apply', 'cancel', 'close', 'open', 'retry', 'skip', 'start', 'toastDone'])
     face?.actions.open()
     expect(face?.hooks.update.getSnapshot().dialogOpen).toBe(true)
     face?.actions.close()

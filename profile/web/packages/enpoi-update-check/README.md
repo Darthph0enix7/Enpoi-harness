@@ -58,7 +58,8 @@ Patch row id `enpoi-update-check`:
 | `updateCheck.dismiss` | `{ request: { version } }` | the status after recording the skip (`gateway/bad-request` when `version` is missing) |
 | `updateCheck.start` | — | the fresh record (`mode: 'prepare'` on a two-phase engine, `mode: 'one-shot'` on an older one, `phase: 'starting'`); `gateway/bad-request` when no update is available, a run is active, an update is already prepared, the shim is missing, or the launch fails (including no resolvable Node.js runtime) |
 | `updateCheck.apply` | — | the fresh apply record (`mode: 'apply'`, `phase: 'applying'`); `gateway/bad-request` when nothing is staged or the launch fails |
-| `updateCheck.run` | — | the current run record, or null when this install never started one |
+| `updateCheck.run` | — | the current run record, or null: the plugin's own run when one is executing, otherwise a live run observed from the engine marker (a `dsh update` started in a terminal), otherwise the persisted record |
+| `updateCheck.cancel` | — | the engine cancel outcome (`cancelled`/`refused`/`noop`/`failed`) with its message and the resulting record (`cancelled` on success); `gateway/bad-request` only when the shim is missing |
 
 The Remote arguments mirror the descriptors' **parameter names**: `dismiss`
 wraps its `request` object (`payload.args.request.version`), every
@@ -83,7 +84,8 @@ record, so the offered action is Restart to update.
   output naming `--prepare` counts as supported; a probe failure, timeout, or
   empty output defaults to UNSUPPORTED because guessing wrong would break the
   very first update on an old device.
-- **Rungs.** A supported engine gets `dsh update --channel <c> --prepare`
+- **Rungs.** The one-shot rung exports `DSH_UPDATE_MODE=one-shot` so the
+  engine's marker labels the no-flag run. A supported engine gets `dsh update --channel <c> --prepare`
   (`rung: 'two-phase'`): the run stages the tree and rests at `prepared` until
   `apply`. An older engine gets the one-shot `dsh update --channel <c>`
   (`rung: 'one-shot'`): the run includes the switch and service restart
@@ -113,6 +115,26 @@ record, so the offered action is Restart to update.
   `step`/`steps` from the engine's `[N/9]` markers, `lastLine`, a bounded
   40-line `logTail`, and the terminal result lines (`successfully updated` /
   `Update applied:` / `FAILED` / `rolled back`).
+- **Engine marker & terminal-started runs (implemented).** The running
+  installer's marker (`$PREFIX/harness/.update-run.json`: `runId, pid, mode
+  (plain|prepare|apply|one-shot), step, steps, phase (running → switching →
+  applying → done, terminal failed/rolledback/cancelled), startedAt, logPath,
+  version, target`) lets the plugin observe an update started outside the UI:
+  `updateCheck.run` reads it on each call (a small file; no watch), verifies
+  the pid is live and not a zombie (`kill 0` + `ps -o stat=` / `/proc`), and
+  synthesizes a record whose mode/phase map onto the same client states
+  (`plain`/`one-shot` → one-shot-style rung, `running` → `preparing`,
+  `switching`/`applying` → `applying`, terminal phases → their results,
+  `logTail` from the marker's `logPath`). A stale dead-pid marker reports
+  nothing. A surviving plugin run reconciles with the marker's pid/phase when
+  the marker names the same run.
+- **Cancel (implemented).** `updateCheck.cancel` shells the installed shim
+  (`dsh update --cancel --json`, bounded 30 s) so every safety rule stays in
+  the engine: SIGTERM → bounded wait → SIGKILL, refusal past the switch,
+  partial sweeps, marker → `cancelled`. The plugin relays the outcome; a
+  successful cancel becomes a `cancelled` record (the plugin's own when it
+  started the run, otherwise one synthesized from the terminal marker) and a
+  refusal surfaces the engine's message.
 - **Restart reconcile.** Either rung's switch restarts the service, so the
   watcher dies with it. On plugin boot the record is reconciled against the log
   tail (a terminal line the watcher missed), the staged marker, and the install

@@ -42,6 +42,10 @@ import {
   defaultShimPath, launchUpdater, LaunchEnvironmentError, resolveRuntimePath, RUN_HOME_ENV,
   type LaunchOutcome, type LaunchRung, type LaunchUpdaterInput,
 } from './launcher.js'
+import { cancelEngineRun, type CancelEngineInput, type EngineCancelOutcome, type EngineCancelStatus } from './cancel.js'
+import {
+  isMarkerLive, isProcessLive, modeFromMarker, observedRecordFromMarker, phaseFromMarker, readRunMarker, type EngineRunMarker,
+} from './marker.js'
 import { probeEngineCapability, type EngineProbeResult } from './probe.js'
 import {
   effectivePid, executingPhase, hasStagedApply, isPreparedPhase, isProcessAlive, isRunActive, modeFlag, preparedRecord,
@@ -112,8 +116,22 @@ export interface UpdateRunControllerOptions {
   readonly probe?: (input: { shim: string; env: NodeJS.ProcessEnv; timeoutMs?: number }) => Promise<EngineProbeResult>
   /** Capability-probe bound, milliseconds (default 10 s). */
   readonly probeTimeoutMs?: number
+  /** Engine-cancel seam; defaults to {@link cancelEngineRun}. */
+  readonly cancelEngine?: (input: CancelEngineInput) => Promise<EngineCancelOutcome>
+  /** Engine-cancel bound, milliseconds (default 30 s). */
+  readonly cancelTimeoutMs?: number
   /** Called after each record change (the plugin logs it). */
   readonly onUpdate?: (record: UpdateRunRecord) => void
+}
+
+/** The `updateCheck/cancel` reply: the engine's outcome plus the record it leaves behind. */
+export interface UpdateCancelOutcome {
+  /** Engine outcome (`cancelled` / `refused` / `noop` / `failed`). */
+  readonly status: EngineCancelStatus
+  /** Human message: the engine's own words, or the local failure reason. */
+  readonly message: string
+  /** The record after the attempt (relayed into `cancelled` on success). */
+  readonly record: UpdateRunRecord | null
 }
 
 /** How long a run may show no sign of life (pid file, log content) before it is failed. */
@@ -174,13 +192,43 @@ export class UpdateRunController {
     }
   }
 
-  /** The current record (from memory, or the persisted state on first read). */
+  /**
+   * The current run as the UI should see it: the plugin's own executing record
+   * first, otherwise a live run observed from the engine marker (a
+   * terminal-started update), otherwise the plugin's persisted record
+   * (prepared or terminal). The marker costs one small file read per call and
+   * is never watched host-side.
+   */
   run(): UpdateRunRecord | null {
+    const own = this.loadOwn()
+    if (own !== null && own.result === null && !isPreparedPhase(own.phase) && this.isAliveRecord(own)) return own
+    return this.observeEngineRun() ?? own
+  }
+
+  /** The persisted plugin record (loaded once). */
+  private loadOwn(): UpdateRunRecord | null {
     if (!this.loaded) {
       this.loaded = true
       this.record = readRunRecord(runRecordPath(this.options.home))
     }
     return this.record
+  }
+
+  /** Whether a marker names the same run as the persisted record (log path, or mode/target). */
+  private markerMatchesRecord(record: UpdateRunRecord, marker: EngineRunMarker): boolean {
+    if (record.logPath !== '' && marker.logPath !== '' && record.logPath === marker.logPath) return true
+    if (modeFromMarker(marker.mode) !== record.mode) return false
+    return record.target === '' || marker.target === '' || marker.target === record.target || marker.version === record.target
+  }
+
+  /** Synthesize a live record from the engine marker, or null when none is live. */
+  private observeEngineRun(): UpdateRunRecord | null {
+    const marker = readRunMarker(this.prefix)
+    if (marker === null || !isMarkerLive(marker, this.options.isAlive ?? isProcessLive)) return null
+    return observedRecordFromMarker(marker, {
+      prefix: this.prefix,
+      channel: this.options.readIdentity().channel,
+    })
   }
 
   /**
@@ -229,10 +277,28 @@ export class UpdateRunController {
    * @returns the reconciled record, or null when none exists.
    */
   reconcile(): UpdateRunRecord | null {
-    const current = this.run()
+    const current = this.loadOwn()
     if (current === null) return null
     if (current.result === null && !isPreparedPhase(current.phase) && this.isAliveRecord(current)) {
-      // The updater outlived the old watcher: resume watching.
+      // The updater outlived the old watcher: resume watching. When the engine
+      // marker names the same live run, its pid/phase/step are authoritative
+      // (the log-derived record may lag the switch).
+      const marker = readRunMarker(this.prefix)
+      if (marker !== null && isMarkerLive(marker, this.options.isAlive ?? isProcessLive) && this.markerMatchesRecord(current, marker)) {
+        const merged: UpdateRunRecord = {
+          ...current,
+          pid: marker.pid,
+          // The marker knows when the switch began even if the log parse lags;
+          // `running` keeps the finer log-derived phase.
+          phase: marker.phase === 'switching'
+            ? 'applying'
+            : marker.phase === 'running' ? current.phase : phaseFromMarker(marker.phase),
+          step: marker.step > 0 ? marker.step : current.step,
+          steps: marker.steps > 0 ? marker.steps : current.steps,
+        }
+        this.watch(merged)
+        return merged
+      }
       this.watch(current)
       return current
     }
@@ -332,6 +398,55 @@ export class UpdateRunController {
       )
     }
     return this.begin('apply', { target: current.target, channel: current.channel })
+  }
+
+  /**
+   * Cancel the live run through the engine's own `dsh update --cancel --json`
+   * (bounded), so the pre-switch/sweep/refusal rules stay in the engine. On a
+   * successful cancel the record is relayed into `cancelled`: the plugin's own
+   * record when it started the run, otherwise one synthesized from the (now
+   * terminal) engine marker.
+   *
+   * @returns the engine's outcome and the resulting record.
+   * @throws RunRefusedError when the shim is missing.
+   */
+  async cancel(): Promise<UpdateCancelOutcome> {
+    const current = this.run()
+    const shim = (this.options.resolveShim ?? resolveShimPath)(this.options.home)
+    if (shim === null) {
+      throw new RunRefusedError(
+        'shim-missing',
+        `updateCheck.cancel: the dsh shim was not found (checked the recorded binDir and ${defaultShimPath()})`,
+      )
+    }
+    const outcome = await (this.options.cancelEngine ?? cancelEngineRun)({
+      shim,
+      env: this.probeEnvironment(),
+      ...(this.options.cancelTimeoutMs === undefined ? {} : { timeoutMs: this.options.cancelTimeoutMs }),
+    })
+    if (outcome.status !== 'cancelled') {
+      return { status: outcome.status, message: outcome.message, record: current }
+    }
+    return { status: 'cancelled', message: outcome.message, record: this.relayCancelled(current) }
+  }
+
+  /** Relay a successful engine cancel into the record the UI renders. */
+  private relayCancelled(current: UpdateRunRecord | null): UpdateRunRecord | null {
+    if (current !== null && current.observed !== true) {
+      const next = this.terminalRecord(current, 'cancelled')
+      this.persist(next)
+      this.stopWatcher()
+      return next
+    }
+    const marker = readRunMarker(this.prefix)
+    if (marker === null) return current
+    const record = observedRecordFromMarker(marker, {
+      prefix: this.prefix,
+      channel: this.options.readIdentity().channel,
+    })
+    this.loaded = true
+    this.persist(record)
+    return record
   }
 
   /** Stop the watcher (plugin unload). The updater itself keeps running. */
@@ -550,6 +665,12 @@ export class UpdateRunController {
   /** Whether a record has a live process by the controller's liveness seam. */
   private isAliveRecord(record: UpdateRunRecord): boolean {
     if (record.result !== null || isPreparedPhase(record.phase)) return false
+    // An observed record's pid is the engine's own; the wrapper pid file and
+    // the plugin's liveness seam do not apply to it.
+    if (record.observed === true) {
+      if (record.pid === null) return false
+      return (this.options.isAlive ?? isProcessLive)(record.pid)
+    }
     if (this.options.isAlive === undefined) return isRunActive(this.options.home, record)
     const pid = effectivePid(this.options.home, record)
     return pid !== null && this.options.isAlive(pid)

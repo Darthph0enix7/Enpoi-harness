@@ -9,6 +9,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   PENDING_KEY,
+  RELOAD_WATCH_MS,
   STATUS_POLL_MS,
   TOAST_KEY,
   TRIGGER_MIN_GAP_MS,
@@ -233,7 +234,12 @@ describe('UpdateController polling', () => {
     b.ticks.fireIntervals()
     await settle()
     expect(b.controller.store.getSnapshot().run?.result).toBe('success')
-    expect(b.ticks.intervals()).toBe(1)
+    // The run poll stopped (a terminal record never changes); the bounded
+    // reload watch may still be running, but it never reads updateCheck.run.
+    const runCalls = b.calls.filter(call => call.method === 'updateCheck.run').length
+    b.ticks.fireIntervals()
+    await settle()
+    expect(b.calls.filter(call => call.method === 'updateCheck.run')).toHaveLength(runCalls)
     b.controller.dispose()
   })
 })
@@ -368,6 +374,132 @@ describe('UpdateController actions and their exact wire args', () => {
     await settle()
     expect(b.calls.filter(call => call.method === 'updateCheck.dismiss')).toHaveLength(0)
     b.controller.dispose()
+  })
+})
+
+describe('UpdateController cancel', () => {
+  it('relays a cancelled engine outcome into the record', async () => {
+    const cancelled = runWire({ observed: true, launcher: 'external', phase: 'cancelled', result: 'cancelled', staged: true })
+    const b = bench({
+      answers: {
+        'updateCheck.status': availableStatus,
+        'updateCheck.run': executingRun,
+        'updateCheck.cancel': { status: 'cancelled', message: 'Cancelled run run1: runner stopped', record: cancelled },
+      },
+    })
+    b.controller.mount()
+    await settle()
+    b.controller.cancel()
+    await settle()
+    expect(b.calls.at(-1)).toEqual({ method: 'updateCheck.cancel', args: {} })
+    expect(b.controller.store.getSnapshot().run).toMatchObject({ result: 'cancelled', phase: 'cancelled' })
+    b.controller.dispose()
+  })
+
+  it('surfaces the engine refusal without touching the record', async () => {
+    const b = bench({
+      answers: {
+        'updateCheck.status': availableStatus,
+        'updateCheck.run': runWire({ mode: 'apply', phase: 'applying', step: 8 }),
+        'updateCheck.cancel': { status: 'refused', message: 'refusing — the update is past the switch (phase applying)', record: null },
+      },
+    })
+    b.controller.mount()
+    await settle()
+    b.controller.cancel()
+    await settle()
+    expect(b.controller.store.getSnapshot().actionError).toContain('past the switch')
+    expect(b.controller.store.getSnapshot().run?.phase).toBe('applying')
+    b.controller.dispose()
+  })
+
+  it('re-reads the run after a no-op cancel', async () => {
+    const b = bench({
+      answers: {
+        'updateCheck.status': availableStatus,
+        'updateCheck.run': null,
+        'updateCheck.cancel': { status: 'noop', message: 'no update is running', record: null },
+      },
+    })
+    b.controller.mount()
+    await settle()
+    const before = b.calls.filter(call => call.method === 'updateCheck.run').length
+    b.controller.cancel()
+    await settle()
+    expect(b.calls.filter(call => call.method === 'updateCheck.run')).toHaveLength(before + 1)
+    b.controller.dispose()
+  })
+})
+
+describe('UpdateController reload watch', () => {
+  it('reloads once the identity changes inside the watch window', async () => {
+    let clock = 0
+    const storage = memoryStorage({ [PENDING_KEY]: JSON.stringify({ from: '0.1.7-enpoi.2.81', target: '0.1.7-enpoi.2.84' }) })
+    const answers: Record<string, unknown> = { 'updateCheck.status': availableStatus, 'updateCheck.run': null }
+    const b = bench({ answers, storage, now: () => clock })
+    b.controller.mount()
+    await settle()
+    expect(b.reload).not.toHaveBeenCalled()
+
+    // A reconnect with a pending update starts the bounded watch.
+    b.controller.onConnectionReset()
+    await settle()
+    b.ticks.fireIntervals()
+    await settle()
+    expect(b.reload).not.toHaveBeenCalled()
+
+    // The restarted service now reports the new version; the next tick reloads.
+    answers['updateCheck.status'] = {
+      ...availableStatus,
+      state: 'current' as const,
+      latest: undefined,
+      current: { version: '0.1.7-enpoi.2.84', commit: 'def5678', channel: 'stable' },
+    }
+    clock += 2_000
+    b.ticks.fireIntervals()
+    await settle()
+    expect(b.reload).toHaveBeenCalledTimes(1)
+    b.controller.dispose()
+  })
+
+  it('does not reload without an identity change and stops at the deadline', async () => {
+    let clock = 0
+    const storage = memoryStorage({ [PENDING_KEY]: JSON.stringify({ from: '0.1.7-enpoi.2.81', target: '0.1.7-enpoi.2.84' }) })
+    const b = bench({ answers: { 'updateCheck.status': availableStatus, 'updateCheck.run': null }, storage, now: () => clock })
+    b.controller.mount()
+    await settle()
+    b.controller.onConnectionReset()
+    await settle()
+    expect(b.ticks.intervals()).toBe(2)
+    clock += 2_000
+    b.ticks.fireIntervals()
+    await settle()
+    expect(b.reload).not.toHaveBeenCalled()
+
+    // Past the watch window the timer disposes itself (only the status interval remains).
+    clock += RELOAD_WATCH_MS + 1
+    b.ticks.fireIntervals()
+    await settle()
+    expect(b.reload).not.toHaveBeenCalled()
+    expect(b.ticks.intervals()).toBe(1)
+    b.controller.dispose()
+  })
+
+  it('starts the watch when a run reaches terminal success', async () => {
+    const answers: Record<string, unknown> = {
+      'updateCheck.status': availableStatus,
+      'updateCheck.run': runWire({ mode: 'apply', phase: 'applying', step: 9 }),
+    }
+    const b = bench({ answers })
+    b.controller.mount()
+    await settle()
+    answers['updateCheck.run'] = runWire({ mode: 'apply', phase: 'success', result: 'success', step: 9 })
+    b.ticks.fireIntervals()
+    await settle()
+    // status + run + reload-watch intervals; the watch is bounded and cleaned on dispose.
+    expect(b.ticks.intervals()).toBeGreaterThanOrEqual(2)
+    b.controller.dispose()
+    expect(b.ticks.intervals()).toBe(0)
   })
 })
 

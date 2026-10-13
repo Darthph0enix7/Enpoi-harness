@@ -155,9 +155,9 @@ function readInstallIdentity(homeDir) {
 import { Remote, RemoteError, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 
 // src/run-service.ts
-import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync3, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync4, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname2, join as join4 } from "node:path";
+import { dirname as dirname2, join as join5 } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // src/launcher.ts
@@ -166,6 +166,7 @@ import { accessSync, constants, readdirSync } from "node:fs";
 import { delimiter, join as join2 } from "node:path";
 import { homedir } from "node:os";
 var RUN_HOME_ENV = "DSH_HOME";
+var UPDATE_MODE_ENV = "DSH_UPDATE_MODE";
 var LaunchEnvironmentError = class extends Error {
   /** Every location the probe consulted, in order. */
   probed;
@@ -275,7 +276,10 @@ function resolveLaunchEnvironment(input) {
     ...baseEnv,
     PATH: resolved.path,
     [RUN_HOME_ENV]: input.home,
-    ...input.prefix === "" ? {} : { PREFIX: input.prefix }
+    ...input.prefix === "" ? {} : { PREFIX: input.prefix },
+    // The engine labels its run marker from this hook; a one-shot rung has no
+    // phase flag, so without it the marker would read `plain`.
+    ...input.flag === "one-shot" ? { [UPDATE_MODE_ENV]: "one-shot" } : {}
   };
   return {
     nodePath: resolved.probe.binDir === "" ? null : join2(resolved.probe.binDir, "node"),
@@ -321,7 +325,8 @@ function launchPlan(input, environment) {
   const envArgs = [
     `--setenv=PATH=${environment.path}`,
     `--setenv=${RUN_HOME_ENV}=${input.home}`,
-    ...input.prefix === "" ? [] : [`--setenv=PREFIX=${input.prefix}`]
+    ...input.prefix === "" ? [] : [`--setenv=PREFIX=${input.prefix}`],
+    ...input.flag === "one-shot" ? [`--setenv=${UPDATE_MODE_ENV}=one-shot`] : []
   ];
   const steps = [];
   if (platform === "linux" && has("systemd-run")) {
@@ -371,12 +376,12 @@ function launchPlan(input, environment) {
 }
 function launchUpdater(input) {
   const environment = resolveLaunchEnvironment(input);
-  const spawn2 = input.spawn ?? ((command, args, options) => nodeSpawn(command, [...args], options));
+  const spawn3 = input.spawn ?? ((command, args, options) => nodeSpawn(command, [...args], options));
   const plan = launchPlan(input, environment);
   let lastError;
   for (const step of plan) {
     try {
-      const child = spawn2(step.command, step.args, {
+      const child = spawn3(step.command, step.args, {
         detached: true,
         stdio: "ignore",
         env: environment.env
@@ -397,60 +402,100 @@ function defaultShimPath() {
   return join2(homedir(), ".local", "bin", "dsh");
 }
 
-// src/probe.ts
+// src/cancel.ts
 import { spawn } from "node:child_process";
-var ENGINE_PROBE_TIMEOUT_MS = 1e4;
-var ENGINE_PROBE_OUTPUT_CAP = 64 * 1024;
-function probeEngineCapability(input) {
-  const timeoutMs = input.timeoutMs ?? ENGINE_PROBE_TIMEOUT_MS;
+var CANCEL_TIMEOUT_MS = 3e4;
+var CANCEL_OUTPUT_CAP = 64 * 1024;
+function parseCancelJson(stdout) {
+  for (const line of stdout.split("\n").reverse()) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (typeof parsed !== "object" || parsed === null) continue;
+    const raw = parsed;
+    if (raw.action !== "cancel") continue;
+    const status = raw.status === "cancelled" || raw.status === "refused" || raw.status === "noop" ? raw.status : "failed";
+    const pidRaw = typeof raw.pid === "string" ? Number.parseInt(raw.pid, 10) : raw.pid;
+    return {
+      status,
+      runId: typeof raw.runId === "string" ? raw.runId : "",
+      pid: typeof pidRaw === "number" && Number.isFinite(pidRaw) && pidRaw > 0 ? Math.trunc(pidRaw) : null,
+      phase: typeof raw.phase === "string" ? raw.phase : ""
+    };
+  }
+  return null;
+}
+function cancelEngineRun(input) {
+  const timeoutMs = input.timeoutMs ?? CANCEL_TIMEOUT_MS;
   const spawnImpl = input.spawn ?? ((command, args, options) => spawn(command, [...args], {
     env: options.env,
     stdio: ["ignore", "pipe", "pipe"]
   }));
   return new Promise((resolve) => {
     let settled = false;
-    let output = "";
+    let stdout = "";
+    let stderr = "";
     let timer;
-    const finish = (result) => {
+    const finish = (outcome) => {
       if (settled) return;
       settled = true;
       if (timer !== void 0) clearTimeout(timer);
-      resolve(result);
+      resolve(outcome);
+    };
+    const lastLine = (text) => {
+      const lines = text.split("\n").map((line) => line.trim()).filter((line) => line !== "");
+      return lines.at(-1) ?? "";
     };
     try {
-      const child = spawnImpl(input.shim, ["update", "--help"], { env: input.env });
-      const collect = (chunk) => {
-        if (output.length >= ENGINE_PROBE_OUTPUT_CAP) return;
-        output += typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
-      };
-      child.stdout?.on("data", collect);
-      child.stderr?.on("data", collect);
+      const child = spawnImpl(input.shim, ["update", "--cancel", "--json"], { env: input.env });
+      child.stdout?.on("data", (chunk) => {
+        if (stdout.length < CANCEL_OUTPUT_CAP) stdout += typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      });
+      child.stderr?.on("data", (chunk) => {
+        if (stderr.length < CANCEL_OUTPUT_CAP) stderr += typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      });
       child.on("error", (error) => {
-        finish({ capability: "unsupported", reason: `probe failed to start: ${error.message}` });
+        finish({ status: "failed", message: `cancel failed to start: ${error.message}`, runId: "", pid: null, phase: "" });
       });
       child.on("close", (code) => {
-        if (output.includes("--prepare")) {
-          finish({ capability: "supported" });
+        const parsed = parseCancelJson(stdout);
+        if (parsed === null) {
+          const message2 = lastLine(stderr) || lastLine(stdout) || `cancel exited ${String(code)} without a result`;
+          finish({ status: "failed", message: message2, runId: "", pid: null, phase: "" });
           return;
         }
-        finish({
-          capability: "unsupported",
-          reason: output.trim() === "" ? `probe produced no output (exit ${String(code)})` : `engine help does not list --prepare (exit ${String(code)})`
-        });
+        const message = lastLine(stderr) || lastLine(stdout);
+        finish({ ...parsed, message });
       });
       timer = setTimeout(() => {
         try {
           child.kill?.();
         } catch {
         }
-        finish({ capability: "unsupported", reason: `probe timed out after ${String(timeoutMs)}ms` });
+        finish({ status: "failed", message: `cancel timed out after ${String(timeoutMs)}ms`, runId: "", pid: null, phase: "" });
       }, timeoutMs);
       timer.unref?.();
     } catch (error) {
-      finish({ capability: "unsupported", reason: `probe failed: ${error instanceof Error ? error.message : String(error)}` });
+      finish({
+        status: "failed",
+        message: `cancel failed: ${error instanceof Error ? error.message : String(error)}`,
+        runId: "",
+        pid: null,
+        phase: ""
+      });
     }
   });
 }
+
+// src/marker.ts
+import { execFileSync } from "node:child_process";
+import { readFileSync as readFileSync3 } from "node:fs";
+import { join as join4 } from "node:path";
 
 // src/run.ts
 import { existsSync, mkdirSync, readFileSync as readFileSync2, renameSync, statSync, writeFileSync } from "node:fs";
@@ -464,7 +509,7 @@ function phaseForResult(result) {
   return result;
 }
 function isTerminalPhase(phase) {
-  return phase === "success" || phase === "failed" || phase === "rolledback";
+  return phase === "success" || phase === "failed" || phase === "rolledback" || phase === "cancelled";
 }
 function isPreparedPhase(phase) {
   return phase === "prepared";
@@ -543,10 +588,10 @@ function hasStagedApply(prefix) {
   return existsSync(stagedApplyPath(prefix));
 }
 function isUpdatePhase(value) {
-  return value === "starting" || value === "prepared" || value === "preparing" || value === "applying" || value === "success" || value === "failed" || value === "rolledback";
+  return value === "starting" || value === "prepared" || value === "preparing" || value === "applying" || value === "success" || value === "failed" || value === "rolledback" || value === "cancelled";
 }
 function isUpdateResult(value) {
-  return value === "success" || value === "failed" || value === "rolledback";
+  return value === "success" || value === "failed" || value === "rolledback" || value === "cancelled";
 }
 function normalizeRunRecord(raw) {
   const mode = raw.mode === "apply" || raw.mode === "one-shot" ? raw.mode : "prepare";
@@ -571,6 +616,7 @@ function normalizeRunRecord(raw) {
     result: isUpdateResult(raw.result) ? raw.result : null,
     staged: raw.staged === true,
     logTail: Array.isArray(raw.logTail) ? raw.logTail.filter((line) => typeof line === "string") : [],
+    ...raw.observed === true ? { observed: true } : {},
     ...finishedAt === void 0 ? {} : { finishedAt },
     ...reason === void 0 ? {} : { reason }
   };
@@ -578,7 +624,7 @@ function normalizeRunRecord(raw) {
 function isRunRecordShape(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const record = value;
-  return typeof record.runId === "string" && typeof record.target === "string" && typeof record.phase === "string" && typeof record.startedAt === "string" && typeof record.logPath === "string" && (record.result === null || record.result === "success" || record.result === "failed" || record.result === "rolledback");
+  return typeof record.runId === "string" && typeof record.target === "string" && typeof record.phase === "string" && typeof record.startedAt === "string" && typeof record.logPath === "string" && (record.result === null || record.result === "success" || record.result === "failed" || record.result === "rolledback" || record.result === "cancelled");
 }
 function readRunRecord(file) {
   try {
@@ -678,6 +724,178 @@ function sameRunRecord(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+// src/marker.ts
+var RUN_MARKER_FILE = ".update-run.json";
+function runMarkerPath(prefix) {
+  return join4(prefix, "harness", RUN_MARKER_FILE);
+}
+var MARKER_MODES = ["plain", "prepare", "apply", "one-shot"];
+var MARKER_PHASES = ["running", "switching", "applying", "done", "failed", "rolledback", "cancelled"];
+function isMarkerMode(value) {
+  return typeof value === "string" && MARKER_MODES.includes(value);
+}
+function isMarkerPhase(value) {
+  return typeof value === "string" && MARKER_PHASES.includes(value);
+}
+function readRunMarker(prefix) {
+  try {
+    const parsed = JSON.parse(readFileSync3(runMarkerPath(prefix), "utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+    const raw = parsed;
+    if (typeof raw.runId !== "string" || typeof raw.pid !== "number" || !Number.isFinite(raw.pid)) return null;
+    if (!isMarkerMode(raw.mode) || !isMarkerPhase(raw.phase)) return null;
+    return {
+      runId: raw.runId,
+      pid: Math.trunc(raw.pid),
+      mode: raw.mode,
+      step: typeof raw.step === "number" && Number.isFinite(raw.step) ? raw.step : 0,
+      steps: typeof raw.steps === "number" && raw.steps > 0 ? raw.steps : 0,
+      phase: raw.phase,
+      startedAt: typeof raw.startedAt === "string" ? raw.startedAt : "",
+      logPath: typeof raw.logPath === "string" ? raw.logPath : "",
+      version: typeof raw.version === "string" ? raw.version : "",
+      target: typeof raw.target === "string" ? raw.target : ""
+    };
+  } catch {
+    return null;
+  }
+}
+function isProcessLive(pid, platform = process.platform) {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+  if (platform === "linux") {
+    try {
+      const stat = readFileSync3(`/proc/${String(pid)}/stat`, "utf8");
+      const state = stat.slice(stat.lastIndexOf(")") + 1).trim().split(/\s+/)[0];
+      return state !== void 0 && !state.startsWith("Z") && state !== "X";
+    } catch {
+      return false;
+    }
+  }
+  try {
+    const out = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).trim();
+    return out !== "" && !out.startsWith("Z") && !out.startsWith("X");
+  } catch {
+    return true;
+  }
+}
+function isMarkerLive(marker, isAlive = isProcessLive) {
+  return marker.pid > 0 && isAlive(marker.pid);
+}
+function modeFromMarker(mode) {
+  if (mode === "prepare") return "prepare";
+  if (mode === "apply") return "apply";
+  return "one-shot";
+}
+function phaseFromMarker(phase) {
+  switch (phase) {
+    case "running":
+      return "preparing";
+    case "switching":
+      return "applying";
+    case "applying":
+      return "applying";
+    case "done":
+      return "success";
+    case "failed":
+      return "failed";
+    case "rolledback":
+      return "rolledback";
+    case "cancelled":
+      return "cancelled";
+  }
+}
+function resultFromMarkerPhase(phase) {
+  if (phase === "done") return "success";
+  if (phase === "failed" || phase === "rolledback" || phase === "cancelled") return phase;
+  return null;
+}
+function observedRecordFromMarker(marker, context) {
+  const mode = modeFromMarker(marker.mode);
+  const parsed = context.readLog === void 0 ? marker.logPath === "" ? { lastLine: "", logTail: [] } : readRunLog(marker.logPath) : context.readLog(marker.logPath);
+  const result = resultFromMarkerPhase(marker.phase);
+  const finishedAt = result === null ? void 0 : marker.startedAt === "" ? void 0 : marker.startedAt;
+  return {
+    runId: marker.runId,
+    target: marker.target !== "" ? marker.target : marker.version,
+    channel: context.channel,
+    mode,
+    rung: rungForMode(mode),
+    phase: phaseFromMarker(marker.phase),
+    step: marker.step,
+    steps: marker.steps === 0 ? 9 : marker.steps,
+    lastLine: parsed.lastLine,
+    startedAt: marker.startedAt,
+    pid: marker.pid,
+    logPath: marker.logPath,
+    result,
+    launcher: "external",
+    staged: hasStagedApply(context.prefix),
+    logTail: [...parsed.logTail],
+    observed: true,
+    ...finishedAt === void 0 ? {} : { finishedAt },
+    ...result === null || result === "success" ? {} : { reason: parsed.lastLine }
+  };
+}
+
+// src/probe.ts
+import { spawn as spawn2 } from "node:child_process";
+var ENGINE_PROBE_TIMEOUT_MS = 1e4;
+var ENGINE_PROBE_OUTPUT_CAP = 64 * 1024;
+function probeEngineCapability(input) {
+  const timeoutMs = input.timeoutMs ?? ENGINE_PROBE_TIMEOUT_MS;
+  const spawnImpl = input.spawn ?? ((command, args, options) => spawn2(command, [...args], {
+    env: options.env,
+    stdio: ["ignore", "pipe", "pipe"]
+  }));
+  return new Promise((resolve) => {
+    let settled = false;
+    let output = "";
+    let timer;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== void 0) clearTimeout(timer);
+      resolve(result);
+    };
+    try {
+      const child = spawnImpl(input.shim, ["update", "--help"], { env: input.env });
+      const collect = (chunk) => {
+        if (output.length >= ENGINE_PROBE_OUTPUT_CAP) return;
+        output += typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      };
+      child.stdout?.on("data", collect);
+      child.stderr?.on("data", collect);
+      child.on("error", (error) => {
+        finish({ capability: "unsupported", reason: `probe failed to start: ${error.message}` });
+      });
+      child.on("close", (code) => {
+        if (output.includes("--prepare")) {
+          finish({ capability: "supported" });
+          return;
+        }
+        finish({
+          capability: "unsupported",
+          reason: output.trim() === "" ? `probe produced no output (exit ${String(code)})` : `engine help does not list --prepare (exit ${String(code)})`
+        });
+      });
+      timer = setTimeout(() => {
+        try {
+          child.kill?.();
+        } catch {
+        }
+        finish({ capability: "unsupported", reason: `probe timed out after ${String(timeoutMs)}ms` });
+      }, timeoutMs);
+      timer.unref?.();
+    } catch (error) {
+      finish({ capability: "unsupported", reason: `probe failed: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  });
+}
+
 // src/run-service.ts
 var RunRefusedError = class extends Error {
   /** Structured refusal reason. */
@@ -696,7 +914,7 @@ var RUN_START_GRACE_MS = 15e3;
 function resolvePrefix(home) {
   try {
     const state = JSON.parse(
-      readFileSync3(join4(home, "harness", "install-state.json"), "utf8")
+      readFileSync4(join5(home, "harness", "install-state.json"), "utf8")
     );
     return typeof state.prefix === "string" && state.prefix !== "" ? state.prefix : home;
   } catch {
@@ -707,13 +925,13 @@ function resolveShimPath(home) {
   let binDir = "";
   try {
     const state = JSON.parse(
-      readFileSync3(join4(home, "harness", "install-state.json"), "utf8")
+      readFileSync4(join5(home, "harness", "install-state.json"), "utf8")
     );
     binDir = typeof state.binDir === "string" ? state.binDir : "";
   } catch {
     binDir = "";
   }
-  const candidates = [...binDir === "" ? [] : [join4(binDir, "dsh")], defaultShimPath()];
+  const candidates = [...binDir === "" ? [] : [join5(binDir, "dsh")], defaultShimPath()];
   return candidates.find((candidate) => existsSync2(candidate)) ?? null;
 }
 var UpdateRunController = class {
@@ -741,13 +959,40 @@ var UpdateRunController = class {
       }
     };
   }
-  /** The current record (from memory, or the persisted state on first read). */
+  /**
+   * The current run as the UI should see it: the plugin's own executing record
+   * first, otherwise a live run observed from the engine marker (a
+   * terminal-started update), otherwise the plugin's persisted record
+   * (prepared or terminal). The marker costs one small file read per call and
+   * is never watched host-side.
+   */
   run() {
+    const own = this.loadOwn();
+    if (own !== null && own.result === null && !isPreparedPhase(own.phase) && this.isAliveRecord(own)) return own;
+    return this.observeEngineRun() ?? own;
+  }
+  /** The persisted plugin record (loaded once). */
+  loadOwn() {
     if (!this.loaded) {
       this.loaded = true;
       this.record = readRunRecord(runRecordPath(this.options.home));
     }
     return this.record;
+  }
+  /** Whether a marker names the same run as the persisted record (log path, or mode/target). */
+  markerMatchesRecord(record, marker) {
+    if (record.logPath !== "" && marker.logPath !== "" && record.logPath === marker.logPath) return true;
+    if (modeFromMarker(marker.mode) !== record.mode) return false;
+    return record.target === "" || marker.target === "" || marker.target === record.target || marker.version === record.target;
+  }
+  /** Synthesize a live record from the engine marker, or null when none is live. */
+  observeEngineRun() {
+    const marker = readRunMarker(this.prefix);
+    if (marker === null || !isMarkerLive(marker, this.options.isAlive ?? isProcessLive)) return null;
+    return observedRecordFromMarker(marker, {
+      prefix: this.prefix,
+      channel: this.options.readIdentity().channel
+    });
   }
   /**
    * One installed-engine capability probe per controller (one plugin boot):
@@ -792,9 +1037,23 @@ var UpdateRunController = class {
    * @returns the reconciled record, or null when none exists.
    */
   reconcile() {
-    const current = this.run();
+    const current = this.loadOwn();
     if (current === null) return null;
     if (current.result === null && !isPreparedPhase(current.phase) && this.isAliveRecord(current)) {
+      const marker = readRunMarker(this.prefix);
+      if (marker !== null && isMarkerLive(marker, this.options.isAlive ?? isProcessLive) && this.markerMatchesRecord(current, marker)) {
+        const merged = {
+          ...current,
+          pid: marker.pid,
+          // The marker knows when the switch began even if the log parse lags;
+          // `running` keeps the finer log-derived phase.
+          phase: marker.phase === "switching" ? "applying" : marker.phase === "running" ? current.phase : phaseFromMarker(marker.phase),
+          step: marker.step > 0 ? marker.step : current.step,
+          steps: marker.steps > 0 ? marker.steps : current.steps
+        };
+        this.watch(merged);
+        return merged;
+      }
       this.watch(current);
       return current;
     }
@@ -887,6 +1146,53 @@ var UpdateRunController = class {
       );
     }
     return this.begin("apply", { target: current.target, channel: current.channel });
+  }
+  /**
+   * Cancel the live run through the engine's own `dsh update --cancel --json`
+   * (bounded), so the pre-switch/sweep/refusal rules stay in the engine. On a
+   * successful cancel the record is relayed into `cancelled`: the plugin's own
+   * record when it started the run, otherwise one synthesized from the (now
+   * terminal) engine marker.
+   *
+   * @returns the engine's outcome and the resulting record.
+   * @throws RunRefusedError when the shim is missing.
+   */
+  async cancel() {
+    const current = this.run();
+    const shim = (this.options.resolveShim ?? resolveShimPath)(this.options.home);
+    if (shim === null) {
+      throw new RunRefusedError(
+        "shim-missing",
+        `updateCheck.cancel: the dsh shim was not found (checked the recorded binDir and ${defaultShimPath()})`
+      );
+    }
+    const outcome = await (this.options.cancelEngine ?? cancelEngineRun)({
+      shim,
+      env: this.probeEnvironment(),
+      ...this.options.cancelTimeoutMs === void 0 ? {} : { timeoutMs: this.options.cancelTimeoutMs }
+    });
+    if (outcome.status !== "cancelled") {
+      return { status: outcome.status, message: outcome.message, record: current };
+    }
+    return { status: "cancelled", message: outcome.message, record: this.relayCancelled(current) };
+  }
+  /** Relay a successful engine cancel into the record the UI renders. */
+  relayCancelled(current) {
+    if (current !== null && current.observed !== true) {
+      const next = this.terminalRecord(current, "cancelled");
+      this.persist(next);
+      this.stopWatcher();
+      return next;
+    }
+    const marker = readRunMarker(this.prefix);
+    if (marker === null) return current;
+    const record = observedRecordFromMarker(marker, {
+      prefix: this.prefix,
+      channel: this.options.readIdentity().channel
+    });
+    this.loaded = true;
+    this.persist(record);
+    return record;
   }
   /** Stop the watcher (plugin unload). The updater itself keeps running. */
   dispose() {
@@ -1083,6 +1389,10 @@ var UpdateRunController = class {
   /** Whether a record has a live process by the controller's liveness seam. */
   isAliveRecord(record) {
     if (record.result !== null || isPreparedPhase(record.phase)) return false;
+    if (record.observed === true) {
+      if (record.pid === null) return false;
+      return (this.options.isAlive ?? isProcessLive)(record.pid);
+    }
     if (this.options.isAlive === void 0) return isRunActive(this.options.home, record);
     const pid = effectivePid(this.options.home, record);
     return pid !== null && this.options.isAlive(pid);
@@ -1283,11 +1593,11 @@ function startUpdateCheckSchedule(options) {
 }
 
 // src/store.ts
-import { mkdirSync as mkdirSync3, readFileSync as readFileSync4, renameSync as renameSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync3 } from "node:fs";
 import { dirname as dirname3 } from "node:path";
 function readDismissedVersion(file) {
   try {
-    const record = JSON.parse(readFileSync4(file, "utf8"));
+    const record = JSON.parse(readFileSync5(file, "utf8"));
     return typeof record.version === "string" && record.version !== "" ? record.version : null;
   } catch {
     return null;
@@ -1402,6 +1712,8 @@ function apply(ctx, config = {}) {
 }
 export {
   APPLY_SWITCH_STEP,
+  CANCEL_OUTPUT_CAP,
+  CANCEL_TIMEOUT_MS,
   CATALOG_FETCH_TIMEOUT_MS,
   CATALOG_RAW_BASE_URL,
   CATALOG_SCHEMA_VERSION,
@@ -1413,14 +1725,17 @@ export {
   LOG_TAIL_LINES,
   LaunchEnvironmentError,
   RUN_HOME_ENV,
+  RUN_MARKER_FILE,
   RUN_START_GRACE_MS,
   RUN_STEP_TOTAL,
   RunRefusedError,
   UPDATE_CHECK_NAMESPACE,
+  UPDATE_MODE_ENV,
   UpdateCheckCore,
   UpdateCheckService,
   UpdateRunController,
   apply,
+  cancelEngineRun,
   catalogUrl,
   commandOnPath,
   compareVersions,
@@ -1430,8 +1745,10 @@ export {
   fetchCatalog,
   hasStagedApply,
   inject,
+  isMarkerLive,
   isPreparedPhase,
   isProcessAlive,
+  isProcessLive,
   isRunActive,
   isTerminalPhase,
   jitteredDelay,
@@ -1439,16 +1756,21 @@ export {
   launchUpdater,
   launchWrapper,
   modeFlag,
+  modeFromMarker,
   modeLabel,
   name,
+  observedRecordFromMarker,
+  parseCancelJson,
   parseCatalogDocument,
   parseRunLog,
   phaseForResult,
+  phaseFromMarker,
   preparedRecord,
   probeEngineCapability,
   readDismissedVersion,
   readInstallIdentity,
   readRunLog,
+  readRunMarker,
   readRunPid,
   readRunRecord,
   reconcileRunRecord,
@@ -1458,7 +1780,9 @@ export {
   resolveRuntimePath,
   resolveShimPath,
   resultFromLine,
+  resultFromMarkerPhase,
   runLogPath,
+  runMarkerPath,
   runPidPath,
   runRecordPath,
   rungForMode,

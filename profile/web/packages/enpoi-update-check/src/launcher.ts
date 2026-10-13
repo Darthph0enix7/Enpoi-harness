@@ -122,6 +122,9 @@ export interface LaunchEnvironment {
 /** Environment variable the run pins so the updater resolves the same home. */
 export const RUN_HOME_ENV = 'DSH_HOME'
 
+/** Environment hook the engine reads to label a no-flag run in its marker (`one-shot`). */
+export const UPDATE_MODE_ENV = 'DSH_UPDATE_MODE'
+
 /** A launch whose environment carries no usable Node.js runtime. */
 export class LaunchEnvironmentError extends Error {
   /** Every location the probe consulted, in order. */
@@ -289,6 +292,9 @@ export function resolveLaunchEnvironment(input: LaunchPlanInput): LaunchEnvironm
     PATH: resolved.path,
     [RUN_HOME_ENV]: input.home,
     ...(input.prefix === '' ? {} : { PREFIX: input.prefix }),
+    // The engine labels its run marker from this hook; a one-shot rung has no
+    // phase flag, so without it the marker would read `plain`.
+    ...(input.flag === 'one-shot' ? { [UPDATE_MODE_ENV]: 'one-shot' } : {}),
   }
   return {
     nodePath: resolved.probe.binDir === '' ? null : join(resolved.probe.binDir, 'node'),
@@ -357,6 +363,7 @@ export function launchPlan(input: LaunchPlanInput, environment: LaunchEnvironmen
     `--setenv=PATH=${environment.path}`,
     `--setenv=${RUN_HOME_ENV}=${input.home}`,
     ...(input.prefix === '' ? [] : [`--setenv=PREFIX=${input.prefix}`]),
+    ...(input.flag === 'one-shot' ? [`--setenv=${UPDATE_MODE_ENV}=one-shot`] : []),
   ]
   const steps: LaunchPlanStep[] = []
   if (platform === 'linux' && has('systemd-run')) {

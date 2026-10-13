@@ -32,8 +32,8 @@ export type { UpdateIndicatorInjected, UpdateIndicatorProps } from './UpdateIndi
 export type { UpdateSettingsInjected, UpdateSettingsRowProps } from './UpdateSettingsRow.tsx'
 export type { UpdateUiState } from './controller.ts'
 export type {
-  UpdateCheckLatestWire, UpdateCheckState, UpdateCheckStatusWire, UpdateRunMode, UpdateRunPhase, UpdateRunResult, UpdateRunWire,
-  UpdateRung,
+  UpdateCancelOutcomeWire, UpdateCheckLatestWire, UpdateCheckState, UpdateCheckStatusWire, UpdateRunMode, UpdateRunPhase,
+  UpdateRunResult, UpdateRunWire, UpdateRung,
 } from './rpc.ts'
 export type { UpdateKey } from './locales.ts'
 
@@ -71,6 +71,7 @@ export function apply(ctx: ClientContext): void {
         apply: () => { controller.apply() },
         retry: () => { controller.retry() },
         skip: () => { controller.skip() },
+        cancel: () => { controller.cancel() },
         toastDone: () => { controller.toastDone() },
       },
     }),

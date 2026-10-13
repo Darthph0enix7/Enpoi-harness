@@ -154,6 +154,13 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
+/* The progress panel's cancel row: one quiet control, pinned to the end. */
+.progressActions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
 .preparedHint {
   margin: 0;
   font-size: 13px;

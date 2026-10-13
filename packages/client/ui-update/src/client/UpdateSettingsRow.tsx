@@ -70,7 +70,7 @@ export function UpdateSettingsRow({ useUpdate, actions, t }: UpdateSettingsRowPr
     action = { label: t('action.restart'), run: actions.apply, primary: true }
   } else if (failedRun !== null) {
     view = 'failed'
-    label = t('settings.failed')
+    label = failedRun.result === 'cancelled' ? t('settings.cancelled') : t('settings.failed')
     // The dialog carries the reason, the log tail, and Retry.
     action = { label: t('action.retry'), run: actions.open, primary: false }
   } else if (status.state === 'dismissed' && latest !== undefined) {

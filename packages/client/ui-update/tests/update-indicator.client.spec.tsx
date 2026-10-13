@@ -55,6 +55,7 @@ function mount(initial: Partial<UpdateUiState> = {}) {
     apply: vi.fn(),
     retry: vi.fn(),
     skip: vi.fn(),
+    cancel: vi.fn(),
     toastDone: vi.fn(),
   }
   const props = {
@@ -255,6 +256,65 @@ describe('UpdateIndicator dialog', () => {
     expect(actions.apply).toHaveBeenCalledTimes(1)
     // No offer actions while prepared: the staged tree is applied, not replaced.
     expect(screen.queryByRole('button', { name: en['action.updateNow'] })).toBeNull()
+  })
+
+  it('offers Cancel while the run can still be stopped and hides it past the switch', () => {
+    const preparing = mount({
+      status: availableStatus,
+      run: run({ phase: 'preparing', step: 4 }),
+      dialogOpen: true,
+    })
+    const cancel = screen.getByRole('button', { name: en['action.cancel'] })
+    fireEvent.click(cancel)
+    expect(preparing.actions.cancel).toHaveBeenCalledTimes(1)
+    preparing.unmount()
+
+    // A two-phase apply is past the switch from its launch: never cancellable.
+    mount({ status: availableStatus, run: run({ mode: 'apply', phase: 'applying', step: 5 }), dialogOpen: true })
+    expect(screen.queryByRole('button', { name: en['action.cancel'] })).toBeNull()
+    cleanup()
+
+    // A one-shot run is cancellable until its switch step (8/9).
+    mount({ status: availableStatus, run: run({ mode: 'one-shot', rung: 'one-shot', phase: 'preparing', step: 7 }), dialogOpen: true })
+    expect(screen.getByRole('button', { name: en['action.cancel'] })).toBeTruthy()
+    cleanup()
+    mount({ status: availableStatus, run: run({ mode: 'one-shot', rung: 'one-shot', phase: 'preparing', step: 8 }), dialogOpen: true })
+    expect(screen.queryByRole('button', { name: en['action.cancel'] })).toBeNull()
+  })
+
+  it('renders an observed (terminal-started) run through the same states', () => {
+    // A live run synthesized from the engine marker: the executing pill, the
+    // progress panel, and an offered Cancel — no special rendering.
+    const observed = mount({
+      status: availableStatus,
+      run: run({ observed: true, launcher: 'external', phase: 'preparing', step: 3, lastLine: '[3/9] pnpm: corepack' }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-indicator]')?.getAttribute('data-dsh-update-indicator')).toBe('updating')
+    expect(document.querySelector('[data-dsh-update-progress]')).not.toBeNull()
+    expect(screen.getByRole('button', { name: en['action.cancel'] })).toBeTruthy()
+    observed.unmount()
+
+    // An observed failure lights the failure surface with Retry.
+    mount({
+      status: availableStatus,
+      run: run({ observed: true, launcher: 'external', phase: 'failed', result: 'failed', reason: 'the update run exited' }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-failure]')?.getAttribute('data-dsh-update-failure')).toBe('failed')
+    expect(screen.getByRole('button', { name: en['action.retry'] })).toBeTruthy()
+  })
+
+  it('renders a cancelled run with its own copy and Retry', () => {
+    const { actions } = mount({
+      status: availableStatus,
+      run: run({ observed: true, launcher: 'external', phase: 'cancelled', result: 'cancelled', reason: 'Cancelled run 123: runner stopped' }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-failure]')?.getAttribute('data-dsh-update-failure')).toBe('cancelled')
+    expect(screen.getByText(en['result.cancelled'])).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en['action.retry'] }))
+    expect(actions.retry).toHaveBeenCalledTimes(1)
   })
 
   it('renders the starting copy and a zero bar before the first step', () => {

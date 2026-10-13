@@ -145,6 +145,17 @@ describe('UpdateSettingsRow', () => {
     expect(actions.open).toHaveBeenCalledTimes(1)
   })
 
+  it('labels a cancelled run and offers Retry through the dialog', () => {
+    const { actions } = mount({
+      status: availableStatus,
+      run: run({ observed: true, launcher: 'external', phase: 'cancelled', result: 'cancelled', reason: 'Cancelled run ext-1' }),
+    })
+    expect(rowState()).toBe('failed')
+    expect(screen.getByText(en['settings.cancelled'])).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en['action.retry'] }))
+    expect(actions.open).toHaveBeenCalledTimes(1)
+  })
+
   it('disables the control while a call is in flight', () => {
     mount({ status: availableStatus, busy: true })
     expect(screen.getByRole('button', { name: en['action.updateNow'] }).hasAttribute('disabled')).toBe(true)

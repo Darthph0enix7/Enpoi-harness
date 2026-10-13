@@ -3,7 +3,7 @@
  *
  * Endpoints (wire names): `updateCheck/status`, `updateCheck/checkNow`,
  * `updateCheck/dismiss`, `updateCheck/start`, `updateCheck/apply`,
- * `updateCheck/run`. Thin decorated shell over {@link UpdateCheckCore} and
+ * `updateCheck/run`, `updateCheck/cancel`. Thin decorated shell over {@link UpdateCheckCore} and
  * {@link UpdateRunController} (decorator-free, so the vitest pipeline tests
  * the logic directly). Advisory until `start` is called: nothing here
  * downloads or applies an update on its own, and `start` (prepare) never
@@ -15,7 +15,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { UpdateRunRecord } from './run.js'
-import { RunRefusedError, type UpdateRunController } from './run-service.js'
+import { RunRefusedError, type UpdateCancelOutcome, type UpdateRunController } from './run-service.js'
 import type { UpdateCheckCore, UpdateCheckStatus } from './service.js'
 
 /** Cordis service key and Typert wire namespace. */
