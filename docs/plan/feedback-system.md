@@ -48,7 +48,7 @@
    work dir removed) → JSON {category, severity, summary, details}   (fail-soft)
         │
         ▼
-[feedback/submit]   POST https://enpoi.vip/feedback  (fail-soft; 1 retry)
+[feedback/submit]   POST https://enpoi-feedback.kalinsaz123321.workers.dev/feedback  (fail-soft; 1 retry)
         │
         ▼
 [enpoi feedback-service]  serverlocal: 127.0.0.1:8091 + webserver proxy
@@ -87,7 +87,7 @@
   `lifecycle-chrome/command-menu*`, `apps/web/tests/feedback-command.e2e.ts`,
   `shipped-composition.e2e.ts` if needed); tests.
 - **Verification** — unit suites both lanes; end-to-end: a scratch managed
-  prefix submits a real feedback to `https://enpoi.vip/feedback` and the admin
+  prefix submits a real feedback to `https://enpoi-feedback.kalinsaz123321.workers.dev/feedback` and the admin
   list shows it; the Mac/PC smoke left to the operator.
 
 ## 6. Landing status (2026-10-12)
@@ -126,9 +126,24 @@
 4. **Defaults ON** for the three data checkboxes + submission; one settings
    switch disables submission entirely (local record still happens).
 
+## 6a. Endpoint: Cloudflare Worker (2026-10-13, final)
+
+The collector moved off the operator's hardware entirely: one Cloudflare Worker
+(`~/feedback-worker/worker.js`, free tier) at
+`https://enpoi-feedback.kalinsaz123321.workers.dev` stores each submission as a
+Workers KV entry and serves the token-gated read surface (`/admin` HTML browse,
+`/admin/list`, `/admin/get`). No GitHub, no server, no database: nothing of the
+operator's runs. The serverlocal collector (`feedback-service`) and the
+`enpoi.vip/feedback` proxy route are retired (service stopped and disabled,
+route removed, public path now 404s); its collected submissions were backfilled
+into the Worker store. The read token lives in `~/feedback-worker/.env` (mode
+600); the Cloudflare API token used for the deploy can be revoked — the Worker
+is independent of it. KV `list` is eventually consistent (~60 s), so the browse
+page may lag briefly behind a fresh submission.
+
 ## 6. Overnight verification (live, 2026-10-12)
 
-- **Endpoint**: verified public + local — `https://enpoi.vip/feedback` and the
+- **Endpoint**: verified public + local — `https://enpoi-feedback.kalinsaz123321.workers.dev/feedback` and the
   direct `127.0.0.1:8091` both 201; storage + admin list + telemetry-only and
   empty-body cases correct (`~/feedback-service/`).
 - **Full harness chain** (scratch web instance on :3099 + gateway RPC

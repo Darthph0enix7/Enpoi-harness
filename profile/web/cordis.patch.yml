@@ -149,7 +149,7 @@
       name: "@deepseek-ai/dsh-feedback-submit"
       config:
         enabled: true
-        endpoint: https://enpoi.vip/feedback
+        endpoint: https://enpoi-feedback.kalinsaz123321.workers.dev/feedback
         timeoutMs: 15000
         retryDelayMs: 500
 

@@ -20,7 +20,7 @@ Feedback submission client: one JSON POST to the configured endpoint, fail-soft 
 <a id="use-this-package"></a>
 ## Use this package
 
-Mount the plugin with the base composition; it registers `ctx.feedbackCollect` (feedback-collect), `ctx.feedbackSubmit` (feedback-submit, config: `enabled` default true, `endpoint` default `https://enpoi.vip/feedback`, `timeoutMs` 15000, `retryDelayMs` 500), or `ctx.feedbackTriage` (feedback-triage). Without the plugin the record path still records locally and returns null results.
+Mount the plugin with the base composition; it registers `ctx.feedbackCollect` (feedback-collect), `ctx.feedbackSubmit` (feedback-submit, config: `enabled` default true, `endpoint` default `https://enpoi-feedback.kalinsaz123321.workers.dev/feedback`, `timeoutMs` 15000, `retryDelayMs` 500), or `ctx.feedbackTriage` (feedback-triage). Without the plugin the record path still records locally and returns null results.
 
 <a id="known-limitations-and-deferred-work"></a>
 ## Known Limitations and Deferred Work

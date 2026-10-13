@@ -33,7 +33,7 @@ export interface Config {
 /** Config schema with the contract defaults: submission on, our endpoint. */
 export const Config = Schema.object({
   enabled: Schema.boolean().default(true),
-  endpoint: Schema.string().default('https://enpoi.vip/feedback'),
+  endpoint: Schema.string().default('https://enpoi-feedback.kalinsaz123321.workers.dev/feedback'),
   timeoutMs: Schema.number().min(100).max(120_000).default(15_000),
   retryDelayMs: Schema.number().min(0).max(10_000).default(500),
 })
@@ -55,7 +55,7 @@ export class FeedbackSubmit extends Service implements FeedbackSubmitService {
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'feedbackSubmit')
     this._enabled = config.enabled ?? true
-    this._endpoint = config.endpoint ?? 'https://enpoi.vip/feedback'
+    this._endpoint = config.endpoint ?? 'https://enpoi-feedback.kalinsaz123321.workers.dev/feedback'
     this._timeoutMs = config.timeoutMs ?? 15_000
     this._retryDelayMs = config.retryDelayMs ?? 500
   }
