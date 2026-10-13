@@ -1,6 +1,6 @@
 # UI Update Manifest + In-App Updates — Plan
 
-Status: proposed (2026-10-13). Owner decisions open at the end.
+Status: P1 (catalog) + P2 (host check) implemented on `local/serverlocal` (2026-10-13); P3+ proposed. The five owner decisions are resolved in §9.
 
 ## 1. Goal
 
@@ -23,7 +23,7 @@ Experience sketch:
 
 ## 2. Non-goals
 
-- No silent auto-update without user intent (an opt-in setting may allow "update when idle").
+- No auto-update of any kind: manual only, always (decision 3).
 - No per-launch nagging: checks are rare, dismissible, and skippable per version.
 - No browser-side downloads or updates: the browser only talks to its own host.
 
@@ -31,7 +31,7 @@ Experience sketch:
 
 A tiny generated file, fetched cheaply, carrying exactly what the UI needs.
 
-**Schema (`update-catalog.json`, ~1–2 KB per release):**
+**Schema (`<channel>.json`, ~1–2 KB per release):**
 
 ```jsonc
 {
@@ -51,15 +51,9 @@ A tiny generated file, fetched cheaply, carrying exactly what the UI needs.
 }
 ```
 
-**Generation:** a step in `harness-release.yml` after the release publishes: collect
-`git log --oneline <prevTag>..<tag>`, prepend an entry to the catalog, and commit/push
-the catalog to the channel branch (a `catalog/` directory, one file per channel) **or**
-attach it as a release asset. Both: asset = immutable per release; branch file = the
-always-current fetch target.
+**Generation:** `scripts/update-catalog.mjs` builds/updates a catalog from git alone (offline, idempotent: a new tag prepends, a re-run replaces its own entry, the last 40 releases are kept, merge and `[skip ci]` subjects are skipped). A `harness-release.yml` job runs whenever the target release tag is published — including on a re-run that deduped to an already-published release, so a run that died before the catalog copy self-heals. Both channels are maintained from the one shared release stream (the two channel branches are pushed with the same commit): the same releases land in `stable.json` and `beta.json` with the per-file `channel` field, and both ride the release as `update-catalog-<channel>.json` assets; the asset pair is the immutable per-release record, the branch files are the always-current fetch targets. The branch push (one commit carrying both files) is fail-soft so a published release never fails on it.
 
-**Hosting & fetch:** `raw.githubusercontent.com/…/<channel>/catalog/update-catalog.json`
-(CDN-cached, ETag-friendly). The **host fetches it, never the browser** — server-side
-fetch keeps CSP/offline behavior simple and lets one check serve all connected clients.
+**Hosting & fetch:** `https://raw.githubusercontent.com/Darthph0enix7/Enpoi-harness/catalog/<channel>.json` — branch `catalog`, file `<channel>.json` at the branch root (CDN-cached, ETag-friendly). The **host fetches it, never the browser** — server-side fetch keeps CSP/offline behavior simple and lets one check serve all connected clients.
 
 **Size budget:** entries are commit subjects; 40 entries ≈ 40–60 KB worst case, ~10 KB
 typical. If it grows, split: a 300-byte `latest.json` for the poll and a
@@ -71,14 +65,11 @@ wrong notes or point at a version whose real release assets fail verification.
 
 ## 4. The check
 
-- A small host plugin (`update-check`) runs on web start (+30 s jitter) and then every
-  6 h (config changeable; `check.enabled`, `check.intervalMinutes`).
-- States: `unknown` (never fetched / offline) → `current` → `available {from, to, notes}`
-  → `dismissed(version)` → `updating`.
-- "Skip this version" persists per install; a newer version re-arms the indicator.
-- Channel follows the install's channel (beta installs see beta).
-- The result is exposed through one status remote (`update/status`) and pushed to
-  connected clients as an event so every open tab updates at once.
+- The host plugin `enpoi-update-check` (`profile/web/packages/enpoi-update-check`) runs on web start (+30 s, jittered) and then every 6 h; the config row `enpoi-update-check` carries `enabled`, `intervalMinutes: 360`, `jitterSeconds: 300`.
+- States: `unknown` (never fetched / offline) → `current` → `available {version, notes}` → `dismissed(version)`; `updating` arrives with P4. A failed check keeps the last successful comparison and records `error`; one debug log line per failed attempt, no retries before the next interval.
+- "Skip this version" persists per install (`$DSH_HOME/update-check/dismissed.json`); a newer version re-arms the indicator.
+- Channel follows the install's channel (beta installs see beta; `install-state.json` → `channel`, default `stable`).
+- The result is exposed through the `updateCheck` Remote namespace (`status`, `checkNow`, `dismiss`). The profile plugin family has no client push, so clients poll; the P3 UI surface owns any push.
 
 ## 5. Running the update (background, resumable)
 
@@ -92,6 +83,7 @@ The engine never runs in the browser and never inside the process it replaces.
   - The runner = the existing installer in its JSON mode
     (`DSH_JSON=1 scripts/update.sh --channel …`), unchanged engine, or `--no-prebuilt`
     when the user asks for a source build.
+- **Two-phase runner (from decision 2):** the runner first prepares the update fully in the background — fetch, verify, unpack, deps, profile — while the user keeps working; preparation alone never switches. When the prepared tree is complete the run state becomes `ready`, and the UI offers a user-triggered **`Restart to update`**; only that action performs the switch + service restart, so the soft lock covers the switch → reconnect window rather than the whole download.
 - **Progress contract:** the runner writes `harness/update-state.json` at every substep
   and a line per event to a run log:
   ```jsonc
@@ -123,8 +115,7 @@ The engine never runs in the browser and never inside the process it replaces.
 - Changelog rendering: the aggregated `notes` from the user's version (exclusive) up to
   the newest, grouped by conventional-commit type (feat/fix/chore), capped with a
   "show all" expander.
-- Settings (existing settings UI): check frequency, channel, "check automatically"
-  toggle, "update automatically when idle" (opt-in, default off), skip-list management.
+- Settings (existing settings UI): check frequency, channel, "check automatically" toggle, skip-list management.
 - i18n: locale-owned copy in `ui-update` + zh pair; snapshots for the dialog states.
 
 ## 7. Edge cases
@@ -134,31 +125,25 @@ The engine never runs in the browser and never inside the process it replaces.
 | Branch advanced, its release still building | Catalog carries published releases only; `available` shows the newest published; the divergence path is a runner concern (already fixed). |
 | Offline / fetch fails | Silent retry next interval; status stays `unknown`; never blocks the UI. |
 | Multiple tabs / devices | One host-side run; all tabs see the same pushed state; other devices check independently. |
-| Active agent run during `switch` | Engine waits for the turn/uses its existing quiesce; UI shows "will interrupt". Optional: "update when idle". |
+| Active agent run during `switch` | Engine waits for the turn/uses its existing quiesce; UI shows "will interrupt" before the user-triggered switch. |
 | Update fails + rollback | State `rolledback` with the engine's reason; UI offers Retry / details; the install stays healthy (proven today). |
 | macOS vs Linux detach | systemd-run / launchd / setsid ladder; the runner is shell-portable. |
 | Movement during a run (channel switch) | `update/start` pins the channel+target at launch; the runner does not re-resolve. |
 
 ## 8. Phasing
 
-1. **P1 — Catalog**: workflow step (generate + push per-channel catalog + attach the
-   asset); schema + a validating test; size budget check. (Small.)
-2. **P2 — Host check**: `update-check` plugin (interval, fetch, compare, status remote,
-   settings rows); unit tests with a stubbed catalog. (Small-medium.)
+1. **P1 — Catalog** (implemented): `scripts/update-catalog.mjs` + tests; the `harness-release.yml` catalog job publishes both channel files and the asset pair for every published release (self-healing on re-runs); the schema above and the 40-release cap are enforced. (Small.)
+2. **P2 — Host check** (implemented): `enpoi-update-check` profile plugin (interval, fetch, compare, `updateCheck` remote, dismissed store); unit tests with a stubbed catalog. (Small-medium.)
 3. **P3 — Indicator + dialog**: `ui-update` chrome pill + dialog with changelog;
    i18n + snapshots. (Medium.)
-4. **P4 — Run + progress**: detached runner launcher + `update-state.json` contract +
-   host streaming + progress strip + reconnect/reload. (Medium-large; the core.)
-5. **P5 — Polish**: lock overlay, skip-list, idle-auto option, failure surfaces,
+4. **P4 — Run + progress**: detached runner launcher + `update-state.json` contract + host streaming + progress strip + reconnect/reload; two-phase per decision 2 (prepare in the background → `ready` → user-triggered `Restart to update` performs switch + service restart). (Medium-large; the core.)
+5. **P5 — Polish**: lock overlay, skip-list, failure surfaces,
    docs; macOS launchd path verification. (Medium.)
 
-## 9. Open decisions (owner)
+## 9. Owner decisions (resolved 2026-10-13)
 
-1. **Check cadence**: 6 h + on web start (proposed) — or only on demand?
-2. **Lock policy**: soft lock only for `switch → reconnect` (proposed) — or hard lock
-   from the moment an update starts?
-3. **Auto-update**: manual button only (proposed) — or an opt-in "when idle" setting
-   from the start?
-4. **Catalog hosting**: channel-branch file + per-release asset (proposed) — or asset-only?
-5. **Changelog source**: generated commit subjects (proposed) — or curated highlight
-   notes per release (manual work, better prose)?
+1. **Check cadence**: "every 6 hours + once shortly after web start (jittered)" — implemented as §4 describes.
+2. **Lock policy**: "SOFT lock; additionally the final switch/restart must be USER-TRIGGERED (the runner prepares in the background, then the UI offers a 'Restart to update' action). Only design for this now — the runner itself is a later phase." — the P4 shape is recorded in §5 and §8.
+3. **Auto-update**: "No automatic updates: manual only, always."
+4. **Catalog scope**: "each install checks ITS OWN channel only (stable install → stable catalog; beta → beta). The release workflow maintains the catalog for the channel it released." — implemented in §3: both channel catalogs are mirrored from the one shared release stream, so each install still reads only its own file.
+5. **Changelog source**: "commit subjects, zero curation."

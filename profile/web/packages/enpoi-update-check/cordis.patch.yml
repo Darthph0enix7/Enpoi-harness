@@ -1,0 +1,17 @@
+# dsh-enpoi-update-check bundle patch — mounts the host-side update check
+# (docs/plan/ui-update-manifest.md P2).
+#
+# Reads the per-channel update catalog published by harness-release.yml
+# (release asset + `catalog` branch file), compares it with this install's
+# recorded version, and exposes the result as the `updateCheck` Remote
+# namespace. Advisory only: no download, no switch, no auto-update. The
+# plugin is fully fail-soft — a fetch failure leaves the state `unknown`.
+- insert:
+    - id: enpoi-update-check
+      name: 'dsh-enpoi-update-check'
+      config:
+        enabled: true
+        # Catalog check cadence in minutes; the first check runs ~30 s after
+        # boot. Jitter spreads the boot check and every interval (seconds).
+        intervalMinutes: 360
+        jitterSeconds: 300

@@ -367,3 +367,127 @@ jobs:
           cat "$SUMS/SHA256SUMS"
           gh release upload "$TAG" "$SUMS/SHA256SUMS" --clobber
           gh release edit "$TAG" --draft=false
+
+  # The update catalogs exist only for published releases. This job runs when
+  # the release was published by this run AND when a re-run deduped to an
+  # already-published release (`publish` skipped), so a run that died between
+  # publishing and the catalog copy self-heals: the generator is idempotent, so
+  # re-running for the same tag is a no-op apart from `generatedAt`. A tag that
+  # is absent or still a draft stops the step before anything is written.
+  #
+  # Both channels are maintained from the one shared release stream (the two
+  # channel branches are pushed with the same commit, so one build serves both
+  # installs): the same releases land in `stable.json` and `beta.json` with the
+  # per-file `channel` field, and both ride the release as
+  # `update-catalog-<channel>.json` assets. The branch file is the
+  # always-current client fetch target —
+  #   https://raw.githubusercontent.com/<owner>/<repo>/catalog/<channel>.json
+  #   (branch `catalog`, file `<channel>.json` at the branch root).
+  # Pushing to `catalog` cannot re-trigger this workflow: the push trigger is
+  # branch-scoped to `stable` (see `on.push.branches`), and the catalog commit
+  # also carries `[skip ci]` as belt-and-braces. The branch push is fail-soft —
+  # a published release must never fail because this copy hiccuped; the assets
+  # already carry the record.
+  catalog:
+    name: publish update catalogs
+    needs:
+      - prepare
+      - build
+      - publish
+    if: >-
+      always()
+      && needs.prepare.result == 'success'
+      && needs.publish.result != 'failure'
+      && needs.publish.result != 'cancelled'
+    runs-on: ubuntu-24.04
+    steps:
+      # Full history + tags: the catalogs are generated from `git log` between
+      # release tags.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.2
+
+      - name: Publish the update catalogs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v$RELEASE_VERSION"
+
+          # Published-only: a re-run of a still-draft (or absent) release must
+          # not surface an entry. `isDraft` answers both cases through gh's
+          # exit status.
+          STATE="$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null || echo missing)"
+          if [ "$STATE" = "missing" ]; then
+            echo "update catalog: no release for $TAG; nothing to publish"
+            exit 0
+          fi
+          if [ "$STATE" = "true" ]; then
+            echo "update catalog: $TAG is still a draft; nothing to publish"
+            exit 0
+          fi
+
+          WORK="$RUNNER_TEMP/update-catalogs"
+          rm -rf "$WORK"
+          mkdir -p "$WORK/existing"
+
+          # Seed each channel from its branch file so the new release prepends
+          # (and a re-run replaces its own entry). A missing branch or file is
+          # the first-run case for that channel: start empty.
+          FETCHED=0
+          if git fetch --depth=1 origin catalog 2>/dev/null; then
+            FETCHED=1
+            for CHANNEL in stable beta; do
+              git show "FETCH_HEAD:$CHANNEL.json" > "$WORK/existing/$CHANNEL.json" 2>/dev/null \
+                || rm -f "$WORK/existing/$CHANNEL.json"
+            done
+          fi
+
+          # One build serves both channels, so both catalogs get this release;
+          # each file carries its own `channel` field.
+          for CHANNEL in stable beta; do
+            EXISTING="$WORK/existing/$CHANNEL.json"
+            if [ -s "$EXISTING" ]; then
+              node scripts/update-catalog.mjs --channel "$CHANNEL" --tag "$TAG" --in "$EXISTING" --out "$WORK/update-catalog-$CHANNEL.json"
+            else
+              node scripts/update-catalog.mjs --channel "$CHANNEL" --tag "$TAG" --out "$WORK/update-catalog-$CHANNEL.json"
+            fi
+          done
+
+          gh release upload "$TAG" "$WORK/update-catalog-stable.json" "$WORK/update-catalog-beta.json" --clobber
+
+          # The branch push is the only fail-soft part: the release is already
+          # published and the assets already carry the records. One commit
+          # carries both files.
+          catalogs_push() {
+            WT="$WORK/branch"
+            # A previous run in the same checkout can leave a stale worktree
+            # registration; prune it before adding.
+            git worktree prune || true
+            if [ "$FETCHED" = 1 ]; then
+              git worktree add --detach "$WT" FETCH_HEAD || return 1
+              git -C "$WT" checkout -q -B catalog || return 1
+            else
+              git worktree add --detach "$WT" HEAD || return 1
+              git -C "$WT" checkout -q --orphan catalog || return 1
+              git -C "$WT" rm -rf . >/dev/null 2>&1 || true
+            fi
+            cp "$WORK/update-catalog-stable.json" "$WT/stable.json" || return 1
+            cp "$WORK/update-catalog-beta.json" "$WT/beta.json" || return 1
+            git -C "$WT" add stable.json beta.json || return 1
+            git -C "$WT" -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -q -m "chore(catalog): stable+beta $TAG [skip ci]" || return 1
+            git -C "$WT" push -q origin "HEAD:refs/heads/catalog" || return 1
+          }
+          if catalogs_push; then
+            echo "update catalogs: pushed stable.json + beta.json for $TAG"
+          else
+            echo "::warning::update catalogs: branch push failed for $TAG; the assets update-catalog-stable.json and update-catalog-beta.json still carry this release"
+          fi

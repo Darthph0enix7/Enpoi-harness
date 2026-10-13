@@ -1,0 +1,25 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write profile/web/packages/enpoi-update-check/README.md
+/dsh-enpoi-update-check:
+  en: 4a11a58a5c1288b6
+  zh: 75d2796195984724
+/dsh-enpoi-update-check/what-it-does:
+  en: bd62435be36c4c26
+  zh: 2e734c64fe0daf52
+/dsh-enpoi-update-check/configuration:
+  en: 8722f2d43a9e3871
+  zh: 094cf31004de54a9
+/dsh-enpoi-update-check/remote-surface:
+  en: 9adf10238feb4f3a
+  zh: b3fd2481bfb86d3a
+/dsh-enpoi-update-check/where-it-is-mounted:
+  en: 21561b45a0a9ee15
+  zh: 00a5ff8c92c0f37b
+/dsh-enpoi-update-check/build:
+  en: b09ff23eb8ce9780
+  zh: 7f72cbf6fe8b99f1
+/dsh-enpoi-update-check/tests:
+  en: 8b1a2bca483ccee0
+  zh: 7b9fc215b23c8d37

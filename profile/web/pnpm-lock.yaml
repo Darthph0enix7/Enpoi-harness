@@ -112,6 +112,9 @@ importers:
       dsh-enpoi-ui-state:
         specifier: workspace:*
         version: link:packages/enpoi-ui-state
+      dsh-enpoi-update-check:
+        specifier: workspace:*
+        version: link:packages/enpoi-update-check
       dsh-enpoi-verify-gate:
         specifier: workspace:*
         version: link:packages/enpoi-verify-gate
@@ -251,6 +254,8 @@ importers:
         version: link:../enpoi-contracts
 
   packages/enpoi-ui-state: {}
+
+  packages/enpoi-update-check: {}
 
   packages/enpoi-verify-gate:
     dependencies:
