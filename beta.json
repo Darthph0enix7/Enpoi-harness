@@ -1,8 +1,20 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-13T15:33:35.877Z",
+  "generatedAt": "2026-10-13T16:25:34.728Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.83",
+      "commit": "fac60db",
+      "releasedAt": "2026-10-13T15:59:48.000Z",
+      "notes": [
+        "fix(update): recognize the engine's apply success line (Update applied:)",
+        "docs(plan): record the implemented phases, launch environment, and overlay geometry",
+        "fix(update): live defects + two-phase prepare/apply surface",
+        "fix(update): re-validate the staged record under the update lock before applying",
+        "feat(update): two-phase engine — prepare stages, apply switches"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.82",
       "commit": "587fffe",
@@ -351,15 +363,6 @@
       "releasedAt": "2026-10-08T20:37:38.000Z",
       "notes": [
         "fix(portability): repo-relative generator and sidebar builders"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.43",
-      "commit": "5616a03",
-      "releasedAt": "2026-10-08T19:52:02.000Z",
-      "notes": [
-        "fix(peer): ask admission, supersede and retired bindings; inbox FIFO proven",
-        "feat(cli): dsh --version reports the real build identity"
       ]
     }
   ]
