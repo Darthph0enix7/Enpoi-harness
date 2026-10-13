@@ -1,8 +1,17 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-10-13T18:33:13.337Z",
+  "generatedAt": "2026-10-13T20:54:02.723Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.86",
+      "commit": "545082a",
+      "releasedAt": "2026-10-13T20:17:51.000Z",
+      "notes": [
+        "fix(update): merge template dsh.profile.bundles into the live profile",
+        "feat(update-ui): manual Check for updates in the dialog and the settings row"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.85",
       "commit": "45d263b",
@@ -360,14 +369,6 @@
         "feat(models): owner-modifiable catalogs — presets, heavy overlay, snapshot control, unified hints",
         "feat(tool-groups): owner-editable membership, custom groups, roster validation",
         "fix(ui-brand-enpoi): mirror from repo profile sources, machine-independent labels"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.45",
-      "commit": "0e5c660",
-      "releasedAt": "2026-10-08T20:42:36.000Z",
-      "notes": [
-        "fix(models): non-destructive refresh, live-first discovery, real modalities/tags, opencode-go overlay"
       ]
     }
   ]
