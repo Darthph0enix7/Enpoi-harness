@@ -1,8 +1,19 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-13T13:50:45.283Z",
+  "generatedAt": "2026-10-13T15:33:35.877Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.82",
+      "commit": "587fffe",
+      "releasedAt": "2026-10-13T15:05:40.000Z",
+      "notes": [
+        "fix(ui-update): omit `latest` in the current-state test fixture (exactOptionalPropertyTypes)",
+        "feat(update): in-app update surface — ui-update client + host run lifecycle (P3 + minimal P4)",
+        "feat(update): per-channel update catalog + host update-check plugin (P1+P2)",
+        "docs(plan): UI update manifest + in-app updates — design and open decisions"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.81",
       "commit": "32ba66f",
@@ -349,14 +360,6 @@
       "notes": [
         "fix(peer): ask admission, supersede and retired bindings; inbox FIFO proven",
         "feat(cli): dsh --version reports the real build identity"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.42",
-      "commit": "6ffcc27",
-      "releasedAt": "2026-10-08T19:30:33.000Z",
-      "notes": [
-        "fix(llm): retry the pi-ai provider's prose overload errors"
       ]
     }
   ]
