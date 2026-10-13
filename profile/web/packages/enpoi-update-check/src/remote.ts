@@ -148,4 +148,23 @@ export class UpdateCheckService extends TypertRemoteService {
   run(): UpdateRunRecord | null {
     return this.runs.run()
   }
+
+  /**
+   * Cancel the running update through the engine's own `dsh update --cancel`
+   * (bounded; refuses once the run is past the switch; a no-op when nothing
+   * runs). The engine owns the kill/cleanup semantics.
+   *
+   * @returns the engine's outcome and the resulting record.
+   */
+  @Remote
+  async cancel(): Promise<UpdateCancelOutcome> {
+    try {
+      return await this.runs.cancel()
+    } catch (error) {
+      if (error instanceof RunRefusedError) {
+        throw new RemoteError('gateway/bad-request', error.message, {})
+      }
+      throw error
+    }
+  }
 }

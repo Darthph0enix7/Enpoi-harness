@@ -1401,8 +1401,8 @@ var UpdateRunController = class {
 
 // src/remote.ts
 var UPDATE_CHECK_NAMESPACE = "updateCheck";
-var _run_dec, _apply_dec, _start_dec, _dismiss_dec, _checkNow_dec, _status_dec, _a, _init;
-var UpdateCheckService = class extends (_a = TypertRemoteService, _status_dec = [Remote], _checkNow_dec = [Remote], _dismiss_dec = [Remote], _start_dec = [Remote], _apply_dec = [Remote], _run_dec = [Remote], _a) {
+var _cancel_dec, _run_dec, _apply_dec, _start_dec, _dismiss_dec, _checkNow_dec, _status_dec, _a, _init;
+var UpdateCheckService = class extends (_a = TypertRemoteService, _status_dec = [Remote], _checkNow_dec = [Remote], _dismiss_dec = [Remote], _start_dec = [Remote], _apply_dec = [Remote], _run_dec = [Remote], _cancel_dec = [Remote], _a) {
   /**
    * @param ctx - owning context (service registration is automatic).
    * @param options - the core that owns the status and the run controller.
@@ -1451,6 +1451,16 @@ var UpdateCheckService = class extends (_a = TypertRemoteService, _status_dec = 
   run() {
     return this.runs.run();
   }
+  async cancel() {
+    try {
+      return await this.runs.cancel();
+    } catch (error) {
+      if (error instanceof RunRefusedError) {
+        throw new RemoteError("gateway/bad-request", error.message, {});
+      }
+      throw error;
+    }
+  }
 };
 _init = __decoratorStart(_a);
 __decorateElement(_init, 1, "status", _status_dec, UpdateCheckService);
@@ -1459,6 +1469,7 @@ __decorateElement(_init, 1, "dismiss", _dismiss_dec, UpdateCheckService);
 __decorateElement(_init, 1, "start", _start_dec, UpdateCheckService);
 __decorateElement(_init, 1, "apply", _apply_dec, UpdateCheckService);
 __decorateElement(_init, 1, "run", _run_dec, UpdateCheckService);
+__decorateElement(_init, 1, "cancel", _cancel_dec, UpdateCheckService);
 __decoratorMetadata(_init, UpdateCheckService);
 /** Nothing is injected into the service fiber; the plugin passes the core. */
 __publicField(UpdateCheckService, "inject", []);
