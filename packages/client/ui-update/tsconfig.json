@@ -24,6 +24,9 @@
       "path": "../ui-layout"
     },
     {
+      "path": "../ui-settings/tsconfig.client.json"
+    },
+    {
       "path": "../ui-primitives"
     },
     {

@@ -11,6 +11,7 @@ import { stubConfigForm } from '@deepseek-ai/dsh-client-test-runtime'
 import { apply as applyLocale, inject as localeInject } from '@deepseek-ai/dsh-client-locale/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { UpdateIndicatorInjected } from '../src/client/UpdateIndicator.tsx'
+import type { UpdateSettingsInjected } from '../src/client/UpdateSettingsRow.tsx'
 import { apply, inject } from '../src/client/index.ts'
 import { en, NS, zh } from '../src/client/locales.ts'
 import { apply as applyNode } from '../src/index.ts'
@@ -23,6 +24,7 @@ async function bench(): Promise<{ ctx: Context; fiber: ReturnType<Context['plugi
     name: 'root',
     children: {
       'shell.overlay': { kind: 'list', scope: 'root' },
+      'settings.general.item': { kind: 'list', scope: 'root' },
     },
   } as never, () => null)
   // The locale plugin binds a settings scope, which reads the connection handle
@@ -57,6 +59,22 @@ describe('ui-update browser half', () => {
     expect(face?.hooks.update.getSnapshot().dialogOpen).toBe(false)
   })
 
+  it('registers the General-settings row under the version row with the shared controller face', async () => {
+    const { ctx } = await bench()
+    const entry = ctx.slots.entries('settings.general.item').find(candidate => candidate.options.id === 'update')
+    expect(entry).toBeDefined()
+    expect(entry?.options.order).toBe(101)
+    expect(entry?.locale).toBe(NS)
+    const face = (entry?.inject as unknown as (() => UpdateSettingsInjected) | undefined)?.()
+    expect(face?.hooks.update.getSnapshot()).toMatchObject({ status: null, run: null })
+    // The row's open shares the pill's controller store, not a second source.
+    const pill = ctx.slots.entries('shell.overlay').find(candidate => candidate.options.id === 'update-indicator')
+    const pillFace = (pill?.inject as unknown as (() => UpdateIndicatorInjected) | undefined)?.()
+    expect(face?.hooks.update).toBe(pillFace?.hooks.update)
+    face?.actions.open()
+    expect(face?.hooks.update.getSnapshot().dialogOpen).toBe(true)
+  })
+
   it('registers both dictionaries under its own namespace and releases them with the fiber', async () => {
     const { ctx, fiber } = await bench()
     const translate = ctx.locale.bind(NS)
@@ -71,8 +89,10 @@ describe('ui-update browser half', () => {
   it('drops the overlay entry when the plugin fiber unloads (HMR safety)', async () => {
     const { ctx, fiber } = await bench()
     expect(ctx.slots.entries('shell.overlay').map(entry => entry.options.id)).toContain('update-indicator')
+    expect(ctx.slots.entries('settings.general.item').map(entry => entry.options.id)).toContain('update')
     await fiber.dispose()
     expect(ctx.slots.entries('shell.overlay').map(entry => entry.options.id)).not.toContain('update-indicator')
+    expect(ctx.slots.entries('settings.general.item').map(entry => entry.options.id)).not.toContain('update')
   })
 
   it('keeps the English dictionary key-identical to the Chinese source of truth', () => {

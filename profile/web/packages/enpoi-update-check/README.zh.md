@@ -43,7 +43,7 @@ Remote 参数镜像描述符的**参数名**：`dismiss` 包裹其 `request` 对
 
 ## 运行更新（P4）
 
-`updateCheck.start` 固定可用目标与渠道，写入 `$DSH_HOME/update-check/run.json`，清空 `$DSH_HOME/update-check/run.log`，并分离式启动已安装的 `dsh` shim；`updateCheck.apply` 对其记录的暂存树重复同样过程。已准备好的更新会被 `start` 有意拒绝（`already-prepared`）：暂存目标由引擎记录固定，此时应提供的是“重启以更新”。
+`updateCheck.start` 固定可用目标与渠道，写入 `$DSH_HOME/update-check/run.json`，清空 `$DSH_HOME/update-check/run.log`，并分离式启动已安装的 `dsh` shim；`updateCheck.apply` 对其记录的暂存树重复同样过程。被跳过（dismissed）的版本仍可启动——跳过只隐藏客户端指示器，设置页控件会重新武装更新；而已准备好的更新会被 `start` 有意拒绝（`already-prepared`）：暂存目标由引擎记录固定，此时应提供的是“重启以更新”。
 
 - **能力探测。** 两阶段标志只存在于较新的引擎中，因此控制器在每次插件启动时探测一次已安装的 shim（`<shim> update --help`，上限 10 秒）并缓存结果。只有帮助输出包含 `--prepare` 才算支持；探测失败、超时或输出为空一律按不支持处理——猜错的代价是旧设备上的第一次更新直接失败。
 - **档位。** 支持的引擎使用 `dsh update --channel <c> --prepare`（`rung: 'two-phase'`）：运行暂存树并停留在 `prepared` 直到 `apply`。旧引擎使用一次性 `dsh update --channel <c>`（`rung: 'one-shot'`）：这次运行自行包含切换与服务重启，永远不会变成 `prepared`，且 `updateCheck.apply` 会以明确的“无内容可应用”拒绝。`launcher` 记录操作系统档位（`systemd-run|launchctl|setsid|spawn`）；`rung` 记录引擎代际。

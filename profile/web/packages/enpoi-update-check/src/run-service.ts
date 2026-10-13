@@ -252,9 +252,10 @@ export class UpdateRunController {
    * an older engine gets the one-shot `dsh update --channel <c>` whose run
    * includes the switch and restart.
    *
-   * An already-prepared update is deliberately refused
-   * (`already-prepared`): the staged target is pinned by the engine's record,
-   * so the offered action is Restart to update, not prepare again.
+   * A dismissed version is startable (the skip only hides the indicator), and
+   * an already-prepared update is deliberately refused (`already-prepared`):
+   * the staged target is pinned by the engine's record, so the offered action
+   * is Restart to update, not prepare again.
    *
    * @returns the freshly persisted record.
    * @throws RunRefusedError when no update is available, a run is active, an
@@ -264,7 +265,10 @@ export class UpdateRunController {
   async start(): Promise<UpdateRunRecord> {
     this.reconcile()
     const status = this.options.readStatus()
-    if (status.state !== 'available' || status.latest === undefined) {
+    // A dismissed version is startable: "Skip this version" only hides the
+    // indicator, and the operator explicitly asking again (the Settings
+    // control or a dialog on a skipped release) must be able to update.
+    if ((status.state !== 'available' && status.state !== 'dismissed') || status.latest === undefined) {
       throw new RunRefusedError(
         'not-available',
         `updateCheck.start: no update is available (state=${status.state})`,

@@ -71,9 +71,11 @@ process executes, `updateCheck.run`.
 `updateCheck.start` pins the available target and channel, writes
 `$DSH_HOME/update-check/run.json`, truncates `$DSH_HOME/update-check/run.log`,
 and launches the installed `dsh` shim detached. `updateCheck.apply` repeats
-that against the recorded staged tree. An already-prepared update is
-deliberately refused by `start` (`already-prepared`): the staged target is
-pinned by the engine's record, so the offered action is Restart to update.
+that against the recorded staged tree. A dismissed ("skipped") version stays
+startable — the skip only hides the client indicator, and the Settings control
+re-arms the update — while an already-prepared update is deliberately refused
+by `start` (`already-prepared`): the staged target is pinned by the engine's
+record, so the offered action is Restart to update.
 
 - **Capability probe.** The two-phase flags only exist in newer engines, so
   the controller probes the installed shim once per plugin boot

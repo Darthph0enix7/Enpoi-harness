@@ -87,12 +87,19 @@ describe('UpdateIndicator pill', () => {
     expect(document.querySelector('[data-dsh-update-indicator]')).toBeNull()
   })
 
-  it('renders the available pill with the newest version and opens the dialog', () => {
+  it('renders the available pill as exactly "Update" — no version, no arrow', () => {
     const { actions } = mount({ status: availableStatus })
     const pill = document.querySelector('[data-dsh-update-indicator]')
     expect(pill?.getAttribute('data-dsh-update-indicator')).toBe('available')
-    expect(pill?.textContent).toBe('0.1.7-enpoi.2.84 ↑')
-    expect(pill?.getAttribute('aria-label')).toBe('Update 0.1.7-enpoi.2.84 available — click for details')
+    expect(pill?.textContent).toBe('Update')
+    expect(pill?.textContent).not.toContain('0.1.7')
+    expect(pill?.textContent).not.toContain('↑')
+    // The accessible name is version-free too; the dialog carries the details.
+    expect(pill?.getAttribute('aria-label')).toBe('View available update')
+    expect(pill?.getAttribute('aria-label')).not.toContain('0.1.7')
+    // The accent class rides the available state (the stylesheet assertion in
+    // styles.client.spec.ts pins the subtle brand token it resolves to).
+    expect(pill?.className).toContain('pill')
     fireEvent.click(pill!)
     expect(actions.open).toHaveBeenCalledTimes(1)
   })
@@ -113,7 +120,7 @@ describe('UpdateIndicator pill', () => {
     const pill = document.querySelector('[data-dsh-update-indicator]')
     expect(pill?.getAttribute('data-dsh-update-indicator')).toBe('prepared')
     expect(pill?.textContent).toContain(en['indicator.prepared'])
-    expect(pill?.getAttribute('aria-label')).toBe('Update 0.1.7-enpoi.2.84 is ready — restart to finish')
+    expect(pill?.getAttribute('aria-label')).toBe('Update ready — restart to finish')
     fireEvent.click(pill!)
     expect(actions.open).toHaveBeenCalledTimes(1)
   })
@@ -158,6 +165,15 @@ describe('UpdateIndicator dialog', () => {
     })
     expect(document.querySelector('[data-dsh-update-notes]')).toBeNull()
     expect(screen.getByText(en['dialog.notesEmpty'])).toBeTruthy()
+  })
+
+  it('keeps Update now enabled for a skipped version and shows the skip hint', () => {
+    const { actions } = mount({ status: { ...availableStatus, state: 'dismissed' }, dialogOpen: true })
+    expect(document.querySelector('[data-dsh-update-skipped-hint]')?.textContent).toBe(en['dialog.skippedHint'])
+    const button = screen.getByRole('button', { name: en['action.updateNow'] })
+    expect(button.hasAttribute('disabled')).toBe(false)
+    fireEvent.click(button)
+    expect(actions.start).toHaveBeenCalledTimes(1)
   })
 
   it('renders the prepare progress panel with step, bar, last line, and no switch warning', () => {

@@ -37,8 +37,18 @@
   opacity: 1;
 }
 
+/* The available/prepared states carry one restrained accent step above the
+   neutral chrome: the settings surface's update color, not a loud CTA. The
+   executing state stays quiet. */
+.pill[data-dsh-update-indicator='available'],
 .pill[data-dsh-update-indicator='prepared'] {
-  color: var(--dsw-alias-state-warning-primary, var(--dsw-alias-label-secondary));
+  color: var(--dsw-alias-brand-primary-new-colorprimary-new-color);
+}
+
+.pill[data-dsh-update-indicator='available']:hover,
+.pill[data-dsh-update-indicator='prepared']:hover {
+  color: var(--dsw-alias-brand-primary-new-colorprimary-new-color);
+  background: color-mix(in srgb, var(--dsw-alias-brand-primary-new-colorprimary-new-color) 10%, var(--dsw-alias-bg-raised));
 }
 
 .pillText {

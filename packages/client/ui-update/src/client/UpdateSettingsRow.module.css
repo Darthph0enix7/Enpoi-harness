@@ -1,0 +1,36 @@
+/* General-settings update row: the version row (order 100) sits directly
+   above, so this row keeps no top padding of its own and inherits the section
+   stack's rhythm. The action button is the only control; the label reads as
+   one line of settings copy. */
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 0 16px;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.label {
+  color: var(--dsw-alias-label-primary);
+  overflow-wrap: anywhere;
+}
+
+.hint {
+  color: var(--dsw-alias-label-caption);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.row[data-dsh-update-settings='current'] .label {
+  color: var(--dsw-alias-label-caption);
+}

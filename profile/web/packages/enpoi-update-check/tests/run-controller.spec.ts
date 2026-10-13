@@ -177,6 +177,15 @@ describe('UpdateRunController.start (prepare)', () => {
     b.controller.dispose()
   })
 
+  it('starts an update for a dismissed version (the Settings control re-arms it)', async () => {
+    const b = bench({ status: { ...available(), state: 'dismissed' } })
+    const record = await b.controller.start()
+    expect(record).toMatchObject({ target: '0.1.7-enpoi.2.84', mode: 'prepare', result: null })
+    expect(b.launches).toHaveLength(1)
+    expect(b.launches[0]).toMatchObject({ flag: '--prepare', channel: 'stable' })
+    b.controller.dispose()
+  })
+
   it('records a launch failure with the clear reason and refuses', async () => {
     const b = bench({ launch: () => { throw new Error('no Node.js runtime found for the updater (probed: PATH)') } })
     await expect(b.controller.start()).rejects.toThrowError(

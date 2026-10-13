@@ -67,6 +67,10 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
   const executing = activeRun !== null
   const prepared = preparedRun !== null
   const available = status?.state === 'available' && latest !== undefined
+  // A dismissed release is still startable: the Settings control (and this
+  // dialog, when opened from it) offers Update now for a skipped version.
+  const canStart = (status?.state === 'available' || status?.state === 'dismissed') && latest !== undefined
+  const skipped = status?.state === 'dismissed'
   // A landed run hides the pill even if the 6 h check has not re-read the
   // status yet; a failed run keeps it, because Retry starts from here.
   const showPill = executing || prepared || (available && landedRun === null)
@@ -74,9 +78,7 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
   const pillMode = executing ? 'updating' : prepared ? 'prepared' : 'available'
   const pillLabel = activeRun !== null
     ? t('indicator.updatingAria', { step: activeRun.step, steps: activeRun.steps })
-    : preparedRun !== null
-      ? t('indicator.preparedAria', { version: preparedRun.target })
-      : latest === undefined ? t('indicator.updating') : t('indicator.availableAria', { version: latest.version })
+    : preparedRun !== null ? t('indicator.preparedAria') : t('indicator.pillAria')
   const executingLabel = activeRun === null || activeRun.phase === 'starting'
     ? t('progress.starting')
     // A one-shot update switches inside its own run (phase stays `preparing`),
@@ -104,7 +106,7 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
     </>
   ) : (
     <>
-      <Button variant="primary" disabled={state.busy || !available} onClick={actions.start}>{t('action.updateNow')}</Button>
+      <Button variant="primary" disabled={state.busy || !canStart} onClick={actions.start}>{t('action.updateNow')}</Button>
       <Button disabled={state.busy} onClick={actions.close}>{t('action.later')}</Button>
       <Button disabled={state.busy} onClick={actions.skip}>{t('action.skip')}</Button>
     </>
@@ -128,8 +130,8 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
           title={pillLabel}
           onClick={actions.open}
         >
-          {pillMode === 'available' && latest !== undefined && (
-            <span className={css.pillText}>{t('indicator.available', { version: latest.version })}</span>
+          {pillMode === 'available' && (
+            <span className={css.pillText}>{t('indicator.pill')}</span>
           )}
           {pillMode !== 'available' && (
             <>
@@ -211,6 +213,9 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
               )}
               {latest.notes.length === 0 && <p className={css.reason}>{t('dialog.notesEmpty')}</p>}
             </section>
+          )}
+          {skipped && (
+            <p className={css.warning} data-dsh-update-skipped-hint>{t('dialog.skippedHint')}</p>
           )}
           {state.actionError !== null && (
             <p className={css.error} role="alert">{t('error.action', { message: state.actionError })}</p>
