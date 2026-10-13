@@ -156,6 +156,7 @@ import { Remote, RemoteError, TypertRemoteService } from "@deepseek-ai/dsh-typer
 
 // src/run-service.ts
 import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync3, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
 import { dirname as dirname2, join as join4 } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -254,24 +255,35 @@ function resolveRuntime(input) {
   }
   return { probe: null, probed };
 }
+function resolveRuntimePath(input) {
+  const baseEnv = input.baseEnv ?? process.env;
+  const { probe, probed } = resolveRuntime(input);
+  if (probe === null) return { path: null, probe: null, probed };
+  const segments = [probe.binDir, baseEnv.PATH ?? "", ...systemBinDirs(input.platform)].flatMap((value) => value.split(delimiter)).filter((segment) => segment !== "");
+  return { path: [...new Set(segments)].join(delimiter), probe, probed };
+}
 function resolveLaunchEnvironment(input) {
   const baseEnv = input.baseEnv ?? process.env;
-  const { probe, probed } = resolveRuntime({
+  const resolved = resolveRuntimePath({
     prefix: input.prefix,
     homeDir: input.probeHomeDir ?? homedir(),
     ...input.baseEnv === void 0 ? {} : { baseEnv: input.baseEnv },
     ...input.platform === void 0 ? {} : { platform: input.platform }
   });
-  if (probe === null) throw new LaunchEnvironmentError(probed);
-  const segments = [probe.binDir, baseEnv.PATH ?? "", ...systemBinDirs(input.platform)].flatMap((value) => value.split(delimiter)).filter((segment) => segment !== "");
-  const path = [...new Set(segments)].join(delimiter);
+  if (resolved.path === null || resolved.probe === null) throw new LaunchEnvironmentError(resolved.probed);
   const env = {
     ...baseEnv,
-    PATH: path,
+    PATH: resolved.path,
     [RUN_HOME_ENV]: input.home,
     ...input.prefix === "" ? {} : { PREFIX: input.prefix }
   };
-  return { nodePath: probe.binDir === "" ? null : join2(probe.binDir, "node"), source: probe.source, path, env, probed };
+  return {
+    nodePath: resolved.probe.binDir === "" ? null : join2(resolved.probe.binDir, "node"),
+    source: resolved.probe.source,
+    path: resolved.path,
+    env,
+    probed: resolved.probed
+  };
 }
 function shellQuote(value) {
   return `'${value.replaceAll("'", "'\\''")}'`;
@@ -290,6 +302,7 @@ function launchWrapper(environment) {
   return parts.join("; ");
 }
 function wrapperArgs(input, environment) {
+  const engineArgs = input.flag === "--apply" ? ["--apply"] : ["--channel", input.channel ?? "stable", ...input.flag === "--prepare" ? ["--prepare"] : []];
   return [
     "-c",
     launchWrapper(environment),
@@ -298,7 +311,7 @@ function wrapperArgs(input, environment) {
     input.pidFile,
     input.shim,
     "update",
-    ...input.flag === "--prepare" ? ["--channel", input.channel ?? "stable", "--prepare"] : ["--apply"]
+    ...engineArgs
   ];
 }
 function launchPlan(input, environment) {
@@ -358,12 +371,12 @@ function launchPlan(input, environment) {
 }
 function launchUpdater(input) {
   const environment = resolveLaunchEnvironment(input);
-  const spawn = input.spawn ?? ((command, args, options) => nodeSpawn(command, [...args], options));
+  const spawn2 = input.spawn ?? ((command, args, options) => nodeSpawn(command, [...args], options));
   const plan = launchPlan(input, environment);
   let lastError;
   for (const step of plan) {
     try {
-      const child = spawn(step.command, step.args, {
+      const child = spawn2(step.command, step.args, {
         detached: true,
         stdio: "ignore",
         env: environment.env
@@ -384,13 +397,68 @@ function defaultShimPath() {
   return join2(homedir(), ".local", "bin", "dsh");
 }
 
+// src/probe.ts
+import { spawn } from "node:child_process";
+var ENGINE_PROBE_TIMEOUT_MS = 1e4;
+var ENGINE_PROBE_OUTPUT_CAP = 64 * 1024;
+function probeEngineCapability(input) {
+  const timeoutMs = input.timeoutMs ?? ENGINE_PROBE_TIMEOUT_MS;
+  const spawnImpl = input.spawn ?? ((command, args, options) => spawn(command, [...args], {
+    env: options.env,
+    stdio: ["ignore", "pipe", "pipe"]
+  }));
+  return new Promise((resolve) => {
+    let settled = false;
+    let output = "";
+    let timer;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== void 0) clearTimeout(timer);
+      resolve(result);
+    };
+    try {
+      const child = spawnImpl(input.shim, ["update", "--help"], { env: input.env });
+      const collect = (chunk) => {
+        if (output.length >= ENGINE_PROBE_OUTPUT_CAP) return;
+        output += typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      };
+      child.stdout?.on("data", collect);
+      child.stderr?.on("data", collect);
+      child.on("error", (error) => {
+        finish({ capability: "unsupported", reason: `probe failed to start: ${error.message}` });
+      });
+      child.on("close", (code) => {
+        if (output.includes("--prepare")) {
+          finish({ capability: "supported" });
+          return;
+        }
+        finish({
+          capability: "unsupported",
+          reason: output.trim() === "" ? `probe produced no output (exit ${String(code)})` : `engine help does not list --prepare (exit ${String(code)})`
+        });
+      });
+      timer = setTimeout(() => {
+        try {
+          child.kill?.();
+        } catch {
+        }
+        finish({ capability: "unsupported", reason: `probe timed out after ${String(timeoutMs)}ms` });
+      }, timeoutMs);
+      timer.unref?.();
+    } catch (error) {
+      finish({ capability: "unsupported", reason: `probe failed: ${error instanceof Error ? error.message : String(error)}` });
+    }
+  });
+}
+
 // src/run.ts
 import { existsSync, mkdirSync, readFileSync as readFileSync2, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join as join3 } from "node:path";
 var RUN_STEP_TOTAL = 9;
 var APPLY_SWITCH_STEP = 8;
 function executingPhase(mode) {
-  return mode === "prepare" ? "preparing" : "applying";
+  return mode === "apply" ? "applying" : "preparing";
 }
 function phaseForResult(result) {
   return result;
@@ -402,7 +470,15 @@ function isPreparedPhase(phase) {
   return phase === "prepared";
 }
 function modeFlag(mode) {
-  return mode === "prepare" ? "--prepare" : "--apply";
+  if (mode === "prepare") return "--prepare";
+  if (mode === "apply") return "--apply";
+  return "one-shot";
+}
+function rungForMode(mode) {
+  return mode === "one-shot" ? "one-shot" : "two-phase";
+}
+function modeLabel(mode) {
+  return mode === "one-shot" ? "update" : mode;
 }
 var LOG_TAIL_LINES = 40;
 var LOG_TAIL_BYTES = 64 * 1024;
@@ -550,7 +626,7 @@ function reconcileRunRecord(record, identity, context) {
     return { record: { ...terminalRecord(record, "success", now, staged), lastLine: parsed.lastLine === "" ? record.lastLine : parsed.lastLine, logTail: parsed.logTail }, changed: true };
   }
   const version = identity.version === "" ? "unknown" : identity.version;
-  const action = record.mode === "prepare" ? "prepare" : "apply";
+  const action = modeLabel(record.mode);
   return {
     record: {
       ...record,
@@ -614,6 +690,7 @@ var UpdateRunController = class {
   record = null;
   loaded = false;
   watcher = null;
+  capability = null;
   timers;
   /**
    * @param options - home, identity/status readers, launch and timer seams.
@@ -640,6 +717,43 @@ var UpdateRunController = class {
     return this.record;
   }
   /**
+   * One installed-engine capability probe per controller (one plugin boot):
+   * `dsh update --help` bounded, cached forever after. Failures default to
+   * UNSUPPORTED, so the first update on an old engine uses the one-shot rung.
+   * @returns the cached probe promise.
+   */
+  probe() {
+    this.capability ??= this.runProbe();
+    return this.capability;
+  }
+  async runProbe() {
+    const shim = (this.options.resolveShim ?? resolveShimPath)(this.options.home);
+    if (shim === null) {
+      return { capability: "unsupported", reason: `the dsh shim was not found (checked the recorded binDir and ${defaultShimPath()})` };
+    }
+    return await (this.options.probe ?? probeEngineCapability)({
+      shim,
+      env: this.probeEnvironment(),
+      ...this.options.probeTimeoutMs === void 0 ? {} : { timeoutMs: this.options.probeTimeoutMs }
+    });
+  }
+  /** The probe's environment: the composed runtime PATH where one resolves, plus DSH_HOME/PREFIX. */
+  probeEnvironment() {
+    const baseEnv = this.options.baseEnv ?? process.env;
+    const resolved = resolveRuntimePath({
+      prefix: this.prefix,
+      homeDir: this.options.probeHomeDir ?? homedir2(),
+      baseEnv,
+      ...this.options.platform === void 0 ? {} : { platform: this.options.platform }
+    });
+    return {
+      ...baseEnv,
+      ...resolved.path === null ? {} : { PATH: resolved.path },
+      [RUN_HOME_ENV]: this.options.home,
+      ...this.prefix === "" ? {} : { PREFIX: this.prefix }
+    };
+  }
+  /**
    * Boot reconcile: resolve a record left by a dead watcher. Idempotent.
    * A prepared record survives untouched; a live updater resumes watching.
    * @returns the reconciled record, or null when none exists.
@@ -661,14 +775,21 @@ var UpdateRunController = class {
     return record;
   }
   /**
-   * Start one prepare run (`dsh update --channel <c> --prepare`).
+   * Start one update run. The probe decides the rung: a two-phase engine gets
+   * `dsh update --channel <c> --prepare` (the staged tree waits for `apply`),
+   * an older engine gets the one-shot `dsh update --channel <c>` whose run
+   * includes the switch and restart.
+   *
+   * An already-prepared update is deliberately refused
+   * (`already-prepared`): the staged target is pinned by the engine's record,
+   * so the offered action is Restart to update, not prepare again.
    *
    * @returns the freshly persisted record.
    * @throws RunRefusedError when no update is available, a run is active, an
    *   update is already prepared, the shim is missing, or the launch fails
    *   (including a launch environment with no usable Node.js runtime).
    */
-  start() {
+  async start() {
     this.reconcile();
     const status = this.options.readStatus();
     if (status.state !== "available" || status.latest === void 0) {
@@ -692,21 +813,33 @@ var UpdateRunController = class {
         );
       }
     }
-    return this.begin("prepare", {
-      target: status.latest.version,
-      channel: status.current.channel
-    });
+    const pin = { target: status.latest.version, channel: status.current.channel };
+    const capability = await this.probe();
+    return capability.capability === "supported" ? this.begin("prepare", pin) : this.begin("one-shot", pin);
   }
   /**
    * Apply the staged update (`dsh update --apply`).
    *
    * @returns the freshly persisted record.
-   * @throws RunRefusedError when nothing is prepared, the staged marker is
-   *   missing, a run is active, the shim is missing, or the launch fails.
+   * @throws RunRefusedError when nothing is prepared, the record is a one-shot
+   *   update (its run owns the restart), the staged marker is missing, a run
+   *   is active, the shim is missing, or the launch fails.
    */
   apply() {
     this.reconcile();
     const current = this.run();
+    if (current !== null && this.isAliveRecord(current)) {
+      throw new RunRefusedError(
+        "already-running",
+        `updateCheck.apply: an update is already running (run ${current.runId})`
+      );
+    }
+    if (current !== null && current.mode === "one-shot") {
+      throw new RunRefusedError(
+        "not-prepared",
+        `updateCheck.apply: run ${current.runId} is a one-shot update (this engine has no --prepare); there is nothing to apply \u2014 the run restarts the service itself when it switches`
+      );
+    }
     if (current === null || !isPreparedPhase(current.phase)) {
       throw new RunRefusedError(
         "not-prepared",
@@ -719,25 +852,19 @@ var UpdateRunController = class {
         "updateCheck.apply: the staged apply marker is gone; run Update now to prepare again"
       );
     }
-    if (this.isAliveRecord(current)) {
-      throw new RunRefusedError(
-        "already-running",
-        `updateCheck.apply: an update is already running (run ${current.runId})`
-      );
-    }
     return this.begin("apply", { target: current.target, channel: current.channel });
   }
   /** Stop the watcher (plugin unload). The updater itself keeps running. */
   dispose() {
     this.stopWatcher();
   }
-  /** Persist a fresh record for `mode`, launch its engine flag, and watch it. */
+  /** Persist a fresh record for `mode`, launch its engine invocation, and watch it. */
   begin(mode, pin) {
     const shim = (this.options.resolveShim ?? resolveShimPath)(this.options.home);
     if (shim === null) {
       throw new RunRefusedError(
         "shim-missing",
-        `updateCheck.${mode === "prepare" ? "start" : "apply"}: the dsh shim was not found (checked the recorded binDir and ${defaultShimPath()})`
+        `updateCheck.${mode === "apply" ? "apply" : "start"}: the dsh shim was not found (checked the recorded binDir and ${defaultShimPath()})`
       );
     }
     const home = this.options.home;
@@ -748,6 +875,7 @@ var UpdateRunController = class {
       target: pin.target,
       channel: pin.channel,
       mode,
+      rung: rungForMode(mode),
       phase: "starting",
       step: 0,
       steps: RUN_STEP_TOTAL,
@@ -756,7 +884,7 @@ var UpdateRunController = class {
       pid: null,
       logPath,
       result: null,
-      rung: "pending",
+      launcher: "pending",
       staged: mode === "apply" ? hasStagedApply(this.prefix) : false,
       logTail: []
     };
@@ -781,7 +909,7 @@ var UpdateRunController = class {
         prefix: this.prefix,
         shim,
         flag: modeFlag(record.mode),
-        ...record.mode === "prepare" ? { channel: record.channel } : {},
+        ...record.mode === "apply" ? {} : { channel: record.channel },
         runId: record.runId,
         logPath: record.logPath,
         pidFile: runPidPath(home),
@@ -802,12 +930,13 @@ var UpdateRunController = class {
         reason: `could not launch the updater: ${message}`
       };
       this.persist(failed);
-      const verb = error instanceof LaunchEnvironmentError ? "updateCheck.start" : `updateCheck.${record.mode === "prepare" ? "start" : "apply"}`;
+      const verb = error instanceof LaunchEnvironmentError ? "updateCheck.start" : `updateCheck.${record.mode === "apply" ? "apply" : "start"}`;
       throw new RunRefusedError("launch-failed", `${verb}: could not launch the updater: ${message}`);
     }
     const started = {
       ...record,
-      rung: outcome.rung,
+      launcher: outcome.rung,
+      rung: rungForMode(record.mode),
       pid: outcome.pid,
       phase: executingPhase(record.mode)
     };
@@ -955,9 +1084,9 @@ var UpdateCheckService = class extends (_a = TypertRemoteService, _status_dec = 
     }
     return this.core.dismiss(version);
   }
-  start() {
+  async start() {
     try {
-      return this.runs.start();
+      return await this.runs.start();
     } catch (error) {
       if (error instanceof RunRefusedError) {
         throw new RemoteError("gateway/bad-request", error.message, {});
@@ -1210,6 +1339,13 @@ function apply(ctx, config = {}) {
     } catch (error) {
       ctx.logger.debug(`enpoi-update-check: run reconcile failed \u2014 ${errorText2(error)}`);
     }
+    void runs.probe().then((capability) => {
+      if (capability.capability === "supported") {
+        ctx.logger.debug("enpoi-update-check: engine supports --prepare (two-phase rung)");
+      } else {
+        ctx.logger.info(`enpoi-update-check: engine does not support --prepare (one-shot rung) \u2014 ${capability.reason ?? "no reason recorded"}`);
+      }
+    });
     ctx.plugin(UpdateCheckService, { core, runs });
     if (config.enabled !== false) {
       const stop = startUpdateCheckSchedule({
@@ -1236,6 +1372,8 @@ export {
   CATALOG_RAW_BASE_URL,
   CATALOG_SCHEMA_VERSION,
   Config,
+  ENGINE_PROBE_OUTPUT_CAP,
+  ENGINE_PROBE_TIMEOUT_MS,
   FIRST_CHECK_DELAY_MS,
   LOG_TAIL_BYTES,
   LOG_TAIL_LINES,
@@ -1267,11 +1405,13 @@ export {
   launchUpdater,
   launchWrapper,
   modeFlag,
+  modeLabel,
   name,
   parseCatalogDocument,
   parseRunLog,
   phaseForResult,
   preparedRecord,
+  probeEngineCapability,
   readDismissedVersion,
   readInstallIdentity,
   readRunLog,
@@ -1281,11 +1421,13 @@ export {
   resolveLaunchEnvironment,
   resolvePrefix,
   resolveRuntime,
+  resolveRuntimePath,
   resolveShimPath,
   resultFromLine,
   runLogPath,
   runPidPath,
   runRecordPath,
+  rungForMode,
   sameRunRecord,
   stagedApplyPath,
   startUpdateCheckSchedule,

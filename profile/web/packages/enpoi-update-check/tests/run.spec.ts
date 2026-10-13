@@ -19,6 +19,7 @@ import {
   isRunActive,
   isTerminalPhase,
   modeFlag,
+  modeLabel,
   parseRunLog,
   phaseForResult,
   preparedRecord,
@@ -27,6 +28,7 @@ import {
   readRunRecord,
   reconcileRunRecord,
   resultFromLine,
+  rungForMode,
   runRecordPath,
   sameRunRecord,
   stagedApplyPath,
@@ -53,6 +55,7 @@ function record(overrides: Partial<UpdateRunRecord> = {}): UpdateRunRecord {
     target: '0.1.7-enpoi.2.84',
     channel: 'stable',
     mode: 'prepare',
+    rung: 'two-phase',
     phase: 'preparing',
     step: 0,
     steps: 9,
@@ -61,7 +64,7 @@ function record(overrides: Partial<UpdateRunRecord> = {}): UpdateRunRecord {
     pid: 4242,
     logPath: '/nonexistent/run.log',
     result: null,
-    rung: 'setsid',
+    launcher: 'setsid',
     staged: false,
     logTail: [],
     ...overrides,
@@ -91,11 +94,19 @@ async function deadPid(): Promise<number> {
 }
 
 describe('phases, modes, and the staged marker', () => {
-  it('maps modes, engine flags, executing phases, and terminal phases', () => {
+  it('maps modes, engine invocations, executing phases, and terminal phases', () => {
     expect(modeFlag('prepare')).toBe('--prepare')
     expect(modeFlag('apply')).toBe('--apply')
+    expect(modeFlag('one-shot')).toBe('one-shot')
+    expect(rungForMode('prepare')).toBe('two-phase')
+    expect(rungForMode('apply')).toBe('two-phase')
+    expect(rungForMode('one-shot')).toBe('one-shot')
     expect(executingPhase('prepare')).toBe('preparing')
     expect(executingPhase('apply')).toBe('applying')
+    expect(executingPhase('one-shot')).toBe('preparing')
+    expect(modeLabel('prepare')).toBe('prepare')
+    expect(modeLabel('apply')).toBe('apply')
+    expect(modeLabel('one-shot')).toBe('update')
     expect(phaseForResult('success')).toBe('success')
     expect(phaseForResult('failed')).toBe('failed')
     expect(phaseForResult('rolledback')).toBe('rolledback')
@@ -339,6 +350,20 @@ describe('reconcileRunRecord', () => {
     )
     expect(reconciled.result).toBe('failed')
     expect(reconciled.reason).toContain('the apply run is no longer running')
+  })
+
+  it('marks a dead one-shot update with the update-run wording and never prepared', async () => {
+    const home = scratch()
+    mkdirSync(join(home, 'update-check'), { recursive: true })
+    writeFileSync(join(home, 'update-check', 'run.pid'), String(await deadPid()))
+    const { record: reconciled } = reconcileRunRecord(
+      record({ mode: 'one-shot', rung: 'one-shot', phase: 'preparing', step: 7 }),
+      identity('0.1.7-enpoi.2.81'),
+      { home, prefix: join(home, 'prefix'), now: () => new Date('2026-10-13T12:30:00.000Z') },
+    )
+    expect(reconciled.result).toBe('failed')
+    expect(reconciled.phase).not.toBe('prepared')
+    expect(reconciled.reason).toContain('the update run is no longer running')
   })
 
   it('is idempotent on a terminal record', () => {

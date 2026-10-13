@@ -22,6 +22,7 @@ function run(overrides: Partial<UpdateRunWire> = {}): UpdateRunWire {
     target: '0.1.7-enpoi.2.84',
     channel: 'stable',
     mode: 'prepare',
+    rung: 'two-phase',
     phase: 'preparing',
     step: 0,
     steps: 9,
@@ -30,7 +31,7 @@ function run(overrides: Partial<UpdateRunWire> = {}): UpdateRunWire {
     pid: 4242,
     logPath: '/home/dsh/update-check/run.log',
     result: null,
-    rung: 'setsid',
+    launcher: 'setsid',
     staged: false,
     logTail: [],
     ...overrides,
@@ -189,6 +190,41 @@ describe('UpdateIndicator dialog', () => {
     })
     expect(screen.getByText(en['progress.switching'])).toBeTruthy()
     expect(screen.getByText(en['progress.disconnectWarning'])).toBeTruthy()
+  })
+
+  it('renders a one-shot run with plain progress and the mid-run disconnect warning', () => {
+    const early = mount({
+      status: availableStatus,
+      run: run({ mode: 'one-shot', rung: 'one-shot', phase: 'preparing', step: 4, lastLine: '[4/9] dependencies and build' }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-indicator]')?.getAttribute('data-dsh-update-indicator')).toBe('updating')
+    expect(document.querySelector('[data-dsh-update-progress]')).not.toBeNull()
+    expect(screen.getByText(en['progress.preparing'])).toBeTruthy()
+    expect(screen.queryByText(en['progress.disconnectWarning'])).toBeNull()
+    expect(screen.queryByText(en['progress.prepared'])).toBeNull()
+    early.unmount()
+    mount({
+      status: availableStatus,
+      run: run({ mode: 'one-shot', rung: 'one-shot', phase: 'preparing', step: 8, lastLine: '[8/9] switch, service and backfill' }),
+      dialogOpen: true,
+    })
+    expect(screen.getByText(en['progress.switching'])).toBeTruthy()
+    expect(screen.getByText(en['progress.disconnectWarning'])).toBeTruthy()
+    // A one-shot run owns its restart: no prepared section, no restart action.
+    expect(document.querySelector('[data-dsh-update-prepared]')).toBeNull()
+    expect(screen.queryByRole('button', { name: en['action.restart'] })).toBeNull()
+  })
+
+  it('never renders the prepared state or restart affordance for a one-shot record', () => {
+    mount({
+      status: availableStatus,
+      run: run({ mode: 'one-shot', rung: 'one-shot', phase: 'prepared', step: 7, staged: true }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-prepared]')).toBeNull()
+    expect(screen.queryByRole('button', { name: en['action.restart'] })).toBeNull()
+    expect(document.querySelector('[data-dsh-update-indicator]')?.getAttribute('data-dsh-update-indicator')).toBe('available')
   })
 
   it('renders the prepared hint and [Restart to update] calling apply', () => {

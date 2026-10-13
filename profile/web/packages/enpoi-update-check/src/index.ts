@@ -138,6 +138,17 @@ export function apply(ctx: Context, config: Config = {}): void {
     } catch (error) {
       ctx.logger.debug(`enpoi-update-check: run reconcile failed — ${errorText(error)}`)
     }
+    // Capability probe, once per plugin boot: a two-phase engine gets the
+    // staged prepare/apply flow, an older engine the one-shot update. The
+    // result is cached for the controller's lifetime; unsupported is logged
+    // loudly because it selects a different, restart-in-run flow.
+    void runs.probe().then((capability) => {
+      if (capability.capability === 'supported') {
+        ctx.logger.debug('enpoi-update-check: engine supports --prepare (two-phase rung)')
+      } else {
+        ctx.logger.info(`enpoi-update-check: engine does not support --prepare (one-shot rung) — ${capability.reason ?? 'no reason recorded'}`)
+      }
+    })
 
     // The status surface exists even when checks are disabled, so the operator
     // can still read the last result and call checkNow explicitly.
@@ -181,6 +192,7 @@ export {
   LaunchEnvironmentError,
   resolveLaunchEnvironment,
   resolveRuntime,
+  resolveRuntimePath,
   RUN_HOME_ENV,
   systemBinDirs,
   wrapperArgs,
@@ -195,6 +207,16 @@ export {
   type RuntimeProbe,
   type RuntimeSource,
 } from './launcher.js'
+export {
+  ENGINE_PROBE_OUTPUT_CAP,
+  ENGINE_PROBE_TIMEOUT_MS,
+  probeEngineCapability,
+  type EngineCapability,
+  type EngineProbeInput,
+  type EngineProbeResult,
+  type ProbeChild,
+  type ProbeSpawn,
+} from './probe.js'
 export { UPDATE_CHECK_NAMESPACE, UpdateCheckService, type DismissRequest, type UpdateCheckServiceOptions } from './remote.js'
 export {
   APPLY_SWITCH_STEP,
@@ -208,6 +230,7 @@ export {
   LOG_TAIL_BYTES,
   LOG_TAIL_LINES,
   modeFlag,
+  modeLabel,
   parseRunLog,
   phaseForResult,
   preparedRecord,
@@ -217,6 +240,7 @@ export {
   reconcileRunRecord,
   resultFromLine,
   RUN_STEP_TOTAL,
+  rungForMode,
   runLogPath,
   runPidPath,
   runRecordPath,
@@ -231,6 +255,7 @@ export {
   type UpdateRunMode,
   type UpdateRunRecord,
   type UpdateRunResult,
+  type UpdateRung,
 } from './run.js'
 export {
   resolvePrefix,

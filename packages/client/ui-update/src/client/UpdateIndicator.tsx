@@ -59,7 +59,9 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
   const latest = status?.latest
   const run = state.run
   const activeRun = run !== null && isExecutingPhase(run.phase) ? run : null
-  const preparedRun = run !== null && run.phase === 'prepared' ? run : null
+  // A prepared record only exists on the two-phase rung; a one-shot run owns
+  // its own restart and must never render the restart affordance.
+  const preparedRun = run !== null && run.rung === 'two-phase' && run.phase === 'prepared' ? run : null
   const failedRun = run !== null && run.result !== null && run.result !== 'success' ? run : null
   const landedRun = run !== null && run.result === 'success' ? run : null
   const executing = activeRun !== null
@@ -77,9 +79,16 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
       : latest === undefined ? t('indicator.updating') : t('indicator.availableAria', { version: latest.version })
   const executingLabel = activeRun === null || activeRun.phase === 'starting'
     ? t('progress.starting')
-    : activeRun.phase === 'preparing'
-      ? t('progress.preparing')
-      : activeRun.step >= APPLY_SWITCH_STEP ? t('progress.switching') : t('progress.applying')
+    // A one-shot update switches inside its own run (phase stays `preparing`),
+    // so the switch step is the same warning point on both rungs.
+    : activeRun.step >= APPLY_SWITCH_STEP && (activeRun.phase === 'applying' || activeRun.rung === 'one-shot')
+      ? t('progress.switching')
+      : activeRun.phase === 'applying'
+        ? t('progress.applying')
+        : t('progress.preparing')
+  const showDisconnectWarning = activeRun !== null
+    && activeRun.step >= APPLY_SWITCH_STEP
+    && (activeRun.phase === 'applying' || activeRun.rung === 'one-shot')
 
   const footer: ReactNode = executing ? (
     <Button onClick={actions.close}>{t('action.later')}</Button>
@@ -161,7 +170,7 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
               <pre className={css.lastLine} data-dsh-update-lastline>
                 {activeRun.lastLine !== '' ? activeRun.lastLine : t('progress.starting')}
               </pre>
-              {activeRun.phase === 'applying' && activeRun.step >= APPLY_SWITCH_STEP && (
+              {showDisconnectWarning && (
                 <p className={css.warning}>{t('progress.disconnectWarning')}</p>
               )}
             </section>

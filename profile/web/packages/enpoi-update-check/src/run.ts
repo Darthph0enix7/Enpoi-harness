@@ -8,10 +8,16 @@
  * `$DSH_HOME/update-check/run.log`, and the `[N/9]` step markers plus the
  * terminal result lines in that log are the progress contract.
  *
- * | mode      | engine flag          | witness                                    | phase |
- * |-----------|----------------------|--------------------------------------------|-------|
- * | `prepare` | `dsh update --prepare` | `[1/9]`..`[7/9]`, then exit 0 with `$PREFIX/harness/.staged-apply.json` written | `starting` → `preparing` → `prepared` |
- * | `apply`   | `dsh update --apply`   | `[8/9] switch, service and backfill`, `[9/9] self-check`, the health proof, then the final result line | `applying` → `success` \| `failed` \| `rolledback` |
+ * | mode       | engine invocation          | witness                                    | phase |
+ * |------------|----------------------------|--------------------------------------------|-------|
+ * | `prepare`  | `dsh update --channel <c> --prepare` | `[1/9]`..`[7/9]`, then exit 0 with `$PREFIX/harness/.staged-apply.json` written | `starting` → `preparing` → `prepared` |
+ * | `apply`    | `dsh update --apply`       | `[8/9] switch, service and backfill`, `[9/9] self-check`, the health proof, then the final result line | `applying` → `success` \| `failed` \| `rolledback` |
+ * | `one-shot` | `dsh update --channel <c>` | the full `[1/9]`..`[9/9]` flow, then the final result line | `preparing` → `success` \| `failed` \| `rolledback` (never `prepared`) |
+ *
+ * A one-shot run exists for installs whose engine predates the two-phase
+ * flags: the capability probe reports unsupported and the run includes the
+ * switch and service restart itself. `rung` records which engine generation
+ * the run targeted; `launcher` records the OS rung that started the process.
  *
  * The staged file is the prepare-success witness (the engine removes it on a
  * successful apply), and the install version equal to the run's target is the
@@ -29,8 +35,11 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSyn
 import { dirname, join } from 'node:path'
 import type { InstallIdentity } from './catalog.js'
 
-/** The engine flag a run drives. */
-export type UpdateRunMode = 'prepare' | 'apply'
+/** The engine invocation a run drives. */
+export type UpdateRunMode = 'prepare' | 'apply' | 'one-shot'
+
+/** Which engine generation the run targets: the two-phase flags, or the legacy one-shot update. */
+export type UpdateRung = 'two-phase' | 'one-shot'
 
 /** Progress phases a run reports (the run.json contract, final). */
 export type UpdatePhase =
@@ -51,9 +60,9 @@ export const RUN_STEP_TOTAL = 9
 /** Engine step at which the switch (and its service restart) begins. */
 export const APPLY_SWITCH_STEP = 8
 
-/** The progress phase while a run of `mode` is executing. */
+/** The progress phase while a run of `mode` is executing. A one-shot update prepares then switches in one run. */
 export function executingPhase(mode: UpdateRunMode): 'preparing' | 'applying' {
-  return mode === 'prepare' ? 'preparing' : 'applying'
+  return mode === 'apply' ? 'applying' : 'preparing'
 }
 
 /** The terminal phase that mirrors one result. */
@@ -71,9 +80,21 @@ export function isPreparedPhase(phase: UpdatePhase): boolean {
   return phase === 'prepared'
 }
 
-/** The engine flag for a run mode. */
-export function modeFlag(mode: UpdateRunMode): '--prepare' | '--apply' {
-  return mode === 'prepare' ? '--prepare' : '--apply'
+/** The shim flag for a run mode; a one-shot update takes no phase flag. */
+export function modeFlag(mode: UpdateRunMode): '--prepare' | '--apply' | 'one-shot' {
+  if (mode === 'prepare') return '--prepare'
+  if (mode === 'apply') return '--apply'
+  return 'one-shot'
+}
+
+/** The engine generation a run mode targets. */
+export function rungForMode(mode: UpdateRunMode): UpdateRung {
+  return mode === 'one-shot' ? 'one-shot' : 'two-phase'
+}
+
+/** Human label for a run's engine invocation (failure reasons). */
+export function modeLabel(mode: UpdateRunMode): string {
+  return mode === 'one-shot' ? 'update' : mode
 }
 
 /** One update run as persisted in `run.json` and returned over the Remote. */
@@ -84,8 +105,10 @@ export interface UpdateRunRecord {
   readonly target: string
   /** Channel pinned at launch (`stable` or `beta`). */
   readonly channel: string
-  /** Which engine flag this run drives. */
+  /** Which engine invocation this run drives. */
   readonly mode: UpdateRunMode
+  /** Which engine generation the run targets. */
+  readonly rung: UpdateRung
   /** Current progress phase; see the module table. */
   readonly phase: UpdatePhase
   /** Current 1-based engine step; 0 before the first `[N/9]` marker. */
@@ -102,8 +125,8 @@ export interface UpdateRunRecord {
   readonly logPath: string
   /** Terminal result, or null while the run is active or prepared. */
   readonly result: UpdateRunResult | null
-  /** Launcher rung that started the process (`systemd-run|launchctl|setsid|spawn`). */
-  readonly rung: string
+  /** OS launcher rung that started the process (`systemd-run|launchctl|setsid|spawn`). */
+  readonly launcher: string
   /** Whether `$PREFIX/harness/.staged-apply.json` exists at the last check. */
   readonly staged: boolean
   /** Bounded tail of the log (last {@link LOG_TAIL_LINES} non-empty lines). */
@@ -407,7 +430,7 @@ export function reconcileRunRecord(
     return { record: { ...terminalRecord(record, 'success', now, staged), lastLine: parsed.lastLine === '' ? record.lastLine : parsed.lastLine, logTail: parsed.logTail }, changed: true }
   }
   const version = identity.version === '' ? 'unknown' : identity.version
-  const action = record.mode === 'prepare' ? 'prepare' : 'apply'
+  const action = modeLabel(record.mode)
   return {
     record: {
       ...record,

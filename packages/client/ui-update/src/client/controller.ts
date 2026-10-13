@@ -271,12 +271,12 @@ export class UpdateController {
   }
 
   /**
-   * Retry a failed run: replay `apply` while the staged marker survived a
-   * rolled-back/failed apply, and re-prepare otherwise.
+   * Retry a failed run: replay `apply` while a two-phase staged marker
+   * survived, and prepare (or restart the one-shot flow) otherwise.
    */
   retry(): void {
     const run = this.store.getSnapshot().run
-    if (run !== null && run.mode === 'apply' && run.staged) this.apply()
+    if (run !== null && run.rung === 'two-phase' && run.mode === 'apply' && run.staged) this.apply()
     else this.start()
   }
 

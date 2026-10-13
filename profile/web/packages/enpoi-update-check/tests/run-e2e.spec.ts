@@ -63,6 +63,7 @@ function stageRuntime(home: string): string {
 /** The two-phase fake updater: refuses to run without node on PATH. */
 const PHASED_SHIM = [
   'command -v node >/dev/null || { echo "✗ ERROR: no usable Node.js found for the update"; exit 1; }',
+  'if [ "${2:-}" = "--help" ]; then echo "usage: dsh update [--channel stable|beta] [--prepare] [--apply]"; exit 0; fi',
   'mode=update',
   'for arg in "$@"; do case "$arg" in --prepare) mode=prepare;; --apply) mode=apply;; esac; done',
   'if [ "$mode" = "prepare" ]; then',
@@ -85,6 +86,19 @@ const PHASED_SHIM = [
   '  exit 0',
   'fi',
   'echo "[1/9] environment"; exit 0',
+].join('\n')
+
+/** The pre-two-phase fake updater: its help does NOT advertise --prepare. */
+const ONE_SHOT_SHIM = [
+  'command -v node >/dev/null || { echo "✗ ERROR: no usable Node.js found for the update"; exit 1; }',
+  'if [ "${2:-}" = "--help" ]; then echo "usage: dsh update [--channel stable|beta] [--force]"; exit 0; fi',
+  'echo "[1/9] environment: existing install under $DSH_HOME"',
+  'echo "[4/9] dependencies and build: prebuilt release (no local build)"',
+  'echo "[7/9] home, dependencies and migrations"',
+  'echo "[8/9] switch, service and backfill"',
+  'echo "[9/9] self-check"',
+  'echo "Enpoi Harness successfully updated!"',
+  'exit 0',
 ].join('\n')
 
 async function waitForRecord(
@@ -118,11 +132,11 @@ function e2eController(home: string, baseEnv: NodeJS.ProcessEnv): UpdateRunContr
 }
 
 describe('launch environment on a scratch install', () => {
-  it('fails the run with one clear reason when no runtime resolves (env -i style)', () => {
+  it('fails the run with one clear reason when no runtime resolves (env -i style)', async () => {
     const home = scratch()
     stageInstall(home, PHASED_SHIM)
     const controller = e2eController(home, {})
-    expect(() => controller.start()).toThrowError(/no Node.js runtime found for the updater/)
+    await expect(controller.start()).rejects.toThrowError(/no Node.js runtime found for the updater/)
     const persisted = readRunRecord(runRecordPath(home))!
     expect(persisted.result).toBe('failed')
     expect(persisted.reason).toContain('no Node.js runtime found for the updater')
@@ -137,7 +151,7 @@ describe('launch environment on a scratch install', () => {
     stageInstall(home, PHASED_SHIM)
     stageRuntime(home)
     const controller = e2eController(home, {})
-    const started = controller.start()
+    const started = await controller.start()
     expect(started.mode).toBe('prepare')
     const prepared = await waitForRecord(controller, record => record?.phase === 'prepared')
     controller.dispose()
@@ -164,7 +178,7 @@ describe('simulated two-phase update (fake updater, real launcher + watcher)', (
       pollIntervalMs: 50,
       onUpdate: record => { phases.push(record.phase) },
     })
-    controller.start()
+    await controller.start()
     await waitForRecord(controller, record => record?.phase === 'prepared')
     const applied = controller.apply()
     expect(applied).toMatchObject({ mode: 'apply', phase: 'applying', target: '0.1.7-enpoi.2.84' })
@@ -206,7 +220,7 @@ describe('simulated two-phase update (fake updater, real launcher + watcher)', (
     writeFileSync(runRecordPath(home), `${JSON.stringify({
       runId: 'run-prep', target: '0.1.7-enpoi.2.84', channel: 'stable', mode: 'prepare', phase: 'prepared',
       step: 7, steps: 9, lastLine: '[7/9] home, dependencies and migrations', startedAt: new Date().toISOString(),
-      pid: null, logPath: runLogPath(home), result: null, rung: 'spawn', staged: true, logTail: [],
+      pid: null, logPath: runLogPath(home), result: null, rung: 'two-phase', launcher: 'spawn', staged: true, logTail: [],
     })}\n`)
     const controller = e2eController(home, {})
     controller.apply()
@@ -231,7 +245,7 @@ describe('simulated two-phase update (fake updater, real launcher + watcher)', (
     writeFileSync(runRecordPath(home), `${JSON.stringify({
       runId: 'run-prep', target: '0.1.7-enpoi.2.84', channel: 'stable', mode: 'prepare', phase: 'prepared',
       step: 7, steps: 9, lastLine: '[7/9] home, dependencies and migrations', startedAt: new Date().toISOString(),
-      pid: null, logPath: runLogPath(home), result: null, rung: 'spawn', staged: true, logTail: [],
+      pid: null, logPath: runLogPath(home), result: null, rung: 'two-phase', launcher: 'spawn', staged: true, logTail: [],
     })}\n`)
     const controller = e2eController(home, {})
     controller.apply()
@@ -239,5 +253,64 @@ describe('simulated two-phase update (fake updater, real launcher + watcher)', (
     controller.dispose()
     expect(done).toMatchObject({ result: 'failed', phase: 'failed', step: 8 })
     expect(done.reason).toContain('the apply run exited before reporting a result')
+  })
+})
+
+describe('one-shot fallback on a pre-two-phase engine', () => {
+  it('probes unsupported and runs the full step band to success without preparing', async () => {
+    const home = scratch()
+    stageInstall(home, ONE_SHOT_SHIM)
+    stageRuntime(home)
+    const phases: string[] = []
+    const controller = new UpdateRunController({
+      home,
+      readIdentity: () => ({ channel: 'stable', version: '0.1.7-enpoi.2.81', commit: 'abc1234' }),
+      readStatus: () => status(),
+      hasCommand: () => false,
+      baseEnv: {},
+      probeHomeDir: join(home, 'probe-home'),
+      pollIntervalMs: 50,
+      onUpdate: record => { phases.push(record.phase) },
+    })
+    const probe = await controller.probe()
+    expect(probe.capability).toBe('unsupported')
+    expect(probe.reason).toContain('--prepare')
+
+    const started = await controller.start()
+    expect(started).toMatchObject({ mode: 'one-shot', rung: 'one-shot' })
+    const done = await waitForRecord(controller, record => record?.result !== null)
+    controller.dispose()
+
+    expect(done).toMatchObject({ result: 'success', phase: 'success', step: 9, rung: 'one-shot', mode: 'one-shot' })
+    expect(done.staged).toBe(false)
+    expect(done.logTail.some(line => line.includes('[8/9] switch'))).toBe(true)
+    expect(done.logTail.some(line => line.includes('[9/9] self-check'))).toBe(true)
+    expect(done.logTail).toContain('Enpoi Harness successfully updated!')
+    // The one-shot rung never rests at prepared and never writes a staged record.
+    expect(phases).toContain('preparing')
+    expect(phases).not.toContain('prepared')
+    expect(phases).toContain('success')
+    expect(hasStagedApply(home)).toBe(false)
+    const persisted = readRunRecord(runRecordPath(home))!
+    expect(persisted).toEqual(done)
+  })
+
+  it('refuses apply on the one-shot record after the run owns its restart', async () => {
+    const home = scratch()
+    stageInstall(home, ONE_SHOT_SHIM)
+    stageRuntime(home)
+    const controller = e2eController(home, {})
+    await controller.start()
+    const done = await waitForRecord(controller, record => record?.result !== null)
+    expect(done.result).toBe('success')
+    let error: unknown
+    try {
+      controller.apply()
+    } catch (caught) {
+      error = caught
+    }
+    controller.dispose()
+    expect(error).toMatchObject({ name: 'RunRefusedError', reason: 'not-prepared' })
+    expect((error as Error).message).toContain('one-shot')
   })
 })

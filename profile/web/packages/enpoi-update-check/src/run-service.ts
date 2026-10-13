@@ -2,19 +2,26 @@
  * enpoi-update-check — the update-run controller: prepare, apply, watch,
  * reconcile (docs/plan/ui-update-manifest.md P4, engine two-phase flags).
  *
- * One controller per plugin instance owns at most one run:
+ * One controller per plugin instance owns at most one run. The installed
+ * engine's capability is probed once per boot ({@link UpdateRunController.probe}):
+ * a two-phase engine gets `dsh update --channel <c> --prepare` (the staged
+ * tree waits for `apply`), an older engine gets the one-shot
+ * `dsh update --channel <c>` whose run includes the switch and restart —
+ * the first in-app update on any pre-two-phase device must not fail on an
+ * unknown flag.
  *
- * - `start` pins the channel and target from the current `available` status
- *   and launches `dsh update --channel <c> --prepare`. The watcher follows the
- *   log; when the prepare process exits with `$PREFIX/harness/.staged-apply.json`
- *   written, the record rests at `phase: 'prepared'` (no process, nothing to
- *   watch) and the UI offers Restart to update.
- * - `apply` launches `dsh update --apply` against that staged tree; the
- *   watcher follows the switch/self-check/health steps to `success`, `failed`,
- *   or `rolledback`.
- * - A later plugin instance (the web service restarted mid-run — the apply's
- *   own switch does this) resumes the watcher when the updater is still alive,
- *   and otherwise reconciles against the log tail, the staged marker, and the
+ * - `start` pins the channel and target from the current `available` status.
+ *   On the two-phase rung the watcher follows the log; when the prepare
+ *   process exits with `$PREFIX/harness/.staged-apply.json` written, the
+ *   record rests at `phase: 'prepared'` (no process, nothing to watch) and the
+ *   UI offers Restart to update. On the one-shot rung it runs straight
+ *   through to a terminal phase and never becomes `prepared`.
+ * - `apply` launches `dsh update --apply` against the staged tree; the watcher
+ *   follows the switch/self-check/health steps to `success`, `failed`, or
+ *   `rolledback`. A one-shot record is refused (its run owns the restart).
+ * - A later plugin instance (the web service restarted mid-run — any rung's
+ *   switch does this) resumes the watcher when the updater is still alive, and
+ *   otherwise reconciles against the log tail, the staged marker, and the
  *   install identity ({@link reconcileRunRecord}). A prepared record survives
  *   a restart unchanged.
  *
@@ -27,16 +34,19 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { InstallIdentity } from './catalog.js'
 import {
-  defaultShimPath, launchUpdater, LaunchEnvironmentError, type LaunchOutcome, type LaunchRung, type LaunchUpdaterInput,
+  defaultShimPath, launchUpdater, LaunchEnvironmentError, resolveRuntimePath, RUN_HOME_ENV,
+  type LaunchOutcome, type LaunchRung, type LaunchUpdaterInput,
 } from './launcher.js'
+import { probeEngineCapability, type EngineProbeResult } from './probe.js'
 import {
   effectivePid, executingPhase, hasStagedApply, isPreparedPhase, isProcessAlive, isRunActive, modeFlag, preparedRecord,
-  readRunLog, readRunPid, readRunRecord, reconcileRunRecord, RUN_STEP_TOTAL, runLogPath, runPidPath, runRecordPath,
-  sameRunRecord, writeRunRecord,
+  readRunLog, readRunPid, readRunRecord, reconcileRunRecord, RUN_STEP_TOTAL, rungForMode, runLogPath,
+  runPidPath, runRecordPath, sameRunRecord, writeRunRecord,
   type UpdatePhase, type UpdateRunMode, type UpdateRunRecord,
 } from './run.js'
 import type { UpdateCheckStatus } from './service.js'
@@ -98,6 +108,10 @@ export interface UpdateRunControllerOptions {
   readonly baseEnv?: NodeJS.ProcessEnv
   /** User home probed for the nvm layout (tests use a scratch home). */
   readonly probeHomeDir?: string
+  /** Engine capability probe seam; defaults to {@link probeEngineCapability}. */
+  readonly probe?: (input: { shim: string; env: NodeJS.ProcessEnv; timeoutMs?: number }) => Promise<EngineProbeResult>
+  /** Capability-probe bound, milliseconds (default 10 s). */
+  readonly probeTimeoutMs?: number
   /** Called after each record change (the plugin logs it). */
   readonly onUpdate?: (record: UpdateRunRecord) => void
 }
@@ -144,6 +158,7 @@ export class UpdateRunController {
   private record: UpdateRunRecord | null = null
   private loaded = false
   private watcher: ReturnType<typeof setInterval> | null = null
+  private capability: Promise<EngineProbeResult> | null = null
   private readonly timers: RunTimers
 
   /**
@@ -166,6 +181,46 @@ export class UpdateRunController {
       this.record = readRunRecord(runRecordPath(this.options.home))
     }
     return this.record
+  }
+
+  /**
+   * One installed-engine capability probe per controller (one plugin boot):
+   * `dsh update --help` bounded, cached forever after. Failures default to
+   * UNSUPPORTED, so the first update on an old engine uses the one-shot rung.
+   * @returns the cached probe promise.
+   */
+  probe(): Promise<EngineProbeResult> {
+    this.capability ??= this.runProbe()
+    return this.capability
+  }
+
+  private async runProbe(): Promise<EngineProbeResult> {
+    const shim = (this.options.resolveShim ?? resolveShimPath)(this.options.home)
+    if (shim === null) {
+      return { capability: 'unsupported', reason: `the dsh shim was not found (checked the recorded binDir and ${defaultShimPath()})` }
+    }
+    return await (this.options.probe ?? probeEngineCapability)({
+      shim,
+      env: this.probeEnvironment(),
+      ...(this.options.probeTimeoutMs === undefined ? {} : { timeoutMs: this.options.probeTimeoutMs }),
+    })
+  }
+
+  /** The probe's environment: the composed runtime PATH where one resolves, plus DSH_HOME/PREFIX. */
+  private probeEnvironment(): NodeJS.ProcessEnv {
+    const baseEnv = this.options.baseEnv ?? process.env
+    const resolved = resolveRuntimePath({
+      prefix: this.prefix,
+      homeDir: this.options.probeHomeDir ?? homedir(),
+      baseEnv,
+      ...(this.options.platform === undefined ? {} : { platform: this.options.platform }),
+    })
+    return {
+      ...baseEnv,
+      ...(resolved.path === null ? {} : { PATH: resolved.path }),
+      [RUN_HOME_ENV]: this.options.home,
+      ...(this.prefix === '' ? {} : { PREFIX: this.prefix }),
+    }
   }
 
   /**
@@ -192,14 +247,21 @@ export class UpdateRunController {
   }
 
   /**
-   * Start one prepare run (`dsh update --channel <c> --prepare`).
+   * Start one update run. The probe decides the rung: a two-phase engine gets
+   * `dsh update --channel <c> --prepare` (the staged tree waits for `apply`),
+   * an older engine gets the one-shot `dsh update --channel <c>` whose run
+   * includes the switch and restart.
+   *
+   * An already-prepared update is deliberately refused
+   * (`already-prepared`): the staged target is pinned by the engine's record,
+   * so the offered action is Restart to update, not prepare again.
    *
    * @returns the freshly persisted record.
    * @throws RunRefusedError when no update is available, a run is active, an
    *   update is already prepared, the shim is missing, or the launch fails
    *   (including a launch environment with no usable Node.js runtime).
    */
-  start(): UpdateRunRecord {
+  async start(): Promise<UpdateRunRecord> {
     this.reconcile()
     const status = this.options.readStatus()
     if (status.state !== 'available' || status.latest === undefined) {
@@ -223,22 +285,36 @@ export class UpdateRunController {
         )
       }
     }
-    return this.begin('prepare', {
-      target: status.latest.version,
-      channel: status.current.channel,
-    })
+    const pin = { target: status.latest.version, channel: status.current.channel }
+    const capability = await this.probe()
+    return capability.capability === 'supported'
+      ? this.begin('prepare', pin)
+      : this.begin('one-shot', pin)
   }
 
   /**
    * Apply the staged update (`dsh update --apply`).
    *
    * @returns the freshly persisted record.
-   * @throws RunRefusedError when nothing is prepared, the staged marker is
-   *   missing, a run is active, the shim is missing, or the launch fails.
+   * @throws RunRefusedError when nothing is prepared, the record is a one-shot
+   *   update (its run owns the restart), the staged marker is missing, a run
+   *   is active, the shim is missing, or the launch fails.
    */
   apply(): UpdateRunRecord {
     this.reconcile()
     const current = this.run()
+    if (current !== null && this.isAliveRecord(current)) {
+      throw new RunRefusedError(
+        'already-running',
+        `updateCheck.apply: an update is already running (run ${current.runId})`,
+      )
+    }
+    if (current !== null && current.mode === 'one-shot') {
+      throw new RunRefusedError(
+        'not-prepared',
+        `updateCheck.apply: run ${current.runId} is a one-shot update (this engine has no --prepare); there is nothing to apply — the run restarts the service itself when it switches`,
+      )
+    }
     if (current === null || !isPreparedPhase(current.phase)) {
       throw new RunRefusedError(
         'not-prepared',
@@ -251,12 +327,6 @@ export class UpdateRunController {
         'updateCheck.apply: the staged apply marker is gone; run Update now to prepare again',
       )
     }
-    if (this.isAliveRecord(current)) {
-      throw new RunRefusedError(
-        'already-running',
-        `updateCheck.apply: an update is already running (run ${current.runId})`,
-      )
-    }
     return this.begin('apply', { target: current.target, channel: current.channel })
   }
 
@@ -265,13 +335,13 @@ export class UpdateRunController {
     this.stopWatcher()
   }
 
-  /** Persist a fresh record for `mode`, launch its engine flag, and watch it. */
+  /** Persist a fresh record for `mode`, launch its engine invocation, and watch it. */
   private begin(mode: UpdateRunMode, pin: { target: string; channel: string }): UpdateRunRecord {
     const shim = (this.options.resolveShim ?? resolveShimPath)(this.options.home)
     if (shim === null) {
       throw new RunRefusedError(
         'shim-missing',
-        `updateCheck.${mode === 'prepare' ? 'start' : 'apply'}: the dsh shim was not found (checked the recorded binDir and ${defaultShimPath()})`,
+        `updateCheck.${mode === 'apply' ? 'apply' : 'start'}: the dsh shim was not found (checked the recorded binDir and ${defaultShimPath()})`,
       )
     }
     const home = this.options.home
@@ -282,6 +352,7 @@ export class UpdateRunController {
       target: pin.target,
       channel: pin.channel,
       mode,
+      rung: rungForMode(mode),
       phase: 'starting',
       step: 0,
       steps: RUN_STEP_TOTAL,
@@ -290,7 +361,7 @@ export class UpdateRunController {
       pid: null,
       logPath,
       result: null,
-      rung: 'pending',
+      launcher: 'pending',
       staged: mode === 'apply' ? hasStagedApply(this.prefix) : false,
       logTail: [],
     }
@@ -320,7 +391,7 @@ export class UpdateRunController {
         prefix: this.prefix,
         shim,
         flag: modeFlag(record.mode),
-        ...(record.mode === 'prepare' ? { channel: record.channel } : {}),
+        ...(record.mode === 'apply' ? {} : { channel: record.channel }),
         runId: record.runId,
         logPath: record.logPath,
         pidFile: runPidPath(home),
@@ -341,12 +412,13 @@ export class UpdateRunController {
         reason: `could not launch the updater: ${message}`,
       }
       this.persist(failed)
-      const verb = error instanceof LaunchEnvironmentError ? 'updateCheck.start' : `updateCheck.${record.mode === 'prepare' ? 'start' : 'apply'}`
+      const verb = error instanceof LaunchEnvironmentError ? 'updateCheck.start' : `updateCheck.${record.mode === 'apply' ? 'apply' : 'start'}`
       throw new RunRefusedError('launch-failed', `${verb}: could not launch the updater: ${message}`)
     }
     const started: UpdateRunRecord = {
       ...record,
-      rung: outcome.rung satisfies LaunchRung,
+      launcher: outcome.rung satisfies LaunchRung,
+      rung: rungForMode(record.mode),
       pid: outcome.pid,
       phase: executingPhase(record.mode),
     }

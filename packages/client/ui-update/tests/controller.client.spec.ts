@@ -76,6 +76,7 @@ function runWire(overrides: Partial<UpdateRunWire> = {}): UpdateRunWire {
     target: '0.1.7-enpoi.2.84',
     channel: 'stable',
     mode: 'prepare',
+    rung: 'two-phase',
     phase: 'preparing',
     step: 1,
     steps: 9,
@@ -84,7 +85,7 @@ function runWire(overrides: Partial<UpdateRunWire> = {}): UpdateRunWire {
     pid: 4242,
     logPath: '/home/dsh/update-check/run.log',
     result: null,
-    rung: 'setsid',
+    launcher: 'setsid',
     staged: false,
     logTail: [],
     ...overrides,
@@ -290,6 +291,43 @@ describe('UpdateController actions and their exact wire args', () => {
     await settle()
     expect(fresh.calls.at(-1)).toEqual({ method: 'updateCheck.start', args: {} })
     fresh.controller.dispose()
+  })
+
+  it('retry re-runs the one-shot flow and only replays apply for a two-phase apply record', async () => {
+    const failedOneShot = runWire({ mode: 'one-shot', rung: 'one-shot', phase: 'failed', result: 'failed', staged: false })
+    const oneShot = bench({
+      answers: {
+        'updateCheck.status': availableStatus,
+        'updateCheck.run': failedOneShot,
+        'updateCheck.start': runWire({ mode: 'one-shot', rung: 'one-shot' }),
+      },
+    })
+    oneShot.controller.mount()
+    await settle()
+    oneShot.controller.open()
+    await settle()
+    oneShot.controller.retry()
+    await settle()
+    expect(oneShot.calls.at(-1)).toEqual({ method: 'updateCheck.start', args: {} })
+    oneShot.controller.dispose()
+
+    // Defensive guard: a record claiming `apply` on the one-shot rung (which
+    // the host never writes) still retries through start, never apply.
+    const mixed = bench({
+      answers: {
+        'updateCheck.status': availableStatus,
+        'updateCheck.run': runWire({ mode: 'apply', rung: 'one-shot', phase: 'rolledback', result: 'rolledback', staged: true }),
+        'updateCheck.start': runWire(),
+      },
+    })
+    mixed.controller.mount()
+    await settle()
+    mixed.controller.open()
+    await settle()
+    mixed.controller.retry()
+    await settle()
+    expect(mixed.calls.at(-1)).toEqual({ method: 'updateCheck.start', args: {} })
+    mixed.controller.dispose()
   })
 
   it('surfaces a refused start as the action error', async () => {

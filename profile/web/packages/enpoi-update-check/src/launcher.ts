@@ -71,8 +71,8 @@ export interface LaunchPlanInput {
   readonly prefix: string
   /** Absolute path of the installed `dsh` shim. */
   readonly shim: string
-  /** Engine flag this run drives. */
-  readonly flag: '--prepare' | '--apply'
+  /** Engine invocation this run drives. */
+  readonly flag: '--prepare' | '--apply' | 'one-shot'
   /** Channel for a prepare run; absent for apply. */
   readonly channel?: string
   /** Run id: the unit/label suffix and the update-check directory key. */
@@ -244,8 +244,31 @@ export function resolveRuntime(input: {
 }
 
 /**
- * Compose the runtime environment for one launch: the probe's directory first,
- * then the inherited PATH, then the standard system directories (deduplicated).
+ * Compose the runtime PATH for one launch (or the capability probe): the
+ * probe's directory first, then the inherited PATH, then the standard system
+ * directories (deduplicated).
+ *
+ * @param input - prefix/home/platform and the base environment.
+ * @returns the composed path with its probe and every location consulted; the
+ *   path is null when no runtime resolves.
+ */
+export function resolveRuntimePath(input: {
+  readonly prefix: string
+  readonly homeDir: string
+  readonly baseEnv?: NodeJS.ProcessEnv
+  readonly platform?: NodeJS.Platform
+}): { readonly path: string | null; readonly probe: RuntimeProbe | null; readonly probed: readonly string[] } {
+  const baseEnv = input.baseEnv ?? process.env
+  const { probe, probed } = resolveRuntime(input)
+  if (probe === null) return { path: null, probe: null, probed }
+  const segments = [probe.binDir, baseEnv.PATH ?? '', ...systemBinDirs(input.platform)]
+    .flatMap(value => value.split(delimiter))
+    .filter(segment => segment !== '')
+  return { path: [...new Set(segments)].join(delimiter), probe, probed }
+}
+
+/**
+ * Compose the runtime environment for one launch.
  * Throws when nothing resolved a Node.js runtime.
  *
  * @param input - prefix/home/platform, base environment, and the shim/flag.
@@ -254,24 +277,26 @@ export function resolveRuntime(input: {
  */
 export function resolveLaunchEnvironment(input: LaunchPlanInput): LaunchEnvironment {
   const baseEnv = input.baseEnv ?? process.env
-  const { probe, probed } = resolveRuntime({
+  const resolved = resolveRuntimePath({
     prefix: input.prefix,
     homeDir: input.probeHomeDir ?? homedir(),
     ...(input.baseEnv === undefined ? {} : { baseEnv: input.baseEnv }),
     ...(input.platform === undefined ? {} : { platform: input.platform }),
   })
-  if (probe === null) throw new LaunchEnvironmentError(probed)
-  const segments = [probe.binDir, baseEnv.PATH ?? '', ...systemBinDirs(input.platform)]
-    .flatMap(value => value.split(delimiter))
-    .filter(segment => segment !== '')
-  const path = [...new Set(segments)].join(delimiter)
+  if (resolved.path === null || resolved.probe === null) throw new LaunchEnvironmentError(resolved.probed)
   const env: NodeJS.ProcessEnv = {
     ...baseEnv,
-    PATH: path,
+    PATH: resolved.path,
     [RUN_HOME_ENV]: input.home,
     ...(input.prefix === '' ? {} : { PREFIX: input.prefix }),
   }
-  return { nodePath: probe.binDir === '' ? null : join(probe.binDir, 'node'), source: probe.source, path, env, probed }
+  return {
+    nodePath: resolved.probe.binDir === '' ? null : join(resolved.probe.binDir, 'node'),
+    source: resolved.probe.source,
+    path: resolved.path,
+    env,
+    probed: resolved.probed,
+  }
 }
 
 /** POSIX single-quote one value for embedding in the wrapper script. */
@@ -302,6 +327,9 @@ export function launchWrapper(environment: LaunchEnvironment): string {
 
 /** The wrapper argv that runs the updater: `sh -c <wrapper> dsh-update <log> <pid> <shim> update <flag…>`. */
 export function wrapperArgs(input: LaunchPlanInput, environment: LaunchEnvironment): string[] {
+  const engineArgs = input.flag === '--apply'
+    ? ['--apply']
+    : ['--channel', input.channel ?? 'stable', ...(input.flag === '--prepare' ? ['--prepare'] : [])]
   return [
     '-c',
     launchWrapper(environment),
@@ -310,7 +338,7 @@ export function wrapperArgs(input: LaunchPlanInput, environment: LaunchEnvironme
     input.pidFile,
     input.shim,
     'update',
-    ...(input.flag === '--prepare' ? ['--channel', input.channel ?? 'stable', '--prepare'] : ['--apply']),
+    ...engineArgs,
   ]
 }
 

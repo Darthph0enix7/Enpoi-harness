@@ -56,7 +56,7 @@ Patch row id `enpoi-update-check`:
 | `updateCheck.status` | — | `{ state, current: { version, commit, channel }, latest?: { version, commit, releasedAt, notes }, checkedAt?, error? }` |
 | `updateCheck.checkNow` | — | the status after one check (single-flight with the timer; never rejects) |
 | `updateCheck.dismiss` | `{ request: { version } }` | the status after recording the skip (`gateway/bad-request` when `version` is missing) |
-| `updateCheck.start` | — | the fresh prepare record (`mode: 'prepare'`, `phase: 'starting'`); `gateway/bad-request` when no update is available, a run is active, an update is already prepared, the shim is missing, or the launch fails (including no resolvable Node.js runtime) |
+| `updateCheck.start` | — | the fresh record (`mode: 'prepare'` on a two-phase engine, `mode: 'one-shot'` on an older one, `phase: 'starting'`); `gateway/bad-request` when no update is available, a run is active, an update is already prepared, the shim is missing, or the launch fails (including no resolvable Node.js runtime) |
 | `updateCheck.apply` | — | the fresh apply record (`mode: 'apply'`, `phase: 'applying'`); `gateway/bad-request` when nothing is staged or the launch fails |
 | `updateCheck.run` | — | the current run record, or null when this install never started one |
 
@@ -70,9 +70,25 @@ process executes, `updateCheck.run`.
 
 `updateCheck.start` pins the available target and channel, writes
 `$DSH_HOME/update-check/run.json`, truncates `$DSH_HOME/update-check/run.log`,
-and launches the installed `dsh` shim detached as
-`dsh update --channel <channel> --prepare`; `updateCheck.apply` repeats that
-with `dsh update --apply` against the recorded staged tree.
+and launches the installed `dsh` shim detached. `updateCheck.apply` repeats
+that against the recorded staged tree. An already-prepared update is
+deliberately refused by `start` (`already-prepared`): the staged target is
+pinned by the engine's record, so the offered action is Restart to update.
+
+- **Capability probe.** The two-phase flags only exist in newer engines, so
+  the controller probes the installed shim once per plugin boot
+  (`<shim> update --help`, bounded at 10 s) and caches the answer. Only help
+  output naming `--prepare` counts as supported; a probe failure, timeout, or
+  empty output defaults to UNSUPPORTED because guessing wrong would break the
+  very first update on an old device.
+- **Rungs.** A supported engine gets `dsh update --channel <c> --prepare`
+  (`rung: 'two-phase'`): the run stages the tree and rests at `prepared` until
+  `apply`. An older engine gets the one-shot `dsh update --channel <c>`
+  (`rung: 'one-shot'`): the run includes the switch and service restart
+  itself, never becomes `prepared`, and `updateCheck.apply` refuses it with a
+  clear "nothing to apply" message. `launcher` records the OS rung
+  (`systemd-run|launchctl|setsid|spawn`); `rung` records the engine
+  generation.
 
 - **Launch environment.** The web service's environment is not the login
   environment, so the launcher probes for a Node.js runtime itself — the
@@ -87,13 +103,15 @@ with `dsh update --apply` against the recorded staged tree.
   everywhere: `setsid`, then a bare detached `sh`. Every rung runs the same
   POSIX wrapper, which records the updater's own pid in
   `$DSH_HOME/update-check/run.pid` and redirects stdout+stderr into `run.log`.
-- **Phases.** `starting` → `preparing` → `prepared` (the prepare process
-  exited 0 and left the staged marker; nothing is watched while it waits) →
-  `applying` → `success | failed | rolledback`. The watcher polls the log tail
-  (1 s) and the wrapper pid file: `step`/`steps` from the engine's `[N/9]`
-  markers, `lastLine`, a bounded 40-line `logTail`, and the terminal result
-  lines (`successfully updated` / `FAILED` / `rolled back`).
-- **Restart reconcile.** The apply's switch restarts the service, so the
+- **Phases.** Two-phase: `starting` → `preparing` → `prepared` (the prepare
+  process exited 0 and left the staged marker; nothing is watched while it
+  waits) → `applying` → `success | failed | rolledback`. One-shot:
+  `starting` → `preparing` → `success | failed | rolledback` (never
+  `prepared`). The watcher polls the log tail (1 s) and the wrapper pid file:
+  `step`/`steps` from the engine's `[N/9]` markers, `lastLine`, a bounded
+  40-line `logTail`, and the terminal result lines (`successfully updated` /
+  `Update applied:` / `FAILED` / `rolled back`).
+- **Restart reconcile.** Either rung's switch restarts the service, so the
   watcher dies with it. On plugin boot the record is reconciled against the log
   tail (a terminal line the watcher missed), the staged marker, and the install
   identity: a prepared record with its marker survives untouched; a still-live

@@ -58,8 +58,11 @@ export type UpdateRunPhase =
 /** Terminal run outcomes. */
 export type UpdateRunResult = 'success' | 'failed' | 'rolledback'
 
-/** The engine flag a run drives. */
-export type UpdateRunMode = 'prepare' | 'apply'
+/** The engine invocation a run drives. */
+export type UpdateRunMode = 'prepare' | 'apply' | 'one-shot'
+
+/** Which engine generation a run targets (one-shot updates restart mid-run). */
+export type UpdateRung = 'two-phase' | 'one-shot'
 
 /** `updateCheck.run` / `updateCheck.start` / `updateCheck.apply` record. */
 export interface UpdateRunWire {
@@ -67,6 +70,8 @@ export interface UpdateRunWire {
   readonly target: string
   readonly channel: string
   readonly mode: UpdateRunMode
+  /** Which engine generation the run targets; a one-shot run never prepares. */
+  readonly rung: UpdateRung
   readonly phase: UpdateRunPhase
   readonly step: number
   readonly steps: number
@@ -75,7 +80,8 @@ export interface UpdateRunWire {
   readonly pid: number | null
   readonly logPath: string
   readonly result: UpdateRunResult | null
-  readonly rung: string
+  /** OS launcher rung (`systemd-run|launchctl|setsid|spawn`). */
+  readonly launcher: string
   /** Whether the engine's staged-apply marker exists (prepare landed). */
   readonly staged: boolean
   readonly logTail: readonly string[]

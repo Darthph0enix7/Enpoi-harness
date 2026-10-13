@@ -105,9 +105,9 @@ export class UpdateCheckService extends TypertRemoteService {
    *   the launch fails (including no resolvable Node.js runtime).
    */
   @Remote
-  start(): UpdateRunRecord {
+  async start(): Promise<UpdateRunRecord> {
     try {
-      return this.runs.start()
+      return await this.runs.start()
     } catch (error) {
       if (error instanceof RunRefusedError) {
         throw new RemoteError('gateway/bad-request', error.message, {})

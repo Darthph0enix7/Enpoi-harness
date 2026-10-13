@@ -82,6 +82,7 @@ function bench(options: {
   launch?: (input: LaunchUpdaterInput) => LaunchOutcome
   isAlive?: (pid: number) => boolean
   now?: () => Date
+  probeCapability?: 'supported' | 'unsupported'
 } = {}): Bench {
   const home = options.home ?? scratch()
   const ticks = manualTimers()
@@ -101,6 +102,9 @@ function bench(options: {
     runId: () => 'run42',
     pollIntervalMs: 1_000,
     timers: ticks.timers,
+    probe: async () => (options.probeCapability === 'unsupported'
+      ? { capability: 'unsupported', reason: 'engine help does not list --prepare (exit 0)' }
+      : { capability: 'supported' }),
     ...(options.isAlive === undefined ? {} : { isAlive: options.isAlive }),
     ...(options.now === undefined ? {} : { now: options.now }),
   })
@@ -115,46 +119,47 @@ async function deadPid(): Promise<number> {
 }
 
 describe('UpdateRunController.start (prepare)', () => {
-  it('refuses when no update is available, with a typed reason', () => {
+  it('refuses when no update is available, with a typed reason', async () => {
     for (const status of [
       { state: 'current', current: { version: '0.1.7-enpoi.2.84', commit: 'a', channel: 'stable' } } as UpdateCheckStatus,
       { state: 'unknown', current: { version: '', commit: '', channel: 'stable' } } as UpdateCheckStatus,
       { state: 'available', current: { version: 'x', commit: 'a', channel: 'stable' } } as UpdateCheckStatus,
     ]) {
       const b = bench({ status })
-      expect(() => b.controller.start()).toThrowError(
+      await expect(b.controller.start()).rejects.toThrowError(
         expect.objectContaining({ name: 'RunRefusedError', reason: 'not-available' }) as Error,
       )
     }
   })
 
-  it('refuses when a run is already active or an update is already prepared', () => {
+  it('refuses when a run is already active or an update is already prepared', async () => {
     const live = recordFixture({ record: { phase: 'preparing' } })
     const b = bench({ home: live.home })
     writeLiveRecord(live.home, live.record, process.pid)
-    expect(() => b.controller.start()).toThrowError(expect.objectContaining({ reason: 'already-running' }))
+    await expect(b.controller.start()).rejects.toThrowError(expect.objectContaining({ reason: 'already-running' }))
 
     const preparedHome = scratch()
     stageApply(preparedHome)
     writeLiveRecord(preparedHome, recordFixture({ home: preparedHome, record: { phase: 'prepared', staged: true, step: 7 } }).record, null)
     const prepared = bench({ home: preparedHome })
-    expect(() => prepared.controller.start()).toThrowError(expect.objectContaining({ reason: 'already-prepared' }))
+    await expect(prepared.controller.start()).rejects.toThrowError(expect.objectContaining({ reason: 'already-prepared' }))
   })
 
-  it('pins the target and channel, truncates the log, and launches --prepare', () => {
+  it('pins the target and channel, truncates the log, and launches --prepare', async () => {
     const b = bench()
     writeLog(b.home, 'stale output from an older run\n')
-    const record = b.controller.start()
+    const record = await b.controller.start()
     expect(record).toMatchObject({
       runId: 'run42',
       target: '0.1.7-enpoi.2.84',
       channel: 'stable',
       mode: 'prepare',
+      rung: 'two-phase',
+      launcher: 'setsid',
       phase: 'preparing',
       step: 0,
       steps: 9,
       result: null,
-      rung: 'setsid',
       pid: 4242,
       staged: false,
     })
@@ -172,9 +177,9 @@ describe('UpdateRunController.start (prepare)', () => {
     b.controller.dispose()
   })
 
-  it('records a launch failure with the clear reason and refuses', () => {
+  it('records a launch failure with the clear reason and refuses', async () => {
     const b = bench({ launch: () => { throw new Error('no Node.js runtime found for the updater (probed: PATH)') } })
-    expect(() => b.controller.start()).toThrowError(
+    await expect(b.controller.start()).rejects.toThrowError(
       expect.objectContaining({ name: 'RunRefusedError', reason: 'launch-failed' }),
     )
     const persisted = JSON.parse(readFileSync(runRecordPath(b.home), 'utf8')) as UpdateRunRecord
@@ -188,10 +193,10 @@ describe('UpdateRunController.start (prepare)', () => {
 })
 
 describe('UpdateRunController watcher', () => {
-  it('follows the prepare steps, then rests at prepared when the staged marker appears', () => {
+  it('follows the prepare steps, then rests at prepared when the staged marker appears', async () => {
     const alive = { value: true }
     const b = bench({ isAlive: () => alive.value })
-    b.controller.start()
+    await b.controller.start()
     writeLog(b.home, '[1/9] environment: existing install\n  ✓ cli found\n[4/9] dependencies and build: prebuilt release\n')
     b.ticks.tick()
     const midway = b.controller.run()!
@@ -212,7 +217,7 @@ describe('UpdateRunController watcher', () => {
 
   it('records failed when the prepare exits without staging anything', async () => {
     const b = bench({ isAlive: () => false })
-    b.controller.start()
+    await b.controller.start()
     writeLog(b.home, '[4/9] dependencies and build\nunpacking archive\n')
     writeFileSync(runPidPath(b.home), String(await deadPid()))
     b.ticks.tick()
@@ -222,13 +227,13 @@ describe('UpdateRunController watcher', () => {
     expect(b.ticks.active()).toBe(0)
   })
 
-  it('holds a probably-starting run through the grace window when no wrapper pid exists yet', () => {
+  it('holds a probably-starting run through the grace window when no wrapper pid exists yet', async () => {
     let offset = 0
     const late = bench({
       isAlive: () => false,
       now: () => new Date(Date.now() + offset),
     })
-    late.controller.start()
+    await late.controller.start()
     late.ticks.tick()
     expect(late.controller.run()!.result).toBeNull()
     offset = 60_000
@@ -263,7 +268,8 @@ describe('UpdateRunController.apply', () => {
       phase: 'applying',
       result: null,
       staged: true,
-      rung: 'setsid',
+      rung: 'two-phase',
+      launcher: 'setsid',
     })
     expect(b.launches).toHaveLength(1)
     expect(b.launches[0]).toMatchObject({ flag: '--apply', prefix: home })
@@ -376,11 +382,97 @@ describe('resolveShimPath', () => {
   })
 })
 
+describe('UpdateRunController one-shot rung (engine without --prepare)', () => {
+  it('starts the one-shot invocation when the probe reports unsupported', async () => {
+    const b = bench({ probeCapability: 'unsupported' })
+    const record = await b.controller.start()
+    expect(record).toMatchObject({
+      runId: 'run42',
+      mode: 'one-shot',
+      rung: 'one-shot',
+      phase: 'preparing',
+      result: null,
+      staged: false,
+    })
+    expect(b.launches).toHaveLength(1)
+    expect(b.launches[0]).toMatchObject({ flag: 'one-shot', channel: 'stable', prefix: b.home })
+    b.controller.dispose()
+  })
+
+  it('runs the full step band to success and never rests at prepared', async () => {
+    const b = bench({ probeCapability: 'unsupported' })
+    await b.controller.start()
+    writeLog(b.home, [
+      '[1/9] environment: existing install',
+      '[4/9] dependencies and build: prebuilt release (no local build)',
+      '[7/9] home, dependencies and migrations',
+      '[8/9] switch, service and backfill',
+      '[9/9] self-check',
+      'Enpoi Harness successfully updated!',
+    ].join('\n'))
+    b.ticks.tick()
+    const done = b.controller.run()!
+    expect(done).toMatchObject({ result: 'success', phase: 'success', step: 9, rung: 'one-shot' })
+    expect(done.staged).toBe(false)
+    expect(b.ticks.active()).toBe(0)
+    b.controller.dispose()
+  })
+
+  it('fails a dead one-shot run even when a staged marker exists', async () => {
+    const home = scratch()
+    stageApply(home)
+    const b = bench({ home, probeCapability: 'unsupported', isAlive: () => false })
+    await b.controller.start()
+    writeLog(home, '[4/9] dependencies and build\nunpacking archive\n')
+    writeFileSync(runPidPath(home), String(await deadPid()))
+    b.ticks.tick()
+    expect(b.controller.run()).toMatchObject({ result: 'failed', phase: 'failed' })
+    expect(b.controller.run()!.phase).not.toBe('prepared')
+    b.controller.dispose()
+  })
+
+  it('refuses apply on a one-shot record with the clear one-shot message', () => {
+    const home = scratch()
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: { mode: 'one-shot', rung: 'one-shot', phase: 'failed', result: 'failed', staged: false },
+    }).record, null)
+    const b = bench({ home })
+    let error: unknown
+    try {
+      b.controller.apply()
+    } catch (caught) {
+      error = caught
+    }
+    expect(error).toMatchObject({ name: 'RunRefusedError', reason: 'not-prepared' })
+    expect((error as Error).message).toContain('one-shot')
+    expect((error as Error).message).toContain('nothing to apply')
+  })
+
+  it('probes once per controller and caches the answer', async () => {
+    const home = scratch()
+    const probe = vi.fn(async () => ({ capability: 'supported' as const }))
+    const controller = new UpdateRunController({
+      home,
+      readIdentity: () => ({ channel: 'stable', version: '0.1.7-enpoi.2.81', commit: 'abc1234' }),
+      readStatus: () => available(),
+      resolveShim: () => join(home, 'bin', 'dsh'),
+      resolvePrefix: () => home,
+      timers: manualTimers().timers,
+      probe,
+    })
+    expect(await controller.probe()).toEqual({ capability: 'supported' })
+    expect(await controller.probe()).toEqual({ capability: 'supported' })
+    expect(probe).toHaveBeenCalledTimes(1)
+    controller.dispose()
+  })
+})
+
 describe('liveness seam wiring', () => {
-  it('uses the injected isAlive instead of the real process probe', () => {
+  it('uses the injected isAlive instead of the real process probe', async () => {
     const isAlive = vi.fn(() => true)
     const b = bench({ isAlive })
-    b.controller.start()
+    await b.controller.start()
     b.ticks.tick()
     expect(isAlive).toHaveBeenCalledWith(4242)
     b.controller.dispose()
@@ -400,6 +492,8 @@ function recordFixture(options: { home?: string; record?: Partial<UpdateRunRecor
       target: '0.1.7-enpoi.2.84',
       channel: 'stable',
       mode: 'prepare',
+      rung: 'two-phase',
+      launcher: 'setsid',
       phase: 'preparing',
       step: 0,
       steps: 9,
@@ -408,7 +502,6 @@ function recordFixture(options: { home?: string; record?: Partial<UpdateRunRecor
       pid: null,
       logPath: runLogPath(home),
       result: null,
-      rung: 'setsid',
       staged: false,
       logTail: [],
       ...options.record,
