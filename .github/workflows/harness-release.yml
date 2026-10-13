@@ -188,6 +188,14 @@ jobs:
       - name: Build official harness (includes build:web)
         run: pnpm run build:official
 
+      # Every workspace package a shipped composition mounts by name must be in
+      # the CLI's dependency closure: a miss imports fine in a checkout (pnpm
+      # links everything) and fails on prebuilt installs — the 2.78
+      # feedback-submit/-triage failure. This gate reproduces the runtime
+      # resolution against the built tree.
+      - name: Verify mounted packages resolve in the installation closure
+        run: node scripts/verify-mounted-packages.mjs
+
       - name: Ensure profile plugin bundles
         env:
           HARNESS_ROOT: ${{ github.workspace }}

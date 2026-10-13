@@ -2049,6 +2049,15 @@ importers:
       '@deepseek-ai/dsh-deepseek-llm-api-extensions':
         specifier: workspace:*
         version: link:../../llm/deepseek-llm-api-extensions
+      '@deepseek-ai/dsh-feedback-collect':
+        specifier: workspace:*
+        version: link:../../feedback/feedback-collect
+      '@deepseek-ai/dsh-feedback-submit':
+        specifier: workspace:*
+        version: link:../../feedback/feedback-submit
+      '@deepseek-ai/dsh-feedback-triage':
+        specifier: workspace:*
+        version: link:../../feedback/feedback-triage
       '@deepseek-ai/dsh-fs-local':
         specifier: workspace:*
         version: link:../../fs/fs-local
