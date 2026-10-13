@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-主机侧更新检查（docs/plan/ui-update-manifest.md P2）：读取按渠道划分的更新目录，与本机安装记录的版本比较，并通过 `updateCheck` Remote 命名空间暴露结果。仅供告知——不下载、不切换、不自动更新；用户触发的重启流程属于后续阶段。
+主机侧更新检查与应用内更新运行（docs/plan/ui-update-manifest.md P2 + P4）：读取按渠道划分的更新目录，与本机安装记录的版本比较，并通过 `updateCheck` Remote 命名空间暴露结果。检查仅供告知；运行只由显式的 `updateCheck.start` 启动——操作者的 `[立即更新]` 点击就是重启决定，之后运行自行推进到切换与重启。
 
 ## 功能
 
@@ -35,8 +35,18 @@
 | `updateCheck.status` | — | `{ state, current: { version, commit, channel }, latest?: { version, commit, releasedAt, notes }, checkedAt?, error? }` |
 | `updateCheck.checkNow` | — | 一次检查之后的状态（与定时器共享单次飞行；永不拒绝） |
 | `updateCheck.dismiss` | `{ version }` | 记录跳过后状态（`version` 缺失时返回 `gateway/bad-request`） |
+| `updateCheck.start` | — | 新的运行记录（`phase: 'starting'`）；无可用更新、已有运行进行中、shim 缺失或启动失败时返回 `gateway/bad-request` |
+| `updateCheck.run` | — | 当前运行记录；本机从未启动过运行时为 null |
 
-该插件系列没有客户端推送；客户端轮询 `updateCheck.status`。任何推送由 P3 UI 界面负责。
+该插件系列没有客户端推送；客户端轮询 `updateCheck.status`，运行进行中时另轮询 `updateCheck.run`。
+
+## 运行更新（P4）
+
+`updateCheck.start` 固定可用目标与渠道，写入 `$DSH_HOME/update-check/run.json`，清空 `$DSH_HOME/update-check/run.log`，并以 `dsh update --channel <channel>` 分离式启动已安装的 `dsh` shim：
+
+- Linux：`systemd-run --user --unit=dsh-update-<runId> --collect --wait`；macOS：`launchctl submit -l com.dsh.update.<runId>`；各处兜底：`setsid`，最后是裸的分离式 `sh`。所有阶梯都运行同一个 POSIX 包装脚本，它把更新器自身的 pid 记入 `$DSH_HOME/update-check/run.pid`，并把 stdout+stderr 重定向进 `run.log`。
+- 观察者每秒轮询日志末尾并刷新记录：从引擎的 `[N/9]` 标记解析 `step`/`steps`、`lastLine`、受限的 40 行 `logTail`，以及按文档化步骤区间表得到的 `phase`（1–2 fetch、3 verify、4 unpack、5 deps、6–7 profile、8 switch、9 selfcheck）。终局结果行设置 `result`（`success` / `failed` / `rolledback`）；没有结果行的退出记为 `failed`，原因是最后一行。
+- 切换时服务会重启，观察者随之消亡。插件启动时对记录做对账：更新器仍存活则恢复观察；安装版本已等于运行目标则记 `success`；其余情况记 `failed` 并附明确原因。对账是幂等的，且从不删除日志（界面读取其末尾）。
 
 ## 挂载位置
 

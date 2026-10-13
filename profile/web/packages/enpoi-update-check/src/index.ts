@@ -1,6 +1,6 @@
 /**
  * enpoi-update-check — host-side update check (docs/plan/ui-update-manifest.md
- * P2).
+ * P2) and the in-app update run (P4).
  *
  * What it owns:
  * - The periodic catalog check: a jittered boot check (~30 s base) and a
@@ -9,14 +9,19 @@
  * - The install-vs-newest comparison and the `unknown | current | available |
  *   dismissed` status, exposed as the `updateCheck` Typert Remote namespace
  *   (`status`, `checkNow`, `dismiss`).
+ * - The one update run: `updateCheck.start` pins the target and launches the
+ *   installed shim detached (`updateCheck/run` reports the record while the
+ *   watcher refreshes it); a boot reconcile resolves a run whose watcher died
+ *   with the previous service instance.
  * - The persisted per-install skip record
  *   (`$DSH_HOME/update-check/dismissed.json`); a newer catalog version re-arms.
  *
- * Advisory only: no download, no switch, no auto-update. Every failure is
- * fail-soft — the state stays `unknown` (or keeps its last successful
- * comparison) and at most one debug log line records the attempt. There is no
- * client push in this profile plugin family, so status is pollable through the
- * Remote namespace only; the P3 UI surface will own any push.
+ * The check is advisory; the run is operator-triggered exactly once, at the
+ * [Update now] click. Every failure is fail-soft — the check keeps its last
+ * successful comparison, and a failed run leaves a readable record plus log
+ * tail for Retry. There is no client push in this profile plugin family, so
+ * status and run are pollable through the Remote namespace only; the P3 UI
+ * surface owns the polling cadence.
  *
  * @module dsh-enpoi-update-check
  */
@@ -26,6 +31,7 @@ import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import Schema from '@deepseek-ai/schemastery'
 import { fetchCatalog, readInstallIdentity } from './catalog.js'
 import { UpdateCheckService } from './remote.js'
+import { UpdateRunController } from './run-service.js'
 import { UpdateCheckCore, startUpdateCheckSchedule } from './service.js'
 import { readDismissedVersion, writeDismissedVersion } from './store.js'
 
@@ -109,9 +115,33 @@ export function apply(ctx: Context, config: Config = {}): void {
       onFailure: message => { ctx.logger.debug(`enpoi-update-check: ${message}`) },
     })
 
+    // The run controller owns the one active `dsh update` process. It
+    // re-reads the install identity at call time: a run that switched the
+    // tree while this service was restarting must reconcile against the NEW
+    // state, not the identity captured at mount.
+    const runs = new UpdateRunController({
+      home,
+      readIdentity: () => readInstallIdentity(home),
+      readStatus: () => core.snapshot(),
+      onUpdate: record => {
+        ctx.logger.debug(`enpoi-update-check: run ${record.runId} phase=${record.phase} step=${String(record.step)}/${String(record.steps)}${record.result === null ? '' : ` result=${record.result}`}`)
+      },
+    })
+    ctx.effect(() => () => { runs.dispose() }, 'enpoi-update-check.run-watcher')
+    // Boot reconcile: resolve a run whose watcher died with the previous
+    // service instance (mid-run restart). Idempotent and log-preserving.
+    try {
+      const reconciled = runs.reconcile()
+      if (reconciled !== null) {
+        ctx.logger.info(`enpoi-update-check: reconciled run ${reconciled.runId} (phase=${reconciled.phase}${reconciled.result === null ? '' : ` result=${reconciled.result}`})`)
+      }
+    } catch (error) {
+      ctx.logger.debug(`enpoi-update-check: run reconcile failed — ${errorText(error)}`)
+    }
+
     // The status surface exists even when checks are disabled, so the operator
     // can still read the last result and call checkNow explicitly.
-    ctx.plugin(UpdateCheckService, { core })
+    ctx.plugin(UpdateCheckService, { core, runs })
 
     if (config.enabled !== false) {
       const stop = startUpdateCheckSchedule({
@@ -142,7 +172,60 @@ export {
   type CatalogEntry,
   type InstallIdentity,
 } from './catalog.js'
+export {
+  commandOnPath,
+  defaultShimPath,
+  launchPlan,
+  launchUpdater,
+  LAUNCH_WRAPPER,
+  RUN_HOME_ENV,
+  wrapperArgs,
+  type LaunchChild,
+  type LaunchOutcome,
+  type LaunchPlanInput,
+  type LaunchPlanStep,
+  type LaunchRung,
+  type LaunchSpawn,
+  type LaunchUpdaterInput,
+} from './launcher.js'
 export { UPDATE_CHECK_NAMESPACE, UpdateCheckService, type DismissRequest, type UpdateCheckServiceOptions } from './remote.js'
+export {
+  effectivePid,
+  isProcessAlive,
+  isRunActive,
+  LOG_TAIL_BYTES,
+  LOG_TAIL_LINES,
+  parseRunLog,
+  phaseForResult,
+  phaseForStep,
+  readRunLog,
+  readRunPid,
+  readRunRecord,
+  reconcileRunRecord,
+  resultFromLine,
+  RUN_STEP_TOTAL,
+  runLogPath,
+  runPidPath,
+  runRecordPath,
+  sameRunRecord,
+  STEP_PHASES,
+  targetReached,
+  updateCheckDir,
+  writeRunRecord,
+  type ParsedRunLog,
+  type UpdatePhase,
+  type UpdateRunRecord,
+  type UpdateRunResult,
+} from './run.js'
+export {
+  resolveShimPath,
+  RunRefusedError,
+  RUN_START_GRACE_MS,
+  UpdateRunController,
+  type RunRefusalReason,
+  type RunTimers,
+  type UpdateRunControllerOptions,
+} from './run-service.js'
 export {
   FIRST_CHECK_DELAY_MS,
   jitteredDelay,

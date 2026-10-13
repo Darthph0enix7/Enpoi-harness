@@ -1,6 +1,6 @@
 # UI Update Manifest + In-App Updates — Plan
 
-Status: P1 (catalog) + P2 (host check) implemented on `local/serverlocal` (2026-10-13); P3+ proposed. The five owner decisions are resolved in §9.
+Status: P1 (catalog), P2 (host check), P3 (client UI), and a minimal P4 (run start + progress + reconnect, without the prepare-then-apply split) are implemented on `local/serverlocal` (2026-10-13). The five owner decisions are resolved in §9; the two-phase split of decision 2 remains the recorded future refinement (§5), and the shipped run reconciles across the service restart it causes (§5, reconcile).
 
 ## 1. Goal
 
@@ -75,28 +75,13 @@ wrong notes or point at a version whose real release assets fail verification.
 
 The engine never runs in the browser and never inside the process it replaces.
 
-- Trigger: the UI calls `update/start`; the host validates (no run active, disk ok),
-  then **launches a detached runner**:
-  - Linux: `systemd-run --user --unit=dsh-update-<ts>` (transient, survives the web restart).
-  - macOS: `launchd` transient job (the installer already owns launchd handling); fallback
-    `setsid nohup` where neither exists.
-  - The runner = the existing installer in its JSON mode
-    (`DSH_JSON=1 scripts/update.sh --channel …`), unchanged engine, or `--no-prebuilt`
-    when the user asks for a source build.
-- **Two-phase runner (from decision 2):** the runner first prepares the update fully in the background — fetch, verify, unpack, deps, profile — while the user keeps working; preparation alone never switches. When the prepared tree is complete the run state becomes `ready`, and the UI offers a user-triggered **`Restart to update`**; only that action performs the switch + service restart, so the soft lock covers the switch → reconnect window rather than the whole download.
-- **Progress contract:** the runner writes `harness/update-state.json` at every substep
-  and a line per event to a run log:
-  ```jsonc
-  { "runId": "…", "phase": "fetch|verify|unpack|deps|profile|switch|selfcheck|health|done|failed|rolledback",
-    "step": 3, "steps": 9, "bytesTotal": 319651879, "bytesDone": 137000000,
-    "message": "Unpacking prebuilt release", "startedAt": …, "pid": …, "result": "…" }
-  ```
-  The host streams this (poll 1 s while a run is active) to clients via the existing
-  push channel; the dialog renders phase + bar from `bytesDone/bytesTotal` or step N/9.
-- **Survival:** closing the browser changes nothing (the runner is a unit/process of its
-  own). If the *service* restarts mid-run, the runner keeps going and its state file is
-  read again after reconnect. A stale-run lock (pid + startedAt) prevents double runs;
-  a crashed runner leaves `failed` state with the log tail for **Retry**.
+- Trigger: the UI calls `updateCheck/start`; the host validates (an update is available, no run active, the shim is present), writes `run.json`, and **launches a detached runner**:
+  - Linux: `systemd-run --user --unit=dsh-update-<runId> --collect --wait` (transient, survives the web restart).
+  - macOS: `launchctl submit -l com.dsh.update.<runId>`; fallback `setsid`, then a bare detached `sh`, everywhere.
+  - The runner = the installed `dsh` shim (`<binDir>/dsh update --channel <channel>`), unchanged engine. Every rung shares one POSIX wrapper that records the updater pid in `run.pid` and redirects stdout+stderr into `run.log`.
+- **Two-phase runner (from decision 2): NOT implemented.** The shipped minimal P4 launches the runner directly from `updateCheck.start` — the [Update now] click IS the user's restart decision — and the run proceeds to switch+restart on its own. The prepare-then-apply split below remains the recorded refinement: the runner first prepares the update fully in the background — fetch, verify, unpack, deps, profile — while the user keeps working; preparation alone never switches. When the prepared tree is complete the run state becomes `ready`, and the UI offers a user-triggered **`Restart to update`**; only that action performs the switch + service restart, so the soft lock covers the switch → reconnect window rather than the whole download.
+- **Progress contract (implemented):** the shipped watcher derives progress from the runner's `[N/9]` step lines in `$DSH_HOME/update-check/run.log` plus the terminal result lines (`successfully updated` / `FAILED` / `rolled back`), and persists the pollable record to `$DSH_HOME/update-check/run.json` (`{runId, target, channel, phase, step, steps, lastLine, startedAt, pid, logPath, result, rung, logTail, finishedAt?, reason?}`). The step-band table is `1–2 fetch, 3 verify, 4 unpack, 5 deps, 6–7 profile, 8 switch, 9 selfcheck`, with `done`/`failed`/`rolledback` terminal phases. The originally proposed engine-side `harness/update-state.json` with byte counts is not consumed; byte-level progress stays deferred, and clients poll `updateCheck/run` (the UI polls ~2 s only while a run is active) instead of a host push.
+- **Survival:** closing the browser changes nothing (the runner is a unit/process of its own); if the *service* restarts mid-run, the runner keeps going and its state file is read again after reconnect. The shipped reconcile is idempotent and log-preserving: a still-live updater (its wrapper pid file) resumes the watcher; an install version equal to the run's target records `success`; any other dead run is `failed` with an explicit reason. A stale-run lock (pid + startedAt) prevents double runs; a crashed runner leaves `failed` state with the log tail for **Retry**.
 - **The restart window:** the engine switches the tree, restarts `dsh-web`, self-checks
   and rolls back on failure. The UI: soft-lock from `switch` until reconnect — an overlay
   "Updating — the UI will reload automatically", then reconnect + auto-reload with the
@@ -134,11 +119,9 @@ The engine never runs in the browser and never inside the process it replaces.
 
 1. **P1 — Catalog** (implemented): `scripts/update-catalog.mjs` + tests; the `harness-release.yml` catalog job publishes both channel files and the asset pair for every published release (self-healing on re-runs); the schema above and the 40-release cap are enforced. (Small.)
 2. **P2 — Host check** (implemented): `enpoi-update-check` profile plugin (interval, fetch, compare, `updateCheck` remote, dismissed store); unit tests with a stubbed catalog. (Small-medium.)
-3. **P3 — Indicator + dialog**: `ui-update` chrome pill + dialog with changelog;
-   i18n + snapshots. (Medium.)
-4. **P4 — Run + progress**: detached runner launcher + `update-state.json` contract + host streaming + progress strip + reconnect/reload; two-phase per decision 2 (prepare in the background → `ready` → user-triggered `Restart to update` performs switch + service restart). (Medium-large; the core.)
-5. **P5 — Polish**: lock overlay, skip-list, failure surfaces,
-   docs; macOS launchd path verification. (Medium.)
+3. **P3 — Indicator + dialog** (implemented): `ui-update` chrome pill in the frame-wide `shell.overlay` + dialog with changelog; i18n en+zh; controller tests, i18n gate, client build. (Medium.)
+4. **P4 — Run + progress** (implemented, minimal): detached runner launcher (systemd-run / launchctl / setsid / spawn ladder) + `run.json` watcher + progress strip + reconnect/reload, and the boot reconcile across the service restart. The two-phase per decision 2 (prepare in the background → `ready` → user-triggered `Restart to update`) remains the recorded future refinement and is listed in the `ui-update` README as deferred work. (Medium-large; the core.)
+5. **P5 — Polish** (partly implemented with P4): failure surface, skip-list, docs; remaining: the dedicated lock overlay, settings knobs (frequency/channel/auto-check), and macOS launchd path verification.
 
 ## 9. Owner decisions (resolved 2026-10-13)
 

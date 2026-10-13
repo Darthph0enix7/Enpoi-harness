@@ -1,0 +1,164 @@
+/* Frame-wide update indicator. The shell overlay layer is click-through, so
+   only the pill opts into the pointer. The dialog is portaled by Modal. */
+
+.pill {
+  position: fixed;
+  right: 16px;
+  /* Sits below the system-analysis chip's 1050 layer when both are visible. */
+  bottom: 16px;
+  z-index: 1040;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-raised);
+  border: 1px solid var(--dsw-alias-border-secondary);
+  border-radius: var(--dsw-radius-full, 999px);
+  box-shadow: var(--dsw-shadow-lv2);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.pill:hover {
+  color: var(--dsw-alias-brand-primary);
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.pill[data-dsh-update-indicator='updating'] {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.pillText {
+  max-width: min(280px, calc(100vw - 64px));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.versions {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.channel {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.progressHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.bar {
+  height: 6px;
+  overflow: hidden;
+  background: var(--dsw-alias-bg-quaternary);
+  border-radius: 3px;
+}
+
+.fill {
+  height: 100%;
+  background: var(--dsw-alias-brand-primary);
+  border-radius: 3px;
+  transition: width 300ms ease;
+}
+
+.lastLine,
+.log {
+  max-height: 160px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  font-family: var(--dsw-font-mono, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--dsw-alias-bg-quaternary);
+  border-radius: var(--dsw-radius-sm);
+}
+
+.log {
+  max-height: 220px;
+}
+
+.warning {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.failureTitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-state-error-primary, var(--dsw-alias-label-primary));
+}
+
+.reason {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.logHead {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.success {
+  margin: 0;
+  font-size: 13px;
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.notes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 240px;
+  margin: 0;
+  padding: 0 0 0 18px;
+  overflow: auto;
+  font-size: 13px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--dsw-alias-state-error-primary);
+}

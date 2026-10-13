@@ -3,8 +3,8 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write profile/web/packages/enpoi-update-check/README.md
 /dsh-enpoi-update-check:
-  en: 4a11a58a5c1288b6
-  zh: 75d2796195984724
+  en: 7171da08f204e654
+  zh: a19b44c34d5b2c0e
 /dsh-enpoi-update-check/what-it-does:
   en: bd62435be36c4c26
   zh: 2e734c64fe0daf52
@@ -12,8 +12,11 @@
   en: 8722f2d43a9e3871
   zh: 094cf31004de54a9
 /dsh-enpoi-update-check/remote-surface:
-  en: 9adf10238feb4f3a
-  zh: b3fd2481bfb86d3a
+  en: 14565fb0154c6285
+  zh: a65dcb4f2d1c3b75
+/dsh-enpoi-update-check/running-the-update-p4:
+  en: 01093798efb3c261
+  zh: 8c42ea886cfb4aea
 /dsh-enpoi-update-check/where-it-is-mounted:
   en: 21561b45a0a9ee15
   zh: 00a5ff8c92c0f37b

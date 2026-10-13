@@ -121,6 +121,7 @@
     "@deepseek-ai/dsh-client-ui-theme": "workspace:*",
     "@deepseek-ai/dsh-client-ui-tool": "workspace:*",
     "@deepseek-ai/dsh-client-ui-trajectory": "workspace:*",
+    "@deepseek-ai/dsh-client-ui-update": "workspace:*",
     "@deepseek-ai/dsh-client-ui-user-questions": "workspace:*",
     "@deepseek-ai/dsh-client-ui-workflow-run": "workspace:*",
     "@deepseek-ai/dsh-client-ui-workspace": "workspace:*",
