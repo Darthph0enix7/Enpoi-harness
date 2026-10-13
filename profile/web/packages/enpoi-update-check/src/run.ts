@@ -147,12 +147,18 @@ function plain(line: string): string {
  * case-sensitive on purpose: the engine prints `FAILED`/`✗ ERROR:` for a hard
  * failure, while lowercase "failed" appears inside non-terminal warnings
  * ("profile dependency refresh failed").
+ *
+ * Success lines: the one-shot flow's `Enpoi Harness successfully updated!`
+ * summary, an apply's `Update applied: … — current → …`, and the no-op
+ * `dsh is already up to date: …`. `Update prepared: …` is deliberately NOT a
+ * result: a prepare run's witness is the staged-apply marker, so its line must
+ * not turn the record terminal.
  * @param line - plain (ANSI-stripped) log line.
  * @returns the result the line announces, or null.
  */
 export function resultFromLine(line: string): UpdateRunResult | null {
   if (/rolled back/i.test(line)) return 'rolledback'
-  if (/successfully updated|already up to date/i.test(line)) return 'success'
+  if (/successfully updated|already up to date|update applied:/i.test(line)) return 'success'
   if (/\bFAILED\b|✗\s*ERROR:/.test(line)) return 'failed'
   return null
 }

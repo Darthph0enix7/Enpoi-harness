@@ -413,7 +413,7 @@ function plain(line) {
 }
 function resultFromLine(line) {
   if (/rolled back/i.test(line)) return "rolledback";
-  if (/successfully updated|already up to date/i.test(line)) return "success";
+  if (/successfully updated|already up to date|update applied:/i.test(line)) return "success";
   if (/\bFAILED\b|✗\s*ERROR:/.test(line)) return "failed";
   return null;
 }

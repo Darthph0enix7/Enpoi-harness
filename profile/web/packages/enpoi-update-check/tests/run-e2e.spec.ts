@@ -80,7 +80,7 @@ const PHASED_SHIM = [
   '  echo "  ✓ current → 0.1.7-enpoi.2.84"',
   '  echo "[9/9] self-check"',
   '  echo "  ✓ self-check passed"',
-  '  echo "Enpoi Harness successfully updated!"',
+  '  echo "Update applied: 0.1.7-enpoi.2.84 (stable channel) — current → 0.1.7-enpoi.2.84"',
   '  rm -f "$PREFIX/harness/.staged-apply.json"',
   '  exit 0',
   'fi',
@@ -172,7 +172,7 @@ describe('simulated two-phase update (fake updater, real launcher + watcher)', (
     controller.dispose()
 
     expect(done).toMatchObject({ result: 'success', phase: 'success', step: 9, mode: 'apply' })
-    expect(done.logTail).toContain('Enpoi Harness successfully updated!')
+    expect(done.logTail.some(line => line.startsWith('Update applied:'))).toBe(true)
     expect(done.logTail.some(line => line.includes('[8/9] switch'))).toBe(true)
     expect(hasStagedApply(home)).toBe(false)
     // Every phase the two-phase contract names was observed in order.

@@ -139,12 +139,18 @@ describe('parseRunLog', () => {
   it.each([
     ['Enpoi Harness successfully updated!', 'success'],
     ['dsh is already up to date: 0.1.7-enpoi.2.84 (stable channel)', 'success'],
+    ['Update applied: 0.1.7-enpoi.2.84 (stable channel) — current → 0.1.7-enpoi.2.84', 'success'],
     ['dsh update FAILED; rolled back to 0.1.7-enpoi.2.81 (previous tree self-check: ok)', 'rolledback'],
     ['✗ ERROR: no install state at /home/dsh/harness/install-state.json', 'failed'],
     ['dsh update FAILED; rolled back to x, but the user-file restore did NOT complete.', 'rolledback'],
   ] as const)('classifies %j as %s', (line, result) => {
     expect(resultFromLine(line)).toBe(result)
     expect(parseRunLog(`[9/9] self-check\n${line}\n`).result).toBe(result)
+  })
+
+  it('never treats the prepare completion line as a terminal result', () => {
+    expect(resultFromLine('Update prepared: 0.1.7-enpoi.2.84 (stable channel) — nothing was switched or restarted.')).toBeNull()
+    expect(parseRunLog('[7/9] home, dependencies and migrations\nUpdate prepared: 0.1.7-enpoi.2.84 (stable channel) — nothing was switched or restarted.\n').result).toBeNull()
   })
 
   it('lets the last result line win and keeps lowercase warnings non-terminal', () => {
