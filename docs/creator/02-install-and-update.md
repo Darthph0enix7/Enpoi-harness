@@ -47,7 +47,9 @@ Read this file to install a machine, move it between channels, update it, or res
 | `--forget PATH` | unset | update-time CLI parity for tombstones: record PATH in `$DSH_HOME/update/tombstones.txt` (repeatable; relative paths only; the file stays canonical) |
 | `--accept-shipped PATH` | unset | update-time CLI parity for pins: remove PATH's pin from `$DSH_HOME/update/pins.yaml` and take the shipped file (restored now when the pristine archive has it, else by the next update; repeatable) |
 | `--update` | off | mechanical update mode (same engine) |
-| `--dry-run` | off | print the plan, write nothing |
+| `--prepare` | off | with `--update`: run the full flow through profile/dependencies/migrations, record the staged tree in `$PREFIX/harness/.staged-apply.json`, and exit 0 without switching `current` or restarting anything; idempotent for the version already staged, a newer target replaces the record |
+| `--apply` | off | with `--update`: switch to the tree recorded by `.staged-apply.json`, restart the service, self-check, health-proof, prune, and delete the record; refuses with exit 1 when nothing is staged and keeps the record after any failure so the UI can retry |
+| `--dry-run` | off | print the plan, write nothing (not valid with `--apply`) |
 | `--force` / `--force-downgrade` | off | reinstall same version / allow version decrease |
 | `--write-rc` | off | append the PATH line to the detected shell's startup files (see §1) |
 | `--json` | off | one machine-readable status object on stdout |

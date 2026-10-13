@@ -119,6 +119,8 @@ FORCE=0
 FORCE_DOWNGRADE=0
 JSON_OUT=0
 UPDATE_MODE=0
+UPDATE_PREPARE=0
+UPDATE_APPLY=0
 REPAIR_MODE=0
 UNINSTALL_MODE=0
 PURGE=0
@@ -630,6 +632,17 @@ Options:
                       (repeatable; relative paths only)
   --update            mechanical update: install, migrate, switch, self-check,
                       roll back to the previous versioned dir on failure
+  --prepare           with --update: run the full flow through profile,
+                      dependencies, and migrations, then record the staged
+                      tree in $PREFIX/harness/.staged-apply.json and exit 0
+                      WITHOUT switching current or restarting anything
+                      (idempotent for the version already staged; a newer
+                      target replaces the record)
+  --apply             with --update: switch to the tree recorded by
+                      $PREFIX/harness/.staged-apply.json, restart the service,
+                      self-check, health-proof, prune, and delete the record.
+                      Refuses (exit 1) when nothing is staged; the record
+                      survives a failure so the UI can retry
   --repair            verify the install's invariants (version dirs, current,
                       shim, profile tree, services, settings, ports) and fix the
                       safe ones; report the rest with the exact remedy command
@@ -727,6 +740,8 @@ while [ "$#" -gt 0 ]; do
     --accept-shipped=*) ACCEPT_SHIPPED_PATHS="${ACCEPT_SHIPPED_PATHS:+$ACCEPT_SHIPPED_PATHS
 }${arg#*=}"; shift;;
     --update) UPDATE_MODE=1; shift;;
+    --prepare) UPDATE_PREPARE=1; shift;;
+    --apply) UPDATE_APPLY=1; shift;;
     --repair) REPAIR_MODE=1; shift;;
     --clean) CLEAN_MODE=1; shift;;
     --uninstall) UNINSTALL_MODE=1; shift;;
@@ -6423,7 +6438,12 @@ rollback() { # prev backup failed_version
   else
     restart_service
   fi
-  restore_user_files "$backup" || restore_rc=1
+  # An empty backup is legal (two-phase apply: prepare already owns the
+  # migrated home, and rolling the tree back also rolls the runtime back), and
+  # restore_user_files must never be handed a path it did not record.
+  if [ -n "$backup" ]; then
+    restore_user_files "$backup" || restore_rc=1
+  fi
   # One more reload after the user-file restore (warn-only): the job may still
   # carry the failed tree's paths or a rewritten plist, and the service must be
   # left running the restored tree. The in-session path defers to the
@@ -6667,6 +6687,69 @@ EOF
   return 0
 }
 
+# The pid embedded in a scratch artifact's own name (.download-<pid>.tar.gz,
+# .release-<x>-<pid>, .update-<x>-<pid>), with the archive suffixes stripped
+# first; empty when the name carries no usable token.
+artifact_owner_pid() { # path -> pid or empty
+  local name pid
+  name="$(basename "$1")"
+  case "$name" in *.sha256) name="${name%.sha256}";; esac
+  case "$name" in *.tar.gz) name="${name%.tar.gz}";; *.tar) name="${name%.tar}";; esac
+  case "$name" in *-*) : ;; *) printf ''; return 0;; esac
+  pid="${name##*-}"
+  case "$pid" in ''|*[!0-9]*) printf '';; *) printf '%s' "$pid";; esac
+}
+
+# A scratch artifact is live when its .owner record names a live pid, or its
+# own name carries a live pid; an artifact with no pid token at all is stale by
+# construction. (scratch_owner_alive stays the stricter path for staging
+# directories, whose names must never be parsed for pids; these flat files
+# always embed theirs.)
+artifact_owner_alive() { # path -> 0 when a live owner exists
+  local path="$1" pid owner
+  owner="$path.owner"
+  if [ -f "$owner" ]; then
+    pid="$(cat "$owner" 2>/dev/null || true)"
+    case "$pid" in ''|*[!0-9]*) return 1;; esac
+    kill -0 "$pid" 2>/dev/null && return 0
+    return 1
+  fi
+  pid="$(artifact_owner_pid "$path")"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# Stale harness-root update artifacts from crashed runs: partial downloads
+# (.download-<pid>.tar.gz [+ .sha256]) and delta scratch (.release-*,
+# .update-*) whose owner is gone. The keep set here is NONE by design — the
+# intentional bounded keeps live elsewhere: release archives under .cache/
+# (newest 2, pruned just above) and .last-update-* run reports (newest 3 runs,
+# prune_update_reports). Never touched: current, the live version tree,
+# .staged-apply.json (the two-phase record), and .backup-* (its own newest-5
+# policy). Byte savings are reported, not just the count.
+prune_orphaned_update_artifacts() {
+  local h="$PREFIX/harness" p base freed_kb=0 removed=0 sz
+  [ -d "$h" ] || return 0
+  for p in "$h"/.download-* "$h"/.release-* "$h"/.update-*; do
+    [ -e "$p" ] || continue
+    base="$(basename "$p")"
+    # The update lock is live state, not scratch: the sweep runs while holding
+    # it, and unlinking it would let a second update acquire a different inode.
+    case "$base" in .download-cache*|.update.lock|.update.lock.d) continue;; esac
+    artifact_owner_alive "$p" && continue
+    sz="$(du -sk "$p" 2>/dev/null | awk '{print $1}')"
+    sz="${sz:-0}"
+    if rm -rf -- "$p" "$p.owner" 2>/dev/null; then
+      removed=$((removed + 1))
+      freed_kb=$((freed_kb + sz))
+      log "pruned stale update artifact $base (freed ${sz}KB)"
+    else
+      warn "could not prune stale update artifact $base"
+    fi
+  done
+  [ "$removed" -gt 0 ] && log "pruned $removed stale update artifact(s) (freed $(human_bytes $((freed_kb * 1024))))"
+  return 0
+}
+
 # Successful-update disk hygiene: bounded release-archive cache (newest 2) and
 # bounded backup sets (newest 5) under the harness and the live profile.
 prune_update_artifacts() {
@@ -6691,6 +6774,7 @@ prune_update_artifacts() {
     done < <(ls -1t "$PREFIX/harness/.cache"/$pattern 2>/dev/null)
   done
   prune_update_reports
+  prune_orphaned_update_artifacts
   for group in "$PREFIX/harness" "$PROFILE_DIR"; do
     [ -d "$group" ] || continue
     i=0
@@ -6741,13 +6825,13 @@ cleanup_stale_artifacts() {
     rm -rf -- "$p" 2>/dev/null && count=$((count + 1))
   done
 
-  # 2. Clean temporary downloads (.download-*) where process is dead
+  # 2. Clean temporary downloads (.download-*) where process is dead.
+  # The suffix-aware owner check keeps a live `.download-<pid>.tar.gz` while a
+  # leftover like `.download-21919.tar.gz` (owner long gone) is reaped.
   for p in "$PREFIX/harness"/.download-*; do
     [ -e "$p" ] || continue
     case "$(basename "$p")" in .download-cache*) continue;; esac
-    pid="${p##*-}"
-    case "$pid" in ''|*[!0-9]*) pid="";; esac
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then continue; fi
+    artifact_owner_alive "$p" && continue
     rm -rf -- "$p" 2>/dev/null && count=$((count + 1))
   done
 
@@ -6957,6 +7041,56 @@ acquire_update_lock() {
   return 0
 }
 
+# ── Two-phase prepare/apply state ───────────────────────────────────────────
+# `dsh update --prepare` stops immediately before the switch and records what
+# a later `dsh update --apply` needs. The field set written below is the
+# UI/plugin contract (profile/web/packages/enpoi-update-check and
+# packages/client/ui-update read it): version, treeDirName, channel,
+# releaseCommit, prebuilt, preparedAt. Do not add, rename, or drop fields
+# without updating both consumers.
+STAGED_APPLY_FILE_NAME=".staged-apply.json"
+
+staged_apply_path() {
+  printf '%s' "$PREFIX/harness/$STAGED_APPLY_FILE_NAME"
+}
+
+# Atomic write (temp + rename); releaseCommit is null when the target's commit
+# could not be resolved (source builds without git metadata).
+write_staged_apply() { # version tree_dir channel release_commit prebuilt
+  local file tmp commit_json
+  file="$(staged_apply_path)"
+  mkdir -p "$(dirname "$file")" || return 1
+  tmp="$file.tmp.$$"
+  if [ -n "$4" ]; then commit_json="\"$(json_escape "$4")\""; else commit_json="null"; fi
+  {
+    printf '{\n'
+    printf '  "version": "%s",\n' "$(json_escape "$1")"
+    printf '  "treeDirName": "%s",\n' "$(json_escape "$2")"
+    printf '  "channel": "%s",\n' "$(json_escape "$3")"
+    printf '  "releaseCommit": %s,\n' "$commit_json"
+    printf '  "prebuilt": %s,\n' "$([ "$5" = 1 ] && printf 'true' || printf 'false')"
+    printf '  "preparedAt": "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '}\n'
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+  return 0
+}
+
+# The version this invocation would target when that can be answered without
+# downloading: the release-tag redirect for the default path, the source's
+# package.json for a local --source. An empty answer means "unknown" and the
+# full flow must run. Used only by prepare's same-version idempotency probe.
+prepare_target_probe() {
+  local tag=""
+  if [ -n "$SOURCE" ]; then
+    if [ -d "$SOURCE" ] && [ -f "$SOURCE/package.json" ]; then read_version "$SOURCE/package.json" 2>/dev/null || true; fi
+    return 0
+  fi
+  tag="$(latest_release_tag 2>/dev/null || true)"
+  [ -n "$tag" ] && printf '%s' "${tag#v}"
+  return 0
+}
+
 do_update() {
   local state="$PREFIX/harness/install-state.json" current backup late_backup rc recorded_home recorded_bin installed_version deferred_restart transport_engine
   STEP_TOTAL=9
@@ -7019,6 +7153,12 @@ do_update() {
   installed_version="$INSTALLED_VERSION"
   INSTALLED_COMMIT="$INSTALLED_COMMIT"
   update_request_flags_apply
+  # Two-phase apply: the record from a previous --prepare drives everything;
+  # nothing is fetched, built, or migrated on this path (see do_apply_staged).
+  if [ "$UPDATE_APPLY" = 1 ]; then
+    do_apply_staged "$current"
+    return $?
+  fi
   if [ "$DRY_RUN" = 1 ]; then
     local target_value="" dry_target_commit=""
     if [ -z "$SOURCE" ]; then
@@ -7100,6 +7240,30 @@ do_update() {
     emit_json update 1
     return 0
   fi
+  # A second --prepare for the version already staged must not redo the work.
+  # The cheap target probe mirrors the flow's first move (the release-tag
+  # redirect for the default path; the source's package.json for a local
+  # source). Every other state — a newer target, a changed channel, a missing
+  # or incomplete staged tree — falls through to the full flow below, which
+  # replaces the staged record.
+  if [ "$UPDATE_PREPARE" = 1 ]; then
+    local staged_file staged_version staged_dir staged_channel probe
+    staged_file="$(staged_apply_path)"
+    if [ -f "$staged_file" ]; then
+      staged_version="$(json_field "$staged_file" version 2>/dev/null || true)"
+      staged_dir="$(json_field "$staged_file" treeDirName 2>/dev/null || true)"
+      staged_channel="$(json_field "$staged_file" channel 2>/dev/null || true)"
+      probe="$(prepare_target_probe)"
+      if [ -n "$staged_version" ] && [ "$staged_version" = "$probe" ] && [ "$staged_channel" = "$CHANNEL" ] \
+        && [ -n "$staged_dir" ] && [ -d "$PREFIX/harness/$staged_dir" ] \
+        && [ -f "$PREFIX/harness/$staged_dir/.dsh-install-complete" ]; then
+        VERSION="$staged_version"
+        say "dsh update prepared: $staged_version is already staged ($PREFIX/harness/$staged_dir); nothing to redo"
+        emit_json update-prepared 1
+        return 0
+      fi
+    fi
+  fi
   # Without this, every run_logged call in update mode redirects to an empty
   # path and fails. After the dry-run return, so --dry-run opens no log file.
   init_log_file
@@ -7111,6 +7275,14 @@ do_update() {
   # is held, the incoming staging is untouched).
   sweep_experimental_residue
   log "update: active $current on the $CHANNEL channel"
+  # A plain update reconciles the whole install itself, so a record staged by
+  # --prepare for an older target is discarded before any build work: a later
+  # --apply must never switch BACK to it. The no-op path above returns before
+  # this point and writes nothing, so it leaves the record alone.
+  if [ -f "$(staged_apply_path)" ]; then
+    rm -f "$(staged_apply_path)"
+    log "update: discarded the staged apply record (a plain update reconciles the install)"
+  fi
   # Ladder selection first: the read-only planner names the rung before any
   # artifact download (the apply path shares the dry-run planner's decision).
   delta_plan_init "$installed_version"
@@ -7388,6 +7560,29 @@ do_update() {
     exit 1
   fi
 
+  # ── Two-phase prepare stop ──
+  # Everything durable is done: tree built/verified, profile refreshed, deps
+  # installed, migrations run. Record the staged tree and stop here — current,
+  # the service, and install-state.json are untouched, and the migrated home
+  # is deliberately KEPT (it is the exact state the one-shot has moments
+  # before its own switch, and the state apply returns to on failure). The
+  # pre-switch restore is disarmed: nothing may rewind the prepared state.
+  if [ "$UPDATE_PREPARE" = 1 ]; then
+    write_staged_apply "$VERSION" "$TREE_DIR_NAME" "$CHANNEL" "${RELEASE_COMMIT:-}" "${PREBUILT:-0}" \
+      || die "could not write the staged apply record $(staged_apply_path)"
+    PRE_SWITCH_RESTORE=""
+    prune_update_artifacts
+    log "prepare: staged $VERSION ($TREE_DIR_NAME) for a later --apply; current stays $current"
+    say ""
+    say "${C_GREEN}${C_BOLD}Update prepared:${C_RESET} $VERSION (${CHANNEL} channel) — nothing was switched or restarted."
+    say "  staged:  $(staged_apply_path)"
+    say "  tree:    $PREFIX/harness/$TREE_DIR_NAME"
+    say "  active:  $current (unchanged)"
+    say "  apply:   dsh update --apply  (switch, restart, self-check, health)"
+    emit_json update-prepared 1
+    return 0
+  fi
+
   step "switch, service and backfill"
   # A second snapshot immediately before the switch is forensic evidence only:
   # the profile merge and migrations have already rewritten the files it holds.
@@ -7472,6 +7667,105 @@ do_update() {
   rm -f "${DELTA_PLAN_FILE:-}" "${DELTA_CHAIN_FILE:-}"
   print_summary update
   emit_json update 1
+  if [ "$deferred_restart" = 1 ]; then delegate_service_restart; fi
+  return 0
+}
+
+# ── Two-phase apply ─────────────────────────────────────────────────────────
+# `dsh update --apply`: consume the record `--prepare` wrote. Nothing is
+# fetched, built, merged, or migrated here; prepare owns all of it. Sequence:
+# atomic switch -> service restart -> self-check -> health proof -> retention
+# prune -> delete the staged record. install-state.json is rewritten for the
+# new tree as part of the switch: health proof requires the recorded identity
+# to equal `current`, and the next update/repair resolves its identity from the
+# same sources.
+#
+# Failure semantics. Pre-switch refusals (no record, malformed record, missing
+# or incomplete staged tree) change nothing and KEEP the record. A post-switch
+# failure (self-check or health proof) uses rollback(): previous tree restored,
+# service restarted onto it, state rewritten, and the failed staged tree
+# archived as <dir>.failed-<ts> by the existing failed-tree policy. The record
+# survives BOTH cases so the UI can retry; a retry is deterministic and safe —
+# the same tree either keeps failing and rolling back, or, once it is fixed,
+# restored, or re-prepared, succeeds and consumes the record.
+do_apply_staged() { # prev_version
+  local prev="$1" staged version tree channel prepared_at deferred_restart=0
+  staged="$(staged_apply_path)"
+  [ -f "$staged" ] || die "dsh update --apply: nothing staged at $staged (run 'dsh update --prepare' first)"
+
+  version="$(json_field "$staged" version 2>/dev/null || true)"
+  tree="$(json_field "$staged" treeDirName 2>/dev/null || true)"
+  channel="$(json_field "$staged" channel 2>/dev/null || true)"
+  prepared_at="$(json_field "$staged" preparedAt 2>/dev/null || true)"
+  # The record is a durable/file boundary: validate the directory name before
+  # it ever reaches a path expression.
+  case "$tree" in
+    ''|.|..|*/|/*|*..*|*[!A-Za-z0-9._-]*)
+      die "dsh update --apply: the staged record is malformed (treeDirName='$tree'); re-run 'dsh update --prepare'";;
+  esac
+  if [ ! -d "$PREFIX/harness/$tree" ] || [ ! -f "$PREFIX/harness/$tree/.dsh-install-complete" ]; then
+    die "dsh update --apply: the staged tree $PREFIX/harness/$tree is missing or incomplete; nothing was switched and the staged record is kept ($staged). Re-run 'dsh update --prepare'"
+  fi
+  [ -n "$channel" ] && CHANNEL="$channel"
+
+  acquire_update_lock
+  init_log_file
+  log "apply: consuming staged $version ($tree, prepared ${prepared_at:-unknown}); switching from $prev"
+  say "dsh update --apply: switching to $version (staged ${prepared_at:-unknown})"
+  # The runner's step lines stay inside the 1..9 contract the UI watcher maps:
+  # 8 = switch, 9 = self-check. Prepare ended at 7 (migrations).
+  STEP_NO=7
+  STEP_TOTAL=9
+
+  step "switch, service and backfill"
+  substep_info "switch: current → $tree (atomic symlink replace)"
+  switch_current "$tree" || die "could not switch $PREFIX/harness/current to $tree"
+  substep_ok "current → $tree"
+  log "apply: switched current -> $tree"
+  VERSION="$version"
+  TREE_DIR_NAME="$tree"
+  PREV_VERSION="$prev"
+  HARNESS="$PREFIX/harness/$tree"
+  if running_under_service; then deferred_restart=1; fi
+  if [ "$deferred_restart" = 0 ]; then
+    [ -n "$SERVICE_UNIT" ] && substep_info "service: restarting $SERVICE_UNIT"
+    restart_service
+  else
+    substep_info "service: restart deferred to after the current turn"
+  fi
+
+  step "self-check"
+  substep_info "self-check: CLI version/help, profile smoke, error audit"
+  if ! selfcheck; then
+    warn "apply: self-check failed after the switch; rolling back to $prev"
+    rollback "$prev" "" "$tree"
+    write_diagnostics apply-failed
+    say ""
+    say "${C_RED}${C_BOLD}Update apply failed:${C_RESET} rolled back to $prev. The staged record is kept ($staged); after fixing the tree re-run 'dsh update --apply' (or re-run 'dsh update --prepare')."
+    emit_json apply 0
+    exit 1
+  fi
+  substep_ok "self-check passed"
+  # Durable bookkeeping for the switch (see the function comment).
+  restore_state_for_tree "$tree" || warn "could not rewrite $PREFIX/harness/install-state.json for $tree"
+  substep_info "health: post-update proof (identity, service, profile, shim)"
+  if ! health_proof_robust; then
+    warn "apply: health proof failed; rolling back to $prev"
+    rollback "$prev" "" "$tree"
+    write_diagnostics apply-failed
+    say ""
+    say "${C_RED}${C_BOLD}Update apply failed:${C_RESET} health proof failed; rolled back to $prev. The staged record is kept ($staged)."
+    emit_json apply 0
+    exit 1
+  fi
+  prune_versions "$tree" "$prev"
+  prune_update_artifacts
+  if ! rm -f "$staged"; then
+    warn "apply: could not remove the staged record $staged (the tree is live now; remove the file manually)"
+  fi
+  say ""
+  say "${C_GREEN}${C_BOLD}Update applied:${C_RESET} $version (${CHANNEL} channel) — current → $tree"
+  emit_json apply 1
   if [ "$deferred_restart" = 1 ]; then delegate_service_restart; fi
   return 0
 }
@@ -8118,6 +8412,18 @@ if [ "$PURGE" = 1 ] && [ "$UNINSTALL_MODE" != 1 ]; then
 fi
 if [ -n "$MERGE_BASELINE" ] && [ "$UPDATE_MODE" != 1 ]; then
   die "--merge-baseline applies to --update only"
+fi
+if { [ "$UPDATE_PREPARE" = 1 ] || [ "$UPDATE_APPLY" = 1 ]; } && [ "$UPDATE_MODE" != 1 ]; then
+  die "--prepare/--apply apply to --update only (run: dsh update --prepare | dsh update --apply)"
+fi
+if [ "$UPDATE_PREPARE" = 1 ] && [ "$UPDATE_APPLY" = 1 ]; then
+  die "choose one of --prepare, --apply"
+fi
+if [ "$UPDATE_APPLY" = 1 ] && [ "$DRY_RUN" = 1 ]; then
+  die "--dry-run does not apply to --apply (it switches and restarts; inspect the staged record $PREFIX/harness/.staged-apply.json instead)"
+fi
+if [ "$UPDATE_APPLY" = 1 ] && { [ -n "$FORGET_PATHS" ] || [ -n "$ACCEPT_SHIPPED_PATHS" ]; }; then
+  die "--forget/--accept-shipped apply to a full update, not --apply (use them with --prepare or a plain update)"
 fi
 if { [ -n "$FORGET_PATHS" ] || [ -n "$ACCEPT_SHIPPED_PATHS" ]; } && [ "$UPDATE_MODE" != 1 ]; then
   die "--forget/--accept-shipped apply to --update only"
