@@ -3024,8 +3024,12 @@ END {
 
 # Union the shipped dependency keys into the live profile package.json.
 # Shipped wins on a version conflict; user-only dependencies are kept; every
-# other field of the live manifest is preserved. An unparseable live manifest
-# aborts the update with the shipped keys listed instead of clobbering it.
+# other field of the live manifest is preserved. The shipped template's
+# `dsh.profile.bundles` mount list is unioned the same way (missing shipped
+# entries appended, live order and custom entries untouched, an absent live
+# list adopting the shipped one), so a template bundle added by a later release
+# actually mounts on an updated install. An unparseable live manifest aborts
+# the update with the shipped keys listed instead of clobbering it.
 merge_profile_package_json() { # shipped live
   local shipped="$1" live="$2" tmp="$2.merge-$$" out rc
   [ -f "$shipped" ] || { log "profile package.json merge: no shipped manifest at $shipped; skipping"; return 0; }
@@ -3060,15 +3064,69 @@ for (const map of maps) {
   for (const key of Object.keys(liveMap)) if (!(key in shippedMap)) kept.push(`${map}:${key}`)
   merged[map] = mergedMap
 }
+// `dsh.profile.bundles` is the mount list for the profile plugin bundles. A
+// shipped template that adds a bundle (e.g. dsh-enpoi-update-check) must reach
+// an existing install: append shipped entries the live list is missing, never
+// remove and never reorder, and keep live-only/custom entries exactly where
+// they are. An absent live list adopts the shipped one; a live value that is
+// not an array (or dsh/dsh.profile that is not an object) is left untouched
+// and reported, never clobbered.
+const isPlainObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value)
+const bundleList = (doc) => {
+  const list = doc?.dsh?.profile?.bundles
+  return Array.isArray(list) ? list : null
+}
+const shippedBundles = bundleList(shipped) ?? []
+const liveBundles = bundleList(live)
+const bundlesAdded = []
+let bundlesAdopt = false
+let bundlesNote = ""
+if (shippedBundles.length > 0) {
+  const liveDshRaw = live?.dsh
+  const liveProfileRaw = isPlainObject(liveDshRaw) ? liveDshRaw.profile : undefined
+  if (liveBundles !== null) {
+    const seen = new Set(liveBundles)
+    for (const name of shippedBundles) {
+      if (typeof name !== "string" || seen.has(name)) continue
+      seen.add(name)
+      bundlesAdded.push(name)
+    }
+    if (bundlesAdded.length > 0) {
+      merged.dsh = { ...liveDshRaw, profile: { ...liveProfileRaw, bundles: [...liveBundles, ...bundlesAdded] } }
+    }
+  } else if (liveDshRaw !== undefined && !isPlainObject(liveDshRaw)) {
+    bundlesNote = "bundles:kept (live dsh is not an object)"
+  } else if (liveProfileRaw !== undefined && !isPlainObject(liveProfileRaw)) {
+    bundlesNote = "bundles:kept (live dsh.profile is not an object)"
+  } else if (liveProfileRaw?.bundles !== undefined) {
+    bundlesNote = "bundles:kept (live dsh.profile.bundles is not an array)"
+  } else {
+    merged.dsh = { ...(isPlainObject(liveDshRaw) ? liveDshRaw : {}), profile: { ...(isPlainObject(liveProfileRaw) ? liveProfileRaw : {}), bundles: [...shippedBundles] } }
+    bundlesAdopt = true
+  }
+}
 const text = `${JSON.stringify(merged, null, 2)}\n`
-if (text === fs.readFileSync(livePath, "utf8")) process.exit(2)
+const liveText = fs.readFileSync(livePath, "utf8")
+// Writing identical bytes is harmless, but a kept-bundles note must still be
+// reported: only the truly-unchanged case short-circuits here.
+if (text === liveText && bundlesNote === "") process.exit(2)
 fs.writeFileSync(outPath, text)
 const detail = [
   added.length > 0 ? `added ${added.join(", ")}` : "",
   updated.length > 0 ? `updated ${updated.join(", ")}` : "",
   kept.length > 0 ? `kept user-only ${kept.join(", ")}` : "",
+  bundlesAdded.length > 0 ? `bundles:${bundlesAdded.join(",")}` : "",
+  bundlesAdopt ? `bundles:adopted(${shippedBundles.length})` : "",
+  bundlesNote,
 ].filter(Boolean).join("; ")
-console.log(`${added.length} added, ${updated.length} updated, ${kept.length} user-only kept${detail ? ` (${detail})` : ""}`)
+const counts = [
+  `${added.length} added`,
+  `${updated.length} updated`,
+  `${kept.length} user-only kept`,
+]
+if (bundlesAdded.length > 0) counts.push(`${bundlesAdded.length} bundle(s) added`)
+if (bundlesAdopt) counts.push(`${shippedBundles.length} bundle(s) adopted`)
+console.log(`${counts.join(", ")}${detail ? ` (${detail})` : ""}`)
 ' "$shipped" "$live" "$tmp" 2>&1)"
   rc=$?
   case "$rc" in
@@ -3082,7 +3140,7 @@ console.log(`${added.length} added, ${updated.length} updated, ${kept.length} us
       ;;
     2)
       rm -f "$tmp"
-      log "profile package.json merge: live manifest already carries every shipped dependency"
+      log "profile package.json merge: live manifest already carries every shipped dependency and bundle"
       ;;
     3)
       rm -f "$tmp"

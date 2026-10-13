@@ -871,6 +871,107 @@ describe('profile package.json dependency union', () => {
   })
 })
 
+describe('profile package.json dsh.profile.bundles union', () => {
+  it('appends missing template bundles, keeps operator order and custom entries, and names them in the log', () => {
+    const shipped = fixture('bundles-shipped.package.json', JSON.stringify({
+      name: 'dsh-profile-web',
+      dependencies: { 'dsh-enpoi-update-check': '0.2.0' },
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-enpoi-update-check', 'dsh-enpoi-new'] } },
+    }, null, 2))
+    const liveBefore = {
+      name: 'dsh-profile-web',
+      dependencies: { 'dsh-enpoi-update-check': '0.2.0', 'user-only': '1.0.0' },
+      dsh: { profile: { bundles: ['custom-op-bundle', '@deepseek-ai/dsh-base'], other: 1 }, extra: true },
+      scripts: { postinstall: 'node scripts/x.mjs' },
+    }
+    const live = fixture('bundles-live.package.json', JSON.stringify(liveBefore, null, 2))
+    const result = runPackageMerge(shipped, live)
+    expect(result.status).toBe(0)
+    const merged = parseManifest(live) as ProfileManifest & { dsh?: { profile?: { bundles?: string[]; other?: number }; extra?: boolean } }
+    // The operator's list order and custom entry are untouched; both missing
+    // template entries are appended after the live list.
+    expect(merged.dsh?.profile?.bundles).toEqual([
+      'custom-op-bundle',
+      '@deepseek-ai/dsh-base',
+      'dsh-enpoi-update-check',
+      'dsh-enpoi-new',
+    ])
+    expect(merged.dsh?.profile?.other).toBe(1)
+    expect(merged.dsh?.extra).toBe(true)
+    expect(merged.scripts).toEqual({ postinstall: 'node scripts/x.mjs' })
+    // The merge log names what was added (the device defect was invisible).
+    expect(result.output).toContain('2 bundle(s) added')
+    expect(result.output).toContain('bundles:dsh-enpoi-update-check,dsh-enpoi-new')
+    // Idempotent across repeated refreshes: no duplicates, byte-identical.
+    const after = readFileSync(live, 'utf8')
+    const second = runPackageMerge(shipped, live)
+    expect(second.status).toBe(0)
+    expect(readFileSync(live, 'utf8')).toBe(after)
+    expect(second.output).toContain('already carries every shipped dependency and bundle')
+  })
+
+  it('adopts the template list when the live manifest has none', () => {
+    const shipped = fixture('bundles-adopt-shipped.package.json', JSON.stringify({
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', 'dsh-enpoi-update-check'] } },
+    }, null, 2))
+    const live = fixture('bundles-adopt-live.package.json', JSON.stringify({
+      name: 'dsh-profile-web',
+      dependencies: { 'user-only': '1.0.0' },
+    }, null, 2))
+    const result = runPackageMerge(shipped, live)
+    expect(result.status).toBe(0)
+    const merged = parseManifest(live) as ProfileManifest & { dsh?: { profile?: { bundles?: string[] } } }
+    expect(merged.dsh?.profile?.bundles).toEqual(['@deepseek-ai/dsh-base', 'dsh-enpoi-update-check'])
+    expect(result.output).toContain('2 bundle(s) adopted')
+    expect(result.output).toContain('bundles:adopted(2)')
+    // Adoption is idempotent too.
+    const after = readFileSync(live, 'utf8')
+    const second = runPackageMerge(shipped, live)
+    expect(second.status).toBe(0)
+    expect(readFileSync(live, 'utf8')).toBe(after)
+  })
+
+  it('keeps an operator dsh object with other keys and does not duplicate adopted entries', () => {
+    const shipped = fixture('bundles-merge-dsh-shipped.package.json', JSON.stringify({
+      dsh: { profile: { bundles: ['dsh-enpoi-update-check'] } },
+    }, null, 2))
+    const live = fixture('bundles-merge-dsh-live.package.json', JSON.stringify({
+      name: 'dsh-profile-web',
+      dsh: { profile: { bundles: ['dsh-enpoi-update-check'] }, operatorNote: 'keep me' },
+    }, null, 2))
+    const result = runPackageMerge(shipped, live)
+    // Already carries the shipped bundle: the live list stays as-is.
+    expect(result.status).toBe(0)
+    const merged = JSON.parse(readFileSync(live, 'utf8')) as { dsh: { profile: { bundles: string[] }; operatorNote: string } }
+    expect(merged.dsh.profile.bundles).toEqual(['dsh-enpoi-update-check'])
+    expect(merged.dsh.operatorNote).toBe('keep me')
+    // A second run is a no-op.
+    const after = readFileSync(live, 'utf8')
+    const second = runPackageMerge(shipped, live)
+    expect(second.status).toBe(0)
+    expect(readFileSync(live, 'utf8')).toBe(after)
+    expect(second.output).toContain('already carries every shipped dependency and bundle')
+  })
+
+  it('never clobbers a live bundles value that is not an array, and reports it', () => {
+    const shipped = fixture('bundles-bad-shipped.package.json', JSON.stringify({
+      dependencies: { 'shipped-dep': '1.0.0' },
+      dsh: { profile: { bundles: ['dsh-enpoi-update-check'] } },
+    }, null, 2))
+    const live = fixture('bundles-bad-live.package.json', JSON.stringify({
+      name: 'dsh-profile-web',
+      dsh: { profile: { bundles: 'operator-owned' } },
+    }, null, 2))
+    const result = runPackageMerge(shipped, live)
+    expect(result.status).toBe(0)
+    const merged = parseManifest(live) as ProfileManifest & { dsh?: { profile?: { bundles?: unknown } } }
+    expect(merged.dsh?.profile?.bundles).toBe('operator-owned')
+    expect(merged.dependencies?.['shipped-dep']).toBe('1.0.0')
+    // The gap is reported even though nothing else changed.
+    expect(result.output).toContain('bundles:kept (live dsh.profile.bundles is not an array)')
+  })
+})
+
 describe('profile patchedDependencies union', () => {
   const SHIPPED_WORKSPACE = `packages:
   - .
