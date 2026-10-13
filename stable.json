@@ -1,0 +1,363 @@
+{
+  "schemaVersion": 1,
+  "channel": "stable",
+  "generatedAt": "2026-10-13T13:50:44.608Z",
+  "releases": [
+    {
+      "version": "0.1.7-enpoi.2.81",
+      "commit": "32ba66f",
+      "releasedAt": "2026-10-13T12:04:45.000Z",
+      "notes": [
+        "fix(update): reset the prebuilt flag on the channel-divergence fallback"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.80",
+      "commit": "5eab1d7",
+      "releasedAt": "2026-10-13T11:34:50.000Z",
+      "notes": [
+        "fix(feedback): triage leaves no trace — delete the session artifacts after dispose"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.79",
+      "commit": "8b3f41c",
+      "releasedAt": "2026-10-13T10:28:03.000Z",
+      "notes": [
+        "fix(release): declare the feedback services in the base bundle; gate mounted-package resolution"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.78",
+      "commit": "7e69176",
+      "releasedAt": "2026-10-13T08:47:24.000Z",
+      "notes": [
+        "feat(feedback): move the collector to a serverless Cloudflare Worker",
+        "feat(feedback): non-blocking dialog submit with a bottom-right pipeline chip; robust dialog layout",
+        "fix(feedback): triage preset + reply capture — the pipeline now returns real analyses",
+        "feat(feedback): end-to-end feedback pipeline — dialog checkboxes, collection, triage, live submission"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.77",
+      "commit": "a45158b",
+      "releasedAt": "2026-10-12T20:46:14.000Z",
+      "notes": [
+        "fix(spec): guard the optional bootstrap index in the fallback-reload assertion",
+        "fix(update): rollback rewrites install-state; race-proof macOS service restart; quieter pnpm pin note"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.76",
+      "commit": "61ca959",
+      "releasedAt": "2026-10-12T19:48:39.000Z",
+      "notes": [
+        "fix(spec): satisfy the host typecheck in the service-restart reload assertions",
+        "fix(update): macOS service reload after plist changes (bootout/bootstrap/kickstart)"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.75",
+      "commit": "c81abd4",
+      "releasedAt": "2026-10-12T19:10:24.000Z",
+      "notes": [
+        "chore(maintenance): docs truth pass, i18n reconciliation, orphan/dead-code cleanup, test:gui triage"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.74",
+      "commit": "d694efa",
+      "releasedAt": "2026-10-12T17:17:28.000Z",
+      "notes": [
+        "feat(providers): opencode-go routing-affinity delivery + retro-review fixes + heavy-provider hygiene"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.73",
+      "commit": "626afc2",
+      "releasedAt": "2026-10-12T14:55:58.000Z",
+      "notes": [
+        "chore(consistency): managed-install CLI home model, release trim, unify leftovers"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.72",
+      "commit": "2d9eef6",
+      "releasedAt": "2026-10-12T13:57:02.000Z",
+      "notes": [
+        "perf+ux(update): rename-based stage flatten; announce retention prunes and commit resolution"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.71",
+      "commit": "d9311e4",
+      "releasedAt": "2026-10-12T10:52:11.000Z",
+      "notes": [
+        "fix(health): context-robust service probe; service-only failures never restore files"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.70",
+      "commit": "c73db7d",
+      "releasedAt": "2026-10-12T10:06:09.000Z",
+      "notes": [
+        "ux(update): no silent phase - sweep start+timing, checksum completion, install start line"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.69",
+      "commit": "8fafa0a",
+      "releasedAt": "2026-10-12T09:37:40.000Z",
+      "notes": [
+        "feat(update): retire the delta updater - simple prebuilt flow + residue scrub + health proof"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.68",
+      "commit": "6d7c3d5",
+      "releasedAt": "2026-10-12T07:31:21.000Z",
+      "notes": [
+        "feat(update): single-line TTY progress, 6-hop diff chains, zero-I/O skips, parallel walks"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.67",
+      "commit": "06e0d4f",
+      "releasedAt": "2026-10-11T23:25:08.000Z",
+      "notes": [
+        "fix(update): sweep the v2 apply journal after a successful switch"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.66",
+      "commit": "6a6d598",
+      "releasedAt": "2026-10-11T23:01:48.000Z",
+      "notes": [
+        "perf(update): stop refreshing the superseded tree's scan index"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.65",
+      "commit": "7c0dbf2",
+      "releasedAt": "2026-10-11T22:37:28.000Z",
+      "notes": [
+        "fix(update): bounded v2 journal - real-tree applies in minutes, not hours"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.64",
+      "commit": "3afc430",
+      "releasedAt": "2026-10-11T19:43:51.000Z",
+      "notes": [
+        "feat(update): persistent scan index - steady-state updates hash nothing"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.63",
+      "commit": "c984282",
+      "releasedAt": "2026-10-11T18:49:13.000Z",
+      "notes": [
+        "perf(update): selective merge-base extraction with reuse and ticker"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.62",
+      "commit": "112f5ab",
+      "releasedAt": "2026-10-11T17:50:58.000Z",
+      "notes": [
+        "perf(update): one ticked tree-walk per update; scoped snapshot; liveness everywhere"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.61",
+      "commit": "01867a5",
+      "releasedAt": "2026-10-11T16:18:08.000Z",
+      "notes": [
+        "fix(update): identity reconciliation, live progress, sandbox-safe pnpm"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.60",
+      "commit": "aa58eaf",
+      "releasedAt": "2026-10-11T14:02:23.000Z",
+      "notes": [
+        "fix(profile): wallpaper off by default; skin-center patch delivery",
+        "feat(update): merge-base retention, flags and delivery hardening; docs for the new system"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.59",
+      "commit": "c377833",
+      "releasedAt": "2026-10-11T11:20:06.000Z",
+      "notes": [
+        "feat(update): delta transport and preservation net wired into ds update"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.58",
+      "commit": "aa34d4a",
+      "releasedAt": "2026-10-11T09:34:38.000Z",
+      "notes": [
+        "feat(host/update-engine): preservation and merge engine for delta updates"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.57",
+      "commit": "c603947",
+      "releasedAt": "2026-10-11T07:15:41.000Z",
+      "notes": [
+        "fix(ui-settings-models): converge new providers through the catalog sync"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.56",
+      "commit": "b259576",
+      "releasedAt": "2026-10-10T21:11:09.000Z",
+      "notes": [
+        "feat(peer-bridge): mid-follow reachability watchdog"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.55",
+      "commit": "7ee8d14",
+      "releasedAt": "2026-10-10T20:56:39.000Z",
+      "notes": [
+        "feat(peer-bridge): early-return approvals with resume; fix settled rendering",
+        "fix(subagent): audit the shared keep list; clarify one-shot continuation"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.54",
+      "commit": "e8e6f86",
+      "releasedAt": "2026-10-10T17:46:42.000Z",
+      "notes": [
+        "docs(compaction-basic): state measured provider cache behavior",
+        "fix(install): union the profile workspace patchedDependencies on refresh",
+        "feat(compaction): add the dsh-compressor tool-result augment"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.53",
+      "commit": "2edbfee",
+      "releasedAt": "2026-10-10T15:50:14.000Z",
+      "notes": [
+        "chore: ignore .research run directories",
+        "fix(peer-bridge): list available pairings on alias miss; per-pairing create routing",
+        "feat(system-prompt): state the routed provider/model and chain in the identity line"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.52",
+      "commit": "e3bcda7",
+      "releasedAt": "2026-10-10T12:34:49.000Z",
+      "notes": [
+        "fix(install): wrap-proof TTY progress frames (width-clamped, degradation ladder)"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.51",
+      "commit": "55273e6",
+      "releasedAt": "2026-10-10T11:44:17.000Z",
+      "notes": [
+        "fix(install): live update progress, per-step heartbeats, and no silent exec death"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.50",
+      "commit": "9635876",
+      "releasedAt": "2026-10-10T10:55:09.000Z",
+      "notes": [
+        "fix(release): no device patch or phantom MCP ships in the profile",
+        "fix(profile): isolate provider metadata; endpoint-authoritative model refresh",
+        "fix(client): model visibility keeps operator intent; panel remounts per route",
+        "fix(provider-sync): validate thinking level keys and bypass withhold guard on manual refresh",
+        "fix(installer): Oracle-approved locking, atomic progress, FD hygiene, and step 6 caching",
+        "fix(update): preserve recorded channel on plain 'dsh update' without --channel",
+        "fix(install): self-healing update lock, trap INT/TERM, and clean lock on exit",
+        "fix(install): grammatical past-tense in completion banner (updated vs updateed)",
+        "feat(install): live slide progress bar with percentage, downloaded MB, and speed"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.49",
+      "commit": "559db28",
+      "releasedAt": "2026-10-09T17:24:24.000Z",
+      "notes": [
+        "fix(boot): guard against empty or undefined plugin name in manifestOf",
+        "feat(release): prune heavy optional vendor binaries and docs from prebuilt assets",
+        "feat(install): parallel chunked downloader with resume, stall-detection & integrity validation",
+        "fix(harness): Wave 1 bug-fix batch — client fencing, dedup, portability, config knobs, shipped defaults & i18n",
+        "fix(provider-sync): Oracle-reviewed concurrency batch — re-plan on conflict, atomic writes, serialized pass"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.48",
+      "commit": "9ecc6e0",
+      "releasedAt": "2026-10-09T09:36:30.000Z",
+      "notes": [
+        "fix(ui-plugin-manager): drop the readonly assertion from the probe degrade table",
+        "fix(i18n): finish the residual client sweep — gate to zero",
+        "fix(provider-sync): extend opencode-go overlay removals to the full retired set",
+        "feat(ui-settings-models): reset route references when a provider is deleted",
+        "feat(provider-sync): authoritative model lists with removal of outdated ids",
+        "fix(ui-model-selection): re-anchor the picker card on content resize",
+        "feat(agents): baseline opt-out, extendBuiltins merge, customTools pinned",
+        "feat(provider-data): models.dev path/URL + route map config, seed delete markers",
+        "fix(portability): heal node-path units, FreeLLMAPI feed field, ds.fish resolver, URL validation"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.47",
+      "commit": "13565f3",
+      "releasedAt": "2026-10-08T22:05:32.000Z",
+      "notes": [
+        "fix(ui-settings-models): route the translate stub to the client project",
+        "feat(ui-brand-enpoi): typed en/zh dictionary — package i18n gate to zero",
+        "feat(models/portability): settings-models i18n + dynamic wizard data; P1 portability"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.46",
+      "commit": "814f8bf",
+      "releasedAt": "2026-10-08T21:23:03.000Z",
+      "notes": [
+        "feat(models): owner-modifiable catalogs — presets, heavy overlay, snapshot control, unified hints",
+        "feat(tool-groups): owner-editable membership, custom groups, roster validation",
+        "fix(ui-brand-enpoi): mirror from repo profile sources, machine-independent labels"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.45",
+      "commit": "0e5c660",
+      "releasedAt": "2026-10-08T20:42:36.000Z",
+      "notes": [
+        "fix(models): non-destructive refresh, live-first discovery, real modalities/tags, opencode-go overlay"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.44",
+      "commit": "a98f6e9",
+      "releasedAt": "2026-10-08T20:37:38.000Z",
+      "notes": [
+        "fix(portability): repo-relative generator and sidebar builders"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.43",
+      "commit": "5616a03",
+      "releasedAt": "2026-10-08T19:52:02.000Z",
+      "notes": [
+        "fix(peer): ask admission, supersede and retired bindings; inbox FIFO proven",
+        "feat(cli): dsh --version reports the real build identity"
+      ]
+    },
+    {
+      "version": "0.1.7-enpoi.2.42",
+      "commit": "6ffcc27",
+      "releasedAt": "2026-10-08T19:30:33.000Z",
+      "notes": [
+        "fix(llm): retry the pi-ai provider's prose overload errors"
+      ]
+    }
+  ]
+}
