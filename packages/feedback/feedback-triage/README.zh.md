@@ -1,5 +1,5 @@
 ---
-description: "临时反馈分诊：供反馈流水线的用户与维护者阅读。"
+description: "临时反馈分诊：一个隔离的 Kilo 会话把载荷分类为严格 JSON，随后被释放并删除其持久日志，因此会话列表绝不会列出它。"
 kind: "package-reference"
 ---
 

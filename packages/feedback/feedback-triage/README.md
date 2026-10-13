@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Ephemeral feedback triage: one isolated, disposed Kilo session classifies a payload into strict JSON. It is one stage of the feedback pipeline: the `sessionFeedback.record` Remote orchestrates collect → triage → submit, and each stage is fail-soft so the local record always succeeds.
+Ephemeral feedback triage: one isolated Kilo session classifies a payload into strict JSON, then is disposed with its durable log deleted, so the session rail never lists it. It is one stage of the feedback pipeline: the `sessionFeedback.record` Remote orchestrates collect → triage → submit, and each stage is fail-soft so the local record always succeeds.
 
 ## Table of Contents
 

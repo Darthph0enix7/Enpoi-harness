@@ -4,12 +4,12 @@
 #   pnpm run verify-translation-pairing --write packages/feedback/feedback-triage/README.md
 /:
   en: c9a64dea0beb1ec1
-  zh: a94baf56704cd96a
+  zh: 37cec6390eb86525
 /deepseek-ai-dsh-feedback-triage:
   en: e70bc8bad893bf2d
   zh: 606d717c4c779882
 /deepseek-ai-dsh-feedback-triage/summary:
-  en: 5106af3237799a5c
+  en: 67c21eab694a8df9
   zh: 1cceda7d18b332d6
 /deepseek-ai-dsh-feedback-triage/table-of-contents:
   en: d2f09029bb49c4b4

@@ -4,7 +4,8 @@
  * `{category, severity, summary, details?}`. The session mirrors the first-run
  * system-analysis pattern — branded id, the `system-analysis` permission
  * preset, the keyless Kilo free route, a hard time bound — and is disposed
- * after idle WITHOUT archiving, so it never pollutes the session rail. Every
+ * after idle WITHOUT archiving; its durable session artifacts are deleted, so
+ * it never pollutes the session rail. Every
  * failure returns null: triage is advisory and must never fail the record
  * path.
  * @module @deepseek-ai/dsh-feedback-triage
@@ -179,8 +180,9 @@ export type FeedbackTriageRunner = (
 
 /**
  * Run one bounded triage in an isolated session and return the parsed answer.
- * The session is disposed (never archived) and its scratch workspace removed
- * before this resolves; every failure returns null.
+ * The session is disposed (never archived), its durable session artifacts
+ * deleted, and its scratch workspace removed before this resolves; every
+ * failure returns null.
  * @param options - deployment services, route, preset, bound, and workspace.
  * @param input - the recorded message plus the shared sections.
  * @param signal - caller cancellation; a hard timeout is added inside.
@@ -270,6 +272,14 @@ export async function runFeedbackTriage(
       await handle?.dispose()
     } catch (error: unknown) {
       ctx.logger.warn('feedback-triage: the triage session did not dispose cleanly:', error)
+    }
+    // Dispose detaches the live entry; the durable log is what the session
+    // list reads, so remove it or the rail lists one session per triage.
+    const persistence = ctx.get('sessionPersistence') as { delete?: (id: SessionId) => Promise<void> } | undefined
+    try {
+      await persistence?.delete?.(sessionId)
+    } catch (error: unknown) {
+      ctx.logger.warn('feedback-triage: the triage session artifacts were not deleted:', error)
     }
     rmSync(options.workspace, { recursive: true, force: true })
   }
