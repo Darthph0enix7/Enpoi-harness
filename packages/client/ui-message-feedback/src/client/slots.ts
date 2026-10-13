@@ -69,7 +69,9 @@ export interface FeedbackDialogInjected {
   submit: () => Promise<void>
   /** Close the dialog and discard the draft. */
   dismiss: () => void
-  /** Retire the current submission-failure toast without closing its draft. */
+  /** Retire the settled success indicator after its pause. */
+  dismissPipeline: () => void
+  /** Retire the current submission-failure toast or failed pipeline indicator. */
   dismissFailure: () => void
   /**
    * Retire the toast the view finished showing.

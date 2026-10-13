@@ -39,7 +39,15 @@ export const ALL_SHARED: FeedbackShareFlags = Object.freeze({
   message: true,
 })
 
-/** Dialog and toast state the overlay view renders from. */
+/**
+ * The background record pipeline's phase, rendered by the bottom-right
+ * indicator: idle shows nothing, running an indeterminate progress chip,
+ * sent a success chip the view retires after its pause, and failed a chip
+ * with the failure copy that stays until dismissed.
+ */
+export type FeedbackPipeline = 'idle' | 'running' | 'sent' | 'failed'
+
+/** Dialog, toast, and background-pipeline state the overlay view renders from. */
 export interface FeedbackDialogState {
   /** Target the dialog is open for; null while closed. */
   readonly target: FeedbackDialogTarget | null
@@ -47,12 +55,14 @@ export interface FeedbackDialogState {
   readonly text: string
   /** What the Session submission shares; every open resets it to all-on. */
   readonly share: FeedbackShareFlags
-  /** A submission is in flight; the form ignores edits and submits until it settles. */
+  /** A message-target submission is in flight; the form ignores edits until it settles. */
   readonly submitting: boolean
-  /** Failure code of the last submission from this open; null when none. */
+  /** Failure code of the last submission; the failure toast (open dialog) or the failed pipeline chip. */
   readonly failure: string | null
   /** Sequence of the acknowledgement toast on screen; 0 while none. */
   readonly toast: number
+  /** Background record pipeline phase; survives open, dismiss, and toast changes. */
+  readonly pipeline: FeedbackPipeline
 }
 
 /**
@@ -73,22 +83,38 @@ export type FeedbackDialogEntry = FeedbackRecord & {
  */
 export type FeedbackSubmit = (target: FeedbackDialogTarget, entry: FeedbackDialogEntry) => Promise<MessageFeedbackActionResult>
 
-const CLOSED: Omit<FeedbackDialogState, 'toast'> = {
+const CLOSED: Omit<FeedbackDialogState, 'toast' | 'pipeline'> = {
   target: null, category: null, text: '', share: ALL_SHARED, submitting: false, failure: null,
 }
 
 /** Per-session dialog controller; one instance backs the overlay entry and every message control. */
 export class FeedbackDialogController {
-  /** Dialog state store (the overlay entry subscribes here). */
-  readonly state: SnapshotStore<FeedbackDialogState> = createSnapshotStore<FeedbackDialogState>({ ...CLOSED, toast: 0 })
+  /** Dialog, toast, and pipeline state store (the overlay entry subscribes here). */
+  readonly state: SnapshotStore<FeedbackDialogState> = createSnapshotStore<FeedbackDialogState>({
+    ...CLOSED, toast: 0, pipeline: 'idle',
+  })
   /** Bumped by every open, dismiss, and dispose so a late settlement can tell its draft is gone. */
   private generation = 0
   private toastSeq = 0
+  /** Set by {@link dispose}: a background settlement no longer publishes. */
+  private disposed = false
 
   /**
    * @param submit - records one submission; the owner routes it by target.
    */
   constructor(private readonly submit: FeedbackSubmit) {}
+
+  /** The members that survive a close or replace: the toast and the background pipeline. */
+  private preserved(): Pick<FeedbackDialogState, 'toast' | 'pipeline' | 'failure'> {
+    const s = this.state.getSnapshot()
+    return {
+      toast: s.toast,
+      pipeline: s.pipeline,
+      // A failed pipeline chip outlives the draft; every other failure belongs
+      // to the open-dialog failure toast and clears with the draft.
+      failure: s.pipeline === 'failed' ? s.failure : null,
+    }
+  }
 
   /**
    * Open the dialog with an empty draft, replacing any open draft.
@@ -96,13 +122,13 @@ export class FeedbackDialogController {
    */
   open(target: FeedbackDialogTarget): void {
     this.generation += 1
-    this.state.set({ ...CLOSED, target, toast: this.state.getSnapshot().toast })
+    this.state.set({ ...CLOSED, ...this.preserved(), target })
   }
 
-  /** Close the dialog and discard the draft; a toast on screen stays. */
+  /** Close the dialog and discard the draft; a toast or pipeline chip on screen stays. */
   dismiss(): void {
     this.generation += 1
-    this.state.set({ ...CLOSED, toast: this.state.getSnapshot().toast })
+    this.state.set({ ...CLOSED, ...this.preserved() })
   }
 
   /**
@@ -116,23 +142,35 @@ export class FeedbackDialogController {
   }
 
   /**
-   * Submit the draft; an empty draft is a valid submission. Success closes the
-   * dialog and raises the acknowledgement toast; a failure keeps the dialog
-   * open and publishes its code for the failure toast.
-   * @returns after the submission settles.
+   * Submit the draft; an empty draft is a valid submission. A message target
+   * awaits its rating write: success closes the dialog and acknowledges, and a
+   * failure keeps the draft open with its code. A Session target dispatches
+   * without awaiting: the dialog closes and acknowledges now, and the record's
+   * settlement drives the background pipeline indicator instead.
+   * @returns after the submission is dispatched.
    */
   async submitDraft(): Promise<void> {
     const s = this.state.getSnapshot()
     if (s.target === null || s.submitting) return
-    const generation = this.generation
-    this.state.set({ ...s, submitting: true, failure: null })
     const text = s.text.trim()
-    const result = await this.submit(s.target, {
+    const entry: FeedbackDialogEntry = {
       ...(text.length === 0 ? {} : { text }),
       ...(s.category === null ? {} : { category: s.category }),
       share: s.share,
       submit: true,
-    })
+    }
+    if (s.target.kind === 'message') {
+      await this.submitMessage(s.target, entry)
+      return
+    }
+    this.submitSession(s.target, entry)
+  }
+
+  /** Await a message rating: success closes the draft, failure keeps it with its code. */
+  private async submitMessage(target: Extract<FeedbackDialogTarget, { kind: 'message' }>, entry: FeedbackDialogEntry): Promise<void> {
+    const generation = this.generation
+    this.state.set({ ...this.state.getSnapshot(), submitting: true, failure: null })
+    const result = await this.submit(target, entry)
     if (result.ok) {
       // The remark is recorded whichever draft is on screen now, so the toast
       // always shows; only the draft that produced it closes.
@@ -144,10 +182,55 @@ export class FeedbackDialogController {
     this.state.set({ ...this.state.getSnapshot(), submitting: false, failure: result.error.code, toast: 0 })
   }
 
-  /** Clear the current failure toast without closing its draft. */
+  /**
+   * Dispatch a Session record and close the draft now: the acknowledgement
+   * toast is raised immediately, and the settle flips the pipeline indicator.
+   */
+  private submitSession(target: Extract<FeedbackDialogTarget, { kind: 'session' }>, entry: FeedbackDialogEntry): void {
+    this.generation += 1
+    this.toastSeq += 1
+    this.state.set({ ...CLOSED, toast: this.toastSeq, pipeline: 'running', failure: null })
+    void this.submit(target, entry).then(
+      (result) => { this.settlePipeline(result) },
+      (error: unknown) => {
+        this.settlePipeline({
+          ok: false,
+          error: { code: 'internal', message: error instanceof Error ? error.message : String(error) },
+        })
+      },
+    )
+  }
+
+  /**
+   * Land one background record's outcome on the pipeline indicator; the last
+   * settlement of a burst wins, and a disposed controller publishes nothing.
+   * @param result - the settled record result.
+   */
+  private settlePipeline(result: MessageFeedbackActionResult): void {
+    if (this.disposed) return
+    const s = this.state.getSnapshot()
+    this.state.set(result.ok
+      ? { ...s, pipeline: 'sent', failure: null }
+      : { ...s, pipeline: 'failed', failure: result.error.code })
+  }
+
+  /**
+   * Retire the settled success indicator after its pause; a failed indicator
+   * waits for {@link dismissFailure}.
+   */
+  dismissPipeline(): void {
+    const s = this.state.getSnapshot()
+    if (s.pipeline === 'sent') this.state.set({ ...s, pipeline: 'idle' })
+  }
+
+  /** Clear the current failure; also retires a failed pipeline indicator. */
   dismissFailure(): void {
     const s = this.state.getSnapshot()
-    this.state.set({ ...s, failure: null })
+    this.state.set({
+      ...s,
+      failure: null,
+      ...s.pipeline === 'failed' ? { pipeline: 'idle' as const } : {},
+    })
   }
 
   /** Show the acknowledgement toast; a toast already on screen restarts. */
@@ -165,9 +248,10 @@ export class FeedbackDialogController {
     if (s.toast === seq) this.state.set({ ...s, toast: 0 })
   }
 
-  /** Scope-teardown disposer: drop the draft and the toast, orphan in-flight work. */
+  /** Scope-teardown disposer: drop the draft, the toast, and the pipeline, orphan in-flight work. */
   dispose(): void {
+    this.disposed = true
     this.generation += 1
-    this.state.set({ ...CLOSED, toast: 0 })
+    this.state.set({ ...CLOSED, toast: 0, pipeline: 'idle' })
   }
 }

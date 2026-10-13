@@ -95,9 +95,21 @@ describe('MessageFeedbackActions row styles', () => {
 })
 
 describe('FeedbackDialog layout styles', () => {
-  it('uses the reviewed spacing, text colours, and submit-button geometry', () => {
+  it('keeps the dialog in normal flow: no negative margins, a bounded card, a scrolling content region', () => {
+    // The share group and the categories both bled into their neighbours when
+    // spacing was tuned with negative margins against a fixed child count;
+    // every stacked member now spaces itself with a positive margin and the
+    // card caps at the modal padding box so the content region scrolls instead
+    // of pushing a sibling out.
     expect(block('FeedbackDialog', '.dialog.dialog')).toMatch(/gap:\s*38px/)
-    expect(block('FeedbackDialog', '.categories')).toMatch(/margin-top:\s*-14px/)
+    expect(block('FeedbackDialog', '.dialog.dialog')).toMatch(/max-height:\s*100%/)
+    expect(block('FeedbackDialog', '.categories')).not.toMatch(/margin-top:\s*-/)
+    expect(block('FeedbackDialog', '.share')).toMatch(/margin:\s*18px 0 0/)
+    expect(block('FeedbackDialog', '.scrollArea')).toMatch(/overflow-y:\s*auto/)
+    expect(block('FeedbackDialog', '.scrollArea')).toMatch(/min-height:\s*0/)
+  })
+
+  it('uses the reviewed text colours and submit-button geometry', () => {
     expect(block('FeedbackDialog', '.chip')).toMatch(/color:\s*var\(--dsw-alias-label-primary\)/)
     expect(block('FeedbackDialog', '.detail::placeholder')).toMatch(/color:\s*var\(--dsw-alias-label-caption\)/)
     expect(block('FeedbackDialog', '.detail')).toContain('border-radius: var(--dsw-radius-lg)')

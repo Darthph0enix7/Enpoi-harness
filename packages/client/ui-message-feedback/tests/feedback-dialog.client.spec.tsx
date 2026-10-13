@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
 /**
  * FeedbackDialog rendering: the modal shows the seven category chips, the
- * detail box, and the hint while a target is open; a chip toggles the
- * category through the injected verb; Submit routes to the controller and
- * stays enabled with an empty draft; a failure code renders a warning toast;
- * and the acknowledgement toast mounts from the toast sequence and retires
- * through dismissToast once its fade completes.
+ * detail box, the hint, and the four share checkboxes while a Session target
+ * is open; a chip toggles the category through the injected verb; Submit
+ * routes to the controller and stays enabled with an empty draft; a failure
+ * code renders a warning toast while the dialog is open; the acknowledgement
+ * toast mounts from the toast sequence and retires through dismissToast once
+ * its fade completes; and the background-pipeline chip renders running, sent
+ * (fading through dismissPipeline), and failed (dismissed through
+ * dismissFailure) states.
  */
 import { useSyncExternalStore } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -25,13 +28,15 @@ const t = makeTranslate(zh, commonZh)
 /** Render the entry over a fixed state and recording verbs. */
 function mount(overrides: Partial<FeedbackDialogState> = {}) {
   const state: FeedbackDialogState = {
-    target: { kind: 'session' }, category: null, text: '', share: ALL_SHARED, submitting: false, failure: null, toast: 0,
+    target: { kind: 'session' }, category: null, text: '', share: ALL_SHARED, submitting: false, failure: null,
+    toast: 0, pipeline: 'idle',
     ...overrides,
   }
   const verbs = {
     edit: vi.fn(),
     submit: vi.fn(() => Promise.resolve()),
     dismiss: vi.fn(),
+    dismissPipeline: vi.fn(),
     dismissFailure: vi.fn(),
     dismissToast: vi.fn(),
   }
@@ -134,24 +139,28 @@ describe('FeedbackDialog', () => {
   })
 
   it('renders submission failures as toasts outside the dialog', () => {
-    const conflict = mount({ failure: 'version-conflict' })
+    const message = { kind: 'message', messageId: 'm-1' as MessageId, rating: 'positive' } as const
+    const conflict = mount({ target: message, failure: 'version-conflict' })
     const conflictToast = conflict.getByRole('alert')
     expect(conflictToast.textContent).toBe(zh['error.conflict'])
     expect(conflict.getByRole('dialog').contains(conflictToast)).toBe(false)
     cleanup()
 
-    const oversized = mount({ failure: 'note-too-large' })
+    const oversized = mount({ target: message, failure: 'note-too-large' })
     expect(oversized.getByRole('alert').textContent).toBe(zh['error.noteTooLarge'])
     cleanup()
 
-    const other = mount({ failure: 'session-not-found' })
+    const other = mount({ target: message, failure: 'session-not-found' })
     expect(other.getByRole('alert').textContent).toBe(zh['error.generic'])
   })
 
   it('retires a submission-failure toast after its extended hold', () => {
     vi.useFakeTimers()
     try {
-      const ui = mount({ failure: 'version-conflict' })
+      const ui = mount({
+        target: { kind: 'message', messageId: 'm-1' as MessageId, rating: 'positive' },
+        failure: 'version-conflict',
+      })
 
       act(() => { vi.advanceTimersByTime(7000) })
 
@@ -180,5 +189,46 @@ describe('FeedbackDialog', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  it('renders the in-flight pipeline chip without opening the dialog', () => {
+    const ui = mount({ target: null, pipeline: 'running' })
+
+    const chip = ui.getByRole('status')
+    expect(chip.textContent).toContain(zh['chip.title'])
+    expect(chip.textContent).toContain(zh['chip.running'])
+    expect(ui.queryByRole('dialog')).toBeNull()
+  })
+
+  it('fades the sent chip after its pause and retires it through dismissPipeline', () => {
+    vi.useFakeTimers()
+    try {
+      const ui = mount({ target: null, pipeline: 'sent' })
+      expect(ui.getByRole('status').textContent).toContain(zh['chip.sent'])
+      expect(ui.dismissPipeline).not.toHaveBeenCalled()
+
+      act(() => { vi.advanceTimersByTime(3500) })
+      expect(ui.dismissPipeline).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('renders a failed chip with the failure copy and retires it through dismissFailure', () => {
+    const ui = mount({ target: null, pipeline: 'failed', failure: 'gateway/internal' })
+
+    // The chip replaces the open-dialog failure toast, so only one alert shows.
+    expect(ui.getAllByRole('alert')).toHaveLength(1)
+    expect(ui.getByRole('alert').textContent).toContain(zh['error.generic'])
+
+    fireEvent.click(ui.getByRole('button', { name: commonZh.close }))
+    expect(ui.dismissFailure).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders no pipeline chip while idle', () => {
+    const ui = mount({ target: null })
+
+    expect(ui.queryByRole('status')).toBeNull()
+    expect(ui.queryByRole('alert')).toBeNull()
   })
 })

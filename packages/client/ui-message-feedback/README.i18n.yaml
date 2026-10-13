@@ -3,8 +3,8 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/client/ui-message-feedback/README.md
 /:
-  en: 8aef97e8b41fcc4b
-  zh: 2a28ff708de40cef
+  en: a7a965157faed1e3
+  zh: 1af85344e7012481
 /deepseek-ai-dsh-client-ui-message-feedback:
   en: eef16395a28d7264
   zh: 8b3daf739cdbc512
@@ -15,14 +15,14 @@
   en: d152484eb41ac6b4
   zh: 09388d293f9be9cb
 /deepseek-ai-dsh-client-ui-message-feedback/use-this-package:
-  en: 11a3ff80cec8785f
-  zh: 4c3a3f76adbf9dc7
+  en: 259b250d21d1408c
+  zh: 4ce974191ea587f4
 /deepseek-ai-dsh-client-ui-message-feedback/use-this-package/failures:
-  en: f060de7d9f44b058
-  zh: 60770de36be6e90f
+  en: 19fdd89e46ba1bbb
+  zh: 4126cb5a28763630
 /deepseek-ai-dsh-client-ui-message-feedback/understand-the-implementation:
-  en: 61260495346ceb3e
-  zh: 32e05d3eb82fcaf2
+  en: 94792dae9645e436
+  zh: 5fe807015a0b2831
 /deepseek-ai-dsh-client-ui-message-feedback/further-exploration:
   en: 47906e09b597c666
   zh: f729475bcc21f4ec

@@ -18,11 +18,12 @@ function bench(result: () => Promise<MessageFeedbackActionResult> = () => Promis
 }
 
 describe('FeedbackDialogController', () => {
-  it('starts closed with no toast', () => {
+  it('starts closed with no toast and no pipeline', () => {
     const { controller } = bench()
 
     expect(controller.state.getSnapshot()).toEqual({
       target: null, category: null, text: '', share: ALL_SHARED, submitting: false, failure: null, toast: 0,
+      pipeline: 'idle',
     })
   })
 
@@ -55,21 +56,32 @@ describe('FeedbackDialogController', () => {
     expect(submit).not.toHaveBeenCalled()
   })
 
-  it('submits the Session target with the trimmed text and the category', async () => {
-    const { controller, submit } = bench()
+  it('dispatches the Session target without waiting: the dialog closes and acknowledges at once', async () => {
+    let release = (): void => {}
+    const gate = new Promise<MessageFeedbackActionResult>((resolve) => { release = () => { resolve({ ok: true }) } })
+    const { controller, submit } = bench(() => gate)
     controller.open({ kind: 'session' })
     controller.edit({ category: 'service-stability' })
     controller.edit({ text: '  timed out twice  ' })
 
     await controller.submitDraft()
 
+    // Dispatched, not awaited: the draft is gone, the toast is up, and the
+    // background record is still in flight on the pipeline chip.
     expect(submit).toHaveBeenCalledWith({ kind: 'session' }, {
       text: 'timed out twice',
       category: 'service-stability',
       share: ALL_SHARED,
       submit: true,
     })
-    expect(controller.state.getSnapshot()).toMatchObject({ target: null, toast: 1 })
+    expect(controller.state.getSnapshot()).toMatchObject({
+      target: null, toast: 1, pipeline: 'running', failure: null, submitting: false,
+    })
+
+    release()
+    await gate
+    await Promise.resolve()
+    expect(controller.state.getSnapshot()).toMatchObject({ pipeline: 'sent', failure: null })
   })
 
   it('submits an empty draft as an entry with neither text nor category', async () => {
@@ -152,11 +164,11 @@ describe('FeedbackDialogController', () => {
     expect(controller.state.getSnapshot().target).toEqual(MESSAGE_TARGET)
   })
 
-  it('freezes the draft and refuses a second submit while one is in flight', async () => {
+  it('freezes a message draft and refuses a second submit while one is in flight', async () => {
     let release = (): void => {}
     const gate = new Promise<MessageFeedbackActionResult>((resolve) => { release = () => { resolve({ ok: true }) } })
     const { controller, submit } = bench(() => gate)
-    controller.open({ kind: 'session' })
+    controller.open(MESSAGE_TARGET)
     controller.edit({ text: 'first' })
 
     const first = controller.submitDraft()
@@ -171,11 +183,11 @@ describe('FeedbackDialogController', () => {
     expect(controller.state.getSnapshot()).toMatchObject({ target: null, toast: 1 })
   })
 
-  it('acknowledges a success that lands after a reopen without closing the new draft', async () => {
+  it('acknowledges a message success that lands after a reopen without closing the new draft', async () => {
     let release = (): void => {}
     const gate = new Promise<MessageFeedbackActionResult>((resolve) => { release = () => { resolve({ ok: true }) } })
     const { controller } = bench(() => gate)
-    controller.open({ kind: 'session' })
+    controller.open(MESSAGE_TARGET)
     const pending = controller.submitDraft()
     controller.open(MESSAGE_TARGET)
     controller.edit({ text: 'new draft' })
@@ -188,20 +200,85 @@ describe('FeedbackDialogController', () => {
     })
   })
 
-  it('drops a failure that lands after the draft was dismissed', async () => {
+  it('drops a message failure that lands after the draft was dismissed', async () => {
     let release = (): void => {}
     const gate = new Promise<MessageFeedbackActionResult>((resolve) => {
       release = () => { resolve({ ok: false, error: { code: 'gateway/internal', message: 'boom' } }) }
     })
     const { controller } = bench(() => gate)
-    controller.open({ kind: 'session' })
+    controller.open(MESSAGE_TARGET)
     const pending = controller.submitDraft()
     controller.dismiss()
 
     release()
     await pending
 
-    expect(controller.state.getSnapshot()).toMatchObject({ target: null, failure: null, submitting: false, toast: 0 })
+    expect(controller.state.getSnapshot()).toMatchObject({
+      target: null, failure: null, submitting: false, toast: 0, pipeline: 'idle',
+    })
+  })
+
+  it('lands a Session failure on the pipeline chip and retires it with dismissFailure', async () => {
+    const { controller } = bench(() => Promise.resolve({
+      ok: false,
+      error: { code: 'gateway/internal', message: 'boom' },
+    }))
+    controller.open({ kind: 'session' })
+    await controller.submitDraft()
+    await Promise.resolve()
+
+    // The failure never reopens the dialog: it lands on the background chip.
+    expect(controller.state.getSnapshot()).toMatchObject({
+      target: null, failure: 'gateway/internal', pipeline: 'failed',
+    })
+    controller.dismissFailure()
+    expect(controller.state.getSnapshot()).toMatchObject({ failure: null, pipeline: 'idle' })
+  })
+
+  it('keeps a failed Session indicator across a reopen and dismiss, and drops it on dispose', async () => {
+    const { controller } = bench(() => Promise.resolve({
+      ok: false,
+      error: { code: 'gateway/internal', message: 'boom' },
+    }))
+    controller.open({ kind: 'session' })
+    await controller.submitDraft()
+    await Promise.resolve()
+
+    controller.open({ kind: 'session' })
+    expect(controller.state.getSnapshot()).toMatchObject({ pipeline: 'failed', failure: 'gateway/internal' })
+    controller.dismiss()
+    expect(controller.state.getSnapshot()).toMatchObject({ pipeline: 'failed', failure: 'gateway/internal' })
+
+    controller.dispose()
+    expect(controller.state.getSnapshot()).toMatchObject({ pipeline: 'idle', failure: null, toast: 0 })
+  })
+
+  it('retires the sent indicator only through dismissPipeline, never a failed one', async () => {
+    const { controller } = bench()
+    controller.open({ kind: 'session' })
+    await controller.submitDraft()
+    await Promise.resolve()
+    expect(controller.state.getSnapshot().pipeline).toBe('sent')
+
+    controller.dismissPipeline()
+    expect(controller.state.getSnapshot().pipeline).toBe('idle')
+    controller.dismissPipeline()
+    expect(controller.state.getSnapshot().pipeline).toBe('idle')
+  })
+
+  it('publishes no background settlement after dispose', async () => {
+    let release = (): void => {}
+    const gate = new Promise<MessageFeedbackActionResult>((resolve) => { release = () => { resolve({ ok: true }) } })
+    const { controller } = bench(() => gate)
+    controller.open({ kind: 'session' })
+    await controller.submitDraft()
+    controller.dispose()
+
+    release()
+    await gate
+    await Promise.resolve()
+
+    expect(controller.state.getSnapshot()).toMatchObject({ pipeline: 'idle', toast: 0 })
   })
 
   it('retires only the toast the view finished showing', async () => {
@@ -232,6 +309,7 @@ describe('FeedbackDialogController', () => {
     controller.dispose()
     expect(controller.state.getSnapshot()).toEqual({
       target: null, category: null, text: '', share: ALL_SHARED, submitting: false, failure: null, toast: 0,
+      pipeline: 'idle',
     })
   })
 })

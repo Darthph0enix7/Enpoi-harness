@@ -1,20 +1,26 @@
 /**
- * The feedback dialog and its acknowledgement and failure toasts, rendered as one entry
- * of `conversation.input.overlay` so each Session owns exactly one of each.
- * The Modal and the Toast both portal to `document.body`; the overlay slot
- * only supplies the per-session controller and the composer card the toast
- * centers over.
+ * The feedback dialog, its acknowledgement and failure toasts, and the
+ * non-blocking bottom-right pipeline chip, rendered as one entry of
+ * `conversation.input.overlay` so each Session owns exactly one of each. The
+ * Modal, the Toast, and the pipeline chip all portal to `document.body`; the
+ * overlay slot only supplies the per-session controller and the composer card
+ * the toast centers over.
  * @module @deepseek-ai/dsh-client-ui-message-feedback/client/FeedbackDialog
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
-  Button, Checkbox, IconWarningOutlineRegular, Modal, Toast,
+  Button, Checkbox, IconWarningOutlineRegular, Modal, StateDot, Toast,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { FeedbackCategory } from '@deepseek-ai/dsh-command-feedback/types'
 import type { FeedbackShareFlags } from './dialog.ts'
 import type { FeedbackDialogProps } from './slots.ts'
 import css from './FeedbackDialog.module.css'
+
+/** Pause the settled success chip holds before fading, and the fade's own length. */
+const SENT_HOLD_MS = 3000
+const SENT_FADE_MS = 400
 
 /**
  * The chips in presentation order. A client bundle may not import a Host
@@ -45,12 +51,15 @@ const FAILURE_COPY: Partial<Record<string, 'error.conflict' | 'error.noteTooLarg
 }
 
 /**
- * Render one Session's feedback dialog and toast.
+ * Render one Session's feedback dialog, its acknowledgement and failure
+ * toasts, and the non-blocking background-pipeline chip.
  * @param props - the dialog hook, the draft verbs, and the locale seat.
- * @returns the modal while a target is open and either toast while it is showing.
+ * @returns the modal while a target is open, either toast while it is showing,
+ *   and the bottom-right pipeline chip while a Session record is in flight or
+ *   settled.
  */
 export function FeedbackDialog({
-  useDialog, edit, submit, dismiss, dismissFailure, dismissToast, t,
+  useDialog, edit, submit, dismiss, dismissPipeline, dismissFailure, dismissToast, t,
 }: FeedbackDialogProps) {
   const state = useDialog(s => s)
   // The toast centers over the composer card this entry renders inside of.
@@ -64,9 +73,25 @@ export function FeedbackDialog({
   // A toast retires with the entry that showed it: the Toast's own timer dies
   // on unmount, and the Session's controller must not replay it on return.
   useEffect(() => () => { dismissToast(toast) }, [dismissToast, toast])
+  const pipeline = state.pipeline
   const failureCode = state.failure
   const failure = failureCode === null ? null : t(FAILURE_COPY[failureCode] ?? 'error.generic')
   const onFailureDone = useCallback(() => { dismissFailure() }, [dismissFailure])
+  // A settled success chip pauses, fades, then retires through the controller;
+  // a failure chip stays until its dismiss control retires it.
+  const [leaving, setLeaving] = useState(false)
+  useEffect(() => {
+    if (pipeline !== 'sent') {
+      setLeaving(false)
+      return
+    }
+    const fade = setTimeout(() => { setLeaving(true) }, SENT_HOLD_MS)
+    const retire = setTimeout(() => { setLeaving(false); dismissPipeline() }, SENT_HOLD_MS + SENT_FADE_MS)
+    return () => {
+      clearTimeout(fade)
+      clearTimeout(retire)
+    }
+  }, [pipeline, dismissPipeline])
 
   return (
     <>
@@ -80,7 +105,7 @@ export function FeedbackDialog({
           onDone={onToastDone}
         />
       )}
-      {failure !== null && (
+      {failure !== null && state.target !== null && pipeline !== 'failed' && (
         <Toast
           key={`failure-${failureCode}`}
           text={failure}
@@ -90,12 +115,40 @@ export function FeedbackDialog({
           onDone={onFailureDone}
         />
       )}
+      {/* The pipeline chip portals out of the overlay so it sits above the
+          composer; the Session record is not awaited by the dialog. */}
+      {pipeline !== 'idle' && createPortal((
+        <div className={css.pipelineDock} data-feedback-pipeline={pipeline} data-leaving={leaving || undefined}>
+          <div className={css.pipelineChip} role={pipeline === 'failed' ? 'alert' : 'status'}>
+            <StateDot state={pipeline === 'running' ? 'ongoing' : pipeline === 'sent' ? 'done' : 'error'} />
+            <span className={css.pipelineBody}>
+              <strong>{t('chip.title')}</strong>
+              <span className={css.pipelineStage} data-feedback-pipeline-stage>
+                {pipeline === 'running' ? t('chip.running') : pipeline === 'sent' ? t('chip.sent') : (failure ?? t('error.generic'))}
+              </span>
+            </span>
+            {pipeline === 'failed' && (
+              <button
+                type="button"
+                className={css.pipelineDismiss}
+                aria-label={t('close')}
+                title={t('close')}
+                data-feedback-pipeline-dismiss
+                onClick={dismissFailure}
+              >
+                ×
+              </button>
+            )}
+          </div>
+        </div>
+      ), document.body)}
       <Modal
         open={state.target !== null}
         title={t('dialog.title')}
         closeLabel={t('close')}
         onClose={dismiss}
         className={css.dialog as string}
+        contentClassName={css.scrollArea as string}
         footer={(
           <Button
             variant="primary"

@@ -126,6 +126,7 @@ export function apply(ctx: ClientContext): void {
         edit: (draft) => { dialog.edit(draft) },
         submit: () => dialog.submitDraft(),
         dismiss: () => { dialog.dismiss() },
+        dismissPipeline: () => { dialog.dismissPipeline() },
         dismissFailure: () => { dialog.dismissFailure() },
         dismissToast: (seq) => { dialog.dismissToast(seq) },
       }

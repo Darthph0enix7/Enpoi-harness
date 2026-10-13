@@ -10,7 +10,7 @@
  * The node half stays inert.
  */
 import { Context, Service } from '@deepseek-ai/cordis'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup } from '@testing-library/react'
 import { SlotRegistry } from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
@@ -36,7 +36,13 @@ const seeded: MessageFeedbackItem = {
 }
 
 /** Boot the plugin over fake faces; the Remote namespaces record every call. */
-async function bench(options: { recordResult?: unknown; recordCarrier?: unknown } = {}) {
+async function bench(options: {
+  recordResult?: unknown
+  recordCarrier?: unknown
+  /** Held open to observe the non-blocking submit before the record settles. */
+  recordGate?: Promise<void>
+  putResult?: unknown
+} = {}) {
   const ctx = new Context()
   const calls: { method: string; request: unknown }[] = []
   // The generated face wraps every business result in the carrier envelope.
@@ -48,7 +54,7 @@ async function bench(options: { recordResult?: unknown; recordCarrier?: unknown 
     },
     put: (request: unknown) => {
       calls.push({ method: 'put', request })
-      return carried({ ok: true as const, value: seeded })
+      return carried(options.putResult ?? { ok: true as const, value: seeded })
     },
     delete: (request: unknown) => {
       calls.push({ method: 'delete', request })
@@ -61,9 +67,10 @@ async function bench(options: { recordResult?: unknown; recordCarrier?: unknown 
     }
   }
   const sessionFeedback = {
-    record: (request: unknown) => {
+    record: async (request: unknown) => {
       calls.push({ method: 'record', request })
-      if (options.recordCarrier !== undefined) return Promise.resolve(options.recordCarrier)
+      if (options.recordGate !== undefined) await options.recordGate
+      if (options.recordCarrier !== undefined) return options.recordCarrier
       return carried(options.recordResult ?? { ok: true as const, value: { recorded: true as const } })
     },
   }
@@ -197,7 +204,12 @@ describe('ui-message-feedback browser plugin', () => {
         share: { systemInfo: true, context: true, session: true, message: true },
         submit: true,
       })
-    expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({ target: null, toast: 1 })
+    // The submit dispatch does not wait for the record: the draft is closed and
+    // acknowledged while the background pipeline chip is running.
+    expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({ target: null, toast: 1, pipeline: 'running' })
+    await vi.waitFor(() => {
+      expect(dialog.hooks.dialog.getSnapshot().pipeline).toBe('sent')
+    })
 
     message.openDialog(MSG, 'positive')
     dialog.edit({ category: 'task-result' })
@@ -239,7 +251,33 @@ describe('ui-message-feedback browser plugin', () => {
     })
   })
 
-  it('keeps the dialog open with the carrier code when the record call itself fails', async () => {
+  it('closes the dialog and acknowledges while the Session record is still pending', async () => {
+    let release = (): void => {}
+    const gate = new Promise<void>((resolve) => { release = () => { resolve() } })
+    const b = await bench({ recordGate: gate })
+    await b.fiber.await()
+    const dialog = b.dialogEntry()!.inject!(sid('s1'))
+    const decoration = b.decorations.get('feedback')
+    if (decoration?.ui.kind !== 'action') throw new Error('the /feedback decoration is not an action')
+    decoration.ui.run({ sessionId: sid('s1') })
+    dialog.edit({ text: 'fire and forget' })
+
+    await dialog.submit()
+
+    // Submitted, not awaited: the request is on the wire, the dialog is gone,
+    // the toast is up, and the chip runs while the record promise is pending.
+    expect(b.calls.filter(call => call.method === 'record')).toHaveLength(1)
+    expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({
+      target: null, toast: 1, pipeline: 'running', failure: null,
+    })
+
+    release()
+    await vi.waitFor(() => {
+      expect(dialog.hooks.dialog.getSnapshot().pipeline).toBe('sent')
+    })
+  })
+
+  it('lands a carrier failure on the failed chip instead of reopening the dialog', async () => {
     const b = await bench({ recordCarrier: { ok: false as const, error: { code: 'gateway/internal', message: 'socket closed', details: {} } } })
     await b.fiber.await()
     const dialog = b.dialogEntry()!.inject!(sid('s1'))
@@ -248,13 +286,18 @@ describe('ui-message-feedback browser plugin', () => {
     decoration.ui.run({ sessionId: sid('s1') })
 
     await dialog.submit()
+    await vi.waitFor(() => {
+      expect(dialog.hooks.dialog.getSnapshot().pipeline).toBe('failed')
+    })
 
-    expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({ target: { kind: 'session' }, failure: 'gateway/internal', toast: 0 })
+    expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({
+      target: null, failure: 'gateway/internal', toast: 1,
+    })
     dialog.dismissFailure()
-    expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({ target: { kind: 'session' }, failure: null })
+    expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({ failure: null, pipeline: 'idle' })
   })
 
-  it('keeps the dialog open with the failure code when the Host rejects the remark', async () => {
+  it('lands a Host-rejected remark on the failed chip with its code', async () => {
     const b = await bench({
       recordResult: { ok: false as const, error: { code: 'session-not-found', sessionId: 'gone' } },
     })
@@ -265,8 +308,30 @@ describe('ui-message-feedback browser plugin', () => {
     decoration.ui.run({ sessionId: sid('gone') })
 
     await dialog.submit()
+    await vi.waitFor(() => {
+      expect(dialog.hooks.dialog.getSnapshot().pipeline).toBe('failed')
+    })
 
-    expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({ target: { kind: 'session' }, failure: 'session-not-found' })
+    expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({ target: null, failure: 'session-not-found' })
+    dialog.dismissFailure()
+    expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({ failure: null, pipeline: 'idle' })
+  })
+
+  it('keeps a message dialog open with the failure code, since ratings stay awaited', async () => {
+    const b = await bench({ putResult: { ok: false as const, error: { code: 'version-conflict', current: seeded } } })
+    await b.fiber.await()
+    const message = b.entry()!.inject!(sid('s1'))
+    const dialog = b.dialogEntry()!.inject!(sid('s1'))
+    message.openDialog(MSG, 'positive')
+    dialog.edit({ text: 'draft' })
+
+    await dialog.submit()
+
+    expect(dialog.hooks.dialog.getSnapshot()).toMatchObject({
+      target: { kind: 'message', messageId: MSG, rating: 'positive' },
+      failure: 'version-conflict',
+      pipeline: 'idle',
+    })
     dialog.dismiss()
     expect(dialog.hooks.dialog.getSnapshot().target).toBeNull()
   })

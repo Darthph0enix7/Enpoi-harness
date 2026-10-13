@@ -1,16 +1,29 @@
 /* The card width leaves four categories on the first row and three on the
-   second. The doubled selector overrides the Modal card geometry. */
+   second. The doubled selector overrides the Modal card geometry. The card
+   caps at the modal's padding box; the content region scrolls, so the body
+   grows with the textarea without ever pushing a sibling out of the card. */
 .dialog.dialog {
   gap: 38px;
   width: min(488px, 100%);
+  max-height: 100%;
   border-radius: var(--dsw-radius-panel);
+}
+
+/* Scrolling content region of the elevated modal card: bounded so the footer
+   stays pinned, with the l2 thumb pair an elevated surface takes. */
+.scrollArea {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
 }
 
 .categories {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-top: -14px;
 }
 
 .chip {
@@ -90,12 +103,13 @@
 }
 
 /* The sharing scope sits under the detail box as one compact group: a
-   caption-size legend, one wrapping checkbox row, and one hint line. */
+   caption-size legend, one wrapping checkbox row, and one hint line. Positive
+   margins only: normal flow keeps it below the detail box at every size. */
 .share {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin: -20px 0 0;
+  margin: 18px 0 0;
   padding: 0;
   border: 0;
 }
@@ -125,9 +139,103 @@
   line-height: 18px;
 }
 
+/* Bottom-right background-pipeline chip: the system-analysis chip's material
+   and placement, rendered per Session from the same overlay entry. Pointer
+   events stay off the dock so it never blocks the composer beneath. */
+.pipelineDock {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1050;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  max-width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.pipelineChip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: max-content;
+  max-width: 100%;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-layer-2);
+  border: 0;
+  border-radius: var(--dsw-radius-lg);
+  box-shadow: var(--dsw-shadow-lv3);
+  pointer-events: auto;
+  animation: feedbackChipIn 160ms ease both;
+}
+
+.pipelineDock[data-leaving] .pipelineChip {
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 400ms ease, transform 400ms ease;
+}
+
+.pipelineBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pipelineStage {
+  color: var(--dsw-alias-label-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pipelineDismiss {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--dsw-alias-label-tertiary);
+  background: none;
+  border: 0;
+  border-radius: 50%;
+  corner-shape: round;
+  cursor: pointer;
+}
+
+.pipelineDismiss:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.pipelineDismiss:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+
+@keyframes feedbackChipIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .chip,
   .detail {
+    transition: none;
+  }
+
+  .pipelineChip {
+    animation: none;
+  }
+
+  .pipelineDock[data-leaving] .pipelineChip {
     transition: none;
   }
 }
