@@ -139,10 +139,11 @@ function watchAssistantText(ctx: Context, sessionId: SessionId): { text: () => s
   let latest: string | undefined
   const stop = ctx.on('session/event', (session, event) => {
     if (session.id !== sessionId || event.type !== 'assistant/message') return
-    const content = (event.data as { content?: unknown }).content
+    const content = (event.data as { message?: { content?: unknown } }).message?.content
     if (!Array.isArray(content)) return
     const text = content
-      .map(block => (typeof block === 'object' && block !== null && typeof (block as { text?: unknown }).text === 'string'
+      .filter(block => typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'text')
+      .map(block => (typeof (block as { text?: unknown }).text === 'string'
         ? (block as { text: string }).text
         : ''))
       .join('')
@@ -253,6 +254,11 @@ export async function runFeedbackTriage(
       }),
     ])
     const reply = assistant.text()
+    if (reply === undefined) {
+      // ctx.logger output is not wired to the service journal; this line keeps
+      // the miss visible where operators look.
+      console.error('[feedback-triage] no assistant reply captured; analysis skipped')
+    }
     return reply === undefined ? null : parseTriage(reply)
   } catch (error: unknown) {
     ctx.logger.warn('feedback-triage: triage failed:', error)
@@ -293,7 +299,7 @@ export interface Config {
 export const Config = Schema.object({
   provider: Schema.string().default('kilo'),
   model: Schema.string().default('kilo-auto/free'),
-  preset: Schema.string().default('system-analysis'),
+  preset: Schema.string().default('sysadmin'),
   permissionPreset: Schema.string().default('system-analysis'),
   timeoutMinutes: Schema.number().min(1).max(60).default(5),
 })
@@ -313,7 +319,7 @@ export class FeedbackTriageSession extends Service implements FeedbackTriageServ
       workspace: triageWorkspacePath(),
       provider: config.provider ?? 'kilo',
       model: config.model ?? 'kilo-auto/free',
-      preset: config.preset ?? 'system-analysis',
+      preset: config.preset ?? 'sysadmin',
       permissionPreset: config.permissionPreset ?? 'system-analysis',
       timeoutMinutes: config.timeoutMinutes ?? 5,
     }, input, signal)

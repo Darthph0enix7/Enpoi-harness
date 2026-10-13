@@ -139,11 +139,19 @@
   `f5b857b568c0` with the complete payload (see
   `~/feedback-service/data/20261012/`). Anonymity verified: no raw session id,
   no keys, hashed IP at the endpoint.
-- **Open**: the triage real-runner returned `null` in the scratch composition
-  (no `feedback-triage-*` session dir was created and no warn surfaced; the
-  composition shows a pre-existing `preset-standard (undefined): failed to
-  import` warning). Triage is unit-proven and shares the production
-  system-analysis pattern — it needs one clean-profile/device run to confirm.
+- **Triage root-caused and fixed (2026-10-13 morning)**: two defects —
+  (1) the triage agent preset defaulted to `system-analysis`, which is a
+  *permission* preset; the agent preset must be `sysadmin` (mirroring the
+  first-run investigation); (2) the reply watcher read `event.data.content`
+  while `assistant/message` carries content at `event.data.message.content`,
+  so no reply was ever captured and the runner returned null silently.
+  Fixed both; the live run now returns a parsed analysis
+  (`{category, severity, summary, details}`) and the endpoint stores it
+  (`analysisCategory` in the admin list). Free-route latency is variable
+  (≈20 s–3 min), so the dialog can wait on the pipeline.
+- **Observation**: plugin `ctx.logger.warn` output does not reach the service
+  journal — silent failures in plugins are invisible; the triage keeps one
+  `console.error` line on the no-reply path until the logger wiring is fixed.
 - **Follow-ups**: collect's deprecated `snapshotEvents` → live-event migration;
   a browser e2e asserting the four checkboxes; a server-side contract test for
   telemetry-only payloads; the `session.prompt` RPC shape (for richer context

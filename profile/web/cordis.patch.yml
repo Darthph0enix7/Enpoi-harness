@@ -161,7 +161,7 @@
     - id: feedback-triage
       name: "@deepseek-ai/dsh-feedback-triage"
       config:
-        preset: system-analysis
+        preset: sysadmin
         permissionPreset: system-analysis
         timeoutMinutes: 5
 
