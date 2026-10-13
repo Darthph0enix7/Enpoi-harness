@@ -1,8 +1,21 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-10-13T16:25:34.684Z",
+  "generatedAt": "2026-10-13T18:33:13.337Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.85",
+      "commit": "45d263b",
+      "releasedAt": "2026-10-13T18:10:52.000Z",
+      "notes": [
+        "fix(update): the cancel endpoint was never declared on the remote class",
+        "feat(update): engine-marker observer, UI cancel, and bounded post-restart reload",
+        "feat(update): live-run marker, attach, cancel; TTY-less pnpm hardening",
+        "feat(update): version-free Update pill + General-settings update row (skips stay updatable)",
+        "fix(update): normalize legacy run.json records across the rung/launcher split",
+        "feat(update): engine capability probe + one-shot fallback for pre-two-phase installs"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.83",
       "commit": "fac60db",
@@ -355,14 +368,6 @@
       "releasedAt": "2026-10-08T20:42:36.000Z",
       "notes": [
         "fix(models): non-destructive refresh, live-first discovery, real modalities/tags, opencode-go overlay"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.44",
-      "commit": "a98f6e9",
-      "releasedAt": "2026-10-08T20:37:38.000Z",
-      "notes": [
-        "fix(portability): repo-relative generator and sidebar builders"
       ]
     }
   ]
