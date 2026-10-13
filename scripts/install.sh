@@ -2115,8 +2115,6 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
     rm -rf "$STAGED"; STAGED=""
     return 1
   fi
-  VERSION="$version"
-  PREBUILT=1
   # The tag's own commit is the recorded build identity; empty when git and
   # the GitHub API cannot resolve it (install_tree then falls back to the
   # channel ref's commit). Network-bound and variable: announce + time it.
@@ -2130,6 +2128,12 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
     rm -rf "$STAGED"; STAGED=""
     return 1
   fi
+  # Only a release that survives every check is the prebuilt target: the
+  # divergence fallback above must leave PREBUILT unset, or the source tree
+  # staged next would skip its dependency/build step and switch in unbuilt
+  # (--version/--help fail, self-check rolls the update back).
+  VERSION="$version"
+  PREBUILT=1
   return 0
 }
 
