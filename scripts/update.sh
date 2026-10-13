@@ -4,8 +4,10 @@
 # which runs scripts/doctor.mjs with the Node recorded by the install.
 # Invoked by the `dsh` shim as `dsh update|repair|uninstall|doctor [flags]`;
 # runnable directly too (a bare invocation means update). The two-phase update
-# flags (`dsh update --prepare` / `dsh update --apply`) are passed through
-# verbatim to the installer engine, which owns their semantics.
+# flags (`dsh update --prepare` / `dsh update --apply`) and the live-run cancel
+# (`dsh update --cancel`) are passed through verbatim to the installer engine,
+# which owns their semantics. A plain `dsh update` meeting a live run attaches
+# to it (progress subscription) instead of failing.
 #
 # $DSH_HOME is a user-scoped setting, not a prefix property, and the shim only
 # knows the install prefix. Derive the configured home here — an explicit
@@ -33,7 +35,7 @@ for arg in "$@"; do
     --channel=*) explicit_channel="${arg#--channel=}"; argv+=("$arg");;
     --dsh-home|--dsh-home=*) explicit_home=1; argv+=("$arg");;
     update|repair|uninstall|doctor|clean) mode="$arg";;
-    --prepare|--apply) argv+=("$arg");;
+    --prepare|--apply|--cancel) argv+=("$arg");;
     *) argv+=("$arg");;
   esac
 done

@@ -121,6 +121,7 @@ JSON_OUT=0
 UPDATE_MODE=0
 UPDATE_PREPARE=0
 UPDATE_APPLY=0
+UPDATE_CANCEL=0
 REPAIR_MODE=0
 UNINSTALL_MODE=0
 PURGE=0
@@ -248,6 +249,9 @@ say() {
 
 step() { # label
   STEP_NO=$((STEP_NO + 1))
+  # The engine run marker (attach/cancel contract) advances with every numbered
+  # step; QUIET must not hide progress that a detached watcher reads.
+  if [ "${RUN_MARKER_ACTIVE:-0}" = 1 ]; then run_marker_write "${RUN_MARKER_PHASE:-running}"; fi
   [ "$QUIET" = 1 ] && return 0
   progress_clear
   if [ "$STEP_TOTAL" -gt 0 ]; then
@@ -643,6 +647,13 @@ Options:
                       self-check, health-proof, prune, and delete the record.
                       Refuses (exit 1) when nothing is staged; the record
                       survives a failure so the UI can retry
+  --cancel            with --update: stop a live update run — SIGTERM the
+                      runner pid from $PREFIX/harness/.update-run.json, wait
+                      (DSH_CANCEL_TIMEOUT, default 10s), escalate to SIGKILL —
+                      sweep its partial artifacts, and mark the run cancelled.
+                      Refused while the run is past the switch (phase
+                      switching/applying). A plain `dsh update` that meets a
+                      live run attaches and follows it instead of failing.
   --repair            verify the install's invariants (version dirs, current,
                       shim, profile tree, services, settings, ports) and fix the
                       safe ones; report the rest with the exact remedy command
@@ -689,6 +700,13 @@ Environment:
                                      first 100.64.0.0/10 host address otherwise)
   DSH_NO_PREBUILT                    same as --no-prebuilt
   DSH_NO_PROFILE_MERGE               same as --no-profile-merge
+  DSH_CANCEL_TIMEOUT                 seconds to wait after SIGTERM before
+                                     SIGKILLing a run cancelled by
+                                     `dsh update --cancel` (default 10)
+  DSH_ATTACH_INTERVAL                seconds between polls when `dsh update`
+                                     attaches to a live run (default 2)
+  DSH_UPDATE_MODE                    labels a no-flag run in the engine run
+                                     marker: plain (default) or one-shot
 
 Exit codes: 0 success, 1 failure (update rolls back first), 42 sudo trap fired.
 USAGE
@@ -697,8 +715,11 @@ USAGE
 # One EXIT trap owns all cleanup: staging dirs, a pre-switch user-file restore
 # that an early die did not reach explicitly, and the portable mkdir lock
 # directory. A single chained trap keeps the existing cleanup from being
-# clobbered by a later trap registration.
-trap 'if [ -n "${STAGED:-}" ]; then rm -rf "$STAGED"; fi; if [ -n "${PROFILE_STAGE:-}" ]; then rm -rf "$PROFILE_STAGE"; fi; if [ -n "${PRE_SWITCH_RESTORE:-}" ]; then restore_pre_switch "$PRE_SWITCH_RESTORE" "the update"; fi; if [ -n "${UPDATE_LOCK_DIR:-}" ]; then rm -rf "$UPDATE_LOCK_DIR" 2>/dev/null; fi; if [ -n "${UPDATE_LOCK_FILE:-}" ]; then exec 9>&- 2>/dev/null || true; fi; if [ -n "${CURRENT_RUN_LOGGED_PID:-}" ]; then kill -TERM "$CURRENT_RUN_LOGGED_PID" 2>/dev/null || true; fi' EXIT
+# clobbered by a later trap registration. The first statement finalizes the
+# engine run marker (attach/cancel contract) from the exit status; it is
+# definition-guarded because the trap is registered before the functions and
+# must never break a library-only source.
+trap 'exit_rc=$?; if [ "${RUN_MARKER_ACTIVE:-0}" = 1 ] && command -v run_marker_exit_hook >/dev/null 2>&1; then run_marker_exit_hook "$exit_rc"; fi; if [ -n "${STAGED:-}" ]; then rm -rf "$STAGED"; fi; if [ -n "${PROFILE_STAGE:-}" ]; then rm -rf "$PROFILE_STAGE"; fi; if [ -n "${PRE_SWITCH_RESTORE:-}" ]; then restore_pre_switch "$PRE_SWITCH_RESTORE" "the update"; fi; if [ -n "${UPDATE_LOCK_DIR:-}" ]; then rm -rf "$UPDATE_LOCK_DIR" 2>/dev/null; fi; if [ -n "${UPDATE_LOCK_FILE:-}" ]; then exec 9>&- 2>/dev/null || true; fi; if [ -n "${CURRENT_RUN_LOGGED_PID:-}" ]; then kill -TERM "$CURRENT_RUN_LOGGED_PID" 2>/dev/null || true; fi' EXIT
 
 # ── Argument parsing ────────────────────────────────────────────────────────
 need_value() { [ "$#" -ge 2 ] || die "option $1 needs a value"; }
@@ -742,6 +763,7 @@ while [ "$#" -gt 0 ]; do
     --update) UPDATE_MODE=1; shift;;
     --prepare) UPDATE_PREPARE=1; shift;;
     --apply) UPDATE_APPLY=1; shift;;
+    --cancel) UPDATE_CANCEL=1; shift;;
     --repair) REPAIR_MODE=1; shift;;
     --clean) CLEAN_MODE=1; shift;;
     --uninstall) UNINSTALL_MODE=1; shift;;
@@ -2301,7 +2323,16 @@ install_tree() { # installs $VERSION into $PREFIX/harness/${TREE_DIR_NAME:-$VERS
     substep_ok "Prebuilt tree installed (no build required)"
     return 0
   fi
-  if ! run_logged "Installing workspace dependencies" "$INSTALL_TIMEOUT" "$HARNESS" "$PNPM" install --frozen-lockfile --store-dir "${PNPM_STORE_DIR:-$PREFIX/.pnpm-store}"; then
+  # pnpm aborts a real install when it decides the modules directory must be
+  # purged (the live failure: a node_modules recorded by a different pnpm kept
+  # its own storeDir, so the pinned pnpm wanted to recreate it) and there is no
+  # TTY to answer the confirmation — ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY.
+  # `--config.confirmModulesPurge=false` is the pnpm 11.x answer (verified
+  # against 11.7.0: the env forms npm_config_confirm_modules_purge /
+  # npm_config_confirmModulesPurge / pnpm_config_* do NOT work, `CI=true` and
+  # `--yes` do but change other defaults). Every installer-driven `pnpm
+  # install` carries it so a detached update can never die on that prompt.
+  if ! run_logged "Installing workspace dependencies" "$INSTALL_TIMEOUT" "$HARNESS" "$PNPM" install --frozen-lockfile --config.confirmModulesPurge=false --store-dir "${PNPM_STORE_DIR:-$PREFIX/.pnpm-store}"; then
     warn "pnpm install failed"
     if [ -n "$displaced" ]; then rm -rf "$HARNESS"; mv "$displaced" "$HARNESS" 2>/dev/null || true; fi
     return 1
@@ -3366,8 +3397,11 @@ profile_install() {
     fi
   fi
 
+  # Non-interactive purge confirmation (same reason as the workspace install:
+  # a profile node_modules recorded by another pnpm must never abort a detached
+  # update with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY).
   if ! DSH_PROGRESS_INTERVAL="${DSH_PROFILE_PROGRESS_INTERVAL:-15}" \
-    run_logged "Installing Enpoi profile dependencies (pnpm install)" "$PROFILE_INSTALL_TIMEOUT" "$PROFILE_DIR" "$PNPM" install --prefer-offline --store-dir "${PNPM_STORE_DIR:-$PREFIX/.pnpm-store}"; then
+    run_logged "Installing Enpoi profile dependencies (pnpm install)" "$PROFILE_INSTALL_TIMEOUT" "$PROFILE_DIR" "$PNPM" install --prefer-offline --config.confirmModulesPurge=false --store-dir "${PNPM_STORE_DIR:-$PREFIX/.pnpm-store}"; then
     warn "profile pnpm install failed"
     return 1
   fi
@@ -6060,6 +6094,7 @@ sweep_experimental_residue() {
   #    scratch, planner files. Live owners and the incoming staging are kept.
   for p in "$h"/.staging-* "$h"/.update-* "$h"/.base-*; do
     [ -e "$p" ] || continue
+    is_run_marker_path "$p" && continue
     case "${STAGED:-}" in "$p") continue;; esac
     scratch_owner_alive "$p" && continue
     residue_remove "$p" "$(basename "$p")"
@@ -6477,6 +6512,9 @@ rollback() { # prev backup failed_version
   unset DSH_UPDATE_SELFTEST_FAIL
   if selfcheck >/dev/null 2>&1; then prev_ok=0; else warn "the previous tree also fails self-check; inspect $HARNESS"; fi
   ROLLED_BACK=1
+  # Terminal marker for the attach contract: a rolled-back run reports as
+  # rolledback (with the reason available in the log), never as a plain fail.
+  run_marker_phase rolledback
   if [ "$restore_rc" != 0 ]; then
     write_diagnostics rolled-back-partial
     emit_json update 0
@@ -6732,9 +6770,10 @@ prune_orphaned_update_artifacts() {
   for p in "$h"/.download-* "$h"/.release-* "$h"/.update-*; do
     [ -e "$p" ] || continue
     base="$(basename "$p")"
-    # The update lock is live state, not scratch: the sweep runs while holding
-    # it, and unlinking it would let a second update acquire a different inode.
-    case "$base" in .download-cache*|.update.lock|.update.lock.d) continue;; esac
+    # The update lock and the run marker are live state, not scratch: the sweep
+    # runs while holding the lock / after writing the marker, and unlinking
+    # either would break concurrency or the attach/cancel contract.
+    case "$base" in .download-cache*|.update.lock|.update.lock.d|.update-run.json|.update-run.json.tmp.*) continue;; esac
     artifact_owner_alive "$p" && continue
     sz="$(du -sk "$p" 2>/dev/null | awk '{print $1}')"
     sz="${sz:-0}"
@@ -6821,6 +6860,7 @@ cleanup_stale_artifacts() {
   # pid-suffixed; keep it while the owner lives.
   for p in "$PREFIX/harness"/.update-* "$PREFIX/harness"/.release-* "$PREFIX/harness"/.base-* "$PREFIX/harness"/.delta-*; do
     [ -e "$p" ] || continue
+    is_run_marker_path "$p" && continue
     scratch_owner_alive "$p" && continue
     rm -rf -- "$p" 2>/dev/null && count=$((count + 1))
   done
@@ -6959,6 +6999,7 @@ do_clean() {
   # from exactly that directory and journal (`dsh update` continues by
   # fingerprint), so `dsh clean` must not break the resume path.
   for p in "$PREFIX/harness"/.staging-* "$PREFIX/harness"/.profile-staging-* "$PREFIX/harness"/.download-* "$PREFIX/harness"/.backup-* "$PREFIX/harness"/*.replaced-* "$PREFIX/harness"/.update-* "$PREFIX/harness"/.release-* "$PREFIX/harness"/.base-* "$PREFIX/harness"/.delta-*; do
+    is_run_marker_path "$p" && continue
     case "$p" in
       "$PREFIX/harness"/.staging-*|"$PREFIX/harness"/.profile-staging-*)
         if scratch_owner_alive "$(staging_guard_base "$p")"; then
@@ -7008,9 +7049,11 @@ do_clean() {
 acquire_update_lock() {
   [ "${DRY_RUN:-0}" != 1 ] || return 0
   mkdir -p "$PREFIX/harness" 2>/dev/null || true
-  # Always ensure signals trigger the EXIT trap to clean up locks and staged trees
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  # Always ensure signals trigger the EXIT trap to clean up locks and staged
+  # trees; RUN_MARKER_SIGNALLED makes the run marker's terminal phase read
+  # `cancelled` for a signalled exit (attach/cancel contract).
+  trap 'RUN_MARKER_SIGNALLED=1; exit 130' INT
+  trap 'RUN_MARKER_SIGNALLED=1; exit 143' TERM
 
   local lock_file="$PREFIX/harness/.update.lock"
   if command -v flock >/dev/null 2>&1; then
@@ -7018,7 +7061,7 @@ acquire_update_lock() {
     if ! flock -n 9; then
       local holder_pid=""
       holder_pid="$(head -n 1 "$lock_file" 2>/dev/null || true)"
-      die "another update is already running${holder_pid:+ (PID $holder_pid)}; wait for it to finish"
+      update_lock_contention "$holder_pid" ""
     fi
     printf '%s\n' "$$" > "$lock_file" 2>/dev/null || true
     UPDATE_LOCK_FILE="$lock_file"
@@ -7030,9 +7073,9 @@ acquire_update_lock() {
   if ! mkdir "$lock_dir" 2>/dev/null; then
     pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
     if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-      rm -rf "$lock_dir" 2>/dev/null && mkdir "$lock_dir" 2>/dev/null || die "another update is already running (lock: $lock_dir)"
+      rm -rf "$lock_dir" 2>/dev/null && mkdir "$lock_dir" 2>/dev/null || update_lock_contention "$pid" " (lock: $lock_dir)"
     else
-      die "another update is already running${pid:+ (PID $pid)}; wait for it to finish, or remove $lock_dir if it is stale"
+      update_lock_contention "$pid" ", or remove $lock_dir if it is stale"
     fi
   fi
   echo "$$" > "$lock_dir/pid"
@@ -7091,12 +7134,146 @@ prepare_target_probe() {
   return 0
 }
 
+# ── Engine run marker (attach/cancel contract) ──────────────────────────────
+# The running installer is the sole writer of $PREFIX/harness/.update-run.json;
+# `dsh update` (attach) and `dsh update --cancel` read it. Field set is the
+# CLI/UI contract: runId, pid, mode (plain|prepare|apply|one-shot), step, steps,
+# phase, startedAt, logPath, version, target. Phases: running → switching →
+# applying → done, with failed/rolledback/cancelled terminal. A dead pid makes
+# the marker stale: it never blocks anything, and the next run replaces it
+# (a stale `phase` still names what the last run did). DSH_UPDATE_MODE=one-shot
+# lets a launcher label the no-flag rung explicitly.
+RUN_MARKER_ACTIVE=0
+RUN_MARKER_TERMINAL=""
+RUN_MARKER_SIGNALLED=0
+RUN_MARKER_PHASE="running"
+RUN_MARKER_ID=""
+RUN_MARKER_MODE=""
+RUN_MARKER_STARTED_AT=""
+RUN_MARKER_TARGET=""
+
+run_marker_path() { printf '%s/harness/.update-run.json' "$PREFIX"; }
+
+# The live run marker shares the `.update-*` scratch prefix, so every sweep
+# that would otherwise scrape `.update-*` must skip it (it is the runner's
+# state; removing it mid-run breaks attach and cancel).
+is_run_marker_path() { # path -> 0 when this is the run marker (or its temp)
+  case "$(basename "$1")" in .update-run.json|.update-run.json.tmp.*) return 0;; esac
+  return 1
+}
+
+run_marker_write() { # phase
+  local phase="$1" file tmp
+  file="$(run_marker_path)"
+  RUN_MARKER_PHASE="$phase"
+  case "$phase" in done|failed|rolledback|cancelled) RUN_MARKER_TERMINAL="$phase";; esac
+  mkdir -p "$PREFIX/harness" 2>/dev/null || return 0
+  tmp="$file.tmp.$$"
+  {
+    printf '{\n'
+    printf '  "runId": "%s",\n' "$(json_escape "$RUN_MARKER_ID")"
+    printf '  "pid": %s,\n' "$$"
+    printf '  "mode": "%s",\n' "$(json_escape "$RUN_MARKER_MODE")"
+    printf '  "step": %s,\n' "${STEP_NO:-0}"
+    printf '  "steps": %s,\n' "${STEP_TOTAL:-0}"
+    printf '  "phase": "%s",\n' "$phase"
+    printf '  "startedAt": "%s",\n' "$RUN_MARKER_STARTED_AT"
+    printf '  "logPath": "%s",\n' "$(json_escape "${LOG_FILE:-$PREFIX/logs/install.log}")"
+    printf '  "version": "%s",\n' "$(json_escape "${VERSION:-}")"
+    printf '  "target": "%s"\n' "$(json_escape "${RUN_MARKER_TARGET:-${VERSION:-}}")"
+    printf '}\n'
+  } > "$tmp" 2>/dev/null && mv "$tmp" "$file" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+run_marker_init() { # mode
+  RUN_MARKER_MODE="${1:-plain}"
+  RUN_MARKER_ID="$(date +%s)-$$"
+  RUN_MARKER_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  RUN_MARKER_TARGET=""
+  RUN_MARKER_PHASE="running"
+  RUN_MARKER_TERMINAL=""
+  RUN_MARKER_SIGNALLED=0
+  RUN_MARKER_ACTIVE=1
+  run_marker_write running
+  log "run marker: $(run_marker_path) (runId $RUN_MARKER_ID, mode $RUN_MARKER_MODE, pid $$)"
+}
+
+run_marker_phase() { # phase
+  [ "${RUN_MARKER_ACTIVE:-0}" = 1 ] || return 0
+  run_marker_write "$1"
+}
+
+# The EXIT-trap hook: a terminal phase is written once, from the real exit
+# status, unless the run already finished one (rollback writes rolledback
+# before exiting 1). SIGTERM/SIGINT exits carry RUN_MARKER_SIGNALLED and read
+# as cancelled.
+run_marker_exit_hook() { # exit status
+  local rc="$1" phase
+  [ "${RUN_MARKER_ACTIVE:-0}" = 1 ] || return 0
+  if [ -n "${RUN_MARKER_TERMINAL:-}" ]; then RUN_MARKER_ACTIVE=0; return 0; fi
+  case "$rc" in 0) phase=done;; *) phase=failed;; esac
+  [ "${RUN_MARKER_SIGNALLED:-0}" = 1 ] && phase=cancelled
+  run_marker_write "$phase"
+  RUN_MARKER_ACTIVE=0
+  return 0
+}
+
+# Read one marker field without assuming Node is resolved yet (attach must work
+# before resolve_node). Quoted strings first, then bare numbers.# A run pid is live only while it can still make progress: a zombie/defunct
+# process (its parent never reaped it) holds no locks and writes nothing, so
+# attach/cancel must treat it as gone.
+pid_live() { # pid -> 0 when the process exists and is not a zombie
+  local pid="$1" stat=""
+  kill -0 "$pid" 2>/dev/null || return 1
+  stat="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
+  case "$stat" in Z*) return 1;; esac
+  return 0
+}
+
+marker_field() { # file key
+  local file="$1" key="$2" v
+  if [ -n "${NODE:-}" ] && [ -x "$NODE" ]; then
+    if v="$("$NODE" -e 'const fs=require("fs");try{const o=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const x=o[process.argv[2]];process.stdout.write(x===undefined||x===null?"":String(x))}catch{process.exit(1)}' "$file" "$key" 2>/dev/null)"; then
+      printf '%s' "$v"; return 0
+    fi
+  fi
+  v="$(sed -n "s/.*\"$key\": *\"\([^\"]*\)\".*/\1/p" "$file" 2>/dev/null | head -n 1)"
+  if [ -z "$v" ]; then
+    v="$(sed -n "s/.*\"$key\": *\([0-9][0-9]*\).*/\1/p" "$file" 2>/dev/null | head -n 1)"
+  fi
+  printf '%s' "$v"
+}
+
+# Canonical numbered-step labels for attach rendering (do_update's 1..9).
+update_step_label() { # n
+  case "$1" in
+    1) printf 'environment';; 2) printf 'source';; 3) printf 'pnpm';;
+    4) printf 'dependencies and build';; 5) printf 'transport';; 6) printf 'profile';;
+    7) printf 'home, dependencies and migrations';; 8) printf 'switch, service and backfill';;
+    9) printf 'self-check';; *) printf 'working';;
+  esac
+}
+
 do_update() {
   local state="$PREFIX/harness/install-state.json" current backup late_backup rc recorded_home recorded_bin installed_version deferred_restart transport_engine
   STEP_TOTAL=9
   [ -f "$state" ] || die "no install state at $state; run the installer first"
   acquire_update_lock
   detect_os_arch
+  # Marker for attach/cancel; --dry-run writes nothing, so it never marks.
+  if [ "${DRY_RUN:-0}" != 1 ]; then
+    if [ "$UPDATE_PREPARE" = 1 ]; then
+      run_marker_init prepare
+    elif [ "$UPDATE_APPLY" = 1 ]; then
+      run_marker_init apply
+    else
+      case "${DSH_UPDATE_MODE:-}" in
+        plain|one-shot) run_marker_init "$DSH_UPDATE_MODE";;
+        *) run_marker_init plain;;
+      esac
+    fi
+  fi
   step "environment: existing install under $PREFIX"
   resolve_node 0 || die "no usable Node.js found for the update"
   if [ -z "$CHANNEL" ]; then CHANNEL="$(json_field "$state" channel)"; [ -n "$CHANNEL" ] || CHANNEL=stable; fi
@@ -7568,6 +7745,7 @@ do_update() {
   # before its own switch, and the state apply returns to on failure). The
   # pre-switch restore is disarmed: nothing may rewind the prepared state.
   if [ "$UPDATE_PREPARE" = 1 ]; then
+    RUN_MARKER_TARGET="$TREE_DIR_NAME"
     write_staged_apply "$VERSION" "$TREE_DIR_NAME" "$CHANNEL" "${RELEASE_COMMIT:-}" "${PREBUILT:-0}" \
       || die "could not write the staged apply record $(staged_apply_path)"
     PRE_SWITCH_RESTORE=""
@@ -7597,10 +7775,15 @@ do_update() {
     late_backup=""
   fi
   substep_info "switch: current → $TREE_DIR_NAME (atomic symlink replace)"
+  # Cancel must never race the switch: from here until the terminal marker the
+  # run reads as switching/applying and `dsh update --cancel` refuses.
+  RUN_MARKER_TARGET="$TREE_DIR_NAME"
+  run_marker_phase switching
   switch_current "$TREE_DIR_NAME" || die "could not switch $PREFIX/harness/current to $TREE_DIR_NAME"
   substep_ok "current → $TREE_DIR_NAME"
   # Past the switch, rollback owns restoration from the pristine snapshot.
   PRE_SWITCH_RESTORE=""
+  run_marker_phase applying
   log "switched current -> $TREE_DIR_NAME"
   # A process inside the managed unit cannot survive a direct restart: systemd
   # stops the unit's whole process tree and launchd the job's. Such an update
@@ -7707,6 +7890,7 @@ do_apply_staged() { # prev_version
     die "dsh update --apply: the staged tree $PREFIX/harness/$tree is missing or incomplete; nothing was switched and the staged record is kept ($staged). Re-run 'dsh update --prepare'"
   fi
   [ -n "$channel" ] && CHANNEL="$channel"
+  RUN_MARKER_TARGET="$tree"
 
   acquire_update_lock
   # Re-validate under the lock: a plain update that ran between the first
@@ -7725,8 +7909,10 @@ do_apply_staged() { # prev_version
 
   step "switch, service and backfill"
   substep_info "switch: current → $tree (atomic symlink replace)"
+  run_marker_phase switching
   switch_current "$tree" || die "could not switch $PREFIX/harness/current to $tree"
   substep_ok "current → $tree"
+  run_marker_phase applying
   log "apply: switched current -> $tree"
   VERSION="$version"
   TREE_DIR_NAME="$tree"
@@ -7773,6 +7959,253 @@ do_apply_staged() { # prev_version
   say "${C_GREEN}${C_BOLD}Update applied:${C_RESET} $version (${CHANNEL} channel) — current → $tree"
   emit_json apply 1
   if [ "$deferred_restart" = 1 ]; then delegate_service_restart; fi
+  return 0
+}
+
+# ── Attach and cancel (live-run subscription) ───────────────────────────────
+# `dsh update` that meets a held update lock with a live run marker does not
+# die: it attaches, renders the running run's progress from the marker + its
+# log, and exits with the run's outcome. Ctrl-C detaches (the run continues).
+# `dsh update --cancel` stops a live pre-switch run and sweeps its partials.
+
+# Called from acquire_update_lock when the lock is held. A plain update tries
+# to attach (never returns when it does); every other mode keeps the original
+# refusal. A missing or stale marker keeps the refusal as well.
+update_lock_contention() { # holder_pid reason_suffix
+  local pid="$1" suffix="$2"
+  if [ "${UPDATE_PREPARE:-0}" = 0 ] && [ "${UPDATE_APPLY:-0}" = 0 ] && [ "${UPDATE_CANCEL:-0}" = 0 ]; then
+    attach_to_running_update || true
+  fi
+  die "another update is already running${pid:+ (PID $pid)}; wait for it to finish${suffix}"
+}
+
+attach_to_running_update() { # -> attaches (exits) or returns 1 when not attachable
+  local marker pid mode phase step steps version target started_at log_path
+  local last_step="" last_phase="" last_version="" offset=0 elapsed now
+  marker="$(run_marker_path)"
+  [ -f "$marker" ] || return 1
+  pid="$(marker_field "$marker" pid)"
+  case "$pid" in ''|*[!0-9]*) return 1;; esac
+  pid_live "$pid" || return 1
+
+  mode="$(marker_field "$marker" mode)"
+  started_at="$(marker_field "$marker" startedAt)"
+
+  say "An update is already running — attaching (mode ${mode:-?}, PID $pid, started ${started_at:-?})."
+  say "Ctrl-C detaches: the update keeps running in the background."
+  # Detach cleanly on a signal: never forward it to the runner (a different
+  # process/unit), and exit 130 so a scripted caller sees the detach.
+  trap 'printf "\n" >&2; say "Detached from update PID '"$pid"'. The update continues in the background."; exit 130' INT TERM
+
+  while pid_live "$pid"; do
+    step="$(marker_field "$marker" step)"
+    steps="$(marker_field "$marker" steps)"
+    phase="$(marker_field "$marker" phase)"
+    version="$(marker_field "$marker" version)"
+    target="$(marker_field "$marker" target)"
+    [ -n "$version" ] || version="$target"
+    if [ "$step" != "$last_step" ]; then
+      say ""
+      say "[${step:-?}/${steps:-?}] $(update_step_label "${step:-?}")  (attached${version:+ — $version})"
+      last_step="$step"
+    elif [ "$version" != "$last_version" ] && [ -n "$version" ]; then
+      say "  … target: $version"
+    fi
+    last_version="$version"
+    case "$phase" in
+      switching)
+        if [ "$last_phase" != "switching" ]; then say "  [live] switching current → ${target:-$version} (the service restarts next)…"; fi
+        ;;
+      applying)
+        if [ "$last_phase" != "applying" ]; then say "  [live] past the switch; finishing self-check and health…"; fi
+        ;;
+    esac
+    last_phase="$phase"
+    # Tail the live log from the last consumed line; the log is the runner's,
+    # read-only here.
+    log_path="$(marker_field "$marker" logPath)"
+    if [ -n "$log_path" ] && [ -f "$log_path" ]; then
+      local lines=""
+      lines="$(wc -l < "$log_path" 2>/dev/null | tr -d ' ')"
+      case "$lines" in ''|*[!0-9]*) lines=0;; esac
+      # A rotated/truncated log restarts the tail instead of reading nothing.
+      [ "$lines" -lt "$offset" ] && offset=0
+      if [ "$lines" -gt "$offset" ]; then
+        tail -n +"$((offset + 1))" "$log_path" 2>/dev/null || true
+        offset="$lines"
+      fi
+    fi
+    sleep "${DSH_ATTACH_INTERVAL:-2}"
+  done
+  # The pid is gone; a trapped exit may still be writing the terminal phase.
+  elapsed=0
+  while [ "$elapsed" -lt 10 ]; do
+    phase="$(marker_field "$marker" phase)"
+    case "$phase" in done|failed|rolledback|cancelled) break;; esac
+    sleep 0.2
+    elapsed=$((elapsed + 1))
+  done
+  # Flush whatever the run wrote after the last poll.
+  log_path="$(marker_field "$marker" logPath)"
+  if [ -n "$log_path" ] && [ -f "$log_path" ]; then
+    local final_lines=""
+    final_lines="$(wc -l < "$log_path" 2>/dev/null | tr -d ' ')"
+    case "$final_lines" in ''|*[!0-9]*) final_lines=0;; esac
+    [ "$final_lines" -gt "$offset" ] && tail -n +"$((offset + 1))" "$log_path" 2>/dev/null || true
+  fi
+  version="$(marker_field "$marker" version)"
+  case "$phase" in
+    done)
+      say ""
+      say "The attached update finished successfully${version:+: $version}."
+      emit_attach_json 1 "$phase" "$pid" "$mode" "$version"
+      exit 0
+      ;;
+    cancelled)
+      say ""
+      say "The attached update was cancelled (partial artifacts are swept; re-run 'dsh update')."
+      emit_attach_json 0 "$phase" "$pid" "$mode" "$version"
+      exit 1
+      ;;
+    *)
+      say ""
+      say "The attached update exited without success (phase ${phase:-unknown}); inspect the log above or run 'dsh doctor'."
+      emit_attach_json 0 "$phase" "$pid" "$mode" "$version"
+      exit 1
+      ;;
+  esac
+}
+
+emit_attach_json() { # ok phase pid mode version
+  [ "$JSON_OUT" = 1 ] || return 0
+  printf '{"ok": %s, "action": "attach", "phase": "%s", "pid": "%s", "mode": "%s", "version": "%s", "prefix": "%s"}\n' \
+    "$1" "$(json_escape "$2")" "$(json_escape "$3")" "$(json_escape "$4")" "$(json_escape "$5")" "$(json_escape "$PREFIX")"
+}
+
+# Rewrite only the phase of an existing marker (cancel's fallback when the
+# runner was SIGKILLed and could not write its own terminal phase). Preserves
+# every other field and the fixed field set.
+mark_run_cancelled() { # marker
+  local file="$1" tmp
+  tmp="$file.tmp.$$"
+  sed 's/"phase": *"[^"]*"/"phase": "cancelled"/' "$file" > "$tmp" 2>/dev/null && mv "$tmp" "$file" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# Dead-owner partial staging from a cancelled run. The .owner file (delta) or
+# the embedded pid (plain `.staging-$$`) decides; a live owner is kept.
+sweep_dead_staging() {
+  local h="$PREFIX/harness" p
+  [ -d "$h" ] || return 0
+  for p in "$h"/.staging-* "$h"/.profile-staging-*; do
+    [ -e "$p" ] || continue
+    scratch_owner_alive "$p" && continue
+    rm -rf -- "$p" "$p.owner" 2>/dev/null && log "cancel: swept partial staging $(basename "$p")"
+  done
+  return 0
+}
+
+emit_cancel_json() { # ok status
+  [ "$JSON_OUT" = 1 ] || return 0
+  printf '{"ok": %s, "action": "cancel", "status": "%s", "runId": "%s", "pid": "%s", "phase": "%s", "prefix": "%s"}\n' \
+    "$1" "$(json_escape "$2")" "$(json_escape "${CANCEL_RUN_ID:-}")" "$(json_escape "${CANCEL_PID:-}")" \
+    "$(json_escape "${CANCEL_PHASE:-}")" "$(json_escape "$PREFIX")"
+}
+
+# `dsh update --cancel`: stop a live run. Guarantees after a successful cancel
+# (all pre-switch): the runner is gone, the update lock is released by its EXIT
+# trap, the pre-switch user-file snapshot was restored by that same trap
+# (PRE_SWITCH_RESTORE was armed), `current` was never switched, partial
+# downloads/staging are swept, and the marker reads `cancelled` — so a later
+# `dsh update` is a normal, idempotent run. Past the switch the run is refused:
+# the switch+self-check+rollback window is seconds and cannot be interrupted
+# safely, and the engine's own rollback is the protected failure path.
+do_cancel() {
+  local marker pid phase mode step steps run_id timeout start now
+  marker="$(run_marker_path)"
+  timeout="${DSH_CANCEL_TIMEOUT:-10}"
+  case "$timeout" in ''|*[!0-9]*) timeout=10;; esac
+  CANCEL_RUN_ID=""; CANCEL_PID=""; CANCEL_PHASE=""
+
+  if [ ! -f "$marker" ]; then
+    say "dsh update --cancel: no run marker at $marker — no update is running."
+    emit_cancel_json 1 noop
+    return 0
+  fi
+  pid="$(marker_field "$marker" pid)"
+  run_id="$(marker_field "$marker" runId)"
+  mode="$(marker_field "$marker" mode)"
+  phase="$(marker_field "$marker" phase)"
+  step="$(marker_field "$marker" step)"
+  steps="$(marker_field "$marker" steps)"
+  CANCEL_RUN_ID="$run_id"; CANCEL_PID="$pid"; CANCEL_PHASE="$phase"
+  case "$pid" in
+    ''|*[!0-9]*)
+      say "dsh update --cancel: the run marker carries no usable pid; nothing to stop."
+      emit_cancel_json 1 noop
+      return 0
+      ;;
+  esac
+  if ! pid_live "$pid"; then
+    say "dsh update --cancel: run ${run_id:-?} (PID $pid) is not running${phase:+ (marker phase: $phase)} — nothing to cancel."
+    emit_cancel_json 1 noop
+    return 0
+  fi
+  case "$phase" in
+    switching|applying)
+      say "dsh update --cancel: refusing — the update is past the switch (phase $phase, step ${step:-?}/${steps:-?})."
+      say "The switch→self-check window is seconds; interrupting it cannot leave a consistent install. Let it finish: a failure rolls back automatically."
+      emit_cancel_json 0 refused
+      return 1
+      ;;
+  esac
+
+  say "dsh update --cancel: stopping run ${run_id:-?} (mode ${mode:-?}, PID $pid, step ${step:-?}/${steps:-?}, phase ${phase:-?})…"
+  kill -TERM "$pid" 2>/dev/null || true
+  start="$(date +%s)"
+  while pid_live "$pid"; do
+    now="$(date +%s)"
+    [ $((now - start)) -ge "$timeout" ] && break
+    sleep 0.5
+  done
+  if pid_live "$pid"; then
+    warn "run $pid did not exit within ${timeout}s; escalating to SIGKILL"
+    kill -KILL "$pid" 2>/dev/null || true
+    start="$(date +%s)"
+    while pid_live "$pid"; do
+      now="$(date +%s)"
+      [ $((now - start)) -ge 5 ] && break
+      sleep 0.2
+    done
+  fi
+  # The runner's EXIT trap writes cancelled on SIGTERM; a SIGKILLed runner
+  # cannot, so write the terminal phase here if it is still non-terminal.
+  phase="$(marker_field "$marker" phase)"
+  case "$phase" in
+    done|failed|rolledback|cancelled) :;;
+    *) mark_run_cancelled "$marker"; phase="cancelled";;
+  esac
+  CANCEL_PHASE="$phase"
+  # The mkdir fallback lock is a directory; a SIGKILLed runner cannot remove
+  # it, and the next update only reclaims it after a failed mkdir. Reap it now
+  # when its recorded owner is gone.
+  if [ -d "$PREFIX/harness/.update.lock.d" ]; then
+    local lpid=""
+    lpid="$(cat "$PREFIX/harness/.update.lock.d/pid" 2>/dev/null || true)"
+    if [ -z "$lpid" ] || ! kill -0 "$lpid" 2>/dev/null; then
+      rm -rf "$PREFIX/harness/.update.lock.d" 2>/dev/null || true
+    fi
+  fi
+  # Sweep the killed run's partials: dead-owner downloads/release scratch and
+  # dead-owner staging. A concurrent new run's live artifacts are never touched.
+  prune_orphaned_update_artifacts
+  sweep_dead_staging
+  say ""
+  say "Cancelled run ${run_id:-?}: runner stopped, marker phase $phase."
+  say "  swept:    partial downloads and staging with a dead owner (see the log for bytes freed)"
+  say "  state:    current was never switched; the pre-switch user-file snapshot was restored by the runner's exit trap"
+  say "  re-run:   dsh update  (a normal, idempotent run)"
+  emit_cancel_json 0 cancelled
   return 0
 }
 
@@ -7957,6 +8390,10 @@ do_repair() {
   for p in "$PREFIX/harness"/.staging-* "$PREFIX/harness"/.download-* "$PREFIX/harness"/.profile-staging-* \
     "$PREFIX/harness"/.update-* "$PREFIX/harness"/.release-* "$PREFIX/harness"/.base-* "$PREFIX/harness"/.delta-*; do
     [ -e "$p" ] || [ -L "$p" ] || continue
+    if is_run_marker_path "$p"; then
+      repair_note "live run marker $p (left alone)"
+      continue
+    fi
     if scratch_owner_alive "$p"; then
       repair_note "active staging $p (owner alive; left alone)"
       continue
@@ -8425,6 +8862,12 @@ fi
 if [ "$UPDATE_PREPARE" = 1 ] && [ "$UPDATE_APPLY" = 1 ]; then
   die "choose one of --prepare, --apply"
 fi
+if [ "$UPDATE_CANCEL" = 1 ] && { [ "$UPDATE_PREPARE" = 1 ] || [ "$UPDATE_APPLY" = 1 ] || [ "$DRY_RUN" = 1 ]; }; then
+  die "choose one of --prepare, --apply, --cancel (--cancel takes no other update flag)"
+fi
+if [ "$UPDATE_CANCEL" = 1 ] && [ "$UPDATE_MODE" != 1 ]; then
+  die "--cancel applies to --update only (run: dsh update --cancel)"
+fi
 if [ "$UPDATE_APPLY" = 1 ] && [ "$DRY_RUN" = 1 ]; then
   die "--dry-run does not apply to --apply (it switches and restarts; inspect the staged record $PREFIX/harness/.staged-apply.json instead)"
 fi
@@ -8470,6 +8913,16 @@ if [ "$GUARD_MODE" = 1 ]; then
   detect_os_arch
   init_log_file
   do_service_guard
+  exit $?
+fi
+
+# The `dsh update --cancel` mode: stop the live run recorded in the engine run
+# marker, sweep its partials, and report. It never takes the update lock (it is
+# stopping the process that holds it) and never switches anything.
+if [ "$UPDATE_CANCEL" = 1 ]; then
+  detect_os_arch
+  init_log_file
+  do_cancel
   exit $?
 fi
 
