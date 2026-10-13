@@ -266,8 +266,59 @@ export function hasStagedApply(prefix: string): boolean {
   return existsSync(stagedApplyPath(prefix))
 }
 
-/** Whether a parsed JSON value looks like a run record. */
-function isRunRecord(value: unknown): value is UpdateRunRecord {
+/** Whether a raw value is one of the reported phases. */
+function isUpdatePhase(value: unknown): value is UpdatePhase {
+  return value === 'starting' || value === 'prepared' || value === 'preparing' || value === 'applying'
+    || value === 'success' || value === 'failed' || value === 'rolledback'
+}
+
+/** Whether a raw value is one of the terminal results. */
+function isUpdateResult(value: unknown): value is UpdateRunResult {
+  return value === 'success' || value === 'failed' || value === 'rolledback'
+}
+
+/**
+ * Normalize one parsed run.json document. Records written before the
+ * rung/launcher split (the engine-capability work) carried the OS launcher in
+ * `rung` and no `launcher`; they are healed here so an in-flight run survives
+ * the plugin upgrade — a legacy prepared record must still read as two-phase
+ * or the UI would never offer its restart.
+ *
+ * @param raw - the parsed document (required string fields already checked).
+ * @returns the normalized record.
+ */
+function normalizeRunRecord(raw: Record<string, unknown>): UpdateRunRecord {
+  const mode: UpdateRunMode = raw.mode === 'apply' || raw.mode === 'one-shot' ? raw.mode : 'prepare'
+  const rung: UpdateRung = raw.rung === 'two-phase' || raw.rung === 'one-shot' ? raw.rung : rungForMode(mode)
+  const launcher = typeof raw.launcher === 'string' && raw.launcher !== ''
+    ? raw.launcher
+    : typeof raw.rung === 'string' && raw.rung !== 'two-phase' && raw.rung !== 'one-shot' ? raw.rung : 'pending'
+  const finishedAt = typeof raw.finishedAt === 'string' ? raw.finishedAt : undefined
+  const reason = typeof raw.reason === 'string' ? raw.reason : undefined
+  return {
+    runId: String(raw.runId),
+    target: typeof raw.target === 'string' ? raw.target : '',
+    channel: typeof raw.channel === 'string' ? raw.channel : 'stable',
+    mode,
+    rung,
+    launcher,
+    phase: isUpdatePhase(raw.phase) ? raw.phase : 'failed',
+    step: typeof raw.step === 'number' && Number.isFinite(raw.step) ? raw.step : 0,
+    steps: typeof raw.steps === 'number' && raw.steps > 0 ? raw.steps : RUN_STEP_TOTAL,
+    lastLine: typeof raw.lastLine === 'string' ? raw.lastLine : '',
+    startedAt: typeof raw.startedAt === 'string' ? raw.startedAt : '',
+    pid: typeof raw.pid === 'number' && Number.isFinite(raw.pid) ? raw.pid : null,
+    logPath: typeof raw.logPath === 'string' ? raw.logPath : '',
+    result: isUpdateResult(raw.result) ? raw.result : null,
+    staged: raw.staged === true,
+    logTail: Array.isArray(raw.logTail) ? raw.logTail.filter((line): line is string => typeof line === 'string') : [],
+    ...(finishedAt === undefined ? {} : { finishedAt }),
+    ...(reason === undefined ? {} : { reason }),
+  }
+}
+
+/** Whether a parsed JSON value has the required run-record fields. */
+function isRunRecordShape(value: unknown): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const record = value as Record<string, unknown>
   return typeof record.runId === 'string'
@@ -279,14 +330,15 @@ function isRunRecord(value: unknown): value is UpdateRunRecord {
 }
 
 /**
- * Read the run record, or null when absent/unreadable.
+ * Read the run record, or null when absent/unreadable/malformed. Legacy
+ * records are normalized (see {@link normalizeRunRecord}).
  * @param file - `run.json` path.
  * @returns the record, or null.
  */
 export function readRunRecord(file: string): UpdateRunRecord | null {
   try {
     const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'))
-    return isRunRecord(parsed) ? parsed : null
+    return isRunRecordShape(parsed) ? normalizeRunRecord(parsed) : null
   } catch {
     return null
   }

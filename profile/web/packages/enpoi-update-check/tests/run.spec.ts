@@ -235,6 +235,62 @@ describe('run record persistence and liveness', () => {
     expect(isProcessAlive(process.pid)).toBe(true)
   })
 
+  it('normalizes a legacy record that carried the OS rung in `rung` (rung/launcher split)', () => {
+    const dir = scratch()
+    const file = runRecordPath(dir)
+    mkdirSync(join(dir, 'update-check'), { recursive: true })
+    writeFileSync(file, JSON.stringify({
+      runId: 'run-old',
+      target: '0.1.7-enpoi.2.84',
+      channel: 'stable',
+      mode: 'prepare',
+      phase: 'prepared',
+      step: 7,
+      steps: 9,
+      lastLine: '[7/9] home, dependencies and migrations',
+      startedAt: '2026-10-13T12:00:00.000Z',
+      pid: null,
+      logPath: '/x/run.log',
+      result: null,
+      // The pre-split shape: the OS launcher lived in `rung`, no `launcher`.
+      rung: 'setsid',
+      staged: true,
+      logTail: [],
+    }))
+    const record = readRunRecord(file)!
+    expect(record).toMatchObject({
+      rung: 'two-phase',
+      launcher: 'setsid',
+      mode: 'prepare',
+      phase: 'prepared',
+      staged: true,
+      step: 7,
+    })
+    // The normalized record still round-trips.
+    expect(writeRunRecord(file, record)).toBe(true)
+    expect(readRunRecord(file)).toEqual(record)
+  })
+
+  it('falls back to the mode-derived rung for an unknown value', () => {
+    const dir = scratch()
+    const file = runRecordPath(dir)
+    mkdirSync(join(dir, 'update-check'), { recursive: true })
+    writeFileSync(file, JSON.stringify({
+      runId: 'run-broken',
+      target: 'x',
+      channel: 'stable',
+      mode: 'one-shot',
+      phase: 'preparing',
+      startedAt: '2026-10-13T12:00:00.000Z',
+      logPath: '/x/run.log',
+      result: null,
+      rung: 'wat',
+      staged: false,
+      logTail: [],
+    }))
+    expect(readRunRecord(file)).toMatchObject({ rung: 'one-shot', launcher: 'wat', mode: 'one-shot' })
+  })
+
   it('builds terminal and prepared records', () => {
     const at = (): Date => new Date('2026-10-13T12:30:00.000Z')
     const failed = terminalRecord(record({ lastLine: '✗ ERROR: nope' }), 'failed', at, false)

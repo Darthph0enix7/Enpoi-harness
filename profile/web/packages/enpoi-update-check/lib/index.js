@@ -542,7 +542,40 @@ function stagedApplyPath(prefix) {
 function hasStagedApply(prefix) {
   return existsSync(stagedApplyPath(prefix));
 }
-function isRunRecord(value) {
+function isUpdatePhase(value) {
+  return value === "starting" || value === "prepared" || value === "preparing" || value === "applying" || value === "success" || value === "failed" || value === "rolledback";
+}
+function isUpdateResult(value) {
+  return value === "success" || value === "failed" || value === "rolledback";
+}
+function normalizeRunRecord(raw) {
+  const mode = raw.mode === "apply" || raw.mode === "one-shot" ? raw.mode : "prepare";
+  const rung = raw.rung === "two-phase" || raw.rung === "one-shot" ? raw.rung : rungForMode(mode);
+  const launcher = typeof raw.launcher === "string" && raw.launcher !== "" ? raw.launcher : typeof raw.rung === "string" && raw.rung !== "two-phase" && raw.rung !== "one-shot" ? raw.rung : "pending";
+  const finishedAt = typeof raw.finishedAt === "string" ? raw.finishedAt : void 0;
+  const reason = typeof raw.reason === "string" ? raw.reason : void 0;
+  return {
+    runId: String(raw.runId),
+    target: typeof raw.target === "string" ? raw.target : "",
+    channel: typeof raw.channel === "string" ? raw.channel : "stable",
+    mode,
+    rung,
+    launcher,
+    phase: isUpdatePhase(raw.phase) ? raw.phase : "failed",
+    step: typeof raw.step === "number" && Number.isFinite(raw.step) ? raw.step : 0,
+    steps: typeof raw.steps === "number" && raw.steps > 0 ? raw.steps : RUN_STEP_TOTAL,
+    lastLine: typeof raw.lastLine === "string" ? raw.lastLine : "",
+    startedAt: typeof raw.startedAt === "string" ? raw.startedAt : "",
+    pid: typeof raw.pid === "number" && Number.isFinite(raw.pid) ? raw.pid : null,
+    logPath: typeof raw.logPath === "string" ? raw.logPath : "",
+    result: isUpdateResult(raw.result) ? raw.result : null,
+    staged: raw.staged === true,
+    logTail: Array.isArray(raw.logTail) ? raw.logTail.filter((line) => typeof line === "string") : [],
+    ...finishedAt === void 0 ? {} : { finishedAt },
+    ...reason === void 0 ? {} : { reason }
+  };
+}
+function isRunRecordShape(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const record = value;
   return typeof record.runId === "string" && typeof record.target === "string" && typeof record.phase === "string" && typeof record.startedAt === "string" && typeof record.logPath === "string" && (record.result === null || record.result === "success" || record.result === "failed" || record.result === "rolledback");
@@ -550,7 +583,7 @@ function isRunRecord(value) {
 function readRunRecord(file) {
   try {
     const parsed = JSON.parse(readFileSync2(file, "utf8"));
-    return isRunRecord(parsed) ? parsed : null;
+    return isRunRecordShape(parsed) ? normalizeRunRecord(parsed) : null;
   } catch {
     return null;
   }
