@@ -73,7 +73,8 @@ const availableStatus = {
 describe('UpdateIndicator pill', () => {
   it.each([
     ['unknown', null],
-    ['current', { ...availableStatus, state: 'current' as const, latest: undefined }],
+    // exactOptionalPropertyTypes: the 'current' wire value omits `latest` entirely.
+    ['current', { state: 'current' as const, current: availableStatus.current }],
     ['dismissed', { ...availableStatus, state: 'dismissed' as const }],
   ])('renders no pill while %s', (_state, status) => {
     mount({ status })
