@@ -3,8 +3,16 @@
  * short viewport) is a stylesheet rule so the frame needs no re-render; the
  * desktop frame's own stylesheet is untouched. Geometry the other mobile
  * lanes read: `--dsh-mobile-header-height` / `--dsh-mobile-bar-height` are
- * the chrome insets the fullscreen right panel sits between.
+ * the chrome insets the fullscreen right panel sits between. They live on the
+ * root while the mobile shell is mounted so body-portalled overlay chips can
+ * read the bar height as `--dsh-shell-inset-bottom`.
  */
+:global(html[data-mobile-shell]) {
+  --dsh-mobile-header-height: calc(48px + var(--dsh-safe-area-inset-top, 0px));
+  --dsh-mobile-bar-height: calc(56px + var(--dsh-safe-area-inset-bottom, 0px));
+  --dsh-shell-inset-bottom: var(--dsh-mobile-bar-height, 0px);
+}
+
 .frame {
   position: relative;
   display: grid;
@@ -13,19 +21,17 @@
   height: 100%;
   overflow: hidden;
   background: var(--dsw-alias-bg-base);
-  --dsh-mobile-header-height: calc(48px + var(--dsh-safe-area-inset-top, 0px));
-  --dsh-mobile-bar-height: calc(56px + var(--dsh-safe-area-inset-bottom, 0px));
 }
 
 /* Landscape and short viewports fold the bar into the header overflow icon. */
 @media (orientation: landscape), (max-height: 499.98px) {
-  .frame {
+  :global(html[data-mobile-shell]) {
     --dsh-mobile-bar-height: 0px;
   }
 }
 
 /* The soft keyboard owns the bottom strip: the bar folds into the header. */
-:global(:root[data-keyboard='open']) .frame {
+:global(html[data-mobile-shell][data-keyboard='open']) {
   --dsh-mobile-bar-height: 0px;
 }
 

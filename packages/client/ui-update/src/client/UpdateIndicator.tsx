@@ -1,9 +1,12 @@
 /**
- * Frame-wide update indicator: a quiet pill in the shell overlay that appears
- * only when a newer release is available (or an update is running), and the
- * update dialog behind it — version pair, channel, changelog, the run
- * progress with its disconnect warning, and the failure surface with the log
- * tail and Retry. The post-restart toast rides the same component.
+ * Frame-wide update surface: a small, quiet pill in the shell overlay (bottom
+ * left, inside the centre column) that appears only when a newer release is
+ * available, an update is executing, or a prepared update awaits its restart.
+ * Behind it sits the dialog — version pair, channel, the release notes as a
+ * generously sized scrollable changelog, the prepare/apply progress with its
+ * switch disconnect warning, the prepared [Restart to update] action, and the
+ * failure surface with the log tail and Retry. The post-restart toast rides
+ * the same component.
  *
  * Nothing here polls: the controller owns the cadence and publishes through
  * the injected hook, so an ordinary session with no update renders nothing.
@@ -16,7 +19,7 @@ import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { UpdateUiState } from './controller.ts'
 import { NS } from './locales.ts'
-import type { UpdateRunWire } from './rpc.ts'
+import { APPLY_SWITCH_STEP, isExecutingPhase, type UpdateRunWire } from './rpc.ts'
 import css from './UpdateIndicator.module.css'
 
 /** Actions and live state delivered through the renderer-bound hooks. */
@@ -26,6 +29,8 @@ export interface UpdateIndicatorInjected {
     open: () => void
     close: () => void
     start: () => void
+    apply: () => void
+    retry: () => void
     skip: () => void
     toastDone: () => void
   }
@@ -53,23 +58,39 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
   const status = state.status
   const latest = status?.latest
   const run = state.run
-  const activeRun = run !== null && run.result === null ? run : null
+  const activeRun = run !== null && isExecutingPhase(run.phase) ? run : null
+  const preparedRun = run !== null && run.phase === 'prepared' ? run : null
   const failedRun = run !== null && run.result !== null && run.result !== 'success' ? run : null
   const landedRun = run !== null && run.result === 'success' ? run : null
+  const executing = activeRun !== null
+  const prepared = preparedRun !== null
   const available = status?.state === 'available' && latest !== undefined
   // A landed run hides the pill even if the 6 h check has not re-read the
   // status yet; a failed run keeps it, because Retry starts from here.
-  const showPill = activeRun !== null || (available && landedRun === null)
-  const percent = run === null ? 0 : stepPercent(run)
+  const showPill = executing || prepared || (available && landedRun === null)
+  const percent = activeRun === null ? 0 : stepPercent(activeRun)
+  const pillMode = executing ? 'updating' : prepared ? 'prepared' : 'available'
   const pillLabel = activeRun !== null
     ? t('indicator.updatingAria', { step: activeRun.step, steps: activeRun.steps })
-    : latest === undefined ? t('indicator.updating') : t('indicator.availableAria', { version: latest.version })
+    : preparedRun !== null
+      ? t('indicator.preparedAria', { version: preparedRun.target })
+      : latest === undefined ? t('indicator.updating') : t('indicator.availableAria', { version: latest.version })
+  const executingLabel = activeRun === null || activeRun.phase === 'starting'
+    ? t('progress.starting')
+    : activeRun.phase === 'preparing'
+      ? t('progress.preparing')
+      : activeRun.step >= APPLY_SWITCH_STEP ? t('progress.switching') : t('progress.applying')
 
-  const footer: ReactNode = activeRun !== null ? (
+  const footer: ReactNode = executing ? (
     <Button onClick={actions.close}>{t('action.later')}</Button>
+  ) : prepared ? (
+    <>
+      <Button variant="primary" disabled={state.busy} onClick={actions.apply}>{t('action.restart')}</Button>
+      <Button disabled={state.busy} onClick={actions.close}>{t('action.later')}</Button>
+    </>
   ) : failedRun !== null ? (
     <>
-      <Button variant="primary" disabled={state.busy} onClick={actions.start}>{t('action.retry')}</Button>
+      <Button variant="primary" disabled={state.busy} onClick={actions.retry}>{t('action.retry')}</Button>
       <Button disabled={state.busy} onClick={actions.close}>{t('action.close')}</Button>
     </>
   ) : (
@@ -93,16 +114,22 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
         <button
           type="button"
           className={css.pill}
-          data-dsh-update-indicator={activeRun !== null ? 'updating' : 'available'}
+          data-dsh-update-indicator={pillMode}
           aria-label={pillLabel}
           title={pillLabel}
           onClick={actions.open}
         >
-          {activeRun !== null
-            ? <><StateDot state="ongoing" size={10} /><span className={css.pillText}>{t('indicator.updating')}</span></>
-            : latest === undefined
-              ? null
-              : <span className={css.pillText}>{t('indicator.available', { version: latest.version })}</span>}
+          {pillMode === 'available' && latest !== undefined && (
+            <span className={css.pillText}>{t('indicator.available', { version: latest.version })}</span>
+          )}
+          {pillMode !== 'available' && (
+            <>
+              <StateDot state={pillMode === 'prepared' ? 'warning' : 'ongoing'} size={9} />
+              <span className={css.pillText}>
+                {pillMode === 'prepared' ? t('indicator.prepared') : t('indicator.updating')}
+              </span>
+            </>
+          )}
         </button>
       )}
       <Modal
@@ -110,6 +137,7 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
         onClose={actions.close}
         title={t('dialog.title')}
         closeLabel={t('dialog.close')}
+        className={css.dialog as string}
         footer={footer}
       >
         <div className={css.content}>
@@ -124,7 +152,7 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
           {activeRun !== null && (
             <section className={css.section} data-dsh-update-progress={activeRun.phase}>
               <div className={css.progressHead}>
-                <strong>{t('progress.title')}</strong>
+                <strong>{executingLabel}</strong>
                 <span data-dsh-update-step>{t('progress.step', { step: activeRun.step, steps: activeRun.steps })}</span>
               </div>
               <div className={css.bar}>
@@ -133,7 +161,14 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
               <pre className={css.lastLine} data-dsh-update-lastline>
                 {activeRun.lastLine !== '' ? activeRun.lastLine : t('progress.starting')}
               </pre>
-              <p className={css.warning}>{t('progress.disconnectWarning')}</p>
+              {activeRun.phase === 'applying' && activeRun.step >= APPLY_SWITCH_STEP && (
+                <p className={css.warning}>{t('progress.disconnectWarning')}</p>
+              )}
+            </section>
+          )}
+          {preparedRun !== null && (
+            <section className={css.section} data-dsh-update-prepared>
+              <p className={css.preparedHint}>{t('progress.prepared')}</p>
             </section>
           )}
           {failedRun !== null && (
@@ -157,7 +192,7 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
               {t('result.success', { version: landedRun.target })}
             </p>
           )}
-          {activeRun === null && run === null && latest !== undefined && (
+          {!executing && !prepared && failedRun === null && latest !== undefined && (
             <section className={css.section}>
               <p className={css.logHead}>{t('dialog.notes')}</p>
               {latest.notes.length > 0 && (

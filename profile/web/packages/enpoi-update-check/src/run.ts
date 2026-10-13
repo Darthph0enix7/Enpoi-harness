@@ -1,33 +1,23 @@
 /**
  * enpoi-update-check — the update-run record, log parser, and restart
- * reconcile (docs/plan/ui-update-manifest.md P4).
+ * reconcile (docs/plan/ui-update-manifest.md P4, engine two-phase flags).
  *
- * One run is one detached `dsh update` process. The host writes
- * `$DSH_HOME/update-check/run.json` before launch and refreshes it while the
- * process lives; the updater's stdout+stderr land in
+ * One run is one detached `dsh update` process driving exactly one engine
+ * flag. The host writes `$DSH_HOME/update-check/run.json` before launch and
+ * refreshes it while the process lives; the updater's stdout+stderr land in
  * `$DSH_HOME/update-check/run.log`, and the `[N/9]` step markers plus the
- * terminal result lines in that log are the progress contract. The current
- * engine prints exactly nine numbered steps on every update path
- * ("Every path prints the same nine numbered phases", scripts/install.sh):
+ * terminal result lines in that log are the progress contract.
  *
- * | step | phase       | engine step label |
- * |------|-------------|-------------------|
- * | 1    | `fetch`     | environment: existing install |
- * | 2    | `fetch`     | source: <channel> archive |
- * | 3    | `verify`    | pnpm: corepack |
- * | 4    | `unpack`    | dependencies and build |
- * | 5    | `deps`      | transport (delta / full release apply / prebuilt / source build) |
- * | 6    | `profile`   | profile: <name> |
- * | 7    | `profile`   | home, dependencies and migrations |
- * | 8    | `switch`    | switch, service and backfill |
- * | 9    | `selfcheck` | self-check (+ health proof) |
+ * | mode      | engine flag          | witness                                    | phase |
+ * |-----------|----------------------|--------------------------------------------|-------|
+ * | `prepare` | `dsh update --prepare` | `[1/9]`..`[7/9]`, then exit 0 with `$PREFIX/harness/.staged-apply.json` written | `starting` → `preparing` → `prepared` |
+ * | `apply`   | `dsh update --apply`   | `[8/9] switch, service and backfill`, `[9/9] self-check`, the health proof, then the final result line | `applying` → `success` \| `failed` \| `rolledback` |
  *
- * Terminal phases come from the log's result lines, checked in this order:
- * `rolled back` (failure that restored the previous tree) → `result:
- * 'rolledback'`; `successfully updated` or `already up to date` → `result:
- * 'success'`; any other `FAILED`/`✗ ERROR:` line → `result: 'failed'`. The
- * phases `done`, `failed`, and `rolledback` are the terminal phase names that
- * mirror those results.
+ * The staged file is the prepare-success witness (the engine removes it on a
+ * successful apply), and the install version equal to the run's target is the
+ * post-restart success witness. Result lines are checked in this order:
+ * `rolled back` → `rolledback`; `successfully updated` or `already up to
+ * date` → `success`; any other `FAILED`/`✗ ERROR:` line → `failed`.
  *
  * Everything here is decorator-free and I/O-light so the profile vitest
  * pipeline exercises the parser, the record store, and the reconcile directly.
@@ -35,21 +25,20 @@
  * @module dsh-enpoi-update-check/run
  */
 
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { dirname } from 'node:path'
-import { compareVersions, type InstallIdentity } from './catalog.js'
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import type { InstallIdentity } from './catalog.js'
 
-/** Progress phases a run reports; `starting` precedes the first log step. */
+/** The engine flag a run drives. */
+export type UpdateRunMode = 'prepare' | 'apply'
+
+/** Progress phases a run reports (the run.json contract, final). */
 export type UpdatePhase =
   | 'starting'
-  | 'fetch'
-  | 'verify'
-  | 'unpack'
-  | 'deps'
-  | 'profile'
-  | 'switch'
-  | 'selfcheck'
-  | 'done'
+  | 'preparing'
+  | 'prepared'
+  | 'applying'
+  | 'success'
   | 'failed'
   | 'rolledback'
 
@@ -59,31 +48,32 @@ export type UpdateRunResult = 'success' | 'failed' | 'rolledback'
 /** Engine step total the current updater prints. */
 export const RUN_STEP_TOTAL = 9
 
-/**
- * Step-band to phase table, indexed by `step - 1` (see the module table for
- * the engine step each band names).
- */
-export const STEP_PHASES: readonly UpdatePhase[] = [
-  'fetch',
-  'fetch',
-  'verify',
-  'unpack',
-  'deps',
-  'profile',
-  'profile',
-  'switch',
-  'selfcheck',
-]
+/** Engine step at which the switch (and its service restart) begins. */
+export const APPLY_SWITCH_STEP = 8
+
+/** The progress phase while a run of `mode` is executing. */
+export function executingPhase(mode: UpdateRunMode): 'preparing' | 'applying' {
+  return mode === 'prepare' ? 'preparing' : 'applying'
+}
 
 /** The terminal phase that mirrors one result. */
 export function phaseForResult(result: UpdateRunResult): UpdatePhase {
-  return result === 'success' ? 'done' : result
+  return result
 }
 
-/** Phase band for a 1-based step number; unknown numbers degrade to `fetch`. */
-export function phaseForStep(step: number): UpdatePhase {
-  if (!Number.isFinite(step) || step < 1) return 'starting'
-  return STEP_PHASES[Math.min(Math.trunc(step), RUN_STEP_TOTAL) - 1] ?? 'fetch'
+/** Whether a phase is terminal (`result` is set). */
+export function isTerminalPhase(phase: UpdatePhase): boolean {
+  return phase === 'success' || phase === 'failed' || phase === 'rolledback'
+}
+
+/** Whether a run is resting in the staged, restart-to-apply state. */
+export function isPreparedPhase(phase: UpdatePhase): boolean {
+  return phase === 'prepared'
+}
+
+/** The engine flag for a run mode. */
+export function modeFlag(mode: UpdateRunMode): '--prepare' | '--apply' {
+  return mode === 'prepare' ? '--prepare' : '--apply'
 }
 
 /** One update run as persisted in `run.json` and returned over the Remote. */
@@ -94,7 +84,9 @@ export interface UpdateRunRecord {
   readonly target: string
   /** Channel pinned at launch (`stable` or `beta`). */
   readonly channel: string
-  /** Current progress phase; starts `starting` and ends terminal. */
+  /** Which engine flag this run drives. */
+  readonly mode: UpdateRunMode
+  /** Current progress phase; see the module table. */
   readonly phase: UpdatePhase
   /** Current 1-based engine step; 0 before the first `[N/9]` marker. */
   readonly step: number
@@ -108,13 +100,15 @@ export interface UpdateRunRecord {
   readonly pid: number | null
   /** Absolute path of the run log the UI tails. */
   readonly logPath: string
-  /** Terminal result, or null while the run is active. */
+  /** Terminal result, or null while the run is active or prepared. */
   readonly result: UpdateRunResult | null
   /** Launcher rung that started the process (`systemd-run|launchctl|setsid|spawn`). */
   readonly rung: string
+  /** Whether `$PREFIX/harness/.staged-apply.json` exists at the last check. */
+  readonly staged: boolean
   /** Bounded tail of the log (last {@link LOG_TAIL_LINES} non-empty lines). */
   readonly logTail: readonly string[]
-  /** Completion time, ISO 8601; absent while the run is active. */
+  /** Completion time, ISO 8601; absent while the run is active or prepared. */
   readonly finishedAt?: string
   /** Human-readable terminal explanation for a failed/rolled-back run. */
   readonly reason?: string
@@ -130,8 +124,6 @@ export interface ParsedRunLog {
   readonly lastLine: string
   /** Up to {@link LOG_TAIL_LINES} last non-empty lines, oldest first. */
   readonly logTail: readonly string[]
-  /** Phase from the step band, or the terminal phase once a result line appears. */
-  readonly phase: UpdatePhase
   /** Terminal result when a result line was seen. */
   readonly result: UpdateRunResult | null
 }
@@ -169,9 +161,8 @@ export function resultFromLine(line: string): UpdateRunResult | null {
  * Parse a log tail into the progress contract.
  *
  * @param text - raw log tail (any number of lines).
- * @returns step/steps, the phase band for the highest step, the bounded line
- *   tail, and the terminal result when a result line is present (the last
- *   result line wins).
+ * @returns step/steps, the bounded line tail, and the terminal result when a
+ *   result line is present (the last result line wins).
  */
 export function parseRunLog(text: string): ParsedRunLog {
   const lines = text.split('\n').map(plain).filter(line => line.trim() !== '')
@@ -190,14 +181,7 @@ export function parseRunLog(text: string): ParsedRunLog {
   }
   const logTail = lines.slice(-LOG_TAIL_LINES)
   const lastLine = lines.at(-1) ?? ''
-  return {
-    step,
-    steps,
-    lastLine,
-    logTail,
-    phase: result === null ? phaseForStep(step) : phaseForResult(result),
-    result,
-  }
+  return { step, steps, lastLine, logTail, result }
 }
 
 /**
@@ -225,22 +209,32 @@ export function readRunLog(logPath: string, maxBytes = LOG_TAIL_BYTES): ParsedRu
 
 /** `update-check` directory under the harness home. */
 export function updateCheckDir(home: string): string {
-  return `${home}/update-check`
+  return join(home, 'update-check')
 }
 
 /** `run.json` path for one home. */
 export function runRecordPath(home: string): string {
-  return `${updateCheckDir(home)}/run.json`
+  return join(updateCheckDir(home), 'run.json')
 }
 
 /** `run.log` path for one home. */
 export function runLogPath(home: string): string {
-  return `${updateCheckDir(home)}/run.log`
+  return join(updateCheckDir(home), 'run.log')
 }
 
 /** `run.pid` path: the updater's own pid, written by the launch wrapper. */
 export function runPidPath(home: string): string {
-  return `${updateCheckDir(home)}/run.pid`
+  return join(updateCheckDir(home), 'run.pid')
+}
+
+/** The staged-apply marker the engine writes after a successful prepare. */
+export function stagedApplyPath(prefix: string): string {
+  return join(prefix, 'harness', '.staged-apply.json')
+}
+
+/** Whether the engine's staged-apply marker exists. */
+export function hasStagedApply(prefix: string): boolean {
+  return existsSync(stagedApplyPath(prefix))
 }
 
 /** Whether a parsed JSON value looks like a run record. */
@@ -322,56 +316,102 @@ export function effectivePid(home: string, record: UpdateRunRecord): number | nu
   return pid ?? record.pid
 }
 
-/** Whether a run is still active: no terminal result and a live process. */
+/** Whether a run is still executing: no terminal result, not prepared, and a live process. */
 export function isRunActive(home: string, record: UpdateRunRecord): boolean {
-  if (record.result !== null) return false
+  if (record.result !== null || isPreparedPhase(record.phase)) return false
   const pid = effectivePid(home, record)
   return pid !== null && isProcessAlive(pid)
 }
 
+/** The terminal record for one result (the failure reason defaults to the last line). */
+export function terminalRecord(
+  record: UpdateRunRecord,
+  result: UpdateRunResult,
+  now: () => Date,
+  staged: boolean,
+): UpdateRunRecord {
+  return {
+    ...record,
+    phase: phaseForResult(result),
+    result,
+    staged,
+    finishedAt: now().toISOString(),
+    ...(result === 'success' ? {} : { reason: record.lastLine === '' ? `${record.mode} run reported ${result}` : record.lastLine }),
+  }
+}
+
+/** The resting record after a successful prepare (staged, awaiting apply). */
+export function preparedRecord(record: UpdateRunRecord, now: () => Date = () => new Date()): UpdateRunRecord {
+  // A record reaching this state never carried a failure reason (those are set
+  // together with a terminal result), so spreading it cannot resurrect one.
+  return { ...record, phase: 'prepared', result: null, staged: true, finishedAt: now().toISOString() }
+}
+
+/** Reconcile inputs beyond the record itself. */
+export interface ReconcileContext {
+  /** Harness home (`$DSH_HOME`), where the pid file and record live. */
+  readonly home: string
+  /** Install prefix, where `harness/.staged-apply.json` lives. */
+  readonly prefix: string
+  /** Clock for `finishedAt`. */
+  readonly now?: () => Date
+}
+
 /**
  * Reconcile one record left behind by a dead watcher (the service restarted
- * mid-run). Idempotent: a terminal record is returned unchanged.
+ * mid-run, or the whole host came back). Idempotent: a terminal record is
+ * returned unchanged.
  *
- * - A live process means the run continues under a new watcher: the record is
- *   returned unchanged (the caller resumes watching).
- * - The install version equals the target: the switch already happened, so the
- *   run is recorded `success`.
- * - Any other dead-process record without a terminal result is `failed` with
- *   an explicit reason; the log is left untouched for the UI's tail.
+ * Order of resolution for a dead run:
+ * 1. a live process means the run continues under a new watcher (unchanged);
+ * 2. a terminal log line (re-read from the log) decides the result;
+ * 3. a `prepared` record whose staged file still exists stays prepared;
+ * 4. a dead `prepare` record whose staged file appeared is prepared;
+ * 5. the install version equal to the run's target is `success`;
+ * 6. anything else is `failed` with an explicit reason. The log is never
+ *    deleted (the UI tails it).
  *
  * @param record - the persisted record.
  * @param identity - the install identity read at reconcile time.
- * @param now - clock for `finishedAt`.
+ * @param context - home/prefix paths and clock.
  * @returns the reconciled record and whether it changed.
  */
 export function reconcileRunRecord(
   record: UpdateRunRecord,
   identity: InstallIdentity,
-  now: () => Date = () => new Date(),
-  home?: string,
+  context: ReconcileContext,
 ): { record: UpdateRunRecord; changed: boolean } {
+  const now = context.now ?? (() => new Date())
   if (record.result !== null) return { record, changed: false }
-  if (home !== undefined && isRunActive(home, record)) return { record, changed: false }
-  if (home === undefined) {
-    const pid = record.pid
-    if (pid !== null && isProcessAlive(pid)) return { record, changed: false }
+  if (isRunActive(context.home, record)) return { record, changed: false }
+  const staged = hasStagedApply(context.prefix)
+  const parsed = readRunLog(record.logPath)
+  if (parsed.result !== null) {
+    const next = terminalRecord(parsed.lastLine === '' ? record : { ...record, lastLine: parsed.lastLine }, parsed.result, now, staged)
+    return { record: next, changed: true }
   }
-  const finishedAt = now().toISOString()
+  if (isPreparedPhase(record.phase) && staged) {
+    if (record.staged) return { record, changed: false }
+    return { record: { ...record, staged: true }, changed: true }
+  }
+  if (record.mode === 'prepare' && staged) {
+    return { record: { ...preparedRecord(record), lastLine: parsed.lastLine === '' ? record.lastLine : parsed.lastLine, logTail: parsed.logTail }, changed: true }
+  }
   if (identity.version !== '' && identity.version === record.target) {
-    return {
-      record: { ...record, phase: 'done', result: 'success', finishedAt },
-      changed: true,
-    }
+    return { record: { ...terminalRecord(record, 'success', now, staged), lastLine: parsed.lastLine === '' ? record.lastLine : parsed.lastLine, logTail: parsed.logTail }, changed: true }
   }
   const version = identity.version === '' ? 'unknown' : identity.version
+  const action = record.mode === 'prepare' ? 'prepare' : 'apply'
   return {
     record: {
       ...record,
       phase: 'failed',
       result: 'failed',
-      finishedAt,
-      reason: `updater is no longer running and the install version (${version}) does not match the target (${record.target})`,
+      staged,
+      finishedAt: now().toISOString(),
+      lastLine: parsed.lastLine === '' ? record.lastLine : parsed.lastLine,
+      logTail: parsed.logTail,
+      reason: `the ${action} run is no longer running and the install version (${version}) does not match the target (${record.target})`,
     },
     changed: true,
   }
@@ -380,10 +420,4 @@ export function reconcileRunRecord(
 /** Whether two records persist identically (skip redundant writes). */
 export function sameRunRecord(left: UpdateRunRecord, right: UpdateRunRecord): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
-}
-
-/** Compare an installed version against a run target; null when uncomparable. */
-export function targetReached(installed: string, target: string): boolean | null {
-  const comparison = compareVersions(installed, target)
-  return comparison === null ? null : comparison >= 0
 }

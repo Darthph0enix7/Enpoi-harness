@@ -53,7 +53,7 @@ kind: "package-library"
 | `StateDot` | 10px 槽内的绿色 `done`、琥珀色 `warning`、红色 `error`、中性灰色 `idle` 圆点，以及 tertiary 灰色 14px 旋转 `ongoing` loading，其动画固定到文档时间零点，所以所有可见 loading 同相旋转。它是 `aria-hidden` 的，名称由渲染点提供。 `appearance="step"` 以实心勾表示完成、空心圆表示等待。 |
 | `ConnectionIndicator` | 行内连接恢复控件，覆盖断线、重试与已恢复三种状态。 |
 | `DisclosureRow` | 24px 紧凑折叠行，标题与内容左右排列。使用浅层 prop 比较进行 memo；内容未变时，保持回调与 React 节点 prop 的引用稳定。 |
-| `Modal` | 页面遮罩之上的居中对话框。嵌套对话框可通过 `onKeyDownCapture` 在文档级 Escape 处理器之前拦截按键。 色层与弹窗淡入，背景模糊始终完整生效，并遵循减少动态效果偏好。调用方已模糊源页面时设置 `backdropBlur={false}`。 |
+| `Modal` | 页面遮罩之上的居中对话框。嵌套对话框可通过 `onKeyDownCapture` 在文档级 Escape 处理器之前拦截按键。遮罩压暗页面并叠加轻微背景模糊（可用 `--dsh-modal-backdrop-blur` 调整）；色层与弹窗淡入，模糊始终完整生效，并遵循减少动态效果偏好。调用方已模糊源页面时设置 `backdropBlur={false}`。 |
 | `RiskConfirmation` | 以显式复选框把关的敏感操作确认。 |
 | `Tooltip` | 锚定在克隆子元素上的悬停文本；可通过 `portal` 渲染到外层，避免被容器裁剪，或受祖先层叠上下文限制其 z-index。 |
 | `HoverCard` | 指针可停留、可选中的悬停预览；可选带复制按钮。 |
@@ -115,7 +115,7 @@ kind: "package-library"
 
 `Menu.listClassName` 独立控制菜单卡片样式，不影响入口容器，也适用于 portal 模式。前置图标使用 `--dsw-alias-menu-icon` 文本色；破坏性操作图标保留错误色。
 
-`Menu` 将卡片材质交给 `MenuSurface`，自定义菜单也使用该组件。`MenuSurface` 转发 div 属性和 ref，采用透明填充及模糊，`compact` 使用较小圆角。默认相对定位使材质层限制在容器内；调用方的类可以设置 fixed 或 absolute 定位。macOS 上，不接收交互的底层通过 CSS 锚点跟随卡片，并随卡片卸载；该底层要求 Web 外壳隔离 body 的层叠上下文。功能类控制布局和层级，组件负责材质和外圆角（[菜单规则](../../../docs/web-styling.zh.md#component-rules)）。 模态遮罩保留黑色半透明填充，不模糊背景。
+`Menu` 将卡片材质交给 `MenuSurface`，自定义菜单也使用该组件。`MenuSurface` 转发 div 属性和 ref，采用透明填充及模糊，`compact` 使用较小圆角。默认相对定位使材质层限制在容器内；调用方的类可以设置 fixed 或 absolute 定位。macOS 上，不接收交互的底层通过 CSS 锚点跟随卡片，并随卡片卸载；该底层要求 Web 外壳隔离 body 的层叠上下文。功能类控制布局和层级，组件负责材质和外圆角（[菜单规则](../../../docs/web-styling.zh.md#component-rules)）。模态遮罩保留半透明填充并叠加轻微背景模糊，使对话框与页面明确分层。
 
 <details>
 <summary>实现细节——点击展开</summary>

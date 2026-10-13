@@ -59,6 +59,8 @@ export function apply(ctx: ClientContext): void {
         open: () => { controller.open() },
         close: () => { controller.close() },
         start: () => { controller.start() },
+        apply: () => { controller.apply() },
+        retry: () => { controller.retry() },
         skip: () => { controller.skip() },
         toastDone: () => { controller.toastDone() },
       },

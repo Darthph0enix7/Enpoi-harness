@@ -1,6 +1,7 @@
 /**
- * UpdateRunController: start gating, launch, watcher progress, terminal
- * results, exit-without-result failure, and the boot reconcile.
+ * UpdateRunController: prepare/apply gating, launch, watcher progress
+ * (preparing → prepared, applying → terminal), and the boot reconcile across
+ * both phases.
  */
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
@@ -10,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { InstallIdentity } from '../src/catalog.js'
 import type { LaunchOutcome, LaunchUpdaterInput } from '../src/launcher.js'
-import { readRunRecord, runLogPath, runPidPath, runRecordPath } from '../src/run.js'
+import { runLogPath, runPidPath, runRecordPath, stagedApplyPath, type UpdateRunRecord } from '../src/run.js'
 import {
   RunRefusedError,
   UpdateRunController,
@@ -53,10 +54,24 @@ function available(version = '0.1.7-enpoi.2.84'): UpdateCheckStatus {
   }
 }
 
-interface Bench extends UpdateRunControllerOptions {
+/** Stage the engine's `.staged-apply.json` marker for `home` as its own prefix. */
+function stageApply(home: string, version = '0.1.7-enpoi.2.84'): string {
+  const file = stagedApplyPath(home)
+  mkdirSync(join(home, 'harness'), { recursive: true })
+  writeFileSync(file, JSON.stringify({ version, treeDirName: version, channel: 'stable', preparedAt: '2026-10-13T12:00:00.000Z' }))
+  return file
+}
+
+function writeLog(home: string, text: string): void {
+  mkdirSync(join(home, 'update-check'), { recursive: true })
+  writeFileSync(runLogPath(home), text)
+}
+
+interface Bench {
   controller: UpdateRunController
   ticks: ReturnType<typeof manualTimers>
   launches: LaunchUpdaterInput[]
+  home: string
   shim: string
 }
 
@@ -82,13 +97,14 @@ function bench(options: {
     readStatus: () => options.status ?? available(),
     launch,
     resolveShim: () => shim,
+    resolvePrefix: () => home,
     runId: () => 'run42',
     pollIntervalMs: 1_000,
     timers: ticks.timers,
     ...(options.isAlive === undefined ? {} : { isAlive: options.isAlive }),
     ...(options.now === undefined ? {} : { now: options.now }),
   })
-  return { controller, ticks, launches, shim, home }
+  return { controller, ticks, launches, home, shim }
 }
 
 async function deadPid(): Promise<number> {
@@ -98,12 +114,7 @@ async function deadPid(): Promise<number> {
   return pid
 }
 
-function writeLog(home: string, text: string): void {
-  mkdirSync(join(home, 'update-check'), { recursive: true })
-  writeFileSync(runLogPath(home), text)
-}
-
-describe('UpdateRunController.start', () => {
+describe('UpdateRunController.start (prepare)', () => {
   it('refuses when no update is available, with a typed reason', () => {
     for (const status of [
       { state: 'current', current: { version: '0.1.7-enpoi.2.84', commit: 'a', channel: 'stable' } } as UpdateCheckStatus,
@@ -117,39 +128,20 @@ describe('UpdateRunController.start', () => {
     }
   })
 
-  it('refuses when a run is already active', () => {
-    const home = scratch()
-    mkdirSync(join(home, 'update-check'), { recursive: true })
-    writeFileSync(runRecordPath(home), `${JSON.stringify({
-      runId: 'old', target: '0.1.7-enpoi.2.84', channel: 'stable', phase: 'deps', step: 4, steps: 9,
-      lastLine: '[4/9] dependencies and build', startedAt: new Date().toISOString(), pid: process.pid,
-      logPath: runLogPath(home), result: null, rung: 'setsid', logTail: [],
-    })}\n`)
-    writeFileSync(runPidPath(home), String(process.pid))
-    const b = bench({ home })
-    expect(() => b.controller.start()).toThrowError(
-      expect.objectContaining({ name: 'RunRefusedError', reason: 'already-running' }),
-    )
-    b.controller.dispose()
-    expect(b.ticks.active()).toBe(0)
+  it('refuses when a run is already active or an update is already prepared', () => {
+    const live = recordFixture({ record: { phase: 'preparing' } })
+    const b = bench({ home: live.home })
+    writeLiveRecord(live.home, live.record, process.pid)
+    expect(() => b.controller.start()).toThrowError(expect.objectContaining({ reason: 'already-running' }))
+
+    const preparedHome = scratch()
+    stageApply(preparedHome)
+    writeLiveRecord(preparedHome, recordFixture({ home: preparedHome, record: { phase: 'prepared', staged: true, step: 7 } }).record, null)
+    const prepared = bench({ home: preparedHome })
+    expect(() => prepared.controller.start()).toThrowError(expect.objectContaining({ reason: 'already-prepared' }))
   })
 
-  it('refuses when the shim is missing', () => {
-    const b = bench()
-    const controller = new UpdateRunController({
-      home: b.home,
-      readIdentity: () => ({ channel: 'stable', version: '0.1.7-enpoi.2.81', commit: 'a' }),
-      readStatus: () => available(),
-      resolveShim: () => null,
-      launch: () => { throw new Error('unreachable') },
-      timers: b.ticks.timers,
-    })
-    expect(() => controller.start()).toThrowError(
-      expect.objectContaining({ name: 'RunRefusedError', reason: 'shim-missing' }),
-    )
-  })
-
-  it('pins the target, truncates the log, launches, and persists the record', () => {
+  it('pins the target and channel, truncates the log, and launches --prepare', () => {
     const b = bench()
     writeLog(b.home, 'stale output from an older run\n')
     const record = b.controller.start()
@@ -157,32 +149,37 @@ describe('UpdateRunController.start', () => {
       runId: 'run42',
       target: '0.1.7-enpoi.2.84',
       channel: 'stable',
-      phase: 'starting',
+      mode: 'prepare',
+      phase: 'preparing',
       step: 0,
       steps: 9,
       result: null,
       rung: 'setsid',
       pid: 4242,
+      staged: false,
     })
     expect(b.launches).toHaveLength(1)
     expect(b.launches[0]).toMatchObject({
       home: b.home,
+      prefix: b.home,
       shim: b.shim,
+      flag: '--prepare',
       channel: 'stable',
       runId: 'run42',
     })
-    expect(readRunRecord(runRecordPath(b.home))).toEqual(record)
     expect(readFileSync(runLogPath(b.home), 'utf8')).toBe('')
+    expect(JSON.parse(readFileSync(runRecordPath(b.home), 'utf8'))).toMatchObject({ result: null, phase: 'preparing' })
     b.controller.dispose()
   })
 
-  it('records a launch failure and refuses with the launch reason', () => {
-    const b = bench({ launch: () => { throw new Error('spawn setsid ENOENT') } })
+  it('records a launch failure with the clear reason and refuses', () => {
+    const b = bench({ launch: () => { throw new Error('no Node.js runtime found for the updater (probed: PATH)') } })
     expect(() => b.controller.start()).toThrowError(
       expect.objectContaining({ name: 'RunRefusedError', reason: 'launch-failed' }),
     )
-    expect(readRunRecord(runRecordPath(b.home))?.result).toBe('failed')
-    expect(readRunRecord(runRecordPath(b.home))?.reason).toContain('ENOENT')
+    const persisted = JSON.parse(readFileSync(runRecordPath(b.home), 'utf8')) as UpdateRunRecord
+    expect(persisted.result).toBe('failed')
+    expect(persisted.reason).toContain('no Node.js runtime found')
   })
 
   it('is exportable as a refusal error type', () => {
@@ -191,34 +188,29 @@ describe('UpdateRunController.start', () => {
 })
 
 describe('UpdateRunController watcher', () => {
-  it('follows step markers, the pid file, and the terminal success line', () => {
-    const b = bench({ isAlive: pid => pid === 4242 || pid === 7777 })
+  it('follows the prepare steps, then rests at prepared when the staged marker appears', () => {
+    const alive = { value: true }
+    const b = bench({ isAlive: () => alive.value })
     b.controller.start()
-    const started = b.controller.run()!
-    expect(started.phase).toBe('starting')
-
-    writeLog(b.home, '[1/9] environment: existing install\n  ✓ cli found\n[3/9] pnpm: corepack\n')
+    writeLog(b.home, '[1/9] environment: existing install\n  ✓ cli found\n[4/9] dependencies and build: prebuilt release\n')
     b.ticks.tick()
     const midway = b.controller.run()!
-    expect(midway).toMatchObject({ step: 3, steps: 9, phase: 'verify', pid: 4242 })
-    expect(midway.lastLine).toBe('[3/9] pnpm: corepack')
-    expect(midway.logTail).toEqual(['[1/9] environment: existing install', '  ✓ cli found', '[3/9] pnpm: corepack'])
+    expect(midway).toMatchObject({ step: 4, steps: 9, phase: 'preparing', pid: 4242 })
+    expect(midway.lastLine).toBe('[4/9] dependencies and build: prebuilt release')
 
-    // The wrapper's own pid takes over from the launcher pid.
-    writeFileSync(runPidPath(b.home), '7777\n')
+    // The engine stages the tree and exits; the marker (not a log line) is the witness.
+    stageApply(b.home)
+    writeLog(b.home, '[1/9] environment\n[7/9] home, dependencies and migrations\n  ✓ profile seeded\n')
+    writeFileSync(runPidPath(b.home), '4242\n')
+    alive.value = false
     b.ticks.tick()
-    expect(b.controller.run()!.pid).toBe(7777)
-
-    writeLog(b.home, '[1/9] environment\n[8/9] switch, service and backfill\n✓ switch: current → 0.1.7-enpoi.2.84\n[9/9] self-check\n✓ self-check passed\nEnpoi Harness successfully updated!\n')
-    b.ticks.tick()
-    const done = b.controller.run()!
-    expect(done).toMatchObject({ step: 9, phase: 'done', result: 'success' })
-    expect(done.finishedAt).toBeDefined()
-    expect(done.logTail.at(-1)).toBe('Enpoi Harness successfully updated!')
+    const prepared = b.controller.run()!
+    expect(prepared).toMatchObject({ phase: 'prepared', result: null, staged: true, step: 7 })
+    expect(b.ticks.active()).toBe(0)
     b.controller.dispose()
   })
 
-  it('records failed when the process exits before a result line', async () => {
+  it('records failed when the prepare exits without staging anything', async () => {
     const b = bench({ isAlive: () => false })
     b.controller.start()
     writeLog(b.home, '[4/9] dependencies and build\nunpacking archive\n')
@@ -226,105 +218,146 @@ describe('UpdateRunController watcher', () => {
     b.ticks.tick()
     const failed = b.controller.run()!
     expect(failed).toMatchObject({ result: 'failed', phase: 'failed', step: 4 })
-    expect(failed.reason).toContain('exited before reporting a result')
-    expect(failed.reason).toContain('unpacking archive')
+    expect(failed.reason).toContain('the prepare run exited before reporting a result')
     expect(b.ticks.active()).toBe(0)
   })
 
   it('holds a probably-starting run through the grace window when no wrapper pid exists yet', () => {
-    const b = bench({ isAlive: () => false })
-    b.controller.start()
-    b.ticks.tick()
-    expect(b.controller.run()!.result).toBeNull()
-    // Past the grace window with no pid file and no output, the run fails.
     let offset = 0
     const late = bench({
       isAlive: () => false,
       now: () => new Date(Date.now() + offset),
     })
     late.controller.start()
+    late.ticks.tick()
+    expect(late.controller.run()!.result).toBeNull()
     offset = 60_000
     late.ticks.tick()
     expect(late.controller.run()).toMatchObject({ result: 'failed' })
-    expect(late.controller.run()!.reason).toContain('before writing any output')
+    expect(late.controller.run()!.reason).toContain('exited before writing any output')
+  })
+})
+
+describe('UpdateRunController.apply', () => {
+  it('refuses when nothing is prepared or the staged marker is gone', () => {
+    const empty = bench()
+    expect(() => empty.controller.apply()).toThrowError(expect.objectContaining({ reason: 'not-prepared' }))
+
+    const preparedHome = scratch()
+    writeLiveRecord(preparedHome, recordFixture({ home: preparedHome, record: { phase: 'prepared', staged: true, step: 7 } }).record, null)
+    const missingMarker = bench({ home: preparedHome })
+    expect(() => missingMarker.controller.apply()).toThrowError(expect.objectContaining({ reason: 'not-prepared' }))
   })
 
-  it('keeps watching after a terminal line until the process exits', () => {
+  it('launches --apply against the staged tree with the recorded target', () => {
+    const home = scratch()
+    stageApply(home)
+    writeLiveRecord(home, recordFixture({ home, record: { phase: 'prepared', staged: true, step: 7, target: '0.1.7-enpoi.2.84' } }).record, null)
+    const b = bench({ home })
+    const record = b.controller.apply()
+    expect(record).toMatchObject({
+      runId: 'run42',
+      target: '0.1.7-enpoi.2.84',
+      channel: 'stable',
+      mode: 'apply',
+      phase: 'applying',
+      result: null,
+      staged: true,
+      rung: 'setsid',
+    })
+    expect(b.launches).toHaveLength(1)
+    expect(b.launches[0]).toMatchObject({ flag: '--apply', prefix: home })
+    expect(b.launches[0]!.channel).toBeUndefined()
+    b.controller.dispose()
+  })
+
+  it('follows the apply steps to success and keeps watching until exit', () => {
     const alive = { value: true }
-    const b = bench({ isAlive: () => alive.value })
-    b.controller.start()
-    writeLog(b.home, '[9/9] self-check\nEnpoi Harness successfully updated!\n')
+    const home = scratch()
+    stageApply(home)
+    writeLiveRecord(home, recordFixture({ home, record: { phase: 'prepared', staged: true, step: 7 } }).record, null)
+    const b = bench({ home, isAlive: () => alive.value })
+    b.controller.apply()
+    writeLog(home, '[8/9] switch, service and backfill\n  ✓ current → 0.1.7-enpoi.2.84\n[9/9] self-check\nEnpoi Harness successfully updated!\n')
     b.ticks.tick()
-    expect(b.controller.run()!.result).toBe('success')
+    const done = b.controller.run()!
+    expect(done).toMatchObject({ mode: 'apply', phase: 'success', result: 'success', step: 9 })
+    expect(done.logTail.at(-1)).toBe('Enpoi Harness successfully updated!')
     expect(b.ticks.active()).toBe(1)
     alive.value = false
     b.ticks.tick()
     expect(b.ticks.active()).toBe(0)
+    b.controller.dispose()
   })
 
   it('records rolledback from the engine rollback line', () => {
-    const b = bench({ isAlive: () => true })
-    b.controller.start()
-    writeLog(b.home, '[9/9] self-check\ndsh update FAILED; rolled back to 0.1.7-enpoi.2.81 (previous tree self-check: ok)\n')
+    const home = scratch()
+    stageApply(home)
+    writeLiveRecord(home, recordFixture({ home, record: { phase: 'prepared', staged: true, step: 7 } }).record, null)
+    const b = bench({ home, isAlive: () => true })
+    b.controller.apply()
+    writeLog(home, '[9/9] self-check\ndsh update FAILED; rolled back to 0.1.7-enpoi.2.81 (previous tree self-check: ok)\n')
     b.ticks.tick()
     expect(b.controller.run()).toMatchObject({ result: 'rolledback', phase: 'rolledback' })
+    expect(b.controller.run()!.reason).toContain('rolled back')
     b.controller.dispose()
   })
 })
 
 describe('UpdateRunController.reconcile', () => {
-  it('marks success when the restart landed the target version', () => {
+  it('keeps a prepared run offered across a restart (marker present)', () => {
     const home = scratch()
-    mkdirSync(join(home, 'update-check'), { recursive: true })
-    writeFileSync(runRecordPath(home), `${JSON.stringify({
-      runId: 'run-restart', target: '0.1.7-enpoi.2.84', channel: 'stable', phase: 'switch', step: 8, steps: 9,
-      lastLine: '[8/9] switch, service and backfill', startedAt: new Date().toISOString(), pid: 4242,
-      logPath: runLogPath(home), result: null, rung: 'setsid', logTail: [],
-    })}\n`)
-    const b = bench({ home, identity: { channel: 'stable', version: '0.1.7-enpoi.2.84', commit: 'def5678' } })
+    stageApply(home)
+    writeLiveRecord(home, recordFixture({ home, record: { phase: 'prepared', staged: true, step: 7 } }).record, null)
+    const b = bench({ home })
     const reconciled = b.controller.reconcile()!
-    expect(reconciled).toMatchObject({ result: 'success', phase: 'done' })
-    expect(readRunRecord(runRecordPath(home))?.result).toBe('success')
+    expect(reconciled).toMatchObject({ phase: 'prepared', result: null, staged: true })
+    expect(b.ticks.active()).toBe(0)
     // Idempotent: a second boot changes nothing.
     expect(b.controller.reconcile()).toEqual(reconciled)
   })
 
-  it('marks failed when the version never reached the target', async () => {
+  it('promotes a dead prepare with the marker to prepared', async () => {
     const home = scratch()
-    mkdirSync(join(home, 'update-check'), { recursive: true })
-    writeFileSync(runRecordPath(home), `${JSON.stringify({
-      runId: 'run-dead', target: '0.1.7-enpoi.2.84', channel: 'stable', phase: 'deps', step: 4, steps: 9,
-      lastLine: '[4/9] dependencies and build', startedAt: new Date().toISOString(), pid: 4242,
-      logPath: runLogPath(home), result: null, rung: 'setsid', logTail: [],
-    })}\n`)
-    writeFileSync(runPidPath(home), String(await deadPid()))
+    stageApply(home)
+    writeLog(home, '[7/9] home, dependencies and migrations\n')
+    writeLiveRecord(home, recordFixture({ home, record: { phase: 'preparing', step: 7 } }).record, await deadPid())
+    const b = bench({ home })
+    const reconciled = b.controller.reconcile()!
+    expect(reconciled).toMatchObject({ phase: 'prepared', result: null, staged: true })
+    expect(JSON.parse(readFileSync(runRecordPath(home), 'utf8'))).toMatchObject({ phase: 'prepared' })
+  })
+
+  it('marks success when the apply switch landed the target version', async () => {
+    const home = scratch()
+    writeLiveRecord(home, recordFixture({ home, record: { mode: 'apply', phase: 'applying', step: 9 } }).record, await deadPid())
+    const b = bench({ home, identity: { channel: 'stable', version: '0.1.7-enpoi.2.84', commit: 'def5678' } })
+    const reconciled = b.controller.reconcile()!
+    expect(reconciled).toMatchObject({ result: 'success', phase: 'success' })
+    expect(readFileSync(runRecordPath(home), 'utf8')).toContain('"result": "success"')
+  })
+
+  it('marks failed when an apply died and the version never reached the target', async () => {
+    const home = scratch()
+    stageApply(home)
+    writeLiveRecord(home, recordFixture({ home, record: { mode: 'apply', phase: 'applying', step: 8, staged: true } }).record, await deadPid())
     const b = bench({ home })
     const reconciled = b.controller.reconcile()!
     expect(reconciled).toMatchObject({ result: 'failed', phase: 'failed' })
-    expect(reconciled.reason).toContain('does not match the target')
+    expect(reconciled.reason).toContain('the apply run is no longer running')
   })
 
-  it('resumes the watcher for a run whose updater is still alive', () => {
+  it('resumes the watcher for a run whose updater is still alive, and returns null with no record', () => {
     const home = scratch()
-    mkdirSync(join(home, 'update-check'), { recursive: true })
-    writeFileSync(runRecordPath(home), `${JSON.stringify({
-      runId: 'run-live', target: '0.1.7-enpoi.2.84', channel: 'stable', phase: 'deps', step: 5, steps: 9,
-      lastLine: '[5/9] transport', startedAt: new Date().toISOString(), pid: process.pid,
-      logPath: runLogPath(home), result: null, rung: 'spawn', logTail: [],
-    })}\n`)
-    writeFileSync(runPidPath(home), String(process.pid))
+    writeLiveRecord(home, recordFixture({ home, record: { mode: 'apply', phase: 'applying', step: 8 } }).record, process.pid)
     const b = bench({ home })
     const resumed = b.controller.reconcile()!
     expect(resumed.result).toBeNull()
     expect(b.ticks.active()).toBe(1)
     b.controller.dispose()
     expect(b.ticks.active()).toBe(0)
-  })
 
-  it('returns null when no run was ever recorded', () => {
-    const b = bench()
-    expect(b.controller.reconcile()).toBeNull()
-    expect(b.controller.run()).toBeNull()
+    expect(bench().controller.reconcile()).toBeNull()
   })
 })
 
@@ -335,7 +368,7 @@ describe('resolveShimPath', () => {
     mkdirSync(join(home, 'harness'), { recursive: true })
     mkdirSync(join(home, 'bin'), { recursive: true })
     writeFileSync(join(home, 'bin', 'dsh'), '#!/bin/sh\n', { mode: 0o755 })
-    writeFileSync(join(home, 'harness', 'install-state.json'), JSON.stringify({ binDir: join(home, 'bin') }))
+    writeFileSync(join(home, 'harness', 'install-state.json'), JSON.stringify({ binDir: join(home, 'bin'), prefix: home }))
     expect(resolveShimPath(home)).toBe(join(home, 'bin', 'dsh'))
     // An unreadable state file resolves nothing under this scratch home.
     writeFileSync(join(home, 'harness', 'install-state.json'), 'not json')
@@ -353,3 +386,39 @@ describe('liveness seam wiring', () => {
     b.controller.dispose()
   })
 })
+
+/** Fixture pairing a scratch home with one record. */
+function recordFixture(options: { home?: string; record?: Partial<UpdateRunRecord> } = {}): {
+  home: string
+  record: UpdateRunRecord
+} {
+  const home = options.home ?? scratch()
+  return {
+    home,
+    record: {
+      runId: 'run-old',
+      target: '0.1.7-enpoi.2.84',
+      channel: 'stable',
+      mode: 'prepare',
+      phase: 'preparing',
+      step: 0,
+      steps: 9,
+      lastLine: '',
+      startedAt: new Date().toISOString(),
+      pid: null,
+      logPath: runLogPath(home),
+      result: null,
+      rung: 'setsid',
+      staged: false,
+      logTail: [],
+      ...options.record,
+    },
+  }
+}
+
+/** Persist a record (and an optional wrapper pid) under `home`. */
+function writeLiveRecord(home: string, record: UpdateRunRecord, pid: number | null): void {
+  mkdirSync(join(home, 'update-check'), { recursive: true })
+  writeFileSync(runRecordPath(home), `${JSON.stringify(record)}\n`)
+  if (pid !== null) writeFileSync(runPidPath(home), `${String(pid)}\n`)
+}

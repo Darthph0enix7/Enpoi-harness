@@ -23,6 +23,7 @@ import type { DeviceSnapshot } from '@deepseek-ai/dsh-client-ui-primitives'
 import { computeColumns, RIGHTBAR_DEFAULT_RATIO, SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED, SIDEBAR_DEFAULT } from './columns.ts'
 import { DocumentTitle } from './DocumentTitle.tsx'
 import { MobileFrame } from './MobileFrame.tsx'
+import { publishShellInsets } from './overlay-insets.ts'
 import type { createLayoutStore } from './stores.ts'
 import css from './AppFrame.module.css'
 
@@ -207,6 +208,24 @@ export function AppFrame({
   colsRef.current = cols
   const rightbarWidth = useRef(normal.rightbar)
   rightbarWidth.current = normal.rightbar
+
+  // Publish the overlay-safe geometry on the root: overlay chips portal to
+  // document.body, so they cannot inherit the frame's own variables. The left
+  // inset is the sidebar column (its collapsed rail included); the right inset
+  // is the right panel's viewport footprint even when it hangs over the centre
+  // without a track. A fullscreen right panel owns the frame and marks the
+  // root so every overlay chip hides instead of sitting over it.
+  const overlayRightInset = layoutInfo.rightbarFullscreen ? viewport : layoutInfo.rightbarShown ? normal.rightbar : 0
+  const overlayCovered = layoutInfo.rightbarFullscreen
+  useEffect(() => {
+    if (mobile) return undefined
+    return publishShellInsets(document.documentElement, {
+      left: cols.sidebar,
+      right: overlayRightInset,
+      bottom: '0px',
+      covered: overlayCovered,
+    })
+  }, [mobile, cols.sidebar, overlayRightInset, overlayCovered])
 
   // The drag base is the rendered width captured at drag start (grabbing a
   // concession-clamped panel must not jump back to the stored preference);

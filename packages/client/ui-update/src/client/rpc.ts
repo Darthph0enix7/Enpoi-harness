@@ -4,6 +4,19 @@
  * a profile plugin, so no generated Remote artifact exists on the client
  * assembly; these are the exact wire contracts its Remote methods declare.
  *
+ * The envelope's `payload.args` carries the descriptor's **named parameters**,
+ * keyed by the parameter name — not the request fields. The current
+ * descriptors and their exact arg shapes:
+ *
+ * | endpoint              | host signature                     | `payload.args` |
+ * |-----------------------|------------------------------------|----------------|
+ * | `updateCheck.status`  | `status()`                         | `{}` |
+ * | `updateCheck.checkNow`| `checkNow()`                       | `{}` |
+ * | `updateCheck.dismiss` | `dismiss(request: {version})`      | `{request: {version}}` |
+ * | `updateCheck.start`   | `start()`                          | `{}` |
+ * | `updateCheck.apply`   | `apply()`                          | `{}` |
+ * | `updateCheck.run`     | `run()`                            | `{}` |
+ *
  * Every call is fail-soft: a transport or gatekeeper failure resolves to
  * `{ ok: false, message }` and never rejects.
  */
@@ -32,28 +45,28 @@ export interface UpdateCheckStatusWire {
   readonly error?: string
 }
 
-/** Run progress phases the host reports (`starting` precedes the first step). */
+/** Run phases the host reports (the two-phase contract). */
 export type UpdateRunPhase =
   | 'starting'
-  | 'fetch'
-  | 'verify'
-  | 'unpack'
-  | 'deps'
-  | 'profile'
-  | 'switch'
-  | 'selfcheck'
-  | 'done'
+  | 'preparing'
+  | 'prepared'
+  | 'applying'
+  | 'success'
   | 'failed'
   | 'rolledback'
 
 /** Terminal run outcomes. */
 export type UpdateRunResult = 'success' | 'failed' | 'rolledback'
 
-/** `updateCheck.run` / `updateCheck.start` record. */
+/** The engine flag a run drives. */
+export type UpdateRunMode = 'prepare' | 'apply'
+
+/** `updateCheck.run` / `updateCheck.start` / `updateCheck.apply` record. */
 export interface UpdateRunWire {
   readonly runId: string
   readonly target: string
   readonly channel: string
+  readonly mode: UpdateRunMode
   readonly phase: UpdateRunPhase
   readonly step: number
   readonly steps: number
@@ -63,6 +76,8 @@ export interface UpdateRunWire {
   readonly logPath: string
   readonly result: UpdateRunResult | null
   readonly rung: string
+  /** Whether the engine's staged-apply marker exists (prepare landed). */
+  readonly staged: boolean
   readonly logTail: readonly string[]
   readonly finishedAt?: string
   readonly reason?: string
@@ -73,19 +88,32 @@ export type UpdateRpcResult<T> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly message: string }
 
+/** Exact `payload.args` shapes the descriptors accept (see the module table). */
+export type UpdateRpcArgs =
+  | Record<string, never>
+  | { readonly request: { readonly version: string } }
+
+/** Whether a run phase means the engine process is working. */
+export function isExecutingPhase(phase: UpdateRunPhase): boolean {
+  return phase === 'starting' || phase === 'preparing' || phase === 'applying'
+}
+
+/** The engine step where the apply's switch (and its service restart) begins. */
+export const APPLY_SWITCH_STEP = 8
+
 let sequence = 0
 
 /**
  * One `updateCheck.*` call over the gateway's client-request envelope.
  *
  * @param method - remote endpoint, e.g. `updateCheck.status`.
- * @param args - exact named wire arguments (empty for the no-argument methods).
+ * @param args - exact named wire arguments (the descriptor's parameter names).
  * @param fetchImpl - fetch implementation (tests inject a stub).
  * @returns the business value or a displayable failure message.
  */
 export async function updateCheckRpc<T>(
   method: string,
-  args: Record<string, unknown>,
+  args: UpdateRpcArgs,
   fetchImpl: typeof fetch = fetch,
 ): Promise<UpdateRpcResult<T>> {
   sequence += 1

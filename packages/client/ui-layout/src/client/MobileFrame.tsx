@@ -19,6 +19,7 @@ import {
   IconPanelLeftOutlineMedium, Sheet, useBackHandler,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { AppFrameProps } from './AppFrame.tsx'
+import { markMobileShell, publishShellInsets } from './overlay-insets.ts'
 import css from './MobileFrame.module.css'
 
 /** Drawer width; the desktop sidebar's minimum, so the wide content is unchanged. */
@@ -74,6 +75,24 @@ export function MobileFrame({
   const [drawerMounted, setDrawerMounted] = useState(false)
   const [drawerRecordHeld, setDrawerRecordHeld] = useState(false)
   const surfaceShown = useStore(state => state.layoutInfo.rightbarShown)
+
+  // Publish the mobile shell's overlay-safe geometry on the root (portalled
+  // chips cannot see the frame's own variables): the open drawer pushes them
+  // right, the mobile right surface is fullscreen so it marks the root
+  // covered, and the stylesheet supplies the bar height as the bottom inset.
+  useEffect(() => {
+    const root = document.documentElement
+    const cleanMobile = markMobileShell(root)
+    const cleanInsets = publishShellInsets(root, {
+      left: drawerOpen ? MOBILE_DRAWER_WIDTH : 0,
+      right: surfaceShown ? viewport : 0,
+      covered: surfaceShown,
+    })
+    return () => {
+      cleanInsets()
+      cleanMobile()
+    }
+  }, [drawerOpen, surfaceShown, viewport])
 
   // The occupant mounts on the first open and stays mounted: a surface the
   // drawer hands off (Settings) keeps its state while the drawer slides away,

@@ -2,11 +2,12 @@
  * enpoi-update-check — the `updateCheck` Typert Remote namespace.
  *
  * Endpoints (wire names): `updateCheck/status`, `updateCheck/checkNow`,
- * `updateCheck/dismiss`, `updateCheck/start`, `updateCheck/run`. Thin
- * decorated shell over {@link UpdateCheckCore} and
+ * `updateCheck/dismiss`, `updateCheck/start`, `updateCheck/apply`,
+ * `updateCheck/run`. Thin decorated shell over {@link UpdateCheckCore} and
  * {@link UpdateRunController} (decorator-free, so the vitest pipeline tests
  * the logic directly). Advisory until `start` is called: nothing here
- * downloads or applies an update on its own.
+ * downloads or applies an update on its own, and `start` (prepare) never
+ * switches the tree — only `apply` does.
  *
  * @module dsh-enpoi-update-check/remote
  */
@@ -93,19 +94,41 @@ export class UpdateCheckService extends TypertRemoteService {
   }
 
   /**
-   * Start one update run: pin the available target, launch the updater
-   * detached, and return the fresh run record. The [Update now] click is the
-   * operator's restart decision; the run proceeds to switch+restart on its
-   * own.
+   * Start one prepare run (`dsh update --channel <c> --prepare`): pin the
+   * available target, stage the update detached, and return the fresh run
+   * record. The [Update now] click is the operator's consent to prepare; the
+   * staged tree waits for an explicit `apply`.
    *
-   * @returns the run record (phase `starting`).
+   * @returns the run record (phase `starting`, then `preparing`).
    * @throws RemoteError `gateway/bad-request` when no update is available, a
-   *   run is already active, the shim is missing, or the launch fails.
+   *   run is active, an update is already prepared, the shim is missing, or
+   *   the launch fails (including no resolvable Node.js runtime).
    */
   @Remote
   start(): UpdateRunRecord {
     try {
       return this.runs.start()
+    } catch (error) {
+      if (error instanceof RunRefusedError) {
+        throw new RemoteError('gateway/bad-request', error.message, {})
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Apply the staged update (`dsh update --apply`): switch, service restart,
+   * self-check, health, retention, then the staged marker is consumed. The
+   * [Restart to update] click is the operator's restart decision.
+   *
+   * @returns the run record (phase `applying`).
+   * @throws RemoteError `gateway/bad-request` when nothing is staged, a run is
+   *   active, the shim is missing, or the launch fails.
+   */
+  @Remote
+  apply(): UpdateRunRecord {
+    try {
+      return this.runs.apply()
     } catch (error) {
       if (error instanceof RunRefusedError) {
         throw new RemoteError('gateway/bad-request', error.message, {})

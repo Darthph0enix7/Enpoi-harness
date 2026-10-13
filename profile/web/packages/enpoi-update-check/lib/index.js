@@ -155,26 +155,34 @@ function readInstallIdentity(homeDir) {
 import { Remote, RemoteError, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 
 // src/run-service.ts
-import { existsSync, readFileSync as readFileSync3, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
-import { join as join3 } from "node:path";
+import { existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync3, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname as dirname2, join as join4 } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // src/launcher.ts
 import { spawn as nodeSpawn } from "node:child_process";
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, readdirSync } from "node:fs";
 import { delimiter, join as join2 } from "node:path";
 import { homedir } from "node:os";
-var LAUNCH_WRAPPER = 'log="$1"; pid="$2"; shift 2; echo $$ > "$pid"; exec "$@" >>"$log" 2>&1';
 var RUN_HOME_ENV = "DSH_HOME";
-function commandOnPath(command, pathSpec = process.env.PATH) {
-  if (pathSpec === void 0 || pathSpec === "") return false;
-  for (const dir of pathSpec.split(delimiter)) {
-    if (dir === "") continue;
-    if (directoryHasExecutable(join2(dir, command))) return true;
+var LaunchEnvironmentError = class extends Error {
+  /** Every location the probe consulted, in order. */
+  probed;
+  /**
+   * @param probed - every location the probe consulted, in order.
+   */
+  constructor(probed) {
+    super(
+      `no Node.js runtime found for the updater (probed: ${probed.join(", ")}). Install Node 22.19+ or record the install prefix so $PREFIX/runtime/node/current resolves.`
+    );
+    this.name = "LaunchEnvironmentError";
+    this.probed = probed;
   }
-  return false;
+};
+function systemBinDirs(platform = process.platform) {
+  return platform === "darwin" ? ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] : ["/usr/local/bin", "/usr/bin", "/bin"];
 }
-function directoryHasExecutable(file) {
+function isExecutable(file) {
   try {
     accessSync(file, constants.X_OK);
     return true;
@@ -182,23 +190,126 @@ function directoryHasExecutable(file) {
     return false;
   }
 }
-function wrapperArgs(input) {
+function commandOnPath(command, pathSpec) {
+  if (pathSpec === void 0 || pathSpec === "") return false;
+  for (const dir of pathSpec.split(delimiter)) {
+    if (dir === "") continue;
+    if (isExecutable(join2(dir, command))) return true;
+  }
+  return false;
+}
+function newestVersionDir(parent) {
+  let names;
+  try {
+    names = readdirSync(parent).filter((name2) => /^v?\d/.test(name2));
+  } catch {
+    return void 0;
+  }
+  if (names.length === 0) return void 0;
+  const weight = (name2) => name2.replace(/^v/, "").split(/[^0-9]+/).filter((part) => part !== "").map(Number);
+  names.sort((left, right) => {
+    const a = weight(left);
+    const b = weight(right);
+    for (let index = 0; index < Math.max(a.length, b.length); index++) {
+      const diff = (a[index] ?? 0) - (b[index] ?? 0);
+      if (diff !== 0) return diff;
+    }
+    return left.localeCompare(right);
+  });
+  return names.at(-1);
+}
+function resolveRuntime(input) {
+  const platform = input.platform ?? process.platform;
+  const baseEnv = input.baseEnv ?? process.env;
+  const probed = [];
+  const prefixRuntime = join2(input.prefix, "runtime", "node", "current", "bin");
+  probed.push(prefixRuntime);
+  if (isExecutable(join2(prefixRuntime, "node"))) {
+    return { probe: { binDir: prefixRuntime, source: "prefix-runtime" }, probed };
+  }
+  for (const root of [
+    join2(input.homeDir, ".local", "share", "nvm"),
+    join2(input.homeDir, ".nvm", "versions", "node")
+  ]) {
+    const newest = newestVersionDir(root);
+    if (newest === void 0) {
+      probed.push(`${root}/*/bin`);
+      continue;
+    }
+    const binDir = join2(root, newest, "bin");
+    probed.push(binDir);
+    if (isExecutable(join2(binDir, "node"))) {
+      return { probe: { binDir, source: "nvm" }, probed };
+    }
+  }
+  if (commandOnPath("node", baseEnv.PATH)) {
+    return { probe: { binDir: "", source: "path" }, probed };
+  }
+  probed.push("PATH");
+  for (const dir of systemBinDirs(platform)) {
+    probed.push(dir);
+    if (isExecutable(join2(dir, "node"))) {
+      return { probe: { binDir: dir, source: "system" }, probed };
+    }
+  }
+  return { probe: null, probed };
+}
+function resolveLaunchEnvironment(input) {
+  const baseEnv = input.baseEnv ?? process.env;
+  const { probe, probed } = resolveRuntime({
+    prefix: input.prefix,
+    homeDir: input.probeHomeDir ?? homedir(),
+    ...input.baseEnv === void 0 ? {} : { baseEnv: input.baseEnv },
+    ...input.platform === void 0 ? {} : { platform: input.platform }
+  });
+  if (probe === null) throw new LaunchEnvironmentError(probed);
+  const segments = [probe.binDir, baseEnv.PATH ?? "", ...systemBinDirs(input.platform)].flatMap((value) => value.split(delimiter)).filter((segment) => segment !== "");
+  const path = [...new Set(segments)].join(delimiter);
+  const env = {
+    ...baseEnv,
+    PATH: path,
+    [RUN_HOME_ENV]: input.home,
+    ...input.prefix === "" ? {} : { PREFIX: input.prefix }
+  };
+  return { nodePath: probe.binDir === "" ? null : join2(probe.binDir, "node"), source: probe.source, path, env, probed };
+}
+function shellQuote(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+function launchWrapper(environment) {
+  const parts = [
+    'log="$1"',
+    'pid="$2"',
+    "shift 2",
+    `export PATH=${shellQuote(environment.path)}`,
+    `export ${RUN_HOME_ENV}=${shellQuote(environment.env[RUN_HOME_ENV] ?? "")}`
+  ];
+  const prefix = environment.env.PREFIX;
+  if (prefix !== void 0 && prefix !== "") parts.push(`export PREFIX=${shellQuote(prefix)}`);
+  parts.push('echo $$ > "$pid"', 'exec "$@" >>"$log" 2>&1');
+  return parts.join("; ");
+}
+function wrapperArgs(input, environment) {
   return [
     "-c",
-    LAUNCH_WRAPPER,
+    launchWrapper(environment),
     "dsh-update",
     input.logPath,
     input.pidFile,
     input.shim,
     "update",
-    "--channel",
-    input.channel
+    ...input.flag === "--prepare" ? ["--channel", input.channel ?? "stable", "--prepare"] : ["--apply"]
   ];
 }
-function launchPlan(input) {
+function launchPlan(input, environment) {
   const platform = input.platform ?? process.platform;
-  const has = input.hasCommand ?? ((command) => commandOnPath(command));
-  const args = wrapperArgs(input);
+  const has = input.hasCommand ?? ((command) => commandOnPath(command, process.env.PATH));
+  const args = wrapperArgs(input, environment);
+  const envArgs = [
+    `--setenv=PATH=${environment.path}`,
+    `--setenv=${RUN_HOME_ENV}=${input.home}`,
+    ...input.prefix === "" ? [] : [`--setenv=PREFIX=${input.prefix}`]
+  ];
   const steps = [];
   if (platform === "linux" && has("systemd-run")) {
     const runtimeDir = process.env.XDG_RUNTIME_DIR ?? `/run/user/${String(input.uid ?? process.getuid?.() ?? 0)}`;
@@ -213,7 +324,7 @@ function launchPlan(input) {
         "--wait",
         `--unit=dsh-update-${input.runId}`,
         `--setenv=XDG_RUNTIME_DIR=${runtimeDir}`,
-        `--setenv=${RUN_HOME_ENV}=${input.home}`,
+        ...envArgs,
         "--",
         "sh",
         ...args
@@ -246,15 +357,16 @@ function launchPlan(input) {
   return steps;
 }
 function launchUpdater(input) {
+  const environment = resolveLaunchEnvironment(input);
   const spawn = input.spawn ?? ((command, args, options) => nodeSpawn(command, [...args], options));
-  const plan = launchPlan(input);
+  const plan = launchPlan(input, environment);
   let lastError;
   for (const step of plan) {
     try {
       const child = spawn(step.command, step.args, {
         detached: true,
         stdio: "ignore",
-        env: { ...process.env, [RUN_HOME_ENV]: input.home }
+        env: environment.env
       });
       child.unref?.();
       return {
@@ -273,26 +385,24 @@ function defaultShimPath() {
 }
 
 // src/run.ts
-import { mkdirSync, readFileSync as readFileSync2, renameSync, statSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, readFileSync as readFileSync2, renameSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join as join3 } from "node:path";
 var RUN_STEP_TOTAL = 9;
-var STEP_PHASES = [
-  "fetch",
-  "fetch",
-  "verify",
-  "unpack",
-  "deps",
-  "profile",
-  "profile",
-  "switch",
-  "selfcheck"
-];
-function phaseForResult(result) {
-  return result === "success" ? "done" : result;
+var APPLY_SWITCH_STEP = 8;
+function executingPhase(mode) {
+  return mode === "prepare" ? "preparing" : "applying";
 }
-function phaseForStep(step) {
-  if (!Number.isFinite(step) || step < 1) return "starting";
-  return STEP_PHASES[Math.min(Math.trunc(step), RUN_STEP_TOTAL) - 1] ?? "fetch";
+function phaseForResult(result) {
+  return result;
+}
+function isTerminalPhase(phase) {
+  return phase === "success" || phase === "failed" || phase === "rolledback";
+}
+function isPreparedPhase(phase) {
+  return phase === "prepared";
+}
+function modeFlag(mode) {
+  return mode === "prepare" ? "--prepare" : "--apply";
 }
 var LOG_TAIL_LINES = 40;
 var LOG_TAIL_BYTES = 64 * 1024;
@@ -324,14 +434,7 @@ function parseRunLog(text) {
   }
   const logTail = lines.slice(-LOG_TAIL_LINES);
   const lastLine = lines.at(-1) ?? "";
-  return {
-    step,
-    steps,
-    lastLine,
-    logTail,
-    phase: result === null ? phaseForStep(step) : phaseForResult(result),
-    result
-  };
+  return { step, steps, lastLine, logTail, result };
 }
 function readRunLog(logPath, maxBytes = LOG_TAIL_BYTES) {
   let text = "";
@@ -346,16 +449,22 @@ function readRunLog(logPath, maxBytes = LOG_TAIL_BYTES) {
   return parseRunLog(text);
 }
 function updateCheckDir(home) {
-  return `${home}/update-check`;
+  return join3(home, "update-check");
 }
 function runRecordPath(home) {
-  return `${updateCheckDir(home)}/run.json`;
+  return join3(updateCheckDir(home), "run.json");
 }
 function runLogPath(home) {
-  return `${updateCheckDir(home)}/run.log`;
+  return join3(updateCheckDir(home), "run.log");
 }
 function runPidPath(home) {
-  return `${updateCheckDir(home)}/run.pid`;
+  return join3(updateCheckDir(home), "run.pid");
+}
+function stagedApplyPath(prefix) {
+  return join3(prefix, "harness", ".staged-apply.json");
+}
+function hasStagedApply(prefix) {
+  return existsSync(stagedApplyPath(prefix));
 }
 function isRunRecord(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -403,42 +512,61 @@ function effectivePid(home, record) {
   return pid ?? record.pid;
 }
 function isRunActive(home, record) {
-  if (record.result !== null) return false;
+  if (record.result !== null || isPreparedPhase(record.phase)) return false;
   const pid = effectivePid(home, record);
   return pid !== null && isProcessAlive(pid);
 }
-function reconcileRunRecord(record, identity, now = () => /* @__PURE__ */ new Date(), home) {
+function terminalRecord(record, result, now, staged) {
+  return {
+    ...record,
+    phase: phaseForResult(result),
+    result,
+    staged,
+    finishedAt: now().toISOString(),
+    ...result === "success" ? {} : { reason: record.lastLine === "" ? `${record.mode} run reported ${result}` : record.lastLine }
+  };
+}
+function preparedRecord(record, now = () => /* @__PURE__ */ new Date()) {
+  return { ...record, phase: "prepared", result: null, staged: true, finishedAt: now().toISOString() };
+}
+function reconcileRunRecord(record, identity, context) {
+  const now = context.now ?? (() => /* @__PURE__ */ new Date());
   if (record.result !== null) return { record, changed: false };
-  if (home !== void 0 && isRunActive(home, record)) return { record, changed: false };
-  if (home === void 0) {
-    const pid = record.pid;
-    if (pid !== null && isProcessAlive(pid)) return { record, changed: false };
+  if (isRunActive(context.home, record)) return { record, changed: false };
+  const staged = hasStagedApply(context.prefix);
+  const parsed = readRunLog(record.logPath);
+  if (parsed.result !== null) {
+    const next = terminalRecord(parsed.lastLine === "" ? record : { ...record, lastLine: parsed.lastLine }, parsed.result, now, staged);
+    return { record: next, changed: true };
   }
-  const finishedAt = now().toISOString();
+  if (isPreparedPhase(record.phase) && staged) {
+    if (record.staged) return { record, changed: false };
+    return { record: { ...record, staged: true }, changed: true };
+  }
+  if (record.mode === "prepare" && staged) {
+    return { record: { ...preparedRecord(record), lastLine: parsed.lastLine === "" ? record.lastLine : parsed.lastLine, logTail: parsed.logTail }, changed: true };
+  }
   if (identity.version !== "" && identity.version === record.target) {
-    return {
-      record: { ...record, phase: "done", result: "success", finishedAt },
-      changed: true
-    };
+    return { record: { ...terminalRecord(record, "success", now, staged), lastLine: parsed.lastLine === "" ? record.lastLine : parsed.lastLine, logTail: parsed.logTail }, changed: true };
   }
   const version = identity.version === "" ? "unknown" : identity.version;
+  const action = record.mode === "prepare" ? "prepare" : "apply";
   return {
     record: {
       ...record,
       phase: "failed",
       result: "failed",
-      finishedAt,
-      reason: `updater is no longer running and the install version (${version}) does not match the target (${record.target})`
+      staged,
+      finishedAt: now().toISOString(),
+      lastLine: parsed.lastLine === "" ? record.lastLine : parsed.lastLine,
+      logTail: parsed.logTail,
+      reason: `the ${action} run is no longer running and the install version (${version}) does not match the target (${record.target})`
     },
     changed: true
   };
 }
 function sameRunRecord(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
-}
-function targetReached(installed, target) {
-  const comparison = compareVersions(installed, target);
-  return comparison === null ? null : comparison >= 0;
 }
 
 // src/run-service.ts
@@ -456,22 +584,33 @@ var RunRefusedError = class extends Error {
   }
 };
 var RUN_START_GRACE_MS = 15e3;
+function resolvePrefix(home) {
+  try {
+    const state = JSON.parse(
+      readFileSync3(join4(home, "harness", "install-state.json"), "utf8")
+    );
+    return typeof state.prefix === "string" && state.prefix !== "" ? state.prefix : home;
+  } catch {
+    return home;
+  }
+}
 function resolveShimPath(home) {
   let binDir = "";
   try {
     const state = JSON.parse(
-      readFileSync3(join3(home, "harness", "install-state.json"), "utf8")
+      readFileSync3(join4(home, "harness", "install-state.json"), "utf8")
     );
     binDir = typeof state.binDir === "string" ? state.binDir : "";
   } catch {
     binDir = "";
   }
-  const candidates = [...binDir === "" ? [] : [join3(binDir, "dsh")], defaultShimPath()];
-  return candidates.find((candidate) => existsSync(candidate)) ?? null;
+  const candidates = [...binDir === "" ? [] : [join4(binDir, "dsh")], defaultShimPath()];
+  return candidates.find((candidate) => existsSync2(candidate)) ?? null;
 }
 var UpdateRunController = class {
   options;
   now;
+  prefix;
   record = null;
   loaded = false;
   watcher = null;
@@ -482,9 +621,14 @@ var UpdateRunController = class {
   constructor(options) {
     this.options = options;
     this.now = options.now ?? (() => /* @__PURE__ */ new Date());
+    this.prefix = (options.resolvePrefix ?? resolvePrefix)(options.home);
     this.timers = options.timers ?? {
-      setInterval: (handler, delayMs) => setInterval(handler, delayMs),
-      clearInterval: (handle) => clearInterval(handle)
+      setInterval: (handler, delayMs) => {
+        return setInterval(handler, delayMs);
+      },
+      clearInterval: (handle) => {
+        clearInterval(handle);
+      }
     };
   }
   /** The current record (from memory, or the persisted state on first read). */
@@ -497,30 +641,32 @@ var UpdateRunController = class {
   }
   /**
    * Boot reconcile: resolve a record left by a dead watcher. Idempotent.
+   * A prepared record survives untouched; a live updater resumes watching.
    * @returns the reconciled record, or null when none exists.
    */
   reconcile() {
     const current = this.run();
     if (current === null) return null;
-    if (current.result === null && this.isAliveRecord(current)) {
+    if (current.result === null && !isPreparedPhase(current.phase) && this.isAliveRecord(current)) {
       this.watch(current);
       return current;
     }
-    const { record, changed } = reconcileRunRecord(
-      current,
-      this.options.readIdentity(),
-      this.now,
-      this.options.isAlive === void 0 ? this.options.home : void 0
-    );
+    if (isPreparedPhase(current.phase) && hasStagedApply(this.prefix)) return current;
+    const { record, changed } = reconcileRunRecord(current, this.options.readIdentity(), {
+      home: this.options.home,
+      prefix: this.prefix,
+      now: this.now
+    });
     if (changed) this.persist(record);
     return record;
   }
   /**
-   * Start one update run.
+   * Start one prepare run (`dsh update --channel <c> --prepare`).
    *
-   * @returns the freshly persisted record (phase `starting`).
-   * @throws RunRefusedError when no update is available, a run is active, the
-   *   shim is missing, or the launch rung fails.
+   * @returns the freshly persisted record.
+   * @throws RunRefusedError when no update is available, a run is active, an
+   *   update is already prepared, the shim is missing, or the launch fails
+   *   (including a launch environment with no usable Node.js runtime).
    */
   start() {
     this.reconcile();
@@ -531,28 +677,77 @@ var UpdateRunController = class {
         `updateCheck.start: no update is available (state=${status.state})`
       );
     }
-    const active = this.run();
-    if (active !== null && active.result === null && this.isAliveRecord(active)) {
+    const current = this.run();
+    if (current !== null && current.result === null) {
+      if (isPreparedPhase(current.phase)) {
+        throw new RunRefusedError(
+          "already-prepared",
+          `updateCheck.start: update ${current.target} is already prepared; apply it instead`
+        );
+      }
+      if (this.isAliveRecord(current)) {
+        throw new RunRefusedError(
+          "already-running",
+          `updateCheck.start: an update is already running (run ${current.runId}, step ${String(current.step)}/${String(current.steps)})`
+        );
+      }
+    }
+    return this.begin("prepare", {
+      target: status.latest.version,
+      channel: status.current.channel
+    });
+  }
+  /**
+   * Apply the staged update (`dsh update --apply`).
+   *
+   * @returns the freshly persisted record.
+   * @throws RunRefusedError when nothing is prepared, the staged marker is
+   *   missing, a run is active, the shim is missing, or the launch fails.
+   */
+  apply() {
+    this.reconcile();
+    const current = this.run();
+    if (current === null || !isPreparedPhase(current.phase)) {
       throw new RunRefusedError(
-        "already-running",
-        `updateCheck.start: an update is already running (run ${active.runId}, step ${String(active.step)}/${String(active.steps)})`
+        "not-prepared",
+        "updateCheck.apply: no prepared update is staged; run Update now first"
       );
     }
+    if (!hasStagedApply(this.prefix)) {
+      throw new RunRefusedError(
+        "not-prepared",
+        "updateCheck.apply: the staged apply marker is gone; run Update now to prepare again"
+      );
+    }
+    if (this.isAliveRecord(current)) {
+      throw new RunRefusedError(
+        "already-running",
+        `updateCheck.apply: an update is already running (run ${current.runId})`
+      );
+    }
+    return this.begin("apply", { target: current.target, channel: current.channel });
+  }
+  /** Stop the watcher (plugin unload). The updater itself keeps running. */
+  dispose() {
+    this.stopWatcher();
+  }
+  /** Persist a fresh record for `mode`, launch its engine flag, and watch it. */
+  begin(mode, pin) {
     const shim = (this.options.resolveShim ?? resolveShimPath)(this.options.home);
     if (shim === null) {
       throw new RunRefusedError(
         "shim-missing",
-        `updateCheck.start: the dsh shim was not found (checked the recorded binDir and ${defaultShimPath()})`
+        `updateCheck.${mode === "prepare" ? "start" : "apply"}: the dsh shim was not found (checked the recorded binDir and ${defaultShimPath()})`
       );
     }
-    const runId = (this.options.runId ?? (() => randomUUID().replace(/-/g, "").slice(0, 10)))();
     const home = this.options.home;
     const logPath = runLogPath(home);
     const pidFile = runPidPath(home);
     const base = {
-      runId,
-      target: status.latest.version,
-      channel: status.current.channel,
+      runId: (this.options.runId ?? (() => randomUUID().replace(/-/g, "").slice(0, 10)))(),
+      target: pin.target,
+      channel: pin.channel,
+      mode,
       phase: "starting",
       step: 0,
       steps: RUN_STEP_TOTAL,
@@ -562,39 +757,41 @@ var UpdateRunController = class {
       logPath,
       result: null,
       rung: "pending",
+      staged: mode === "apply" ? hasStagedApply(this.prefix) : false,
       logTail: []
     };
     try {
+      mkdirSync2(dirname2(logPath), { recursive: true });
       writeFileSync2(logPath, "");
       rmSync(pidFile, { force: true });
     } catch {
     }
-    this.record = base;
     this.loaded = true;
     this.persist(base);
     this.launch(base, shim);
     return this.run() ?? base;
-  }
-  /** Stop the watcher (plugin unload). The updater itself keeps running. */
-  dispose() {
-    this.stopWatcher();
   }
   /** Launch through the ladder, persist the outcome, and start watching. */
   launch(record, shim) {
     const home = this.options.home;
     let outcome;
     try {
-      outcome = (this.options.launch ?? launchUpdater)({
+      const input = {
         home,
+        prefix: this.prefix,
         shim,
-        channel: record.channel,
+        flag: modeFlag(record.mode),
+        ...record.mode === "prepare" ? { channel: record.channel } : {},
         runId: record.runId,
         logPath: record.logPath,
         pidFile: runPidPath(home),
         ...this.options.platform === void 0 ? {} : { platform: this.options.platform },
         ...this.options.hasCommand === void 0 ? {} : { hasCommand: this.options.hasCommand },
-        ...this.options.uid === void 0 ? {} : { uid: this.options.uid }
-      });
+        ...this.options.uid === void 0 ? {} : { uid: this.options.uid },
+        ...this.options.baseEnv === void 0 ? {} : { baseEnv: this.options.baseEnv },
+        ...this.options.probeHomeDir === void 0 ? {} : { probeHomeDir: this.options.probeHomeDir }
+      };
+      outcome = (this.options.launch ?? launchUpdater)(input);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const failed = {
@@ -605,12 +802,14 @@ var UpdateRunController = class {
         reason: `could not launch the updater: ${message}`
       };
       this.persist(failed);
-      throw new RunRefusedError("launch-failed", `updateCheck.start: could not launch the updater: ${message}`);
+      const verb = error instanceof LaunchEnvironmentError ? "updateCheck.start" : `updateCheck.${record.mode === "prepare" ? "start" : "apply"}`;
+      throw new RunRefusedError("launch-failed", `${verb}: could not launch the updater: ${message}`);
     }
     const started = {
       ...record,
       rung: outcome.rung,
-      pid: outcome.pid
+      pid: outcome.pid,
+      phase: executingPhase(record.mode)
     };
     this.persist(started);
     this.watch(started);
@@ -641,45 +840,73 @@ var UpdateRunController = class {
       return;
     }
     const parsed = readRunLog(record.logPath);
+    const staged = hasStagedApply(this.prefix);
     const wrapperPid = readRunPid(runPidPath(this.options.home));
     const pid = wrapperPid ?? record.pid;
     const alive = pid !== null && (this.options.isAlive ?? isProcessAlive)(pid);
     const startedAtMs = Date.parse(record.startedAt);
     const withinGrace = wrapperPid === null && Number.isFinite(startedAtMs) && this.now().getTime() - startedAtMs < RUN_START_GRACE_MS;
-    let next = {
+    const base = {
       ...record,
       step: parsed.step > 0 ? parsed.step : record.step,
       steps: parsed.steps,
       lastLine: parsed.lastLine === "" ? record.lastLine : parsed.lastLine,
-      phase: parsed.step > 0 ? parsed.phase : record.phase,
       logTail: parsed.logTail,
-      pid
+      pid,
+      staged
     };
+    if (isPreparedPhase(record.phase)) {
+      if (staged) {
+        this.persist(base);
+        this.stopWatcher();
+        return;
+      }
+      this.persist(this.failedRecord(base, "the staged update disappeared before it was applied"));
+      this.stopWatcher();
+      return;
+    }
     if (parsed.result !== null) {
-      next = {
-        ...next,
-        result: parsed.result,
-        phase: phaseForResult(parsed.result),
-        finishedAt: this.now().toISOString(),
-        ...parsed.result === "success" ? {} : { reason: parsed.lastLine }
-      };
-      this.persist(next);
+      this.persist(this.terminalRecord(base, parsed.result));
       if (!alive) this.stopWatcher();
       return;
     }
     if (!alive && !withinGrace) {
-      next = {
-        ...next,
-        phase: "failed",
-        result: "failed",
-        finishedAt: this.now().toISOString(),
-        reason: parsed.lastLine === "" ? "the updater exited before writing any output" : `the updater exited before reporting a result (last line: ${parsed.lastLine})`
-      };
-      this.persist(next);
+      if (record.mode === "prepare" && staged) {
+        this.persist(preparedRecord(base, this.now));
+        this.stopWatcher();
+        return;
+      }
+      this.persist(this.failedRecord(
+        base,
+        parsed.lastLine === "" ? `the ${record.mode} run exited before writing any output` : `the ${record.mode} run exited before reporting a result (last line: ${parsed.lastLine})`
+      ));
       this.stopWatcher();
       return;
     }
-    this.persist(next);
+    this.persist({
+      ...base,
+      phase: alive || parsed.step > 0 ? executingPhase(record.mode) : record.phase
+    });
+  }
+  /** One failed record from the current tail. */
+  failedRecord(base, reason) {
+    return {
+      ...base,
+      phase: "failed",
+      result: "failed",
+      finishedAt: this.now().toISOString(),
+      reason
+    };
+  }
+  /** One terminal record from the parsed result. */
+  terminalRecord(base, result) {
+    return {
+      ...base,
+      phase: result,
+      result,
+      finishedAt: this.now().toISOString(),
+      ...result === "success" ? {} : { reason: base.lastLine === "" ? `the ${base.mode} run reported ${result}` : base.lastLine }
+    };
   }
   /** Persist when changed and publish to the plugin. */
   persist(record) {
@@ -692,6 +919,7 @@ var UpdateRunController = class {
   }
   /** Whether a record has a live process by the controller's liveness seam. */
   isAliveRecord(record) {
+    if (record.result !== null || isPreparedPhase(record.phase)) return false;
     if (this.options.isAlive === void 0) return isRunActive(this.options.home, record);
     const pid = effectivePid(this.options.home, record);
     return pid !== null && this.options.isAlive(pid);
@@ -700,8 +928,8 @@ var UpdateRunController = class {
 
 // src/remote.ts
 var UPDATE_CHECK_NAMESPACE = "updateCheck";
-var _run_dec, _start_dec, _dismiss_dec, _checkNow_dec, _status_dec, _a, _init;
-var UpdateCheckService = class extends (_a = TypertRemoteService, _status_dec = [Remote], _checkNow_dec = [Remote], _dismiss_dec = [Remote], _start_dec = [Remote], _run_dec = [Remote], _a) {
+var _run_dec, _apply_dec, _start_dec, _dismiss_dec, _checkNow_dec, _status_dec, _a, _init;
+var UpdateCheckService = class extends (_a = TypertRemoteService, _status_dec = [Remote], _checkNow_dec = [Remote], _dismiss_dec = [Remote], _start_dec = [Remote], _apply_dec = [Remote], _run_dec = [Remote], _a) {
   /**
    * @param ctx - owning context (service registration is automatic).
    * @param options - the core that owns the status and the run controller.
@@ -737,6 +965,16 @@ var UpdateCheckService = class extends (_a = TypertRemoteService, _status_dec = 
       throw error;
     }
   }
+  apply() {
+    try {
+      return this.runs.apply();
+    } catch (error) {
+      if (error instanceof RunRefusedError) {
+        throw new RemoteError("gateway/bad-request", error.message, {});
+      }
+      throw error;
+    }
+  }
   run() {
     return this.runs.run();
   }
@@ -746,6 +984,7 @@ __decorateElement(_init, 1, "status", _status_dec, UpdateCheckService);
 __decorateElement(_init, 1, "checkNow", _checkNow_dec, UpdateCheckService);
 __decorateElement(_init, 1, "dismiss", _dismiss_dec, UpdateCheckService);
 __decorateElement(_init, 1, "start", _start_dec, UpdateCheckService);
+__decorateElement(_init, 1, "apply", _apply_dec, UpdateCheckService);
 __decorateElement(_init, 1, "run", _run_dec, UpdateCheckService);
 __decoratorMetadata(_init, UpdateCheckService);
 /** Nothing is injected into the service fiber; the plugin passes the core. */
@@ -881,8 +1120,8 @@ function startUpdateCheckSchedule(options) {
 }
 
 // src/store.ts
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync4, renameSync as renameSync2, writeFileSync as writeFileSync3 } from "node:fs";
-import { dirname as dirname2 } from "node:path";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync4, renameSync as renameSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname as dirname3 } from "node:path";
 function readDismissedVersion(file) {
   try {
     const record = JSON.parse(readFileSync4(file, "utf8"));
@@ -893,7 +1132,7 @@ function readDismissedVersion(file) {
 }
 function writeDismissedVersion(file, version, now = () => /* @__PURE__ */ new Date()) {
   try {
-    mkdirSync2(dirname2(file), { recursive: true });
+    mkdirSync3(dirname3(file), { recursive: true });
     const temporary = `${file}.tmp.${process.pid}`;
     writeFileSync3(temporary, `${JSON.stringify({ version, at: now().toISOString() }, null, 2)}
 `);
@@ -992,19 +1231,19 @@ function apply(ctx, config = {}) {
   }
 }
 export {
+  APPLY_SWITCH_STEP,
   CATALOG_FETCH_TIMEOUT_MS,
   CATALOG_RAW_BASE_URL,
   CATALOG_SCHEMA_VERSION,
   Config,
   FIRST_CHECK_DELAY_MS,
-  LAUNCH_WRAPPER,
   LOG_TAIL_BYTES,
   LOG_TAIL_LINES,
+  LaunchEnvironmentError,
   RUN_HOME_ENV,
   RUN_START_GRACE_MS,
   RUN_STEP_TOTAL,
   RunRefusedError,
-  STEP_PHASES,
   UPDATE_CHECK_NAMESPACE,
   UpdateCheckCore,
   UpdateCheckService,
@@ -1015,32 +1254,43 @@ export {
   compareVersions,
   defaultShimPath,
   effectivePid,
+  executingPhase,
   fetchCatalog,
+  hasStagedApply,
   inject,
+  isPreparedPhase,
   isProcessAlive,
   isRunActive,
+  isTerminalPhase,
   jitteredDelay,
   launchPlan,
   launchUpdater,
+  launchWrapper,
+  modeFlag,
   name,
   parseCatalogDocument,
   parseRunLog,
   phaseForResult,
-  phaseForStep,
+  preparedRecord,
   readDismissedVersion,
   readInstallIdentity,
   readRunLog,
   readRunPid,
   readRunRecord,
   reconcileRunRecord,
+  resolveLaunchEnvironment,
+  resolvePrefix,
+  resolveRuntime,
   resolveShimPath,
   resultFromLine,
   runLogPath,
   runPidPath,
   runRecordPath,
   sameRunRecord,
+  stagedApplyPath,
   startUpdateCheckSchedule,
-  targetReached,
+  systemBinDirs,
+  terminalRecord,
   updateCheckDir,
   wrapperArgs,
   writeDismissedVersion,

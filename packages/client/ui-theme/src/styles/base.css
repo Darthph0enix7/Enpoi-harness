@@ -19,6 +19,13 @@
   --dsw-radius-lg: 16px;
   --dsw-radius-xl: 20px;
   --dsw-radius-panel: 28px;
+  /* Overlay-safe geometry the frames publish on the root while mounted (the
+     rails a body-portalled overlay chip must stay clear of, and the mobile
+     action bar). Zero before any frame exists, so a chip's position resolves
+     even during boot. */
+  --dsh-shell-inset-left: 0px;
+  --dsh-shell-inset-right: 0px;
+  --dsh-shell-inset-bottom: 0px;
 }
 
 body {

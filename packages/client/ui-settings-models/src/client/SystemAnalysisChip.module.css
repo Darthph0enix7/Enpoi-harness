@@ -4,8 +4,11 @@
 
 .root {
   position: fixed;
-  right: 16px;
-  bottom: 16px;
+  /* Inside the centre column: the frame publishes the rail insets on the root
+     (body-portalled overlays cannot inherit the frame's own variables), and a
+     fullscreen right panel covers the frame outright. */
+  right: calc(var(--dsh-shell-inset-right, 0px) + 16px);
+  bottom: calc(var(--dsh-shell-inset-bottom, 0px) + 16px);
   /* Above the first-run settings modal, below the menu layer. */
   z-index: 1050;
   display: flex;
@@ -14,6 +17,10 @@
   gap: 8px;
   max-width: min(420px, calc(100vw - 32px));
   pointer-events: none;
+}
+
+:global(html[data-shell-covered]) .root {
+  display: none;
 }
 
 /* Running dock: the collapsible reverse-dropdown. The bar is the compact

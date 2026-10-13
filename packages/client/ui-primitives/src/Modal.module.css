@@ -14,11 +14,13 @@
   padding: max(24px, var(--dsh-frame-top-clearance, 24px)) 24px;
 }
 
-/* The mask dims the page; dark theme raises its opacity. */
+/* The mask dims the page and adds a subtle blur so the dialog reads as a
+   layer of its own; `backdropBlur={false}` suppresses the blur for callers
+   that already separate their page some other way. */
 .mask {
   position: absolute;
   inset: 0;
-  backdrop-filter: var(--dsw-mask-blur);
+  backdrop-filter: var(--dsh-modal-backdrop-blur, blur(6px));
 }
 
 .mask::after {

@@ -1,16 +1,30 @@
 /**
  * enpoi-update-check — the detached-launch ladder for the updater
- * (docs/plan/ui-update-manifest.md P4).
+ * (docs/plan/ui-update-manifest.md P4, engine two-phase flags).
  *
  * The updater is the installed `dsh` shim (`<binDir>/dsh update --channel
- * <channel>`), launched so it survives the web service's own restart at the
- * switch step. Every rung runs the same POSIX wrapper, which records the
- * updater's own pid and redirects stdout+stderr into the run log:
+ * <channel> --prepare`, then `dsh update --apply`), launched so it survives
+ * the web service's own restart at the switch step. The web service's
+ * environment is not the login environment (the live failure: the engine
+ * reported "no usable Node.js found for the update"), so the launcher probes
+ * for a Node.js runtime itself and the wrapper exports a composed environment:
  *
  * ```
- * sh -c 'log="$1"; pid="$2"; shift 2; echo $$ > "$pid"; exec "$@" >>"$log" 2>&1' \
- *    dsh-update <logPath> <pidPath> <shim> update --channel <channel>
+ * log="$1"; pid="$2"; shift 2; export PATH='…'; export DSH_HOME='…';
+ * export PREFIX='…'; echo $$ > "$pid"; exec "$@" >>"$log" 2>&1
  * ```
+ *
+ * The runtime probe, in order ({@link resolveRuntime}):
+ * 1. the install's recorded runtime: `$PREFIX/runtime/node/current/bin`;
+ * 2. the nvm layout: `$HOME/.local/share/nvm/<version>/bin` (newest version),
+ *    then `$HOME/.nvm/versions/node/<version>/bin` (newest);
+ * 3. the inherited `PATH` (any usable `node`);
+ * 4. common system directories (`/usr/local/bin`, `/usr/bin`, `/bin`, and
+ *    `/opt/homebrew/bin` on macOS).
+ *
+ * Nothing resolving throws {@link LaunchEnvironmentError}, which the run
+ * controller persists as `run.json`'s failure `reason` instead of letting the
+ * engine print a cryptic line.
  *
  * The rungs, in order of preference (the first whose command exists on PATH
  * wins; the last rung has no command requirement and always works):
@@ -31,12 +45,53 @@
  */
 
 import { spawn as nodeSpawn, type SpawnOptions } from 'node:child_process'
-import { accessSync, constants } from 'node:fs'
+import { accessSync, constants, readdirSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { homedir } from 'node:os'
 
 /** Launch rungs, in ladder order per platform. */
 export type LaunchRung = 'systemd-run' | 'launchctl' | 'setsid' | 'spawn'
+
+/** Where a resolved Node.js runtime came from. */
+export type RuntimeSource = 'prefix-runtime' | 'nvm' | 'path' | 'system'
+
+/** One resolved Node.js runtime. */
+export interface RuntimeProbe {
+  /** Directory to prepend to PATH; empty when the inherited PATH already works. */
+  readonly binDir: string
+  /** Which ladder step resolved it. */
+  readonly source: RuntimeSource
+}
+
+/** Inputs that decide the environment and the ladder. */
+export interface LaunchPlanInput {
+  /** Harness home the updater must resolve (`DSH_HOME`). */
+  readonly home: string
+  /** Install prefix (the state's recorded `prefix`). */
+  readonly prefix: string
+  /** Absolute path of the installed `dsh` shim. */
+  readonly shim: string
+  /** Engine flag this run drives. */
+  readonly flag: '--prepare' | '--apply'
+  /** Channel for a prepare run; absent for apply. */
+  readonly channel?: string
+  /** Run id: the unit/label suffix and the update-check directory key. */
+  readonly runId: string
+  /** Absolute run log path written by the wrapper. */
+  readonly logPath: string
+  /** Absolute pid file path written by the wrapper. */
+  readonly pidFile: string
+  /** Platform selector (defaults to the running platform). */
+  readonly platform?: NodeJS.Platform
+  /** PATH probe for optional rungs (defaults to the process PATH). */
+  readonly hasCommand?: (command: string) => boolean
+  /** Runtime uid used for the systemd-run `XDG_RUNTIME_DIR` fallback. */
+  readonly uid?: number
+  /** Environment the launch composes from (defaults to `process.env`). */
+  readonly baseEnv?: NodeJS.ProcessEnv
+  /** User home probed for the nvm layout (defaults to `os.homedir()`). */
+  readonly probeHomeDir?: string
+}
 
 /** One candidate launch: a command plus its argv. */
 export interface LaunchPlanStep {
@@ -50,46 +105,50 @@ export interface LaunchPlanStep {
   readonly unit?: string
 }
 
-/** Inputs that decide the ladder and its argv. */
-export interface LaunchPlanInput {
-  /** Harness home the updater must resolve (`DSH_HOME`). */
-  readonly home: string
-  /** Absolute path of the installed `dsh` shim. */
-  readonly shim: string
-  /** Channel pinned for this run (`stable` or `beta`). */
-  readonly channel: string
-  /** Run id: the unit/label suffix and the update-check directory key. */
-  readonly runId: string
-  /** Absolute run log path written by the wrapper. */
-  readonly logPath: string
-  /** Absolute pid file path written by the wrapper. */
-  readonly pidFile: string
-  /** Platform selector (defaults to the running platform). */
-  readonly platform?: NodeJS.Platform
-  /** PATH probe for optional rungs (defaults to the process PATH). */
-  readonly hasCommand?: (command: string) => boolean
-  /** Runtime uid used for the systemd-run `XDG_RUNTIME_DIR` fallback. */
-  readonly uid?: number
+/** The composed launch environment. */
+export interface LaunchEnvironment {
+  /** Absolute `node` path the probe found, or null when the inherited PATH works. */
+  readonly nodePath: string | null
+  /** Which ladder step resolved the runtime. */
+  readonly source: RuntimeSource
+  /** PATH value the wrapper exports and the launcher passes. */
+  readonly path: string
+  /** Environment handed to the spawned launcher (and to launchd/systemd). */
+  readonly env: NodeJS.ProcessEnv
+  /** Every location the probe consulted, in order (for the failure message). */
+  readonly probed: readonly string[]
 }
-
-/** The wrapper script, passed as a single `-c` argument. */
-export const LAUNCH_WRAPPER =
-  'log="$1"; pid="$2"; shift 2; echo $$ > "$pid"; exec "$@" >>"$log" 2>&1'
 
 /** Environment variable the run pins so the updater resolves the same home. */
 export const RUN_HOME_ENV = 'DSH_HOME'
 
-/** Whether `command` resolves on `pathSpec`. */
-export function commandOnPath(command: string, pathSpec: string | undefined = process.env.PATH): boolean {
-  if (pathSpec === undefined || pathSpec === '') return false
-  for (const dir of pathSpec.split(delimiter)) {
-    if (dir === '') continue
-    if (directoryHasExecutable(join(dir, command))) return true
+/** A launch whose environment carries no usable Node.js runtime. */
+export class LaunchEnvironmentError extends Error {
+  /** Every location the probe consulted, in order. */
+  readonly probed: readonly string[]
+
+  /**
+   * @param probed - every location the probe consulted, in order.
+   */
+  constructor(probed: readonly string[]) {
+    super(
+      `no Node.js runtime found for the updater (probed: ${probed.join(', ')}). `
+      + 'Install Node 22.19+ or record the install prefix so $PREFIX/runtime/node/current resolves.',
+    )
+    this.name = 'LaunchEnvironmentError'
+    this.probed = probed
   }
-  return false
 }
 
-function directoryHasExecutable(file: string): boolean {
+/** Standard directories appended to every composed PATH. */
+export function systemBinDirs(platform: NodeJS.Platform = process.platform): string[] {
+  return platform === 'darwin'
+    ? ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin']
+    : ['/usr/local/bin', '/usr/bin', '/bin']
+}
+
+/** Whether `file` exists and is executable. */
+function isExecutable(file: string): boolean {
   try {
     accessSync(file, constants.X_OK)
     return true
@@ -98,31 +157,179 @@ function directoryHasExecutable(file: string): boolean {
   }
 }
 
-/** The wrapper argv that runs the updater: `sh -c <wrapper> dsh-update <log> <pid> <shim> update --channel <channel>`. */
-export function wrapperArgs(input: Pick<LaunchPlanInput, 'shim' | 'channel' | 'logPath' | 'pidFile'>): string[] {
+/** Whether `command` resolves on `pathSpec`. */
+export function commandOnPath(command: string, pathSpec: string | undefined): boolean {
+  if (pathSpec === undefined || pathSpec === '') return false
+  for (const dir of pathSpec.split(delimiter)) {
+    if (dir === '') continue
+    if (isExecutable(join(dir, command))) return true
+  }
+  return false
+}
+
+/** Newest version directory (nvm naming, e.g. `v22.22.2`) under `parent`, or undefined. */
+function newestVersionDir(parent: string): string | undefined {
+  let names: string[]
+  try {
+    names = readdirSync(parent).filter(name => /^v?\d/.test(name))
+  } catch {
+    return undefined
+  }
+  if (names.length === 0) return undefined
+  const weight = (name: string): number[] => name.replace(/^v/, '').split(/[^0-9]+/).filter(part => part !== '').map(Number)
+  names.sort((left, right) => {
+    const a = weight(left)
+    const b = weight(right)
+    for (let index = 0; index < Math.max(a.length, b.length); index++) {
+      const diff = (a[index] ?? 0) - (b[index] ?? 0)
+      if (diff !== 0) return diff
+    }
+    return left.localeCompare(right)
+  })
+  return names.at(-1)
+}
+
+/**
+ * Resolve a Node.js runtime for the updater from explicit locations, walking
+ * the documented ladder. The inherited `PATH` counts as a hit only when it
+ * actually resolves `node`.
+ *
+ * @param input - prefix/home/platform and the base environment.
+ * @returns the resolved runtime, or null when nothing was found.
+ */
+export function resolveRuntime(input: {
+  readonly prefix: string
+  readonly homeDir: string
+  readonly baseEnv?: NodeJS.ProcessEnv
+  readonly platform?: NodeJS.Platform
+}): { probe: RuntimeProbe | null; probed: string[] } {
+  const platform = input.platform ?? process.platform
+  const baseEnv = input.baseEnv ?? process.env
+  const probed: string[] = []
+
+  const prefixRuntime = join(input.prefix, 'runtime', 'node', 'current', 'bin')
+  probed.push(prefixRuntime)
+  if (isExecutable(join(prefixRuntime, 'node'))) {
+    return { probe: { binDir: prefixRuntime, source: 'prefix-runtime' }, probed }
+  }
+
+  for (const root of [
+    join(input.homeDir, '.local', 'share', 'nvm'),
+    join(input.homeDir, '.nvm', 'versions', 'node'),
+  ]) {
+    const newest = newestVersionDir(root)
+    if (newest === undefined) {
+      probed.push(`${root}/*/bin`)
+      continue
+    }
+    const binDir = join(root, newest, 'bin')
+    probed.push(binDir)
+    if (isExecutable(join(binDir, 'node'))) {
+      return { probe: { binDir, source: 'nvm' }, probed }
+    }
+  }
+
+  if (commandOnPath('node', baseEnv.PATH)) {
+    return { probe: { binDir: '', source: 'path' }, probed }
+  }
+  probed.push('PATH')
+
+  for (const dir of systemBinDirs(platform)) {
+    probed.push(dir)
+    if (isExecutable(join(dir, 'node'))) {
+      return { probe: { binDir: dir, source: 'system' }, probed }
+    }
+  }
+  return { probe: null, probed }
+}
+
+/**
+ * Compose the runtime environment for one launch: the probe's directory first,
+ * then the inherited PATH, then the standard system directories (deduplicated).
+ * Throws when nothing resolved a Node.js runtime.
+ *
+ * @param input - prefix/home/platform, base environment, and the shim/flag.
+ * @returns the composed environment and the probe that produced it.
+ * @throws LaunchEnvironmentError when no runtime resolves.
+ */
+export function resolveLaunchEnvironment(input: LaunchPlanInput): LaunchEnvironment {
+  const baseEnv = input.baseEnv ?? process.env
+  const { probe, probed } = resolveRuntime({
+    prefix: input.prefix,
+    homeDir: input.probeHomeDir ?? homedir(),
+    ...(input.baseEnv === undefined ? {} : { baseEnv: input.baseEnv }),
+    ...(input.platform === undefined ? {} : { platform: input.platform }),
+  })
+  if (probe === null) throw new LaunchEnvironmentError(probed)
+  const segments = [probe.binDir, baseEnv.PATH ?? '', ...systemBinDirs(input.platform)]
+    .flatMap(value => value.split(delimiter))
+    .filter(segment => segment !== '')
+  const path = [...new Set(segments)].join(delimiter)
+  const env: NodeJS.ProcessEnv = {
+    ...baseEnv,
+    PATH: path,
+    [RUN_HOME_ENV]: input.home,
+    ...(input.prefix === '' ? {} : { PREFIX: input.prefix }),
+  }
+  return { nodePath: probe.binDir === '' ? null : join(probe.binDir, 'node'), source: probe.source, path, env, probed }
+}
+
+/** POSIX single-quote one value for embedding in the wrapper script. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+/**
+ * Build the wrapper script: export the composed environment, record the
+ * updater's own pid, then exec the shim with its argv redirected into the log.
+ *
+ * @param environment - the composed launch environment.
+ * @returns the `sh -c` script text.
+ */
+export function launchWrapper(environment: LaunchEnvironment): string {
+  const parts = [
+    'log="$1"',
+    'pid="$2"',
+    'shift 2',
+    `export PATH=${shellQuote(environment.path)}`,
+    `export ${RUN_HOME_ENV}=${shellQuote(environment.env[RUN_HOME_ENV] ?? '')}`,
+  ]
+  const prefix = environment.env.PREFIX
+  if (prefix !== undefined && prefix !== '') parts.push(`export PREFIX=${shellQuote(prefix)}`)
+  parts.push('echo $$ > "$pid"', 'exec "$@" >>"$log" 2>&1')
+  return parts.join('; ')
+}
+
+/** The wrapper argv that runs the updater: `sh -c <wrapper> dsh-update <log> <pid> <shim> update <flag…>`. */
+export function wrapperArgs(input: LaunchPlanInput, environment: LaunchEnvironment): string[] {
   return [
     '-c',
-    LAUNCH_WRAPPER,
+    launchWrapper(environment),
     'dsh-update',
     input.logPath,
     input.pidFile,
     input.shim,
     'update',
-    '--channel',
-    input.channel,
+    ...(input.flag === '--prepare' ? ['--channel', input.channel ?? 'stable', '--prepare'] : ['--apply']),
   ]
 }
 
 /**
  * Build the ordered launch ladder for one platform.
  *
- * @param input - shim, channel, run id, log/pid paths, and test seams.
+ * @param input - shim, flag, run id, log/pid paths, and test seams.
+ * @param environment - the composed launch environment (from {@link resolveLaunchEnvironment}).
  * @returns the candidates in preference order; the last one always spawns.
  */
-export function launchPlan(input: LaunchPlanInput): LaunchPlanStep[] {
+export function launchPlan(input: LaunchPlanInput, environment: LaunchEnvironment): LaunchPlanStep[] {
   const platform = input.platform ?? process.platform
-  const has = input.hasCommand ?? ((command: string) => commandOnPath(command))
-  const args = wrapperArgs(input)
+  const has = input.hasCommand ?? ((command: string) => commandOnPath(command, process.env.PATH))
+  const args = wrapperArgs(input, environment)
+  const envArgs = [
+    `--setenv=PATH=${environment.path}`,
+    `--setenv=${RUN_HOME_ENV}=${input.home}`,
+    ...(input.prefix === '' ? [] : [`--setenv=PREFIX=${input.prefix}`]),
+  ]
   const steps: LaunchPlanStep[] = []
   if (platform === 'linux' && has('systemd-run')) {
     const runtimeDir = process.env.XDG_RUNTIME_DIR ?? `/run/user/${String(input.uid ?? process.getuid?.() ?? 0)}`
@@ -137,7 +344,7 @@ export function launchPlan(input: LaunchPlanInput): LaunchPlanStep[] {
         '--wait',
         `--unit=dsh-update-${input.runId}`,
         `--setenv=XDG_RUNTIME_DIR=${runtimeDir}`,
-        `--setenv=${RUN_HOME_ENV}=${input.home}`,
+        ...envArgs,
         '--',
         'sh',
         ...args,
@@ -204,18 +411,20 @@ export interface LaunchOutcome {
  *
  * @param input - ladder inputs plus the spawn seam.
  * @returns the rung that started and its pid.
+ * @throws LaunchEnvironmentError when no Node.js runtime resolves.
  * @throws Error when even the final rung cannot spawn.
  */
 export function launchUpdater(input: LaunchUpdaterInput): LaunchOutcome {
+  const environment = resolveLaunchEnvironment(input)
   const spawn = input.spawn ?? ((command, args, options) => nodeSpawn(command, [...args], options))
-  const plan = launchPlan(input)
+  const plan = launchPlan(input, environment)
   let lastError: unknown
   for (const step of plan) {
     try {
       const child = spawn(step.command, step.args, {
         detached: true,
         stdio: 'ignore',
-        env: { ...process.env, [RUN_HOME_ENV]: input.home },
+        env: environment.env,
       })
       // Detach so the web service's own restart cannot take the launcher with
       // it; the wrapper's own redirection owns stdout/stderr.

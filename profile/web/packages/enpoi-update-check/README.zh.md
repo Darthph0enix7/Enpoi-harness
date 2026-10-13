@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-主机侧更新检查与应用内更新运行（docs/plan/ui-update-manifest.md P2 + P4）：读取按渠道划分的更新目录，与本机安装记录的版本比较，并通过 `updateCheck` Remote 命名空间暴露结果。检查仅供告知；运行只由显式的 `updateCheck.start` 启动——操作者的 `[立即更新]` 点击就是重启决定，之后运行自行推进到切换与重启。
+主机侧更新检查与两阶段应用内更新运行（docs/plan/ui-update-manifest.md P2 + P4）：读取按渠道划分的更新目录，与本机安装记录的版本比较，并通过 `updateCheck` Remote 命名空间暴露结果。检查仅供告知；运行只由显式的 `updateCheck.start` 启动。操作者的 `[立即更新]` 点击是对**准备**（`dsh update --prepare`）的同意，暂存树停留在 `$PREFIX/harness/.staged-apply.json`，而 `[重启以更新]` 点击**应用**它（`dsh update --apply`：切换、服务重启、自检、健康检查、保留策略）。
 
 ## 功能
 
@@ -34,19 +34,21 @@
 |---|---|---|
 | `updateCheck.status` | — | `{ state, current: { version, commit, channel }, latest?: { version, commit, releasedAt, notes }, checkedAt?, error? }` |
 | `updateCheck.checkNow` | — | 一次检查之后的状态（与定时器共享单次飞行；永不拒绝） |
-| `updateCheck.dismiss` | `{ version }` | 记录跳过后状态（`version` 缺失时返回 `gateway/bad-request`） |
-| `updateCheck.start` | — | 新的运行记录（`phase: 'starting'`）；无可用更新、已有运行进行中、shim 缺失或启动失败时返回 `gateway/bad-request` |
+| `updateCheck.dismiss` | `{ request: { version } }` | 记录跳过后状态（`version` 缺失时返回 `gateway/bad-request`） |
+| `updateCheck.start` | — | 新的准备记录（`mode: 'prepare'`，`phase: 'starting'`）；无可用更新、已有运行进行中、更新已准备好、shim 缺失或启动失败（含找不到可用 Node.js 运行时）时返回 `gateway/bad-request` |
+| `updateCheck.apply` | — | 新的应用记录（`mode: 'apply'`，`phase: 'applying'`）；无暂存内容或启动失败时返回 `gateway/bad-request` |
 | `updateCheck.run` | — | 当前运行记录；本机从未启动过运行时为 null |
 
-该插件系列没有客户端推送；客户端轮询 `updateCheck.status`，运行进行中时另轮询 `updateCheck.run`。
+Remote 参数镜像描述符的**参数名**：`dismiss` 包裹其 `request` 对象（`payload.args.request.version`），所有无参方法都传空的 `args` 对象。该插件系列没有客户端推送；客户端轮询 `updateCheck.status`，引擎进程执行期间另轮询 `updateCheck.run`。
 
 ## 运行更新（P4）
 
-`updateCheck.start` 固定可用目标与渠道，写入 `$DSH_HOME/update-check/run.json`，清空 `$DSH_HOME/update-check/run.log`，并以 `dsh update --channel <channel>` 分离式启动已安装的 `dsh` shim：
+`updateCheck.start` 固定可用目标与渠道，写入 `$DSH_HOME/update-check/run.json`，清空 `$DSH_HOME/update-check/run.log`，并以 `dsh update --channel <channel> --prepare` 分离式启动已安装的 `dsh` shim；`updateCheck.apply` 对其记录的暂存树以 `dsh update --apply` 重复同样过程。
 
-- Linux：`systemd-run --user --unit=dsh-update-<runId> --collect --wait`；macOS：`launchctl submit -l com.dsh.update.<runId>`；各处兜底：`setsid`，最后是裸的分离式 `sh`。所有阶梯都运行同一个 POSIX 包装脚本，它把更新器自身的 pid 记入 `$DSH_HOME/update-check/run.pid`，并把 stdout+stderr 重定向进 `run.log`。
-- 观察者每秒轮询日志末尾并刷新记录：从引擎的 `[N/9]` 标记解析 `step`/`steps`、`lastLine`、受限的 40 行 `logTail`，以及按文档化步骤区间表得到的 `phase`（1–2 fetch、3 verify、4 unpack、5 deps、6–7 profile、8 switch、9 selfcheck）。终局结果行设置 `result`（`success` / `failed` / `rolledback`）；没有结果行的退出记为 `failed`，原因是最后一行。
-- 切换时服务会重启，观察者随之消亡。插件启动时对记录做对账：更新器仍存活则恢复观察；安装版本已等于运行目标则记 `success`；其余情况记 `failed` 并附明确原因。对账是幂等的，且从不删除日志（界面读取其末尾）。
+- **启动环境。** Web 服务的环境不是登录环境，因此启动器自行探测 Node.js 运行时——安装记录的 `$PREFIX/runtime/node/current/bin`、nvm 布局（`$HOME/.local/share/nvm/<version>/bin`，其次 `$HOME/.nvm/versions/node/<version>/bin`，取最新版本）、继承的 `PATH`，最后是常见系统目录——包装脚本在 exec shim 前导出组合后的 `PATH` 以及 `DSH_HOME`/`PREFIX`。全部落空时以该列表写入 run.json 的 `reason`，而不是让引擎打出晦涩的错误。
+- **阶梯。** Linux：`systemd-run --user --unit=dsh-update-<runId> --collect --wait`；macOS：`launchctl submit -l com.dsh.update.<runId>`；各处兜底：`setsid`，最后是裸的分离式 `sh`。所有阶梯都运行同一个 POSIX 包装脚本，它把更新器自身的 pid 记入 `$DSH_HOME/update-check/run.pid`，并把 stdout+stderr 重定向进 `run.log`。
+- **阶段。** `starting` → `preparing` → `prepared`（准备进程以 0 退出并留下暂存标记；等待期间不观察任何进程）→ `applying` → `success | failed | rolledback`。观察者每秒轮询日志末尾与包装脚本 pid 文件：从引擎的 `[N/9]` 标记解析 `step`/`steps`、`lastLine`、受限的 40 行 `logTail`，以及终局结果行（`successfully updated` / `FAILED` / `rolled back`）。
+- **重启对账。** 应用的切换会重启服务，观察者随之消亡。插件启动时依据日志末尾（观察者错过的终局行）、暂存标记与安装身份对记录做对账：带标记的 prepared 记录原样保留；更新器仍存活则恢复观察；安装版本已等于目标则记 `success`；其余情况记 `failed` 并附明确原因。对账是幂等的，且从不删除日志（界面读取其末尾）。
 
 ## 挂载位置
 

@@ -1,45 +1,50 @@
 /**
- * enpoi-update-check — the update-run controller: start, watch, reconcile
- * (docs/plan/ui-update-manifest.md P4).
+ * enpoi-update-check — the update-run controller: prepare, apply, watch,
+ * reconcile (docs/plan/ui-update-manifest.md P4, engine two-phase flags).
  *
- * One controller per plugin instance owns at most one run. `start` pins the
- * channel and target from the current `available` status, writes `run.json`,
- * truncates `run.log`, and launches the installed `dsh` shim detached through
- * {@link launchUpdater}. A watcher then polls the log tail (1 s) and the
- * wrapper pid file, refreshing the record until the updater exits:
+ * One controller per plugin instance owns at most one run:
  *
- * - a terminal log line sets `result` (`success | failed | rolledback`) and
- *   the matching terminal phase;
- * - an exit without a terminal line records `failed` with the last line as the
- *   reason;
- * - a later plugin instance (the web service restarted mid-run) resumes the
- *   watcher when the updater is still alive, and otherwise reconciles against
- *   the install identity ({@link reconcileRunRecord}).
+ * - `start` pins the channel and target from the current `available` status
+ *   and launches `dsh update --channel <c> --prepare`. The watcher follows the
+ *   log; when the prepare process exits with `$PREFIX/harness/.staged-apply.json`
+ *   written, the record rests at `phase: 'prepared'` (no process, nothing to
+ *   watch) and the UI offers Restart to update.
+ * - `apply` launches `dsh update --apply` against that staged tree; the
+ *   watcher follows the switch/self-check/health steps to `success`, `failed`,
+ *   or `rolledback`.
+ * - A later plugin instance (the web service restarted mid-run — the apply's
+ *   own switch does this) resumes the watcher when the updater is still alive,
+ *   and otherwise reconciles against the log tail, the staged marker, and the
+ *   install identity ({@link reconcileRunRecord}). A prepared record survives
+ *   a restart unchanged.
  *
  * Every mutating step is fail-soft at the file level (record writes never
- * throw), but `start` itself is strict: it refuses with a typed
- * {@link RunRefusedError} when no update is available, another run is active,
- * or the shim is missing.
+ * throw), but `start`/`apply` are strict: they refuse with a typed
+ * {@link RunRefusedError} when the precondition is missing (no update, a run
+ * active, an update already prepared, nothing staged) or the launch fails.
  *
  * @module dsh-enpoi-update-check/run-service
  */
 
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { InstallIdentity } from './catalog.js'
-import { defaultShimPath, launchUpdater, type LaunchOutcome, type LaunchRung, type LaunchUpdaterInput } from './launcher.js'
 import {
-  effectivePid, isProcessAlive, isRunActive, phaseForResult, readRunLog, readRunPid, readRunRecord, reconcileRunRecord,
-  RUN_STEP_TOTAL, runLogPath, runPidPath, runRecordPath, sameRunRecord, writeRunRecord,
-  type UpdateRunRecord,
+  defaultShimPath, launchUpdater, LaunchEnvironmentError, type LaunchOutcome, type LaunchRung, type LaunchUpdaterInput,
+} from './launcher.js'
+import {
+  effectivePid, executingPhase, hasStagedApply, isPreparedPhase, isProcessAlive, isRunActive, modeFlag, preparedRecord,
+  readRunLog, readRunPid, readRunRecord, reconcileRunRecord, RUN_STEP_TOTAL, runLogPath, runPidPath, runRecordPath,
+  sameRunRecord, writeRunRecord,
+  type UpdatePhase, type UpdateRunMode, type UpdateRunRecord,
 } from './run.js'
 import type { UpdateCheckStatus } from './service.js'
 
-/** Why `start` refused; the Remote maps every case to `gateway/bad-request`. */
-export type RunRefusalReason = 'not-available' | 'already-running' | 'shim-missing' | 'launch-failed'
+/** Why `start`/`apply` refused; the Remote maps every case to `gateway/bad-request`. */
+export type RunRefusalReason = 'not-available' | 'already-running' | 'already-prepared' | 'not-prepared' | 'shim-missing' | 'launch-failed'
 
-/** A start refusal with a displayable reason. */
+/** A start/apply refusal with a displayable reason. */
 export class RunRefusedError extends Error {
   /** Structured refusal reason. */
   readonly reason: RunRefusalReason
@@ -73,6 +78,8 @@ export interface UpdateRunControllerOptions {
   readonly launch?: (input: LaunchUpdaterInput) => LaunchOutcome
   /** Shim resolution seam; defaults to {@link resolveShimPath}. */
   readonly resolveShim?: (home: string) => string | null
+  /** Prefix resolution seam; defaults to {@link resolvePrefix}. */
+  readonly resolvePrefix?: (home: string) => string
   /** Clock seam. */
   readonly now?: () => Date
   /** Run id seam (tests inject a fixed id). */
@@ -87,12 +94,28 @@ export interface UpdateRunControllerOptions {
   readonly platform?: NodeJS.Platform
   readonly hasCommand?: (command: string) => boolean
   readonly uid?: number
+  /** Environment the launch composes from (tests simulate `env -i`). */
+  readonly baseEnv?: NodeJS.ProcessEnv
+  /** User home probed for the nvm layout (tests use a scratch home). */
+  readonly probeHomeDir?: string
   /** Called after each record change (the plugin logs it). */
   readonly onUpdate?: (record: UpdateRunRecord) => void
 }
 
 /** How long a run may show no sign of life (pid file, log content) before it is failed. */
 export const RUN_START_GRACE_MS = 15_000
+
+/** Read the recorded install prefix from `install-state.json`, falling back to the home. */
+export function resolvePrefix(home: string): string {
+  try {
+    const state = JSON.parse(
+      readFileSync(join(home, 'harness', 'install-state.json'), 'utf8'),
+    ) as { prefix?: unknown }
+    return typeof state.prefix === 'string' && state.prefix !== '' ? state.prefix : home
+  } catch {
+    return home
+  }
+}
 
 /** Resolve the installed `dsh` shim: the recorded binDir first, then `~/.local/bin/dsh`. */
 export function resolveShimPath(home: string): string | null {
@@ -112,11 +135,12 @@ export function resolveShimPath(home: string): string | null {
 }
 
 /**
- * Owns the one active run: start gating, the watcher, and boot reconcile.
+ * Owns the one run: prepare/apply gating, the watcher, and boot reconcile.
  */
 export class UpdateRunController {
   private readonly options: UpdateRunControllerOptions
   private readonly now: () => Date
+  private readonly prefix: string
   private record: UpdateRunRecord | null = null
   private loaded = false
   private watcher: ReturnType<typeof setInterval> | null = null
@@ -128,9 +152,10 @@ export class UpdateRunController {
   constructor(options: UpdateRunControllerOptions) {
     this.options = options
     this.now = options.now ?? (() => new Date())
+    this.prefix = (options.resolvePrefix ?? resolvePrefix)(options.home)
     this.timers = options.timers ?? {
-      setInterval: (handler, delayMs) => setInterval(handler, delayMs),
-      clearInterval: handle => clearInterval(handle),
+      setInterval: (handler, delayMs) => { return setInterval(handler, delayMs) },
+      clearInterval: (handle) => { clearInterval(handle) },
     }
   }
 
@@ -145,32 +170,34 @@ export class UpdateRunController {
 
   /**
    * Boot reconcile: resolve a record left by a dead watcher. Idempotent.
+   * A prepared record survives untouched; a live updater resumes watching.
    * @returns the reconciled record, or null when none exists.
    */
   reconcile(): UpdateRunRecord | null {
     const current = this.run()
     if (current === null) return null
-    if (current.result === null && this.isAliveRecord(current)) {
+    if (current.result === null && !isPreparedPhase(current.phase) && this.isAliveRecord(current)) {
       // The updater outlived the old watcher: resume watching.
       this.watch(current)
       return current
     }
-    const { record, changed } = reconcileRunRecord(
-      current,
-      this.options.readIdentity(),
-      this.now,
-      this.options.isAlive === undefined ? this.options.home : undefined,
-    )
+    if (isPreparedPhase(current.phase) && hasStagedApply(this.prefix)) return current
+    const { record, changed } = reconcileRunRecord(current, this.options.readIdentity(), {
+      home: this.options.home,
+      prefix: this.prefix,
+      now: this.now,
+    })
     if (changed) this.persist(record)
     return record
   }
 
   /**
-   * Start one update run.
+   * Start one prepare run (`dsh update --channel <c> --prepare`).
    *
-   * @returns the freshly persisted record (phase `starting`).
-   * @throws RunRefusedError when no update is available, a run is active, the
-   *   shim is missing, or the launch rung fails.
+   * @returns the freshly persisted record.
+   * @throws RunRefusedError when no update is available, a run is active, an
+   *   update is already prepared, the shim is missing, or the launch fails
+   *   (including a launch environment with no usable Node.js runtime).
    */
   start(): UpdateRunRecord {
     this.reconcile()
@@ -181,28 +208,80 @@ export class UpdateRunController {
         `updateCheck.start: no update is available (state=${status.state})`,
       )
     }
-    const active = this.run()
-    if (active !== null && active.result === null && this.isAliveRecord(active)) {
+    const current = this.run()
+    if (current !== null && current.result === null) {
+      if (isPreparedPhase(current.phase)) {
+        throw new RunRefusedError(
+          'already-prepared',
+          `updateCheck.start: update ${current.target} is already prepared; apply it instead`,
+        )
+      }
+      if (this.isAliveRecord(current)) {
+        throw new RunRefusedError(
+          'already-running',
+          `updateCheck.start: an update is already running (run ${current.runId}, step ${String(current.step)}/${String(current.steps)})`,
+        )
+      }
+    }
+    return this.begin('prepare', {
+      target: status.latest.version,
+      channel: status.current.channel,
+    })
+  }
+
+  /**
+   * Apply the staged update (`dsh update --apply`).
+   *
+   * @returns the freshly persisted record.
+   * @throws RunRefusedError when nothing is prepared, the staged marker is
+   *   missing, a run is active, the shim is missing, or the launch fails.
+   */
+  apply(): UpdateRunRecord {
+    this.reconcile()
+    const current = this.run()
+    if (current === null || !isPreparedPhase(current.phase)) {
       throw new RunRefusedError(
-        'already-running',
-        `updateCheck.start: an update is already running (run ${active.runId}, step ${String(active.step)}/${String(active.steps)})`,
+        'not-prepared',
+        'updateCheck.apply: no prepared update is staged; run Update now first',
       )
     }
+    if (!hasStagedApply(this.prefix)) {
+      throw new RunRefusedError(
+        'not-prepared',
+        'updateCheck.apply: the staged apply marker is gone; run Update now to prepare again',
+      )
+    }
+    if (this.isAliveRecord(current)) {
+      throw new RunRefusedError(
+        'already-running',
+        `updateCheck.apply: an update is already running (run ${current.runId})`,
+      )
+    }
+    return this.begin('apply', { target: current.target, channel: current.channel })
+  }
+
+  /** Stop the watcher (plugin unload). The updater itself keeps running. */
+  dispose(): void {
+    this.stopWatcher()
+  }
+
+  /** Persist a fresh record for `mode`, launch its engine flag, and watch it. */
+  private begin(mode: UpdateRunMode, pin: { target: string; channel: string }): UpdateRunRecord {
     const shim = (this.options.resolveShim ?? resolveShimPath)(this.options.home)
     if (shim === null) {
       throw new RunRefusedError(
         'shim-missing',
-        `updateCheck.start: the dsh shim was not found (checked the recorded binDir and ${defaultShimPath()})`,
+        `updateCheck.${mode === 'prepare' ? 'start' : 'apply'}: the dsh shim was not found (checked the recorded binDir and ${defaultShimPath()})`,
       )
     }
-    const runId = (this.options.runId ?? (() => randomUUID().replace(/-/g, '').slice(0, 10)))()
     const home = this.options.home
     const logPath = runLogPath(home)
     const pidFile = runPidPath(home)
     const base: UpdateRunRecord = {
-      runId,
-      target: status.latest.version,
-      channel: status.current.channel,
+      runId: (this.options.runId ?? (() => randomUUID().replace(/-/g, '').slice(0, 10)))(),
+      target: pin.target,
+      channel: pin.channel,
+      mode,
       phase: 'starting',
       step: 0,
       steps: RUN_STEP_TOTAL,
@@ -212,25 +291,23 @@ export class UpdateRunController {
       logPath,
       result: null,
       rung: 'pending',
+      staged: mode === 'apply' ? hasStagedApply(this.prefix) : false,
       logTail: [],
     }
-    // A new run owns a fresh log; reconcile never deletes it, start does.
+    // A new run owns a fresh log; reconcile never deletes it, begin does.
+    // The directory is created here so a launch failure still leaves the
+    // (empty) log the UI tails.
     try {
+      mkdirSync(dirname(logPath), { recursive: true })
       writeFileSync(logPath, '')
       rmSync(pidFile, { force: true })
     } catch {
       // The wrapper recreates both; a stale log only confuses the tail.
     }
-    this.record = base
     this.loaded = true
     this.persist(base)
     this.launch(base, shim)
     return this.run() ?? base
-  }
-
-  /** Stop the watcher (plugin unload). The updater itself keeps running. */
-  dispose(): void {
-    this.stopWatcher()
   }
 
   /** Launch through the ladder, persist the outcome, and start watching. */
@@ -238,17 +315,22 @@ export class UpdateRunController {
     const home = this.options.home
     let outcome: LaunchOutcome
     try {
-      outcome = (this.options.launch ?? launchUpdater)({
+      const input: LaunchUpdaterInput = {
         home,
+        prefix: this.prefix,
         shim,
-        channel: record.channel,
+        flag: modeFlag(record.mode),
+        ...(record.mode === 'prepare' ? { channel: record.channel } : {}),
         runId: record.runId,
         logPath: record.logPath,
         pidFile: runPidPath(home),
         ...(this.options.platform === undefined ? {} : { platform: this.options.platform }),
         ...(this.options.hasCommand === undefined ? {} : { hasCommand: this.options.hasCommand }),
         ...(this.options.uid === undefined ? {} : { uid: this.options.uid }),
-      })
+        ...(this.options.baseEnv === undefined ? {} : { baseEnv: this.options.baseEnv }),
+        ...(this.options.probeHomeDir === undefined ? {} : { probeHomeDir: this.options.probeHomeDir }),
+      }
+      outcome = (this.options.launch ?? launchUpdater)(input)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const failed: UpdateRunRecord = {
@@ -259,12 +341,14 @@ export class UpdateRunController {
         reason: `could not launch the updater: ${message}`,
       }
       this.persist(failed)
-      throw new RunRefusedError('launch-failed', `updateCheck.start: could not launch the updater: ${message}`)
+      const verb = error instanceof LaunchEnvironmentError ? 'updateCheck.start' : `updateCheck.${record.mode === 'prepare' ? 'start' : 'apply'}`
+      throw new RunRefusedError('launch-failed', `${verb}: could not launch the updater: ${message}`)
     }
     const started: UpdateRunRecord = {
       ...record,
       rung: outcome.rung satisfies LaunchRung,
       pid: outcome.pid,
+      phase: executingPhase(record.mode),
     }
     this.persist(started)
     this.watch(started)
@@ -296,6 +380,7 @@ export class UpdateRunController {
       return
     }
     const parsed = readRunLog(record.logPath)
+    const staged = hasStagedApply(this.prefix)
     const wrapperPid = readRunPid(runPidPath(this.options.home))
     const pid = wrapperPid ?? record.pid
     const alive = pid !== null && (this.options.isAlive ?? isProcessAlive)(pid)
@@ -303,42 +388,77 @@ export class UpdateRunController {
     const withinGrace = wrapperPid === null
       && Number.isFinite(startedAtMs)
       && this.now().getTime() - startedAtMs < RUN_START_GRACE_MS
-    let next: UpdateRunRecord = {
+    const base: UpdateRunRecord = {
       ...record,
       step: parsed.step > 0 ? parsed.step : record.step,
       steps: parsed.steps,
       lastLine: parsed.lastLine === '' ? record.lastLine : parsed.lastLine,
-      phase: parsed.step > 0 ? parsed.phase : record.phase,
       logTail: parsed.logTail,
       pid,
+      staged,
     }
-    if (parsed.result !== null) {
-      next = {
-        ...next,
-        result: parsed.result,
-        phase: phaseForResult(parsed.result),
-        finishedAt: this.now().toISOString(),
-        ...(parsed.result === 'success' ? {} : { reason: parsed.lastLine }),
+
+    // The prepared resting state: nothing to watch while the marker exists; a
+    // vanished marker means a new update must be prepared from scratch.
+    if (isPreparedPhase(record.phase)) {
+      if (staged) {
+        this.persist(base)
+        this.stopWatcher()
+        return
       }
-      this.persist(next)
-      if (!alive) this.stopWatcher()
-      return
-    }
-    if (!alive && !withinGrace) {
-      next = {
-        ...next,
-        phase: 'failed',
-        result: 'failed',
-        finishedAt: this.now().toISOString(),
-        reason: parsed.lastLine === ''
-          ? 'the updater exited before writing any output'
-          : `the updater exited before reporting a result (last line: ${parsed.lastLine})`,
-      }
-      this.persist(next)
+      this.persist(this.failedRecord(base, 'the staged update disappeared before it was applied'))
       this.stopWatcher()
       return
     }
-    this.persist(next)
+
+    if (parsed.result !== null) {
+      this.persist(this.terminalRecord(base, parsed.result))
+      if (!alive) this.stopWatcher()
+      return
+    }
+
+    if (!alive && !withinGrace) {
+      if (record.mode === 'prepare' && staged) {
+        this.persist(preparedRecord(base, this.now))
+        this.stopWatcher()
+        return
+      }
+      this.persist(this.failedRecord(
+        base,
+        parsed.lastLine === ''
+          ? `the ${record.mode} run exited before writing any output`
+          : `the ${record.mode} run exited before reporting a result (last line: ${parsed.lastLine})`,
+      ))
+      this.stopWatcher()
+      return
+    }
+
+    this.persist({
+      ...base,
+      phase: alive || parsed.step > 0 ? executingPhase(record.mode) : record.phase,
+    })
+  }
+
+  /** One failed record from the current tail. */
+  private failedRecord(base: UpdateRunRecord, reason: string): UpdateRunRecord {
+    return {
+      ...base,
+      phase: 'failed' satisfies UpdatePhase,
+      result: 'failed',
+      finishedAt: this.now().toISOString(),
+      reason,
+    }
+  }
+
+  /** One terminal record from the parsed result. */
+  private terminalRecord(base: UpdateRunRecord, result: NonNullable<UpdateRunRecord['result']>): UpdateRunRecord {
+    return {
+      ...base,
+      phase: result,
+      result,
+      finishedAt: this.now().toISOString(),
+      ...(result === 'success' ? {} : { reason: base.lastLine === '' ? `the ${base.mode} run reported ${result}` : base.lastLine }),
+    }
   }
 
   /** Persist when changed and publish to the plugin. */
@@ -353,6 +473,7 @@ export class UpdateRunController {
 
   /** Whether a record has a live process by the controller's liveness seam. */
   private isAliveRecord(record: UpdateRunRecord): boolean {
+    if (record.result !== null || isPreparedPhase(record.phase)) return false
     if (this.options.isAlive === undefined) return isRunActive(this.options.home, record)
     const pid = effectivePid(this.options.home, record)
     return pid !== null && this.options.isAlive(pid)

@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 /**
- * UpdateController: poll cadence (mount, 60 s visible-only, focus/visibility
- * with a gap), run polling only while active, the start/dismiss actions, the
+ * UpdateController: poll cadence (mount incl. one run read, 60 s
+ * visible-only, focus/visibility with a gap), executing-only run polling,
+ * the prepare/apply/retry/dismiss actions with their exact wire args, the
  * restart detection through `connection/reset`, and the one-time toast
  * marker.
  */
@@ -16,7 +17,7 @@ import {
   type UpdateStorage,
   type UpdateTimers,
 } from '../src/client/controller.ts'
-import { updateCheckRpc, type UpdateRpcResult } from '../src/client/rpc.ts'
+import { updateCheckRpc, type UpdateRpcResult, type UpdateRunWire } from '../src/client/rpc.ts'
 
 /** In-memory storage seam. */
 function memoryStorage(initial: Record<string, string> = {}): UpdateStorage & { values: Map<string, string> } {
@@ -69,21 +70,28 @@ const availableStatus = {
   latest: { version: '0.1.7-enpoi.2.84', commit: 'def5678', releasedAt: '2026-10-13T12:00:00.000Z', notes: ['feat(x): y'] },
 }
 
-const activeRun = {
-  runId: 'run1',
-  target: '0.1.7-enpoi.2.84',
-  channel: 'stable',
-  phase: 'starting' as const,
-  step: 1,
-  steps: 9,
-  lastLine: '[1/9] environment',
-  startedAt: '2026-10-13T12:00:00.000Z',
-  pid: 4242,
-  logPath: '/home/dsh/update-check/run.log',
-  result: null,
-  rung: 'setsid',
-  logTail: [],
+function runWire(overrides: Partial<UpdateRunWire> = {}): UpdateRunWire {
+  return {
+    runId: 'run1',
+    target: '0.1.7-enpoi.2.84',
+    channel: 'stable',
+    mode: 'prepare',
+    phase: 'preparing',
+    step: 1,
+    steps: 9,
+    lastLine: '[1/9] environment',
+    startedAt: '2026-10-13T12:00:00.000Z',
+    pid: 4242,
+    logPath: '/home/dsh/update-check/run.log',
+    result: null,
+    rung: 'setsid',
+    staged: false,
+    logTail: [],
+    ...overrides,
+  }
 }
+
+const executingRun = runWire({ phase: 'preparing', step: 4 })
 
 /** Flush the rpc promise chains (then/finally) to completion. */
 const settle = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0))
@@ -133,29 +141,32 @@ afterEach(() => {
 })
 
 describe('UpdateController polling', () => {
-  it('polls status on mount, on the 60 s interval, and on focus, never inside the trigger gap', async () => {
+  it('reads status and the run once on mount, then status on the 60 s cadence and triggers', async () => {
     let clock = 1_000
-    const b = bench({ answers: { 'updateCheck.status': availableStatus }, now: () => clock })
+    const b = bench({ answers: { 'updateCheck.status': availableStatus, 'updateCheck.run': null }, now: () => clock })
     b.controller.mount()
-    expect(b.calls).toEqual([{ method: 'updateCheck.status', args: {} }])
+    expect(b.calls).toEqual([
+      { method: 'updateCheck.status', args: {} },
+      { method: 'updateCheck.run', args: {} },
+    ])
     expect(STATUS_POLL_MS).toBe(60_000)
-    await b.controller.refreshStatus()
+    await settle()
 
     // A visibility restore inside the trigger gap adds no call.
     b.doc.fire('visibilitychange')
-    expect(b.calls).toHaveLength(1)
-
-    // The 60 s interval polls again.
-    b.ticks.fireIntervals()
     expect(b.calls).toHaveLength(2)
-    await b.controller.refreshStatus()
+
+    // The 60 s interval polls status again.
+    b.ticks.fireIntervals()
+    expect(b.calls.filter(call => call.method === 'updateCheck.status')).toHaveLength(2)
+    await settle()
 
     // Focus inside the gap is price-free; after the gap it reads once more.
     b.win.fire('focus')
-    expect(b.calls).toHaveLength(2)
+    expect(b.calls).toHaveLength(3)
     clock += TRIGGER_MIN_GAP_MS + 1
     b.win.fire('focus')
-    expect(b.calls).toHaveLength(3)
+    expect(b.calls).toHaveLength(4)
     b.controller.dispose()
   })
 
@@ -175,63 +186,67 @@ describe('UpdateController polling', () => {
       reload: vi.fn(),
     })
     controller.mount()
-    expect(calls).toEqual(['updateCheck.status'])
+    expect(calls).toEqual(['updateCheck.status', 'updateCheck.run'])
     ticks.fireIntervals()
-    expect(calls).toHaveLength(1)
+    expect(calls).toHaveLength(2)
     hidden.fire('visibilitychange')
-    expect(calls).toHaveLength(1)
+    expect(calls).toHaveLength(2)
     controller.dispose()
     expect(ticks.intervals()).toBe(0)
   })
 
-  it('reads the run on open and polls it while active, stopping at the terminal result', async () => {
+  it('polls the run every 2 s only while the engine executes, and stops at a prepared record', async () => {
     const answers: Record<string, unknown> = {
       'updateCheck.status': availableStatus,
-      'updateCheck.run': activeRun,
+      'updateCheck.run': executingRun,
     }
     const b = bench({ answers })
     b.controller.mount()
     await settle()
-    b.controller.open()
-    expect(b.calls.map(call => call.method)).toEqual(['updateCheck.status', 'updateCheck.run'])
-    // Active run starts the 2 s poll.
-    await settle()
+    // status interval + run interval.
     expect(b.ticks.intervals()).toBe(2)
-    answers['updateCheck.run'] = { ...activeRun, result: 'success', phase: 'done', step: 9 }
+
+    answers['updateCheck.run'] = runWire({ phase: 'prepared', step: 7, staged: true })
     b.ticks.fireIntervals()
     await settle()
-    expect(b.controller.store.getSnapshot().run?.result).toBe('success')
-    // A terminal run stops the 2 s poll; only the status interval remains.
+    expect(b.controller.store.getSnapshot().run?.phase).toBe('prepared')
+    // A prepared record rests: only the status interval remains.
     expect(b.ticks.intervals()).toBe(1)
     b.controller.dispose()
   })
 
-  it('does not poll the run while closed and terminal', async () => {
-    const b = bench({ answers: { 'updateCheck.status': availableStatus, 'updateCheck.run': null } })
+  it('stops polling when the engine process left a terminal record', async () => {
+    const answers: Record<string, unknown> = {
+      'updateCheck.status': availableStatus,
+      'updateCheck.run': executingRun,
+    }
+    const b = bench({ answers })
     b.controller.mount()
-    b.controller.close()
-    await Promise.resolve()
+    await settle()
+    expect(b.ticks.intervals()).toBe(2)
+    answers['updateCheck.run'] = runWire({ phase: 'applying', result: null, mode: 'apply', step: 9 })
+    b.ticks.fireIntervals()
+    await settle()
+    expect(b.ticks.intervals()).toBe(2)
+    answers['updateCheck.run'] = runWire({ phase: 'success', result: 'success', mode: 'apply', step: 9 })
+    b.ticks.fireIntervals()
+    await settle()
+    expect(b.controller.store.getSnapshot().run?.result).toBe('success')
     expect(b.ticks.intervals()).toBe(1)
     b.controller.dispose()
   })
 })
 
-describe('UpdateController actions', () => {
-  it('start pins the pre-run version and begins following the fresh run', async () => {
-    const b = bench({
-      answers: {
-        'updateCheck.status': availableStatus,
-        'updateCheck.start': activeRun,
-      },
-    })
+describe('UpdateController actions and their exact wire args', () => {
+  it('start prepares, pins the pre-run version, and opens the progress dialog', async () => {
+    const b = bench({ answers: { 'updateCheck.status': availableStatus, 'updateCheck.start': executingRun } })
     b.controller.mount()
-    await Promise.resolve()
+    await settle()
     b.controller.start()
-    await Promise.resolve()
-    await Promise.resolve()
+    await settle()
+    expect(b.calls.at(-1)).toEqual({ method: 'updateCheck.start', args: {} })
     const state = b.controller.store.getSnapshot()
     expect(state.run?.runId).toBe('run1')
-    expect(state.busy).toBe(false)
     expect(state.dialogOpen).toBe(true)
     expect(JSON.parse(b.storage.values.get(PENDING_KEY)!)).toEqual({
       from: '0.1.7-enpoi.2.81',
@@ -240,12 +255,49 @@ describe('UpdateController actions', () => {
     b.controller.dispose()
   })
 
+  it('apply sends no arguments and follows the applying record', async () => {
+    const applied = runWire({ mode: 'apply', phase: 'applying', step: 8, staged: true })
+    const b = bench({ answers: { 'updateCheck.status': availableStatus, 'updateCheck.apply': applied } })
+    b.controller.mount()
+    await settle()
+    b.controller.apply()
+    await settle()
+    expect(b.calls.at(-1)).toEqual({ method: 'updateCheck.apply', args: {} })
+    expect(b.controller.store.getSnapshot().run?.mode).toBe('apply')
+    expect(b.ticks.intervals()).toBe(2)
+    b.controller.dispose()
+  })
+
+  it('retry replays apply while the staged marker survived, and re-prepares otherwise', async () => {
+    const rolled = runWire({ mode: 'apply', phase: 'rolledback', result: 'rolledback', step: 9, staged: true })
+    const prepared = bench({ answers: { 'updateCheck.status': availableStatus, 'updateCheck.run': rolled, 'updateCheck.apply': runWire({ mode: 'apply', phase: 'applying' }) } })
+    prepared.controller.mount()
+    await settle()
+    prepared.controller.open()
+    await settle()
+    prepared.controller.retry()
+    await settle()
+    expect(prepared.calls.at(-1)).toEqual({ method: 'updateCheck.apply', args: {} })
+    prepared.controller.dispose()
+
+    const failedPrepare = runWire({ phase: 'failed', result: 'failed', staged: false })
+    const fresh = bench({ answers: { 'updateCheck.status': availableStatus, 'updateCheck.run': failedPrepare, 'updateCheck.start': executingRun } })
+    fresh.controller.mount()
+    await settle()
+    fresh.controller.open()
+    await settle()
+    fresh.controller.retry()
+    await settle()
+    expect(fresh.calls.at(-1)).toEqual({ method: 'updateCheck.start', args: {} })
+    fresh.controller.dispose()
+  })
+
   it('surfaces a refused start as the action error', async () => {
     const b = bench({ rpcError: 'an update is already running' })
     b.controller.mount()
+    await settle()
     b.controller.start()
-    await Promise.resolve()
-    await Promise.resolve()
+    await settle()
     expect(b.controller.store.getSnapshot()).toMatchObject({
       busy: false,
       actionError: 'an update is already running',
@@ -253,16 +305,19 @@ describe('UpdateController actions', () => {
     b.controller.dispose()
   })
 
-  it('skip dismisses the latest version and closes the dialog', async () => {
+  it('skip wraps the version in the descriptor’s `request` parameter and closes the dialog', async () => {
     const dismissed = { ...availableStatus, state: 'dismissed' as const }
     const b = bench({ answers: { 'updateCheck.status': availableStatus, 'updateCheck.dismiss': dismissed } })
     b.controller.mount()
-    await Promise.resolve()
+    await settle()
     b.controller.open()
+    await settle()
     b.controller.skip()
-    await Promise.resolve()
-    await Promise.resolve()
-    expect(b.calls.at(-1)).toEqual({ method: 'updateCheck.dismiss', args: { version: '0.1.7-enpoi.2.84' } })
+    await settle()
+    expect(b.calls.at(-1)).toEqual({
+      method: 'updateCheck.dismiss',
+      args: { request: { version: '0.1.7-enpoi.2.84' } },
+    })
     expect(b.controller.store.getSnapshot()).toMatchObject({ status: { state: 'dismissed' }, dialogOpen: false })
     b.controller.dispose()
   })
@@ -270,9 +325,10 @@ describe('UpdateController actions', () => {
   it('ignores skip when no release is offered', async () => {
     const b = bench({ answers: { 'updateCheck.status': { ...availableStatus, state: 'current', latest: undefined } } })
     b.controller.mount()
+    await settle()
     b.controller.skip()
-    await Promise.resolve()
-    expect(b.calls).toHaveLength(1)
+    await settle()
+    expect(b.calls.filter(call => call.method === 'updateCheck.dismiss')).toHaveLength(0)
     b.controller.dispose()
   })
 })
@@ -281,14 +337,13 @@ describe('UpdateController restart detection', () => {
   it('reloads once the server reports a different version after a reconnect', async () => {
     const answers: Record<string, unknown> = {
       'updateCheck.status': availableStatus,
-      'updateCheck.start': activeRun,
+      'updateCheck.start': executingRun,
     }
     const b = bench({ answers })
     b.controller.mount()
-    await Promise.resolve()
+    await settle()
     b.controller.start()
-    await Promise.resolve()
-    await Promise.resolve()
+    await settle()
     expect(b.reload).not.toHaveBeenCalled()
 
     answers['updateCheck.status'] = {
@@ -298,24 +353,39 @@ describe('UpdateController restart detection', () => {
       current: { version: '0.1.7-enpoi.2.84', commit: 'def5678', channel: 'stable' },
     }
     b.controller.onConnectionReset()
-    await Promise.resolve()
-    await Promise.resolve()
+    await settle()
     expect(b.reload).toHaveBeenCalledTimes(1)
     expect(JSON.parse(b.storage.values.get(TOAST_KEY)!)).toEqual({ version: '0.1.7-enpoi.2.84' })
     expect(b.storage.values.has(PENDING_KEY)).toBe(false)
     b.controller.dispose()
   })
 
-  it('does not reload on an unrelated reconnect while a run is in flight', async () => {
-    const b = bench({ answers: { 'updateCheck.status': availableStatus, 'updateCheck.start': activeRun } })
+  it('reloads when the apply reports success even before the version read moves', async () => {
+    const succeeded = runWire({ mode: 'apply', phase: 'success', result: 'success', step: 9 })
+    // The tab that clicked Restart carries the pending marker; a fresh tab
+    // with only a stale success record must not reload.
+    const storage = memoryStorage({ [PENDING_KEY]: JSON.stringify({ from: '0.1.7-enpoi.2.81', target: '0.1.7-enpoi.2.84' }) })
+    const b = bench({ storage, answers: { 'updateCheck.status': availableStatus, 'updateCheck.run': succeeded } })
     b.controller.mount()
-    await Promise.resolve()
+    await settle()
+    expect(b.reload).toHaveBeenCalledTimes(1)
+    b.controller.dispose()
+
+    const fresh = bench({ answers: { 'updateCheck.status': availableStatus, 'updateCheck.run': succeeded } })
+    fresh.controller.mount()
+    await settle()
+    expect(fresh.reload).not.toHaveBeenCalled()
+    fresh.controller.dispose()
+  })
+
+  it('does not reload on an unrelated reconnect while a run is in flight', async () => {
+    const b = bench({ answers: { 'updateCheck.status': availableStatus, 'updateCheck.start': executingRun } })
+    b.controller.mount()
+    await settle()
     b.controller.start()
-    await Promise.resolve()
-    await Promise.resolve()
+    await settle()
     b.controller.onConnectionReset()
-    await Promise.resolve()
-    await Promise.resolve()
+    await settle()
     expect(b.reload).not.toHaveBeenCalled()
     b.controller.dispose()
   })
@@ -344,8 +414,7 @@ describe('UpdateController restart detection', () => {
       },
     })
     b.controller.mount()
-    await Promise.resolve()
-    await Promise.resolve()
+    await settle()
     expect(b.reload).toHaveBeenCalledTimes(1)
     b.controller.dispose()
   })

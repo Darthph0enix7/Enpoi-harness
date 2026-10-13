@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-client-ui-update` is the browser half of the in-app update flow. A pill in the shell overlay appears when the host reports a newer release; clicking it opens the dialog with the version pair, channel, release notes, and `[Update now] [Later] [Skip this version]`. A running update shows the engine step (`N/9`), last log line, progress bar, and disconnect warning; a failed or rolled-back run shows its reason and log tail with Retry. After the switch restarts the service, the reconnected page reloads and shows a one-time "Updated to X" toast. Nothing installs automatically: `Update now` is the operator's restart decision.
+`dsh-client-ui-update` is the browser half of the two-phase in-app update flow. A small pill bottom-left in the shell overlay appears when the host reports a newer release; clicking it opens the dialog with the version pair, channel, a scrollable release-notes changelog, and `[Update now] [Later] [Skip this version]`. `Update now` prepares the update and the pill turns into a distinct, still-subtle `Restart to update` state; its dialog offers `[Restart to update]`, which applies the staged tree and follows the switch to success. A failed or rolled-back run shows its reason and log tail with Retry. After the restart, the reconnected page reloads and shows a one-time "Updated to X" toast.
 
 ## Table of Contents
 
@@ -29,15 +29,15 @@ Load the plugin through the web-app manifest. It renders nothing while the insta
 
 ### The indicator
 
-The pill lives in the `shell.overlay` list, the frame-wide floating layer that outlives every panel, and reads `{latest version} ↑`. Updating shows a spinner with the same label. The copy is locale-owned (`update` namespace, en + zh); the version and channel are wire data rendered verbatim.
+The pill lives in the `shell.overlay` list, the frame-wide floating layer that outlives every panel, and reads `{latest version} ↑`. It is deliberately slight: 11px type, a translucent raised fill, a hairline border. Its position derives from the shell insets the frame publishes on the document root (`--dsh-shell-inset-left/-right/-bottom`), so it stays inside the centre column — never over the left rail, the conversation's sidebars, or (on mobile) the action bar — and hides entirely while a fullscreen right panel owns the frame. Preparing/applying shows a spinner with the same label; a prepared update shows the distinct `Restart to update` state. The copy is locale-owned (`update` namespace, en + zh); versions, channels, and log lines are wire data rendered verbatim.
 
 ### The dialog
 
-The dialog renders the version pair, the channel, and the release notes as the changelog. `Update now` calls `updateCheck/start` and keeps the dialog open on the progress panel; `Later` closes it (an active run continues); `Skip this version` records the dismissal through `updateCheck/dismiss` and closes. While a run is active the panel polls `updateCheck/run` every ~2 s; a failed or rolled-back record renders its reason, the bounded log tail (last 40 lines), and Retry.
+The dialog renders the version pair, the channel, and the release notes as a changelog that grows with its content (up to most of the dialog) and scrolls internally, so dozens of long commit subjects stay readable. `Update now` calls `updateCheck/start` (the prepare) and keeps the dialog open on the progress panel; `Later` closes it (an executing run continues); `Skip this version` records the dismissal through `updateCheck/dismiss` and the pill disappears. While the engine executes, the panel polls `updateCheck/run` every ~2 s and shows the phase label, step `N/9`, the log's last line, and — from the switch step on — the disconnect warning. The prepared state offers `[Restart to update]` (`updateCheck/apply`). A failed or rolled-back record renders its reason, the bounded log tail (last 40 lines), and Retry (which replays `apply` while the staged marker survived and re-prepares otherwise).
 
 ### Polling and the restart
 
-`updateCheck/status` is read on mount, every 60 s while the tab is visible, and on window focus or visibility restore (coalesced into at most one call per second). The run record is polled only while a run is active. `start` pins the pre-run install version in session storage; after the update's switch restarts the service, the reconnected page compares the host's reported version, writes the one-time toast payload, and reloads. A manual reload mid-run keeps that marker, so completion is still detected.
+`updateCheck/status` is read on mount, every 60 s while the tab is visible, and on window focus or visibility restore (coalesced into at most one call per second). The run record is read once on mount — so a prepared update reopened in a fresh tab is offered again — and then polled every ~2 s only while the engine process executes (`starting`/`preparing`/`applying`). `start` and `apply` pin the pre-run install version in session storage; after the apply's switch restarts the service, the reconnected page compares the host's reported version, writes the one-time toast payload, and reloads. A manual reload mid-run keeps that marker, so completion is still detected.
 
 -----
 
@@ -47,14 +47,14 @@ The dialog renders the version pair, the channel, and the release notes as the c
 <details>
 <summary>Implementation internals — click to expand</summary>
 
-The host plugin (`profile/web/packages/enpoi-update-check`) is a profile plugin, so no generated Remote artifact exists on the client assembly: every call is one `POST /api/updateCheck.<method>` carrying the shared client-request envelope (`{type, method, rpcId, payload:{args}}`), the same pattern `enpoiUiState.*` uses. The controller owns all polling and publishes through one snapshot store bound into the slot entry's `hooks` compartment; the component holds no subscription machinery and no transport state.
+The host plugin (`profile/web/packages/enpoi-update-check`) is a profile plugin, so no generated Remote artifact exists on the client assembly: every call is one `POST /api/updateCheck.<method>` carrying the shared client-request envelope (`{type, method, rpcId, payload:{args}}`), the same pattern `enpoiUiState.*` uses. The args carry the descriptor's named parameters, not the request fields: `dismiss` sends `{request: {version}}`, every no-parameter method sends `{}`. The controller owns all polling and publishes through one snapshot store bound into the slot entry's `hooks` compartment; the component holds no subscription machinery and no transport state.
 
 | File | Role |
 |---|---|
 | [`src/client/index.ts`](src/client/index.ts) | dictionaries + the `shell.overlay` registration |
-| [`src/client/controller.ts`](src/client/controller.ts) | polling policy, start/dismiss, restart detection, the toast marker |
-| [`src/client/rpc.ts`](src/client/rpc.ts) | the `updateCheck.*` envelope caller and the wire contracts |
-| [`src/client/UpdateIndicator.tsx`](src/client/UpdateIndicator.tsx) | pill, dialog, progress, failure surface, toast |
+| [`src/client/controller.ts`](src/client/controller.ts) | polling policy, prepare/apply/retry/dismiss, restart detection, the toast marker |
+| [`src/client/rpc.ts`](src/client/rpc.ts) | the `updateCheck.*` envelope caller, the descriptor arg table, and the wire contracts |
+| [`src/client/UpdateIndicator.tsx`](src/client/UpdateIndicator.tsx) | pill, dialog, changelog, progress, restart, failure surface, toast |
 | [`src/client/locales.ts`](src/client/locales.ts) | the `update` namespace copy (zh source of truth) |
 
 </details>
@@ -85,8 +85,8 @@ None; the package never assembles or sends provider requests.
 
 These limits define current package constraints, not a task backlog.
 
-- **The prepare/apply split is not implemented** — `Update now` starts the engine, which prepares and then switches in one run; a `ready` state with a user-triggered `Restart to update` remains the future refinement recorded in the plan.
-- **Progress granularity is the engine's step line** — the bar follows `[N/9]`; byte-level progress needs the engine's state file, which the host watcher does not consume yet.
+- **Progress granularity is the engine's step line** — the bar follows `[N/9]`; byte-level progress needs an engine state file, which the host watcher does not consume yet.
+- **A prepared update is offered again in any tab of this browser profile** — the prepared state lives in the host's `run.json`, so a reopened tab discovers it through the mount read; the restart itself always dispatches from the tab that clicks it.
 
 <a id="dev-note"></a>
 ### Dev Note

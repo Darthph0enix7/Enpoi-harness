@@ -1,7 +1,8 @@
 /**
- * `update` namespace dictionaries: the chrome indicator, the update dialog
- * (changelog, progress, failure), and the post-restart toast. Version and
- * channel values are wire data rendered verbatim through placeholders.
+ * `update` namespace dictionaries: the chrome indicator (available,
+ * executing, prepared), the update dialog (changelog, progress, restart,
+ * failure), and the post-restart toast. Version, channel, step counts, and
+ * log lines are wire data rendered verbatim through placeholders.
  */
 
 /** Dictionary namespace owned by this plugin. */
@@ -13,6 +14,8 @@ export const zh = {
   'indicator.availableAria': '有新版本 {version}，点击查看',
   'indicator.updating': '正在更新…',
   'indicator.updatingAria': '正在更新：步骤 {step}/{steps}',
+  'indicator.prepared': '重启以更新',
+  'indicator.preparedAria': '更新 {version} 已就绪，重启以完成',
   'dialog.title': 'Harness 更新',
   'dialog.close': '关闭',
   'dialog.versions': '{current} → {latest}',
@@ -23,9 +26,14 @@ export const zh = {
   'action.later': '稍后',
   'action.skip': '跳过此版本',
   'action.retry': '重试',
+  'action.restart': '重启以更新',
   'action.close': '关闭',
   'progress.title': '正在更新',
   'progress.starting': '正在启动更新器…',
+  'progress.preparing': '正在准备更新…',
+  'progress.applying': '正在应用更新…',
+  'progress.switching': '正在切换并重启…',
+  'progress.prepared': '更新已就绪，重启后自动完成。',
   'progress.step': '步骤 {step}/{steps}',
   'progress.disconnectWarning': '切换到新版本时界面会短暂断开，随后自动重连并重新加载。',
   'result.success': '已更新到 {version}',
@@ -42,6 +50,8 @@ export const en: Record<UpdateKey, string> = {
   'indicator.availableAria': 'Update {version} available — click for details',
   'indicator.updating': 'Updating…',
   'indicator.updatingAria': 'Updating: step {step}/{steps}',
+  'indicator.prepared': 'Restart to update',
+  'indicator.preparedAria': 'Update {version} is ready — restart to finish',
   'dialog.title': 'Harness update',
   'dialog.close': 'Close',
   'dialog.versions': '{current} → {latest}',
@@ -52,9 +62,14 @@ export const en: Record<UpdateKey, string> = {
   'action.later': 'Later',
   'action.skip': 'Skip this version',
   'action.retry': 'Retry',
+  'action.restart': 'Restart to update',
   'action.close': 'Close',
   'progress.title': 'Updating',
   'progress.starting': 'Starting the updater…',
+  'progress.preparing': 'Preparing the update…',
+  'progress.applying': 'Applying the update…',
+  'progress.switching': 'Switching over and restarting…',
+  'progress.prepared': 'The update is ready; the restart finishes it automatically.',
   'progress.step': 'Step {step}/{steps}',
   'progress.disconnectWarning': 'The UI briefly disconnects while switching to the new version, then reconnects and reloads on its own.',
   'result.success': 'Updated to {version}',

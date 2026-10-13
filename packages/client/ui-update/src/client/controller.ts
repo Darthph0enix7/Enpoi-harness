@@ -1,28 +1,32 @@
 /**
  * The in-app update controller: the pollable state behind the chrome
- * indicator, the dialog actions, the run progress, and the post-restart
+ * indicator, the dialog actions, the two-phase run, and the post-restart
  * reload. One instance per plugin apply.
+ *
+ * Flow: `start` runs the engine's prepare (`starting` → `preparing` →
+ * `prepared`); the prepared record is a resting state the dialog turns into
+ * [Restart to update]. `apply` runs the staged apply (`applying` →
+ * `success | failed | rolledback`), whose switch restarts the service: the
+ * reconnected page compares the install version, writes the one-time toast
+ * payload, and reloads. Retry after a failed/rolled-back apply replays
+ * `apply` while the staged marker survives, and re-prepares otherwise.
  *
  * Polling policy (cheap by design):
  * - `updateCheck.status` on mount, every {@link STATUS_POLL_MS} while the tab
  *   is visible, and on window focus / visibility restore (coalesced by
  *   {@link TRIGGER_MIN_GAP_MS} and single-flight);
- * - `updateCheck.run` every {@link RUN_POLL_MS} only while a run is active
- *   (or the dialog is open and watching one).
- *
- * Restart handling: `start` pins the pre-run install version in session
- * storage; when the server reports a different version after a
- * `connection/reset` (the switch restarted the service), the controller
- * records the one-time toast payload and reloads the page. A manual reload
- * mid-run re-reads the pending marker, so completion is still detected.
+ * - `updateCheck.run` once on mount (to discover a prepared record that
+ *   outlived the tab), and every {@link RUN_POLL_MS} only while the engine
+ *   process is executing (`starting`/`preparing`/`applying`). A prepared
+ *   record does not change without a user action, so it is not polled.
  */
 import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
-import { updateCheckRpc, type UpdateCheckStatusWire, type UpdateRunWire } from './rpc.ts'
+import { isExecutingPhase, updateCheckRpc, type UpdateCheckStatusWire, type UpdateRunWire } from './rpc.ts'
 
 /** Status poll interval while the tab is visible. */
 export const STATUS_POLL_MS = 60_000
 
-/** Run poll interval while a run is active. */
+/** Run poll interval while the engine process is executing. */
 export const RUN_POLL_MS = 2_000
 
 /** Minimum gap between trigger-driven status polls (focus / visibility). */
@@ -42,7 +46,7 @@ export interface UpdateUiState {
   readonly run: UpdateRunWire | null
   /** Whether the dialog is open. */
   readonly dialogOpen: boolean
-  /** Whether a start/dismiss call is in flight. */
+  /** Whether a start/apply/dismiss call is in flight. */
   readonly busy: boolean
   /** Displayable failure of the last action, cleared by the next action. */
   readonly actionError: string | null
@@ -197,13 +201,14 @@ export class UpdateController {
     this.writeMarker(TOAST_KEY, undefined)
   }
 
-  /** Attach triggers and run the first status read. */
+  /** Attach triggers, read the status, and discover a run that outlived the tab. */
   mount(): void {
     if (this.disposed) return
     this.doc?.addEventListener('visibilitychange', this.onVisibility)
     this.win?.addEventListener('focus', this.onFocus)
     this.statusHandle = this.timers.setInterval(() => { this.onStatusTick() }, this.statusIntervalMs)
     void this.refreshStatus(true, true)
+    void this.refreshRun()
   }
 
   /** Detach triggers and stop both polls. */
@@ -223,13 +228,13 @@ export class UpdateController {
     void this.refreshRun()
   }
 
-  /** Close the dialog; an active run keeps going in the background. */
+  /** Close the dialog; an executing run keeps going in the background. */
   close(): void {
     this.update({ dialogOpen: false, actionError: null })
     this.stopRunPollIfIdle()
   }
 
-  /** `[Update now]` / `[Retry]`: one start call, then follow the run. */
+  /** `[Update now]`: prepare the update (`updateCheck/start`). */
   start(): void {
     if (this.store.getSnapshot().busy) return
     const status = this.store.getSnapshot().status
@@ -241,15 +246,38 @@ export class UpdateController {
         return
       }
       const run = result.value as UpdateRunWire
-      const marker: PendingMarker = {
-        from: status === null ? '' : status.current.version,
-        target: run.target,
-      }
-      this.pending = marker
-      this.writeMarker(PENDING_KEY, marker)
+      this.pinPending(status, run)
       this.update({ busy: false, run, dialogOpen: true })
       this.ensureRunPoll()
     })
+  }
+
+  /** `[Restart to update]`: apply the staged update (`updateCheck/apply`). */
+  apply(): void {
+    if (this.store.getSnapshot().busy) return
+    const status = this.store.getSnapshot().status
+    this.update({ busy: true, actionError: null })
+    void this.rpc('updateCheck.apply', {}).then((result) => {
+      if (this.disposed) return
+      if (!result.ok) {
+        this.update({ busy: false, actionError: result.message })
+        return
+      }
+      const applied = result.value as UpdateRunWire
+      this.pinPending(status, applied)
+      this.update({ busy: false, run: applied, dialogOpen: true })
+      this.ensureRunPoll()
+    })
+  }
+
+  /**
+   * Retry a failed run: replay `apply` while the staged marker survived a
+   * rolled-back/failed apply, and re-prepare otherwise.
+   */
+  retry(): void {
+    const run = this.store.getSnapshot().run
+    if (run !== null && run.mode === 'apply' && run.staged) this.apply()
+    else this.start()
   }
 
   /** `[Skip this version]`: persist the dismissal and close the dialog. */
@@ -258,7 +286,9 @@ export class UpdateController {
     const version = status?.latest?.version
     if (version === undefined || this.store.getSnapshot().busy) return
     this.update({ busy: true, actionError: null })
-    void this.rpc('updateCheck.dismiss', { version }).then((result) => {
+    // The descriptor names its single parameter `request`; the args object
+    // must mirror that name (see the rpc.ts descriptor table).
+    void this.rpc('updateCheck.dismiss', { request: { version } }).then((result) => {
       if (this.disposed) return
       if (!result.ok) {
         this.update({ busy: false, actionError: result.message })
@@ -278,7 +308,7 @@ export class UpdateController {
   }
 
   /**
-   * A connection generation was established: after the update's switch this is
+   * A connection generation was established: after the apply's switch this is
    * how the page learns the service is back. Completion is judged by the
    * install version changing, not by the reconnect itself, so this read
    * bypasses the focus gap (a reconnect is a real event, not pointer chatter).
@@ -308,7 +338,7 @@ export class UpdateController {
     return this.statusInFlight
   }
 
-  /** One run read; starts/stops the run poll from the result. */
+  /** One run read; starts/stops the run poll from the result (prepared never polls). */
   refreshRun(): Promise<void> {
     if (this.disposed) return Promise.resolve()
     if (this.runInFlight !== null) return this.runInFlight
@@ -317,10 +347,20 @@ export class UpdateController {
       const run = result.value === null || result.value === undefined ? null : result.value as UpdateRunWire
       this.update({ run })
       this.maybeCompleteUpdate()
-      if (run !== null && run.result === null) this.ensureRunPoll()
+      if (run !== null && isExecutingPhase(run.phase)) this.ensureRunPoll()
       else this.stopRunPollIfIdle()
     }).finally(() => { this.runInFlight = null })
     return this.runInFlight
+  }
+
+  /** Record the pre-run version so the post-switch reload can be detected. */
+  private pinPending(status: UpdateCheckStatusWire | null, run: UpdateRunWire | null): void {
+    const marker: PendingMarker = {
+      from: status === null ? '' : status.current.version,
+      target: run === null ? '' : run.target,
+    }
+    this.pending = marker
+    this.writeMarker(PENDING_KEY, marker)
   }
 
   /** Reload and announce the new version once the server reports it. */
@@ -347,10 +387,9 @@ export class UpdateController {
 
   private stopRunPollIfIdle(): void {
     const { run } = this.store.getSnapshot()
-    const active = run !== null && run.result === null
-    // A terminal record never changes again; Retry starts a new run and
-    // restarts the poll from ensureRunPoll.
-    if (active) return
+    // Only an executing engine changes the record; prepared waits for the
+    // user's restart and a terminal record never changes again.
+    if (run !== null && isExecutingPhase(run.phase)) return
     if (this.runHandle !== null) {
       this.timers.clearInterval(this.runHandle)
       this.runHandle = null
