@@ -1,5 +1,7 @@
 # Agent Note: Desktop 更新后续扩展
 
+> **SUPERSEDED (2026-10-14):** Electron 更新器路径已不复存在；见 `dsh update` 更新系统。
+
 Status: proposed
 
 [English](2026-09-08-desktop-update-extensions.md) | 中文

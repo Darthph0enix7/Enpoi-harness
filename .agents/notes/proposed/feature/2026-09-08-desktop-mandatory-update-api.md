@@ -1,5 +1,7 @@
 # Agent Note: Desktop mandatory-update API
 
+> **SUPERSEDED (2026-10-14):** the Electron updater path no longer exists; see the `dsh update` system.
+
 Status: proposed
 
 English | [中文](2026-09-08-desktop-mandatory-update-api.zh.md)

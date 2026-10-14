@@ -1,12 +1,17 @@
 # Enpoi Harness — Current State & Modification Ledger
 
+> **STATUS (2026-10-14): historical snapshot — superseded.** This file records the v0.1.1-rc.2 fork era and is kept as history. Current state: releases **0.1.7-enpoi.2.9x** ship via the update system (`dsh update`, channels stable/beta), live profile at `~/.dsh/profiles/web`, frozen profile bundled in the repo at `profile/web/`.
+
 Fork of [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)
-(rc line `v0.1.1-rc.2`) running as **Enpoi Harness** on serverlocal.
-Fork repo: `Darthph0enix7/enpoi-harness` (public). This file is the
+(rc line `v0.1.1-rc.2` — historical; the fork now ships `0.1.7-enpoi.2.9x`
+releases, see the STATUS banner above) running as **Enpoi Harness** on serverlocal.
+Fork repo: `Darthph0enix7/Enpoi-harness` (public). This file is the
 authoritative record of everything changed on top of upstream.
 
 > Update this file whenever the stand changes. Profile-side customizations
 > live in the companion repo `Darthph0enix7/dsh-enpoi-web-profile`.
+> **Superseded (2026-10-14):** the profile is frozen inside the harness repo
+> at `profile/web/` and live at `~/.dsh/profiles/web`.
 
 ## 1. Branches
 
@@ -45,17 +50,27 @@ may still reference it.
 - HTTPS: `tailscale serve --https=8443` → https://serverlocal.pike-acrux.ts.net:8443/
   (secure context required by the web client; fixes crypto.randomUUID on remote hosts).
 - `DSH_HOME=~/.dsh`.
-- Global `dsh` wrapper: `~/.local/bin/dsh` → `apps/cli/lib/bin.js`.
+- Global `dsh` wrapper (at the time): `~/.local/bin/dsh` → `apps/cli/lib/bin.js`.
+  Today the wrapper is the installer-generated shim: `dsh update|repair|uninstall|doctor`
+  delegate to `~/.dsh/harness/current/scripts/update.sh`; everything else runs
+  `~/.dsh/harness/current/apps/cli/lib/bin.js`.
+- **Current (2026-10-14):** releases install under `~/.dsh/harness/`
+  (`0.1.7-enpoi.2.90` current; channels stable/beta) and apply in place via
+  `dsh update`. Ports are unchanged: `127.0.0.1:3080` + tailnet forwarder
+  `100.122.163.25:3080`, HTTPS `8443` via `tailscale serve`
+  (`serverlocal.pike-acrux.ts.net`).
 
-## 4. Web profile (`~/.dsh/profiles/web`) — see dsh-enpoi-web-profile repo
+## 4. Web profile (`~/.dsh/profiles/web`) — frozen at `profile/web/`, see doc 91
 
 Bundles: `@deepseek-ai/dsh-base`, `@deepseek-ai/dsh-web-app`,
 `dsh-better-sidebar@0.14.0` (patched), `@linxin666/dsh-client-ui-skin-center`
 (active skin: summer-liquid-glass, obsidian liquid wallpaper).
-The whole profile directory is versioned in
+The whole profile directory was versioned in
 `Darthph0enix7/dsh-enpoi-web-profile` — patches, rebuild script, and the
 dsh-better-sidebar source patch overlay live there (see its README for the
-full customization ledger).
+full customization ledger). **Superseded (2026-10-14):** the profile is now
+frozen offline inside the harness repo at `profile/web/` and refreshed by
+`dsh update`; the live copy at `~/.dsh/profiles/web` is still the served profile.
 
 ## 5. Upstream merge guardrails
 
