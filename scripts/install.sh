@@ -7098,14 +7098,92 @@ do_clean() {
   return 0
 }
 
+# ── Update lock: stale-lock reclaim and lock-free subscription ──────────────
 # One update per install root: a concurrent update would race the version tree,
 # the current symlink, and the user-file backups. flock(1) releases the lock
 # when this process exits; macOS ships no flock, so the fallback is an atomic
-# mkdir plus the holder's PID, which also reclaims a lock left by a dead
-# process. --dry-run is read-only and skips the lock. The EXIT trap removes the
-# fallback lock directory.
+# mkdir plus the holder's PID. --dry-run is read-only and skips the lock. The
+# EXIT trap removes the fallback lock directory.
+#
+# The flock rung (Linux) cannot go stale: the kernel releases the lock with the
+# holder. The mkdir rung (macOS, no flock) makes the directory itself the lock,
+# so a holder that died without its EXIT trap leaves a stale lock behind; the
+# recorded pid is the only ownership evidence and is checked with pid_live
+# (dead, zombie, or unreadable = stale). Reclaiming is safe exactly then; a
+# live pid is never touched. A plain `dsh update` subscribes lock-free before
+# competing for the lock, so an attach can never leave a lock behind.
+update_lock_dir() { printf '%s/harness/.update.lock.d' "$PREFIX"; }
+
+# Recorded owner pid of an mkdir lock ("" when unreadable/absent/invalid).
+update_lock_dir_pid() { # lock_dir -> pid or empty
+  local pid=""
+  pid="$(cat "$1/pid" 2>/dev/null || true)"
+  case "$pid" in
+    ''|*[!0-9]*) printf '';;
+    *) printf '%s' "$pid";;
+  esac
+}
+
+# Reclaim a dead-owner mkdir lock with one clear warning naming the stale pid.
+# A live recorded pid keeps the lock and returns 0 (callers decide whether to
+# attach, wait, or refuse). Absent or empty lock = nothing to do.
+reap_stale_update_lock_dir() {
+  local lock_dir pid note
+  lock_dir="$(update_lock_dir)"
+  [ -d "$lock_dir" ] || return 0
+  pid="$(update_lock_dir_pid "$lock_dir")"
+  if [ -n "$pid" ] && pid_live "$pid"; then
+    log "update lock: $lock_dir is held by live PID $pid"
+    return 0
+  fi
+  if [ -n "$pid" ]; then
+    note="stale PID $pid is not running"
+  else
+    note="no readable owner PID"
+  fi
+  warn "reclaiming stale update lock $lock_dir ($note); its owner is gone — no manual removal needed"
+  log "update lock: reclaimed stale $lock_dir ($note)"
+  rm -rf -- "$lock_dir" 2>/dev/null || {
+    warn "could not reclaim stale update lock $lock_dir; remove it manually if it blocks the next run"
+    return 1
+  }
+  return 0
+}
+
+# True when a subscriable run is active: the update lock is HELD and the run
+# marker's pid is live. Read-only: never creates, reclaims, or holds the lock
+# (the flock probe acquires and releases it atomically; the mkdir rung only
+# tests directory existence). Used before any lock attempt so a plain update
+# subscribes without ever competing for the lock.
+update_run_is_subscribable() {
+  local marker pid lock_file lock_dir
+  marker="$(run_marker_path)"
+  [ -f "$marker" ] || return 1
+  pid="$(marker_field "$marker" pid)"
+  case "$pid" in ''|*[!0-9]*) return 1;; esac
+  pid_live "$pid" || return 1
+  if command -v flock >/dev/null 2>&1; then
+    lock_file="$PREFIX/harness/.update.lock"
+    exec 8>>"$lock_file" 2>/dev/null || return 1
+    if flock -n 8 2>/dev/null; then
+      exec 8>&- 2>/dev/null || true
+      return 1
+    fi
+    exec 8>&- 2>/dev/null || true
+  else
+    lock_dir="$(update_lock_dir)"
+    [ -d "$lock_dir" ] || return 1
+  fi
+  return 0
+}
+
 acquire_update_lock() {
   [ "${DRY_RUN:-0}" != 1 ] || return 0
+  # One lock per process: do_update acquires it, and the apply path re-enters
+  # through do_apply_staged. Re-acquiring must be a no-op — on the mkdir rung
+  # (macOS) a second attempt sees this very process as the live holder and
+  # would otherwise refuse the run against itself.
+  [ "${UPDATE_LOCK_OWNED:-0}" = 1 ] && return 0
   mkdir -p "$PREFIX/harness" 2>/dev/null || true
   # Always ensure signals trigger the EXIT trap to clean up locks and staged
   # trees; RUN_MARKER_SIGNALLED makes the run marker's terminal phase read
@@ -7113,31 +7191,58 @@ acquire_update_lock() {
   trap 'RUN_MARKER_SIGNALLED=1; exit 130' INT
   trap 'RUN_MARKER_SIGNALLED=1; exit 143' TERM
 
+  # A plain update subscribes before it ever competes for the lock: the
+  # subscriber path owns nothing (no create, no reclaim, no hold), so a
+  # Ctrl-C/kill/crash/zombie subscriber can never leave a lock behind. If the
+  # run ends while we look, attach falls through to normal acquisition.
+  if [ "${UPDATE_PREPARE:-0}" = 0 ] && [ "${UPDATE_APPLY:-0}" = 0 ]; then
+    if update_run_is_subscribable; then
+      attach_to_running_update || true
+    fi
+  fi
+
   local lock_file="$PREFIX/harness/.update.lock"
   if command -v flock >/dev/null 2>&1; then
     exec 9>>"$lock_file"
     if ! flock -n 9; then
+      # Held. The kernel drops flock with its holder, so a failed acquisition
+      # means a live holder; a plain update attaches when the run's marker is
+      # live, every other mode reports it.
       local holder_pid=""
       holder_pid="$(head -n 1 "$lock_file" 2>/dev/null || true)"
       update_lock_contention "$holder_pid" ""
     fi
     printf '%s\n' "$$" > "$lock_file" 2>/dev/null || true
     UPDATE_LOCK_FILE="$lock_file"
+    UPDATE_LOCK_OWNED=1
+    # Hygiene: a stale mkdir-rung lock left on this prefix (copied installs,
+    # PATH-restricted runs) must not linger. A live one is kept and logged.
+    reap_stale_update_lock_dir || true
     log "update lock acquired: $lock_file (PID $$)"
     return 0
   fi
 
-  local lock_dir="$PREFIX/harness/.update.lock.d" pid
+  local lock_dir pid
+  lock_dir="$(update_lock_dir)"
   if ! mkdir "$lock_dir" 2>/dev/null; then
-    pid="$(cat "$lock_dir/pid" 2>/dev/null || true)"
-    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
-      rm -rf "$lock_dir" 2>/dev/null && mkdir "$lock_dir" 2>/dev/null || update_lock_contention "$pid" " (lock: $lock_dir)"
-    else
-      update_lock_contention "$pid" ", or remove $lock_dir if it is stale"
+    pid="$(update_lock_dir_pid "$lock_dir")"
+    if [ -n "$pid" ] && pid_live "$pid"; then
+      # Genuinely live holder: subscribe (plain) or refuse, never break.
+      update_lock_contention "$pid" ", or remove $lock_dir only if its recorded PID is a reused or zombie process"
+    fi
+    # Dead, zombie, or unreadable owner: reclaim (one warning) and continue.
+    reap_stale_update_lock_dir \
+      || die "could not reclaim stale update lock $lock_dir; remove it manually and re-run"
+    if ! mkdir "$lock_dir" 2>/dev/null; then
+      # A concurrent process recreated the lock between reclaim and mkdir: fall
+      # back to the normal contention decision for its recorded owner.
+      pid="$(update_lock_dir_pid "$lock_dir")"
+      update_lock_contention "${pid:-}" ", or remove $lock_dir only if its recorded PID is a reused or zombie process"
     fi
   fi
-  echo "$$" > "$lock_dir/pid"
+  printf '%s\n' "$$" > "$lock_dir/pid"
   UPDATE_LOCK_DIR="$lock_dir"
+  UPDATE_LOCK_OWNED=1
   log "update lock acquired (mkdir fallback): $lock_dir"
   return 0
 }
@@ -8028,7 +8133,9 @@ do_apply_staged() { # prev_version
 
 # Called from acquire_update_lock when the lock is held. A plain update tries
 # to attach (never returns when it does); every other mode keeps the original
-# refusal. A missing or stale marker keeps the refusal as well.
+# refusal. A missing or stale marker keeps the refusal as well. The attach path
+# never creates, reclaims, or holds the lock, so any subscriber exit — Ctrl-C,
+# signal, crash, or a reaped zombie — leaves no lock behind.
 update_lock_contention() { # holder_pid reason_suffix
   local pid="$1" suffix="$2"
   if [ "${UPDATE_PREPARE:-0}" = 0 ] && [ "${UPDATE_APPLY:-0}" = 0 ] && [ "${UPDATE_CANCEL:-0}" = 0 ]; then
@@ -8185,6 +8292,11 @@ do_cancel() {
   case "$timeout" in ''|*[!0-9]*) timeout=10;; esac
   CANCEL_RUN_ID=""; CANCEL_PID=""; CANCEL_PHASE=""
 
+  # A cancel must never refuse for a lock the next run would auto-break: reap a
+  # dead-owner mkdir lock up front (live owners are never touched). This also
+  # self-heals the noop paths below, so a stale lock cannot outlive its run.
+  reap_stale_update_lock_dir || true
+
   if [ ! -f "$marker" ]; then
     say "dsh update --cancel: no run marker at $marker — no update is running."
     emit_cancel_json 1 noop
@@ -8244,18 +8356,10 @@ do_cancel() {
     *) mark_run_cancelled "$marker"; phase="cancelled";;
   esac
   CANCEL_PHASE="$phase"
-  # The mkdir fallback lock is a directory; a SIGKILLed runner cannot remove
-  # it, and the next update only reclaims it after a failed mkdir. Reap it now
-  # when its recorded owner is gone.
-  if [ -d "$PREFIX/harness/.update.lock.d" ]; then
-    local lpid=""
-    lpid="$(cat "$PREFIX/harness/.update.lock.d/pid" 2>/dev/null || true)"
-    if [ -z "$lpid" ] || ! kill -0 "$lpid" 2>/dev/null; then
-      rm -rf "$PREFIX/harness/.update.lock.d" 2>/dev/null || true
-    fi
-  fi
   # Sweep the killed run's partials: dead-owner downloads/release scratch and
   # dead-owner staging. A concurrent new run's live artifacts are never touched.
+  # (The mkdir lock was already reaped at entry when its owner was dead; a
+  # SIGKILLed runner's lock is reaped there on the next cancel/update.)
   prune_orphaned_update_artifacts
   sweep_dead_staging
   say ""

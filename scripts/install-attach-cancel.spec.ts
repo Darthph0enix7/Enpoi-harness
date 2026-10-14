@@ -276,6 +276,22 @@ describe.skipIf(win32)('cancel', () => {
     expect(second.stdout).toContain('"status": "noop"')
   })
 
+  it('reclaims a dead-owner update lock while it is a no-op', () => {
+    const { prefix, marker } = minimalPrefix()
+    const dead = spawnSync(process.execPath, ['-e', '']).pid
+    if (dead === undefined) throw new Error('no pid')
+    const lockDir = join(prefix, 'harness/.update.lock.d')
+    mkdirSync(lockDir, { recursive: true })
+    writeFileSync(join(lockDir, 'pid'), `${String(dead)}\n`)
+    writeMarker(marker, { pid: 2147483647 })
+    const result = runScript(['--update', '--cancel', '--json', '--prefix', prefix])
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('"status": "noop"')
+    expect(result.stderr).toContain('reclaiming stale update lock')
+    expect(result.stderr).toContain(`stale PID ${String(dead)} is not running`)
+    expect(existsSync(lockDir)).toBe(false)
+  })
+
   it('refuses --cancel without --update and with another update flag', () => {
     const a = runScript(['--cancel'])
     expect(a.status).not.toBe(0)

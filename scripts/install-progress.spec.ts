@@ -227,7 +227,7 @@ describe('copy_profile_tree', () => {
 describe('update lock', () => {
   /** Minimal PATH without flock so the mkdir fallback is exercised. */
   function fakeBin(): string {
-    return toolBin(['dirname', 'basename', 'date', 'mkdir', 'cat', 'rm', 'head', 'sleep'])
+    return toolBin(['dirname', 'basename', 'date', 'mkdir', 'cat', 'rm', 'head', 'sleep', 'sed', 'ps'])
   }
 
   function fallbackPreamble(dir: string, binDir: string): string {
@@ -248,7 +248,28 @@ describe('update lock', () => {
     )
     expect(result.status).toBe(0)
     expect(result.stdout).toMatch(/acquired rc=0 pid=(\d+) self=\1/)
+    // One clear warning names the stale pid and says it was reclaimed.
+    expect(result.stderr).toContain('reclaiming stale update lock')
+    expect(result.stderr).toContain('stale PID 4194303 is not running')
+    expect(result.stderr).toContain('no manual removal needed')
     expect(existsSync(join(dir, 'prefix', 'harness', '.update.lock.d'))).toBe(false)
+  })
+
+  it('reclaims a lock whose pid file is missing or unreadable', () => {
+    const dir = scratch()
+    const binDir = fakeBin()
+    const result = runBash(
+      [
+        fallbackPreamble(dir, binDir),
+        'mkdir -p "$PREFIX/harness/.update.lock.d"',
+        'acquire_update_lock',
+        'printf "acquired rc=%s\\n" "$?"',
+      ].join('\n'),
+    )
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('acquired rc=0')
+    expect(result.stderr).toContain('no readable owner PID')
+    expect(result.stderr).toContain('reclaiming stale update lock')
   })
 
   it('releases the lock when SIGTERM/SIGINT interrupt the update', () => {
@@ -280,6 +301,71 @@ describe('update lock', () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('another update is already running')
     expect(result.stdout).not.toContain('SHOULD NOT REACH')
+  })
+
+  it('keeps a live-holder lock intact and never reclaims it', () => {
+    const dir = scratch()
+    const binDir = fakeBin()
+    const result = runBash(
+      [
+        fallbackPreamble(dir, binDir),
+        'sleep 30 & holder=$!',
+        'trap \'kill "$holder" 2>/dev/null || true\' EXIT',
+        'mkdir -p "$PREFIX/harness/.update.lock.d"',
+        'echo "$holder" > "$PREFIX/harness/.update.lock.d/pid"',
+        'reap_stale_update_lock_dir',
+        'printf "reap_rc=%s dir=%s pid=%s\\n" "$?" "$([ -d "$PREFIX/harness/.update.lock.d" ] && echo kept || echo gone)" "$(cat "$PREFIX/harness/.update.lock.d/pid")"',
+      ].join('\n'),
+    )
+    expect(result.status).toBe(0)
+    expect(result.stdout).toMatch(/reap_rc=0 dir=kept pid=(\d+)/)
+    expect(result.stderr).not.toContain('reclaiming stale update lock')
+  })
+
+  it('probes subscription only for a held lock plus a live marker pid', () => {
+    const dir = scratch()
+    const binDir = fakeBin()
+    const result = runBash(
+      [
+        fallbackPreamble(dir, binDir),
+        'sleep 30 & runner=$!',
+        'trap \'kill "$runner" 2>/dev/null || true\' EXIT',
+        'mkdir -p "$PREFIX/harness"',
+        'printf \'{"runId":"t","pid":%s,"mode":"prepare","step":1,"steps":9,"phase":"running","startedAt":"x","logPath":"/dev/null","version":"","target":""}\\n\' "$runner" > "$PREFIX/harness/.update-run.json"',
+        // lock free at first: no subscription even with a live marker
+        'update_run_is_subscribable; printf "free=%s\\n" "$?"',
+        'mkdir -p "$PREFIX/harness/.update.lock.d"',
+        'echo "$runner" > "$PREFIX/harness/.update.lock.d/pid"',
+        // held + live marker pid: subscribable
+        'update_run_is_subscribable; printf "held_live=%s\\n" "$?"',
+        // held + dead marker pid: not subscribable
+        'printf \'{"runId":"t","pid":4194303,"mode":"prepare","step":1,"steps":9,"phase":"done","startedAt":"x","logPath":"/dev/null","version":"","target":""}\\n\' > "$PREFIX/harness/.update-run.json"',
+        'update_run_is_subscribable; printf "held_dead=%s\\n" "$?"',
+        // the probe never owns or mutates the lock
+        'printf "lock_dir=%s lock_pid=%s\\n" "$([ -d "$PREFIX/harness/.update.lock.d" ] && echo kept || echo gone)" "$(cat "$PREFIX/harness/.update.lock.d/pid")"',
+      ].join('\n'),
+    )
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('free=1')
+    expect(result.stdout).toMatch(/held_live=0/)
+    expect(result.stdout).toContain('held_dead=1')
+    expect(result.stdout).toMatch(/lock_dir=kept lock_pid=(\d+)/)
+  })
+
+  it('reclaims a stale mkdir lock on the flock rung too (hygiene)', () => {
+    const dir = scratch()
+    const result = runBash(
+      [
+        libPreamble(dir),
+        'mkdir -p "$PREFIX/harness/.update.lock.d"',
+        'echo 4194303 > "$PREFIX/harness/.update.lock.d/pid"',
+        'acquire_update_lock',
+        'printf "acquired rc=%s dir=%s\\n" "$?" "$([ -d "$PREFIX/harness/.update.lock.d" ] && echo kept || echo gone)"',
+      ].join('\n'),
+    )
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('acquired rc=0 dir=gone')
+    expect(result.stderr).toContain('reclaiming stale update lock')
   })
 })
 
