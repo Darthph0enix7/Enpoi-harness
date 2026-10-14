@@ -134,8 +134,14 @@ export function repositoryClientBuildEnvironment(
 
 /**
  * Resolve the exact public values required by an official build at one commit.
+ *
+ * An explicit `DSH_CLIENT_VERSION` wins: the release workflow owns the shipped
+ * release version (`<tree base>.<run number>`) and exports it, so client
+ * artifacts label the release they came from; without one (a local
+ * `build:official` rehearsal), the repository's own package version is used.
+ *
  * @param root - repository root whose HEAD must match the built source.
- * @param environment - optional explicit commit source for non-Git build environments.
+ * @param environment - optional explicit version/commit source for non-Git build environments.
  * @returns complete official client environment.
  */
 export function officialClientBuildEnvironment(
@@ -144,7 +150,7 @@ export function officialClientBuildEnvironment(
 ): Readonly<Record<`DSH_CLIENT_${string}`, string>> {
   return {
     DSH_CLIENT_COMMIT_HASH: repositoryCommitHash(root, environment),
-    DSH_CLIENT_VERSION: repositoryVersion(root),
+    DSH_CLIENT_VERSION: environment[CLIENT_VERSION_VARIABLE] ?? repositoryVersion(root),
     ...OFFICIAL_CLIENT_BUILD_ENVIRONMENT,
   }
 }

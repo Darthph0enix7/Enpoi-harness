@@ -353,6 +353,22 @@ describe('harness-release.yml wiring', () => {
     expect(env?.RELEASE_VERSION).toBe('${{ steps.version.outputs.version }}')
     expect(env?.BASE_VERSION).toBe('${{ steps.version.outputs.base }}')
   })
+
+  it('feeds the full release version into the official client build environment', () => {
+    const workflow = yaml.load(readFileSync(join(root, '.github/workflows/harness-release.yml'), 'utf8')) as { jobs: Record<string, { steps: Record<string, unknown>[] }> }
+    const build = workflow.jobs['build']!.steps
+    const resolve = build.find(step => step.name === 'Resolve official build environment')
+    expect(resolve).toBeDefined()
+    const env = resolve?.env as Record<string, unknown> | undefined
+    // The release version (tree base + run number) is what the shipped client
+    // artifacts must name; it comes from the prepare job, never from a second
+    // package.json read that would silently fall back to the base.
+    expect(env?.RELEASE_VERSION).toBe('${{ needs.prepare.outputs.version }}')
+    const run = String(resolve?.run)
+    expect(run).toContain('DSH_CLIENT_VERSION=$RELEASE_VERSION')
+    expect(run).not.toContain("readFileSync('package.json'")
+    expect(run).not.toContain('${{')
+  })
 })
 
 afterAll(afterAllCleanup)

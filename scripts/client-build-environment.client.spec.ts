@@ -162,6 +162,18 @@ describe('client build environment', () => {
       DSH_CLIENT_TITLE: 'DeepSeek Harness',
       DSH_CLIENT_VERSION: '1.2.3-rc.4',
     })
+    // The release workflow owns the shipped release version (tree base + run
+    // number) and exports it; an explicit DSH_CLIENT_VERSION wins over the
+    // repository base while the commit stays the build's own.
+    expect(officialClientBuildEnvironment(fixtureRoot, {
+      DSH_CLIENT_COMMIT_HASH: COMMIT_HASH,
+      DSH_CLIENT_VERSION: '1.2.3-rc.4.86',
+    })).toEqual({
+      DSH_CLIENT_BUILD_PROFILE: 'official',
+      DSH_CLIENT_COMMIT_HASH: COMMIT_HASH.slice(0, 7),
+      DSH_CLIENT_TITLE: 'DeepSeek Harness',
+      DSH_CLIENT_VERSION: '1.2.3-rc.4.86',
+    })
 
     write(join(fixtureRoot, '.gitignore'), 'ignored.txt\n')
     git(fixtureRoot, ['add', '.gitignore'])

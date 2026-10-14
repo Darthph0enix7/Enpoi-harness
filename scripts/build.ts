@@ -8,6 +8,7 @@ import {
   CLIENT_BUILD_RECORD_PATH,
   CLIENT_BUILD_PROFILE_SELECTOR,
   clientBuildProcessEnvironment,
+  officialClientBuildEnvironment,
   repositoryClientBuildEnvironment,
   resolveClientBuildEnvironment,
   writeClientBuildRecord,
@@ -35,9 +36,14 @@ function main(): void {
     allowPositionals: false,
   })
   const root = resolve(import.meta.dirname, '..')
-  const repositoryEnvironment = repositoryClientBuildEnvironment(root, process.env)
   const profile = values.profile ?? process.env[CLIENT_BUILD_PROFILE_SELECTOR]
-  const clientEnvironment = resolveClientBuildEnvironment(repositoryEnvironment, profile)
+  // The official (release) profile carries the full release version the
+  // workflow exports (`<tree base>.<run number>`), so the shipped UI names the
+  // release it came from; a complete default build keeps the repository's own
+  // package version and metadata.
+  const clientEnvironment = profile === 'official'
+    ? officialClientBuildEnvironment(root, process.env)
+    : resolveClientBuildEnvironment(repositoryClientBuildEnvironment(root, process.env), profile)
   const buildEnvironment = clientBuildProcessEnvironment(process.env, clientEnvironment)
 
   rmSync(resolve(root, CLIENT_BUILD_RECORD_PATH), { force: true })
