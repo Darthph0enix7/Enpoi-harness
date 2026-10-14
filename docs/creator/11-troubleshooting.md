@@ -40,7 +40,7 @@ Run from `$REPO`.
 | Gate | Command | Expected |
 |---|---|---|
 | Error ledger | `node scripts/error-audit.mjs --ack $EVIDENCE/error-audit/baseline/acknowledged.json` | `exit 0` (no unexplained signal; exit 2 = harness/usage failure) |
-| Tool rosters | `node scripts/tool-roster-diff.mjs` | Fixtures are 53/53/53; the stored baseline is the frozen 0.1.7 capture, so the current run reports `DRIFT` naming the additions (39/40 → 53) — a `MATCH` means the baseline was refreshed, never that the fixtures are stale |
+| Tool rosters | `node scripts/tool-roster-diff.mjs` | Fixtures and the stored baseline are both 50/50/53 (orchestrator/sysadmin/creator), so the current run reports `MATCH`; a `DRIFT` names real roster changes — refresh the baseline only when the change is intended |
 | Token contrast | `node "$PROFILE/scripts/dsh-token-contrast.mjs"` | `PASS`, drift `[]`; floor 4.5:1, both base modes |
 | Branding live | `node "$PROFILE/scripts/dsh-rebrand.mjs" --check --live` | `PASS (live)` — fork title + contrast, probes the served origin |
 

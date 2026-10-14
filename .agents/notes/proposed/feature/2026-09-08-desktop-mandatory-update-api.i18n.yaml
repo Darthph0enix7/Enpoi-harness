@@ -3,8 +3,8 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/proposed/feature/2026-09-08-desktop-mandatory-update-api.md
 /agent-note-desktop-mandatory-update-api:
-  en: c0ea3f7826d8e253
-  zh: 89feec8209a54f26
+  en: a88afc3f9484e70e
+  zh: 3e4d68fae5994aac
 /agent-note-desktop-mandatory-update-api/problem:
   en: cc14e499c0f87586
   zh: 4cf849710b782d4b

@@ -3,8 +3,8 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/proposed/feature/2026-09-08-desktop-update-policy-and-installation.md
 /agent-note-desktop-update-policy-and-installation:
-  en: 250865822f42a08a
-  zh: f7fab178a4835c04
+  en: cf2d80ad292922fc
+  zh: eb3caf9cc034a32c
 /agent-note-desktop-update-policy-and-installation/problem:
   en: 96e7c7a206e06f15
   zh: 189133653543a98c
