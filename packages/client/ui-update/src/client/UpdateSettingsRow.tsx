@@ -53,6 +53,9 @@ export function UpdateSettingsRow({ useUpdate, actions, t }: UpdateSettingsRowPr
   const activeRun = run !== null && isExecutingPhase(run.phase) ? run : null
   const preparedRun = run !== null && run.rung === 'two-phase' && run.phase === 'prepared' ? run : null
   const failedRun = run !== null && run.result !== null && run.result !== 'success' ? run : null
+  // The same landed-offering rule as the pill: a success that landed the
+  // release still offered by a lagging status must not re-offer it.
+  const landedOffering = run !== null && run.result === 'success' && latest !== undefined && run.target === latest.version
 
   let view: RowView
   let label: string
@@ -81,11 +84,14 @@ export function UpdateSettingsRow({ useUpdate, actions, t }: UpdateSettingsRowPr
     label = t('settings.newVersion', { version: latest.version })
     hint = t('settings.skipped')
     action = { label: t('action.updateNow'), run: actions.open, primary: true }
-  } else if (status.state === 'available' && latest !== undefined) {
+  } else if (status.state === 'available' && latest !== undefined && !landedOffering) {
     view = 'available'
     label = t('settings.newVersion', { version: latest.version })
     action = { label: t('action.updateNow'), run: actions.open, primary: true }
-  } else if (status.state === 'current') {
+  } else if (status.state === 'current' || landedOffering) {
+    // `landedOffering` means the success record already installed the release
+    // a lagging status still offers: show the quiet current state, never
+    // re-offer it.
     view = 'current'
     label = t('settings.upToDate')
     offerCheck = true

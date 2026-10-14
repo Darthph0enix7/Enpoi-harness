@@ -196,6 +196,23 @@ describe('UpdateSettingsRow', () => {
     expect(actions.open).toHaveBeenCalledTimes(1)
   })
 
+  it('does not re-offer the release a landed run just installed, and re-arms on a newer one', () => {
+    // Lagging status still says available for the version the success landed.
+    mount({
+      status: availableStatus,
+      run: run({ mode: 'apply', phase: 'success', result: 'success', step: 9, target: availableStatus.latest.version }),
+    })
+    expect(screen.queryByRole('button', { name: en['action.updateNow'] })).toBeNull()
+    expect(screen.getByText(en['settings.upToDate'])).toBeTruthy()
+    cleanup()
+    // A newer catalog version re-offers the action.
+    mount({
+      status: { ...availableStatus, latest: { ...availableStatus.latest, version: '0.1.7-enpoi.2.85' } },
+      run: run({ mode: 'apply', phase: 'success', result: 'success', step: 9, target: '0.1.7-enpoi.2.84' }),
+    })
+    expect(screen.getByRole('button', { name: en['action.updateNow'] })).toBeTruthy()
+  })
+
   it('disables the control while a call is in flight', () => {
     mount({ status: availableStatus, busy: true })
     expect(screen.getByRole('button', { name: en['action.updateNow'] }).hasAttribute('disabled')).toBe(true)

@@ -131,11 +131,56 @@ describe('UpdateIndicator pill', () => {
   })
 
   it('hides the pill once a run landed and keeps it after a failure (retry path)', () => {
-    const landed = mount({ status: availableStatus, run: run({ result: 'success', phase: 'success', step: 9, mode: 'apply' }) })
+    const landed = mount({
+      status: availableStatus,
+      run: run({ result: 'success', phase: 'success', step: 9, mode: 'apply', target: availableStatus.latest.version }),
+    })
     expect(document.querySelector('[data-dsh-update-indicator]')).toBeNull()
     landed.unmount()
     mount({ status: availableStatus, run: run({ result: 'failed', phase: 'failed' }) })
     expect(document.querySelector('[data-dsh-update-indicator]')).not.toBeNull()
+  })
+
+  it('renders the Update pill while available even when a stale landed record persists (the live bug)', () => {
+    // The owner's PC shape: run.json still carries the PREVIOUS update's
+    // terminal success (target 2.90) while the catalog offers 2.91. The old
+    // unscoped landed-run guard hid the pill forever.
+    mount({
+      status: availableStatus,
+      run: run({ mode: 'apply', phase: 'success', result: 'success', step: 9, target: '0.1.7-enpoi.2.81' }),
+    })
+    const pill = document.querySelector('[data-dsh-update-indicator]')
+    expect(pill).not.toBeNull()
+    expect(pill?.tagName).toBe('BUTTON')
+    expect(pill?.getAttribute('data-dsh-update-indicator')).toBe('available')
+    expect(pill?.textContent).toBe('Update')
+    expect((pill as HTMLElement).style.display).not.toBe('none')
+    expect(pill?.hasAttribute('hidden')).toBe(false)
+  })
+
+  it('re-arms the pill when a newer version follows a landed run, and for a dismissed release', () => {
+    // Landed 2.84, catalog now offers 2.85: the pill re-arms.
+    const newer = { ...availableStatus, latest: { ...availableStatus.latest, version: '0.1.7-enpoi.2.85' } }
+    mount({ status: newer, run: run({ result: 'success', phase: 'success', step: 9, mode: 'apply', target: '0.1.7-enpoi.2.84' }) })
+    expect(document.querySelector('[data-dsh-update-indicator]')?.textContent).toBe('Update')
+    cleanup()
+    // Dismissed: hidden; a newer catalog version re-arms it.
+    mount({ status: { ...availableStatus, state: 'dismissed' } })
+    expect(document.querySelector('[data-dsh-update-indicator]')).toBeNull()
+    cleanup()
+    mount({ status: { ...newer, state: 'dismissed' } })
+    expect(document.querySelector('[data-dsh-update-indicator]')).toBeNull()
+    cleanup()
+    mount({ status: newer })
+    expect(document.querySelector('[data-dsh-update-indicator]')?.textContent).toBe('Update')
+  })
+
+  it('keeps the pill hidden through a terminal-success run that landed the offered release', () => {
+    mount({
+      status: availableStatus,
+      run: run({ mode: 'apply', phase: 'success', result: 'success', step: 9, target: availableStatus.latest.version }),
+    })
+    expect(document.querySelector('[data-dsh-update-indicator]')).toBeNull()
   })
 })
 

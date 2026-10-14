@@ -75,9 +75,13 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
   // dialog, when opened from it) offers Update now for a skipped version.
   const canStart = (status?.state === 'available' || status?.state === 'dismissed') && latest !== undefined
   const skipped = status?.state === 'dismissed'
-  // A landed run hides the pill even if the 6 h check has not re-read the
-  // status yet; a failed run keeps it, because Retry starts from here.
-  const showPill = executing || prepared || (available && landedRun === null)
+  // A landed run suppresses the pill only while it landed the release that is
+  // still the newest offer (the status read simply has not caught up). A
+  // NEWER catalog version re-arms the pill even though the terminal success
+  // record persists — the old unscoped guard hid the pill forever after any
+  // successful update.
+  const landedOffering = landedRun !== null && latest !== undefined && landedRun.target === latest.version
+  const showPill = executing || prepared || (available && !landedOffering)
   const percent = activeRun === null ? 0 : stepPercent(activeRun)
   const pillMode = executing ? 'updating' : prepared ? 'prepared' : 'available'
   const pillLabel = activeRun !== null

@@ -601,6 +601,51 @@ describe('UpdateController reload watch', () => {
   })
 })
 
+describe('UpdateController stale-run reconcile', () => {
+  it('re-reads the run on a reconnect even without a pending marker (clears a stale updating pill)', async () => {
+    const answers: Record<string, unknown> = {
+      'updateCheck.status': availableStatus,
+      'updateCheck.run': runWire({ mode: 'apply', phase: 'applying', step: 8 }),
+    }
+    const b = bench({ answers })
+    b.controller.mount()
+    await settle()
+    const before = b.calls.filter(call => call.method === 'updateCheck.run').length
+    // The service restarted: the run actually succeeded while the socket was down.
+    answers['updateCheck.run'] = runWire({ mode: 'apply', phase: 'success', result: 'success', step: 9 })
+    b.controller.onConnectionReset()
+    await settle()
+    expect(b.calls.filter(call => call.method === 'updateCheck.run').length).toBeGreaterThan(before)
+    expect(b.controller.store.getSnapshot().run?.result).toBe('success')
+    b.controller.dispose()
+  })
+
+  it('reconciles an executing run when the status reports the install current', async () => {
+    const answers: Record<string, unknown> = {
+      'updateCheck.status': availableStatus,
+      'updateCheck.run': runWire({ mode: 'apply', phase: 'applying', step: 8 }),
+    }
+    const b = bench({ answers })
+    b.controller.mount()
+    await settle()
+    expect(b.controller.store.getSnapshot().run?.phase).toBe('applying')
+    // The served install is current but the store still reads executing: the
+    // run record is stale and must be re-read without user interaction.
+    answers['updateCheck.status'] = {
+      ...availableStatus,
+      state: 'current' as const,
+      latest: undefined,
+      current: { version: '0.1.7-enpoi.2.84', commit: 'def5678', channel: 'stable' },
+    }
+    answers['updateCheck.run'] = runWire({ mode: 'apply', phase: 'success', result: 'success', step: 9 })
+    b.ticks.fireIntervals()
+    await settle()
+    await settle()
+    expect(b.controller.store.getSnapshot().run?.result).toBe('success')
+    b.controller.dispose()
+  })
+})
+
 describe('UpdateController restart detection', () => {
   it('reloads once the server reports a different version after a reconnect', async () => {
     const answers: Record<string, unknown> = {

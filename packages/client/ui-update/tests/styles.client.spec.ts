@@ -35,6 +35,40 @@ describe('update pill copy', () => {
   })
 })
 
+describe('pill pipeline layers', () => {
+  const appFrameCss = readFileSync(
+    fileURLToPath(new URL('../../ui-layout/src/client/AppFrame.module.css', import.meta.url)),
+    'utf8',
+  )
+  const mobileFrameCss = readFileSync(
+    fileURLToPath(new URL('../../ui-layout/src/client/MobileFrame.module.css', import.meta.url)),
+    'utf8',
+  )
+
+  it('the shell overlay layer exists, is visible, and re-enables pointer events for entries', () => {
+    const layer = /\.overlayLayer\s*\{([^}]*)\}/m.exec(appFrameCss)?.[1] ?? ''
+    expect(layer).toContain('position: absolute')
+    expect(layer).toContain('inset: 0')
+    expect(layer).not.toContain('display: none')
+    expect(layer).not.toContain('visibility: hidden')
+    expect(/\.overlayLayer\s*>\s*\*\s*\{([^}]*)\}/m.exec(appFrameCss)?.[1] ?? '').toContain('pointer-events: auto')
+    const mobileLayer = /\.overlayLayer\s*\{([^}]*)\}/m.exec(mobileFrameCss)?.[1] ?? ''
+    expect(mobileLayer).toContain('inset: 0')
+  })
+
+  it('the pill itself has no hiding rule beyond the fullscreen-covered selector', () => {
+    const pill = block('.pill')
+    expect(pill).toContain('position: fixed')
+    expect(pill).toContain('z-index: 900')
+    expect(pill).not.toContain('display: none')
+    expect(pill).not.toContain('visibility: hidden')
+    // The only hiding rule is the covered-marker one.
+    const hiddenRules = [...indicatorCss.matchAll(/[^{}]+\{[^}]*display:\s*none[^}]*\}/g)].map(match => match[0])
+    expect(hiddenRules).toHaveLength(1)
+    expect(hiddenRules[0]).toContain('html[data-shell-covered]')
+  })
+})
+
 describe('manual check styling', () => {
   it('renders the check action as a quiet inline text action', () => {
     const check = block('.checkAction')

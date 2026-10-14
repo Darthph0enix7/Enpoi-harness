@@ -405,6 +405,11 @@ export class UpdateController {
    * seconds before it serves the new identity.
    */
   onConnectionReset(): void {
+    // A reconnect is a real event: the run may have finished (or the service
+    // restarted mid-switch) while the socket was down, so re-read the run
+    // regardless of a pending marker — this is what clears a stale
+    // "updating" pill after a successful update.
+    void this.refreshRun()
     if (this.pending === undefined) return
     void this.refreshStatus(true, true)
     this.startReloadWatch()
@@ -426,6 +431,12 @@ export class UpdateController {
       const status = result.value as UpdateCheckStatusWire
       this.update({ status })
       this.maybeCompleteUpdate()
+      // The served install is current but the store still reads a run as
+      // executing: that run record is stale (the success write may have been
+      // missed across a restart). Reconcile it now instead of waiting for a
+      // user interaction.
+      const run = this.store.getSnapshot().run
+      if (status.state === 'current' && run !== null && isExecutingPhase(run.phase)) void this.refreshRun()
     }).finally(() => { this.statusInFlight = null })
     return this.statusInFlight
   }
