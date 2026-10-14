@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-14T09:29:36.068Z",
+  "generatedAt": "2026-10-14T15:17:25.938Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.91",
+      "commit": "a199148",
+      "releasedAt": "2026-10-14T14:50:32.000Z",
+      "notes": [
+        "docs(plan): record the 2.90 cross-device verification evidence"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.90",
       "commit": "f945ed1",
@@ -348,18 +356,6 @@
         "fix(install): self-healing update lock, trap INT/TERM, and clean lock on exit",
         "fix(install): grammatical past-tense in completion banner (updated vs updateed)",
         "feat(install): live slide progress bar with percentage, downloaded MB, and speed"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.49",
-      "commit": "559db28",
-      "releasedAt": "2026-10-09T17:24:24.000Z",
-      "notes": [
-        "fix(boot): guard against empty or undefined plugin name in manifestOf",
-        "feat(release): prune heavy optional vendor binaries and docs from prebuilt assets",
-        "feat(install): parallel chunked downloader with resume, stall-detection & integrity validation",
-        "fix(harness): Wave 1 bug-fix batch — client fencing, dedup, portability, config knobs, shipped defaults & i18n",
-        "fix(provider-sync): Oracle-reviewed concurrency batch — re-plan on conflict, atomic writes, serialized pass"
       ]
     }
   ]
