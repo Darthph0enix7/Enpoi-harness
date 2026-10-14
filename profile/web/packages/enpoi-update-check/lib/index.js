@@ -60,6 +60,14 @@ var CATALOG_FETCH_TIMEOUT_MS = 15e3;
 function catalogUrl(channel) {
   return `${CATALOG_RAW_BASE_URL}/${channel === "beta" ? "beta" : "stable"}.json`;
 }
+var MIN_COMMIT_PREFIX = 7;
+function commitsMatch(left, right) {
+  const a = left.trim().toLowerCase();
+  const b = right.trim().toLowerCase();
+  if (a.length < MIN_COMMIT_PREFIX || b.length < MIN_COMMIT_PREFIX) return false;
+  if (!/^[0-9a-f]+$/.test(a) || !/^[0-9a-f]+$/.test(b)) return false;
+  return a.startsWith(b) || b.startsWith(a);
+}
 function compareVersions(left, right) {
   const leftTokens = versionTokens(left);
   const rightTokens = versionTokens(right);
@@ -1717,6 +1725,20 @@ var UpdateCheckCore = class {
       if (newest === void 0) {
         return this.fail(checkedAt, "catalog carries no releases");
       }
+      if (commitsMatch(this.options.identity.commit, newest.commit)) {
+        this.status = {
+          state: "current",
+          current: { ...this.options.identity },
+          latest: {
+            version: newest.version,
+            commit: newest.commit,
+            releasedAt: newest.releasedAt,
+            notes: cloneNotes(newest.notes)
+          },
+          checkedAt
+        };
+        return this.snapshot();
+      }
       const comparison = compareVersions(this.options.identity.version, newest.version);
       if (comparison === null) {
         return this.fail(
@@ -1918,6 +1940,7 @@ export {
   LOG_TAIL_BYTES,
   LOG_TAIL_LINES,
   LaunchEnvironmentError,
+  MIN_COMMIT_PREFIX,
   RUN_HOME_ENV,
   RUN_MARKER_FILE,
   RUN_STALE_WINDOW_MS,
@@ -1933,6 +1956,7 @@ export {
   cancelEngineRun,
   catalogUrl,
   commandOnPath,
+  commitsMatch,
   compareVersions,
   defaultShimPath,
   effectivePid,

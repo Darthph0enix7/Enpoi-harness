@@ -423,6 +423,21 @@ describe('UpdateIndicator dialog', () => {
     expect(screen.getByText(en['result.rolledback'])).toBeTruthy()
   })
 
+  it('qualifies a stamped source-build current version in the dialog and the toast', () => {
+    mount({
+      status: {
+        ...availableStatus,
+        current: { version: '0.1.7-enpoi.2+gbb12abc', commit: 'bb12abc', channel: 'stable' },
+      },
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-versions]')?.textContent)
+      .toBe('0.1.7-enpoi.2+gbb12abc (source build) → 0.1.7-enpoi.2.84')
+    cleanup()
+    mount({ status: availableStatus, toastVersion: '0.1.7-enpoi.2+gbb12abc' })
+    expect(screen.getByRole('alert').textContent).toBe('Updated to 0.1.7-enpoi.2+gbb12abc (source build)')
+  })
+
   it('renders the success line for a landed run', () => {
     mount({ status: availableStatus, run: run({ mode: 'apply', result: 'success', phase: 'success', step: 9 }), dialogOpen: true })
     expect(document.querySelector('[data-dsh-update-success]')?.textContent).toBe('Updated to 0.1.7-enpoi.2.84')

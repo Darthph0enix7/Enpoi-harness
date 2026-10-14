@@ -22,9 +22,15 @@ service restart, self-check, health, retention).
   (branch `catalog`, file `<channel>.json` at the branch root; the same JSON
   ships as the `update-catalog-<channel>.json` release asset).
 - Compares `install-state.json` `version`/`commit` (version falling back to the
-  running tree's `package.json`) against the newest catalog entry. The version
-  comparator orders the `0.1.7-enpoi.<n>` shape numerically; an unparseable
-  version leaves the state `unknown`.
+  running tree's `package.json`) against the newest catalog entry. **Commit
+  identity wins over the version string:** when both commits are hex-ish, at
+  least 7 characters, and one is a prefix of the other (short vs full sha),
+  the install is `current` regardless of the version comparison — a
+  source-built install stamped `0.1.7-enpoi.2+gbb12abc` (or the bare base)
+  whose commit is the catalog target's commit is never offered that same
+  revision forever. The version comparator orders the `0.1.7-enpoi.<n>` shape
+  numerically and remains the fallback when either side lacks a commit; an
+  unparseable version with no commit match leaves the state `unknown`.
 - States: `unknown` (never fetched, or a failure with no prior success) →
   `current` → `available` → `dismissed`. A failure keeps the last successful
   comparison and records `error`; a newer catalog version re-arms `available`

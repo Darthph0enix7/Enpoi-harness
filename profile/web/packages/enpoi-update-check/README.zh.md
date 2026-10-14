@@ -8,7 +8,7 @@
 
 - 检查**本机安装渠道**的目录（`install-state.json` → `channel`；缺失或不可读时为 `stable`），启动后约 30 秒（含抖动）检查一次，之后每隔 `intervalMinutes`（含抖动）检查一次。
 - 目录 URL 遵循 `harness-release.yml` 发布的约定：`https://raw.githubusercontent.com/Darthph0enix7/Enpoi-harness/catalog/<channel>.json`（分支 `catalog`，文件为分支根目录下的 `<channel>.json`；同一份 JSON 也会作为 `update-catalog-<channel>.json` 发布资产提供）。
-- 将 `install-state.json` 的 `version`/`commit`（版本回退到运行树的 `package.json`）与目录中最新的条目比较。版本比较器按数值处理 `0.1.7-enpoi.<n>` 形态；无法解析的版本保持 `unknown`。
+- 将 `install-state.json` 的 `version`/`commit`（版本回退到运行树的 `package.json`）与目录中最新的条目比较。**提交身份优先于版本字符串：** 当两侧提交均为十六进制、长度至少 7，且一方是另一方的前缀（短 sha 对完整 sha）时，安装即为 `current`，与版本比较无关——源码构建的安装即使被标记为 `0.1.7-enpoi.2+gbb12abc`（或裸基础版本），只要其提交就是目录目标的提交，就绝不会被永远提示同一个版本可更新。版本比较器按数值处理 `0.1.7-enpoi.<n>` 形态，并在任一侧缺少提交时作为回退；无法解析且提交不匹配的版本保持 `unknown`。
 - 状态：`unknown`（从未获取，或没有成功先例的失败）→ `current` → `available` → `dismissed`。失败会保留上一次成功比较的结果并记录 `error`；跳过之后出现更新的目录版本会重新触发 `available`。
 - 完全失效无害：每次尝试只做一次有界获取（15 秒超时），下一个间隔之前不重试，每次失败最多输出一行 debug 日志。
 - 跳过记录持久化在 `$DSH_HOME/update-check/dismissed.json`（原子写入；存储失败降级为"未跳过"）。

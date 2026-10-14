@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { catalogUrl, compareVersions } from '../src/catalog.js'
+import { catalogUrl, commitsMatch, compareVersions, MIN_COMMIT_PREFIX } from '../src/catalog.js'
 
 describe('compareVersions', () => {
   it('returns 0 for identical versions, with or without the leading v', () => {
@@ -33,6 +33,25 @@ describe('compareVersions', () => {
     }
     // A numeric segment facing a text segment cannot be ordered.
     expect(compareVersions('1.2.3', '1.2.x')).toBeNull()
+  })
+})
+
+describe('commitsMatch', () => {
+  it('matches equal stamps and prefix forms in either direction', () => {
+    expect(commitsMatch('bb12abc', 'bb12abc')).toBe(true)
+    expect(commitsMatch('bb12abc', 'bb12abc64c00112233445566778899aabbccddee')).toBe(true)
+    expect(commitsMatch('bb12abc64c00112233445566778899aabbccddee', 'bb12abc')).toBe(true)
+    expect(commitsMatch('BB12ABC', 'bb12abc')).toBe(true)
+    expect(commitsMatch(' bb12abc ', 'bb12abc')).toBe(true)
+  })
+
+  it('rejects short, empty, malformed, or different stamps', () => {
+    expect(commitsMatch('bb12ab', 'bb12abc')).toBe(false)
+    expect(commitsMatch('', 'bb12abc')).toBe(false)
+    expect(commitsMatch('bb12abc', '')).toBe(false)
+    expect(commitsMatch('not-hex', 'bb12abc')).toBe(false)
+    expect(commitsMatch('aaaaaaa', 'bb12abc')).toBe(false)
+    expect(MIN_COMMIT_PREFIX).toBe(7)
   })
 })
 

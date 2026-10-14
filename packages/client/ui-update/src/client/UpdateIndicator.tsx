@@ -20,6 +20,7 @@ import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-cli
 import type { UpdateUiState } from './controller.ts'
 import { NS } from './locales.ts'
 import { APPLY_SWITCH_STEP, isExecutingPhase, type UpdateRunWire } from './rpc.ts'
+import { formatVersion } from './version.ts'
 import css from './UpdateIndicator.module.css'
 
 /** Actions and live state delivered through the renderer-bound hooks. */
@@ -128,7 +129,7 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
     <>
       {state.toastVersion !== null && (
         <Toast
-          text={t('toast.updated', { version: state.toastVersion })}
+          text={t('toast.updated', { version: formatVersion(state.toastVersion, t) })}
           tone="success"
           onDone={actions.toastDone}
         />
@@ -168,7 +169,7 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
             <div className={css.head}>
               {latest !== undefined && (
                 <p className={css.versions} data-dsh-update-versions>
-                  {t('dialog.versions', { current: status.current.version, latest: latest.version })}
+                  {t('dialog.versions', { current: formatVersion(status.current.version, t), latest: latest.version })}
                 </p>
               )}
               <div className={css.headMeta}>

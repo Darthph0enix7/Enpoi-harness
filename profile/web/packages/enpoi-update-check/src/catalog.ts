@@ -66,6 +66,28 @@ export function catalogUrl(channel: string): string {
  * @returns -1/0/1, or null when either side is not comparable (empty, no
  *   alphanumeric-segment shape, or a numeric/text kind mismatch at one index).
  */
+/** Shortest commit prefix considered a safe identity match. */
+export const MIN_COMMIT_PREFIX = 7
+
+/**
+ * Whether two commit stamps name the same revision. Both sides must be
+ * hex-ish and at least {@link MIN_COMMIT_PREFIX} characters; the shorter may
+ * be a prefix of the longer (short vs full sha), otherwise they are equal.
+ * An empty or malformed side never matches — callers then fall back to the
+ * version-string comparison.
+ *
+ * @param left - one commit stamp (installed or catalog).
+ * @param right - the other commit stamp.
+ * @returns true when both name the same revision.
+ */
+export function commitsMatch(left: string, right: string): boolean {
+  const a = left.trim().toLowerCase()
+  const b = right.trim().toLowerCase()
+  if (a.length < MIN_COMMIT_PREFIX || b.length < MIN_COMMIT_PREFIX) return false
+  if (!/^[0-9a-f]+$/.test(a) || !/^[0-9a-f]+$/.test(b)) return false
+  return a.startsWith(b) || b.startsWith(a)
+}
+
 export function compareVersions(left: string, right: string): number | null {
   const leftTokens = versionTokens(left)
   const rightTokens = versionTokens(right)

@@ -3,8 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CatalogEntry } from '../src/catalog.js'
 import { jitteredDelay, startUpdateCheckSchedule, UpdateCheckCore } from '../src/service.js'
 
-function entry(version: string, notes: string[] = ['note']): CatalogEntry {
-  return { version, commit: 'abc1234', releasedAt: '2026-10-13T12:00:00.000Z', notes }
+function entry(version: string, notes: string[] = ['note'], commit = 'def5678'): CatalogEntry {
+  return { version, commit, releasedAt: '2026-10-13T12:00:00.000Z', notes }
 }
 
 interface Harness {
@@ -71,7 +71,7 @@ describe('UpdateCheckCore', () => {
     expect(status.state).toBe('available')
     expect(status.latest).toEqual({
       version: '0.1.7-enpoi.2.84',
-      commit: 'abc1234',
+      commit: 'def5678',
       releasedAt: '2026-10-13T12:00:00.000Z',
       notes: ['feat: a', 'fix: b'],
     })
@@ -84,6 +84,87 @@ describe('UpdateCheckCore', () => {
     expect((await core.checkNow()).state).toBe('current')
     const ahead = harness({ version: '0.1.7-enpoi.2.85' })
     expect((await ahead.core.checkNow()).state).toBe('current')
+  })
+
+  it('reports current when the installed commit is the catalog commit, despite a bare base version', async () => {
+    // The source-build fallback stamps `0.1.7-enpoi.2+g<sha>` (or the bare
+    // base); the catalog target is `0.1.7-enpoi.2.88`. Same revision, so the
+    // install is current and no update is ever offered for it.
+    const { core } = harness({
+      version: '0.1.7-enpoi.2+gbb12abc',
+      commit: 'bb12abc',
+      entries: [entry('0.1.7-enpoi.2.88', ['note'], 'bb12abc')],
+    })
+    const status = await core.checkNow()
+    expect(status.state).toBe('current')
+    expect(status.latest?.version).toBe('0.1.7-enpoi.2.88')
+    expect(status.error).toBeUndefined()
+  })
+
+  it('matches short and full commit forms in either direction', async () => {
+    const shortInstalled = harness({
+      version: '0.1.7-enpoi.2',
+      commit: 'bb12abc',
+      entries: [entry('0.1.7-enpoi.2.88', ['note'], 'bb12abc64c00112233445566778899aabbccddee')],
+    })
+    expect((await shortInstalled.core.checkNow()).state).toBe('current')
+    const fullInstalled = harness({
+      version: '0.1.7-enpoi.2+gbb12abc64c0',
+      commit: 'bb12abc64c00112233445566778899aabbccddee',
+      entries: [entry('0.1.7-enpoi.2.88', ['note'], 'bb12abc')],
+    })
+    expect((await fullInstalled.core.checkNow()).state).toBe('current')
+  })
+
+  it('offers the update when the commits differ, and falls back to the version without commits', async () => {
+    const different = harness({
+      version: '0.1.7-enpoi.2',
+      commit: 'aaaaaaa',
+      entries: [entry('0.1.7-enpoi.2.88', ['note'], 'bb12abc')],
+    })
+    expect((await different.core.checkNow()).state).toBe('available')
+
+    const noInstalledCommit = harness({
+      version: '0.1.7-enpoi.2',
+      commit: '',
+      entries: [entry('0.1.7-enpoi.2.88', ['note'], 'bb12abc')],
+    })
+    expect((await noInstalledCommit.core.checkNow()).state).toBe('available')
+
+    const noCatalogCommit = harness({
+      version: '0.1.7-enpoi.2',
+      commit: 'bb12abc',
+      entries: [entry('0.1.7-enpoi.2.88', ['note'], '')],
+    })
+    expect((await noCatalogCommit.core.checkNow()).state).toBe('available')
+  })
+
+  it('treats a short or malformed commit stamp as no identity and uses the version comparison', async () => {
+    for (const commit of ['bb12', 'not-hex', 'ZZZZZZZ']) {
+      const { core } = harness({
+        version: '0.1.7-enpoi.2',
+        commit,
+        entries: [entry('0.1.7-enpoi.2.88', ['note'], 'bb12abc')],
+      })
+      expect((await core.checkNow()).state, commit).toBe('available')
+    }
+  })
+
+  it('lets a commit match decide even when the version strings are uncomparable', async () => {
+    const matching = harness({
+      version: 'banana',
+      commit: 'bb12abc',
+      entries: [entry('0.1.7-enpoi.2.88', ['note'], 'bb12abc')],
+    })
+    expect((await matching.core.checkNow()).state).toBe('current')
+    const unmatched = harness({
+      version: 'banana',
+      commit: 'aaaaaaa',
+      entries: [entry('0.1.7-enpoi.2.88', ['note'], 'bb12abc')],
+    })
+    const status = await unmatched.core.checkNow()
+    expect(status.state).toBe('unknown')
+    expect(status.error).toContain('uncomparable versions')
   })
 
   it('stays unknown with an error when the fetch is offline, logging one failure', async () => {

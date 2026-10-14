@@ -11,7 +11,7 @@
  */
 
 import type { CatalogEntry, InstallIdentity } from './catalog.js'
-import { compareVersions } from './catalog.js'
+import { commitsMatch, compareVersions } from './catalog.js'
 
 /** The four indicator states. */
 export type UpdateCheckState = 'unknown' | 'current' | 'available' | 'dismissed'
@@ -126,6 +126,24 @@ export class UpdateCheckCore {
       const newest = entries[0]
       if (newest === undefined) {
         return this.fail(checkedAt, 'catalog carries no releases')
+      }
+      // Commit identity wins over the version string: a source-built install
+      // stamped with the bare base version (`0.1.7-enpoi.2`, or `…+g<sha>`)
+      // whose commit is the catalog target's commit is CURRENT, so it can
+      // never be offered the same revision forever.
+      if (commitsMatch(this.options.identity.commit, newest.commit)) {
+        this.status = {
+          state: 'current',
+          current: { ...this.options.identity },
+          latest: {
+            version: newest.version,
+            commit: newest.commit,
+            releasedAt: newest.releasedAt,
+            notes: cloneNotes(newest.notes),
+          },
+          checkedAt,
+        }
+        return this.snapshot()
       }
       const comparison = compareVersions(this.options.identity.version, newest.version)
       if (comparison === null) {
