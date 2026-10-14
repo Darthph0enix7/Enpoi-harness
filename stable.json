@@ -1,8 +1,18 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-10-14T07:06:31.105Z",
+  "generatedAt": "2026-10-14T08:24:27.843Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.88",
+      "commit": "bb12abc",
+      "releasedAt": "2026-10-14T07:55:55.000Z",
+      "notes": [
+        "fix(update): reclaim stale locks, keep attach lock-free, one lock per run",
+        "fix(update): one liveness truth, stale-state self-healing, and UI recovery",
+        "fix(release): ship the full release version in client artifacts"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.87",
       "commit": "7f3ce23",
@@ -357,16 +367,6 @@
         "feat(agents): baseline opt-out, extendBuiltins merge, customTools pinned",
         "feat(provider-data): models.dev path/URL + route map config, seed delete markers",
         "fix(portability): heal node-path units, FreeLLMAPI feed field, ds.fish resolver, URL validation"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.47",
-      "commit": "13565f3",
-      "releasedAt": "2026-10-08T22:05:32.000Z",
-      "notes": [
-        "fix(ui-settings-models): route the translate stub to the client project",
-        "feat(ui-brand-enpoi): typed en/zh dictionary — package i18n gate to zero",
-        "feat(models/portability): settings-models i18n + dynamic wizard data; P1 portability"
       ]
     }
   ]
