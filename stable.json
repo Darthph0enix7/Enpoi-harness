@@ -1,8 +1,18 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-10-14T15:17:25.894Z",
+  "generatedAt": "2026-10-14T16:19:10.071Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.92",
+      "commit": "93fd627",
+      "releasedAt": "2026-10-14T15:57:03.000Z",
+      "notes": [
+        "fix(update-ui): scope the landed-run pill guard, reconcile stale runs on reconnect",
+        "docs: true up the roster gate line and re-record the superseded-note pairings",
+        "docs(hygiene): supersede the v0.1.1-era state ledger and the desktop-updater notes"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.91",
       "commit": "a199148",
@@ -340,22 +350,6 @@
       "releasedAt": "2026-10-10T11:44:17.000Z",
       "notes": [
         "fix(install): live update progress, per-step heartbeats, and no silent exec death"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.50",
-      "commit": "9635876",
-      "releasedAt": "2026-10-10T10:55:09.000Z",
-      "notes": [
-        "fix(release): no device patch or phantom MCP ships in the profile",
-        "fix(profile): isolate provider metadata; endpoint-authoritative model refresh",
-        "fix(client): model visibility keeps operator intent; panel remounts per route",
-        "fix(provider-sync): validate thinking level keys and bypass withhold guard on manual refresh",
-        "fix(installer): Oracle-approved locking, atomic progress, FD hygiene, and step 6 caching",
-        "fix(update): preserve recorded channel on plain 'dsh update' without --channel",
-        "fix(install): self-healing update lock, trap INT/TERM, and clean lock on exit",
-        "fix(install): grammatical past-tense in completion banner (updated vs updateed)",
-        "feat(install): live slide progress bar with percentage, downloaded MB, and speed"
       ]
     }
   ]
