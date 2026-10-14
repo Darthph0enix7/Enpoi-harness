@@ -190,6 +190,15 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
+/* The failure surface's recovery block: the hint plus the one button. */
+.recover {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 2px;
+}
+
 /* The progress panel's cancel row: one quiet control, pinned to the end. */
 .progressActions {
   display: flex;

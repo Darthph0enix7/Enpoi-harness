@@ -59,6 +59,7 @@ function mount(initial: Partial<UpdateUiState> = {}) {
     skip: vi.fn(),
     cancel: vi.fn(),
     checkNow: vi.fn(),
+    recover: vi.fn(),
     toastDone: vi.fn(),
   }
   const props = {
@@ -328,6 +329,50 @@ describe('UpdateIndicator dialog', () => {
     })
     expect(document.querySelector('[data-dsh-update-failure]')?.getAttribute('data-dsh-update-failure')).toBe('failed')
     expect(screen.getByRole('button', { name: en['action.retry'] })).toBeTruthy()
+  })
+
+  it('offers Clear update state & retry on a failed record that kept a staged tree', () => {
+    const { actions } = mount({
+      status: availableStatus,
+      run: run({
+        mode: 'apply',
+        phase: 'failed',
+        result: 'failed',
+        staged: true,
+        reason: 'another update is already running (PID 30852)',
+        logTail: ['[8/9] switch, service and backfill'],
+      }),
+      dialogOpen: true,
+    })
+    const block = document.querySelector('[data-dsh-update-recover]')
+    expect(block).not.toBeNull()
+    expect(screen.getByText(en['failure.recoverHint'])).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en['action.recover'] }))
+    expect(actions.recover).toHaveBeenCalledTimes(1)
+  })
+
+  it('offers recovery for an already-running failure without a staged flag, and hides it otherwise', () => {
+    const stale = mount({
+      status: availableStatus,
+      run: run({ phase: 'failed', result: 'failed', staged: false, reason: 'an update is already running (run 1791962848-31835)' }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-recover]')).not.toBeNull()
+    stale.unmount()
+    mount({
+      status: availableStatus,
+      run: run({ phase: 'failed', result: 'failed', staged: false, reason: 'the prepare run exited before reporting a result' }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-recover]')).toBeNull()
+    // A rolled-back apply with a surviving staged tree also recovers.
+    cleanup()
+    mount({
+      status: availableStatus,
+      run: run({ mode: 'apply', phase: 'rolledback', result: 'rolledback', staged: true }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-recover]')).not.toBeNull()
   })
 
   it('renders a cancelled run with its own copy and Retry', () => {

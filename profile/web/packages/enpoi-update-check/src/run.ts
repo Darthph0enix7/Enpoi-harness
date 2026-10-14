@@ -160,6 +160,77 @@ export const LOG_TAIL_LINES = 40
 /** How many bytes of the log a tail read inspects. */
 export const LOG_TAIL_BYTES = 64 * 1024
 
+/** No file movement for this long means a "live" run is stalled (stale until proven otherwise). */
+export const RUN_STALE_WINDOW_MS = 5 * 60_000
+
+/** One file's mtime in ms, or null when unreadable. */
+export function fileMtimeMs(file: string): number | null {
+  try {
+    return statSync(file).mtimeMs
+  } catch {
+    return null
+  }
+}
+
+/**
+ * How long ago the newest of `paths` last moved, or null when no file is
+ * readable (no evidence: callers must not treat missing evidence as stalled).
+ * @param paths - files a live run moves (its log, the engine marker, a pid file).
+ * @param nowMs - current time in ms.
+ * @returns age in ms, or null.
+ */
+export function progressAgeMs(paths: readonly string[], nowMs: number): number | null {
+  let newest = 0
+  let found = false
+  for (const path of paths) {
+    const mtime = fileMtimeMs(path)
+    if (mtime === null) continue
+    found = true
+    if (mtime > newest) newest = mtime
+  }
+  return found ? Math.max(0, nowMs - newest) : null
+}
+
+/** Whether a progress age proves a run stalled (no evidence is never stalled). */
+export function isProgressStale(ageMs: number | null, staleWindowMs = RUN_STALE_WINDOW_MS): boolean {
+  return ageMs !== null && ageMs > staleWindowMs
+}
+
+/** The staged-apply record the engine writes after a successful prepare. */
+export interface StagedApplyRecord {
+  /** Staged release version. */
+  readonly version: string
+  /** Tree directory under `harness/` the apply switches to. */
+  readonly treeDirName: string
+  /** Channel the prepare ran with. */
+  readonly channel: string
+  /** Prepared timestamp, ISO 8601. */
+  readonly preparedAt: string
+}
+
+/**
+ * Read and validate the engine's staged-apply record.
+ * @param prefix - install prefix.
+ * @returns the staged record, or null when absent/malformed.
+ */
+export function readStagedApply(prefix: string): StagedApplyRecord | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(stagedApplyPath(prefix), 'utf8'))
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+    const raw = parsed as Record<string, unknown>
+    if (typeof raw.version !== 'string' || raw.version === '') return null
+    if (typeof raw.treeDirName !== 'string' || raw.treeDirName === '') return null
+    return {
+      version: raw.version,
+      treeDirName: raw.treeDirName,
+      channel: typeof raw.channel === 'string' ? raw.channel : 'stable',
+      preparedAt: typeof raw.preparedAt === 'string' ? raw.preparedAt : '',
+    }
+  } catch {
+    return null
+  }
+}
+
 const STEP_MARKER = /\[(\d+)\/(\d+)\]/
 const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g
 
@@ -460,16 +531,20 @@ export interface ReconcileContext {
  * @param record - the persisted record.
  * @param identity - the install identity read at reconcile time.
  * @param context - home/prefix paths and clock.
+ * @param options - `live` overrides the pid-only liveness probe (the
+ *   controller's strong liveness: pid + progress freshness + non-terminal).
  * @returns the reconciled record and whether it changed.
  */
 export function reconcileRunRecord(
   record: UpdateRunRecord,
   identity: InstallIdentity,
   context: ReconcileContext,
+  options: { readonly live?: boolean } = {},
 ): { record: UpdateRunRecord; changed: boolean } {
   const now = context.now ?? (() => new Date())
   if (record.result !== null) return { record, changed: false }
-  if (isRunActive(context.home, record)) return { record, changed: false }
+  const live = options.live ?? isRunActive(context.home, record)
+  if (live) return { record, changed: false }
   const staged = hasStagedApply(context.prefix)
   const parsed = readRunLog(record.logPath)
   if (parsed.result !== null) {

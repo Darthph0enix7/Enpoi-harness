@@ -44,13 +44,14 @@ import {
 } from './launcher.js'
 import { cancelEngineRun, type CancelEngineInput, type EngineCancelOutcome, type EngineCancelStatus } from './cancel.js'
 import {
-  isMarkerLive, isProcessLive, modeFromMarker, observedRecordFromMarker, phaseFromMarker, readRunMarker, type EngineRunMarker,
+  isMarkerLive, isProcessLive, markerProgressAge, modeFromMarker, observedRecordFromMarker, phaseFromMarker, readRunMarker,
+  type EngineRunMarker,
 } from './marker.js'
 import { probeEngineCapability, type EngineProbeResult } from './probe.js'
 import {
-  effectivePid, executingPhase, hasStagedApply, isPreparedPhase, isProcessAlive, isRunActive, modeFlag, preparedRecord,
-  readRunLog, readRunPid, readRunRecord, reconcileRunRecord, RUN_STEP_TOTAL, rungForMode, runLogPath,
-  runPidPath, runRecordPath, sameRunRecord, writeRunRecord,
+  effectivePid, executingPhase, hasStagedApply, isPreparedPhase, isProcessAlive, isProgressStale, isRunActive, modeFlag,
+  preparedRecord, progressAgeMs, readRunLog, readRunPid, readRunRecord, readStagedApply, reconcileRunRecord,
+  RUN_STALE_WINDOW_MS, RUN_STEP_TOTAL, rungForMode, runLogPath, runPidPath, runRecordPath, sameRunRecord, writeRunRecord,
   type UpdatePhase, type UpdateRunMode, type UpdateRunRecord,
 } from './run.js'
 import type { UpdateCheckStatus } from './service.js'
@@ -200,8 +201,11 @@ export class UpdateRunController {
    * is never watched host-side.
    */
   run(): UpdateRunRecord | null {
+    // Every read heals: a stale record must never surface as an active run or
+    // block a gate (the engine's own truth decides real liveness).
+    this.healStaleOwn()
     const own = this.loadOwn()
-    if (own !== null && own.result === null && !isPreparedPhase(own.phase) && this.isAliveRecord(own)) return own
+    if (own !== null && own.result === null && !isPreparedPhase(own.phase) && this.blockingRun(own)) return own
     return this.observeEngineRun() ?? own
   }
 
@@ -224,11 +228,60 @@ export class UpdateRunController {
   /** Synthesize a live record from the engine marker, or null when none is live. */
   private observeEngineRun(): UpdateRunRecord | null {
     const marker = readRunMarker(this.prefix)
-    if (marker === null || !isMarkerLive(marker, this.options.isAlive ?? isProcessLive)) return null
+    if (marker === null) return null
+    if (!isMarkerLive(marker, this.options.isAlive ?? isProcessLive, {
+      progressAgeMs: markerProgressAge(marker, this.prefix, this.now().getTime()),
+    })) return null
     return observedRecordFromMarker(marker, {
       prefix: this.prefix,
       channel: this.options.readIdentity().channel,
     })
+  }
+
+  /**
+   * Whether the engine's own truth names a live run: a live non-terminal,
+   * non-stalled marker, or the mkdir-fallback lock's live owner pid. The
+   * flock file's presence means nothing (flock releases without removing it),
+   * so it is never consulted.
+   */
+  private engineRunActive(): boolean {
+    const marker = readRunMarker(this.prefix)
+    if (marker !== null && isMarkerLive(marker, this.options.isAlive ?? isProcessLive, {
+      progressAgeMs: markerProgressAge(marker, this.prefix, this.now().getTime()),
+    })) return true
+    const lockPid = readRunPid(join(this.prefix, 'harness', '.update.lock.d', 'pid'))
+    return lockPid !== null && (this.options.isAlive ?? isProcessLive)(lockPid)
+  }
+
+  /** Whether the engine's live run is the same run as the persisted record. */
+  private engineRunActiveFor(record: UpdateRunRecord): boolean {
+    if (!this.engineRunActive()) return false
+    const marker = readRunMarker(this.prefix)
+    return marker !== null && this.markerMatchesRecord(record, marker)
+  }
+
+  /**
+   * Auto-heal a stale persisted record: not live by pid, and either the engine
+   * agrees nothing runs or the engine runs something else. The record is
+   * reconciled to a terminal state (success when the install already reached
+   * the target, otherwise failed with a clear reason) and the dead pid file is
+   * dropped, so no gate can refuse on state that is not real. Runs younger
+   * than the start grace and prepared records are left alone.
+   */
+  private healStaleOwn(): void {
+    const own = this.loadOwn()
+    if (own === null || own.result !== null || isPreparedPhase(own.phase)) return
+    const startedAtMs = Date.parse(own.startedAt)
+    if (Number.isFinite(startedAtMs) && this.now().getTime() - startedAtMs < RUN_START_GRACE_MS) return
+    if (this.isAliveRecord(own) || this.engineRunActiveFor(own)) return
+    const { record, changed } = reconcileRunRecord(own, this.options.readIdentity(), {
+      home: this.options.home,
+      prefix: this.prefix,
+      now: this.now,
+    }, { live: false })
+    if (changed) this.persist(record)
+    this.stopWatcher()
+    try { rmSync(runPidPath(this.options.home), { force: true }) } catch { /* best effort */ }
   }
 
   /**
@@ -279,12 +332,15 @@ export class UpdateRunController {
   reconcile(): UpdateRunRecord | null {
     const current = this.loadOwn()
     if (current === null) return null
-    if (current.result === null && !isPreparedPhase(current.phase) && this.isAliveRecord(current)) {
+    if (current.result === null && !isPreparedPhase(current.phase) && this.blockingRun(current)) {
       // The updater outlived the old watcher: resume watching. When the engine
       // marker names the same live run, its pid/phase/step are authoritative
       // (the log-derived record may lag the switch).
       const marker = readRunMarker(this.prefix)
-      if (marker !== null && isMarkerLive(marker, this.options.isAlive ?? isProcessLive) && this.markerMatchesRecord(current, marker)) {
+      const markerLive = marker !== null && isMarkerLive(marker, this.options.isAlive ?? isProcessLive, {
+        progressAgeMs: markerProgressAge(marker, this.prefix, this.now().getTime()),
+      })
+      if (marker !== null && markerLive && this.markerMatchesRecord(current, marker)) {
         const merged: UpdateRunRecord = {
           ...current,
           pid: marker.pid,
@@ -303,12 +359,15 @@ export class UpdateRunController {
       return current
     }
     if (isPreparedPhase(current.phase) && hasStagedApply(this.prefix)) return current
+    // A non-live non-prepared record is stale by definition: reconcile with
+    // strong liveness so a recycled pid cannot keep it active.
     const { record, changed } = reconcileRunRecord(current, this.options.readIdentity(), {
       home: this.options.home,
       prefix: this.prefix,
       now: this.now,
-    })
+    }, { live: false })
     if (changed) this.persist(record)
+    try { rmSync(runPidPath(this.options.home), { force: true }) } catch { /* best effort */ }
     return record
   }
 
@@ -348,7 +407,9 @@ export class UpdateRunController {
           `updateCheck.start: update ${current.target} is already prepared; apply it instead`,
         )
       }
-      if (this.isAliveRecord(current)) {
+      // Strong liveness or the engine's own live run; a stale record was
+      // already healed by run(), so this only refuses for something real.
+      if (this.blockingRun(current)) {
         throw new RunRefusedError(
           'already-running',
           `updateCheck.start: an update is already running (run ${current.runId}, step ${String(current.step)}/${String(current.steps)})`,
@@ -373,7 +434,7 @@ export class UpdateRunController {
   apply(): UpdateRunRecord {
     this.reconcile()
     const current = this.run()
-    if (current !== null && this.isAliveRecord(current)) {
+    if (current !== null && this.blockingRun(current)) {
       throw new RunRefusedError(
         'already-running',
         `updateCheck.apply: an update is already running (run ${current.runId})`,
@@ -385,7 +446,12 @@ export class UpdateRunController {
         `updateCheck.apply: run ${current.runId} is a one-shot update (this engine has no --prepare); there is nothing to apply — the run restarts the service itself when it switches`,
       )
     }
-    if (current === null || !isPreparedPhase(current.phase)) {
+    // A failed apply with a valid staged marker is re-appliable without a new
+    // prepare (the engine re-validates the staged record under its lock): this
+    // is the recovery path the UI's "Clear update state & retry" uses.
+    const revisableFailure = current !== null
+      && current.result !== null && current.result !== 'success' && current.staged === true
+    if (current === null || (!isPreparedPhase(current.phase) && !revisableFailure)) {
       throw new RunRefusedError(
         'not-prepared',
         'updateCheck.apply: no prepared update is staged; run Update now first',
@@ -397,7 +463,59 @@ export class UpdateRunController {
         'updateCheck.apply: the staged apply marker is gone; run Update now to prepare again',
       )
     }
-    return this.begin('apply', { target: current.target, channel: current.channel })
+    // Re-apply the version the staged record actually names (the failed
+    // record's target may predate it).
+    const staged = readStagedApply(this.prefix)
+    return this.begin('apply', {
+      target: staged?.version ?? current.target,
+      channel: staged?.channel ?? current.channel,
+    })
+  }
+
+  /**
+   * Clear stale update state so a stuck failure can recover: refuses while
+   * anything is genuinely live (the observer's view, the persisted record by
+   * strong liveness, or the engine's own marker/mkdir-lock truth), then heals
+   * the persisted record to a terminal state and drops the dead pid file. The
+   * engine's marker and the staged tree are never touched, so a valid staged
+   * update survives for an immediate re-apply.
+   *
+   * @returns the run record after clearing (terminal, or observed when the
+   *   engine started something in the meantime).
+   * @throws RunRefusedError when a live run or the engine's live lock exists.
+   */
+  clearStale(): UpdateRunRecord | null {
+    const observed = this.observeEngineRun()
+    if (observed !== null && this.isAliveRecord(observed)) {
+      throw new RunRefusedError(
+        'already-running',
+        `updateCheck.clearStale: run ${observed.runId} is live (${observed.phase}); cancel it or wait`,
+      )
+    }
+    const own = this.loadOwn()
+    if (own !== null && this.isAliveRecord(own)) {
+      throw new RunRefusedError(
+        'already-running',
+        `updateCheck.clearStale: run ${own.runId} is live (${own.phase}); cancel it or wait`,
+      )
+    }
+    if (this.engineRunActive()) {
+      throw new RunRefusedError(
+        'already-running',
+        'updateCheck.clearStale: the engine still holds a live update lock; wait for it or cancel it',
+      )
+    }
+    if (own !== null && own.result === null && !isPreparedPhase(own.phase)) {
+      const { record } = reconcileRunRecord(own, this.options.readIdentity(), {
+        home: this.options.home,
+        prefix: this.prefix,
+        now: this.now,
+      }, { live: false })
+      this.persist(record)
+      this.stopWatcher()
+    }
+    try { rmSync(runPidPath(this.options.home), { force: true }) } catch { /* best effort */ }
+    return this.run()
   }
 
   /**
@@ -663,16 +781,35 @@ export class UpdateRunController {
   }
 
   /** Whether a record has a live process by the controller's liveness seam. */
+  /**
+   * Strong liveness: terminal/prepared records are never live; the pid must be
+   * live and non-zombie; and the run's own files must have moved inside the
+   * stall window — a recycled pid or a dead process behind a live-looking pid
+   * never blocks. Missing file evidence counts as live (never auto-heal on
+   * absent evidence).
+   */
   private isAliveRecord(record: UpdateRunRecord): boolean {
     if (record.result !== null || isPreparedPhase(record.phase)) return false
-    // An observed record's pid is the engine's own; the wrapper pid file and
-    // the plugin's liveness seam do not apply to it.
+    const probe = this.options.isAlive ?? isProcessLive
     if (record.observed === true) {
-      if (record.pid === null) return false
-      return (this.options.isAlive ?? isProcessLive)(record.pid)
+      // The observed record's pid and log are the engine's own.
+      if (record.pid === null || !probe(record.pid)) return false
+      const age = progressAgeMs(record.logPath === '' ? [] : [record.logPath], this.now().getTime())
+      return !isProgressStale(age)
     }
-    if (this.options.isAlive === undefined) return isRunActive(this.options.home, record)
+    // The wrapper pid file is the primary anchor for plugin-started runs; the
+    // record's own pid is the fallback.
     const pid = effectivePid(this.options.home, record)
-    return pid !== null && this.options.isAlive(pid)
+    if (pid === null || !probe(pid)) return false
+    // Freshness evidence is the run log only: the pid file is written once at
+    // launch and says nothing about progress.
+    const age = progressAgeMs([record.logPath], this.now().getTime())
+    return !isProgressStale(age)
+  }
+
+  /** Whether a run must block a new start/apply: strong liveness, or the engine's own live run matching it. */
+  private blockingRun(record: UpdateRunRecord): boolean {
+    if (record.result !== null || isPreparedPhase(record.phase)) return false
+    return this.isAliveRecord(record) || this.engineRunActiveFor(record)
   }
 }

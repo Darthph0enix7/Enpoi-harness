@@ -21,7 +21,8 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  hasStagedApply, readRunLog, rungForMode, type UpdatePhase, type UpdateRunMode, type UpdateRunRecord, type UpdateRunResult,
+  hasStagedApply, isProgressStale, progressAgeMs, readRunLog, RUN_STALE_WINDOW_MS, rungForMode,
+  type UpdatePhase, type UpdateRunMode, type UpdateRunRecord, type UpdateRunResult,
 } from './run.js'
 
 /** Marker file name under `<prefix>/harness`. */
@@ -128,9 +129,51 @@ export function isProcessLive(pid: number, platform: NodeJS.Platform = process.p
   }
 }
 
-/** Whether a marker names a live (non-zombie) engine process. */
-export function isMarkerLive(marker: EngineRunMarker, isAlive: (pid: number) => boolean = isProcessLive): boolean {
-  return marker.pid > 0 && isAlive(marker.pid)
+/** Liveness inputs beyond the pid probe. */
+export interface MarkerLivenessOptions {
+  /**
+   * How long ago the newest of the marker/log files moved. `undefined` means
+   * no evidence was gathered (callers without a prefix): the marker then
+   * counts as fresh rather than stalled.
+   */
+  readonly progressAgeMs?: number | null
+  /** Stall window override (tests). */
+  readonly staleWindowMs?: number
+}
+
+/**
+ * Whether a marker names a live engine run: terminal phases are never live
+ * (regardless of a recycled pid), the pid must be live and non-zombie, and
+ * the marker/log must have moved within the stall window when that evidence
+ * is available.
+ *
+ * @param marker - the parsed marker.
+ * @param isAlive - process probe.
+ * @param options - progress age/window.
+ * @returns true only for a genuinely progressing run.
+ */
+export function isMarkerLive(
+  marker: EngineRunMarker,
+  isAlive: (pid: number) => boolean = isProcessLive,
+  options: MarkerLivenessOptions = {},
+): boolean {
+  if (resultFromMarkerPhase(marker.phase) !== null) return false
+  if (marker.pid <= 0 || !isAlive(marker.pid)) return false
+  const age = options.progressAgeMs
+  if (age !== undefined && isProgressStale(age, options.staleWindowMs ?? RUN_STALE_WINDOW_MS)) return false
+  return true
+}
+
+/**
+ * How long ago the marker or its log last moved, or null when neither is
+ * readable (no evidence).
+ * @param marker - the parsed marker.
+ * @param prefix - install prefix (the marker path).
+ * @param nowMs - current time in ms.
+ * @returns age in ms, or null.
+ */
+export function markerProgressAge(marker: EngineRunMarker, prefix: string, nowMs: number): number | null {
+  return progressAgeMs([runMarkerPath(prefix), ...(marker.logPath === '' ? [] : [marker.logPath])], nowMs)
 }
 
 /** The run mode a marker mode maps to in the plugin's record. */

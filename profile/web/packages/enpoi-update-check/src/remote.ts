@@ -3,7 +3,7 @@
  *
  * Endpoints (wire names): `updateCheck/status`, `updateCheck/checkNow`,
  * `updateCheck/dismiss`, `updateCheck/start`, `updateCheck/apply`,
- * `updateCheck/run`, `updateCheck/cancel`. Thin decorated shell over {@link UpdateCheckCore} and
+ * `updateCheck/run`, `updateCheck/cancel`, `updateCheck/clearStale`. Thin decorated shell over {@link UpdateCheckCore} and
  * {@link UpdateRunController} (decorator-free, so the vitest pipeline tests
  * the logic directly). Advisory until `start` is called: nothing here
  * downloads or applies an update on its own, and `start` (prepare) never
@@ -147,6 +147,28 @@ export class UpdateCheckService extends TypertRemoteService {
   @Remote
   run(): UpdateRunRecord | null {
     return this.runs.run()
+  }
+
+  /**
+   * Clear stale update state so a stuck failure can recover: refuses while a
+   * run or the engine's lock is genuinely live, otherwise heals the persisted
+   * record to a terminal state and drops the dead pid file. The engine marker
+   * and the staged tree are never touched, so a valid staged update survives
+   * for an immediate re-apply.
+   *
+   * @returns the run record after clearing, or null.
+   * @throws RemoteError `gateway/bad-request` when something is genuinely live.
+   */
+  @Remote
+  clearStale(): UpdateRunRecord | null {
+    try {
+      return this.runs.clearStale()
+    } catch (error) {
+      if (error instanceof RunRefusedError) {
+        throw new RemoteError('gateway/bad-request', error.message, {})
+      }
+      throw error
+    }
   }
 
   /**

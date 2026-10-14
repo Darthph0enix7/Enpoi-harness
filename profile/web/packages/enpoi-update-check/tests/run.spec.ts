@@ -13,6 +13,11 @@ import type { InstallIdentity } from '../src/catalog.js'
 import {
   effectivePid,
   executingPhase,
+  fileMtimeMs,
+  isProgressStale,
+  progressAgeMs,
+  readStagedApply,
+  RUN_STALE_WINDOW_MS,
   hasStagedApply,
   isPreparedPhase,
   isProcessAlive,
@@ -301,6 +306,69 @@ describe('run record persistence and liveness', () => {
     const prepared = preparedRecord(record({ step: 7 }), at)
     expect(prepared).toMatchObject({ phase: 'prepared', result: null, staged: true, step: 7, finishedAt: '2026-10-13T12:30:00.000Z' })
     expect(prepared.reason).toBeUndefined()
+  })
+})
+
+describe('progress freshness and the staged-apply record', () => {
+  it('measures the newest file mtime and never calls missing evidence stale', () => {
+    const dir = scratch()
+    const file = join(dir, 'run.log')
+    writeFileSync(file, 'x')
+    const now = Date.now()
+    const age = progressAgeMs([file], now)
+    expect(age).not.toBeNull()
+    expect(age!).toBeLessThan(5_000)
+    expect(isProgressStale(age)).toBe(false)
+    expect(isProgressStale(progressAgeMs([join(dir, 'missing')], now))).toBe(false)
+    expect(progressAgeMs([join(dir, 'missing')], now)).toBeNull()
+    expect(isProgressStale(RUN_STALE_WINDOW_MS + 1)).toBe(true)
+    expect(isProgressStale(RUN_STALE_WINDOW_MS - 1)).toBe(false)
+    expect(fileMtimeMs(file)).toBeGreaterThan(0)
+    expect(fileMtimeMs(join(dir, 'missing'))).toBeNull()
+  })
+
+  it('reads and validates the engine staged-apply record', () => {
+    const prefix = scratch()
+    expect(readStagedApply(prefix)).toBeNull()
+    mkdirSync(join(prefix, 'harness'), { recursive: true })
+    writeFileSync(stagedApplyPath(prefix), JSON.stringify({
+      version: '0.1.7-enpoi.2.87',
+      treeDirName: '0.1.7-enpoi.2.87',
+      channel: 'stable',
+      releaseCommit: null,
+      prebuilt: true,
+      preparedAt: '2026-10-13T07:25:52Z',
+    }))
+    expect(readStagedApply(prefix)).toEqual({
+      version: '0.1.7-enpoi.2.87',
+      treeDirName: '0.1.7-enpoi.2.87',
+      channel: 'stable',
+      preparedAt: '2026-10-13T07:25:52Z',
+    })
+    writeFileSync(stagedApplyPath(prefix), '{"version": ""}')
+    expect(readStagedApply(prefix)).toBeNull()
+    writeFileSync(stagedApplyPath(prefix), 'not json')
+    expect(readStagedApply(prefix)).toBeNull()
+  })
+
+  it('honours an explicit live override in reconcileRunRecord', async () => {
+    const home = scratch()
+    mkdirSync(join(home, 'update-check'), { recursive: true })
+    writeFileSync(join(home, 'update-check', 'run.pid'), String(process.pid))
+    const pidLive = record({ phase: 'preparing', step: 4 })
+    // The pid probe alone would keep it; the strong-liveness override reconciles it.
+    const { record: reconciled, changed } = reconcileRunRecord(pidLive, identity('0.1.7-enpoi.2.81'), {
+      home,
+      prefix: join(home, 'prefix'),
+      now: () => new Date('2026-10-13T12:30:00.000Z'),
+    }, { live: false })
+    expect(changed).toBe(true)
+    expect(reconciled.result).toBe('failed')
+    const { changed: unchanged } = reconcileRunRecord(pidLive, identity('0.1.7-enpoi.2.81'), {
+      home,
+      prefix: join(home, 'prefix'),
+    }, { live: true })
+    expect(unchanged).toBe(false)
   })
 })
 

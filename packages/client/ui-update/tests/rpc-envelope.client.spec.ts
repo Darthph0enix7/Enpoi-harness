@@ -35,7 +35,7 @@ function capture(value: unknown = null): { requests: Captured[]; fetchImpl: type
 
 describe('updateCheck envelope shapes', () => {
   it('sends no-argument methods with an empty args object', async () => {
-    for (const method of ['updateCheck.status', 'updateCheck.checkNow', 'updateCheck.start', 'updateCheck.apply', 'updateCheck.run']) {
+    for (const method of ['updateCheck.status', 'updateCheck.checkNow', 'updateCheck.start', 'updateCheck.apply', 'updateCheck.run', 'updateCheck.clearStale']) {
       const { requests, fetchImpl } = capture()
       await updateCheckRpc(method, {}, fetchImpl)
       expect(requests).toHaveLength(1)

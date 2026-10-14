@@ -270,6 +270,28 @@ export class UpdateController {
     })
   }
 
+  /**
+   * `[Clear update state & retry]`: asks the host to clear stale run state
+   * (`updateCheck/clearStale`, which refuses while anything is genuinely
+   * live), then retries — an `apply` when the record still names a valid
+   * staged tree (no re-download), otherwise a fresh `start`.
+   */
+  recover(): void {
+    if (this.store.getSnapshot().busy) return
+    this.update({ busy: true, actionError: null })
+    void this.rpc('updateCheck.clearStale', {}).then((result) => {
+      if (this.disposed) return
+      if (!result.ok) {
+        this.update({ busy: false, actionError: result.message })
+        return
+      }
+      const record = result.value === null || result.value === undefined ? null : result.value as UpdateRunWire
+      this.update({ busy: false, run: record })
+      if (record !== null && record.staged) this.apply()
+      else this.start()
+    })
+  }
+
   /** `[Update now]`: prepare the update (`updateCheck/start`). */
   start(): void {
     if (this.store.getSnapshot().busy) return

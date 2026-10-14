@@ -3,7 +3,7 @@
  * (preparing → prepared, applying → terminal), and the boot reconcile across
  * both phases.
  */
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -520,6 +520,14 @@ describe('UpdateRunController engine-marker observer', () => {
     b.controller.dispose()
   })
 
+  it('never observes a terminal marker even when its pid still reads live', () => {
+    const home = scratch()
+    writeMarker(home, { phase: 'failed', step: 8 })
+    const b = bench({ home, isAlive: () => true })
+    expect(b.controller.run()).toBeNull()
+    b.controller.dispose()
+  })
+
   it('ignores a stale (dead-pid) marker and falls back to the persisted record', async () => {
     const home = scratch()
     writeMarker(home, { pid: await deadPid() })
@@ -616,6 +624,173 @@ describe('UpdateRunController engine-marker observer', () => {
     })
     await expect(controller.cancel()).rejects.toThrowError(expect.objectContaining({ reason: 'shim-missing' }))
     controller.dispose()
+  })
+})
+
+describe('UpdateRunController stale-state self-healing', () => {
+  /** Push one file's mtime well past the stall window. */
+  function staleMtime(path: string): void {
+    const past = new Date(Date.now() - 30 * 60_000)
+    utimesSync(path, past, past)
+  }
+
+  it('heals a dead-pid record on run() and lets start proceed', async () => {
+    const home = scratch()
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: { phase: 'preparing', step: 4, startedAt: new Date(Date.now() - 10 * 60_000).toISOString() },
+    }).record, await deadPid())
+    const b = bench({ home })
+    const healed = b.controller.run()!
+    expect(healed).toMatchObject({ result: 'failed', phase: 'failed' })
+    expect(healed.reason).toContain('no longer running')
+    const started = await b.controller.start()
+    expect(started).toMatchObject({ mode: 'prepare', phase: 'preparing' })
+    b.controller.dispose()
+  })
+
+  it('heals a recycled-pid record once its log stopped moving', async () => {
+    const home = scratch()
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: { phase: 'preparing', step: 4, startedAt: new Date(Date.now() - 30 * 60_000).toISOString() },
+    }).record, process.pid)
+    writeLog(home, '[4/9] dependencies and build\n')
+    staleMtime(runLogPath(home))
+    // The recycled pid reads live, but the run is not progressing.
+    const b = bench({ home, isAlive: () => true })
+    const healed = b.controller.run()!
+    expect(healed).toMatchObject({ result: 'failed', phase: 'failed' })
+    const started = await b.controller.start()
+    expect(started.mode).toBe('prepare')
+    b.controller.dispose()
+  })
+
+  it('still refuses while a genuinely progressing run is alive', async () => {
+    const home = scratch()
+    writeLiveRecord(home, recordFixture({ home, record: { phase: 'preparing', step: 2 } }).record, process.pid)
+    writeLog(home, '[2/9] source: stable channel archive\n')
+    const b = bench({ home, isAlive: () => true })
+    await expect(b.controller.start()).rejects.toThrowError(expect.objectContaining({ reason: 'already-running' }))
+    b.controller.dispose()
+  })
+
+  it('never lets a terminal record block, and re-applies the staged tree after a failure (the Mac case)', async () => {
+    const home = scratch()
+    mkdirSync(join(home, 'harness'), { recursive: true })
+    writeFileSync(stagedApplyPath(home), JSON.stringify({
+      version: '0.1.7-enpoi.2.87', treeDirName: '0.1.7-enpoi.2.87', channel: 'stable', preparedAt: '2026-10-13T07:25:52Z',
+    }))
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: {
+        mode: 'apply',
+        phase: 'failed',
+        result: 'failed',
+        staged: true,
+        target: '0.1.7-enpoi.2.86',
+        reason: 'another update is already running (PID 30852)',
+        startedAt: new Date(Date.now() - 20 * 60_000).toISOString(),
+      },
+    }).record, process.pid)
+    const b = bench({ home, isAlive: () => true })
+    const record = b.controller.apply()
+    // The staged record's version wins over the failed record's target.
+    expect(record).toMatchObject({ mode: 'apply', target: '0.1.7-enpoi.2.87', phase: 'applying' })
+    expect(b.launches).toHaveLength(1)
+    expect(b.launches[0]).toMatchObject({ flag: '--apply', prefix: home })
+    b.controller.dispose()
+  })
+
+  it('refuses apply on a failed record whose staged marker is gone', () => {
+    const home = scratch()
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: { mode: 'apply', phase: 'failed', result: 'failed', staged: true },
+    }).record, null)
+    const b = bench({ home })
+    expect(() => b.controller.apply()).toThrowError(expect.objectContaining({ reason: 'not-prepared' }))
+    b.controller.dispose()
+  })
+})
+
+describe('UpdateRunController clearStale', () => {
+  function writeMarkerDoc(home: string, phase: string, pid: number, logPath: string): void {
+    mkdirSync(join(home, 'harness'), { recursive: true })
+    writeFileSync(runMarkerPath(home), JSON.stringify({
+      runId: 'ext-1', pid, mode: 'apply', step: 8, steps: 9, phase, startedAt: '2026-10-13T07:30:00Z',
+      logPath, version: '', target: '0.1.7-enpoi.2.87',
+    }))
+  }
+
+  it('refuses while the engine lock directory has a live owner', () => {
+    const home = scratch()
+    mkdirSync(join(home, 'harness', '.update.lock.d'), { recursive: true })
+    writeFileSync(join(home, 'harness', '.update.lock.d', 'pid'), String(process.pid))
+    const b = bench({ home, isAlive: () => true })
+    expect(() => b.controller.clearStale()).toThrowError(expect.objectContaining({ reason: 'already-running' }))
+    expect(readFileSync(join(home, 'harness', '.update.lock.d', 'pid'), 'utf8')).toBe(String(process.pid))
+    b.controller.dispose()
+  })
+
+  it('refuses while a live observed run exists', () => {
+    const home = scratch()
+    writeMarkerDoc(home, 'running', process.pid, join(home, 'install.log'))
+    const b = bench({ home })
+    expect(() => b.controller.clearStale()).toThrowError(expect.objectContaining({ reason: 'already-running' }))
+    b.controller.dispose()
+  })
+
+  it('refuses while the plugin’s own run is genuinely progressing', async () => {
+    const home = scratch()
+    const b = bench({ home, isAlive: () => true })
+    await b.controller.start()
+    expect(() => b.controller.clearStale()).toThrowError(expect.objectContaining({ reason: 'already-running' }))
+    b.controller.dispose()
+  })
+
+  it('heals stale state, leaves the engine marker and staged tree untouched, and lets apply run', async () => {
+    const home = scratch()
+    mkdirSync(join(home, 'harness'), { recursive: true })
+    const stagedBody = JSON.stringify({
+      version: '0.1.7-enpoi.2.87', treeDirName: '0.1.7-enpoi.2.87', channel: 'stable', preparedAt: '2026-10-13T07:25:52Z',
+    })
+    writeFileSync(stagedApplyPath(home), stagedBody)
+    writeMarkerDoc(home, 'failed', await deadPid(), join(home, 'install.log'))
+    const markerBody = readFileSync(runMarkerPath(home), 'utf8')
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: { mode: 'apply', phase: 'applying', step: 8, staged: true, startedAt: new Date(Date.now() - 30 * 60_000).toISOString() },
+    }).record, await deadPid())
+    const b = bench({ home })
+    const cleared = b.controller.clearStale()!
+    expect(cleared).toMatchObject({ result: 'failed', phase: 'failed' })
+    // Engine-owned files are never touched.
+    expect(readFileSync(stagedApplyPath(home), 'utf8')).toBe(stagedBody)
+    expect(readFileSync(runMarkerPath(home), 'utf8')).toBe(markerBody)
+    // The dead pid file is dropped and apply now proceeds against the staged tree.
+    expect(existsSync(runPidPath(home))).toBe(false)
+    const applied = b.controller.apply()
+    expect(applied).toMatchObject({ mode: 'apply', target: '0.1.7-enpoi.2.87' })
+    b.controller.dispose()
+  })
+
+  it('heals a stale prepare that did stage the tree into the prepared state', async () => {
+    const home = scratch()
+    mkdirSync(join(home, 'harness'), { recursive: true })
+    writeFileSync(stagedApplyPath(home), JSON.stringify({
+      version: '0.1.7-enpoi.2.87', treeDirName: '0.1.7-enpoi.2.87', channel: 'stable', preparedAt: '2026-10-13T07:25:52Z',
+    }))
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: { mode: 'prepare', phase: 'preparing', step: 7, staged: true, startedAt: new Date(Date.now() - 30 * 60_000).toISOString() },
+    }).record, await deadPid())
+    const b = bench({ home })
+    const cleared = b.controller.clearStale()!
+    expect(cleared).toMatchObject({ phase: 'prepared', result: null })
+    const applied = b.controller.apply()
+    expect(applied).toMatchObject({ mode: 'apply', target: '0.1.7-enpoi.2.87' })
+    b.controller.dispose()
   })
 })
 

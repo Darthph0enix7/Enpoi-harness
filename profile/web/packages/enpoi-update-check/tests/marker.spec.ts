@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   isMarkerLive,
   isProcessLive,
+  markerProgressAge,
   modeFromMarker,
   observedRecordFromMarker,
   phaseFromMarker,
@@ -134,6 +135,35 @@ describe('liveness and mappings', () => {
     expect(isMarkerLive(marker(), () => true)).toBe(true)
     expect(isMarkerLive(marker({ pid: await deadPid() }))).toBe(false)
     expect(isMarkerLive(marker({ pid: 0 }), () => true)).toBe(false)
+  })
+
+  it('never treats a terminal phase as live, even with a live recycled pid', () => {
+    for (const phase of ['done', 'failed', 'rolledback', 'cancelled'] as const) {
+      expect(isMarkerLive(marker({ phase }), () => true), phase).toBe(false)
+    }
+  })
+
+  it('treats a stalled marker as not live once the evidence is available', () => {
+    expect(isMarkerLive(marker(), () => true, { progressAgeMs: 1_000 })).toBe(true)
+    expect(isMarkerLive(marker(), () => true, { progressAgeMs: 10 * 60_000 })).toBe(false)
+    // No evidence (undefined) never counts as stalled.
+    expect(isMarkerLive(marker(), () => true, { progressAgeMs: undefined })).toBe(true)
+    expect(isMarkerLive(marker(), () => true, { progressAgeMs: 10 * 60_000, staleWindowMs: 60 * 60_000 })).toBe(true)
+  })
+
+  it('measures the marker/log progress age, with null for missing evidence', () => {
+    const prefix = scratch()
+    mkdirSync(join(prefix, 'harness'), { recursive: true })
+    const logPath = join(prefix, 'install.log')
+    writeFileSync(logPath, 'x')
+    writeFileSync(runMarkerPath(prefix), JSON.stringify(marker({ logPath })))
+    const now = Date.now()
+    const fresh = markerProgressAge(marker({ logPath }), prefix, now)
+    expect(fresh).not.toBeNull()
+    expect(fresh!).toBeLessThan(5_000)
+    // A marker with no readable files has no evidence.
+    const empty = scratch()
+    expect(markerProgressAge(marker({ logPath: '' }), empty, now)).toBeNull()
   })
 })
 

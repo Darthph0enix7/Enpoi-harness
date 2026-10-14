@@ -34,6 +34,7 @@ export interface UpdateIndicatorInjected {
     skip: () => void
     cancel: () => void
     checkNow: () => void
+    recover: () => void
     toastDone: () => void
   }
 }
@@ -97,6 +98,11 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
   // its launch, a one-shot from step 8) the run cannot be interrupted safely.
   const cancelPastSwitch = activeRun !== null
     && (activeRun.phase === 'applying' || (activeRun.rung === 'one-shot' && activeRun.step >= APPLY_SWITCH_STEP))
+  // A failure that kept a valid staged tree (or that names an already-running/
+  // stale condition) gets the recovery affordance: clear the stale state and
+  // re-apply without re-downloading.
+  const staleFailure = failedRun !== null
+    && (failedRun.staged || /already running|stale/i.test(failedRun.reason ?? ''))
 
   const footer: ReactNode = executing ? (
     <Button onClick={actions.close}>{t('action.later')}</Button>
@@ -226,6 +232,12 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
                   <p className={css.logHead}>{t('failure.log')}</p>
                   <pre className={css.log} data-dsh-update-log>{failedRun.logTail.join('\n')}</pre>
                 </>
+              )}
+              {staleFailure && (
+                <div className={css.recover} data-dsh-update-recover>
+                  <p className={css.warning}>{t('failure.recoverHint')}</p>
+                  <Button disabled={state.busy} onClick={actions.recover}>{t('action.recover')}</Button>
+                </div>
               )}
             </section>
           )}

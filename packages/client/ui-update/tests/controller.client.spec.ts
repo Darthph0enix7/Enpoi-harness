@@ -416,6 +416,65 @@ describe('UpdateController checkNow', () => {
   })
 })
 
+describe('UpdateController recover', () => {
+  it('clears stale state then re-applies a staged record without re-preparing', async () => {
+    const failed = runWire({ mode: 'apply', phase: 'failed', result: 'failed', staged: true, reason: 'already running' })
+    const cleared = runWire({ mode: 'apply', phase: 'failed', result: 'failed', staged: true })
+    const applied = runWire({ mode: 'apply', phase: 'applying', staged: true })
+    const b = bench({
+      answers: {
+        'updateCheck.status': availableStatus,
+        'updateCheck.run': failed,
+        'updateCheck.clearStale': cleared,
+        'updateCheck.apply': applied,
+      },
+    })
+    b.controller.mount()
+    await settle()
+    b.controller.recover()
+    await settle()
+    await settle()
+    expect(b.calls.at(-2)).toEqual({ method: 'updateCheck.clearStale', args: {} })
+    expect(b.calls.at(-1)).toEqual({ method: 'updateCheck.apply', args: {} })
+    expect(b.controller.store.getSnapshot().run?.phase).toBe('applying')
+    b.controller.dispose()
+  })
+
+  it('falls back to a fresh start when clearing leaves nothing staged', async () => {
+    const b = bench({
+      answers: {
+        'updateCheck.status': availableStatus,
+        'updateCheck.run': runWire({ phase: 'failed', result: 'failed', staged: false }),
+        'updateCheck.clearStale': runWire({ phase: 'failed', result: 'failed', staged: false }),
+        'updateCheck.start': runWire({ phase: 'preparing' }),
+      },
+    })
+    b.controller.mount()
+    await settle()
+    b.controller.recover()
+    await settle()
+    await settle()
+    expect(b.calls.at(-1)).toEqual({ method: 'updateCheck.start', args: {} })
+    b.controller.dispose()
+  })
+
+  it('surfaces a refused clear (live run) as the action error', async () => {
+    const b = bench({
+      answers: {
+        'updateCheck.status': availableStatus,
+        'updateCheck.run': runWire(),
+      },
+      rpcError: 'updateCheck.clearStale: run ext-1 is live (preparing); cancel it or wait',
+    })
+    b.controller.mount()
+    await settle()
+    b.controller.recover()
+    await settle()
+    expect(b.controller.store.getSnapshot().actionError).toContain('is live')
+    b.controller.dispose()
+  })
+})
+
 describe('UpdateController cancel', () => {
   it('relays a cancelled engine outcome into the record', async () => {
     const cancelled = runWire({ observed: true, launcher: 'external', phase: 'cancelled', result: 'cancelled', staged: true })

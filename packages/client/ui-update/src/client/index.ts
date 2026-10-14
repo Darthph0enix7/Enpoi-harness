@@ -73,6 +73,7 @@ export function apply(ctx: ClientContext): void {
         skip: () => { controller.skip() },
         cancel: () => { controller.cancel() },
         checkNow: () => { controller.checkNow() },
+        recover: () => { controller.recover() },
         toastDone: () => { controller.toastDone() },
       },
     }),

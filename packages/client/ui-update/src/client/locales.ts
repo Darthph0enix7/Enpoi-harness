@@ -33,6 +33,7 @@ export const zh = {
   'action.retry': '重试',
   'action.restart': '重启以更新',
   'action.cancel': '取消更新',
+  'action.recover': '清除更新状态并重试',
   'action.close': '关闭',
   'progress.title': '正在更新',
   'settings.upToDate': '已是最新版本',
@@ -54,6 +55,7 @@ export const zh = {
   'result.rolledback': '更新失败，已回滚到原版本',
   'result.cancelled': '更新已取消',
   'failure.log': '日志末尾',
+  'failure.recoverHint': '更新状态似乎已过期；清除后重试不会重新下载已暂存的版本。',
   'error.action': '操作失败：{message}',
   'toast.updated': '已更新到 {version}',
 } as const
@@ -83,6 +85,7 @@ export const en: Record<UpdateKey, string> = {
   'action.retry': 'Retry',
   'action.restart': 'Restart to update',
   'action.cancel': 'Cancel update',
+  'action.recover': 'Clear update state & retry',
   'action.close': 'Close',
   'progress.title': 'Updating',
   'settings.upToDate': 'Up to date',
@@ -104,6 +107,7 @@ export const en: Record<UpdateKey, string> = {
   'result.rolledback': 'Update failed and rolled back to the previous version',
   'result.cancelled': 'Update cancelled',
   'failure.log': 'Log tail',
+  'failure.recoverHint': 'The update state looks stale; clearing it retries without re-downloading the staged version.',
   'error.action': 'Action failed: {message}',
   'toast.updated': 'Updated to {version}',
 }

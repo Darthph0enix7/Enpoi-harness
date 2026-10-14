@@ -39,6 +39,7 @@
 | `updateCheck.apply` | — | 新的应用记录（`mode: 'apply'`，`phase: 'applying'`）；无暂存内容或启动失败时返回 `gateway/bad-request` |
 | `updateCheck.run` | — | 当前运行记录或 null：插件自己的运行在执行时优先；否则为从引擎标记观察到的活动运行（在终端里启动的 `dsh update`）；再否则为持久化记录 |
 | `updateCheck.cancel` | — | 引擎取消失败/成功的结局（`cancelled`/`refused`/`noop`/`failed`）及其消息与结果记录（成功为 `cancelled`）；仅 shim 缺失时返回 `gateway/bad-request` |
+| `updateCheck.clearStale` | — | 清除陈旧状态后的记录；当运行或引擎锁真正存活时返回 `gateway/bad-request`（消息指明持有者） |
 
 Remote 参数镜像描述符的**参数名**：`dismiss` 包裹其 `request` 对象（`payload.args.request.version`），所有无参方法都传空的 `args` 对象。该插件系列没有客户端推送；客户端轮询 `updateCheck.status`，引擎进程执行期间另轮询 `updateCheck.run`。
 
@@ -54,6 +55,7 @@ Remote 参数镜像描述符的**参数名**：`dismiss` 包裹其 `request` 对
 - **阶段。** 两阶段：`starting` → `preparing` → `prepared`（准备进程以 0 退出并留下暂存标记；等待期间不观察任何进程）→ `applying` → `success | failed | rolledback`。一次性：`starting` → `preparing` → `success | failed | rolledback`（永不 `prepared`）。观察者每秒轮询日志末尾与包装脚本 pid 文件：从引擎的 `[N/9]` 标记解析 `step`/`steps`、`lastLine`、受限的 40 行 `logTail`，以及终局结果行（`successfully updated` / `Update applied:` / `FAILED` / `rolled back`）。
 - **引擎标记与终端启动的运行（已实现）。** 运行中的安装器会写标记 `$PREFIX/harness/.update-run.json`（字段 `runId, pid, mode (plain|prepare|apply|one-shot), step, steps, phase (running → switching → applying → done，终态 failed/rolledback/cancelled), startedAt, logPath, version, target`），插件据此观察 UI 之外启动的更新：`updateCheck.run` 每次调用读取一次（小文件，不做观察者进程），校验 pid 存活且非僵尸（`kill 0` 加 `ps -o stat=` / `/proc`），并合成与客户端既有状态一致的记录（`plain`/`one-shot` → 一次性档位；`running` → `preparing`；`switching`/`applying` → `applying`；终态阶段映射到对应结果；`logTail` 取自标记的 `logPath`）。pid 已死的陈旧标记不报告任何内容。存活下来的插件运行在标记指向同一次运行时，采用标记的 pid/阶段对账。
 - **取消（已实现）。** `updateCheck.cancel` 调用已安装的 shim（`dsh update --cancel --json`，上限 30 秒），所有安全规则都留在引擎里：SIGTERM → 有界等待 → SIGKILL、切换后拒绝、清理残留、标记写入 `cancelled`。插件只转发结局：成功取消会成为一条 `cancelled` 记录（插件自己启动的运行沿用该记录，否则由终态标记合成）；拒绝则展示引擎的消息。
+- **陈旧状态与自愈（已实现）。** 存活性只有一个事实：仅当 pid 存活且非僵尸、且日志在停滞窗口（`RUN_STALE_WINDOW_MS`，5 分钟）内仍有写入时才视为存活；终态阶段（`failed`/`rolledback`/`cancelled`/`done`）无论 pid 是否被回收都绝不存活。每次 `run` 读取、启动对账以及 `start`/`apply` 门禁都会把陈旧的持久化记录自愈为终态（安装版本已达到目标则记 `success`，否则记 `failed` 并附明确原因）并删除死 pid 文件，因此陈旧状态永远无法阻塞新的运行。门禁同时核对引擎自身的事实——存活且非终态、未停滞的标记，或 mkdir 回退锁中存活的属主 pid（flock 文件的存在本身没有意义）——当引擎真正持锁时交由引擎拒绝（其错误信息精确）。`updateCheck.clearStale` 把同样的自愈暴露给界面：任何真正存活的对象存在时拒绝，绝不触碰引擎标记或暂存树，并返回终态记录。暂存标记仍然有效的失败 apply 无需重新 prepare 即可**重新应用**——`apply` 会依据暂存记录重新校验并把暂存版本固定为目标——对话框的“清除更新状态并重试”正是用于陈旧 already-running 失败之后的恢复。
 - **重启对账。** 任一档位的切换都会重启服务，观察者随之消亡。插件启动时依据日志末尾（观察者错过的终局行）、暂存标记与安装身份对记录做对账：带标记的 prepared 记录原样保留；更新器仍存活则恢复观察；安装版本已等于目标则记 `success`；其余情况记 `failed` 并附明确原因。对账是幂等的，且从不删除日志（界面读取其末尾）。
 
 ## 挂载位置

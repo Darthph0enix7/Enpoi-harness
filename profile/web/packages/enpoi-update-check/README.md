@@ -60,6 +60,7 @@ Patch row id `enpoi-update-check`:
 | `updateCheck.apply` | — | the fresh apply record (`mode: 'apply'`, `phase: 'applying'`); `gateway/bad-request` when nothing is staged or the launch fails |
 | `updateCheck.run` | — | the current run record, or null: the plugin's own run when one is executing, otherwise a live run observed from the engine marker (a `dsh update` started in a terminal), otherwise the persisted record |
 | `updateCheck.cancel` | — | the engine cancel outcome (`cancelled`/`refused`/`noop`/`failed`) with its message and the resulting record (`cancelled` on success); `gateway/bad-request` only when the shim is missing |
+| `updateCheck.clearStale` | — | the record after stale state was cleared; `gateway/bad-request` while a run or the engine's lock is genuinely live (the message names it) |
 
 The Remote arguments mirror the descriptors' **parameter names**: `dismiss`
 wraps its `request` object (`payload.args.request.version`), every
@@ -135,6 +136,24 @@ record, so the offered action is Restart to update.
   successful cancel becomes a `cancelled` record (the plugin's own when it
   started the run, otherwise one synthesized from the terminal marker) and a
   refusal surfaces the engine's message.
+- **Stale state & self-healing (implemented).** Liveness is one truth: a run is
+  live only when its pid is live and non-zombie AND its log moved inside the
+  stall window (`RUN_STALE_WINDOW_MS`, 5 min), and terminal phases
+  (`failed`/`rolledback`/`cancelled`/`done`) are never live regardless of a
+  recycled pid. Every `run` read, the boot reconcile, and the `start`/`apply`
+  gates heal a stale persisted record into a terminal one (success when the
+  install already reached the target, otherwise `failed` with a clear reason)
+  and drop the dead pid file, so stale state can never block a new run. The
+  gates also consult the engine's own truth — a live non-terminal non-stalled
+  marker, or the mkdir-fallback lock's live owner pid (the flock file's
+  presence means nothing) — and defer to the engine when it really holds the
+  lock (its refusal is precise). `updateCheck.clearStale` exposes the same
+  healing to the UI: it refuses while anything is genuinely live, never
+  touches the engine marker or the staged tree, and returns the terminal
+  record. A failed apply whose staged marker is still valid is **re-appliable
+  without a new prepare** — `apply` re-validates against the staged record and
+  pins the staged version as the target — which is what the dialog's
+  *Clear update state & retry* uses after a stale already-running failure.
 - **Restart reconcile.** Either rung's switch restarts the service, so the
   watcher dies with it. On plugin boot the record is reconciled against the log
   tail (a terminal line the watcher missed), the staged marker, and the install
