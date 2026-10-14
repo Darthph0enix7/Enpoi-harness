@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-10-13T20:54:02.723Z",
+  "generatedAt": "2026-10-14T07:06:31.105Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.87",
+      "commit": "7f3ce23",
+      "releasedAt": "2026-10-14T06:46:07.000Z",
+      "notes": [
+        "docs(plan): record the live verification evidence for the update system"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.86",
       "commit": "545082a",
@@ -359,16 +367,6 @@
         "fix(ui-settings-models): route the translate stub to the client project",
         "feat(ui-brand-enpoi): typed en/zh dictionary — package i18n gate to zero",
         "feat(models/portability): settings-models i18n + dynamic wizard data; P1 portability"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.46",
-      "commit": "814f8bf",
-      "releasedAt": "2026-10-08T21:23:03.000Z",
-      "notes": [
-        "feat(models): owner-modifiable catalogs — presets, heavy overlay, snapshot control, unified hints",
-        "feat(tool-groups): owner-editable membership, custom groups, roster validation",
-        "fix(ui-brand-enpoi): mirror from repo profile sources, machine-independent labels"
       ]
     }
   ]
