@@ -1234,11 +1234,12 @@ installed_identity_resolve() { # no args; sets INSTALLED_LINK_DIR/VERSION/COMMIT
   fi
   # The tree's package.json keeps the BASE version by design (a prebuilt
   # release layers the run number on top: package 0.1.7-enpoi.2, marker
-  # 0.1.7-enpoi.2.59). It is a conflict only when the marker claims a release
-  # that does not descend from that base.
+  # 0.1.7-enpoi.2.59; a source build layers `+g<short commit>` on top: package
+  # 0.1.7-enpoi.2, marker 0.1.7-enpoi.2+gbb12abc). It is a conflict only when
+  # the marker claims a release that does not descend from that base.
   if [ -n "$package_version" ] && [ -n "$marker_version" ]; then
     case "$marker_version" in
-      "$package_version"|"$package_version".*|"$package_version"-*) : ;;
+      "$package_version"|"$package_version".*|"$package_version"-*|"$package_version"+*) : ;;
       *) mismatches="${mismatches}$INSTALLED_LINK_DIR/package.json base '$package_version' does not prefix its marker '$marker_version'; " ;;
     esac
   fi
@@ -1403,6 +1404,25 @@ resolve_build_commit() {
     warn "no git metadata available; recording DSH_CLIENT_COMMIT_HASH=$BUILD_COMMIT (digest of $VERSION)"
   fi
   return 0
+}
+
+# The identity stamped on a source-built tree: `<version>+g<short commit>`
+# (git-describe style, e.g. 0.1.7-enpoi.2+gbb12abc). A bare base cannot
+# distinguish a rolling channel build from its release — the update check then
+# offers the same release forever and the client shows the wrong version — so
+# the tree directory, the install marker, install-state, `dsh --version`, the
+# health proof, and the client build environment all carry this one string.
+# Resolves the build commit first (with HARNESS unset so it inspects the
+# SOURCE, not an existing tree) and leaves BUILD_COMMIT/BUILD_DIRTY set for
+# every later consumer. A prebuilt target keeps its release version.
+source_identity_tree_name() { # version -> `<version>+g<short commit>`
+  local saved_harness="${HARNESS:-}"
+  if [ -z "${BUILD_COMMIT:-}" ]; then
+    HARNESS=""
+    resolve_build_commit
+    HARNESS="$saved_harness"
+  fi
+  printf '%s+g%s' "$1" "$(printf '%s' "${BUILD_COMMIT:-}" | cut -c1-7)"
 }
 
 flatten_stage() { # move a single top-level directory's contents up
@@ -2028,6 +2048,24 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
   sha_url="$url.sha256"
   cache_dir="$PREFIX/harness/.cache"
   asset_file="$cache_dir/$asset"
+  # The release's build commit is resolved BEFORE any bytes are fetched. When
+  # the channel head has moved past the newest release, that release belongs to
+  # a different channel state: its tarball would be downloaded only to be
+  # discarded (the live 2.88 run fetched 304 MiB in 301 s and then fell back),
+  # so the divergence is detected up front and the run goes straight to the
+  # source build. Both sides use the same resolution the update path already
+  # relies on; an unresolvable side keeps the prebuilt path (no false skip).
+  PREBUILT_DIVERGED=0
+  substep_info "resolving the release commit…"
+  local commit_started
+  commit_started="$(date +%s)"
+  RELEASE_COMMIT="$(resolve_target_commit "$tag" "$DSH_GITHUB_URL")"
+  substep_ok "release commit resolved ($(( $(date +%s) - commit_started ))s)"
+  if release_commit_diverges; then
+    PREBUILT_DIVERGED=1
+    warn "prebuilt: release $tag was built from ${RELEASE_COMMIT:0:12} but the $CHANNEL channel resolves to ${TARGET_COMMIT:0:12}; skipping the prebuilt download and building from source to honor the requested channel"
+    return 1
+  fi
   mkdir -p "$cache_dir" || return 1
 
   # Fetch checksum first so download verification can validate hash streamingly on assembly
@@ -2152,19 +2190,8 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
     rm -rf "$STAGED"; STAGED=""
     return 1
   fi
-  # The tag's own commit is the recorded build identity; empty when git and
-  # the GitHub API cannot resolve it (install_tree then falls back to the
-  # channel ref's commit). Network-bound and variable: announce + time it.
-  substep_info "resolving the release commit…"
-  local commit_started
-  commit_started="$(date +%s)"
-  RELEASE_COMMIT="$(resolve_target_commit "$tag" "$DSH_GITHUB_URL")"
-  substep_ok "release commit resolved ($(( $(date +%s) - commit_started ))s)"
-  if release_commit_diverges; then
-    warn "prebuilt: release $tag was built from ${RELEASE_COMMIT:0:12} but the $CHANNEL channel resolves to ${TARGET_COMMIT:0:12}; falling back to the source build to honor the requested channel"
-    rm -rf "$STAGED"; STAGED=""
-    return 1
-  fi
+  # The tag's own commit is the recorded build identity; it was resolved (and
+  # checked against the channel head) before any download, above.
   # Only a release that survives every check is the prebuilt target: the
   # divergence fallback above must leave PREBUILT unset, or the source tree
   # staged next would skip its dependency/build step and switch in unbuilt
@@ -2215,9 +2242,10 @@ prepare_source() {
             [ -n "$VERSION" ] || VERSION="$(read_version "$d/package.json" 2>/dev/null || true)"
             if [ -n "$VERSION" ]; then
               # The marker must belong to the directory it sits in (dir name =
-              # release version, or base-<short> for a rolling source build).
+              # release version, base-<short> for a legacy rolling source
+              # build, or base+g<short> for the current source identity).
               case "$name" in
-                "$VERSION"|"$VERSION"-*) : ;;
+                "$VERSION"|"$VERSION"-*|"$VERSION"+*) : ;;
                 *)
                   warn "ignoring complete tree $d: its marker claims '$VERSION' but the directory is '$name' (identity split)"
                   continue
@@ -2239,6 +2267,8 @@ prepare_source() {
     fi
     if [ "$NO_PREBUILT" = 1 ] || [ "${DSH_NO_PREBUILT:-0}" = 1 ]; then
       log "prebuilt: disabled; building from source"
+    elif [ "${PREBUILT_DIVERGED:-0}" = 1 ]; then
+      log "prebuilt: the newest release diverges from the $CHANNEL channel; building from source"
     else
       log "no prebuilt for $OS-$ARCH; building from source (~5 min)"
     fi
@@ -2262,6 +2292,18 @@ prepare_source() {
 # ── Install / build ─────────────────────────────────────────────────────────
 install_tree() { # installs $VERSION into $PREFIX/harness/${TREE_DIR_NAME:-$VERSION}; returns nonzero on failure
   local displaced=""
+  # Source builds stamp the full identity — `<version>+g<short commit>` — in the
+  # tree directory itself, so every consumer that derives identity from the
+  # directory (marker, install-state, `dsh --version`, health proof) sees one
+  # string. A prebuilt target keeps its release version (base + run number) and
+  # a reused tree keeps the caller's directory.
+  if [ "${PREBUILT:-0}" != 1 ] && [ -z "${REUSED_TREE_DIR:-}" ] \
+    && [ ! -f "$PREFIX/harness/${TREE_DIR_NAME:-$VERSION}/.dsh-install-complete" ]; then
+    case "${TREE_DIR_NAME:-}" in
+      "$VERSION"+*) : ;;
+      *) TREE_DIR_NAME="$(source_identity_tree_name "$VERSION")" ;;
+    esac
+  fi
   HARNESS="$PREFIX/harness/${TREE_DIR_NAME:-$VERSION}"
   mkdir -p "$PREFIX/harness" || return 1
   if [ -e "$HARNESS" ]; then
@@ -2337,16 +2379,27 @@ install_tree() { # installs $VERSION into $PREFIX/harness/${TREE_DIR_NAME:-$VERS
     if [ -n "$displaced" ]; then rm -rf "$HARNESS"; mv "$displaced" "$HARNESS" 2>/dev/null || true; fi
     return 1
   fi
-  resolve_build_commit
-  if [ -z "$BUILD_COMMIT" ] && [ -n "${TARGET_COMMIT:-}" ]; then BUILD_COMMIT="$TARGET_COMMIT"; fi
+  [ -n "${BUILD_COMMIT:-}" ] || resolve_build_commit
+  # The client artifacts carry the same identity as the tree. The default
+  # `pnpm run build` pins a complete build's client version to the repository
+  # base, so the source transport builds the official client profile with the
+  # explicit values — the same mechanism the release workflow uses to feed the
+  # full release version. Without it the Web UI would show the bare base.
   if [ -n "$BUILD_COMMIT" ]; then export DSH_CLIENT_COMMIT_HASH="$BUILD_COMMIT"; fi
+  export DSH_CLIENT_VERSION="$TREE_DIR_NAME"
+  export DSH_BUILD_CLIENT_PROFILE=official
   if [ "$BUILD_DIRTY" = true ]; then export DSH_CLIENT_GIT_DIRTY=true; fi
   if ! run_logged "Building core harness & web client" "$BUILD_TIMEOUT" "$HARNESS" "$PNPM" run build; then
     warn "build failed"
     if [ -n "$displaced" ]; then rm -rf "$HARNESS"; mv "$displaced" "$HARNESS" 2>/dev/null || true; fi
     return 1
   fi
-  stamp_install_complete "$HARNESS" "$VERSION" "$BUILD_COMMIT" || return 1
+  stamp_install_complete "$HARNESS" "$TREE_DIR_NAME" "$BUILD_COMMIT" || return 1
+  # Build-only values must not leak into the migrations/selfcheck children.
+  unset DSH_CLIENT_VERSION DSH_BUILD_CLIENT_PROFILE
+  # Every later consumer (install-state, `dsh --version`, health proof,
+  # diagnostics) reads VERSION as the installed identity.
+  VERSION="$TREE_DIR_NAME"
   if [ -n "$displaced" ]; then rm -rf "$displaced" || true; fi
   return 0
 }
@@ -6420,15 +6473,18 @@ do_install() {
   else
     TREE_DIR_NAME="$VERSION"
   fi
-  # A prebuilt release version is unique per build, so its directory is the
-  # version itself; the short-SHA suffix only disambiguates source builds of
-  # one base version on a moved channel.
+  # A source build of the base version must not land on an existing directory
+  # that holds a different build of the same base (the pre-release tree, or an
+  # earlier rolling build): the fresh tree gets the identity name
+  # `<version>+g<short commit>`. The existing tree's own recorded commit
+  # decides, not the active release. A legacy `-short` tree with the matching
+  # commit is still reused in place.
   if [ -z "${REUSED_TREE_DIR:-}" ] && [ "${PREBUILT:-0}" != 1 ] && [ -n "$TARGET_COMMIT" ]; then
     local short
     short="$(printf '%s' "$TARGET_COMMIT" | cut -c1-7)"
     if [ -f "$PREFIX/harness/$VERSION/.dsh-install-complete" ] \
       && ! commit_same "$TARGET_COMMIT" "$(installed_tree_commit "$PREFIX/harness/$VERSION")"; then
-      TREE_DIR_NAME="$VERSION-$short"
+      TREE_DIR_NAME="$(source_identity_tree_name "$VERSION")"
       log "rolling channel advanced: recorded $(installed_tree_commit "$PREFIX/harness/$VERSION") -> target $short; building into $TREE_DIR_NAME"
     elif [ ! -f "$PREFIX/harness/$VERSION/.dsh-install-complete" ] \
       && [ -f "$PREFIX/harness/$VERSION-$short/.dsh-install-complete" ] \
@@ -7750,14 +7806,15 @@ do_update() {
   fi
   # A source build of the base version must not land on an existing directory
   # that holds a different build of the same base (the pre-release tree, or an
-  # earlier rolling build): suffix the directory with the target's short SHA.
-  # The existing tree's own recorded commit decides, not the active release.
+  # earlier rolling build): the fresh tree gets the identity name
+  # `<version>+g<short commit>`. The existing tree's own recorded commit
+  # decides, not the active release.
   if [ -z "${REUSED_TREE_DIR:-}" ] && [ "${PREBUILT:-0}" != 1 ] && [ -n "$TARGET_COMMIT" ] \
     && [ -f "$PREFIX/harness/$VERSION/.dsh-install-complete" ] \
     && ! commit_same "$TARGET_COMMIT" "$(installed_tree_commit "$PREFIX/harness/$VERSION")"; then
     local short
     short="$(printf '%s' "$TARGET_COMMIT" | cut -c1-7)"
-    TREE_DIR_NAME="$VERSION-$short"
+    TREE_DIR_NAME="$(source_identity_tree_name "$VERSION")"
     log "existing $VERSION tree records $(installed_tree_commit "$PREFIX/harness/$VERSION") -> target $short; building into $TREE_DIR_NAME"
   fi
   HARNESS="$PREFIX/harness/$TREE_DIR_NAME"
@@ -7765,11 +7822,12 @@ do_update() {
   # (`0.1.7-enpoi.2`), which sorts below an installed release of the same line
   # (`0.1.7-enpoi.2.42`) because the release adds prerelease identifiers. That
   # is the same build line, not a downgrade; --no-prebuilt and a release whose
-  # platform asset is missing both land here. A base that is genuinely older
-  # (different core or RC marker) still refuses.
+  # platform asset is missing both land here, as does the identity of an
+  # installed source build (`0.1.7-enpoi.2+gbb12abc`). A base that is genuinely
+  # older (different core or RC marker) still refuses.
   if ver_lt "$VERSION" "$installed_version" && [ "$FORCE_DOWNGRADE" != 1 ]; then
     case "$installed_version" in
-      "$VERSION".*) log "target $VERSION is the base of installed release $installed_version; same build line, not a downgrade";;
+      "$VERSION".*|"$VERSION"+*) log "target $VERSION is the same build line as installed $installed_version; not a downgrade";;
       *) die "refusing to downgrade from ${installed_version:-$current} to $VERSION without --force-downgrade";;
     esac
   fi
