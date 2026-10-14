@@ -1,6 +1,6 @@
 # UI Update Manifest + In-App Updates — Plan
 
-Status: P1 (catalog), P2 (host check), P3 (client UI), and P4 (run surface + the two-phase engine split) are implemented on `local/serverlocal` (2026-10-13). The five owner decisions are resolved in §9; decision 2's prepare-then-apply split ships as engine flags `dsh update --prepare` / `dsh update --apply` (§5), and the shipped run reconciles across the service restart it causes (§5, reconcile).
+Status: P1 (catalog), P2 (host check), P3 (client UI), and P4 (run surface + the two-phase engine split) are implemented and live-verified on `local/serverlocal` (2026-10-13/14). Live evidence to date: the full prepare → apply cycle on serverlocal for 2.85 (health PASS, retention sweep, no orphaned artifacts), the Mac's 2.86 update mounting the host plugin after the profile-bundle merge fix, and the terminal attach/cancel drills. The five owner decisions are resolved in §9; decision 2's prepare-then-apply split ships as engine flags `dsh update --prepare` / `dsh update --apply` (§5), and the shipped run reconciles across the service restart it causes (§5, reconcile).
 
 ## 1. Goal
 
