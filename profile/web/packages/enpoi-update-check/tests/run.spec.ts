@@ -37,6 +37,7 @@ import {
   runRecordPath,
   sameRunRecord,
   stagedApplyPath,
+  stagedApplyReady,
   terminalRecord,
   writeRunRecord,
   type UpdateRunRecord,
@@ -76,10 +77,15 @@ function record(overrides: Partial<UpdateRunRecord> = {}): UpdateRunRecord {
   }
 }
 
-/** Stage the engine's marker for `root`'s prefix. */
+/**
+ * Stage a complete applyable update for `root`'s prefix: the engine record and
+ * the tree directory with its `.dsh-install-complete` witness.
+ */
 function stageMarker(root: string, version = '0.1.7-enpoi.2.84'): string {
-  const file = stagedApplyPath(join(root, 'prefix'))
-  mkdirSync(join(root, 'prefix', 'harness'), { recursive: true })
+  const prefix = join(root, 'prefix')
+  const file = stagedApplyPath(prefix)
+  mkdirSync(join(prefix, 'harness', version), { recursive: true })
+  writeFileSync(join(prefix, 'harness', version, '.dsh-install-complete'), `${JSON.stringify({ version })}\n`)
   writeFileSync(file, JSON.stringify({ version, treeDirName: version, channel: 'stable', preparedAt: '2026-10-13T12:00:00.000Z' }))
   return file
 }
@@ -349,6 +355,30 @@ describe('progress freshness and the staged-apply record', () => {
     expect(readStagedApply(prefix)).toBeNull()
     writeFileSync(stagedApplyPath(prefix), 'not json')
     expect(readStagedApply(prefix)).toBeNull()
+  })
+
+  it('requires the staged tree and its completion witness, not just the marker', () => {
+    const prefix = join(scratch(), 'prefix')
+    mkdirSync(join(prefix, 'harness'), { recursive: true })
+    writeFileSync(stagedApplyPath(prefix), JSON.stringify({
+      version: '0.1.7-enpoi.2.84',
+      treeDirName: '0.1.7-enpoi.2.84',
+      channel: 'stable',
+      preparedAt: '2026-10-13T07:25:52Z',
+    }))
+    // The marker alone is not an applyable update (a rolled-back apply keeps
+    // the record while archiving the tree as <dir>.failed-<ts>).
+    expect(hasStagedApply(prefix)).toBe(true)
+    expect(stagedApplyReady(prefix)).toBe(false)
+    mkdirSync(join(prefix, 'harness', '0.1.7-enpoi.2.84'), { recursive: true })
+    expect(stagedApplyReady(prefix)).toBe(false)
+    writeFileSync(join(prefix, 'harness', '0.1.7-enpoi.2.84', '.dsh-install-complete'), '{}\n')
+    expect(stagedApplyReady(prefix)).toBe(true)
+    // A tree name outside the engine's safe segment set never reaches a path.
+    writeFileSync(stagedApplyPath(prefix), JSON.stringify({
+      version: 'x', treeDirName: '../etc', channel: 'stable', preparedAt: '',
+    }))
+    expect(stagedApplyReady(prefix)).toBe(false)
   })
 
   it('honours an explicit live override in reconcileRunRecord', async () => {

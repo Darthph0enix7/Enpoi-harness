@@ -56,10 +56,15 @@ function available(version = '0.1.7-enpoi.2.84'): UpdateCheckStatus {
   }
 }
 
-/** Stage the engine's `.staged-apply.json` marker for `home` as its own prefix. */
+/**
+ * Stage a complete applyable update for `home` (home doubles as prefix): the
+ * engine's `.staged-apply.json` record plus the tree directory and its
+ * `.dsh-install-complete` witness.
+ */
 function stageApply(home: string, version = '0.1.7-enpoi.2.84'): string {
   const file = stagedApplyPath(home)
-  mkdirSync(join(home, 'harness'), { recursive: true })
+  mkdirSync(join(home, 'harness', version), { recursive: true })
+  writeFileSync(join(home, 'harness', version, '.dsh-install-complete'), `${JSON.stringify({ version })}\n`)
   writeFileSync(file, JSON.stringify({ version, treeDirName: version, channel: 'stable', preparedAt: '2026-10-13T12:00:00.000Z' }))
   return file
 }
@@ -85,6 +90,7 @@ function bench(options: {
   isAlive?: (pid: number) => boolean
   now?: () => Date
   probeCapability?: 'supported' | 'unsupported'
+  probe?: () => Promise<{ capability: 'supported' | 'unsupported'; reason?: string }>
   cancelEngine?: () => Promise<EngineCancelOutcome>
 } = {}): Bench {
   const home = options.home ?? scratch()
@@ -105,9 +111,9 @@ function bench(options: {
     runId: () => 'run42',
     pollIntervalMs: 1_000,
     timers: ticks.timers,
-    probe: async () => (options.probeCapability === 'unsupported'
+    probe: options.probe ?? (async () => (options.probeCapability === 'unsupported'
       ? { capability: 'unsupported', reason: 'engine help does not list --prepare (exit 0)' }
-      : { capability: 'supported' }),
+      : { capability: 'supported' })),
     ...(options.cancelEngine === undefined ? {} : { cancelEngine: options.cancelEngine }),
     ...(options.isAlive === undefined ? {} : { isAlive: options.isAlive }),
     ...(options.now === undefined ? {} : { now: options.now }),
@@ -205,6 +211,46 @@ describe('UpdateRunController.start (prepare)', () => {
   })
 })
 
+describe('UpdateRunController.start single flight', () => {
+  it('launches exactly one engine for concurrent start calls in the probe window', async () => {
+    let resolveProbe!: (value: { capability: 'supported' }) => void
+    const probe = new Promise<{ capability: 'supported' }>((resolve) => { resolveProbe = resolve })
+    const b = bench({ probe: () => probe })
+    const first = b.controller.start()
+    const second = b.controller.start()
+    expect(first).toBe(second)
+    // Both calls are parked on the same probe; nothing launched yet.
+    expect(b.launches).toHaveLength(0)
+    resolveProbe({ capability: 'supported' })
+    const [one, two] = await Promise.all([first, second])
+    expect(b.launches).toHaveLength(1)
+    expect(one.runId).toBe('run42')
+    expect(two).toEqual(one)
+    b.controller.dispose()
+  })
+
+  it('re-checks after the probe await and refuses a run that appeared meanwhile', async () => {
+    const home = scratch()
+    let resolveProbe!: (value: { capability: 'supported' }) => void
+    const probe = new Promise<{ capability: 'supported' }>((resolve) => { resolveProbe = resolve })
+    const b = bench({ home, probe: () => probe })
+    const starting = b.controller.start()
+    // An update started outside the UI while the probe was in flight: the
+    // post-await gate must see it and refuse instead of launching a second run.
+    const log = join(home, 'install.log')
+    writeFileSync(log, '[2/9] source\n')
+    mkdirSync(join(home, 'harness'), { recursive: true })
+    writeFileSync(runMarkerPath(home), JSON.stringify({
+      runId: 'ext-9', pid: process.pid, mode: 'plain', step: 2, steps: 9, phase: 'running',
+      startedAt: new Date().toISOString(), logPath: log, version: '', target: '0.1.7-enpoi.2.84',
+    }))
+    resolveProbe({ capability: 'supported' })
+    await expect(starting).rejects.toThrowError(expect.objectContaining({ reason: 'already-running' }))
+    expect(b.launches).toHaveLength(0)
+    b.controller.dispose()
+  })
+})
+
 describe('UpdateRunController watcher', () => {
   it('follows the prepare steps, then rests at prepared when the staged marker appears', async () => {
     const alive = { value: true }
@@ -257,14 +303,40 @@ describe('UpdateRunController watcher', () => {
 })
 
 describe('UpdateRunController.apply', () => {
-  it('refuses when nothing is prepared or the staged marker is gone', () => {
+  it('refuses when nothing is prepared or the staged tree is gone', () => {
     const empty = bench()
     expect(() => empty.controller.apply()).toThrowError(expect.objectContaining({ reason: 'not-prepared' }))
 
     const preparedHome = scratch()
     writeLiveRecord(preparedHome, recordFixture({ home: preparedHome, record: { phase: 'prepared', staged: true, step: 7 } }).record, null)
     const missingMarker = bench({ home: preparedHome })
+    // Reconcile first demotes the prepared record (no staged record on disk):
+    // nothing can be applied, and apply refuses before any launch.
     expect(() => missingMarker.controller.apply()).toThrowError(expect.objectContaining({ reason: 'not-prepared' }))
+    expect(missingMarker.launches).toHaveLength(0)
+  })
+
+  it('never replays apply after a rollback archived the staged tree (the A2 dead end)', () => {
+    const home = scratch()
+    stageApply(home)
+    // The engine archives the failed tree as <dir>.failed-<ts> and keeps the
+    // staged record; the marker survives but names a missing tree, and the
+    // persisted record still reads `staged: true`.
+    rmSync(join(home, 'harness', '0.1.7-enpoi.2.84'), { recursive: true, force: true })
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: { mode: 'apply', phase: 'rolledback', result: 'rolledback', staged: true, target: '0.1.7-enpoi.2.84' },
+    }).record, null)
+    const b = bench({ home })
+    // The read path corrects the derived flag, which is what routes the
+    // client's Retry/recover into a fresh prepare instead of a dead replay.
+    expect(b.controller.run()).toMatchObject({ result: 'rolledback', staged: false })
+    expect(JSON.parse(readFileSync(runRecordPath(home), 'utf8'))).toMatchObject({ staged: false })
+    // apply names the real problem (marker present, tree archived) with its
+    // own refusal, and never launches the engine again.
+    expect(() => b.controller.apply()).toThrowError(expect.objectContaining({ reason: 'staged-tree-missing' }))
+    expect(b.launches).toHaveLength(0)
+    b.controller.dispose()
   })
 
   it('launches --apply against the staged tree with the recorded target', () => {
@@ -596,6 +668,27 @@ describe('UpdateRunController engine-marker observer', () => {
     b.controller.dispose()
   })
 
+  it('never overwrites a terminal record with a cancelled relay (cancel racing a finish)', async () => {
+    const home = scratch()
+    // The run finished (success) between the cancel decision and the relay;
+    // the engine's second read is authoritative, and even an old engine that
+    // still reports `cancelled` must not relabel a terminal record.
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: { mode: 'apply', phase: 'success', result: 'success', step: 9, target: '0.1.7-enpoi.2.84', finishedAt: '2026-10-13T12:30:00.000Z' },
+    }).record, null)
+    const b = bench({
+      home,
+      cancelEngine: async () => ({ status: 'cancelled', message: 'stopped', runId: 'run-old', pid: 4242, phase: 'cancelled' }),
+    })
+    const outcome = await b.controller.cancel()
+    expect(outcome.status).toBe('cancelled')
+    expect(outcome.record).toMatchObject({ result: 'success', phase: 'success' })
+    expect(b.controller.run()).toMatchObject({ result: 'success' })
+    expect(JSON.parse(readFileSync(runRecordPath(home), 'utf8'))).toMatchObject({ result: 'success' })
+    b.controller.dispose()
+  })
+
   it('returns the engine refusal without changing the record', async () => {
     const home = scratch()
     writeMarker(home, { phase: 'applying', step: 8 })
@@ -677,7 +770,8 @@ describe('UpdateRunController stale-state self-healing', () => {
 
   it('never lets a terminal record block, and re-applies the staged tree after a failure (the Mac case)', async () => {
     const home = scratch()
-    mkdirSync(join(home, 'harness'), { recursive: true })
+    mkdirSync(join(home, 'harness', '0.1.7-enpoi.2.87'), { recursive: true })
+    writeFileSync(join(home, 'harness', '0.1.7-enpoi.2.87', '.dsh-install-complete'), '{}\n')
     writeFileSync(stagedApplyPath(home), JSON.stringify({
       version: '0.1.7-enpoi.2.87', treeDirName: '0.1.7-enpoi.2.87', channel: 'stable', preparedAt: '2026-10-13T07:25:52Z',
     }))
@@ -702,7 +796,7 @@ describe('UpdateRunController stale-state self-healing', () => {
     b.controller.dispose()
   })
 
-  it('refuses apply on a failed record whose staged marker is gone', () => {
+  it('refuses apply on a failed record whose staged tree is gone', () => {
     const home = scratch()
     writeLiveRecord(home, recordFixture({
       home,
@@ -710,6 +804,9 @@ describe('UpdateRunController stale-state self-healing', () => {
     }).record, null)
     const b = bench({ home })
     expect(() => b.controller.apply()).toThrowError(expect.objectContaining({ reason: 'not-prepared' }))
+    // The read path corrects the derived flag: the persisted record no longer
+    // claims an applyable tree, so client Retry routes into a fresh prepare.
+    expect(JSON.parse(readFileSync(runRecordPath(home), 'utf8'))).toMatchObject({ staged: false })
     b.controller.dispose()
   })
 })
@@ -751,7 +848,8 @@ describe('UpdateRunController clearStale', () => {
 
   it('heals stale state, leaves the engine marker and staged tree untouched, and lets apply run', async () => {
     const home = scratch()
-    mkdirSync(join(home, 'harness'), { recursive: true })
+    mkdirSync(join(home, 'harness', '0.1.7-enpoi.2.87'), { recursive: true })
+    writeFileSync(join(home, 'harness', '0.1.7-enpoi.2.87', '.dsh-install-complete'), '{}\n')
     const stagedBody = JSON.stringify({
       version: '0.1.7-enpoi.2.87', treeDirName: '0.1.7-enpoi.2.87', channel: 'stable', preparedAt: '2026-10-13T07:25:52Z',
     })
@@ -777,7 +875,8 @@ describe('UpdateRunController clearStale', () => {
 
   it('heals a stale prepare that did stage the tree into the prepared state', async () => {
     const home = scratch()
-    mkdirSync(join(home, 'harness'), { recursive: true })
+    mkdirSync(join(home, 'harness', '0.1.7-enpoi.2.87'), { recursive: true })
+    writeFileSync(join(home, 'harness', '0.1.7-enpoi.2.87', '.dsh-install-complete'), '{}\n')
     writeFileSync(stagedApplyPath(home), JSON.stringify({
       version: '0.1.7-enpoi.2.87', treeDirName: '0.1.7-enpoi.2.87', channel: 'stable', preparedAt: '2026-10-13T07:25:52Z',
     }))

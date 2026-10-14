@@ -25,6 +25,16 @@ describe('compareVersions', () => {
     expect(compareVersions('0.1.8-enpoi.2.1', '0.1.7-enpoi.2.99')).toBe(1)
   })
 
+  it('ignores semver build metadata, so the source-build +g stamp stays comparable', () => {
+    // The live defect: `+` was a separator, so the source build's
+    // `base+g<sha>` stamp read as incomparable (null) against every release.
+    expect(compareVersions('0.1.7-enpoi.2+gbb12abc', '0.1.7-enpoi.2.92')).toBe(-1)
+    expect(compareVersions('0.1.7-enpoi.2.92', '0.1.7-enpoi.2+gbb12abc')).toBe(1)
+    expect(compareVersions('0.1.7-enpoi.2+gbb12abc', '0.1.7-enpoi.2')).toBe(0)
+    expect(compareVersions('0.1.7-enpoi.2+gbb12abc', 'v0.1.7-enpoi.2+gdeadbeef')).toBe(0)
+    expect(compareVersions('0.1.7-enpoi.2+gbb12abc', '0.1.7-enpoi.2.9')).toBe(-1)
+  })
+
   it('returns null for malformed or incomparable inputs', () => {
     for (const malformed of ['', '   ', 'banana', 'v', '!!!', '0.1.7 enpoi.2.1', 'x'.repeat(200)]) {
       expect(compareVersions(malformed, '0.1.7-enpoi.2.81')).toBeNull()

@@ -195,11 +195,15 @@ describe('observedRecordFromMarker', () => {
     expect(record.logTail).toContain('[8/9] switch, service and backfill')
   })
 
-  it('maps a two-phase prepare marker with the staged marker state', () => {
+  it('maps a two-phase prepare marker with the staged tree state', () => {
     const prefix = scratch()
     writeMarker(prefix, marker({ mode: 'prepare', phase: 'running', step: 7 }))
-    mkdirSync(join(prefix, 'harness'), { recursive: true })
-    writeFileSync(stagedApplyPath(prefix), '{}')
+    // `staged` means a complete staged update: record plus tree witness.
+    mkdirSync(join(prefix, 'harness', '0.1.7-enpoi.2.84'), { recursive: true })
+    writeFileSync(join(prefix, 'harness', '0.1.7-enpoi.2.84', '.dsh-install-complete'), '{}\n')
+    writeFileSync(stagedApplyPath(prefix), JSON.stringify({
+      version: '0.1.7-enpoi.2.84', treeDirName: '0.1.7-enpoi.2.84', channel: 'beta', preparedAt: '2026-10-13T12:00:00Z',
+    }))
     const record = observedRecordFromMarker(marker({ mode: 'prepare', phase: 'running', step: 7 }), {
       prefix,
       channel: 'beta',
@@ -213,6 +217,20 @@ describe('observedRecordFromMarker', () => {
       staged: true,
     })
     expect(record.lastLine).toBe('[7/9] home, dependencies and migrations')
+  })
+
+  it('reports staged false when the marker survives but its tree was archived', () => {
+    const prefix = scratch()
+    mkdirSync(join(prefix, 'harness'), { recursive: true })
+    writeFileSync(stagedApplyPath(prefix), JSON.stringify({
+      version: '0.1.7-enpoi.2.84', treeDirName: '0.1.7-enpoi.2.84', channel: 'beta', preparedAt: '2026-10-13T12:00:00Z',
+    }))
+    const record = observedRecordFromMarker(marker({ mode: 'apply', phase: 'rolledback' }), {
+      prefix,
+      channel: 'beta',
+      readLog: () => ({ lastLine: '', logTail: [] }),
+    })
+    expect(record).toMatchObject({ result: 'rolledback', staged: false })
   })
 
   it('maps switching/applying to the applying phase and terminal phases to results', () => {

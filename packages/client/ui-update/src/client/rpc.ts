@@ -17,6 +17,7 @@
  * | `updateCheck.apply`   | `apply()`                          | `{}` |
  * | `updateCheck.run`     | `run()`                            | `{}` |
  * | `updateCheck.cancel`  | `cancel()`                         | `{}` |
+ * | `updateCheck.clearStale` | `clearStale()`                  | `{}` |
  *
  * Every call is fail-soft: a transport or gatekeeper failure resolves to
  * `{ ok: false, message }` and never rejects.
@@ -84,7 +85,12 @@ export interface UpdateRunWire {
   readonly result: UpdateRunResult | null
   /** OS launcher rung (`systemd-run|launchctl|setsid|spawn`). */
   readonly launcher: string
-  /** Whether the engine's staged-apply marker exists (prepare landed). */
+  /**
+   * Whether a complete staged update is ready to apply: the engine's
+   * staged-apply record exists AND names a tree with its
+   * `.dsh-install-complete` witness. False after a rollback archived the tree,
+   * so Retry re-prepares instead of replaying apply against a dead tree.
+   */
   readonly staged: boolean
   readonly logTail: readonly string[]
   readonly finishedAt?: string

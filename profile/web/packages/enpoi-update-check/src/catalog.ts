@@ -61,6 +61,11 @@ export function catalogUrl(channel: string): string {
  * numerically, so `0.1.7-enpoi.2.9 < 0.1.7-enpoi.2.10` and a missing trailing
  * segment is older (`0.1.7-enpoi.2 < 0.1.7-enpoi.2.81`).
  *
+ * Semver build metadata (`+…`, the source build's `+g<short sha>` stamp) is
+ * ignored, never a separator: `0.1.7-enpoi.2+gbb12abc` equals
+ * `0.1.7-enpoi.2` and is older than `0.1.7-enpoi.2.92`. The check still
+ * compares commits first; this comparator decides a differing commit.
+ *
  * @param left - version text, with or without a leading `v`.
  * @param right - version text, with or without a leading `v`.
  * @returns -1/0/1, or null when either side is not comparable (empty, no
@@ -116,10 +121,13 @@ export function compareVersions(left: string, right: string): number | null {
 /** Split a version into comparable numeric/text segments, or null when unusable. */
 function versionTokens(version: unknown): (number | string)[] | null {
   if (typeof version !== 'string') return null
-  const text = version.trim().replace(/^v/i, '')
+  // Build metadata is stripped before tokenizing so the source build's
+  // `base+g<short sha>` stamp compares on its base (the qualifier never
+  // separates into segments that cannot be ordered).
+  const text = version.trim().replace(/^v/i, '').replace(/\+.*$/, '')
   if (text === '' || text.length > 128) return null
-  if (!/^[0-9A-Za-z][0-9A-Za-z.+_-]*$/.test(text)) return null
-  const segments = text.split(/[.+_-]+/)
+  if (!/^[0-9A-Za-z][0-9A-Za-z._-]*$/.test(text)) return null
+  const segments = text.split(/[._-]+/)
   if (!segments.some(segment => /^[0-9]+$/.test(segment))) return null
   return segments.map(segment => (/^[0-9]+$/.test(segment) ? Number(segment) : segment))
 }

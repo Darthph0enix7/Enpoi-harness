@@ -7207,17 +7207,18 @@ reap_stale_update_lock_dir() {
 }
 
 # True when a subscriable run is active: the update lock is HELD and the run
-# marker's pid is live. Read-only: never creates, reclaims, or holds the lock
-# (the flock probe acquires and releases it atomically; the mkdir rung only
-# tests directory existence). Used before any lock attempt so a plain update
-# subscribes without ever competing for the lock.
+# marker's pid is live and progressing (the same stall window the plugin uses;
+# a recycled pid behind stopped files is stale). Read-only: never creates,
+# reclaims, or holds the lock (the flock probe acquires and releases it
+# atomically; the mkdir rung only tests directory existence). Used before any
+# lock attempt so a plain update subscribes without ever competing for the lock.
 update_run_is_subscribable() {
   local marker pid lock_file lock_dir
   marker="$(run_marker_path)"
   [ -f "$marker" ] || return 1
   pid="$(marker_field "$marker" pid)"
   case "$pid" in ''|*[!0-9]*) return 1;; esac
-  pid_live "$pid" || return 1
+  update_marker_progressing "$marker" "$pid" || return 1
   if command -v flock >/dev/null 2>&1; then
     lock_file="$PREFIX/harness/.update.lock"
     exec 8>>"$lock_file" 2>/dev/null || return 1
@@ -7243,9 +7244,11 @@ acquire_update_lock() {
   mkdir -p "$PREFIX/harness" 2>/dev/null || true
   # Always ensure signals trigger the EXIT trap to clean up locks and staged
   # trees; RUN_MARKER_SIGNALLED makes the run marker's terminal phase read
-  # `cancelled` for a signalled exit (attach/cancel contract).
-  trap 'RUN_MARKER_SIGNALLED=1; exit 130' INT
-  trap 'RUN_MARKER_SIGNALLED=1; exit 143' TERM
+  # `cancelled` for a signalled exit (attach/cancel contract). Past the switch
+  # the handler defers instead of exiting (update_signal_exit): interrupting
+  # the switch→self-check→rollback window cannot leave a consistent install.
+  trap 'update_signal_exit 130' INT
+  trap 'update_signal_exit 143' TERM
 
   # A plain update subscribes before it ever competes for the lock: the
   # subscriber path owns nothing (no create, no reclaim, no hold), so a
@@ -7462,6 +7465,73 @@ marker_field() { # file key
     v="$(sed -n "s/.*\"$key\": *\([0-9][0-9]*\).*/\1/p" "$file" 2>/dev/null | head -n 1)"
   fi
   printf '%s' "$v"
+}
+
+# SIGINT/SIGTERM handling while the update lock is held. Before the switch a
+# signalled exit carries RUN_MARKER_SIGNALLED (the EXIT trap writes the
+# terminal phase as `cancelled`). Once `switching` is written the
+# switch→self-check→rollback window is the protected failure path, so the
+# signal is deferred: interrupting it cannot leave a consistent install, and
+# `dsh update --cancel` refuses there for the same reason.
+update_signal_exit() { # exit code
+  local phase=""
+  if [ "${RUN_MARKER_ACTIVE:-0}" = 1 ]; then
+    phase="$(marker_field "$(run_marker_path)" phase)"
+    case "$phase" in
+      switching|applying)
+        warn "ignoring the interrupt: the update is past the switch (phase $phase); a failure rolls back automatically"
+        return 0
+        ;;
+    esac
+  fi
+  RUN_MARKER_SIGNALLED=1
+  exit "$1"
+}
+
+# Newest mtime among the readable files, epoch seconds, or empty when none is
+# readable (no evidence must never read as stalled). GNU stat first, then the
+# BSD/macOS form.
+file_newest_mtime() { # file...
+  local f m newest=""
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    m="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || true)"
+    case "$m" in ''|*[!0-9]*) continue;; esac
+    if [ -z "$newest" ] || [ "$m" -gt "$newest" ]; then newest="$m"; fi
+  done
+  [ -n "$newest" ] || return 0
+  printf '%s' "$newest"
+}
+
+# How long ago the run marker or its log last moved, in seconds; empty when
+# neither is readable (no evidence). Mirrors the plugin's marker/log progress
+# age (`marker.ts` `markerProgressAge`).
+marker_progress_age_seconds() { # marker
+  local marker="$1" log newest now
+  log="$(marker_field "$marker" logPath)"
+  newest="$(file_newest_mtime "$marker" ${log:+"$log"})"
+  [ -n "$newest" ] || return 0
+  now="$(date +%s)"
+  [ "$now" -ge "$newest" ] || { printf '0'; return 0; }
+  printf '%s' "$((now - newest))"
+}
+
+# The plugin's stall window (`marker.ts` RUN_STALE_WINDOW_MS, 5 min): a marker
+# whose pid is live but whose files stopped moving this long ago names a
+# recycled pid, not a running update.
+RUN_STALE_WINDOW_SECONDS="${DSH_UPDATE_STALE_WINDOW:-300}"
+
+# A recorded run pid is live only while the run is also progressing: the pid
+# must be live and non-zombie, and the marker/log must have moved inside
+# RUN_STALE_WINDOW_SECONDS. Missing evidence keeps the pid-only behavior
+# (never act on absent evidence).
+update_marker_progressing() { # marker pid -> 0 when live and progressing
+  local marker="$1" pid="$2" age
+  pid_live "$pid" || return 1
+  age="$(marker_progress_age_seconds "$marker")"
+  [ -n "$age" ] || return 0
+  [ "$age" -le "$RUN_STALE_WINDOW_SECONDS" ] || return 1
+  return 0
 }
 
 # Canonical numbered-step labels for attach rendering (do_update's 1..9).
@@ -8209,7 +8279,9 @@ attach_to_running_update() { # -> attaches (exits) or returns 1 when not attacha
   [ -f "$marker" ] || return 1
   pid="$(marker_field "$marker" pid)"
   case "$pid" in ''|*[!0-9]*) return 1;; esac
-  pid_live "$pid" || return 1
+  # Pid liveness alone is not enough: a recycled pid behind a marker whose
+  # files stopped moving for the stall window is stale, never attached to.
+  update_marker_progressing "$marker" "$pid" || return 1
 
   mode="$(marker_field "$marker" mode)"
   started_at="$(marker_field "$marker" startedAt)"
@@ -8374,8 +8446,20 @@ do_cancel() {
       return 0
       ;;
   esac
-  if ! pid_live "$pid"; then
-    say "dsh update --cancel: run ${run_id:-?} (PID $pid) is not running${phase:+ (marker phase: $phase)} — nothing to cancel."
+  # A terminal marker phase is authoritative: the run finished in the window
+  # between the caller's decision and this read (or its pid was recycled).
+  # NEVER relabel a finished run as cancelled, and never signal the pid.
+  case "$phase" in
+    done|failed|rolledback|cancelled)
+      say "dsh update --cancel: run ${run_id:-?} already finished (phase $phase) — nothing to cancel."
+      emit_cancel_json 1 noop
+      return 0
+      ;;
+  esac
+  # Pid liveness alone is not eligibility: a recycled pid behind a marker
+  # whose files stopped moving for the stall window must never be signalled.
+  if ! update_marker_progressing "$marker" "$pid"; then
+    say "dsh update --cancel: run ${run_id:-?} (PID $pid) is not progressing (marker phase: ${phase:-?}) — nothing to cancel."
     emit_cancel_json 1 noop
     return 0
   fi
@@ -8392,6 +8476,18 @@ do_cancel() {
   kill -TERM "$pid" 2>/dev/null || true
   start="$(date +%s)"
   while pid_live "$pid"; do
+    # The TERM may land just as the run crosses the switch; the runner then
+    # defers it (update_signal_exit). Never escalate to SIGKILL across that
+    # boundary: the rollback path is protected.
+    phase="$(marker_field "$marker" phase)"
+    case "$phase" in
+      switching|applying)
+        say ""
+        say "dsh update --cancel: the run crossed into $phase while cancelling; deferring to its own rollback path (no SIGKILL)."
+        emit_cancel_json 0 refused
+        return 1
+        ;;
+    esac
     now="$(date +%s)"
     [ $((now - start)) -ge "$timeout" ] && break
     sleep 0.5
@@ -8406,11 +8502,19 @@ do_cancel() {
       sleep 0.2
     done
   fi
-  # The runner's EXIT trap writes cancelled on SIGTERM; a SIGKILLed runner
-  # cannot, so write the terminal phase here if it is still non-terminal.
+  # The runner's EXIT trap writes its terminal phase, and a race can finish
+  # the run (done/failed/rolledback) inside the cancel window: a terminal
+  # phase is authoritative and is never relabelled cancelled. A SIGKILLed
+  # runner cannot write its own phase, so only a still-non-terminal marker is
+  # relabelled here.
   phase="$(marker_field "$marker" phase)"
   case "$phase" in
-    done|failed|rolledback|cancelled) :;;
+    done|failed|rolledback)
+      say "dsh update --cancel: run ${run_id:-?} finished (phase $phase) before the cancel took effect — nothing was cancelled."
+      emit_cancel_json 1 noop
+      return 0
+      ;;
+    cancelled) :;;
     *) mark_run_cancelled "$marker"; phase="cancelled";;
   esac
   CANCEL_PHASE="$phase"

@@ -92,10 +92,10 @@ function compareVersions(left, right) {
 }
 function versionTokens(version) {
   if (typeof version !== "string") return null;
-  const text = version.trim().replace(/^v/i, "");
+  const text = version.trim().replace(/^v/i, "").replace(/\+.*$/, "");
   if (text === "" || text.length > 128) return null;
-  if (!/^[0-9A-Za-z][0-9A-Za-z.+_-]*$/.test(text)) return null;
-  const segments = text.split(/[.+_-]+/);
+  if (!/^[0-9A-Za-z][0-9A-Za-z._-]*$/.test(text)) return null;
+  const segments = text.split(/[._-]+/);
   if (!segments.some((segment) => /^[0-9]+$/.test(segment))) return null;
   return segments.map((segment) => /^[0-9]+$/.test(segment) ? Number(segment) : segment);
 }
@@ -634,6 +634,15 @@ function stagedApplyPath(prefix) {
 function hasStagedApply(prefix) {
   return existsSync(stagedApplyPath(prefix));
 }
+function stagedTreeReady(prefix, treeDirName) {
+  if (!/^[A-Za-z0-9._-]+$/.test(treeDirName)) return false;
+  if (treeDirName === "." || treeDirName.includes("..")) return false;
+  return existsSync(join3(prefix, "harness", treeDirName, ".dsh-install-complete"));
+}
+function stagedApplyReady(prefix) {
+  const staged = readStagedApply(prefix);
+  return staged !== null && stagedTreeReady(prefix, staged.treeDirName);
+}
 function isUpdatePhase(value) {
   return value === "starting" || value === "prepared" || value === "preparing" || value === "applying" || value === "success" || value === "failed" || value === "rolledback" || value === "cancelled";
 }
@@ -736,7 +745,7 @@ function reconcileRunRecord(record, identity, context, options = {}) {
   if (record.result !== null) return { record, changed: false };
   const live2 = options.live ?? isRunActive(context.home, record);
   if (live2) return { record, changed: false };
-  const staged = hasStagedApply(context.prefix);
+  const staged = stagedApplyReady(context.prefix);
   const parsed = readRunLog(record.logPath);
   if (parsed.result !== null) {
     const next = terminalRecord(parsed.lastLine === "" ? record : { ...record, lastLine: parsed.lastLine }, parsed.result, now, staged);
@@ -888,7 +897,7 @@ function observedRecordFromMarker(marker, context) {
     logPath: marker.logPath,
     result,
     launcher: "external",
-    staged: hasStagedApply(context.prefix),
+    staged: stagedApplyReady(context.prefix),
     logTail: [...parsed.logTail],
     observed: true,
     ...finishedAt === void 0 ? {} : { finishedAt },
@@ -997,6 +1006,7 @@ var UpdateRunController = class {
   loaded = false;
   watcher = null;
   capability = null;
+  startInFlight = null;
   timers;
   /**
    * @param options - home, identity/status readers, launch and timer seams.
@@ -1024,8 +1034,24 @@ var UpdateRunController = class {
   run() {
     this.healStaleOwn();
     const own = this.loadOwn();
-    if (own !== null && own.result === null && !isPreparedPhase(own.phase) && this.blockingRun(own)) return own;
-    return this.observeEngineRun() ?? own;
+    const current = own === null ? null : this.stagedTruth(own);
+    if (current !== null && current.result === null && !isPreparedPhase(current.phase) && this.blockingRun(current)) return current;
+    return this.observeEngineRun() ?? current;
+  }
+  /**
+   * The `staged` flag is derived truth: it must match the staged record and
+   * its tree on disk at read time. The engine archives a rolled-back tree as
+   * `<dir>.failed-<ts>` while keeping the staged record, so a persisted
+   * record that still reads `staged: true` (or a legacy `false` against a
+   * complete tree) is corrected and persisted here — the UI's Retry/recover
+   * decision must never be based on a stale flag.
+   */
+  stagedTruth(record) {
+    const staged = stagedApplyReady(this.prefix);
+    if (record.staged === staged) return record;
+    const next = { ...record, staged };
+    this.persist(next);
+    return next;
   }
   /** The persisted plugin record (loaded once). */
   loadOwn() {
@@ -1165,7 +1191,7 @@ var UpdateRunController = class {
       this.watch(current);
       return current;
     }
-    if (isPreparedPhase(current.phase) && hasStagedApply(this.prefix)) return current;
+    if (isPreparedPhase(current.phase) && stagedApplyReady(this.prefix)) return current;
     const { record, changed } = reconcileRunRecord(current, this.options.readIdentity(), {
       home: this.options.home,
       prefix: this.prefix,
@@ -1189,12 +1215,25 @@ var UpdateRunController = class {
    * the staged target is pinned by the engine's record, so the offered action
    * is Restart to update, not prepare again.
    *
+   * Single-flight (like `UpdateCheckCore.checkNow`): concurrent callers share
+   * one gate+probe+begin pass, so two Update-now clicks in the probe window
+   * launch exactly one engine — the loser of a double launch could only die
+   * on the engine lock and leave a transient failed record.
+   *
    * @returns the freshly persisted record.
    * @throws RunRefusedError when no update is available, a run is active, an
    *   update is already prepared, the shim is missing, or the launch fails
    *   (including a launch environment with no usable Node.js runtime).
    */
-  async start() {
+  start() {
+    if (this.startInFlight !== null) return this.startInFlight;
+    this.startInFlight = this.startOnce().finally(() => {
+      this.startInFlight = null;
+    });
+    return this.startInFlight;
+  }
+  /** The gated prepare/one-shot pass behind {@link start}'s single flight. */
+  async startOnce() {
     this.reconcile();
     const status = this.options.readStatus();
     if (status.state !== "available" && status.state !== "dismissed" || status.latest === void 0) {
@@ -1220,6 +1259,21 @@ var UpdateRunController = class {
     }
     const pin = { target: status.latest.version, channel: status.current.channel };
     const capability = await this.probe();
+    const afterProbe = this.run();
+    if (afterProbe !== null && afterProbe.result === null) {
+      if (isPreparedPhase(afterProbe.phase)) {
+        throw new RunRefusedError(
+          "already-prepared",
+          `updateCheck.start: update ${afterProbe.target} is already prepared; apply it instead`
+        );
+      }
+      if (this.blockingRun(afterProbe)) {
+        throw new RunRefusedError(
+          "already-running",
+          `updateCheck.start: an update is already running (run ${afterProbe.runId}, step ${String(afterProbe.step)}/${String(afterProbe.steps)})`
+        );
+      }
+    }
     return capability.capability === "supported" ? this.begin("prepare", pin) : this.begin("one-shot", pin);
   }
   /**
@@ -1227,8 +1281,9 @@ var UpdateRunController = class {
    *
    * @returns the freshly persisted record.
    * @throws RunRefusedError when nothing is prepared, the record is a one-shot
-   *   update (its run owns the restart), the staged marker is missing, a run
-   *   is active, the shim is missing, or the launch fails.
+   *   update (its run owns the restart), the staged record or its tree is
+   *   missing/incomplete (`staged-tree-missing`), a run is active, the shim is
+   *   missing, or the launch fails.
    */
   apply() {
     this.reconcile();
@@ -1246,22 +1301,29 @@ var UpdateRunController = class {
       );
     }
     const revisableFailure = current !== null && current.result !== null && current.result !== "success" && current.staged === true;
+    const staged = readStagedApply(this.prefix);
+    const stagedReady = staged !== null && stagedTreeReady(this.prefix, staged.treeDirName);
     if (current === null || !isPreparedPhase(current.phase) && !revisableFailure) {
+      if (staged !== null && !stagedReady) {
+        throw new RunRefusedError(
+          "staged-tree-missing",
+          `updateCheck.apply: the staged tree ${staged.treeDirName} is missing or incomplete; run Update now to prepare again`
+        );
+      }
       throw new RunRefusedError(
         "not-prepared",
         "updateCheck.apply: no prepared update is staged; run Update now first"
       );
     }
-    if (!hasStagedApply(this.prefix)) {
+    if (!stagedReady) {
       throw new RunRefusedError(
-        "not-prepared",
-        "updateCheck.apply: the staged apply marker is gone; run Update now to prepare again"
+        "staged-tree-missing",
+        staged === null ? "updateCheck.apply: the staged update record is gone; run Update now to prepare again" : `updateCheck.apply: the staged tree ${staged.treeDirName} is missing or incomplete; run Update now to prepare again`
       );
     }
-    const staged = readStagedApply(this.prefix);
     return this.begin("apply", {
-      target: staged?.version ?? current.target,
-      channel: staged?.channel ?? current.channel
+      target: staged.version,
+      channel: staged.channel
     });
   }
   /**
@@ -1341,8 +1403,14 @@ var UpdateRunController = class {
     }
     return { status: "cancelled", message: outcome.message, record: this.relayCancelled(current) };
   }
-  /** Relay a successful engine cancel into the record the UI renders. */
+  /**
+   * Relay a successful engine cancel into the record the UI renders. A
+   * terminal record is authoritative and is never overwritten: the run may
+   * have finished (done/failed/rolledback) between the engine's eligibility
+   * read and its kill, and that outcome must survive the cancel relay.
+   */
   relayCancelled(current) {
+    if (current !== null && current.result !== null) return current;
     if (current !== null && current.observed !== true) {
       const next = this.terminalRecord(current, "cancelled");
       this.persist(next);
@@ -1390,7 +1458,7 @@ var UpdateRunController = class {
       logPath,
       result: null,
       launcher: "pending",
-      staged: mode === "apply" ? hasStagedApply(this.prefix) : false,
+      staged: mode === "apply" ? stagedApplyReady(this.prefix) : false,
       logTail: []
     };
     try {
@@ -1474,7 +1542,7 @@ var UpdateRunController = class {
       return;
     }
     const parsed = readRunLog(record.logPath);
-    const staged = hasStagedApply(this.prefix);
+    const staged = stagedApplyReady(this.prefix);
     const wrapperPid = readRunPid(runPidPath(this.options.home));
     const pid = wrapperPid ?? record.pid;
     const alive = pid !== null && (this.options.isAlive ?? isProcessAlive)(pid);
@@ -2012,6 +2080,8 @@ export {
   rungForMode,
   sameRunRecord,
   stagedApplyPath,
+  stagedApplyReady,
+  stagedTreeReady,
   startUpdateCheckSchedule,
   systemBinDirs,
   terminalRecord,

@@ -53,6 +53,13 @@ export function UpdateSettingsRow({ useUpdate, actions, t }: UpdateSettingsRowPr
   const activeRun = run !== null && isExecutingPhase(run.phase) ? run : null
   const preparedRun = run !== null && run.rung === 'two-phase' && run.phase === 'prepared' ? run : null
   const failedRun = run !== null && run.result !== null && run.result !== 'success' ? run : null
+  // A failed/cancelled/rolled-back record is actionable only while it leads
+  // somewhere: a complete staged tree (Retry re-applies) or a still-offered
+  // release (Update now prepares fresh). With a `current` status and no
+  // staged tree it is history — the row must fall through to the quiet
+  // current state instead of offering a dead-end Retry.
+  const canStart = (status.state === 'available' || status.state === 'dismissed') && latest !== undefined
+  const failedActionable = failedRun !== null && (failedRun.staged || canStart)
   // The same landed-offering rule as the pill: a success that landed the
   // release still offered by a lagging status must not re-offer it.
   const landedOffering = run !== null && run.result === 'success' && latest !== undefined && run.target === latest.version
@@ -74,10 +81,10 @@ export function UpdateSettingsRow({ useUpdate, actions, t }: UpdateSettingsRowPr
     // The prepared row performs the restart directly (the same controller
     // action the dialog's primary button calls).
     action = { label: t('action.restart'), run: actions.apply, primary: true }
-  } else if (failedRun !== null) {
+  } else if (failedActionable) {
     view = 'failed'
     label = failedRun.result === 'cancelled' ? t('settings.cancelled') : t('settings.failed')
-    // The dialog carries the reason, the log tail, and Retry.
+    // The dialog carries the reason, the log tail, and Retry/Update now.
     action = { label: t('action.retry'), run: actions.open, primary: false }
   } else if (status.state === 'dismissed' && latest !== undefined) {
     view = 'skipped'

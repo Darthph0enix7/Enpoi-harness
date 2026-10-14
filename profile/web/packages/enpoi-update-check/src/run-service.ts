@@ -49,15 +49,23 @@ import {
 } from './marker.js'
 import { probeEngineCapability, type EngineProbeResult } from './probe.js'
 import {
-  effectivePid, executingPhase, hasStagedApply, isPreparedPhase, isProcessAlive, isProgressStale, isRunActive, modeFlag,
+  effectivePid, executingPhase, isPreparedPhase, isProcessAlive, isProgressStale, isRunActive, modeFlag,
   preparedRecord, progressAgeMs, readRunLog, readRunPid, readRunRecord, readStagedApply, reconcileRunRecord,
-  RUN_STALE_WINDOW_MS, RUN_STEP_TOTAL, rungForMode, runLogPath, runPidPath, runRecordPath, sameRunRecord, writeRunRecord,
+  RUN_STALE_WINDOW_MS, RUN_STEP_TOTAL, rungForMode, runLogPath, runPidPath, runRecordPath, sameRunRecord,
+  stagedApplyReady, stagedTreeReady, writeRunRecord,
   type UpdatePhase, type UpdateRunMode, type UpdateRunRecord,
 } from './run.js'
 import type { UpdateCheckStatus } from './service.js'
 
 /** Why `start`/`apply` refused; the Remote maps every case to `gateway/bad-request`. */
-export type RunRefusalReason = 'not-available' | 'already-running' | 'already-prepared' | 'not-prepared' | 'shim-missing' | 'launch-failed'
+export type RunRefusalReason =
+  | 'not-available'
+  | 'already-running'
+  | 'already-prepared'
+  | 'not-prepared'
+  | 'staged-tree-missing'
+  | 'shim-missing'
+  | 'launch-failed'
 
 /** A start/apply refusal with a displayable reason. */
 export class RunRefusedError extends Error {
@@ -178,6 +186,7 @@ export class UpdateRunController {
   private loaded = false
   private watcher: ReturnType<typeof setInterval> | null = null
   private capability: Promise<EngineProbeResult> | null = null
+  private startInFlight: Promise<UpdateRunRecord> | null = null
   private readonly timers: RunTimers
 
   /**
@@ -205,8 +214,25 @@ export class UpdateRunController {
     // block a gate (the engine's own truth decides real liveness).
     this.healStaleOwn()
     const own = this.loadOwn()
-    if (own !== null && own.result === null && !isPreparedPhase(own.phase) && this.blockingRun(own)) return own
-    return this.observeEngineRun() ?? own
+    const current = own === null ? null : this.stagedTruth(own)
+    if (current !== null && current.result === null && !isPreparedPhase(current.phase) && this.blockingRun(current)) return current
+    return this.observeEngineRun() ?? current
+  }
+
+  /**
+   * The `staged` flag is derived truth: it must match the staged record and
+   * its tree on disk at read time. The engine archives a rolled-back tree as
+   * `<dir>.failed-<ts>` while keeping the staged record, so a persisted
+   * record that still reads `staged: true` (or a legacy `false` against a
+   * complete tree) is corrected and persisted here — the UI's Retry/recover
+   * decision must never be based on a stale flag.
+   */
+  private stagedTruth(record: UpdateRunRecord): UpdateRunRecord {
+    const staged = stagedApplyReady(this.prefix)
+    if (record.staged === staged) return record
+    const next = { ...record, staged }
+    this.persist(next)
+    return next
   }
 
   /** The persisted plugin record (loaded once). */
@@ -358,7 +384,7 @@ export class UpdateRunController {
       this.watch(current)
       return current
     }
-    if (isPreparedPhase(current.phase) && hasStagedApply(this.prefix)) return current
+    if (isPreparedPhase(current.phase) && stagedApplyReady(this.prefix)) return current
     // A non-live non-prepared record is stale by definition: reconcile with
     // strong liveness so a recycled pid cannot keep it active.
     const { record, changed } = reconcileRunRecord(current, this.options.readIdentity(), {
@@ -382,12 +408,24 @@ export class UpdateRunController {
    * the staged target is pinned by the engine's record, so the offered action
    * is Restart to update, not prepare again.
    *
+   * Single-flight (like `UpdateCheckCore.checkNow`): concurrent callers share
+   * one gate+probe+begin pass, so two Update-now clicks in the probe window
+   * launch exactly one engine — the loser of a double launch could only die
+   * on the engine lock and leave a transient failed record.
+   *
    * @returns the freshly persisted record.
    * @throws RunRefusedError when no update is available, a run is active, an
    *   update is already prepared, the shim is missing, or the launch fails
    *   (including a launch environment with no usable Node.js runtime).
    */
-  async start(): Promise<UpdateRunRecord> {
+  start(): Promise<UpdateRunRecord> {
+    if (this.startInFlight !== null) return this.startInFlight
+    this.startInFlight = this.startOnce().finally(() => { this.startInFlight = null })
+    return this.startInFlight
+  }
+
+  /** The gated prepare/one-shot pass behind {@link start}'s single flight. */
+  private async startOnce(): Promise<UpdateRunRecord> {
     this.reconcile()
     const status = this.options.readStatus()
     // A dismissed version is startable: "Skip this version" only hides the
@@ -418,6 +456,23 @@ export class UpdateRunController {
     }
     const pin = { target: status.latest.version, channel: status.current.channel }
     const capability = await this.probe()
+    // The probe await is a real gap: an engine run started elsewhere (or a
+    // settled sibling call) can appear in it, so re-check before begin.
+    const afterProbe = this.run()
+    if (afterProbe !== null && afterProbe.result === null) {
+      if (isPreparedPhase(afterProbe.phase)) {
+        throw new RunRefusedError(
+          'already-prepared',
+          `updateCheck.start: update ${afterProbe.target} is already prepared; apply it instead`,
+        )
+      }
+      if (this.blockingRun(afterProbe)) {
+        throw new RunRefusedError(
+          'already-running',
+          `updateCheck.start: an update is already running (run ${afterProbe.runId}, step ${String(afterProbe.step)}/${String(afterProbe.steps)})`,
+        )
+      }
+    }
     return capability.capability === 'supported'
       ? this.begin('prepare', pin)
       : this.begin('one-shot', pin)
@@ -428,8 +483,9 @@ export class UpdateRunController {
    *
    * @returns the freshly persisted record.
    * @throws RunRefusedError when nothing is prepared, the record is a one-shot
-   *   update (its run owns the restart), the staged marker is missing, a run
-   *   is active, the shim is missing, or the launch fails.
+   *   update (its run owns the restart), the staged record or its tree is
+   *   missing/incomplete (`staged-tree-missing`), a run is active, the shim is
+   *   missing, or the launch fails.
    */
   apply(): UpdateRunRecord {
     this.reconcile()
@@ -451,24 +507,38 @@ export class UpdateRunController {
     // is the recovery path the UI's "Clear update state & retry" uses.
     const revisableFailure = current !== null
       && current.result !== null && current.result !== 'success' && current.staged === true
+    // The engine keeps the staged record after a rolled-back apply while its
+    // failed tree is archived as `<dir>.failed-<ts>`: replaying `--apply`
+    // against it fails forever with "the staged tree … is missing or
+    // incomplete". The marker presence with a broken tree gets its own
+    // refusal so the client re-prepares instead of replaying.
+    const staged = readStagedApply(this.prefix)
+    const stagedReady = staged !== null && stagedTreeReady(this.prefix, staged.treeDirName)
     if (current === null || (!isPreparedPhase(current.phase) && !revisableFailure)) {
+      if (staged !== null && !stagedReady) {
+        throw new RunRefusedError(
+          'staged-tree-missing',
+          `updateCheck.apply: the staged tree ${staged.treeDirName} is missing or incomplete; run Update now to prepare again`,
+        )
+      }
       throw new RunRefusedError(
         'not-prepared',
         'updateCheck.apply: no prepared update is staged; run Update now first',
       )
     }
-    if (!hasStagedApply(this.prefix)) {
+    if (!stagedReady) {
       throw new RunRefusedError(
-        'not-prepared',
-        'updateCheck.apply: the staged apply marker is gone; run Update now to prepare again',
+        'staged-tree-missing',
+        staged === null
+          ? 'updateCheck.apply: the staged update record is gone; run Update now to prepare again'
+          : `updateCheck.apply: the staged tree ${staged.treeDirName} is missing or incomplete; run Update now to prepare again`,
       )
     }
     // Re-apply the version the staged record actually names (the failed
     // record's target may predate it).
-    const staged = readStagedApply(this.prefix)
     return this.begin('apply', {
-      target: staged?.version ?? current.target,
-      channel: staged?.channel ?? current.channel,
+      target: staged.version,
+      channel: staged.channel,
     })
   }
 
@@ -548,8 +618,14 @@ export class UpdateRunController {
     return { status: 'cancelled', message: outcome.message, record: this.relayCancelled(current) }
   }
 
-  /** Relay a successful engine cancel into the record the UI renders. */
+  /**
+   * Relay a successful engine cancel into the record the UI renders. A
+   * terminal record is authoritative and is never overwritten: the run may
+   * have finished (done/failed/rolledback) between the engine's eligibility
+   * read and its kill, and that outcome must survive the cancel relay.
+   */
   private relayCancelled(current: UpdateRunRecord | null): UpdateRunRecord | null {
+    if (current !== null && current.result !== null) return current
     if (current !== null && current.observed !== true) {
       const next = this.terminalRecord(current, 'cancelled')
       this.persist(next)
@@ -599,7 +675,7 @@ export class UpdateRunController {
       logPath,
       result: null,
       launcher: 'pending',
-      staged: mode === 'apply' ? hasStagedApply(this.prefix) : false,
+      staged: mode === 'apply' ? stagedApplyReady(this.prefix) : false,
       logTail: [],
     }
     // A new run owns a fresh log; reconcile never deletes it, begin does.
@@ -689,7 +765,7 @@ export class UpdateRunController {
       return
     }
     const parsed = readRunLog(record.logPath)
-    const staged = hasStagedApply(this.prefix)
+    const staged = stagedApplyReady(this.prefix)
     const wrapperPid = readRunPid(runPidPath(this.options.home))
     const pid = wrapperPid ?? record.pid
     const alive = pid !== null && (this.options.isAlive ?? isProcessAlive)(pid)

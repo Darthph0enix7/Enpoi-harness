@@ -24,6 +24,10 @@ No `0.1.7-enpoi.2.84` or `0.1.7-enpoi.2.89` release exists (no tag, no catalog e
 | `0.1.7-enpoi.2.91` | 2026-10-14 14:50 | Docs: the 2.90 cross-device verification evidence recorded in the plan. |
 | `0.1.7-enpoi.2.92` | 2026-10-14 15:57 | The landed-run pill guard is scoped to the offered version (a persisted success no longer suppresses later releases) and reconnect/status reads reconcile a stale run; docs hygiene (STATE.md superseded banner, roster line, note pairings). |
 
+## Pre-sign-off fix wave
+
+The post-2.92 pre-sign-off wave (owner-reported UI defect plus the fix-9 read-only audit's findings), all landed before the sign-off: source-built `base+g<sha>` installs are offered their next release again (the comparator treats `+` as build metadata, never a separator, so a differing commit reaches the version comparison instead of `unknown`); a rolled-back apply's archived staged tree is validated by `updateCheck.apply` (distinct `staged-tree-missing`) and the record's `staged` flag now means "a complete staged update is ready to apply", so Retry/recover/Update-now route into a fresh prepare instead of replaying a doomed apply; `--cancel` and the plugin's cancel relay treat terminal marker phases as authoritative (a run finishing inside the cancel window reports `noop`/already finished, never `cancelled`, and a terminal record is never overwritten), and the engine defers INT/TERM once `switching` is written; `start` is single-flight so two Update-now clicks in the probe window launch one engine; engine attach/cancel eligibility now requires the same marker/log progression window the plugin uses (a recycled pid behind stopped files is never signalled or attached to); and a terminal cancelled/failed/rolledback record with a `current` status renders as history (Up to date + Check) instead of the sticky "Update cancelled / Retry" row the owner hit on the Mac — a no-op prepare (already up to date, nothing staged) ends as a terminal success the surfaces present as up to date.
+
 ## Live incidents found and fixed
 
 | # | Incident | Symptom on a device | Root cause | Fix |

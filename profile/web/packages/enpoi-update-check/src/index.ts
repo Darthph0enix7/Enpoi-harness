@@ -282,6 +282,8 @@ export {
   runRecordPath,
   sameRunRecord,
   stagedApplyPath,
+  stagedApplyReady,
+  stagedTreeReady,
   terminalRecord,
   updateCheckDir,
   writeRunRecord,

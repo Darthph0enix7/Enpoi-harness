@@ -29,8 +29,10 @@ service restart, self-check, health, retention).
   source-built install stamped `0.1.7-enpoi.2+gbb12abc` (or the bare base)
   whose commit is the catalog target's commit is never offered that same
   revision forever. The version comparator orders the `0.1.7-enpoi.<n>` shape
-  numerically and remains the fallback when either side lacks a commit; an
-  unparseable version with no commit match leaves the state `unknown`.
+  numerically and ignores semver build metadata (`+…`), so the source build's
+  `+g<sha>` stamp compares on its base when the commits differ; it remains the
+  fallback when either side lacks a commit, and an unparseable version with no
+  commit match leaves the state `unknown`.
 - States: `unknown` (never fetched, or a failure with no prior success) →
   `current` → `available` → `dismissed`. A failure keeps the last successful
   comparison and records `error`; a newer catalog version re-arms `available`
@@ -63,7 +65,7 @@ Patch row id `enpoi-update-check`:
 | `updateCheck.checkNow` | — | the status after one check (single-flight with the timer; never rejects) |
 | `updateCheck.dismiss` | `{ request: { version } }` | the status after recording the skip (`gateway/bad-request` when `version` is missing) |
 | `updateCheck.start` | — | the fresh record (`mode: 'prepare'` on a two-phase engine, `mode: 'one-shot'` on an older one, `phase: 'starting'`); `gateway/bad-request` when no update is available, a run is active, an update is already prepared, the shim is missing, or the launch fails (including no resolvable Node.js runtime) |
-| `updateCheck.apply` | — | the fresh apply record (`mode: 'apply'`, `phase: 'applying'`); `gateway/bad-request` when nothing is staged or the launch fails |
+| `updateCheck.apply` | — | the fresh apply record (`mode: 'apply'`, `phase: 'applying'`); `gateway/bad-request` when nothing is staged, the staged record's tree is missing or incomplete (`staged-tree-missing`, e.g. after a rollback archived it), or the launch fails |
 | `updateCheck.run` | — | the current run record, or null: the plugin's own run when one is executing, otherwise a live run observed from the engine marker (a `dsh update` started in a terminal), otherwise the persisted record |
 | `updateCheck.cancel` | — | the engine cancel outcome (`cancelled`/`refused`/`noop`/`failed`) with its message and the resulting record (`cancelled` on success); `gateway/bad-request` only when the shim is missing |
 | `updateCheck.clearStale` | — | the record after stale state was cleared; `gateway/bad-request` while a run or the engine's lock is genuinely live (the message names it) |
@@ -78,12 +80,17 @@ process executes, `updateCheck.run`.
 
 `updateCheck.start` pins the available target and channel, writes
 `$DSH_HOME/update-check/run.json`, truncates `$DSH_HOME/update-check/run.log`,
-and launches the installed `dsh` shim detached. `updateCheck.apply` repeats
-that against the recorded staged tree. A dismissed ("skipped") version stays
-startable — the skip only hides the client indicator, and the Settings control
-re-arms the update — while an already-prepared update is deliberately refused
-by `start` (`already-prepared`): the staged target is pinned by the engine's
-record, so the offered action is Restart to update.
+and launches the installed `dsh` shim detached; it is single-flight, so
+concurrent Update-now clicks share one prepare launch. `updateCheck.apply`
+repeats that against the recorded staged tree, and first requires that tree to
+be complete (`treeDirName` plus its `.dsh-install-complete` witness); a
+record kept after a rolled-back apply (the engine archived the failed tree)
+is refused with `staged-tree-missing` instead of replaying a doomed apply.
+A dismissed ("skipped") version stays startable — the skip only hides the
+client indicator, and the Settings control re-arms the update — while an
+already-prepared update is deliberately refused by `start`
+(`already-prepared`): the staged target is pinned by the engine's record, so
+the offered action is Restart to update.
 
 - **Capability probe.** The two-phase flags only exist in newer engines, so
   the controller probes the installed shim once per plugin boot
@@ -138,10 +145,14 @@ record, so the offered action is Restart to update.
 - **Cancel (implemented).** `updateCheck.cancel` shells the installed shim
   (`dsh update --cancel --json`, bounded 30 s) so every safety rule stays in
   the engine: SIGTERM → bounded wait → SIGKILL, refusal past the switch,
-  partial sweeps, marker → `cancelled`. The plugin relays the outcome; a
-  successful cancel becomes a `cancelled` record (the plugin's own when it
-  started the run, otherwise one synthesized from the terminal marker) and a
-  refusal surfaces the engine's message.
+  partial sweeps, marker → `cancelled`. Terminal marker phases are
+  authoritative on both sides: a run that finished inside the cancel window
+  reports `noop` (already finished), the engine defers INT/TERM once
+  `switching` is written, and the plugin never overwrites a terminal record
+  with `cancelled`. The plugin relays the outcome; a successful cancel becomes
+  a `cancelled` record (the plugin's own when it started the run, otherwise
+  one synthesized from the terminal marker) and a refusal surfaces the
+  engine's message.
 - **Stale state & self-healing (implemented).** Liveness is one truth: a run is
   live only when its pid is live and non-zombie AND its log moved inside the
   stall window (`RUN_STALE_WINDOW_MS`, 5 min), and terminal phases
@@ -156,10 +167,16 @@ record, so the offered action is Restart to update.
   lock (its refusal is precise). `updateCheck.clearStale` exposes the same
   healing to the UI: it refuses while anything is genuinely live, never
   touches the engine marker or the staged tree, and returns the terminal
-  record. A failed apply whose staged marker is still valid is **re-appliable
-  without a new prepare** — `apply` re-validates against the staged record and
-  pins the staged version as the target — which is what the dialog's
-  *Clear update state & retry* uses after a stale already-running failure.
+  record. A failed apply whose staged tree is still complete (the record's
+  `staged` flag is derived from the staged record plus its
+  `.dsh-install-complete` witness) is **re-appliable without a new prepare** —
+  `apply` re-validates and pins the staged version as the target — which is
+  what the dialog's *Clear update state & retry* uses after a stale
+  already-running failure. A record whose tree was archived reads
+  `staged: false`, so the client offers **Update now** (a fresh prepare)
+  instead of replaying apply. Engine attach/cancel eligibility uses the same
+  progress-staleness window as the plugin, so a recycled pid behind a marker
+  whose files stopped moving is never attached to or signalled.
 - **Restart reconcile.** Either rung's switch restarts the service, so the
   watcher dies with it. On plugin boot the record is reconciled against the log
   tail (a terminal line the watcher missed), the staged marker, and the install

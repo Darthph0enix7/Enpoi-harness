@@ -21,7 +21,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
-  hasStagedApply, isProgressStale, progressAgeMs, readRunLog, RUN_STALE_WINDOW_MS, rungForMode,
+  isProgressStale, progressAgeMs, readRunLog, RUN_STALE_WINDOW_MS, rungForMode, stagedApplyReady,
   type UpdatePhase, type UpdateRunMode, type UpdateRunRecord, type UpdateRunResult,
 } from './run.js'
 
@@ -246,7 +246,7 @@ export function observedRecordFromMarker(marker: EngineRunMarker, context: Obser
     logPath: marker.logPath,
     result,
     launcher: 'external',
-    staged: hasStagedApply(context.prefix),
+    staged: stagedApplyReady(context.prefix),
     logTail: [...parsed.logTail],
     observed: true,
     ...(finishedAt === undefined ? {} : { finishedAt }),

@@ -13,7 +13,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -97,6 +97,22 @@ function holdLock(prefix: string): { kill: () => void } {
   return { kill: () => child.kill('SIGKILL') }
 }
 
+/** Push one file's mtime well past the engine's stall window. */
+function staleMtime(path: string): void {
+  const past = new Date(Date.now() - 30 * 60_000)
+  utimesSync(path, past, past)
+}
+
+/** A sleeper whose SIGTERM handler rewrites the marker phase, then exits 0. */
+function finishingSleeper(marker: string, phase: string): ReturnType<typeof spawn> {
+  const script = [
+    'const fs = require("fs")',
+    `process.on("SIGTERM", () => { const p = process.argv[1]; const o = JSON.parse(fs.readFileSync(p, "utf8")); o.phase = ${JSON.stringify(phase)}; fs.writeFileSync(p, JSON.stringify(o)); process.exit(0) })`,
+    'setInterval(() => {}, 1000)',
+  ].join('; ')
+  return spawn(process.execPath, ['-e', script, marker], { stdio: 'ignore' })
+}
+
 const sleepers: ReturnType<typeof spawn>[] = []
 afterEach(() => {
   for (const child of sleepers.splice(0)) child.kill('SIGKILL')
@@ -146,6 +162,28 @@ RUN_MARKER_SIGNALLED=0
     expect(result.stdout).toContain('done=done')
     expect(result.stdout).toContain('rolledback=rolledback')
     expect(result.stdout).toContain('cancelled=cancelled')
+  })
+
+  it('defers INT/TERM once the marker reads switching/applying and exits before it', () => {
+    const prefix = scratch()
+    const result = runLib(String.raw`
+PREFIX="$PREFIX_DIR"; LOG_FILE=/dev/null
+run_marker_init prepare
+run_marker_phase switching
+update_signal_exit 143
+printf 'deferred-switching\n'
+run_marker_phase applying
+update_signal_exit 143
+printf 'deferred-applying\n'
+run_marker_phase running
+( update_signal_exit 143 )
+printf 'signalled-rc=%s\n' "$?"
+`, { PREFIX_DIR: prefix })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('deferred-switching')
+    expect(result.stdout).toContain('deferred-applying')
+    expect(result.stdout).toContain('signalled-rc=143')
+    expect(result.stderr).toContain('ignoring the interrupt')
   })
 
   it('reads string and numeric fields without Node resolved', () => {
@@ -219,6 +257,25 @@ describe.skipIf(win32)('attach on lock contention', () => {
     }
   })
 
+  it('refuses (does not attach) when a live pid sits behind a marker that stopped moving', () => {
+    const { prefix, marker } = minimalPrefix()
+    const sleeper = spawn('sleep', ['30'])
+    sleepers.push(sleeper)
+    writeMarker(marker, { pid: sleeper.pid ?? 0 })
+    staleMtime(marker)
+    const lock = holdLock(prefix)
+    try {
+      const result = runScript(['--update', '--prefix', prefix, '--dsh-home', join(prefix, '..', 'home')], {
+        DSH_ATTACH_INTERVAL: '0.2',
+      })
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toContain('another update is already running')
+      expect(result.stdout).not.toContain('attaching')
+    } finally {
+      lock.kill()
+    }
+  })
+
   it('refuses --prepare contention instead of attaching', () => {
     const { prefix, marker } = minimalPrefix()
     const sleeper = spawn('sleep', ['30'])
@@ -262,6 +319,47 @@ describe.skipIf(win32)('cancel', () => {
     expect(result.status).not.toBe(0)
     expect(result.stdout).toContain('"status": "refused"')
     expect(result.stderr).toContain('past the switch')
+    expect(sleeper.exitCode).toBeNull()
+  })
+
+  it('is a noop, never cancelled, when the marker already reads a terminal phase with a live pid', () => {
+    const { prefix, marker } = minimalPrefix()
+    const sleeper = spawn('sleep', ['30'])
+    sleepers.push(sleeper)
+    writeMarker(marker, { pid: sleeper.pid ?? 0, phase: 'done', step: 9 })
+    const result = runScript(['--update', '--cancel', '--json', '--prefix', prefix], { DSH_CANCEL_TIMEOUT: '2' })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('"status": "noop"')
+    expect(result.stderr).toContain('already finished')
+    expect(result.stdout).not.toContain('"status": "cancelled"')
+    // The finished run's pid is never signalled (it may already be recycled).
+    expect(sleeper.exitCode).toBeNull()
+    expect((JSON.parse(readFileSync(marker, 'utf8')) as { phase: string }).phase).toBe('done')
+  })
+
+  it('reports the run finished, never cancelled, when it crosses the exit trap in the cancel window', () => {
+    const { prefix, marker } = minimalPrefix()
+    const sleeper = finishingSleeper(marker, 'done')
+    sleepers.push(sleeper)
+    writeMarker(marker, { pid: sleeper.pid ?? 0, phase: 'running' })
+    const result = runScript(['--update', '--cancel', '--json', '--prefix', prefix], { DSH_CANCEL_TIMEOUT: '3' })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('"status": "noop"')
+    expect(result.stderr).toContain('finished (phase done)')
+    expect(result.stdout).not.toContain('"status": "cancelled"')
+    expect((JSON.parse(readFileSync(marker, 'utf8')) as { phase: string }).phase).toBe('done')
+  })
+
+  it('never acts on a stale marker whose live pid stopped moving (recycled pid)', () => {
+    const { prefix, marker } = minimalPrefix()
+    const sleeper = spawn('sleep', ['30'])
+    sleepers.push(sleeper)
+    writeMarker(marker, { pid: sleeper.pid ?? 0, phase: 'running' })
+    staleMtime(marker)
+    const result = runScript(['--update', '--cancel', '--json', '--prefix', prefix], { DSH_CANCEL_TIMEOUT: '2' })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('"status": "noop"')
+    expect(result.stderr).toContain('not progressing')
     expect(sleeper.exitCode).toBeNull()
   })
 

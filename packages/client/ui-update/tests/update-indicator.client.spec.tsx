@@ -81,6 +81,11 @@ const availableStatus = {
   },
 }
 
+const currentStatus = {
+  state: 'current' as const,
+  current: { version: '0.1.7-enpoi.2.81', commit: 'abc1234', channel: 'stable' },
+}
+
 describe('UpdateIndicator pill', () => {
   const invisibleStates: [string, UpdateUiState['status']][] = [
     ['unknown', null],
@@ -139,6 +144,20 @@ describe('UpdateIndicator pill', () => {
     landed.unmount()
     mount({ status: availableStatus, run: run({ result: 'failed', phase: 'failed' }) })
     expect(document.querySelector('[data-dsh-update-indicator]')).not.toBeNull()
+  })
+
+  it('stays hidden for terminal cancelled/failed/no-op records while the install is current', () => {
+    const current = currentStatus
+    mount({ status: current, run: run({ observed: true, launcher: 'external', phase: 'cancelled', result: 'cancelled' }) })
+    expect(document.querySelector('[data-dsh-update-indicator]')).toBeNull()
+    cleanup()
+    mount({ status: current, run: run({ phase: 'failed', result: 'failed' }) })
+    expect(document.querySelector('[data-dsh-update-indicator]')).toBeNull()
+    cleanup()
+    // A no-op prepare's terminal success (already up to date, nothing
+    // staged) keeps the pill hidden too.
+    mount({ status: current, run: run({ phase: 'success', result: 'success', staged: false }) })
+    expect(document.querySelector('[data-dsh-update-indicator]')).toBeNull()
   })
 
   it('renders the Update pill while available even when a stale landed record persists (the live bug)', () => {
@@ -366,14 +385,51 @@ describe('UpdateIndicator dialog', () => {
     expect(screen.getByRole('button', { name: en['action.cancel'] })).toBeTruthy()
     observed.unmount()
 
-    // An observed failure lights the failure surface with Retry.
+    // An observed failure lights the failure surface; with nothing staged but
+    // a release still offered, the only forward action is a fresh prepare
+    // (Update now), never a replay of the dead run's apply.
     mount({
       status: availableStatus,
       run: run({ observed: true, launcher: 'external', phase: 'failed', result: 'failed', reason: 'the update run exited' }),
       dialogOpen: true,
     })
     expect(document.querySelector('[data-dsh-update-failure]')?.getAttribute('data-dsh-update-failure')).toBe('failed')
+    expect(screen.queryByRole('button', { name: en['action.retry'] })).toBeNull()
+    expect(screen.getByRole('button', { name: en['action.updateNow'] })).toBeTruthy()
+  })
+
+  it('renders the failed footer by what leads somewhere: Retry with a staged tree, Update now without, nothing while current', () => {
+    // A failed apply whose staged tree survived: Retry re-applies in place.
+    const staged = mount({
+      status: availableStatus,
+      run: run({ mode: 'apply', phase: 'failed', result: 'failed', staged: true }),
+      dialogOpen: true,
+    })
     expect(screen.getByRole('button', { name: en['action.retry'] })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: en['action.updateNow'] })).toBeNull()
+    staged.unmount()
+    // No staged tree, but a release is offered: a fresh prepare is the path.
+    const fresh = mount({
+      status: availableStatus,
+      run: run({ phase: 'failed', result: 'failed', staged: false }),
+      dialogOpen: true,
+    })
+    expect(screen.queryByRole('button', { name: en['action.retry'] })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: en['action.updateNow'] }))
+    expect(fresh.actions.start).toHaveBeenCalledTimes(1)
+    fresh.unmount()
+    // Status current and nothing staged: the record is historical — no
+    // Retry/apply/recover action remains, only Close.
+    mount({
+      status: currentStatus,
+      run: run({ observed: true, phase: 'cancelled', result: 'cancelled', staged: false, reason: 'Cancelled run 123' }),
+      dialogOpen: true,
+    })
+    expect(screen.queryByRole('button', { name: en['action.retry'] })).toBeNull()
+    expect(screen.queryByRole('button', { name: en['action.updateNow'] })).toBeNull()
+    expect(document.querySelector('[data-dsh-update-recover]')).toBeNull()
+    // Only Close remains (besides the modal's own close control).
+    expect(screen.getAllByRole('button', { name: en['action.close'] }).length).toBeGreaterThan(0)
   })
 
   it('offers Clear update state & retry on a failed record that kept a staged tree', () => {
@@ -420,7 +476,7 @@ describe('UpdateIndicator dialog', () => {
     expect(document.querySelector('[data-dsh-update-recover]')).not.toBeNull()
   })
 
-  it('renders a cancelled run with its own copy and Retry', () => {
+  it('renders a cancelled run with its own copy and a fresh prepare when it leads somewhere', () => {
     const { actions } = mount({
       status: availableStatus,
       run: run({ observed: true, launcher: 'external', phase: 'cancelled', result: 'cancelled', reason: 'Cancelled run 123: runner stopped' }),
@@ -428,8 +484,10 @@ describe('UpdateIndicator dialog', () => {
     })
     expect(document.querySelector('[data-dsh-update-failure]')?.getAttribute('data-dsh-update-failure')).toBe('cancelled')
     expect(screen.getByText(en['result.cancelled'])).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: en['action.retry'] }))
-    expect(actions.retry).toHaveBeenCalledTimes(1)
+    // Nothing staged: the offered action is a fresh prepare, not a replay.
+    fireEvent.click(screen.getByRole('button', { name: en['action.updateNow'] }))
+    expect(actions.start).toHaveBeenCalledTimes(1)
+    expect(actions.retry).not.toHaveBeenCalled()
   })
 
   it('renders the starting copy and a zero bar before the first step', () => {
@@ -439,13 +497,14 @@ describe('UpdateIndicator dialog', () => {
     expect(document.querySelector('[data-dsh-update-lastline]')?.textContent).toBe(en['progress.starting'])
   })
 
-  it('renders the failure surface with the reason, the log tail, and Retry', () => {
+  it('renders the failure surface with the reason, the log tail, and Retry for a staged failure', () => {
     const { actions } = mount({
       status: availableStatus,
       run: run({
         result: 'failed',
         phase: 'failed',
         step: 4,
+        staged: true,
         reason: 'the updater exited before reporting a result',
         logTail: ['[4/9] dependencies and build', 'unpacking archive'],
       }),

@@ -47,6 +47,11 @@ const availableStatus = {
   },
 }
 
+const currentStatus = {
+  state: 'current' as const,
+  current: { version: '0.1.7-enpoi.2.81', commit: 'abc1234', channel: 'stable' },
+}
+
 function mount(initial: Partial<UpdateUiState> = {}) {
   const store = createSnapshotStore<UpdateUiState>({
     status: null,
@@ -185,7 +190,7 @@ describe('UpdateSettingsRow', () => {
     expect(actions.open).toHaveBeenCalledTimes(1)
   })
 
-  it('labels a cancelled run and offers Retry through the dialog', () => {
+  it('labels a cancelled run and offers Retry through the dialog while an update is still offered', () => {
     const { actions } = mount({
       status: availableStatus,
       run: run({ observed: true, launcher: 'external', phase: 'cancelled', result: 'cancelled', reason: 'Cancelled run ext-1' }),
@@ -194,6 +199,61 @@ describe('UpdateSettingsRow', () => {
     expect(screen.getByText(en['settings.cancelled'])).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: en['action.retry'] }))
     expect(actions.open).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders a terminal cancelled record as history when the install is current (the live Mac defect)', () => {
+    // The exact live shape: the cancelled record persisted after the user
+    // cancelled, while the status now reports `current` (no update exists).
+    // The row used to show "Update cancelled / Retry" forever; Retry then
+    // launched no-op prepares. It must render as up to date with the quiet
+    // Check action and no Retry/Update/restart affordance.
+    const { actions } = mount({
+      status: currentStatus,
+      run: run({ observed: true, launcher: 'external', phase: 'cancelled', result: 'cancelled', reason: 'Cancelled run ext-1' }),
+    })
+    expect(rowState()).toBe('current')
+    expect(screen.getByText(en['settings.upToDate'])).toBeTruthy()
+    expect(screen.queryByText(en['settings.cancelled'])).toBeNull()
+    expect(screen.queryByRole('button', { name: en['action.retry'] })).toBeNull()
+    expect(screen.queryByRole('button', { name: en['action.updateNow'] })).toBeNull()
+    expect(screen.queryByRole('button', { name: en['action.restart'] })).toBeNull()
+    fireEvent.click(document.querySelector('[data-dsh-update-check]')!)
+    expect(actions.checkNow).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders a failed record as history while current, for every terminal result', () => {
+    for (const result of ['failed', 'rolledback', 'cancelled'] as const) {
+      mount({
+        status: currentStatus,
+        run: run({ phase: result, result, reason: `the prepare run reported ${result}` }),
+      })
+      expect(rowState()).toBe('current')
+      expect(screen.queryByRole('button', { name: en['action.retry'] })).toBeNull()
+      cleanup()
+    }
+  })
+
+  it('presents a no-op prepare (already up to date, nothing staged) as up to date, never a dead-end restart', () => {
+    // The no-op prepare ends in a terminal success record pinned to the
+    // offered version (the engine prints "already up to date") with no staged
+    // tree; the row shows the quiet current state, and the pill stays hidden.
+    mount({
+      status: currentStatus,
+      run: run({ mode: 'prepare', phase: 'success', result: 'success', target: '0.1.7-enpoi.2.92', staged: false }),
+    })
+    expect(rowState()).toBe('current')
+    expect(screen.getByText(en['settings.upToDate'])).toBeTruthy()
+    expect(screen.queryByRole('button', { name: en['action.restart'] })).toBeNull()
+    expect(screen.queryByRole('button', { name: en['action.retry'] })).toBeNull()
+  })
+
+  it('never lets a failed record mask an offered release: available stays actionable', () => {
+    mount({
+      status: availableStatus,
+      run: run({ phase: 'failed', result: 'failed', staged: false, reason: 'the prepare run exited before reporting a result' }),
+    })
+    expect(rowState()).toBe('failed')
+    expect(screen.getByRole('button', { name: en['action.retry'] })).toBeTruthy()
   })
 
   it('does not re-offer the release a landed run just installed, and re-arms on a newer one', () => {

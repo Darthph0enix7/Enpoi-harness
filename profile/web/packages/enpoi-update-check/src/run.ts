@@ -128,7 +128,12 @@ export interface UpdateRunRecord {
   readonly result: UpdateRunResult | null
   /** OS launcher rung that started the process (`systemd-run|launchctl|setsid|spawn`). */
   readonly launcher: string
-  /** Whether `$PREFIX/harness/.staged-apply.json` exists at the last check. */
+  /**
+   * Whether a complete staged update is ready to apply: the engine's
+   * `$PREFIX/harness/.staged-apply.json` record exists AND names a tree with
+   * its `.dsh-install-complete` witness. A record whose tree was archived by
+   * a rollback reads false, so the UI re-prepares instead of replaying apply.
+   */
   readonly staged: boolean
   /** Bounded tail of the log (last {@link LOG_TAIL_LINES} non-empty lines). */
   readonly logTail: readonly string[]
@@ -340,6 +345,35 @@ export function hasStagedApply(prefix: string): boolean {
   return existsSync(stagedApplyPath(prefix))
 }
 
+/**
+ * Whether one staged tree directory is complete. The name must be the single
+ * safe path segment the engine validates before it reaches a path expression
+ * (`scripts/install.sh`), and the tree must carry its `.dsh-install-complete`
+ * witness.
+ *
+ * @param prefix - install prefix (the `harness/` parent of the tree).
+ * @param treeDirName - the staged record's `treeDirName`.
+ * @returns true only when the tree is present and complete.
+ */
+export function stagedTreeReady(prefix: string, treeDirName: string): boolean {
+  if (!/^[A-Za-z0-9._-]+$/.test(treeDirName)) return false
+  if (treeDirName === '.' || treeDirName.includes('..')) return false
+  return existsSync(join(prefix, 'harness', treeDirName, '.dsh-install-complete'))
+}
+
+/**
+ * Whether a staged update is ready to apply: the staged-apply record exists
+ * and names a complete tree. A record kept after a rolled-back apply (the
+ * engine archived the failed tree) reads false.
+ *
+ * @param prefix - install prefix.
+ * @returns true only when the staged record and its tree are both usable.
+ */
+export function stagedApplyReady(prefix: string): boolean {
+  const staged = readStagedApply(prefix)
+  return staged !== null && stagedTreeReady(prefix, staged.treeDirName)
+}
+
 /** Whether a raw value is one of the reported phases. */
 function isUpdatePhase(value: unknown): value is UpdatePhase {
   return value === 'starting' || value === 'prepared' || value === 'preparing' || value === 'applying'
@@ -545,7 +579,10 @@ export function reconcileRunRecord(
   if (record.result !== null) return { record, changed: false }
   const live = options.live ?? isRunActive(context.home, record)
   if (live) return { record, changed: false }
-  const staged = hasStagedApply(context.prefix)
+  // A staged record whose tree was archived is not prepared: a broken tree
+  // must reconcile to a terminal state the UI can recover from with a fresh
+  // prepare.
+  const staged = stagedApplyReady(context.prefix)
   const parsed = readRunLog(record.logPath)
   if (parsed.result !== null) {
     const next = terminalRecord(parsed.lastLine === '' ? record : { ...record, lastLine: parsed.lastLine }, parsed.result, now, staged)

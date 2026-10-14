@@ -113,11 +113,15 @@ function bench(options: {
   storage?: ReturnType<typeof memoryStorage>
   now?: () => number
   rpcError?: string
+  /** Per-method failure seam (the rest of the methods succeed). */
+  rpcErrorFor?: (method: string) => string | undefined
 } = {}): Bench {
   const calls: Bench['calls'] = []
   const rpc = async <T>(method: string, args: Record<string, unknown>): Promise<UpdateRpcResult<T>> => {
     calls.push({ method, args })
     if (options.rpcError !== undefined) return { ok: false, message: options.rpcError }
+    const perMethod = options.rpcErrorFor?.(method)
+    if (perMethod !== undefined) return { ok: false, message: perMethod }
     const answers = options.answers ?? {}
     return { ok: true, value: (method in answers ? answers[method] : null) as T }
   }
@@ -297,6 +301,56 @@ describe('UpdateController actions and their exact wire args', () => {
     await settle()
     expect(fresh.calls.at(-1)).toEqual({ method: 'updateCheck.start', args: {} })
     fresh.controller.dispose()
+  })
+
+  it('retry on a record whose staged tree was archived starts a fresh prepare, never a replay', async () => {
+    // The healed wire shape after the engine archived a rolled-back tree:
+    // `staged: false` even though the record's mode reads apply.
+    const archived = runWire({
+      mode: 'apply',
+      phase: 'rolledback',
+      result: 'rolledback',
+      step: 9,
+      staged: false,
+      reason: 'the staged update tree is missing or incomplete',
+    })
+    const b = bench({
+      answers: {
+        'updateCheck.status': availableStatus,
+        'updateCheck.run': archived,
+        'updateCheck.start': executingRun,
+      },
+    })
+    b.controller.mount()
+    await settle()
+    b.controller.open()
+    await settle()
+    b.controller.retry()
+    await settle()
+    expect(b.calls.at(-1)).toEqual({ method: 'updateCheck.start', args: {} })
+    b.controller.dispose()
+  })
+
+  it('a refused apply re-reads the run so the failure surface can leave the dead end', async () => {
+    const healed = runWire({ mode: 'apply', phase: 'rolledback', result: 'rolledback', staged: false })
+    const b = bench({
+      answers: { 'updateCheck.status': availableStatus, 'updateCheck.run': healed },
+      rpcErrorFor: method => (method === 'updateCheck.apply'
+        ? 'updateCheck.apply: the staged tree 0.1.7-enpoi.2.84 is missing or incomplete; run Update now to prepare again'
+        : undefined),
+    })
+    b.controller.mount()
+    await settle()
+    b.controller.apply()
+    await settle()
+    await settle()
+    expect(b.calls.map(call => call.method)).toContain('updateCheck.apply')
+    // The refusal is surfaced AND the run is re-read, so the footer flips
+    // from Retry to Update now on the next render.
+    expect(b.calls.at(-1)).toEqual({ method: 'updateCheck.run', args: {} })
+    expect(b.controller.store.getSnapshot().actionError).toContain('missing or incomplete')
+    expect(b.controller.store.getSnapshot().run).toMatchObject({ staged: false })
+    b.controller.dispose()
   })
 
   it('retry re-runs the one-shot flow and only replays apply for a two-phase apply record', async () => {

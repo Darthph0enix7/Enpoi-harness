@@ -116,6 +116,21 @@ describe('UpdateCheckCore', () => {
     expect((await fullInstalled.core.checkNow()).state).toBe('current')
   })
 
+  it('offers a +g source build the catalog release when the commits differ', async () => {
+    // The build metadata is not a separator: `base+g<sha>` compares on its
+    // base, so a differing commit is an available update, never `unknown`
+    // (the pre-fix comparator returned null for exactly this pair).
+    const { core } = harness({
+      version: '0.1.7-enpoi.2+gbb12abc',
+      commit: 'bb12abc',
+      entries: [entry('0.1.7-enpoi.2.92', ['note'], 'fffffff')],
+    })
+    const status = await core.checkNow()
+    expect(status.state).toBe('available')
+    expect(status.latest?.version).toBe('0.1.7-enpoi.2.92')
+    expect(status.error).toBeUndefined()
+  })
+
   it('offers the update when the commits differ, and falls back to the version without commits', async () => {
     const different = harness({
       version: '0.1.7-enpoi.2',

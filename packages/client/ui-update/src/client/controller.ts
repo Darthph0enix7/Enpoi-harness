@@ -318,7 +318,11 @@ export class UpdateController {
     void this.rpc('updateCheck.apply', {}).then((result) => {
       if (this.disposed) return
       if (!result.ok) {
+        // A refusal usually means the held record no longer matches the disk
+        // (a rolled-back apply archived its staged tree): re-read so the row
+        // flips from Retry to Update now instead of replaying the dead apply.
         this.update({ busy: false, actionError: result.message })
+        void this.refreshRun()
         return
       }
       const applied = result.value as UpdateRunWire

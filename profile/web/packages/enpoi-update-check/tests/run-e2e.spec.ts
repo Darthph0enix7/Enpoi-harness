@@ -50,6 +50,15 @@ function stageInstall(home: string, shimBody: string): string {
   return shim
 }
 
+/** Stage a complete prepared update: the engine record plus the tree witness. */
+function stagePreparedTree(home: string, version = '0.1.7-enpoi.2.84'): void {
+  mkdirSync(join(home, 'harness', version), { recursive: true })
+  writeFileSync(join(home, 'harness', version, '.dsh-install-complete'), '{}\n')
+  writeFileSync(stagedApplyPath(home), JSON.stringify({
+    version, treeDirName: version, channel: 'stable', preparedAt: '2026-10-13T12:00:00Z',
+  }))
+}
+
 /** Stage the recorded runtime the probe prefers, with a `node` stub good enough for `command -v`. */
 function stageRuntime(home: string): string {
   const bin = join(home, 'runtime', 'node', 'current', 'bin')
@@ -72,7 +81,8 @@ const PHASED_SHIM = [
   '  echo "[4/9] dependencies and build: prebuilt release (no local build)"',
   '  echo "  ! WARNING: telemetry endpoint unreachable"',
   '  echo "[7/9] home, dependencies and migrations"',
-  '  mkdir -p "$PREFIX/harness"',
+  '  mkdir -p "$PREFIX/harness/0.1.7-enpoi.2.84"',
+  '  printf \'{}\\n\' > "$PREFIX/harness/0.1.7-enpoi.2.84/.dsh-install-complete"',
   '  printf \'{"version":"0.1.7-enpoi.2.84","treeDirName":"0.1.7-enpoi.2.84","channel":"stable","preparedAt":"2026-10-13T12:00:00Z"}\\n\' > "$PREFIX/harness/.staged-apply.json"',
   '  exit 0',
   'fi',
@@ -214,8 +224,7 @@ describe('simulated two-phase update (fake updater, real launcher + watcher)', (
     ].join('\n'))
     stageRuntime(home)
     // A prepared record already staged (the restart-after-prepare case).
-    mkdirSync(join(home, 'harness'), { recursive: true })
-    writeFileSync(stagedApplyPath(home), JSON.stringify({ version: '0.1.7-enpoi.2.84' }))
+    stagePreparedTree(home)
     mkdirSync(join(home, 'update-check'), { recursive: true })
     writeFileSync(runRecordPath(home), `${JSON.stringify({
       runId: 'run-prep', target: '0.1.7-enpoi.2.84', channel: 'stable', mode: 'prepare', phase: 'prepared',
@@ -239,8 +248,7 @@ describe('simulated two-phase update (fake updater, real launcher + watcher)', (
       'exit 1',
     ].join('\n'))
     stageRuntime(home)
-    mkdirSync(join(home, 'harness'), { recursive: true })
-    writeFileSync(stagedApplyPath(home), JSON.stringify({ version: '0.1.7-enpoi.2.84' }))
+    stagePreparedTree(home)
     mkdirSync(join(home, 'update-check'), { recursive: true })
     writeFileSync(runRecordPath(home), `${JSON.stringify({
       runId: 'run-prep', target: '0.1.7-enpoi.2.84', channel: 'stable', mode: 'prepare', phase: 'prepared',
