@@ -1,8 +1,17 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-14T08:24:27.888Z",
+  "generatedAt": "2026-10-14T09:29:36.068Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.90",
+      "commit": "f945ed1",
+      "releasedAt": "2026-10-14T09:06:55.000Z",
+      "notes": [
+        "fix(update): stamp source builds with base+g<sha>; detect release divergence before fetching",
+        "fix(update): commit-identity current-detection and source-build display"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.88",
       "commit": "bb12abc",
@@ -351,22 +360,6 @@
         "feat(install): parallel chunked downloader with resume, stall-detection & integrity validation",
         "fix(harness): Wave 1 bug-fix batch — client fencing, dedup, portability, config knobs, shipped defaults & i18n",
         "fix(provider-sync): Oracle-reviewed concurrency batch — re-plan on conflict, atomic writes, serialized pass"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.48",
-      "commit": "9ecc6e0",
-      "releasedAt": "2026-10-09T09:36:30.000Z",
-      "notes": [
-        "fix(ui-plugin-manager): drop the readonly assertion from the probe degrade table",
-        "fix(i18n): finish the residual client sweep — gate to zero",
-        "fix(provider-sync): extend opencode-go overlay removals to the full retired set",
-        "feat(ui-settings-models): reset route references when a provider is deleted",
-        "feat(provider-sync): authoritative model lists with removal of outdated ids",
-        "fix(ui-model-selection): re-anchor the picker card on content resize",
-        "feat(agents): baseline opt-out, extendBuiltins merge, customTools pinned",
-        "feat(provider-data): models.dev path/URL + route map config, seed delete markers",
-        "fix(portability): heal node-path units, FreeLLMAPI feed field, ds.fish resolver, URL validation"
       ]
     }
   ]
