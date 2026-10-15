@@ -168,6 +168,163 @@ describe('run_logged heartbeat', () => {
   })
 })
 
+describe('run_logged completed-output rescue', () => {
+  const COMPLETION = 'Done in 5.3s using pnpm v11.7.0'
+  const OPT_IN = "--completed-regex '^Done in .+ using pnpm'"
+
+  /** Stage a step command that prints `lines`, writes its pid, then sleeps `seconds`. */
+  function lingeringStub(dir: string, lines: readonly string[], seconds: number): { stub: string; pidFile: string } {
+    const stub = join(dir, 'stub.sh')
+    const pidFile = join(dir, 'stub.pid')
+    writeFileSync(stub, [
+      '#!/bin/sh',
+      `echo $$ > "${pidFile}"`,
+      ...lines.map(line => `echo "${line}"`),
+      `sleep ${String(seconds)}`,
+    ].join('\n'))
+    return { stub, pidFile }
+  }
+
+  /** `kill -0` on the staged stub's pid, after a bounded settle wait. */
+  function stubLiveness(pidFile: string): string {
+    return [
+      'i=0',
+      `while [ "$i" -lt 30 ] && [ -f "${pidFile}" ] && kill -0 "$(cat "${pidFile}")" 2>/dev/null; do i=$((i + 1)); sleep 0.1; done`,
+      `if [ -f "${pidFile}" ] && kill -0 "$(cat "${pidFile}")" 2>/dev/null; then echo "STUB=ALIVE"; else echo "STUB=DEAD"; fi`,
+    ].join('\n')
+  }
+
+  it('rescues a step whose completion line landed but whose process lingers', () => {
+    const dir = scratch()
+    const { stub, pidFile } = lingeringStub(dir, [COMPLETION], 30)
+    const result = runBash([
+      libPreamble(dir),
+      'DSH_RUN_LOG_COMPLETED_GRACE=1',
+      `run_logged ${OPT_IN} "linger probe" 30 "$PREFIX" sh "${stub}"`,
+      'printf "rc=%s\\n" "$?"',
+      stubLiveness(pidFile),
+      `grep -c "printed its completion line" "${dir}/install.log" | sed 's/^/WARNINGS=/'`,
+    ].join('\n'))
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('rc=0')
+    // The lingered process was terminated rather than left running.
+    expect(result.stdout).toContain('STUB=DEAD')
+    // The warning reached stderr and the install log exactly once.
+    expect(result.stderr).toContain('but did not exit within the 1s grace')
+    expect(result.stderr).toContain('✓ linger probe')
+    expect(result.stdout).toContain('WARNINGS=1')
+  }, 20_000)
+
+  it('leaves a step that prints the completion line and exits normally unchanged', () => {
+    const dir = scratch()
+    const { stub } = lingeringStub(dir, [COMPLETION], 0)
+    const result = runBash([
+      libPreamble(dir),
+      'DSH_RUN_LOG_COMPLETED_GRACE=1',
+      `run_logged ${OPT_IN} "clean probe" 30 "$PREFIX" sh "${stub}"`,
+      'printf "rc=%s\\n" "$?"',
+      `grep -c "printed its completion line" "${dir}/install.log" || true`,
+    ].join('\n'))
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('rc=0')
+    expect(result.stdout).not.toContain('printed its completion line')
+    expect(result.stderr).toContain('✓ clean probe')
+    expect(result.stderr).not.toContain('but did not exit')
+  })
+
+  it('still fails a step that hangs with an error tail (no completion line)', () => {
+    const dir = scratch()
+    const { stub } = lingeringStub(dir, ['[4/9] dependencies and build', '✗ ERROR: network reset'], 30)
+    const result = runBash([
+      libPreamble(dir),
+      `run_logged ${OPT_IN} "error probe" 2 "$PREFIX" sh "${stub}"`,
+      'printf "rc=%s\\n" "$?"',
+    ].join('\n'))
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('rc=124')
+    expect(result.stderr).toContain('✗ error probe failed')
+    expect(result.stderr).not.toContain('printed its completion line')
+  }, 20_000)
+
+  it('rescues post-hoc when the budget kills the process before the live grace elapses', () => {
+    const dir = scratch()
+    const { stub } = lingeringStub(dir, [COMPLETION], 30)
+    const result = runBash([
+      libPreamble(dir),
+      // Default 30s grace vs a 2s budget: the timeout ends the step first,
+      // and the completion line as the step's own tail is recognized after.
+      `run_logged ${OPT_IN} "late probe" 2 "$PREFIX" sh "${stub}"`,
+      'printf "rc=%s\\n" "$?"',
+      `grep -c "printed its completion line" "${dir}/install.log" | sed 's/^/WARNINGS=/'`,
+    ].join('\n'))
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('rc=0')
+    expect(result.stdout).toContain('WARNINGS=1')
+    expect(result.stderr).toContain('but did not exit within the 30s grace')
+    expect(result.stderr).not.toContain('failed')
+  }, 20_000)
+
+  it('rescues post-hoc in the quiet path, which has no heartbeat loop', () => {
+    const dir = scratch()
+    const { stub } = lingeringStub(dir, [COMPLETION], 30)
+    const result = runBash([
+      libPreamble(dir),
+      'QUIET=1',
+      `run_logged ${OPT_IN} "quiet rescue probe" 2 "$PREFIX" sh "${stub}"`,
+      'printf "rc=%s\\n" "$?"',
+      `grep -c "printed its completion line" "${dir}/install.log" | sed 's/^/WARNINGS=/'`,
+    ].join('\n'))
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('rc=0')
+    expect(result.stdout).toContain('WARNINGS=1')
+  }, 20_000)
+
+  it('does not rescue a step without the opt-in', () => {
+    const dir = scratch()
+    const { stub } = lingeringStub(dir, [COMPLETION], 30)
+    const result = runBash([
+      libPreamble(dir),
+      `run_logged "plain probe" 2 "$PREFIX" sh "${stub}"`,
+      'printf "rc=%s\\n" "$?"',
+    ].join('\n'))
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('rc=124')
+    expect(result.stderr).not.toContain('printed its completion line')
+  }, 20_000)
+})
+
+describe('run_limited kill window', () => {
+  it('passes --kill-after to timeout and to gtimeout', () => {
+    const dir = scratch()
+    const makeStub = (tool: 'timeout' | 'gtimeout'): string => {
+      const bin = join(dir, `bin-${tool}`)
+      mkdirSync(bin, { recursive: true })
+      writeFileSync(join(bin, tool), '#!/bin/sh\nprintf \'args=%s\\n\' "$*"\n', { mode: 0o755 })
+      return bin
+    }
+    // run_limited `exec`s the tool, so the stub's output is the shell's own.
+    const viaTimeout = runBash([libPreamble(dir), `PATH="${makeStub('timeout')}"`, 'run_limited 7 true'].join('\n'))
+    expect(viaTimeout.stdout).toContain('args=--kill-after=15 7 true')
+    const viaGTimeout = runBash([libPreamble(dir), `PATH="${makeStub('gtimeout')}"`, 'run_limited 7 true'].join('\n'))
+    expect(viaGTimeout.stdout).toContain('args=--kill-after=15 7 true')
+  })
+
+  it('still yields 124 when the limit is genuinely hit', () => {
+    const dir = scratch()
+    const slow = join(dir, 'slow.sh')
+    writeFileSync(slow, '#!/bin/sh\nsleep 30\n')
+    // A subshell because run_limited `exec`s the tool: the outer shell
+    // survives to observe the exit status.
+    const result = runBash([
+      libPreamble(dir),
+      `( run_limited 1 sh "${slow}" )`,
+      'printf "rc=%s\\n" "$?"',
+    ].join('\n'))
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('rc=124')
+  }, 20_000)
+})
+
 describe('non-interactive git', () => {
   it('exports prompt-proof git settings for every child git/ssh', () => {
     const dir = scratch()

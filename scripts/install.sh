@@ -464,11 +464,101 @@ tty_frame() { # spin desc prog alt elapsed
   printf "\r\033[K  ${C_CYAN}%s${C_RESET} %s" "$spin" "$body" >&2
 }
 
-run_logged() { # desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL add byte progress
+# ── Completed-output rescue (run_logged --completed-regex RE) ───────────────
+# A step whose own final output line proves completion must not be failed
+# because its process lingered (live case: pnpm printed `Done in 5.3s using
+# pnpm v11.7.0` after its 5.3s of work, then the process stayed alive ~895s
+# until the 900s budget SIGTERM/KILLed it, failing the whole prepare). The
+# opt-in is a leading argument, so every existing call site is untouched and
+# no VAR=...-before-a-function portability trap is involved.
+
+# Grace between the completion line first appearing and terminating the
+# lingered process; DSH_RUN_LOG_COMPLETED_GRACE overrides the 30s default.
+run_logged_completed_grace() {
+  local grace="${DSH_RUN_LOG_COMPLETED_GRACE:-30}"
+  case "$grace" in ''|*[!0-9]*) grace=30;; esac
+  [ "$grace" -ge 1 ] 2>/dev/null || grace=1
+  printf '%s' "$grace"
+}
+
+# Size of the install log in bytes, 0 when unavailable.
+run_logged_log_size() {
+  local size=""
+  if [ -n "${LOG_FILE:-}" ] && [ -f "$LOG_FILE" ]; then
+    size="$(file_size "$LOG_FILE" 2>/dev/null || true)"
+  fi
+  case "$size" in ''|*[!0-9]*) size=0;; esac
+  printf '%s' "$size"
+}
+
+# The last non-empty line the current step wrote, read from the byte offset
+# captured before the step started (the step's output begins there; the step's
+# own --- START/END --- markers are skipped). Empty when nothing was written.
+run_logged_step_tail() { # start_offset
+  local start="$1" size=""
+  [ -n "${LOG_FILE:-}" ] && [ -f "$LOG_FILE" ] || return 0
+  size="$(file_size "$LOG_FILE" 2>/dev/null || true)"
+  case "$size" in ''|*[!0-9]*) return 0;; esac
+  [ "$size" -gt "$start" ] || return 0
+  tail -c "+$((start + 1))" "$LOG_FILE" 2>/dev/null \
+    | tr -d '\r' \
+    | grep -v '^--- \(START\|END\): ' \
+    | grep -v '^[[:space:]]*$' \
+    | tail -n 1
+}
+
+# The warning both rescue paths print: warn writes it to the install log and
+# to stderr, so the operator sees it and the post-mortem keeps it.
+run_logged_completed_warning() { # desc line grace
+  warn "⚠ $1: the command printed its completion line (\"$2\") but did not exit within the $3s grace; terminated it and continued (work is complete)."
+}
+
+# The step's success line (shared by the normal and the rescued success).
+run_logged_success_line() { # desc elapsed
+  local done_desc="$1"
+  if [ -t 2 ]; then printf "\r\033[K" >&2; done_desc="$(fit_text "$1" "$(( $(text_limit) - 14 ))")"; fi
+  printf "  ${C_GREEN}✓${C_RESET} %s ${C_DIM}(%ds)${C_RESET}\n" "$done_desc" "$2" >&2
+}
+
+# Terminate a lingered step's tree: the command (a direct child of the timeout
+# wrapper) first, then the wrapper itself. Best effort: a missing pkill or an
+# already-dead pid is not an error.
+run_logged_terminate_tree() { # pid signal
+  command -v pkill >/dev/null 2>&1 && pkill -"$2" -P "$1" 2>/dev/null || true
+  kill -"$2" "$1" 2>/dev/null || true
+  return 0
+}
+
+# Post-hoc completion rescue: a step that ended on its timeout budget (rc 124)
+# and left a completion-matching last line is success. Never fires for any
+# other exit code, and never on an error tail (the last line must match).
+run_logged_completed_rescue() { # rc regex desc start_t step_start
+  local rc="$1" regex="$2" desc="$3" start_t="$4" step_start="$5" line elapsed grace
+  [ "$rc" = 124 ] || return 1
+  [ -n "$regex" ] || return 1
+  line="$(run_logged_step_tail "$step_start")"
+  [ -n "$line" ] || return 1
+  printf '%s\n' "$line" | grep -Eq "$regex" || return 1
+  grace="$(run_logged_completed_grace)"
+  elapsed=$(( $(date +%s) - start_t ))
+  [ "$elapsed" -ge 0 ] || elapsed=0
+  run_logged_completed_warning "$desc" "$line" "$grace"
+  run_logged_success_line "$desc" "$elapsed"
+  return 0
+}
+
+run_logged() { # [--completed-regex RE] desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL add byte progress
+  local completed_regex=""
+  if [ "${1:-}" = "--completed-regex" ]; then
+    completed_regex="${2:-}"
+    shift 2
+  fi
   local desc="$1" timeout="$2" workdir="$3"
   shift 3
   local start_t rc=0
   start_t="$(date +%s)"
+  local step_start
+  step_start="$(run_logged_log_size)"
   local watch_file="${DSH_RUN_LOG_PROGRESS_FILE:-}" watch_total="${DSH_RUN_LOG_PROGRESS_TOTAL:-}"
   case "$watch_total" in ''|*[!0-9]*) watch_total="";; esac
   # A download's first progress line is worth a non-TTY line even when the
@@ -478,12 +568,18 @@ run_logged() { # desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL
   if [ "$VERBOSE" = 1 ]; then
     printf "  ${C_CYAN}▸${C_RESET} %s...\n" "$desc" >&2
     ( cd "$workdir" && run_limited "$timeout" "$@" ) 2>&1 | tee -a "$LOG_FILE" >&2
-    return "${PIPESTATUS[0]}"
+    rc="${PIPESTATUS[0]}"
+    # No heartbeat loop here: the post-hoc rescue still recognizes a
+    # completed-output step that ended on its timeout budget.
+    run_logged_completed_rescue "$rc" "$completed_regex" "$desc" "$start_t" "$step_start" && return 0
+    return "$rc"
   fi
 
   if [ "$QUIET" = 1 ]; then
     ( cd "$workdir" && run_limited "$timeout" "$@" ) >> "${LOG_FILE:-/dev/null}" 2>&1
-    return $?
+    rc=$?
+    run_logged_completed_rescue "$rc" "$completed_regex" "$desc" "$start_t" "$step_start" && return 0
+    return "$rc"
   fi
 
   local init_desc="$desc"
@@ -496,6 +592,8 @@ run_logged() { # desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL
   CURRENT_RUN_LOGGED_PID="$pid"
 
   local spin='-\|/' i=0 hb_interval
+  local completed_grace matched_at="" matched_line="" live_rescued=0 kill_deadline=0
+  completed_grace="$(run_logged_completed_grace)"
   hb_interval="$(heartbeat_interval)"
   while kill -0 "$pid" 2>/dev/null; do
     local elapsed_cur=$(( $(date +%s) - start_t ))
@@ -546,6 +644,34 @@ run_logged() { # desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL
         progress_note "… still working: $desc (${elapsed_cur}s)"
       fi
     fi
+    # Completed-output rescue: once the step's own last line matches, start
+    # the grace clock. The match must still hold on a later poll (a tail that
+    # moved on, e.g. to an error line, cancels the rescue); a process still
+    # alive after the grace is terminated and the step reported as success.
+    if [ -n "$completed_regex" ] && [ "$live_rescued" = 0 ]; then
+      local tail_line=""
+      tail_line="$(run_logged_step_tail "$step_start")"
+      if [ -n "$tail_line" ] && printf '%s\n' "$tail_line" | grep -Eq "$completed_regex"; then
+        [ -n "$matched_at" ] || matched_at="$(date +%s)"
+        matched_line="$tail_line"
+      else
+        matched_at=""
+        matched_line=""
+      fi
+      if [ -n "$matched_at" ] && [ $(( $(date +%s) - matched_at )) -ge "$completed_grace" ]; then
+        live_rescued=1
+        run_logged_completed_warning "$desc" "$matched_line" "$completed_grace"
+        run_logged_terminate_tree "$pid" TERM
+        kill_deadline=$(( $(date +%s) + 5 ))
+      fi
+    elif [ "$live_rescued" = 1 ]; then
+      # TERM first, KILL after ~5s: a TERM-ignoring child can never stall the
+      # step past its kill window.
+      if [ "$(date +%s)" -ge "$kill_deadline" ]; then
+        run_logged_terminate_tree "$pid" KILL
+        kill_deadline=$(( $(date +%s) + 86400 ))
+      fi
+    fi
     sleep 0.2
   done
 
@@ -556,11 +682,21 @@ run_logged() { # desc timeout workdir cmd...; DSH_RUN_LOG_PROGRESS_FILE / _TOTAL
   local elapsed=$(( $(date +%s) - start_t ))
   [ "$elapsed" -ge 0 ] || elapsed=0
 
+  # The live rescue already printed its warning and terminated the lingered
+  # process; the step is complete, so it reports success with the elapsed time.
+  if [ "$live_rescued" = 1 ]; then
+    run_logged_success_line "$desc" "$elapsed"
+    return 0
+  fi
+  # A step killed by its timeout budget with the completion line as its own
+  # last output is rescued post-hoc (the verbose/quiet paths and any race the
+  # live loop did not observe).
+  if run_logged_completed_rescue "$rc" "$completed_regex" "$desc" "$start_t" "$step_start"; then
+    return 0
+  fi
+
   if [ "$rc" = 0 ]; then
-    if [ -t 2 ]; then printf "\r\033[K" >&2; fi
-    local done_desc="$desc"
-    if [ -t 2 ]; then done_desc="$(fit_text "$desc" "$(( $(text_limit) - 14 ))")"; fi
-    printf "  ${C_GREEN}✓${C_RESET} %s ${C_DIM}(%ds)${C_RESET}\n" "$done_desc" "$elapsed" >&2
+    run_logged_success_line "$desc" "$elapsed"
     return 0
   else
     if [ -t 2 ]; then printf "\r\033[K" >&2; fi
@@ -810,8 +946,10 @@ done
 run_limited() {
   local seconds="$1"; shift
   exec 9>&- 2>/dev/null || true
-  if command -v timeout >/dev/null 2>&1; then exec timeout "$seconds" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then exec gtimeout "$seconds" "$@"
+  # --kill-after: a TERM-ignoring child can never stall a step past the kill
+  # window; the limit being genuinely hit still yields 124.
+  if command -v timeout >/dev/null 2>&1; then exec timeout --kill-after=15 "$seconds" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then exec gtimeout --kill-after=15 "$seconds" "$@"
   else exec "$@"; fi
 }
 
@@ -3517,8 +3655,12 @@ profile_install() {
   # Non-interactive purge confirmation (same reason as the workspace install:
   # a profile node_modules recorded by another pnpm must never abort a detached
   # update with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY).
+  # The completion-line rescue covers the observed pnpm linger: pnpm prints its
+  # `Done in … using pnpm` summary when the work finished, then the process can
+  # stay alive past the budget (a TERM-ignoring environmental transient). With
+  # that line as the step's own last output, the step is complete.
   if ! DSH_PROGRESS_INTERVAL="${DSH_PROFILE_PROGRESS_INTERVAL:-15}" \
-    run_logged "Installing Enpoi profile dependencies (pnpm install)" "$PROFILE_INSTALL_TIMEOUT" "$PROFILE_DIR" "$PNPM" install --prefer-offline --config.confirmModulesPurge=false --store-dir "${PNPM_STORE_DIR:-$PREFIX/.pnpm-store}"; then
+    run_logged --completed-regex '^Done in .+ using pnpm' "Installing Enpoi profile dependencies (pnpm install)" "$PROFILE_INSTALL_TIMEOUT" "$PROFILE_DIR" "$PNPM" install --prefer-offline --config.confirmModulesPurge=false --store-dir "${PNPM_STORE_DIR:-$PREFIX/.pnpm-store}"; then
     warn "profile pnpm install failed"
     return 1
   fi
