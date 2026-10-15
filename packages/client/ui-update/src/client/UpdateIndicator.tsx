@@ -52,12 +52,15 @@ function stepPercent(run: UpdateRunWire): number {
   return Math.max(0, Math.min(100, Math.round((run.step / run.steps) * 100)))
 }
 
-// The engine's two download-progress forms, written onto its throttled
-// non-TTY progress lines: the size-watch byte form and the chunk engine's
-// `.progress` bar line. The percentage is ASCII digits either way, so the
-// match is locale-independent.
+// The engine's three download-progress forms, written onto its throttled
+// non-TTY progress lines: the size-watch byte form, the chunk engine's
+// `.progress` bar line, and the downloader's own stdout line — which becomes
+// the run's last line for observed CLI runs, whose marker names install.log.
+// The percentage is ASCII digits either way, so the match is
+// locale-independent.
 const SIZE_WATCH_PROGRESS = /(\d+(?:\.\d+)?)\s*MB\s+of\s+(\d+(?:\.\d+)?)\s*MB\s*\(\s*(\d+(?:\.\d+)?)\s*%\s*\)/i
 const FAST_PATH_PROGRESS = /\[[^\]]*\]\s*(\d+(?:\.\d+)?)\s*%\s*·\s*(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\s*MB/i
+const CLI_DOWNLOAD_PROGRESS = /\[download\]\s*(\d+(?:\.\d+)?)\s*%\s*\(/i
 
 /** Clamp a captured percentage into a whole 0-100 bar position. */
 function clampPercent(raw: string | undefined): number {
@@ -76,6 +79,8 @@ function downloadPercent(lastLine: string): number | null {
   if (sizeWatch !== null) return clampPercent(sizeWatch[3])
   const fastPath = FAST_PATH_PROGRESS.exec(lastLine)
   if (fastPath !== null) return clampPercent(fastPath[1])
+  const cli = CLI_DOWNLOAD_PROGRESS.exec(lastLine)
+  if (cli !== null) return clampPercent(cli[1])
   return null
 }
 
@@ -151,18 +156,17 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
     && (activeRun.phase === 'applying' || (activeRun.rung === 'one-shot' && activeRun.step >= APPLY_SWITCH_STEP))
   // A failure that kept a valid staged tree (or that the host stamps
   // `recoverable`, or — on a host predating the field — whose reason names an
-  // already-running/stale condition) gets the recovery affordance: clear the
-  // stale state and re-apply without re-downloading. The reason regex is a
-  // transitional fallback for the update-switch window only (an old host with
-  // this client); drop it once hosts always ship `recoverable`. A failure
-  // with neither a staged tree nor a still-offered release is historical
-  // (status `current`): no Retry/apply/recover action may appear for it,
-  // because none of them leads anywhere.
+  // already-running/stale condition) while a release is still offered gets the
+  // recovery affordance: clear the stale state and retry. Without a staged
+  // tree, recovery starts a fresh prepare, which needs an offered release —
+  // without one the failure is historical (status `current`) and no
+  // Retry/apply/recover action may appear, because none of them leads
+  // anywhere. The reason regex is a transitional fallback for the
+  // update-switch window only (an old host with this client); drop it once
+  // hosts always ship `recoverable`.
   const staleFailure = failedRun !== null
     && (failedRun.staged
-      || failedRun.recoverable === true
-      || (failedRun.recoverable === undefined
-        && canStart && /already running|stale/i.test(failedRun.reason ?? '')))
+      || (canStart && (failedRun.recoverable ?? /already running|stale/i.test(failedRun.reason ?? ''))))
 
   const footer: ReactNode = executing ? (
     <Button onClick={actions.close}>{t('action.later')}</Button>

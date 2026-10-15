@@ -312,6 +312,22 @@ describe('UpdateIndicator dialog', () => {
     expect(document.querySelector('[data-dsh-update-step]')?.textContent).toBe('Step 2/9')
   })
 
+  it('drives the download bar from the CLI downloader line for observed runs', () => {
+    mount({
+      status: currentStatus,
+      run: run({
+        observed: true,
+        launcher: 'external',
+        step: 2,
+        phase: 'preparing',
+        lastLine: '[download] 75% (270.0/360.0 MB, 12.3 MB/s, ~5s remaining)',
+      }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-fill]')?.getAttribute('style')).toContain('width: 75%')
+    expect(document.querySelector('[data-dsh-update-step]')?.textContent).toBe('Step 2/9')
+  })
+
   it('falls back to the step-derived bar without a parse or outside the fetch steps', () => {
     // A near-miss byte line (no size-watch "of" form, no bar form): no parse.
     mount({
@@ -547,6 +563,17 @@ describe('UpdateIndicator dialog', () => {
         recoverable: false,
         reason: 'an update is already running (run 1791962848-31835)',
       }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-recover]')).toBeNull()
+  })
+
+  it('suppresses recovery on a current status even when the host stamps recoverable', () => {
+    // Nothing staged and nothing offered: recovery would start a fresh
+    // prepare, which no release backs — the action would dead-end.
+    mount({
+      status: currentStatus,
+      run: run({ phase: 'failed', result: 'failed', staged: false, recoverable: true }),
       dialogOpen: true,
     })
     expect(document.querySelector('[data-dsh-update-recover]')).toBeNull()
