@@ -23,7 +23,7 @@ function restoreIfNull(statePath, skin) {
   } catch {
     return false;
   }
-  if (typeof doc !== "object" || doc === null) return false;
+  if (typeof doc !== "object" || doc === null || Array.isArray(doc)) return false;
   const record = doc;
   if (record.active !== null && record.active !== void 0) return false;
   record.active = skin;
@@ -32,7 +32,7 @@ function restoreIfNull(statePath, skin) {
     const tmp = `${statePath}.guard-${process.pid}`;
     mkdirSync(dirname(statePath), { recursive: true });
     writeFileSync(tmp, `${JSON.stringify(record, null, 2)}
-`, { encoding: "utf8", flag: "wx" });
+`, "utf8");
     renameSync(tmp, statePath);
   } catch (error) {
     console.warn(`[enpoi-skin-guard] restore write failed: ${error instanceof Error ? error.message : String(error)}`);

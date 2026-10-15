@@ -77,6 +77,10 @@ describe('restoreIfNull', () => {
     const scalar = writeState(scratch(), '"summer-liquid-glass"')
     expect(restoreIfNull(scalar, 'summer-liquid-glass')).toBe(false)
     expect(readFileSync(scalar, 'utf8')).toBe('"summer-liquid-glass"')
+
+    const array = writeState(scratch(), '[]')
+    expect(restoreIfNull(array, 'summer-liquid-glass')).toBe(false)
+    expect(readFileSync(array, 'utf8')).toBe('[]')
   })
 
   it('honors a skin override', () => {

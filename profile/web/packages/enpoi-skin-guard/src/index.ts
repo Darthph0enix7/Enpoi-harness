@@ -62,7 +62,7 @@ export function defaultStatePath(): string {
  *
  * Policy (mirrors `dsh-skin-guard.mjs`): a missing, unreadable, or unparseable
  * file is a no-op — a fresh install seeds its own default. A parsed document
- * that is not an object is a no-op. A selection that is neither `null` nor
+ * that is not a plain object (an array included) is a no-op. A selection that is neither `null` nor
  * `undefined` is an explicit choice and is never overridden, including a
  * different skin. Otherwise `active` is set to `skin`, `initialized` to
  * `true`, every other key is preserved verbatim, and the file is replaced
@@ -80,7 +80,7 @@ export function restoreIfNull(statePath: string, skin: string): boolean {
     // Missing or unparseable state: nothing to guard.
     return false
   }
-  if (typeof doc !== 'object' || doc === null) return false
+  if (typeof doc !== 'object' || doc === null || Array.isArray(doc)) return false
   const record = doc as Record<string, unknown>
   if (record.active !== null && record.active !== undefined) return false
   record.active = skin
@@ -88,7 +88,8 @@ export function restoreIfNull(statePath: string, skin: string): boolean {
   try {
     const tmp = `${statePath}.guard-${process.pid}`
     mkdirSync(dirname(statePath), { recursive: true })
-    writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+    // 'w' (not 'wx'): a stale artifact left by a crashed predecessor with the same pid is overwritten, never blocking the restore.
+    writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`, 'utf8')
     renameSync(tmp, statePath)
   } catch (error) {
     console.warn(`[enpoi-skin-guard] restore write failed: ${error instanceof Error ? error.message : String(error)}`)

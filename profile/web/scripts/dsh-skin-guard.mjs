@@ -28,13 +28,14 @@ function main() {
     // No state file yet: nothing to guard (a fresh install seeds its own default).
     return
   }
-  if (typeof doc !== 'object' || doc === null) return
+  if (typeof doc !== 'object' || doc === null || Array.isArray(doc)) return
   if (doc.active !== null && doc.active !== undefined) return   // explicit choice → leave it
   doc.active = SKIN
   doc.initialized = true
   const tmp = `${STATE}.guard-${process.pid}`
   mkdirSync(dirname(STATE), { recursive: true })
-  writeFileSync(tmp, `${JSON.stringify(doc, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' })
+  // 'w' (not 'wx'): a stale artifact left by a crashed predecessor with the same pid is overwritten, never blocking the restore.
+  writeFileSync(tmp, `${JSON.stringify(doc, null, 2)}\n`, 'utf8')
   renameSync(tmp, STATE)
   console.log(`[skin-guard] restored active skin to ${SKIN}`)
 }
