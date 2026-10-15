@@ -1,8 +1,17 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-15T12:34:50.442Z",
+  "generatedAt": "2026-10-15T12:58:32.680Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.94",
+      "commit": "22cf26e",
+      "releasedAt": "2026-10-15T12:37:58.000Z",
+      "notes": [
+        "fix(profile): harden the skin-guard restore (array guard, EEXIST self-heal)",
+        "feat(profile): enpoi-skin-guard — cross-platform frozen-skin restore"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.93",
       "commit": "b3e4691",
@@ -343,14 +352,6 @@
         "chore: ignore .research run directories",
         "fix(peer-bridge): list available pairings on alias miss; per-pairing create routing",
         "feat(system-prompt): state the routed provider/model and chain in the identity line"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.52",
-      "commit": "e3bcda7",
-      "releasedAt": "2026-10-10T12:34:49.000Z",
-      "notes": [
-        "fix(install): wrap-proof TTY progress frames (width-clamped, degradation ladder)"
       ]
     }
   ]
