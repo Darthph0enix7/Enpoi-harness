@@ -1,8 +1,17 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-15T12:58:32.680Z",
+  "generatedAt": "2026-10-15T17:45:48.416Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.95",
+      "commit": "121fc89",
+      "releasedAt": "2026-10-15T17:04:58.000Z",
+      "notes": [
+        "fix(update): guard launchd removal against live engine runs; sweep only non-running jobs",
+        "fix(update): remove launchd submit jobs when runs rest — stop the macOS relaunch loop"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.94",
       "commit": "22cf26e",
@@ -342,16 +351,6 @@
         "docs(compaction-basic): state measured provider cache behavior",
         "fix(install): union the profile workspace patchedDependencies on refresh",
         "feat(compaction): add the dsh-compressor tool-result augment"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.53",
-      "commit": "2edbfee",
-      "releasedAt": "2026-10-10T15:50:14.000Z",
-      "notes": [
-        "chore: ignore .research run directories",
-        "fix(peer-bridge): list available pairings on alias miss; per-pairing create routing",
-        "feat(system-prompt): state the routed provider/model and chain in the identity line"
       ]
     }
   ]
