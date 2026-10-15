@@ -1,8 +1,22 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-15T17:45:48.416Z",
+  "generatedAt": "2026-10-15T19:32:09.775Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.96",
+      "commit": "07ef2a5",
+      "releasedAt": "2026-10-15T19:03:40.000Z",
+      "notes": [
+        "fix(update-ui): gate recovery on an offered release; parse the CLI download line",
+        "fix(update): reconcile the standalone fast downloader with the embedded copy",
+        "fix(update-ui): byte-driven download progress and structured recovery affordance",
+        "fix(update): self-healing run state — terminal pid cleanup, evidence-gated liveness, attach over refusal",
+        "fix(update): sweep progress residue, scope progress display, bound install.log, drop manual-lock advice",
+        "chore(profile): drop the dead package.json pnpm block and orphaned frontend patch",
+        "fix(update): treat completed pnpm output as success when the process lingers"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.95",
       "commit": "121fc89",
@@ -341,16 +355,6 @@
       "notes": [
         "feat(peer-bridge): early-return approvals with resume; fix settled rendering",
         "fix(subagent): audit the shared keep list; clarify one-shot continuation"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.54",
-      "commit": "e8e6f86",
-      "releasedAt": "2026-10-10T17:46:42.000Z",
-      "notes": [
-        "docs(compaction-basic): state measured provider cache behavior",
-        "fix(install): union the profile workspace patchedDependencies on refresh",
-        "feat(compaction): add the dsh-compressor tool-result augment"
       ]
     }
   ]
