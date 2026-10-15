@@ -197,3 +197,45 @@ describe('scripts/download-fast.mjs', () => {
     expect(existsSync(`${targetFile}.chunks`)).toBe(false)
   })
 })
+
+/**
+ * The two copies of the engine: `scripts/download-fast.mjs` is the canonical
+ * source, and the `FAST_DL_EOF` heredoc inside `write_fast_downloader` in
+ * install.sh is a verbatim copy (the shebang included) materialized for
+ * prefix installs with no repo checkout. `resolve_fast_downloader` prefers
+ * the repo copy, so both paths must run identical code; with no generator or
+ * embed step in the tree, identity is asserted byte-for-byte. Transform: none.
+ */
+describe('embedded copy parity', () => {
+  it('keeps the install.sh heredoc byte-identical to scripts/download-fast.mjs', () => {
+    const install = readFileSync(join(__dirname, 'install.sh'), 'utf8')
+    const marker = 'cat <<\'FAST_DL_EOF\' > "$tmp" || return 1\n'
+    const start = install.indexOf(marker)
+    expect(start).toBeGreaterThanOrEqual(0)
+    const body = install.slice(start + marker.length)
+    const end = body.indexOf('\nFAST_DL_EOF\n')
+    expect(end).toBeGreaterThan(0)
+    const embedded = body.slice(0, end + 1)
+    // A non-vacuous comparison: the extraction found the real engine.
+    expect(embedded.length).toBeGreaterThan(4_000)
+    expect(embedded).toContain('function cleanupChunkState()')
+    expect(embedded).toBe(readFileSync(scriptPath, 'utf8'))
+  })
+
+  it('pins the cleanup entry points shared by both copies', () => {
+    // The verification gate is defensive-only (the pre-pass reaps oversized
+    // parts and resume fixes short ones), so the paths that drop the chunk
+    // state are pinned structurally: verification failure, SHA-256 mismatch,
+    // and success each clean; interrupt and retryable failure deliberately
+    // keep their parts. The parity test above extends this pin to the embed.
+    const source = readFileSync(scriptPath, 'utf8')
+    expect(source).toContain([
+      'function cleanupChunkState() {',
+      '    try { rmSync(chunkDir, { recursive: true, force: true }) } catch {}',
+      '    try { rmSync(topProgressFile, { force: true }) } catch {}',
+    ].join('\n'))
+    expect(source).toMatch(/catch \(err\) \{\n    \/\/ A part set that fails[\s\S]{0,200}cleanupChunkState\(\)\n    throw err/u)
+    expect(source).toMatch(/rmSync\(downloadFile, \{ force: true \}\)\n      cleanupChunkState\(\)/u)
+    expect(source).toMatch(/renameSync\(downloadFile, outputFile\)\n  cleanupChunkState\(\)/u)
+  })
+})

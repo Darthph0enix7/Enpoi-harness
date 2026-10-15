@@ -160,7 +160,6 @@ async function main() {
       } else if (sz < c.expectedSize) {
         totalDownloadedBytes += sz
       } else {
-        // Corrupt/oversized chunk -> truncate
         rmSync(c.partPath, { force: true })
       }
     }
@@ -173,6 +172,16 @@ async function main() {
 
   const progressFile = `${chunkDir}/.progress`
   const topProgressFile = `${outputFile}.progress`
+
+  // A terminal exit owns the engine's scratch state: the parts dir (its
+  // .progress, manifest.json, part-*) and the top-level .progress. The two
+  // exits that resume instead of finishing — an interrupt (exit 130) and a
+  // retryable network failure (exit 1) — keep theirs deliberately, and the
+  // caller removes an assembled `.download` with its own semantics.
+  function cleanupChunkState() {
+    try { rmSync(chunkDir, { recursive: true, force: true }) } catch {}
+    try { rmSync(topProgressFile, { force: true }) } catch {}
+  }
 
   function formatProgressBar(pct, currentMB, totalMB, speedMBs) {
     const width = 12
@@ -303,7 +312,6 @@ async function main() {
     }
   }
 
-  // Execute chunks with concurrency
   const queue = [...chunks]
   const workers = Array.from({ length: concurrency }, async () => {
     while (queue.length > 0 && !isAborting) {
@@ -321,11 +329,17 @@ async function main() {
   reportProgress(true)
   if (isTTY) process.stdout.write('\n')
 
-  // Verify all parts exist with exact sizes
-  for (const c of chunks) {
-    if (!existsSync(c.partPath)) throw new Error(`missing chunk ${c.index}`)
-    const sz = statSync(c.partPath).size
-    if (sz !== c.expectedSize) throw new Error(`incomplete chunk ${c.index} (got ${sz}, expected ${c.expectedSize})`)
+  try {
+    for (const c of chunks) {
+      if (!existsSync(c.partPath)) throw new Error(`missing chunk ${c.index}`)
+      const sz = statSync(c.partPath).size
+      if (sz !== c.expectedSize) throw new Error(`incomplete chunk ${c.index} (got ${sz}, expected ${c.expectedSize})`)
+    }
+  } catch (err) {
+    // A part set that fails its own size check cannot be resumed: drop it so
+    // the next attempt starts clean instead of trusting a poisoned manifest.
+    cleanupChunkState()
+    throw err
   }
 
   console.log(`[download] assembling ${concurrency} parts into ${outputFile}...`)
@@ -358,8 +372,7 @@ async function main() {
   if (expectedSha256) {
     if (actualSha256 !== expectedSha256.toLowerCase()) {
       rmSync(downloadFile, { force: true })
-      rmSync(chunkDir, { recursive: true, force: true })
-      try { rmSync(topProgressFile, { force: true }) } catch {}
+      cleanupChunkState()
       console.error(`[download] SHA-256 verification failed! Expected: ${expectedSha256}, actual: ${actualSha256}`)
       process.exit(3)
     }
@@ -367,8 +380,7 @@ async function main() {
   }
 
   renameSync(downloadFile, outputFile)
-  rmSync(chunkDir, { recursive: true, force: true })
-  try { rmSync(topProgressFile, { force: true }) } catch {}
+  cleanupChunkState()
   console.log(`[download] successfully finished: ${outputFile} (${totalMB} MB)`)
   process.exit(0)
 }
