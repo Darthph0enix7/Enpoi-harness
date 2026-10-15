@@ -633,3 +633,95 @@ prune_update_reports
     ])
   })
 })
+
+describe.skipIf(win32)('progress residue pruning', () => {
+  it('reaps dead-run .progress/.chunks residue and keeps a live run\'s artifacts', () => {
+    const prefix = join(scratch(), 'prefix')
+    const harness = join(prefix, 'harness')
+    const cache = join(harness, '.cache')
+    const chunks = join(cache, 'old-asset.tar.gz.chunks')
+    mkdirSync(chunks, { recursive: true })
+    writeFileSync(join(cache, 'old-asset.tar.gz.progress'), 'stale\n')
+    writeFileSync(join(chunks, '.progress'), 'stale\n')
+    writeFileSync(join(chunks, 'manifest.json'), '{}\n')
+    writeFileSync(join(chunks, 'part-0'), 'partial\n')
+    const old = new Date(Date.now() - 3600_000)
+    for (const p of [join(cache, 'old-asset.tar.gz.progress'), chunks, join(chunks, '.progress'), join(chunks, 'manifest.json')]) {
+      utimesSync(p, old, old)
+    }
+    const dead = runLib(String.raw`
+PREFIX="$PREFIX_DIR"
+prune_orphaned_update_artifacts
+`, { PREFIX_DIR: prefix })
+    expect(dead.status).toBe(0)
+    expect(existsSync(join(cache, 'old-asset.tar.gz.progress'))).toBe(false)
+    expect(existsSync(chunks)).toBe(false)
+
+    // A live run marker keeps even old artifact mtimes: the sweep must never
+    // touch the side channels of a running update.
+    const live = spawn('sleep', ['30'])
+    sleepers.push(live)
+    const liveChunks = join(cache, 'live-asset.tar.gz.chunks')
+    mkdirSync(liveChunks, { recursive: true })
+    writeFileSync(join(cache, 'live-asset.tar.gz.progress'), 'live\n')
+    writeFileSync(join(liveChunks, 'part-0'), 'live\n')
+    for (const p of [join(cache, 'live-asset.tar.gz.progress'), liveChunks, join(liveChunks, 'part-0')]) {
+      utimesSync(p, old, old)
+    }
+    writeFileSync(join(harness, '.update-run.json'), `{"runId":"t","pid":${String(live.pid)},"mode":"one-shot","step":1,"steps":9,"phase":"running","startedAt":"x","logPath":"/dev/null","version":"","target":""}\n`)
+    const kept = runLib(String.raw`
+PREFIX="$PREFIX_DIR"
+prune_orphaned_update_artifacts
+`, { PREFIX_DIR: prefix })
+    expect(kept.status).toBe(0)
+    expect(existsSync(join(cache, 'live-asset.tar.gz.progress'))).toBe(true)
+    expect(existsSync(join(liveChunks, 'part-0'))).toBe(true)
+  })
+})
+
+describe('install log rotation', () => {
+  it('rotates a log past the cap to exactly one predecessor, losing nothing', () => {
+    const dir = scratch()
+    const prefix = join(dir, 'prefix')
+    const logs = join(prefix, 'logs')
+    mkdirSync(logs, { recursive: true })
+    const payload = 'A'.repeat(2048)
+    writeFileSync(join(logs, 'install.log'), `${payload}last-step-output\n`)
+    const result = runLib(String.raw`
+PREFIX="$PREFIX_DIR"
+DSH_INSTALL_LOG_MAX_BYTES=1024
+init_log_file
+printf 'NEW=%s\n' "$(wc -c < "$PREFIX/logs/install.log" | tr -d ' ')"
+printf 'HDR=%s\n' "$(grep -c 'dsh-install session' "$PREFIX/logs/install.log")"
+`, { PREFIX_DIR: prefix })
+    expect(result.status).toBe(0)
+    // The fresh session file holds only its own header; the in-flight step
+    // output moved intact to the predecessor.
+    const newSize = Number(/NEW=(\d+)/u.exec(result.stdout)?.[1] ?? Number.NaN)
+    expect(newSize).toBeGreaterThan(0)
+    expect(newSize).toBeLessThan(1024)
+    expect(result.stdout).toContain('HDR=1')
+    const rolled = readFileSync(join(logs, 'install.log.1'), 'utf8')
+    expect(rolled).toBe(`${payload}last-step-output\n`)
+    expect(readdirSync(logs).sort()).toEqual(['install.log', 'install.log.1'])
+  })
+
+  it('leaves a log at or under the cap in place', () => {
+    const dir = scratch()
+    const prefix = join(dir, 'prefix')
+    const logs = join(prefix, 'logs')
+    mkdirSync(logs, { recursive: true })
+    const payload = 'B'.repeat(1024)
+    writeFileSync(join(logs, 'install.log'), payload)
+    const result = runLib(String.raw`
+PREFIX="$PREFIX_DIR"
+DSH_INSTALL_LOG_MAX_BYTES=1024
+init_log_file
+`, { PREFIX_DIR: prefix })
+    expect(result.status).toBe(0)
+    expect(existsSync(join(logs, 'install.log.1'))).toBe(false)
+    const kept = readFileSync(join(logs, 'install.log'), 'utf8')
+    expect(kept.startsWith(payload)).toBe(true)
+    expect(kept).toContain('dsh-install session')
+  })
+})

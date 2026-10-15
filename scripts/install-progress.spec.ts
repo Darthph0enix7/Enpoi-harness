@@ -30,6 +30,9 @@ const ptyAvailable =
   process.platform !== 'win32' &&
   spawnSync('script', ['-qec', 'true', '/dev/null'], { encoding: 'utf8', timeout: 10_000 }).status === 0
 
+/** The flock rung is Linux-only (macOS ships no flock). */
+const flockAvailable = spawnSync('sh', ['-c', 'command -v flock'], { encoding: 'utf8' }).status === 0
+
 function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '')
 }
@@ -293,6 +296,72 @@ describe('run_logged completed-output rescue', () => {
   }, 20_000)
 })
 
+describe('run_logged progress side-channel scoping', () => {
+  it('ignores a stale .progress from another asset while the size watch drives', () => {
+    const dir = scratch()
+    const result = runBash(
+      [
+        libPreamble(dir),
+        'DSH_PROGRESS_INTERVAL=1',
+        'mkdir -p "$PREFIX/harness/.cache/other-asset.tar.gz.chunks"',
+        'printf \'%s\' \'STALE-FROZEN-BAR\' > "$PREFIX/harness/.cache/other-asset.tar.gz.chunks/.progress"',
+        'touch -t 202001010000 "$PREFIX/harness/.cache/other-asset.tar.gz.chunks/.progress"',
+        // The current step watches a different asset; the residue above must
+        // never freeze the bar over the live byte count.
+        'watch="$PREFIX/harness/.cache/this-asset.tar.gz.download"',
+        '( sleep 1; head -c 1048576 /dev/zero > "$watch" ) &',
+        'writer=$!',
+        'DSH_RUN_LOG_PROGRESS_FILE="$watch" DSH_RUN_LOG_PROGRESS_TOTAL=2097152 run_logged "download probe" 30 "$PREFIX" sleep 3',
+        'wait "$writer" 2>/dev/null || true',
+      ].join('\n'),
+    )
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain('download probe: 1 MB of 2 MB (50%)')
+    expect(result.stderr).not.toContain('STALE-FROZEN-BAR')
+  })
+
+  it('ignores a matching-named .progress whose mtime predates the step', () => {
+    const dir = scratch()
+    const result = runBash(
+      [
+        libPreamble(dir),
+        'DSH_PROGRESS_INTERVAL=1',
+        'mkdir -p "$PREFIX/harness/.cache"',
+        'watch="$PREFIX/harness/.cache/this-asset.tar.gz.download"',
+        'printf \'%s\' \'STALE-MATCHING-NAME\' > "$watch.progress"',
+        'touch -t 202001010000 "$watch.progress"',
+        '( sleep 1; head -c 1048576 /dev/zero > "$watch" ) &',
+        'writer=$!',
+        'DSH_RUN_LOG_PROGRESS_FILE="$watch" DSH_RUN_LOG_PROGRESS_TOTAL=2097152 run_logged "stale-name probe" 30 "$PREFIX" sleep 3',
+        'wait "$writer" 2>/dev/null || true',
+      ].join('\n'),
+    )
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain('stale-name probe: 1 MB of 2 MB (50%)')
+    expect(result.stderr).not.toContain('STALE-MATCHING-NAME')
+  })
+
+  it('prefers a fresh .progress matching the watch, tolerating the .download suffix', () => {
+    const dir = scratch()
+    const result = runBash(
+      [
+        libPreamble(dir),
+        'DSH_PROGRESS_INTERVAL=1',
+        'watch="$PREFIX/harness/.cache/this-asset.tar.gz.download"',
+        'mkdir -p "$PREFIX/harness/.cache/this-asset.tar.gz.chunks"',
+        // The engine writes beside the final asset name; the watch names the
+        // .download file, so the suffix-stripped match must be accepted.
+        '( sleep 1; printf \'%s\' \'[████] 88% · 263.9/299.9 MB\' > "$PREFIX/harness/.cache/this-asset.tar.gz.chunks/.progress" ) &',
+        'writer=$!',
+        'DSH_RUN_LOG_PROGRESS_FILE="$watch" DSH_RUN_LOG_PROGRESS_TOTAL=2097152 run_logged "engine probe" 30 "$PREFIX" sleep 3',
+        'wait "$writer" 2>/dev/null || true',
+      ].join('\n'),
+    )
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain('88% · 263.9/299.9 MB')
+  })
+})
+
 describe('run_limited kill window', () => {
   it('passes --kill-after to timeout and to gtimeout', () => {
     const dir = scratch()
@@ -441,7 +510,7 @@ describe('update lock', () => {
     }
   })
 
-  it('refuses to run beside a live holder', () => {
+  it('refuses to run beside a live holder and names the mkdir rung\'s recorded pid', () => {
     const dir = scratch()
     const binDir = fakeBin()
     const result = runBash(
@@ -451,12 +520,41 @@ describe('update lock', () => {
         'trap \'kill "$holder" 2>/dev/null || true\' EXIT',
         'mkdir -p "$PREFIX/harness/.update.lock.d"',
         'echo "$holder" > "$PREFIX/harness/.update.lock.d/pid"',
+        'printf "HOLDER=%s\\n" "$holder"',
         'acquire_update_lock',
         'printf "SHOULD NOT REACH\\n"',
       ].join('\n'),
     )
     expect(result.status).toBe(1)
     expect(result.stderr).toContain('another update is already running')
+    // The mkdir rung writes its pid at mkdir time, so that pid is the holder.
+    const holderPid = /HOLDER=(\d+)/u.exec(result.stdout)?.[1]
+    expect(holderPid).toBeDefined()
+    expect(result.stderr).toContain(`(PID ${holderPid ?? ''})`)
+    expect(result.stdout).not.toContain('SHOULD NOT REACH')
+  })
+
+  it.runIf(flockAvailable)('reports flock contention without a possibly-stale pid', () => {
+    const dir = scratch()
+    const result = runBash(
+      [
+        libPreamble(dir),
+        'mkdir -p "$PREFIX/harness"',
+        // Hold the flock from this shell; the lock file's recorded pid is
+        // written only AFTER acquisition, so it can still name a previous
+        // run. UPDATE_PREPARE skips the attach path to reach the refusal.
+        'exec 7>>"$PREFIX/harness/.update.lock"',
+        'flock -n 7 || exit 9',
+        'printf "%s\\n" 4194303 > "$PREFIX/harness/.update.lock"',
+        'UPDATE_PREPARE=1',
+        'acquire_update_lock',
+        'printf "SHOULD NOT REACH\\n"',
+      ].join('\n'),
+    )
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('another update is already running; wait for it to finish')
+    expect(result.stderr).not.toContain('(PID')
+    expect(result.stderr).not.toContain('4194303')
     expect(result.stdout).not.toContain('SHOULD NOT REACH')
   })
 
@@ -643,5 +741,18 @@ describe('engine renderer clamp', () => {
     for (const source of [installSource, standaloneSource]) {
       expect(source).toContain('      console.log(msg)')
     }
+  })
+})
+
+describe('reclaim advice', () => {
+  it('states the automatic retry instead of manual removal on the engine paths', () => {
+    const install = readFileSync(installSh, 'utf8')
+    // The lock-reclaim failures and the staged-record removal failure report
+    // the automatic retry; the path stays only as diagnostic detail.
+    expect(install).not.toMatch(/reclaim stale update lock [^\n]*remove it manually/u)
+    expect(install).not.toContain('remove the file manually')
+    expect(install).toContain('the next acquire retries automatically')
+    expect(install).toContain('the next run retries automatically')
+    expect(install).toContain('the next update removes or rewrites it')
   })
 })

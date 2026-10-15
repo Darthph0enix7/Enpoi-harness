@@ -1301,6 +1301,13 @@ describe('download resilience', () => {
     // Falls back to single-stream curl on Range refusal
     expect(prebuiltBlock).toContain('falling back to single-stream curl')
   })
+
+  it('drops the failed parallel attempt\'s progress state before the curl fallback', () => {
+    const install = readFileSync(installSh, 'utf8')
+    const fallback = /if \[ "\$dl_ok" = 0 \]; then[\s\S]{0,800}?curl -fsSL/.exec(install)?.[0] ?? ''
+    expect(fallback).toContain('rm -f "$asset_file.progress"')
+    expect(fallback).toContain('rm -rf "$asset_file.chunks"')
+  })
 })
 
 /**
@@ -1551,6 +1558,114 @@ exit 0
       expect(missing.stdout).toContain('RC=1')
       expect(missing.stdout).toContain('PREBUILT=0')
       expect(existsSync(join(fallbackPrefix, 'harness', '.cache', `dsh-harness-${releaseVersion}-linux-x64.tar.gz.download`))).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('leaves neither the top .progress nor the .chunks dir when the parallel engine falls back', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-release-fallback-'))
+    try {
+      const prefix = join(dir, 'prefix')
+      const tarball = join(dir, 'asset.tar.gz')
+      const releaseVersion = '0.1.7-enpoi.2.43'
+      const treeTop = join(dir, 'stage-tree', `dsh-harness-${releaseVersion}`)
+      mkdirSync(treeTop, { recursive: true })
+      writeFileSync(join(treeTop, 'package.json'), JSON.stringify({ name: 'dsh-harness', version: '0.1.7-enpoi.2' }))
+      expect(spawnSync('tar', ['-czf', tarball, '-C', join(dir, 'stage-tree'), `dsh-harness-${releaseVersion}`]).status).toBe(0)
+      const sha = createHash('sha256').update(readFileSync(tarball)).digest('hex')
+      const shaFile = join(dir, 'asset.sha256')
+      writeFileSync(shaFile, `${sha}  dsh-harness-${releaseVersion}-linux-x64.tar.gz\n`)
+
+      const bin = join(dir, 'bin')
+      mkdirSync(bin)
+      writeFileSync(join(bin, 'curl'), `#!/bin/sh
+out=""; url=""; want_redirect=0; want_headers=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2;;
+    -w) case "$2" in *redirect_url*) want_redirect=1;; esac; shift 2;;
+    -D) [ "$2" = "-" ] && want_headers=1; shift 2;;
+    -C|--retry|--retry-delay|--connect-timeout|--speed-limit|--speed-time|--max-time|--range) shift 2;;
+    -*) shift;;
+    *) url="$1"; shift;;
+  esac
+done
+case "$url" in
+  */releases/latest)
+    [ "$want_redirect" = 1 ] && printf '%s\\n' "$FAKE_RELEASE_URL"
+    exit 0;;
+  *.sha256) cp "$FAKE_SHA_FILE" "$out"; exit 0;;
+  *.tar.gz)
+    if [ "$want_headers" = 1 ]; then printf 'content-range: bytes 0-0/1\\n200'; exit 0; fi
+    cp "$FAKE_TARBALL" "$out"; exit 0;;
+esac
+exit 1
+`, { mode: 0o755 })
+      writeFileSync(join(bin, 'git'), `#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    refs/tags/*)
+      printf '%s\\t%s\\n' "3333333333333333333333333333333333333333" "$arg"
+      exit 0;;
+  esac
+done
+exit 0
+`, { mode: 0o755 })
+
+      // The parallel engine fails after creating both side channels (the top
+      // .progress, and .chunks/ with its .progress, manifest, and parts), as
+      // a real mid-download network failure does.
+      const fakeDl = join(dir, 'fake-download.mjs')
+      const dlLog = join(dir, 'fake-dl.log')
+      writeFileSync(fakeDl, `import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
+const asset = process.argv[3]
+appendFileSync(process.env.FAKE_DL_LOG, 'ran\\n')
+mkdirSync(\`\${asset}.chunks\`, { recursive: true })
+writeFileSync(\`\${asset}.chunks/.progress\`, 'stale\\n')
+writeFileSync(\`\${asset}.chunks/manifest.json\`, '{}\\n')
+writeFileSync(\`\${asset}.chunks/part-0\`, 'partial\\n')
+writeFileSync(\`\${asset}.progress\`, 'stale-top\\n')
+process.exit(1)
+`)
+
+      const script = [
+        'export DSH_INSTALL_LIB_ONLY=1',
+        '. "$INSTALL_SH" 2>/dev/null',
+        'NODE="$(command -v node)"',
+        'PREFIX="$PREFIX_VALUE"',
+        'OS=linux',
+        'ARCH=x64',
+        'CHANNEL=stable',
+        'DSH_GITHUB_URL=https://github.com/example/repo',
+        'LOG_FILE=/dev/null',
+        'PATH="$STUB_BIN:$PATH"',
+        'resolve_fast_downloader() { printf "%s\\n" "$FAKE_DL"; }',
+        'stage_prebuilt; rc=$?',
+        'printf "RC=%s\\n" "$rc"',
+      ].join('\n')
+      const result = spawnSync('bash', ['-c', script], {
+        env: {
+          ...process.env,
+          INSTALL_SH: installSh,
+          PREFIX_VALUE: prefix,
+          STUB_BIN: bin,
+          FAKE_RELEASE_URL: `https://github.com/example/repo/releases/tag/v${releaseVersion}`,
+          FAKE_TARBALL: tarball,
+          FAKE_SHA_FILE: shaFile,
+          FAKE_DL: fakeDl,
+          FAKE_DL_LOG: dlLog,
+        },
+        encoding: 'utf8',
+      })
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('RC=0')
+      // The parallel rung ran (and failed) before the curl fallback delivered.
+      expect(readFileSync(dlLog, 'utf8')).toContain('ran')
+      const asset = join(prefix, 'harness', '.cache', `dsh-harness-${releaseVersion}-linux-x64.tar.gz`)
+      expect(existsSync(asset)).toBe(true)
+      expect(existsSync(`${asset}.progress`)).toBe(false)
+      expect(existsSync(`${asset}.chunks`)).toBe(false)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

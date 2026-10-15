@@ -211,10 +211,29 @@ else
   C_BLUE=""
 fi
 
+# Bound the install log: a file past the cap moves to install.log.1 (exactly
+# one predecessor) BEFORE a session appends its header, so a session's own
+# step output is never split mid-step and the pair stays within ~2x the cap.
+# The fresh install.log keeps its mtime moving; the run marker and the
+# plugin's staleness reads (marker_progress_age_seconds) only ever see a
+# writable log either way.
+rotate_install_log() { # file
+  local file="$1" max="${DSH_INSTALL_LOG_MAX_BYTES:-20971520}" size=""
+  case "$max" in ''|*[!0-9]*) max=20971520;; esac
+  [ "$max" -gt 0 ] 2>/dev/null || return 0
+  [ -f "$file" ] || return 0
+  size="$(file_size "$file" 2>/dev/null || true)"
+  case "$size" in ''|*[!0-9]*) return 0;; esac
+  [ "$size" -gt "$max" ] 2>/dev/null || return 0
+  mv -f "$file" "$file.1" 2>/dev/null || return 0
+  return 0
+}
+
 init_log_file() {
   local log_dir="$PREFIX/logs"
   mkdir -p "$log_dir" 2>/dev/null || log_dir="${TMPDIR:-/tmp}"
   LOG_FILE="$log_dir/install.log"
+  rotate_install_log "$LOG_FILE"
   [ -n "${OS:-}" ] || detect_os_arch
   {
     printf '=================================================================\n'
@@ -491,6 +510,34 @@ run_logged_log_size() {
   printf '%s' "$size"
 }
 
+# True when a downloader side channel belongs to the current run_logged step.
+# A `.progress` from a previous asset or run must never drive (and freeze) the
+# display: its mtime must fall at or after the step start (one second of slack
+# absorbs the whole-second boundary between the writer's first write and the
+# step's start reading), and when a watched destination is known its path must
+# be that watch's own side channel — `<watch>.progress` /
+# `<watch>.chunks/.progress` — with the `.download` suffix tolerated on the
+# watch (the parallel engine writes beside the final name, the curl fallback
+# watches the `.download` file).
+run_logged_progress_current() { # candidate watch_file step_started
+  local pf="$1" watch="$2" step_started="$3" mtime stripped
+  [ -n "$step_started" ] || return 1
+  mtime="$(stat -c %Y "$pf" 2>/dev/null || stat -f %m "$pf" 2>/dev/null || true)"
+  case "$mtime" in ''|*[!0-9]*) return 1;; esac
+  [ $((step_started - mtime)) -le 1 ] 2>/dev/null || return 1
+  [ -n "$watch" ] || return 0
+  case "$pf" in
+    "$watch.progress"|"$watch.chunks/.progress") return 0;;
+  esac
+  stripped="${watch%.download}"
+  if [ "$stripped" != "$watch" ]; then
+    case "$pf" in
+      "$stripped.progress"|"$stripped.chunks/.progress") return 0;;
+    esac
+  fi
+  return 1
+}
+
 # The last non-empty line the current step wrote, read from the byte offset
 # captured before the step started (the step's output begins there; the step's
 # own --- START/END --- markers are skipped). Empty when nothing was written.
@@ -600,14 +647,15 @@ run_logged() { # [--completed-regex RE] desc timeout workdir cmd...; DSH_RUN_LOG
     [ "$elapsed_cur" -ge 0 ] || elapsed_cur=0
     local prog="" alt="" pf="" bytes=""
     for pf in "$PREFIX/harness/.cache/"*.chunks/.progress "$PREFIX/harness/.cache/"*.progress "$workdir/"*.chunks/.progress "$workdir/"*.progress; do
-      if [ -f "$pf" ]; then
-        prog="$(cat "$pf" 2>/dev/null || true)"
-        [ -n "$prog" ] && break
-      fi
+      [ -f "$pf" ] || continue
+      run_logged_progress_current "$pf" "$watch_file" "$start_t" || continue
+      prog="$(cat "$pf" 2>/dev/null || true)"
+      [ -n "$prog" ] && break
     done
     # The watched destination file (the download being written) is the live
-    # truth and is rendered as the owned byte form; the *.progress content
-    # above is the engine's side channel and is preferred while it fits.
+    # truth and is rendered as the owned byte form; a *.progress side channel
+    # above drives the display only while it belongs to THIS step's download
+    # (fresh mtime plus the watched name), never a previous run's residue.
     if [ -n "${DSH_RUN_LOG_TICK_DIR:-}" ]; then
       local tick_count
       tick_count="$(find "$DSH_RUN_LOG_TICK_DIR" -type f 2>/dev/null | wc -l | tr -d ' ')"
@@ -831,6 +879,9 @@ Environment:
                                      (falls back to GH_TOKEN / GITHUB_TOKEN / gh)
   DSH_DEFAULT_PROFILE_SOURCE         built-in default profile source
   DSH_PROFILE_INSTALL_TIMEOUT        profile `pnpm install` budget in seconds
+  DSH_INSTALL_LOG_MAX_BYTES          install.log cap in bytes (default 20971520);
+                                     a larger file rotates to install.log.1
+                                     before the next session appends
   DSH_WEB_HOST / DSH_WEB_PORT        Web UI URL printed (and opened when a
                                      display exists); default 127.0.0.1:3080
   DSH_NO_OPEN                        same as --no-open
@@ -853,13 +904,14 @@ USAGE
 }
 
 # One EXIT trap owns all cleanup: staging dirs, a pre-switch user-file restore
-# that an early die did not reach explicitly, and the portable mkdir lock
-# directory. A single chained trap keeps the existing cleanup from being
-# clobbered by a later trap registration. The first statement finalizes the
-# engine run marker (attach/cancel contract) from the exit status; it is
-# definition-guarded because the trap is registered before the functions and
-# must never break a library-only source.
-trap 'exit_rc=$?; if [ "${RUN_MARKER_ACTIVE:-0}" = 1 ] && command -v run_marker_exit_hook >/dev/null 2>&1; then run_marker_exit_hook "$exit_rc"; fi; if [ -n "${STAGED:-}" ]; then rm -rf "$STAGED"; fi; if [ -n "${PROFILE_STAGE:-}" ]; then rm -rf "$PROFILE_STAGE"; fi; if [ -n "${PRE_SWITCH_RESTORE:-}" ]; then restore_pre_switch "$PRE_SWITCH_RESTORE" "the update"; fi; if [ -n "${UPDATE_LOCK_DIR:-}" ]; then rm -rf "$UPDATE_LOCK_DIR" 2>/dev/null; fi; if [ -n "${UPDATE_LOCK_FILE:-}" ]; then exec 9>&- 2>/dev/null || true; fi; if [ -n "${CURRENT_RUN_LOGGED_PID:-}" ]; then kill -TERM "$CURRENT_RUN_LOGGED_PID" 2>/dev/null || true; fi' EXIT
+# that an early die did not reach explicitly, the portable mkdir lock
+# directory, and the launcher's launchd job (detached, darwin only). A single
+# chained trap keeps the existing cleanup from being clobbered by a later trap
+# registration. The first statement finalizes the engine run marker
+# (attach/cancel contract) from the exit status; it and the launchd release
+# are definition-guarded because the trap is registered before the functions
+# and must never break a library-only source.
+trap 'exit_rc=$?; if [ "${RUN_MARKER_ACTIVE:-0}" = 1 ] && command -v run_marker_exit_hook >/dev/null 2>&1; then run_marker_exit_hook "$exit_rc"; fi; if [ -n "${STAGED:-}" ]; then rm -rf "$STAGED"; fi; if [ -n "${PROFILE_STAGE:-}" ]; then rm -rf "$PROFILE_STAGE"; fi; if [ -n "${PRE_SWITCH_RESTORE:-}" ]; then restore_pre_switch "$PRE_SWITCH_RESTORE" "the update"; fi; if [ -n "${UPDATE_LOCK_DIR:-}" ]; then rm -rf "$UPDATE_LOCK_DIR" 2>/dev/null; fi; if [ -n "${UPDATE_LOCK_FILE:-}" ]; then exec 9>&- 2>/dev/null || true; fi; if [ -n "${CURRENT_RUN_LOGGED_PID:-}" ]; then kill -TERM "$CURRENT_RUN_LOGGED_PID" 2>/dev/null || true; fi; if command -v release_update_job_at_exit >/dev/null 2>&1; then release_update_job_at_exit; fi' EXIT
 
 # ── Argument parsing ────────────────────────────────────────────────────────
 need_value() { [ "$#" -ge 2 ] || die "option $1 needs a value"; }
@@ -1941,6 +1993,16 @@ async function main() {
   const progressFile = `${chunkDir}/.progress`
   const topProgressFile = `${outputFile}.progress`
 
+  // A terminal exit owns the engine's scratch state: the parts dir (its
+  // .progress, manifest.json, part-*) and the top-level .progress. The two
+  // exits that resume instead of finishing — an interrupt (exit 130) and a
+  // retryable network failure (exit 1) — keep theirs deliberately, and the
+  // caller removes an assembled `.download` with its own semantics.
+  function cleanupChunkState() {
+    try { rmSync(chunkDir, { recursive: true, force: true }) } catch {}
+    try { rmSync(topProgressFile, { force: true }) } catch {}
+  }
+
   function formatProgressBar(pct, currentMB, totalMB, speedMBs) {
     const width = 12
     const filled = Math.min(width, Math.max(0, Math.round((pct / 100) * width)))
@@ -2087,10 +2149,17 @@ async function main() {
   reportProgress(true)
   if (isTTY) process.stdout.write('\n')
 
-  for (const c of chunks) {
-    if (!existsSync(c.partPath)) throw new Error(`missing chunk ${c.index}`)
-    const sz = statSync(c.partPath).size
-    if (sz !== c.expectedSize) throw new Error(`incomplete chunk ${c.index} (got ${sz}, expected ${c.expectedSize})`)
+  try {
+    for (const c of chunks) {
+      if (!existsSync(c.partPath)) throw new Error(`missing chunk ${c.index}`)
+      const sz = statSync(c.partPath).size
+      if (sz !== c.expectedSize) throw new Error(`incomplete chunk ${c.index} (got ${sz}, expected ${c.expectedSize})`)
+    }
+  } catch (err) {
+    // A part set that fails its own size check cannot be resumed: drop it so
+    // the next attempt starts clean instead of trusting a poisoned manifest.
+    cleanupChunkState()
+    throw err
   }
 
   console.log(`[download] assembling ${concurrency} parts into ${outputFile}...`)
@@ -2123,8 +2192,7 @@ async function main() {
   if (expectedSha256) {
     if (actualSha256 !== expectedSha256.toLowerCase()) {
       rmSync(downloadFile, { force: true })
-      rmSync(chunkDir, { recursive: true, force: true })
-      try { rmSync(topProgressFile, { force: true }) } catch {}
+      cleanupChunkState()
       console.error(`[download] SHA-256 verification failed! Expected: ${expectedSha256}, actual: ${actualSha256}`)
       process.exit(3)
     }
@@ -2132,8 +2200,7 @@ async function main() {
   }
 
   renameSync(downloadFile, outputFile)
-  rmSync(chunkDir, { recursive: true, force: true })
-  try { rmSync(topProgressFile, { force: true }) } catch {}
+  cleanupChunkState()
   console.log(`[download] successfully finished: ${outputFile} (${totalMB} MB)`)
   process.exit(0)
 }
@@ -2287,9 +2354,12 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
 
     # Fallback: single-stream curl if fast downloader was skipped or fell back
     if [ "$dl_ok" = 0 ]; then
-      # Drop a stale progress file from a failed parallel attempt; the size of
-      # the .download file below is the live progress source.
+      # Drop the failed parallel attempt's side channels — both the top
+      # .progress and the .chunks/ dir (its .progress, manifest.json, part-*)
+      # that nothing else sweeps; the size of the .download file below is the
+      # live progress source.
       rm -f "$asset_file.progress"
+      rm -rf "$asset_file.chunks"
       if ! DSH_RUN_LOG_PROGRESS_FILE="$asset_file.download" DSH_RUN_LOG_PROGRESS_TOTAL="$asset_bytes" \
         run_logged "Downloading prebuilt harness ($OS-$ARCH)" "${DSH_PREBUILT_TIMEOUT:-1800}" "$PREFIX" curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 30 --speed-limit 10240 --speed-time 60 -C - "$url" -o "$asset_file.download"; then
         log "prebuilt: download failed; keeping the partial for a resumable retry ($asset_file.download); building from source for now"
@@ -7054,15 +7124,16 @@ artifact_owner_alive() { # path -> 0 when a live owner exists
 }
 
 # Stale harness-root update artifacts from crashed runs: partial downloads
-# (.download-<pid>.tar.gz [+ .sha256]) and delta scratch (.release-*,
-# .update-*) whose owner is gone. The keep set here is NONE by design — the
-# intentional bounded keeps live elsewhere: release archives under .cache/
-# (newest 2, pruned just above) and .last-update-* run reports (newest 3 runs,
-# prune_update_reports). Never touched: current, the live version tree,
-# .staged-apply.json (the two-phase record), and .backup-* (its own newest-5
-# policy). Byte savings are reported, not just the count.
+# (.download-<pid>.tar.gz [+ .sha256]), delta scratch (.release-*, .update-*)
+# whose owner is gone, and the chunk engine's progress side channels under
+# .cache/ (<asset>.progress, <asset>.chunks/). The keep set here is NONE by
+# design — the intentional bounded keeps live elsewhere: release archives
+# under .cache/ (newest 2, pruned just above) and .last-update-* run reports
+# (newest 3 runs, prune_update_reports). Never touched: current, the live
+# version tree, .staged-apply.json (the two-phase record), and .backup-* (its
+# own newest-5 policy). Byte savings are reported, not just the count.
 prune_orphaned_update_artifacts() {
-  local h="$PREFIX/harness" p base freed_kb=0 removed=0 sz
+  local h="$PREFIX/harness" p base freed_kb=0 removed=0 sz marker mpid now mtime
   [ -d "$h" ] || return 0
   for p in "$h"/.download-* "$h"/.release-* "$h"/.update-*; do
     [ -e "$p" ] || continue
@@ -7082,6 +7153,38 @@ prune_orphaned_update_artifacts() {
       warn "could not prune stale update artifact $base"
     fi
   done
+  # The chunk engine's side channels carry no owner pid, so liveness is the
+  # run marker plus the stall window: nothing is touched while a live marker
+  # exists (this sweep runs inside a run), and a path touched inside the
+  # stall window is kept even when the marker is gone — its runner may have
+  # just been replaced. Older residue is reaped like the rest.
+  marker="$(run_marker_path)"
+  mpid=""
+  if [ -f "$marker" ]; then
+    mpid="$(marker_field "$marker" pid)"
+    case "$mpid" in ''|*[!0-9]*) mpid="";; esac
+  fi
+  if [ -z "$mpid" ] || ! pid_live "$mpid"; then
+    now="$(date +%s)"
+    for p in "$h/.cache"/*.progress "$h/.cache"/*.chunks; do
+      [ -e "$p" ] || continue
+      base="$(basename "$p")"
+      mtime="$(stat -c %Y "$p" 2>/dev/null || stat -f %m "$p" 2>/dev/null || true)"
+      case "$mtime" in
+        ''|*[!0-9]*) ;;
+        *) [ $((now - mtime)) -lt "$RUN_STALE_WINDOW_SECONDS" ] && continue;;
+      esac
+      sz="$(du -sk "$p" 2>/dev/null | awk '{print $1}')"
+      sz="${sz:-0}"
+      if rm -rf -- "$p" 2>/dev/null; then
+        removed=$((removed + 1))
+        freed_kb=$((freed_kb + sz))
+        log "pruned stale update artifact $base (freed ${sz}KB)"
+      else
+        warn "could not prune stale update artifact $base"
+      fi
+    done
+  fi
   [ "$removed" -gt 0 ] && log "pruned $removed stale update artifact(s) (freed $(human_bytes $((freed_kb * 1024))))"
   return 0
 }
@@ -7383,7 +7486,7 @@ reap_stale_update_lock_dir() {
   warn "reclaiming stale update lock $lock_dir ($note); its owner is gone — no manual removal needed"
   log "update lock: reclaimed stale $lock_dir ($note)"
   rm -rf -- "$lock_dir" 2>/dev/null || {
-    warn "could not reclaim stale update lock $lock_dir; remove it manually if it blocks the next run"
+    warn "could not reclaim stale update lock $lock_dir; the next acquire retries automatically (path kept for diagnostics)"
     return 1
   }
   return 0
@@ -7449,10 +7552,11 @@ acquire_update_lock() {
     if ! flock -n 9; then
       # Held. The kernel drops flock with its holder, so a failed acquisition
       # means a live holder; a plain update attaches when the run's marker is
-      # live, every other mode reports it.
-      local holder_pid=""
-      holder_pid="$(head -n 1 "$lock_file" 2>/dev/null || true)"
-      update_lock_contention "$holder_pid" ""
+      # live, every other mode reports it. No pid is printed here: the file's
+      # pid is written only AFTER a successful acquisition, so at this instant
+      # it can still name a previous run — the live-holder fact is the honest
+      # report (the mkdir rung writes its pid at mkdir time and keeps it).
+      update_lock_contention "" ""
     fi
     printf '%s\n' "$$" > "$lock_file" 2>/dev/null || true
     UPDATE_LOCK_FILE="$lock_file"
@@ -7474,7 +7578,7 @@ acquire_update_lock() {
     fi
     # Dead, zombie, or unreadable owner: reclaim (one warning) and continue.
     reap_stale_update_lock_dir \
-      || die "could not reclaim stale update lock $lock_dir; remove it manually and re-run"
+      || die "could not reclaim stale update lock $lock_dir; the next run retries automatically (path kept for diagnostics)"
     if ! mkdir "$lock_dir" 2>/dev/null; then
       # A concurrent process recreated the lock between reclaim and mkdir: fall
       # back to the normal contention decision for its recorded owner.
@@ -7621,6 +7725,21 @@ run_marker_exit_hook() { # exit status
   [ "${RUN_MARKER_SIGNALLED:-0}" = 1 ] && phase=cancelled
   run_marker_write "$phase"
   RUN_MARKER_ACTIVE=0
+  return 0
+}
+
+# The external launcher (the plugin's update wrapper) may run this engine
+# inside a launchd job whose KeepAlive would relaunch it after the run ends
+# (DSH_UPDATE_JOB_LABEL names that job, com.dsh.update.<runId>). Removing the
+# job would SIGTERM its processes — this engine included — so the removal
+# runs detached, one second after the EXIT trap's own cleanup has finished,
+# and stays best-effort: darwin only, empty label is a no-op, and a failure
+# can neither block the exit nor change its status.
+release_update_job_at_exit() {
+  local label="${DSH_UPDATE_JOB_LABEL:-}"
+  [ -n "$label" ] || return 0
+  [ "$(uname -s 2>/dev/null)" = "Darwin" ] || return 0
+  ( sleep 1; launchctl remove "$label" ) >/dev/null 2>&1 &
   return 0
 }
 
@@ -8427,7 +8546,7 @@ do_apply_staged() { # prev_version
   prune_versions "$tree" "$prev"
   prune_update_artifacts
   if ! rm -f "$staged"; then
-    warn "apply: could not remove the staged record $staged (the tree is live now; remove the file manually)"
+    warn "apply: could not remove the staged record $staged (the tree is live now; the next update removes or rewrites it)"
   fi
   say ""
   say "${C_GREEN}${C_BOLD}Update applied:${C_RESET} $version (${CHANNEL} channel) — current → $tree"

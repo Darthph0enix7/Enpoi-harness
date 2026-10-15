@@ -702,3 +702,62 @@ describe('update wiring and the non-session path', () => {
     expect(docs).toMatch(/between turns|delegat/)
   })
 })
+
+describe('launcher job release at exit', () => {
+  /** Poll a captured log for a launchctl line (the removal is detached). */
+  function waitForLogLine(log: string, needle: string, timeoutMs = 5_000): string {
+    const deadline = Date.now() + timeoutMs
+    let seen = ''
+    while (Date.now() < deadline) {
+      seen = readLog(log)
+      if (seen.includes(needle)) return seen
+      spawnSync('sleep', ['0.1'])
+    }
+    return seen
+  }
+
+  it('removes the launcher job with the exact label at engine exit on darwin', () => {
+    const root = tempRoot()
+    const { binDir, log } = fakeLaunchctl(root)
+    // A stubbed uname keeps this Darwin-only test deterministic on every host;
+    // the stub sleep keeps the detached one-shot immediate.
+    writeExecutable(join(binDir, 'uname'), ['#!/bin/sh', 'printf "Darwin\\n"'])
+    writeExecutable(join(binDir, 'sleep'), ['#!/bin/sh', 'exit 0'])
+    const result = runLibrary([
+      'PATH="$STUB_BIN:$PATH"',
+      'DSH_UPDATE_JOB_LABEL=com.dsh.update.testrun-1',
+    ].join('\n'), {
+      home: root, path: binDir,
+      env: { LAUNCHCTL_LOG: log },
+    })
+    expect(result.status).toBe(0)
+    expect(waitForLogLine(log, 'remove com.dsh.update.testrun-1')).toContain('remove com.dsh.update.testrun-1')
+  })
+
+  it('issues nothing without a label or off darwin', () => {
+    const noLabel = tempRoot()
+    const noLabelFake = fakeLaunchctl(noLabel)
+    writeExecutable(join(noLabelFake.binDir, 'uname'), ['#!/bin/sh', 'printf "Darwin\\n"'])
+    writeExecutable(join(noLabelFake.binDir, 'sleep'), ['#!/bin/sh', 'exit 0'])
+    const labelResult = runLibrary('PATH="$STUB_BIN:$PATH"', {
+      home: noLabel, path: noLabelFake.binDir,
+      env: { LAUNCHCTL_LOG: noLabelFake.log },
+    })
+    expect(labelResult.status).toBe(0)
+    expect(readLog(noLabelFake.log)).not.toContain('remove')
+
+    const offDarwin = tempRoot()
+    const offDarwinFake = fakeLaunchctl(offDarwin)
+    writeExecutable(join(offDarwinFake.binDir, 'uname'), ['#!/bin/sh', 'printf "Linux\\n"'])
+    writeExecutable(join(offDarwinFake.binDir, 'sleep'), ['#!/bin/sh', 'exit 0'])
+    const osResult = runLibrary([
+      'PATH="$STUB_BIN:$PATH"',
+      'DSH_UPDATE_JOB_LABEL=com.dsh.update.testrun-2',
+    ].join('\n'), {
+      home: offDarwin, path: offDarwinFake.binDir,
+      env: { LAUNCHCTL_LOG: offDarwinFake.log },
+    })
+    expect(osResult.status).toBe(0)
+    expect(readLog(offDarwinFake.log)).not.toContain('remove')
+  })
+})
