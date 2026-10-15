@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { InstallIdentity } from '../src/catalog.js'
 import type { EngineCancelOutcome } from '../src/cancel.js'
-import { updateJobLabel, type LaunchOutcome, type LaunchUpdaterInput } from '../src/launcher.js'
+import { updateJobLabel, type LaunchdJob, type LaunchOutcome, type LaunchUpdaterInput } from '../src/launcher.js'
 import { runMarkerPath, type EngineRunMarker } from '../src/marker.js'
 import { runLogPath, runPidPath, runRecordPath, stagedApplyPath, type UpdateRunRecord } from '../src/run.js'
 import {
@@ -97,7 +97,7 @@ function bench(options: {
   /** launchd-job removal seam; the bench records every call by default. */
   removeJob?: (label: string) => boolean
   /** launchd-job listing seam; null (no listing) by default, like off-darwin. */
-  listJobs?: () => readonly string[] | null
+  listJobs?: () => readonly LaunchdJob[] | null
 } = {}): Bench {
   const home = options.home ?? scratch()
   const ticks = manualTimers()
@@ -912,6 +912,12 @@ describe('UpdateRunController launchd job removal', () => {
     return { rung: 'launchctl', unit: updateJobLabel('run42'), pid: 4242 }
   }
 
+  /** Push one file's mtime well past the stall window. */
+  function staleMtime(path: string): void {
+    const past = new Date(Date.now() - 30 * 60_000)
+    utimesSync(path, past, past)
+  }
+
   it('removes the submitted job when a launched run reaches a terminal result', async () => {
     const b = bench({ launch: launchctlRung, isAlive: () => false })
     await b.controller.start()
@@ -966,10 +972,16 @@ describe('UpdateRunController launchd job removal', () => {
   })
 
   it('removes the job when a successful cancel relays into a cancelled record', async () => {
+    const alive = { value: true }
     const b = bench({
       launch: launchctlRung,
-      isAlive: () => true,
-      cancelEngine: async () => ({ status: 'cancelled', message: 'stopped', runId: 'run42', pid: 4242, phase: 'cancelled' }),
+      isAlive: () => alive.value,
+      // The engine answers `cancelled` only after the runner exited; model
+      // that fact reaching the plugin's pid probe.
+      cancelEngine: async () => {
+        alive.value = false
+        return { status: 'cancelled', message: 'stopped', runId: 'run42', pid: 4242, phase: 'cancelled' }
+      },
     })
     await b.controller.start()
     const outcome = await b.controller.cancel()
@@ -1014,9 +1026,69 @@ describe('UpdateRunController launchd job removal', () => {
     b.controller.dispose()
   })
 
+  it('never sweeps a job launchd reports as running, only stale ones', () => {
+    const jobs: LaunchdJob[] = [
+      { label: updateJobLabel('live'), running: true },
+      { label: updateJobLabel('dead'), running: false },
+      { label: 'com.other.running', running: true },
+    ]
+    const b = bench({ listJobs: () => jobs })
+    expect(b.controller.reconcile()).toBeNull()
+    expect(b.removals).toEqual([updateJobLabel('dead')])
+    b.controller.dispose()
+  })
+
+  it('refuses to remove the job while the raw engine pid is live, even when progress went stale (healStaleOwn)', async () => {
+    const home = scratch()
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: {
+        runId: 'run42',
+        phase: 'preparing',
+        step: 4,
+        launcher: 'launchctl',
+        startedAt: new Date(Date.now() - 30 * 60_000).toISOString(),
+      },
+    }).record, process.pid)
+    writeLog(home, '[4/9] dependencies and build\n')
+    staleMtime(runLogPath(home))
+    // The strong-liveness heuristic reads the silent run as stale (the log
+    // stopped moving >5 min ago), but the raw pid is alive: the record heals,
+    // the launchd job is never touched (launchctl remove would kill it).
+    const b = bench({ home, isAlive: () => true })
+    expect(b.controller.run()).toMatchObject({ result: 'failed' })
+    expect(b.removals).toEqual([])
+    b.controller.dispose()
+  })
+
+  it('refuses to remove the job while the raw engine pid is live, even when clearStale heals (clearStale)', async () => {
+    const home = scratch()
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: {
+        runId: 'run42',
+        phase: 'preparing',
+        step: 4,
+        launcher: 'launchctl',
+        startedAt: new Date(Date.now() - 30 * 60_000).toISOString(),
+      },
+    }).record, process.pid)
+    writeLog(home, '[4/9] dependencies and build\n')
+    staleMtime(runLogPath(home))
+    const b = bench({ home, isAlive: () => true })
+    expect(b.controller.clearStale()).toMatchObject({ result: 'failed' })
+    expect(b.removals).toEqual([])
+    b.controller.dispose()
+  })
+
   it('sweeps leftover com.dsh.update.* jobs at boot when the marker is not live', () => {
-    const labels = [updateJobLabel('aaa'), 'com.other.job', 'com.dsh.update-guard.token.1', updateJobLabel('bbb')]
-    const b = bench({ listJobs: () => labels })
+    const jobs: LaunchdJob[] = [
+      { label: updateJobLabel('aaa'), running: false },
+      { label: 'com.other.job', running: false },
+      { label: 'com.dsh.update-guard.token.1', running: false },
+      { label: updateJobLabel('bbb'), running: false },
+    ]
+    const b = bench({ listJobs: () => jobs })
     expect(b.controller.reconcile()).toBeNull()
     // Only this plugin's own update jobs; unrelated and guard labels stay.
     expect(b.removals).toEqual([updateJobLabel('aaa'), updateJobLabel('bbb')])
@@ -1032,7 +1104,7 @@ describe('UpdateRunController launchd job removal', () => {
       runId: 'ext-1', pid: process.pid, mode: 'plain', step: 2, steps: 9, phase: 'running',
       startedAt: new Date().toISOString(), logPath: log, version: '', target: '',
     }))
-    const b = bench({ home, listJobs: () => [updateJobLabel('ccc')] })
+    const b = bench({ home, listJobs: () => [{ label: updateJobLabel('ccc'), running: false }] })
     b.controller.reconcile()
     expect(b.removals).toEqual([])
     b.controller.dispose()
@@ -1046,7 +1118,7 @@ describe('UpdateRunController launchd job removal', () => {
       isAlive: () => alive.value,
       // start() lists twice (reconcile + begin) before anything exists; only
       // the post-start reconcile sees labels, while the own run is executing.
-      listJobs: () => (++listings >= 3 ? [updateJobLabel('ccc')] : []),
+      listJobs: () => (++listings >= 3 ? [{ label: updateJobLabel('ccc'), running: false }] : []),
     })
     await b.controller.start()
     expect(listings).toBe(2)
@@ -1061,7 +1133,7 @@ describe('UpdateRunController launchd job removal', () => {
 
   it('runs the pre-launch sweep in begin() before launching a new run', async () => {
     let listings = 0
-    const b = bench({ listJobs: () => (++listings === 2 ? [updateJobLabel('old')] : []) })
+    const b = bench({ listJobs: () => (++listings === 2 ? [{ label: updateJobLabel('old'), running: false }] : []) })
     await b.controller.start()
     // First listing from start()'s reconcile, second from begin() itself.
     expect(listings).toBe(2)

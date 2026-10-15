@@ -46,7 +46,7 @@ import type { InstallIdentity } from './catalog.js'
 import {
   defaultShimPath, launchUpdater, LaunchEnvironmentError, listLaunchdJobs, removeLaunchdJob, resolveRuntimePath,
   RUN_HOME_ENV, UPDATE_JOB_LABEL_PREFIX, updateJobLabel,
-  type LaunchOutcome, type LaunchRung, type LaunchUpdaterInput,
+  type LaunchdJob, type LaunchOutcome, type LaunchRung, type LaunchUpdaterInput,
 } from './launcher.js'
 import { cancelEngineRun, type CancelEngineInput, type EngineCancelOutcome, type EngineCancelStatus } from './cancel.js'
 import {
@@ -138,7 +138,7 @@ export interface UpdateRunControllerOptions {
   /** launchd-job removal seam; defaults to {@link removeLaunchdJob} (darwin-only, fail-soft). */
   readonly removeJob?: (label: string) => boolean
   /** launchd-job listing seam for the stale-job sweep; defaults to {@link listLaunchdJobs}. */
-  readonly listJobs?: () => readonly string[] | null
+  readonly listJobs?: () => readonly LaunchdJob[] | null
   /** Called after each record change (the plugin logs it). */
   readonly onUpdate?: (record: UpdateRunRecord) => void
 }
@@ -957,11 +957,19 @@ export class UpdateRunController {
 
   /**
    * Remove the submitted launchd job that ran one record. Only a run launched
-   * through the launchctl rung owns such a job. The caller must have
-   * established that the engine exited: the removal also stops the job's
-   * processes, and a KeepAlive job would otherwise relaunch the run forever.
+   * through the launchctl rung owns such a job. This is the single choke point
+   * for every removal path: a raw live process (the wrapper pid file, then the
+   * record's launch pid; a null pid counts as not live) skips the removal
+   * entirely, because `launchctl remove` also SIGTERMs the job's processes.
+   * Progress staleness (`isAliveRecord`) is NOT sufficient evidence of exit:
+   * a live engine can be silent in its log for over five minutes during a
+   * large fetch or build, and only the raw pid probe may decide removal.
    */
   private removeSubmittedJob(record: UpdateRunRecord): void {
+    // Raw liveness first: every caller (healStaleOwn, clearStale, the terminal
+    // parse, the terminal tick, the cancel relay, the prepared/staged/failed
+    // paths) is refused here while the engine still runs.
+    if (this.processLive(record)) return
     if (record.launcher !== 'launchctl') return
     this.removeLaunchdJobLabel(updateJobLabel(record.runId))
   }
@@ -969,30 +977,35 @@ export class UpdateRunController {
   /**
    * Remove leftover `com.dsh.update.*` launchd jobs (macOS only). A submitted
    * job carries KeepAlive, so one whose engine already exited is relaunched
-   * every few seconds forever; a live, progressing run owns its job and the
-   * sweep is skipped then. Fail-soft and off-darwin: an unavailable
-   * `launchctl list` removes nothing (never blocks mount).
+   * every few seconds forever; a live run owns its job and the sweep is
+   * skipped then. Fail-soft and off-darwin: an unavailable `launchctl list`
+   * removes nothing (never blocks mount). A job launchd reports with an
+   * active PID is never removed, even when the marker and the controller's
+   * own record both look stale.
    */
   private sweepStaleLaunchdJobs(): void {
     const list = this.options.listJobs ?? (() => listLaunchdJobs())
-    let labels: readonly string[] | null
+    let jobs: readonly LaunchdJob[] | null
     try {
-      labels = list()
+      jobs = list()
     } catch {
       return
     }
-    if (labels === null) return
-    // A live run owns its job. The controller's own executing record covers
-    // the window before the engine writes its marker; the engine marker covers
-    // a run started outside the UI.
+    if (jobs === null) return
+    // A live run owns its job. The controller's own record is checked by its
+    // raw process first, whatever phase it shows — a terminal line can land
+    // while the engine still winds down, and a silent engine can outlive the
+    // progress-staleness window; the engine marker covers a run started
+    // outside the UI.
     const own = this.record
-    if (own !== null && own.result === null && !isPreparedPhase(own.phase) && this.isAliveRecord(own)) return
+    if (own !== null && this.processLive(own)) return
     const marker = readRunMarker(this.prefix)
     if (marker !== null && isMarkerLive(marker, this.options.isAlive ?? isProcessLive, {
       progressAgeMs: markerProgressAge(marker, this.prefix, this.now().getTime()),
     })) return
-    for (const label of labels) {
-      if (label.startsWith(UPDATE_JOB_LABEL_PREFIX)) this.removeLaunchdJobLabel(label)
+    for (const job of jobs) {
+      if (job.running) continue
+      if (job.label.startsWith(UPDATE_JOB_LABEL_PREFIX)) this.removeLaunchdJobLabel(job.label)
     }
   }
 }

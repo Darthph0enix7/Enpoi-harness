@@ -14,6 +14,7 @@ import {
   launchPlan,
   launchUpdater,
   launchWrapper,
+  LAUNCHD_LIST_TIMEOUT_MS,
   LaunchEnvironmentError,
   listLaunchdJobs,
   removeLaunchdJob,
@@ -329,18 +330,21 @@ describe('launchd job removal and listing', () => {
     })).toBe(false)
   })
 
-  it('lists labels from launchctl list output, and stays quiet off darwin or on failure', () => {
+  it('lists jobs with their running state from the PID column, and stays quiet off darwin or on failure', () => {
     const output = [
       'PID\tStatus\tLabel',
       '123\t0\tcom.dsh.update.run42',
-      '-\t0\tcom.dsh.update-guard.token1.123',
-      '\t0\tcom.example.other',
+      '-\t0\tcom.dsh.update.orphan',
+      '0\tcom.dsh.update.nopid',
     ].join('\n')
     const run = vi.fn(() => ({ status: 0, stdout: output }))
     expect(listLaunchdJobs({ platform: 'darwin', run })).toEqual([
-      'com.dsh.update.run42',
-      'com.dsh.update-guard.token1.123',
-      'com.example.other',
+      // A numeric PID column means the job is running: never sweepable.
+      { label: 'com.dsh.update.run42', running: true },
+      { label: 'com.dsh.update.orphan', running: false },
+      // No PID column at all is ambiguous; it reads as running (safe: the
+      // sweep never removes a job it might catch mid-launch).
+      { label: 'com.dsh.update.nopid', running: true },
     ])
     expect(run).toHaveBeenCalledTimes(1)
     expect(run).toHaveBeenCalledWith('launchctl', ['list'])
@@ -350,6 +354,11 @@ describe('launchd job removal and listing', () => {
     expect(offPlatform).not.toHaveBeenCalled()
     expect(listLaunchdJobs({ platform: 'darwin', run: () => ({ status: 1, stdout: '' }) })).toBeNull()
     expect(listLaunchdJobs({ platform: 'darwin', run: () => { throw new Error('spawn launchctl ENOENT') } })).toBeNull()
+  })
+
+  it('bounds the synchronous listing so a wedged launchctl cannot block the boot', () => {
+    expect(LAUNCHD_LIST_TIMEOUT_MS).toBeGreaterThan(0)
+    expect(LAUNCHD_LIST_TIMEOUT_MS).toBeLessThanOrEqual(5_000)
   })
 })
 

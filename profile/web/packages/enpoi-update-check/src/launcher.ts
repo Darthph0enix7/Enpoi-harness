@@ -217,7 +217,7 @@ function newestVersionDir(parent: string): string | undefined {
  * the documented ladder. The inherited `PATH` counts as a hit only when it
  * actually resolves `node`.
  *
- * @param input - prefix/home/platform and the base environment.
+ * @param input - prefix, home, platform, and the base environment.
  * @returns the resolved runtime, or null when nothing was found.
  */
 export function resolveRuntime(input: {
@@ -271,7 +271,7 @@ export function resolveRuntime(input: {
  * probe's directory first, then the inherited PATH, then the standard system
  * directories (deduplicated).
  *
- * @param input - prefix/home/platform and the base environment.
+ * @param input - prefix, home, platform, and the base environment.
  * @returns the composed path with its probe and every location consulted; the
  *   path is null when no runtime resolves.
  */
@@ -294,7 +294,7 @@ export function resolveRuntimePath(input: {
  * Compose the runtime environment for one launch.
  * Throws when nothing resolved a Node.js runtime.
  *
- * @param input - prefix/home/platform, base environment, and the shim/flag.
+ * @param input - prefix, home, platform, base environment, and the shim/flag.
  * @returns the composed environment and the probe that produced it.
  * @throws LaunchEnvironmentError when no runtime resolves.
  */
@@ -538,10 +538,22 @@ export interface LaunchCommandResult {
 /** Synchronous command seam (tests inject a stub). */
 export type LaunchCommandRun = (command: string, args: readonly string[]) => LaunchCommandResult
 
-/** Default synchronous runner: `execFileSync` with stdout captured, fail-soft. */
+/** Bound for `launchctl list`; a timeout reads like any other failed query. */
+export const LAUNCHD_LIST_TIMEOUT_MS = 3_000
+
+/**
+ * Default synchronous runner: `execFileSync` with stdout captured. Bounded by
+ * {@link LAUNCHD_LIST_TIMEOUT_MS} so a wedged launchctl cannot block the
+ * plugin boot; any failure (exit, timeout, missing binary) is the fail-soft
+ * `{status: null}` result, never a throw.
+ */
 function defaultCommandRun(command: string, args: readonly string[]): LaunchCommandResult {
   try {
-    const stdout = execFileSync(command, [...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    const stdout = execFileSync(command, [...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: LAUNCHD_LIST_TIMEOUT_MS,
+    })
     return { status: 0, stdout: typeof stdout === 'string' ? stdout : '' }
   } catch (error) {
     const failure = error as { status?: unknown; stdout?: unknown }
@@ -552,29 +564,44 @@ function defaultCommandRun(command: string, args: readonly string[]): LaunchComm
   }
 }
 
+/** One job reported by `launchctl list`. */
+export interface LaunchdJob {
+  /** The job's label (the listing's last column; labels carry no whitespace). */
+  readonly label: string
+  /** Whether launchd reports an active PID for the job (the first column). */
+  readonly running: boolean
+}
+
 /**
- * Every submitted launchd label (`launchctl list`'s third column), or null
- * when the platform is not darwin or the query fails. The caller filters for
- * leftovers it owns ({@link UPDATE_JOB_LABEL_PREFIX}); the sweep is
- * fail-soft because a missing launchctl only leaves stale jobs behind.
+ * Every submitted launchd job (`launchctl list`), or null when the platform
+ * is not darwin or the query fails. Each row's first column is the PID of a
+ * running job or `-` (or nothing) for a loaded-but-not-running one; that PID
+ * column decides {@link LaunchdJob.running}, and a running job is never a
+ * sweep candidate. The caller filters for leftovers it owns
+ * ({@link UPDATE_JOB_LABEL_PREFIX}); the sweep is fail-soft because a missing
+ * launchctl only leaves stale jobs behind.
  *
  * @param options - platform selector and command seam (tests).
- * @returns the labels, or null when the listing is unavailable.
+ * @returns the jobs with their running state, or null when unavailable.
  */
 export function listLaunchdJobs(
   options: { readonly platform?: string; readonly run?: LaunchCommandRun } = {},
-): string[] | null {
+): LaunchdJob[] | null {
   if ((options.platform ?? process.platform) !== 'darwin') return null
   const run = options.run ?? defaultCommandRun
   try {
     const result = run('launchctl', ['list'])
     if (result.status !== 0) return null
-    return result.stdout.split('\n')
-      .map(line => line.trim())
-      .filter(line => line !== '' && !line.startsWith('PID'))
-      // PID and status first, the label last; labels never contain whitespace.
-      .map(line => line.split(/\s+/).at(-1) ?? '')
-      .filter(label => label !== '')
+    const jobs: LaunchdJob[] = []
+    for (const raw of result.stdout.split('\n')) {
+      const line = raw.trim()
+      if (line === '' || line.startsWith('PID')) continue
+      const columns = line.split(/\s+/)
+      const label = columns.at(-1) ?? ''
+      if (label === '') continue
+      jobs.push({ label, running: /^[0-9]+$/.test(columns[0] ?? '') })
+    }
+    return jobs
   } catch {
     return null
   }

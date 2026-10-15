@@ -4166,6 +4166,9 @@ guard_remove_launchd_job() {
   command -v launchctl >/dev/null 2>&1 || return 0
   launchctl remove "$GUARD_LAUNCHD_LABEL" >/dev/null 2>&1 || true
   log "service-guard: removed launchd job $GUARD_LAUNCHD_LABEL (one-shot verifier finished)"
+  # Consume the label: the EXIT/INT/TERM trap may run again after the explicit
+  # call, and a second removal (and log line) must be a no-op.
+  GUARD_LAUNCHD_LABEL=""
   return 0
 }
 
@@ -4175,6 +4178,14 @@ guard_remove_launchd_job() {
 # path — success and failure — removes this one-shot verifier's launchd job.
 do_service_guard() {
   local guard_rc=0
+  # Every exit path removes this one-shot verifier's launchd job: the explicit
+  # call below for the normal returns, the EXIT trap for a `die` or any other
+  # shell exit, and the signal traps (which keep the signal's exit semantics
+  # before exiting). The removal consumes the label, so later invocations are
+  # no-ops.
+  trap guard_remove_launchd_job EXIT
+  trap 'guard_remove_launchd_job; exit 130' INT
+  trap 'guard_remove_launchd_job; exit 143' TERM
   do_service_guard_run || guard_rc=$?
   guard_remove_launchd_job
   return "$guard_rc"

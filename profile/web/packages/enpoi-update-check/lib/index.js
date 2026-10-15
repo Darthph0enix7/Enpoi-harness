@@ -421,9 +421,14 @@ function removeLaunchdJob(label, options = {}) {
     return false;
   }
 }
+var LAUNCHD_LIST_TIMEOUT_MS = 3e3;
 function defaultCommandRun(command, args) {
   try {
-    const stdout = execFileSync(command, [...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const stdout = execFileSync(command, [...args], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: LAUNCHD_LIST_TIMEOUT_MS
+    });
     return { status: 0, stdout: typeof stdout === "string" ? stdout : "" };
   } catch (error) {
     const failure = error;
@@ -437,7 +442,16 @@ function listLaunchdJobs(options = {}) {
   try {
     const result = run("launchctl", ["list"]);
     if (result.status !== 0) return null;
-    return result.stdout.split("\n").map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("PID")).map((line) => line.split(/\s+/).at(-1) ?? "").filter((label) => label !== "");
+    const jobs = [];
+    for (const raw of result.stdout.split("\n")) {
+      const line = raw.trim();
+      if (line === "" || line.startsWith("PID")) continue;
+      const columns = line.split(/\s+/);
+      const label = columns.at(-1) ?? "";
+      if (label === "") continue;
+      jobs.push({ label, running: /^[0-9]+$/.test(columns[0] ?? "") });
+    }
+    return jobs;
   } catch {
     return null;
   }
@@ -1718,38 +1732,46 @@ var UpdateRunController = class {
   }
   /**
    * Remove the submitted launchd job that ran one record. Only a run launched
-   * through the launchctl rung owns such a job. The caller must have
-   * established that the engine exited: the removal also stops the job's
-   * processes, and a KeepAlive job would otherwise relaunch the run forever.
+   * through the launchctl rung owns such a job. This is the single choke point
+   * for every removal path: a raw live process (the wrapper pid file, then the
+   * record's launch pid; a null pid counts as not live) skips the removal
+   * entirely, because `launchctl remove` also SIGTERMs the job's processes.
+   * Progress staleness (`isAliveRecord`) is NOT sufficient evidence of exit:
+   * a live engine can be silent in its log for over five minutes during a
+   * large fetch or build, and only the raw pid probe may decide removal.
    */
   removeSubmittedJob(record) {
+    if (this.processLive(record)) return;
     if (record.launcher !== "launchctl") return;
     this.removeLaunchdJobLabel(updateJobLabel(record.runId));
   }
   /**
    * Remove leftover `com.dsh.update.*` launchd jobs (macOS only). A submitted
    * job carries KeepAlive, so one whose engine already exited is relaunched
-   * every few seconds forever; a live, progressing run owns its job and the
-   * sweep is skipped then. Fail-soft and off-darwin: an unavailable
-   * `launchctl list` removes nothing (never blocks mount).
+   * every few seconds forever; a live run owns its job and the sweep is
+   * skipped then. Fail-soft and off-darwin: an unavailable `launchctl list`
+   * removes nothing (never blocks mount). A job launchd reports with an
+   * active PID is never removed, even when the marker and the controller's
+   * own record both look stale.
    */
   sweepStaleLaunchdJobs() {
     const list = this.options.listJobs ?? (() => listLaunchdJobs());
-    let labels;
+    let jobs;
     try {
-      labels = list();
+      jobs = list();
     } catch {
       return;
     }
-    if (labels === null) return;
+    if (jobs === null) return;
     const own = this.record;
-    if (own !== null && own.result === null && !isPreparedPhase(own.phase) && this.isAliveRecord(own)) return;
+    if (own !== null && this.processLive(own)) return;
     const marker = readRunMarker(this.prefix);
     if (marker !== null && isMarkerLive(marker, this.options.isAlive ?? isProcessLive, {
       progressAgeMs: markerProgressAge(marker, this.prefix, this.now().getTime())
     })) return;
-    for (const label of labels) {
-      if (label.startsWith(UPDATE_JOB_LABEL_PREFIX)) this.removeLaunchdJobLabel(label);
+    for (const job of jobs) {
+      if (job.running) continue;
+      if (job.label.startsWith(UPDATE_JOB_LABEL_PREFIX)) this.removeLaunchdJobLabel(job.label);
     }
   }
 };
@@ -2112,6 +2134,7 @@ export {
   ENGINE_PROBE_OUTPUT_CAP,
   ENGINE_PROBE_TIMEOUT_MS,
   FIRST_CHECK_DELAY_MS,
+  LAUNCHD_LIST_TIMEOUT_MS,
   LOG_TAIL_BYTES,
   LOG_TAIL_LINES,
   LaunchEnvironmentError,

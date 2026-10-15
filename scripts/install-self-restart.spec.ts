@@ -545,6 +545,56 @@ describe('detached verifier --service-guard', () => {
     expect(readFileSync(logFile, 'utf8')).toContain(`removed launchd job ${label}`)
   })
 
+  it('removes its launchd job when the verifier body dies (die exits the shell)', () => {
+    const root = tempRoot()
+    const home = join(root, 'home')
+    const prefix = join(root, 'prefix')
+    const launchctl = fakeLaunchctl(root)
+    const logFile = join(prefix, 'logs', 'install.log')
+    mkdirSync(join(prefix, 'logs'), { recursive: true })
+    const label = 'com.dsh.update-guard.token1.die'
+    const result = runLibrary([
+      'OS=darwin',
+      `PREFIX=${prefix}`,
+      `DSH_HOME=${home}`,
+      `LOG_FILE=${logFile}`,
+      `GUARD_LAUNCHD_LABEL=${label}`,
+      'PATH="$STUB_BIN:$PATH"',
+      'do_service_guard_run() { die "verifier body failed"; }',
+      'do_service_guard',
+      'printf "RC=%s\\n" "$?"',
+    ].join('\n'), { home, path: launchctl.binDir, env: { LAUNCHCTL_LOG: launchctl.log } })
+    // `die` exits the shell; the EXIT trap still removes the submitted job.
+    expect(result.status).toBe(1)
+    expect(readLog(launchctl.log)).toContain(`remove ${label}`)
+    expect(readFileSync(logFile, 'utf8')).toContain(`removed launchd job ${label}`)
+  })
+
+  it('removes its launchd job when the verifier body is signalled', () => {
+    const root = tempRoot()
+    const home = join(root, 'home')
+    const prefix = join(root, 'prefix')
+    const launchctl = fakeLaunchctl(root)
+    const logFile = join(prefix, 'logs', 'install.log')
+    mkdirSync(join(prefix, 'logs'), { recursive: true })
+    const label = 'com.dsh.update-guard.token1.signal'
+    const result = runLibrary([
+      'OS=darwin',
+      `PREFIX=${prefix}`,
+      `DSH_HOME=${home}`,
+      `LOG_FILE=${logFile}`,
+      `GUARD_LAUNCHD_LABEL=${label}`,
+      'PATH="$STUB_BIN:$PATH"',
+      'do_service_guard_run() { kill -TERM $$; sleep 1; }',
+      'do_service_guard',
+      'printf "RC=%s\\n" "$?"',
+    ].join('\n'), { home, path: launchctl.binDir, env: { LAUNCHCTL_LOG: launchctl.log } })
+    // The signal trap cleans up and preserves the signal's exit status.
+    expect(result.status).toBe(143)
+    expect(readLog(launchctl.log)).toContain(`remove ${label}`)
+    expect(readFileSync(logFile, 'utf8')).toContain(`removed launchd job ${label}`)
+  })
+
   it('removes only its own labeled job, only on darwin, and is a no-op without a label', () => {
     const root = tempRoot()
     const home = join(root, 'home')
