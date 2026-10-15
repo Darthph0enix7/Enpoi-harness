@@ -95,6 +95,13 @@ export interface UpdateRunWire {
   readonly logTail: readonly string[]
   readonly finishedAt?: string
   readonly reason?: string
+  /**
+   * Whether the host judges this terminal record recoverable through
+   * `updateCheck/clearStale` + retry. Absent on hosts that predate the field
+   * (the update-switch window), where the client falls back to matching
+   * `reason`.
+   */
+  readonly recoverable?: boolean
   /** True when the host synthesized this record from a run started outside the UI. */
   readonly observed?: boolean
 }

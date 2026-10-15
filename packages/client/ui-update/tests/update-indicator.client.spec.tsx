@@ -281,6 +281,82 @@ describe('UpdateIndicator dialog', () => {
     expect(screen.queryByText(en['progress.disconnectWarning'])).toBeNull()
   })
 
+  it('drives the download bar from the size-watch byte line during the fetch steps', () => {
+    mount({
+      status: availableStatus,
+      run: run({
+        step: 2,
+        phase: 'preparing',
+        lastLine: '  ⏳ Downloading prebuilt harness: 270 MB of 360 MB (75%) (123s)',
+      }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-fill]')?.getAttribute('style')).toContain('width: 75%')
+    // The step label keeps its own text; only the bar follows the bytes.
+    expect(document.querySelector('[data-dsh-update-step]')?.textContent).toBe('Step 2/9')
+    expect(document.querySelector('[data-dsh-update-lastline]')?.textContent)
+      .toBe('  ⏳ Downloading prebuilt harness: 270 MB of 360 MB (75%) (123s)')
+  })
+
+  it('drives the download bar from the fast-path chunk-engine line during the fetch steps', () => {
+    mount({
+      status: availableStatus,
+      run: run({
+        step: 2,
+        phase: 'preparing',
+        lastLine: '  ⏳ Fetching prebuilt release: [████████░░░░] 33% · 120.0/360.0 MB · 12.3 MB/s (33s)',
+      }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-fill]')?.getAttribute('style')).toContain('width: 33%')
+    expect(document.querySelector('[data-dsh-update-step]')?.textContent).toBe('Step 2/9')
+  })
+
+  it('falls back to the step-derived bar without a parse or outside the fetch steps', () => {
+    // A near-miss byte line (no size-watch "of" form, no bar form): no parse.
+    mount({
+      status: availableStatus,
+      run: run({ step: 2, phase: 'preparing', lastLine: 'downloaded 120 MB (33%)' }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-fill]')?.getAttribute('style')).toContain('width: 22%')
+    cleanup()
+    // A download-looking line past the switch step stays step-derived.
+    mount({
+      status: availableStatus,
+      run: run({
+        mode: 'apply',
+        phase: 'applying',
+        step: 8,
+        lastLine: '[████████████] 100% · 360.0/360.0 MB · 0.0 MB/s',
+      }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-fill]')?.getAttribute('style')).toContain('width: 89%')
+    cleanup()
+    // A record without a step total renders a zero bar, never a NaN width.
+    mount({
+      status: availableStatus,
+      run: run({ step: 0, steps: 0, phase: 'preparing', lastLine: '' }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-fill]')?.getAttribute('style')).toContain('width: 0%')
+    cleanup()
+    // A terminal success renders no progress bar at all.
+    mount({
+      status: availableStatus,
+      run: run({
+        mode: 'apply',
+        phase: 'success',
+        result: 'success',
+        step: 9,
+        lastLine: '[████████████] 100% · 360.0/360.0 MB · 0.0 MB/s',
+      }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-progress]')).toBeNull()
+  })
+
   it('renders the apply progress panel and the switch disconnect warning from step 8', () => {
     const applying = mount({
       status: availableStatus,
@@ -450,6 +526,30 @@ describe('UpdateIndicator dialog', () => {
     expect(screen.getByText(en['failure.recoverHint'])).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: en['action.recover'] }))
     expect(actions.recover).toHaveBeenCalledTimes(1)
+  })
+
+  it('lets the host recoverable field drive recovery: true offers it, false suppresses it', () => {
+    const offered = mount({
+      status: availableStatus,
+      run: run({ phase: 'failed', result: 'failed', staged: false, recoverable: true }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-recover]')).not.toBeNull()
+    offered.unmount()
+    // The field is present and says no: the reason text alone must not
+    // re-offer recovery — the structured fact wins over the fallback regex.
+    mount({
+      status: availableStatus,
+      run: run({
+        phase: 'failed',
+        result: 'failed',
+        staged: false,
+        recoverable: false,
+        reason: 'an update is already running (run 1791962848-31835)',
+      }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-recover]')).toBeNull()
   })
 
   it('offers recovery for an already-running failure without a staged flag, and hides it otherwise', () => {

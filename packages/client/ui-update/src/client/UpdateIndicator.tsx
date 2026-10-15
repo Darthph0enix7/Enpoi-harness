@@ -52,6 +52,52 @@ function stepPercent(run: UpdateRunWire): number {
   return Math.max(0, Math.min(100, Math.round((run.step / run.steps) * 100)))
 }
 
+// The engine's two download-progress forms, written onto its throttled
+// non-TTY progress lines: the size-watch byte form and the chunk engine's
+// `.progress` bar line. The percentage is ASCII digits either way, so the
+// match is locale-independent.
+const SIZE_WATCH_PROGRESS = /(\d+(?:\.\d+)?)\s*MB\s+of\s+(\d+(?:\.\d+)?)\s*MB\s*\(\s*(\d+(?:\.\d+)?)\s*%\s*\)/i
+const FAST_PATH_PROGRESS = /\[[^\]]*\]\s*(\d+(?:\.\d+)?)\s*%\s*·\s*(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)\s*MB/i
+
+/** Clamp a captured percentage into a whole 0-100 bar position. */
+function clampPercent(raw: string | undefined): number {
+  /* v8 ignore next -- a matched pattern always carries its mandatory capture group. */
+  return Math.max(0, Math.min(100, Math.round(Number(raw ?? '0'))))
+}
+
+/**
+ * The download percentage a progress line announces, or null when the line
+ * carries neither engine form. Pure string matching: never throws.
+ * @param lastLine - the run's last log line, verbatim.
+ * @returns the announced percentage, or null.
+ */
+function downloadPercent(lastLine: string): number | null {
+  const sizeWatch = SIZE_WATCH_PROGRESS.exec(lastLine)
+  if (sizeWatch !== null) return clampPercent(sizeWatch[3])
+  const fastPath = FAST_PATH_PROGRESS.exec(lastLine)
+  if (fastPath !== null) return clampPercent(fastPath[1])
+  return null
+}
+
+/** Whether the run is in its fetch/prepare steps, before the apply switch. */
+function isFetchStep(run: UpdateRunWire): boolean {
+  return run.phase === 'preparing' && run.step < APPLY_SWITCH_STEP
+}
+
+/**
+ * Bar position: the last line's own download percentage while it carries one
+ * during the fetch steps, else the step share.
+ * @param run - the executing run.
+ * @returns the whole-percent bar position.
+ */
+function barPercent(run: UpdateRunWire): number {
+  if (isFetchStep(run)) {
+    const parsed = downloadPercent(run.lastLine)
+    if (parsed !== null) return parsed
+  }
+  return stepPercent(run)
+}
+
 /**
  * Render the update indicator, its dialog, and the one-time toast.
  * @param props - live update state, dialog actions, and localized labels.
@@ -82,7 +128,7 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
   // successful update.
   const landedOffering = landedRun !== null && latest !== undefined && landedRun.target === latest.version
   const showPill = executing || prepared || (available && !landedOffering)
-  const percent = activeRun === null ? 0 : stepPercent(activeRun)
+  const percent = activeRun === null ? 0 : barPercent(activeRun)
   const pillMode = executing ? 'updating' : prepared ? 'prepared' : 'available'
   const pillLabel = activeRun !== null
     ? t('indicator.updatingAria', { step: activeRun.step, steps: activeRun.steps })
@@ -103,13 +149,20 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
   // its launch, a one-shot from step 8) the run cannot be interrupted safely.
   const cancelPastSwitch = activeRun !== null
     && (activeRun.phase === 'applying' || (activeRun.rung === 'one-shot' && activeRun.step >= APPLY_SWITCH_STEP))
-  // A failure that kept a valid staged tree (or that names an already-running/
-  // stale condition) gets the recovery affordance: clear the stale state and
-  // re-apply without re-downloading. A failure with neither a staged tree nor
-  // a still-offered release is historical (status `current`): no Retry/apply/
-  // recover action may appear for it, because none of them leads anywhere.
+  // A failure that kept a valid staged tree (or that the host stamps
+  // `recoverable`, or — on a host predating the field — whose reason names an
+  // already-running/stale condition) gets the recovery affordance: clear the
+  // stale state and re-apply without re-downloading. The reason regex is a
+  // transitional fallback for the update-switch window only (an old host with
+  // this client); drop it once hosts always ship `recoverable`. A failure
+  // with neither a staged tree nor a still-offered release is historical
+  // (status `current`): no Retry/apply/recover action may appear for it,
+  // because none of them leads anywhere.
   const staleFailure = failedRun !== null
-    && (failedRun.staged || (canStart && /already running|stale/i.test(failedRun.reason ?? '')))
+    && (failedRun.staged
+      || failedRun.recoverable === true
+      || (failedRun.recoverable === undefined
+        && canStart && /already running|stale/i.test(failedRun.reason ?? '')))
 
   const footer: ReactNode = executing ? (
     <Button onClick={actions.close}>{t('action.later')}</Button>
