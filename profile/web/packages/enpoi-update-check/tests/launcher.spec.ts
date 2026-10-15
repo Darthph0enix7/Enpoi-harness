@@ -22,6 +22,7 @@ import {
   resolveRuntime,
   RUN_HOME_ENV,
   systemBinDirs,
+  UPDATE_JOB_LABEL_ENV,
   UPDATE_JOB_LABEL_PREFIX,
   UPDATE_MODE_ENV,
   updateJobLabel,
@@ -294,6 +295,31 @@ describe('launchPlan', () => {
       'submit', '-l', 'com.dsh.update.run42', '-o', planInput.logPath, '-e', planInput.logPath, '--',
     ])
     expect(launchctl.args.slice(8, 11)).toEqual(['sh', '-c', expect.any(String)])
+  })
+
+  it('carries the launchd job label into the launchctl wrapper, leaving other rungs clean', () => {
+    const { plan } = planFor(scratch(), { platform: 'darwin', hasCommand: () => true })
+    const wrappers = plan.map(step => step.args.find(arg => typeof arg === 'string' && arg.includes('exec "$@"')))
+    // The launchctl rung's wrapper exports the exact label the engine removes.
+    expect(wrappers[0]).toContain(`export ${UPDATE_JOB_LABEL_ENV}='com.dsh.update.run42'`)
+    // setsid/spawn keep their wrapper free of it.
+    expect(wrappers[1]).not.toContain(UPDATE_JOB_LABEL_ENV)
+    expect(wrappers[2]).not.toContain(UPDATE_JOB_LABEL_ENV)
+    // Non-darwin plans never carry the label.
+    const linux = planFor(scratch(), { platform: 'linux', hasCommand: () => true }).plan
+    expect(linux[0]!.args.find(arg => typeof arg === 'string' && arg.includes('exec "$@"'))).not.toContain(UPDATE_JOB_LABEL_ENV)
+  })
+
+  it('exports DSH_UPDATE_JOB_LABEL from the wrapper only when the environment carries it', () => {
+    const root = scratch()
+    fakeNode(join(root, 'prefix', 'runtime', 'node', 'current', 'bin'))
+    const environment = resolveLaunchEnvironment(input(root))
+    expect(launchWrapper(environment)).not.toContain(UPDATE_JOB_LABEL_ENV)
+    const labelled = {
+      ...environment,
+      env: { ...environment.env, [UPDATE_JOB_LABEL_ENV]: "com.dsh.update.o'neil" },
+    }
+    expect(launchWrapper(labelled)).toContain(`export ${UPDATE_JOB_LABEL_ENV}='com.dsh.update.o'\\''neil'`)
   })
 })
 

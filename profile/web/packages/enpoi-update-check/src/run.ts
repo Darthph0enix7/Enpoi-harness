@@ -34,6 +34,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { InstallIdentity } from './catalog.js'
+import type { EngineRunMarker, MarkerMode } from './marker.js'
 
 /** The engine invocation a run drives. */
 export type UpdateRunMode = 'prepare' | 'apply' | 'one-shot'
@@ -143,6 +144,29 @@ export interface UpdateRunRecord {
   readonly reason?: string
   /** True when the record was synthesized from the engine marker (a run started outside the UI). */
   readonly observed?: boolean
+  /**
+   * Whether the Retry/recover affordance applies to this record: a non-success
+   * terminal result with a staged tree or a lock/staleness reason. The client
+   * computes this heuristic locally; the host serves it so both client
+   * generations agree (absent means the client falls back).
+   */
+  readonly recoverable?: boolean
+}
+
+/**
+ * Whether the Retry/recover affordance applies to one record: a non-success
+ * terminal result whose staged tree can be re-applied or whose reason names a
+ * lock ("another update is already running") or staleness condition. This is
+ * the client's long-standing heuristic, computed host-side so the client lane
+ * can prefer the served {@link UpdateRunRecord.recoverable} field.
+ *
+ * @param record - the run record.
+ * @returns true when the recovery affordance applies.
+ */
+export function isRecoverableRun(record: UpdateRunRecord): boolean {
+  return record.result !== null
+    && record.result !== 'success'
+    && (record.staged === true || /already running|stale/i.test(record.reason ?? ''))
 }
 
 /** One parsed log tail. */
@@ -403,7 +427,7 @@ function normalizeRunRecord(raw: Record<string, unknown>): UpdateRunRecord {
     : typeof raw.rung === 'string' && raw.rung !== 'two-phase' && raw.rung !== 'one-shot' ? raw.rung : 'pending'
   const finishedAt = typeof raw.finishedAt === 'string' ? raw.finishedAt : undefined
   const reason = typeof raw.reason === 'string' ? raw.reason : undefined
-  return {
+  const normalized: UpdateRunRecord = {
     runId: String(raw.runId),
     target: typeof raw.target === 'string' ? raw.target : '',
     channel: typeof raw.channel === 'string' ? raw.channel : 'stable',
@@ -424,6 +448,10 @@ function normalizeRunRecord(raw: Record<string, unknown>): UpdateRunRecord {
     ...(finishedAt === undefined ? {} : { finishedAt }),
     ...(reason === undefined ? {} : { reason }),
   }
+  // `recoverable` is derived truth (like `staged`): recompute it from the
+  // record's own fields, so a legacy document without the field serves the
+  // same answer as a freshly written one.
+  return { ...normalized, recoverable: isRecoverableRun(normalized) }
 }
 
 /** Whether a parsed JSON value has the required run-record fields. */
@@ -546,6 +574,34 @@ export interface ReconcileContext {
   readonly prefix: string
   /** Clock for `finishedAt`. */
   readonly now?: () => Date
+  /**
+   * The engine marker read at reconcile time, when the caller has one. A
+   * `done` marker naming this record proves the run completed even when the
+   * install identity lagged the switch, so it is consulted before the
+   * version comparison.
+   */
+  readonly marker?: EngineRunMarker | null
+}
+
+/** Whether a marker mode names the same engine invocation style as a run mode. */
+function markerModeNamesRun(mode: MarkerMode, run: UpdateRunMode): boolean {
+  if (mode === 'prepare') return run === 'prepare'
+  if (mode === 'apply') return run === 'apply'
+  return run === 'one-shot'
+}
+
+/**
+ * Whether a marker names the same run as one record: the log path when both
+ * carry one, otherwise the mode plus a target/version agreement.
+ *
+ * @param record - the plugin's run record.
+ * @param marker - the engine's marker.
+ * @returns true when the marker describes this record's run.
+ */
+export function runMatchesMarker(record: UpdateRunRecord, marker: EngineRunMarker): boolean {
+  if (record.logPath !== '' && marker.logPath !== '' && record.logPath === marker.logPath) return true
+  if (!markerModeNamesRun(marker.mode, record.mode)) return false
+  return record.target === '' || marker.target === '' || marker.target === record.target || marker.version === record.target
 }
 
 /**
@@ -558,13 +614,15 @@ export interface ReconcileContext {
  * 2. a terminal log line (re-read from the log) decides the result;
  * 3. a `prepared` record whose staged file still exists stays prepared;
  * 4. a dead `prepare` record whose staged file appeared is prepared;
- * 5. the install version equal to the run's target is `success`;
- * 6. anything else is `failed` with an explicit reason. The log is never
+ * 5. the engine marker's terminal `done` phase, when it names this record,
+ *    is `success` (the install state file can lag the switch);
+ * 6. the install version equal to the run's target is `success`;
+ * 7. anything else is `failed` with an explicit reason. The log is never
  *    deleted (the UI tails it).
  *
  * @param record - the persisted record.
  * @param identity - the install identity read at reconcile time.
- * @param context - home/prefix paths and clock.
+ * @param context - home/prefix paths, clock, and the optional engine marker.
  * @param options - `live` overrides the pid-only liveness probe (the
  *   controller's strong liveness: pid + progress freshness + non-terminal).
  * @returns the reconciled record and whether it changed.
@@ -594,6 +652,16 @@ export function reconcileRunRecord(
   }
   if (record.mode === 'prepare' && staged) {
     return { record: { ...preparedRecord(record), lastLine: parsed.lastLine === '' ? record.lastLine : parsed.lastLine, logTail: parsed.logTail }, changed: true }
+  }
+  // The engine's own terminal phase outranks the install identity: a
+  // genuinely-applied update whose state write lagged still reports the
+  // previous version, and must not reconcile to failed (recon D10).
+  const marker = context.marker
+  if (marker !== undefined && marker !== null && marker.phase === 'done' && runMatchesMarker(record, marker)) {
+    return {
+      record: { ...terminalRecord(record, 'success', now, staged), lastLine: parsed.lastLine === '' ? record.lastLine : parsed.lastLine, logTail: parsed.logTail },
+      changed: true,
+    }
   }
   if (identity.version !== '' && identity.version === record.target) {
     return { record: { ...terminalRecord(record, 'success', now, staged), lastLine: parsed.lastLine === '' ? record.lastLine : parsed.lastLine, logTail: parsed.logTail }, changed: true }

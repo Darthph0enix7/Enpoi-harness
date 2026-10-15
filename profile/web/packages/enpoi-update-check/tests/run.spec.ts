@@ -15,6 +15,7 @@ import {
   executingPhase,
   fileMtimeMs,
   isProgressStale,
+  isRecoverableRun,
   progressAgeMs,
   readStagedApply,
   RUN_STALE_WINDOW_MS,
@@ -34,6 +35,7 @@ import {
   reconcileRunRecord,
   resultFromLine,
   rungForMode,
+  runMatchesMarker,
   runRecordPath,
   sameRunRecord,
   stagedApplyPath,
@@ -42,6 +44,7 @@ import {
   writeRunRecord,
   type UpdateRunRecord,
 } from '../src/run.js'
+import type { EngineRunMarker } from '../src/marker.js'
 
 const directories: string[] = []
 
@@ -73,6 +76,9 @@ function record(overrides: Partial<UpdateRunRecord> = {}): UpdateRunRecord {
     launcher: 'setsid',
     staged: false,
     logTail: [],
+    // Serving controllers always attach the derived flag; a hand-built
+    // fixture does too, so deep comparisons with readRunRecord stay whole.
+    recoverable: false,
     ...overrides,
   }
 }
@@ -537,5 +543,95 @@ describe('reconcileRunRecord', () => {
     const { record: reconciled } = reconcileRunRecord(record(), identity(''), { home, prefix: join(home, 'prefix') })
     expect(reconciled.result).toBe('failed')
     expect(reconciled.reason).toContain('unknown')
+  })
+})
+
+/** An engine marker document (the reconcile/identity tests craft fields). */
+function engineMarker(overrides: Partial<EngineRunMarker> = {}): EngineRunMarker {
+  return {
+    runId: '1750000000-77',
+    pid: 4242,
+    mode: 'apply',
+    step: 9,
+    steps: 9,
+    phase: 'done',
+    startedAt: '2026-10-13T12:00:00Z',
+    logPath: '',
+    version: '0.1.7-enpoi.2.84',
+    target: '0.1.7-enpoi.2.84',
+    ...overrides,
+  }
+}
+
+describe('runMatchesMarker', () => {
+  it('matches on the log path, or on mode plus target/version agreement', () => {
+    expect(runMatchesMarker(record({ logPath: '/x/run.log' }), engineMarker({ logPath: '/x/run.log' }))).toBe(true)
+    expect(runMatchesMarker(record({ mode: 'apply', logPath: '/x/run.log' }), engineMarker({ logPath: '/y/install.log' }))).toBe(true)
+    expect(runMatchesMarker(record({ mode: 'apply' }), engineMarker({ mode: 'prepare' }))).toBe(false)
+    expect(runMatchesMarker(record({ mode: 'apply', target: '0.1.7-enpoi.2.84' }), engineMarker({ target: '0.1.7-enpoi.2.85', version: '0.1.7-enpoi.2.85' }))).toBe(false)
+    expect(runMatchesMarker(record({ mode: 'prepare', target: '0.1.7-enpoi.2.84' }), engineMarker({ mode: 'prepare', target: '' }))).toBe(true)
+    expect(runMatchesMarker(record({ mode: 'one-shot', target: '0.1.7-enpoi.2.84' }), engineMarker({ mode: 'plain', target: '0.1.7-enpoi.2.84' }))).toBe(true)
+  })
+})
+
+describe('reconcileRunRecord with the engine marker', () => {
+  it('honours a matching done marker before the stale identity comparison (recon D10)', () => {
+    const home = scratch()
+    const { record: reconciled, changed } = reconcileRunRecord(
+      record({ mode: 'apply', phase: 'applying', step: 9 }),
+      identity('0.1.7-enpoi.2.81'),
+      { home, prefix: join(home, 'prefix'), now: () => new Date('2026-10-13T12:30:00.000Z'), marker: engineMarker() },
+      { live: false },
+    )
+    expect(changed).toBe(true)
+    expect(reconciled).toMatchObject({ result: 'success', phase: 'success', finishedAt: '2026-10-13T12:30:00.000Z' })
+  })
+
+  it('keeps the identity verdict when the marker is not done', () => {
+    const home = scratch()
+    const { record: reconciled } = reconcileRunRecord(
+      record({ mode: 'apply', phase: 'applying', step: 8 }),
+      identity('0.1.7-enpoi.2.81'),
+      { home, prefix: join(home, 'prefix'), marker: engineMarker({ phase: 'running' }) },
+      { live: false },
+    )
+    expect(reconciled.result).toBe('failed')
+    expect(reconciled.reason).toContain('does not match the target')
+  })
+
+  it('keeps the identity verdict when the done marker names another run', () => {
+    const home = scratch()
+    const { record: reconciled } = reconcileRunRecord(
+      record({ mode: 'apply', phase: 'applying', step: 8 }),
+      identity('0.1.7-enpoi.2.81'),
+      { home, prefix: join(home, 'prefix'), marker: engineMarker({ target: '0.1.7-enpoi.2.85', version: '0.1.7-enpoi.2.85' }) },
+      { live: false },
+    )
+    expect(reconciled.result).toBe('failed')
+  })
+})
+
+describe('recoverable (served run-record field)', () => {
+  it('computes the client heuristic across result, staged, and reason permutations', () => {
+    expect(isRecoverableRun(record())).toBe(false)
+    expect(isRecoverableRun(record({ result: 'success', phase: 'success' }))).toBe(false)
+    expect(isRecoverableRun(record({ result: 'failed', phase: 'failed' }))).toBe(false)
+    expect(isRecoverableRun(record({ result: 'failed', phase: 'failed', staged: true }))).toBe(true)
+    expect(isRecoverableRun(record({ result: 'rolledback', phase: 'rolledback', staged: true }))).toBe(true)
+    expect(isRecoverableRun(record({ result: 'cancelled', phase: 'cancelled', reason: 'The attached update was cancelled' }))).toBe(false)
+    expect(isRecoverableRun(record({ result: 'failed', phase: 'failed', reason: 'another update is already running (PID 1)' }))).toBe(true)
+    expect(isRecoverableRun(record({ result: 'failed', phase: 'failed', reason: 'the run is stale' }))).toBe(true)
+    expect(isRecoverableRun(record({ result: 'rolledback', phase: 'rolledback', reason: 'rolled back to 0.1.7-enpoi.2.81' }))).toBe(false)
+  })
+
+  it('serves the computed field for legacy documents without it', () => {
+    const dir = scratch()
+    mkdirSync(join(dir, 'update-check'), { recursive: true })
+    const file = runRecordPath(dir)
+    const legacy = { ...record({ result: 'failed', phase: 'failed', staged: true }), recoverable: undefined }
+    writeFileSync(file, JSON.stringify(legacy))
+    expect(readRunRecord(file)).toMatchObject({ recoverable: true })
+    writeFileSync(file, JSON.stringify({ ...legacy, result: 'success', phase: 'success', staged: false }))
+    expect(readRunRecord(file)).toMatchObject({ recoverable: false })
   })
 })

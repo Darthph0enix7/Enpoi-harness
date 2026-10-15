@@ -148,6 +148,9 @@ describe('liveness and mappings', () => {
     expect(isMarkerLive(marker(), () => true, { progressAgeMs: 10 * 60_000 })).toBe(false)
     // No evidence (undefined) never counts as stalled.
     expect(isMarkerLive(marker(), () => true, { progressAgeMs: undefined })).toBe(true)
+    // Gathered-but-absent evidence (null) is never live: a recycled pid
+    // behind deleted files must not keep a gate refusing.
+    expect(isMarkerLive(marker(), () => true, { progressAgeMs: null })).toBe(false)
     expect(isMarkerLive(marker(), () => true, { progressAgeMs: 10 * 60_000, staleWindowMs: 60 * 60_000 })).toBe(true)
   })
 

@@ -242,14 +242,14 @@ describe('UpdateRunController.start single flight', () => {
     b.controller.dispose()
   })
 
-  it('re-checks after the probe await and refuses a run that appeared meanwhile', async () => {
+  it('attaches to a run that appeared while the probe was in flight, never launching a second', async () => {
     const home = scratch()
     let resolveProbe!: (value: { capability: 'supported' }) => void
     const probe = new Promise<{ capability: 'supported' }>((resolve) => { resolveProbe = resolve })
     const b = bench({ home, probe: () => probe })
     const starting = b.controller.start()
     // An update started outside the UI while the probe was in flight: the
-    // post-await gate must see it and refuse instead of launching a second run.
+    // post-await gate must attach to it instead of launching a second run.
     const log = join(home, 'install.log')
     writeFileSync(log, '[2/9] source\n')
     mkdirSync(join(home, 'harness'), { recursive: true })
@@ -258,7 +258,8 @@ describe('UpdateRunController.start single flight', () => {
       startedAt: new Date().toISOString(), logPath: log, version: '', target: '0.1.7-enpoi.2.84',
     }))
     resolveProbe({ capability: 'supported' })
-    await expect(starting).rejects.toThrowError(expect.objectContaining({ reason: 'already-running' }))
+    const attached = await starting
+    expect(attached).toMatchObject({ runId: 'ext-9', observed: true, result: null })
     expect(b.launches).toHaveLength(0)
     b.controller.dispose()
   })
@@ -586,7 +587,7 @@ describe('UpdateRunController engine-marker observer', () => {
     writeFileSync(runMarkerPath(home), JSON.stringify(document))
   }
 
-  it('surfaces a live terminal-started run and refuses start while it lives', async () => {
+  it('surfaces a live terminal-started run and attaches start to it', async () => {
     const home = scratch()
     writeMarker(home)
     const b = bench({ home })
@@ -601,7 +602,78 @@ describe('UpdateRunController engine-marker observer', () => {
       pid: process.pid,
       observed: true,
     })
-    await expect(b.controller.start()).rejects.toThrowError(expect.objectContaining({ reason: 'already-running' }))
+    // Attach, not refuse: the UI renders the running update it already polls.
+    const attached = await b.controller.start()
+    expect(attached).toMatchObject({ runId: 'ext-1', observed: true, result: null })
+    expect(b.launches).toHaveLength(0)
+    b.controller.dispose()
+  })
+
+  it('attaches apply to a live terminal-started run without touching the shared log', async () => {
+    const home = scratch()
+    writeMarker(home)
+    writeLog(home, 'output the running update still owns\n')
+    const b = bench({ home })
+    const record = b.controller.apply()
+    expect(record).toMatchObject({ runId: 'ext-1', observed: true, result: null })
+    expect(b.launches).toHaveLength(0)
+    expect(readFileSync(runLogPath(home), 'utf8')).toBe('output the running update still owns\n')
+    b.controller.dispose()
+  })
+
+  it('refuses to truncate the log when the engine turns live between the checks (begin guard)', async () => {
+    const home = scratch()
+    writeMarker(home)
+    writeLog(home, 'output the racing engine still owns\n')
+    // The marker reads stale (dead pid) through every pre-check; the pre-launch
+    // sweep hook inside begin() is the instant the engine's pid turns live, so
+    // only begin()'s own guard can catch the race (recon D4).
+    const live = { value: false }
+    let listings = 0
+    const b = bench({
+      home,
+      isAlive: pid => pid === process.pid && live.value,
+      // start()'s reconcile lists once; begin()'s pre-launch sweep is the
+      // second listing, and that is when the engine turns live.
+      listJobs: () => { if (++listings === 2) live.value = true; return null },
+    })
+    const attached = await b.controller.start()
+    expect(attached).toMatchObject({ runId: 'ext-1', observed: true })
+    expect(b.launches).toHaveLength(0)
+    expect(readFileSync(runLogPath(home), 'utf8')).toBe('output the racing engine still owns\n')
+    b.controller.dispose()
+  })
+
+  it('attaches to a live foreign run when the engine refuses the update lock (contention)', async () => {
+    const home = scratch()
+    const b = bench({ home })
+    await b.controller.start()
+    // The plugin's engine died on the engine's lock: another update is live.
+    writeMarker(home, { runId: 'ext-7', pid: process.pid, phase: 'running', step: 3 })
+    writeLog(home, '✗ ERROR: another update is already running (PID 12345); wait for it to finish\n')
+    writeFileSync(runPidPath(home), `${String(await deadPid())}\n`)
+    b.ticks.tick()
+    const record = b.controller.run()!
+    expect(record).toMatchObject({ runId: 'ext-7', observed: true, result: null, step: 3 })
+    // No failed record; the persisted state is the observed live run and the
+    // watcher keeps polling it.
+    expect(JSON.parse(readFileSync(runRecordPath(home), 'utf8'))).toMatchObject({ runId: 'ext-7', observed: true, result: null })
+    expect(existsSync(runPidPath(home))).toBe(false)
+    expect(b.ticks.active()).toBe(1)
+    b.controller.dispose()
+  })
+
+  it('keeps the contention failure when no live run remains, without the manual-removal advice', async () => {
+    const home = scratch()
+    const b = bench({ home })
+    await b.controller.start()
+    writeLog(home, '✗ ERROR: another update is already running (PID 12345); wait for it to finish, or remove /x/harness/.update.lock.d only if its recorded PID is a reused or zombie process\n')
+    writeFileSync(runPidPath(home), `${String(await deadPid())}\n`)
+    b.ticks.tick()
+    const record = b.controller.run()!
+    expect(record).toMatchObject({ runId: 'run42', result: 'failed', recoverable: true })
+    expect(record.reason).toContain('another update is already running')
+    expect(record.reason).not.toContain('remove')
     b.controller.dispose()
   })
 
@@ -769,6 +841,68 @@ describe('UpdateRunController stale-state self-healing', () => {
     expect(healed).toMatchObject({ result: 'failed', phase: 'failed' })
     const started = await b.controller.start()
     expect(started.mode).toBe('prepare')
+    b.controller.dispose()
+  })
+
+  it('treats a recycled pid behind a deleted log as dead instead of blocking forever', async () => {
+    const home = scratch()
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: { phase: 'preparing', step: 4, startedAt: new Date(Date.now() - 30 * 60_000).toISOString() },
+    }).record, process.pid)
+    // No run.log at all: absent evidence is not evidence of life (recon D5).
+    const b = bench({ home, isAlive: () => true })
+    const healed = b.controller.run()!
+    expect(healed).toMatchObject({ result: 'failed', phase: 'failed' })
+    const started = await b.controller.start()
+    expect(started.mode).toBe('prepare')
+    b.controller.dispose()
+  })
+
+  it('lets clearStale open a recycled pid behind deleted files (gates unblock)', async () => {
+    const home = scratch()
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: { phase: 'applying', step: 8, startedAt: new Date(Date.now() - 30 * 60_000).toISOString() },
+    }).record, process.pid)
+    const b = bench({ home, isAlive: () => true })
+    expect(b.controller.clearStale()).toMatchObject({ result: 'failed', phase: 'failed' })
+    b.controller.dispose()
+  })
+
+  it('keeps a just-launched run alive through the launch window when its log is missing', async () => {
+    const home = scratch()
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: { phase: 'preparing', step: 0, startedAt: new Date(Date.now() - 60_000).toISOString() },
+    }).record, process.pid)
+    // The log file is gone but the run started a minute ago: inside
+    // RUN_START_GRACE_MS + the stall window the absent evidence is still
+    // ambiguous, so the gate refuses rather than heal.
+    const b = bench({ home, isAlive: () => true })
+    await expect(b.controller.start()).rejects.toThrowError(expect.objectContaining({ reason: 'already-running' }))
+    b.controller.dispose()
+  })
+
+  it('drops the wrapper pid file when a terminal result is parsed', async () => {
+    const b = bench()
+    await b.controller.start()
+    writeLog(b.home, '[9/9] self-check\nEnpoi Harness successfully updated!\n')
+    writeFileSync(runPidPath(b.home), `${String(await deadPid())}\n`)
+    b.ticks.tick()
+    expect(b.controller.run()).toMatchObject({ result: 'success', recoverable: false })
+    expect(existsSync(runPidPath(b.home))).toBe(false)
+    b.controller.dispose()
+  })
+
+  it('drops the wrapper pid file when a dead run is recorded failed', async () => {
+    const b = bench({ isAlive: () => false })
+    await b.controller.start()
+    writeLog(b.home, '[4/9] dependencies and build\nunpacking archive\n')
+    writeFileSync(runPidPath(b.home), `${String(await deadPid())}\n`)
+    b.ticks.tick()
+    expect(b.controller.run()).toMatchObject({ result: 'failed' })
+    expect(existsSync(runPidPath(b.home))).toBe(false)
     b.controller.dispose()
   })
 

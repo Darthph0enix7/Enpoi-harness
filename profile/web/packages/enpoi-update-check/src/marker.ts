@@ -134,7 +134,8 @@ export interface MarkerLivenessOptions {
   /**
    * How long ago the newest of the marker/log files moved. `undefined` means
    * no evidence was gathered (callers without a prefix): the marker then
-   * counts as fresh rather than stalled.
+   * counts as fresh rather than stalled. `null` means evidence was gathered
+   * but nothing was readable: absent evidence never counts as live.
    */
   readonly progressAgeMs?: number | null
   /** Stall window override (tests). */
@@ -145,7 +146,9 @@ export interface MarkerLivenessOptions {
  * Whether a marker names a live engine run: terminal phases are never live
  * (regardless of a recycled pid), the pid must be live and non-zombie, and
  * the marker/log must have moved within the stall window when that evidence
- * is available.
+ * is available. Gathered-but-absent evidence (`progressAgeMs: null`) is not
+ * live either: a recycled pid behind deleted files must never keep a gate
+ * refusing.
  *
  * @param marker - the parsed marker.
  * @param isAlive - process probe.
@@ -160,6 +163,7 @@ export function isMarkerLive(
   if (resultFromMarkerPhase(marker.phase) !== null) return false
   if (marker.pid <= 0 || !isAlive(marker.pid)) return false
   const age = options.progressAgeMs
+  if (age === null) return false
   if (age !== undefined && isProgressStale(age, options.staleWindowMs ?? RUN_STALE_WINDOW_MS)) return false
   return true
 }

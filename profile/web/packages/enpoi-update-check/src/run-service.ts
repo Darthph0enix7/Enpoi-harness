@@ -50,13 +50,12 @@ import {
 } from './launcher.js'
 import { cancelEngineRun, type CancelEngineInput, type EngineCancelOutcome, type EngineCancelStatus } from './cancel.js'
 import {
-  isMarkerLive, isProcessLive, markerProgressAge, modeFromMarker, observedRecordFromMarker, phaseFromMarker, readRunMarker,
-  type EngineRunMarker,
+  isMarkerLive, isProcessLive, markerProgressAge, observedRecordFromMarker, phaseFromMarker, readRunMarker,
 } from './marker.js'
 import { probeEngineCapability, type EngineProbeResult } from './probe.js'
 import {
-  effectivePid, executingPhase, isPreparedPhase, isProcessAlive, isProgressStale, isRunActive, modeFlag,
-  preparedRecord, progressAgeMs, readRunLog, readRunPid, readRunRecord, readStagedApply, reconcileRunRecord,
+  effectivePid, executingPhase, isPreparedPhase, isProcessAlive, isProgressStale, isRecoverableRun, isRunActive, modeFlag,
+  preparedRecord, progressAgeMs, readRunLog, readRunPid, readRunRecord, readStagedApply, reconcileRunRecord, runMatchesMarker,
   RUN_STALE_WINDOW_MS, RUN_STEP_TOTAL, rungForMode, runLogPath, runPidPath, runRecordPath, sameRunRecord,
   stagedApplyReady, stagedTreeReady, writeRunRecord,
   type UpdatePhase, type UpdateRunMode, type UpdateRunRecord,
@@ -225,8 +224,13 @@ export class UpdateRunController {
     this.healStaleOwn()
     const own = this.loadOwn()
     const current = own === null ? null : this.stagedTruth(own)
-    if (current !== null && current.result === null && !isPreparedPhase(current.phase) && this.blockingRun(current)) return current
-    return this.observeEngineRun() ?? current
+    if (current !== null && current.result === null && !isPreparedPhase(current.phase) && this.blockingRun(current)) return this.withRecoverable(current)
+    return this.withRecoverable(this.observeEngineRun() ?? current)
+  }
+
+  /** Attach the derived `recoverable` flag to a served record (Fix-15c interface). */
+  private withRecoverable(record: UpdateRunRecord | null): UpdateRunRecord | null {
+    return record === null ? null : { ...record, recoverable: isRecoverableRun(record) }
   }
 
   /**
@@ -254,11 +258,11 @@ export class UpdateRunController {
     return this.record
   }
 
-  /** Whether a marker names the same run as the persisted record (log path, or mode/target). */
-  private markerMatchesRecord(record: UpdateRunRecord, marker: EngineRunMarker): boolean {
-    if (record.logPath !== '' && marker.logPath !== '' && record.logPath === marker.logPath) return true
-    if (modeFromMarker(marker.mode) !== record.mode) return false
-    return record.target === '' || marker.target === '' || marker.target === record.target || marker.version === record.target
+  /** Whether the engine's live run is the same run as the persisted record. */
+  private engineRunActiveFor(record: UpdateRunRecord): boolean {
+    if (!this.engineRunActive()) return false
+    const marker = readRunMarker(this.prefix)
+    return marker !== null && runMatchesMarker(record, marker)
   }
 
   /** Synthesize a live record from the engine marker, or null when none is live. */
@@ -289,13 +293,6 @@ export class UpdateRunController {
     return lockPid !== null && (this.options.isAlive ?? isProcessLive)(lockPid)
   }
 
-  /** Whether the engine's live run is the same run as the persisted record. */
-  private engineRunActiveFor(record: UpdateRunRecord): boolean {
-    if (!this.engineRunActive()) return false
-    const marker = readRunMarker(this.prefix)
-    return marker !== null && this.markerMatchesRecord(record, marker)
-  }
-
   /**
    * Auto-heal a stale persisted record: not live by pid, and either the engine
    * agrees nothing runs or the engine runs something else. The record is
@@ -314,13 +311,14 @@ export class UpdateRunController {
       home: this.options.home,
       prefix: this.prefix,
       now: this.now,
+      marker: readRunMarker(this.prefix),
     }, { live: false })
     if (changed) {
       this.persist(record)
       this.removeSubmittedJob(record)
     }
     this.stopWatcher()
-    try { rmSync(runPidPath(this.options.home), { force: true }) } catch { /* best effort */ }
+    this.removeRunPidFile()
   }
 
   /**
@@ -383,7 +381,7 @@ export class UpdateRunController {
       const markerLive = marker !== null && isMarkerLive(marker, this.options.isAlive ?? isProcessLive, {
         progressAgeMs: markerProgressAge(marker, this.prefix, this.now().getTime()),
       })
-      if (marker !== null && markerLive && this.markerMatchesRecord(current, marker)) {
+      if (marker !== null && markerLive && runMatchesMarker(current, marker)) {
         const merged: UpdateRunRecord = {
           ...current,
           pid: marker.pid,
@@ -408,9 +406,10 @@ export class UpdateRunController {
       home: this.options.home,
       prefix: this.prefix,
       now: this.now,
+      marker: readRunMarker(this.prefix),
     }, { live: false })
     if (changed) this.persist(record)
-    try { rmSync(runPidPath(this.options.home), { force: true }) } catch { /* best effort */ }
+    this.removeRunPidFile()
     return record
   }
 
@@ -463,8 +462,11 @@ export class UpdateRunController {
         )
       }
       // Strong liveness or the engine's own live run; a stale record was
-      // already healed by run(), so this only refuses for something real.
+      // already healed by run(), so this only refuses for something real. A
+      // live run started outside the UI is not a dead end: attach to it by
+      // returning the observed record the client already polls (recon D4).
       if (this.blockingRun(current)) {
+        if (current.observed === true) return current
         throw new RunRefusedError(
           'already-running',
           `updateCheck.start: an update is already running (run ${current.runId}, step ${String(current.step)}/${String(current.steps)})`,
@@ -484,6 +486,9 @@ export class UpdateRunController {
         )
       }
       if (this.blockingRun(afterProbe)) {
+        // Same attach rule as the pre-probe check: the engine started a live
+        // run while the probe was in flight, and the UI renders it.
+        if (afterProbe.observed === true) return afterProbe
         throw new RunRefusedError(
           'already-running',
           `updateCheck.start: an update is already running (run ${afterProbe.runId}, step ${String(afterProbe.step)}/${String(afterProbe.steps)})`,
@@ -508,6 +513,9 @@ export class UpdateRunController {
     this.reconcile()
     const current = this.run()
     if (current !== null && this.blockingRun(current)) {
+      // A live run started outside the UI attaches (the observed record is
+      // what the client polls); only the plugin's own run is a dead end.
+      if (current.observed === true) return current
       throw new RunRefusedError(
         'already-running',
         `updateCheck.apply: an update is already running (run ${current.runId})`,
@@ -597,6 +605,7 @@ export class UpdateRunController {
         home: this.options.home,
         prefix: this.prefix,
         now: this.now,
+        marker: readRunMarker(this.prefix),
       }, { live: false })
       this.persist(record)
       // Nothing is live here (the guards above refused): the healed record is
@@ -604,7 +613,7 @@ export class UpdateRunController {
       this.removeSubmittedJob(record)
       this.stopWatcher()
     }
-    try { rmSync(runPidPath(this.options.home), { force: true }) } catch { /* best effort */ }
+    this.removeRunPidFile()
     return this.run()
   }
 
@@ -653,6 +662,7 @@ export class UpdateRunController {
       // on the pid), so the submitted job is resting and must be removed: a
       // KeepAlive job would relaunch the cancelled update every few seconds.
       this.removeSubmittedJob(next)
+      this.removeRunPidFile()
       this.stopWatcher()
       return next
     }
@@ -664,6 +674,7 @@ export class UpdateRunController {
     })
     this.loaded = true
     this.persist(record)
+    this.removeRunPidFile()
     return record
   }
 
@@ -684,6 +695,12 @@ export class UpdateRunController {
         `updateCheck.${mode === 'apply' ? 'apply' : 'start'}: the dsh shim was not found (checked the recorded binDir and ${defaultShimPath()})`,
       )
     }
+    // A live engine run owns the run state: a terminal-started `dsh update`
+    // (or one that reached the lock between the caller's check and this
+    // point) must keep its log and marker. Attach by returning its observed
+    // record instead of truncating the shared log (recon D4).
+    const observed = this.observeEngineRun()
+    if (observed !== null) return observed
     const home = this.options.home
     const logPath = runLogPath(home)
     const pidFile = runPidPath(home)
@@ -752,6 +769,7 @@ export class UpdateRunController {
         reason: `could not launch the updater: ${message}`,
       }
       this.persist(failed)
+      this.removeRunPidFile()
       const verb = error instanceof LaunchEnvironmentError ? 'updateCheck.start' : `updateCheck.${record.mode === 'apply' ? 'apply' : 'start'}`
       throw new RunRefusedError('launch-failed', `${verb}: could not launch the updater: ${message}`)
     }
@@ -792,6 +810,8 @@ export class UpdateRunController {
       // launchd job is removed (the removal also kills the job's process).
       if (record !== null && !this.isAliveRecord(record) && !this.processLive(record)) {
         this.removeSubmittedJob(record)
+        // The run is over: a dead wrapper pid must not linger (recon R1).
+        this.removeRunPidFile()
         this.stopWatcher()
       }
       return
@@ -833,12 +853,32 @@ export class UpdateRunController {
     }
 
     if (parsed.result !== null) {
-      this.persist(this.terminalRecord(base, parsed.result))
+      // A plugin run that lost the engine's update lock to a run that is
+      // still live must attach to it, never surface the lock refusal (recon
+      // D5): the UI then renders the running update's progress.
+      const contention = parsed.result === 'failed' && /another update is already running/i.test(parsed.lastLine)
+      if (contention) {
+        const foreign = this.observeEngineRun()
+        if (foreign !== null) {
+          // The wrapper that printed the refusal is gone; a stale pid file
+          // would misdirect the liveness reads for the attached run.
+          this.removeRunPidFile()
+          this.loaded = true
+          this.persist(foreign)
+          this.watch(foreign)
+          return
+        }
+      }
+      const terminalBase = contention
+        ? { ...base, lastLine: this.stripLockRemovalAdvice(base.lastLine) }
+        : base
+      this.persist(this.terminalRecord(terminalBase, parsed.result))
       if (!alive) {
         // The engine exited with its outcome printed: the run rests, and the
         // job must not be relaunched. A still-live engine is left alone; the
         // later tick (record terminal, process gone) removes the job.
         this.removeSubmittedJob(base)
+        this.removeRunPidFile()
         this.stopWatcher()
       }
       return
@@ -858,6 +898,7 @@ export class UpdateRunController {
           : `the ${record.mode} run exited before reporting a result (last line: ${parsed.lastLine})`,
       ))
       this.removeSubmittedJob(base)
+      this.removeRunPidFile()
       this.stopWatcher()
       return
     }
@@ -866,6 +907,17 @@ export class UpdateRunController {
       ...base,
       phase: alive || parsed.step > 0 ? executingPhase(record.mode) : record.phase,
     })
+  }
+
+  /**
+   * The engine appends manual lock-removal advice to its contention error
+   * ("…; wait for it to finish, or remove <lock> only if its recorded PID is
+   * a reused or zombie process"). That advice must never become the
+   * user-facing reason: the UI cannot verify the lock owner, and acting on it
+   * can break a live run.
+   */
+  private stripLockRemovalAdvice(lastLine: string): string {
+    return lastLine.replace(/[,;]\s*(?:or\s+)?remove\b.*$/i, '').trimEnd()
   }
 
   /** One failed record from the current tail. */
@@ -890,13 +942,14 @@ export class UpdateRunController {
     }
   }
 
-  /** Persist when changed and publish to the plugin. */
+  /** Persist when changed and publish to the plugin (the record carries its derived `recoverable`). */
   private persist(record: UpdateRunRecord): void {
     const previous = this.record
-    this.record = record
-    if (previous === null || !sameRunRecord(previous, record)) {
-      writeRunRecord(runRecordPath(this.options.home), record)
-      this.options.onUpdate?.(record)
+    const stored: UpdateRunRecord = { ...record, recoverable: isRecoverableRun(record) }
+    this.record = stored
+    if (previous === null || !sameRunRecord(previous, stored)) {
+      writeRunRecord(runRecordPath(this.options.home), stored)
+      this.options.onUpdate?.(stored)
     }
   }
 
@@ -905,8 +958,10 @@ export class UpdateRunController {
    * Strong liveness: terminal/prepared records are never live; the pid must be
    * live and non-zombie; and the run's own files must have moved inside the
    * stall window — a recycled pid or a dead process behind a live-looking pid
-   * never blocks. Missing file evidence counts as live (never auto-heal on
-   * absent evidence).
+   * never blocks. The run log is the only progress evidence; missing log
+   * evidence is NOT live (a recycled pid behind deleted files must open every
+   * gate), except inside the launch window (RUN_START_GRACE_MS plus the stall
+   * window) where a just-started run has not written it yet.
    */
   private isAliveRecord(record: UpdateRunRecord): boolean {
     if (record.result !== null || isPreparedPhase(record.phase)) return false
@@ -924,7 +979,13 @@ export class UpdateRunController {
     // Freshness evidence is the run log only: the pid file is written once at
     // launch and says nothing about progress.
     const age = progressAgeMs([record.logPath], this.now().getTime())
-    return !isProgressStale(age)
+    if (isProgressStale(age)) return false
+    if (age !== null) return true
+    // No log evidence at all: only the launch window keeps a run alive, and
+    // an undated record is never it.
+    const startedAtMs = Date.parse(record.startedAt)
+    return Number.isFinite(startedAtMs)
+      && this.now().getTime() - startedAtMs < RUN_START_GRACE_MS + RUN_STALE_WINDOW_MS
   }
 
   /** Whether a run must block a new start/apply: strong liveness, or the engine's own live run matching it. */
@@ -953,6 +1014,16 @@ export class UpdateRunController {
       // A left-behind launchd job is cleaned by the next sweep; never let the
       // removal path fail a run or a read.
     }
+  }
+
+  /**
+   * Drop the wrapper pid file once a run rests. `run.pid` names a live
+   * process only while that process exists; after a terminal persist the dead
+   * file would misdirect every liveness read (recon R1). Fail-soft: the file
+   * is a hint, never a gate.
+   */
+  private removeRunPidFile(): void {
+    try { rmSync(runPidPath(this.options.home), { force: true }) } catch { /* best effort */ }
   }
 
   /**

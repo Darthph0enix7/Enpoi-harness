@@ -179,6 +179,7 @@ function updateJobLabel(runId) {
 }
 var RUN_HOME_ENV = "DSH_HOME";
 var UPDATE_MODE_ENV = "DSH_UPDATE_MODE";
+var UPDATE_JOB_LABEL_ENV = "DSH_UPDATE_JOB_LABEL";
 var LaunchEnvironmentError = class extends Error {
   /** Every location the probe consulted, in order. */
   probed;
@@ -314,6 +315,8 @@ function launchWrapper(environment) {
   ];
   const prefix = environment.env.PREFIX;
   if (prefix !== void 0 && prefix !== "") parts.push(`export PREFIX=${shellQuote(prefix)}`);
+  const jobLabel = environment.env[UPDATE_JOB_LABEL_ENV];
+  if (jobLabel !== void 0 && jobLabel !== "") parts.push(`export ${UPDATE_JOB_LABEL_ENV}=${shellQuote(jobLabel)}`);
   parts.push('echo $$ > "$pid"', 'exec "$@" >>"$log" 2>&1');
   return parts.join("; ");
 }
@@ -362,21 +365,26 @@ function launchPlan(input, environment) {
     });
   }
   if (platform === "darwin" && has("launchctl")) {
+    const label = updateJobLabel(input.runId);
+    const launchdEnvironment = {
+      ...environment,
+      env: { ...environment.env, [UPDATE_JOB_LABEL_ENV]: label }
+    };
     steps.push({
       rung: "launchctl",
       command: "launchctl",
-      unit: updateJobLabel(input.runId),
+      unit: label,
       args: [
         "submit",
         "-l",
-        updateJobLabel(input.runId),
+        label,
         "-o",
         input.logPath,
         "-e",
         input.logPath,
         "--",
         "sh",
-        ...args
+        ...wrapperArgs(input, launchdEnvironment)
       ]
     });
   }
@@ -583,6 +591,9 @@ function rungForMode(mode) {
 function modeLabel(mode) {
   return mode === "one-shot" ? "update" : mode;
 }
+function isRecoverableRun(record) {
+  return record.result !== null && record.result !== "success" && (record.staged === true || /already running|stale/i.test(record.reason ?? ""));
+}
 var LOG_TAIL_LINES = 40;
 var LOG_TAIL_BYTES = 64 * 1024;
 var RUN_STALE_WINDOW_MS = 5 * 6e4;
@@ -705,7 +716,7 @@ function normalizeRunRecord(raw) {
   const launcher = typeof raw.launcher === "string" && raw.launcher !== "" ? raw.launcher : typeof raw.rung === "string" && raw.rung !== "two-phase" && raw.rung !== "one-shot" ? raw.rung : "pending";
   const finishedAt = typeof raw.finishedAt === "string" ? raw.finishedAt : void 0;
   const reason = typeof raw.reason === "string" ? raw.reason : void 0;
-  return {
+  const normalized = {
     runId: String(raw.runId),
     target: typeof raw.target === "string" ? raw.target : "",
     channel: typeof raw.channel === "string" ? raw.channel : "stable",
@@ -726,6 +737,7 @@ function normalizeRunRecord(raw) {
     ...finishedAt === void 0 ? {} : { finishedAt },
     ...reason === void 0 ? {} : { reason }
   };
+  return { ...normalized, recoverable: isRecoverableRun(normalized) };
 }
 function isRunRecordShape(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
@@ -790,6 +802,16 @@ function terminalRecord(record, result, now, staged) {
 function preparedRecord(record, now = () => /* @__PURE__ */ new Date()) {
   return { ...record, phase: "prepared", result: null, staged: true, finishedAt: now().toISOString() };
 }
+function markerModeNamesRun(mode, run) {
+  if (mode === "prepare") return run === "prepare";
+  if (mode === "apply") return run === "apply";
+  return run === "one-shot";
+}
+function runMatchesMarker(record, marker) {
+  if (record.logPath !== "" && marker.logPath !== "" && record.logPath === marker.logPath) return true;
+  if (!markerModeNamesRun(marker.mode, record.mode)) return false;
+  return record.target === "" || marker.target === "" || marker.target === record.target || marker.version === record.target;
+}
 function reconcileRunRecord(record, identity, context, options = {}) {
   const now = context.now ?? (() => /* @__PURE__ */ new Date());
   if (record.result !== null) return { record, changed: false };
@@ -807,6 +829,13 @@ function reconcileRunRecord(record, identity, context, options = {}) {
   }
   if (record.mode === "prepare" && staged) {
     return { record: { ...preparedRecord(record), lastLine: parsed.lastLine === "" ? record.lastLine : parsed.lastLine, logTail: parsed.logTail }, changed: true };
+  }
+  const marker = context.marker;
+  if (marker !== void 0 && marker !== null && marker.phase === "done" && runMatchesMarker(record, marker)) {
+    return {
+      record: { ...terminalRecord(record, "success", now, staged), lastLine: parsed.lastLine === "" ? record.lastLine : parsed.lastLine, logTail: parsed.logTail },
+      changed: true
+    };
   }
   if (identity.version !== "" && identity.version === record.target) {
     return { record: { ...terminalRecord(record, "success", now, staged), lastLine: parsed.lastLine === "" ? record.lastLine : parsed.lastLine, logTail: parsed.logTail }, changed: true };
@@ -893,6 +922,7 @@ function isMarkerLive(marker, isAlive = isProcessLive, options = {}) {
   if (resultFromMarkerPhase(marker.phase) !== null) return false;
   if (marker.pid <= 0 || !isAlive(marker.pid)) return false;
   const age = options.progressAgeMs;
+  if (age === null) return false;
   if (age !== void 0 && isProgressStale(age, options.staleWindowMs ?? RUN_STALE_WINDOW_MS)) return false;
   return true;
 }
@@ -1085,8 +1115,12 @@ var UpdateRunController = class {
     this.healStaleOwn();
     const own = this.loadOwn();
     const current = own === null ? null : this.stagedTruth(own);
-    if (current !== null && current.result === null && !isPreparedPhase(current.phase) && this.blockingRun(current)) return current;
-    return this.observeEngineRun() ?? current;
+    if (current !== null && current.result === null && !isPreparedPhase(current.phase) && this.blockingRun(current)) return this.withRecoverable(current);
+    return this.withRecoverable(this.observeEngineRun() ?? current);
+  }
+  /** Attach the derived `recoverable` flag to a served record (Fix-15c interface). */
+  withRecoverable(record) {
+    return record === null ? null : { ...record, recoverable: isRecoverableRun(record) };
   }
   /**
    * The `staged` flag is derived truth: it must match the staged record and
@@ -1111,11 +1145,11 @@ var UpdateRunController = class {
     }
     return this.record;
   }
-  /** Whether a marker names the same run as the persisted record (log path, or mode/target). */
-  markerMatchesRecord(record, marker) {
-    if (record.logPath !== "" && marker.logPath !== "" && record.logPath === marker.logPath) return true;
-    if (modeFromMarker(marker.mode) !== record.mode) return false;
-    return record.target === "" || marker.target === "" || marker.target === record.target || marker.version === record.target;
+  /** Whether the engine's live run is the same run as the persisted record. */
+  engineRunActiveFor(record) {
+    if (!this.engineRunActive()) return false;
+    const marker = readRunMarker(this.prefix);
+    return marker !== null && runMatchesMarker(record, marker);
   }
   /** Synthesize a live record from the engine marker, or null when none is live. */
   observeEngineRun() {
@@ -1143,12 +1177,6 @@ var UpdateRunController = class {
     const lockPid = readRunPid(join5(this.prefix, "harness", ".update.lock.d", "pid"));
     return lockPid !== null && (this.options.isAlive ?? isProcessLive)(lockPid);
   }
-  /** Whether the engine's live run is the same run as the persisted record. */
-  engineRunActiveFor(record) {
-    if (!this.engineRunActive()) return false;
-    const marker = readRunMarker(this.prefix);
-    return marker !== null && this.markerMatchesRecord(record, marker);
-  }
   /**
    * Auto-heal a stale persisted record: not live by pid, and either the engine
    * agrees nothing runs or the engine runs something else. The record is
@@ -1166,17 +1194,15 @@ var UpdateRunController = class {
     const { record, changed } = reconcileRunRecord(own, this.options.readIdentity(), {
       home: this.options.home,
       prefix: this.prefix,
-      now: this.now
+      now: this.now,
+      marker: readRunMarker(this.prefix)
     }, { live: false });
     if (changed) {
       this.persist(record);
       this.removeSubmittedJob(record);
     }
     this.stopWatcher();
-    try {
-      rmSync(runPidPath(this.options.home), { force: true });
-    } catch {
-    }
+    this.removeRunPidFile();
   }
   /**
    * One installed-engine capability probe per controller (one plugin boot):
@@ -1229,7 +1255,7 @@ var UpdateRunController = class {
       const markerLive = marker !== null && isMarkerLive(marker, this.options.isAlive ?? isProcessLive, {
         progressAgeMs: markerProgressAge(marker, this.prefix, this.now().getTime())
       });
-      if (marker !== null && markerLive && this.markerMatchesRecord(current, marker)) {
+      if (marker !== null && markerLive && runMatchesMarker(current, marker)) {
         const merged = {
           ...current,
           pid: marker.pid,
@@ -1249,13 +1275,11 @@ var UpdateRunController = class {
     const { record, changed } = reconcileRunRecord(current, this.options.readIdentity(), {
       home: this.options.home,
       prefix: this.prefix,
-      now: this.now
+      now: this.now,
+      marker: readRunMarker(this.prefix)
     }, { live: false });
     if (changed) this.persist(record);
-    try {
-      rmSync(runPidPath(this.options.home), { force: true });
-    } catch {
-    }
+    this.removeRunPidFile();
     return record;
   }
   /**
@@ -1305,6 +1329,7 @@ var UpdateRunController = class {
         );
       }
       if (this.blockingRun(current)) {
+        if (current.observed === true) return current;
         throw new RunRefusedError(
           "already-running",
           `updateCheck.start: an update is already running (run ${current.runId}, step ${String(current.step)}/${String(current.steps)})`
@@ -1322,6 +1347,7 @@ var UpdateRunController = class {
         );
       }
       if (this.blockingRun(afterProbe)) {
+        if (afterProbe.observed === true) return afterProbe;
         throw new RunRefusedError(
           "already-running",
           `updateCheck.start: an update is already running (run ${afterProbe.runId}, step ${String(afterProbe.step)}/${String(afterProbe.steps)})`
@@ -1343,6 +1369,7 @@ var UpdateRunController = class {
     this.reconcile();
     const current = this.run();
     if (current !== null && this.blockingRun(current)) {
+      if (current.observed === true) return current;
       throw new RunRefusedError(
         "already-running",
         `updateCheck.apply: an update is already running (run ${current.runId})`
@@ -1417,16 +1444,14 @@ var UpdateRunController = class {
       const { record } = reconcileRunRecord(own, this.options.readIdentity(), {
         home: this.options.home,
         prefix: this.prefix,
-        now: this.now
+        now: this.now,
+        marker: readRunMarker(this.prefix)
       }, { live: false });
       this.persist(record);
       this.removeSubmittedJob(record);
       this.stopWatcher();
     }
-    try {
-      rmSync(runPidPath(this.options.home), { force: true });
-    } catch {
-    }
+    this.removeRunPidFile();
     return this.run();
   }
   /**
@@ -1470,6 +1495,7 @@ var UpdateRunController = class {
       const next = this.terminalRecord(current, "cancelled");
       this.persist(next);
       this.removeSubmittedJob(next);
+      this.removeRunPidFile();
       this.stopWatcher();
       return next;
     }
@@ -1481,6 +1507,7 @@ var UpdateRunController = class {
     });
     this.loaded = true;
     this.persist(record);
+    this.removeRunPidFile();
     return record;
   }
   /** Stop the watcher (plugin unload). The updater itself keeps running. */
@@ -1497,6 +1524,8 @@ var UpdateRunController = class {
         `updateCheck.${mode === "apply" ? "apply" : "start"}: the dsh shim was not found (checked the recorded binDir and ${defaultShimPath()})`
       );
     }
+    const observed = this.observeEngineRun();
+    if (observed !== null) return observed;
     const home = this.options.home;
     const logPath = runLogPath(home);
     const pidFile = runPidPath(home);
@@ -1560,6 +1589,7 @@ var UpdateRunController = class {
         reason: `could not launch the updater: ${message}`
       };
       this.persist(failed);
+      this.removeRunPidFile();
       const verb = error instanceof LaunchEnvironmentError ? "updateCheck.start" : `updateCheck.${record.mode === "apply" ? "apply" : "start"}`;
       throw new RunRefusedError("launch-failed", `${verb}: could not launch the updater: ${message}`);
     }
@@ -1597,6 +1627,7 @@ var UpdateRunController = class {
     if (record === null || record.result !== null) {
       if (record !== null && !this.isAliveRecord(record) && !this.processLive(record)) {
         this.removeSubmittedJob(record);
+        this.removeRunPidFile();
         this.stopWatcher();
       }
       return;
@@ -1630,9 +1661,22 @@ var UpdateRunController = class {
       return;
     }
     if (parsed.result !== null) {
-      this.persist(this.terminalRecord(base, parsed.result));
+      const contention = parsed.result === "failed" && /another update is already running/i.test(parsed.lastLine);
+      if (contention) {
+        const foreign = this.observeEngineRun();
+        if (foreign !== null) {
+          this.removeRunPidFile();
+          this.loaded = true;
+          this.persist(foreign);
+          this.watch(foreign);
+          return;
+        }
+      }
+      const terminalBase = contention ? { ...base, lastLine: this.stripLockRemovalAdvice(base.lastLine) } : base;
+      this.persist(this.terminalRecord(terminalBase, parsed.result));
       if (!alive) {
         this.removeSubmittedJob(base);
+        this.removeRunPidFile();
         this.stopWatcher();
       }
       return;
@@ -1649,6 +1693,7 @@ var UpdateRunController = class {
         parsed.lastLine === "" ? `the ${record.mode} run exited before writing any output` : `the ${record.mode} run exited before reporting a result (last line: ${parsed.lastLine})`
       ));
       this.removeSubmittedJob(base);
+      this.removeRunPidFile();
       this.stopWatcher();
       return;
     }
@@ -1656,6 +1701,16 @@ var UpdateRunController = class {
       ...base,
       phase: alive || parsed.step > 0 ? executingPhase(record.mode) : record.phase
     });
+  }
+  /**
+   * The engine appends manual lock-removal advice to its contention error
+   * ("…; wait for it to finish, or remove <lock> only if its recorded PID is
+   * a reused or zombie process"). That advice must never become the
+   * user-facing reason: the UI cannot verify the lock owner, and acting on it
+   * can break a live run.
+   */
+  stripLockRemovalAdvice(lastLine) {
+    return lastLine.replace(/[,;]\s*(?:or\s+)?remove\b.*$/i, "").trimEnd();
   }
   /** One failed record from the current tail. */
   failedRecord(base, reason) {
@@ -1677,13 +1732,14 @@ var UpdateRunController = class {
       ...result === "success" ? {} : { reason: base.lastLine === "" ? `the ${base.mode} run reported ${result}` : base.lastLine }
     };
   }
-  /** Persist when changed and publish to the plugin. */
+  /** Persist when changed and publish to the plugin (the record carries its derived `recoverable`). */
   persist(record) {
     const previous = this.record;
-    this.record = record;
-    if (previous === null || !sameRunRecord(previous, record)) {
-      writeRunRecord(runRecordPath(this.options.home), record);
-      this.options.onUpdate?.(record);
+    const stored = { ...record, recoverable: isRecoverableRun(record) };
+    this.record = stored;
+    if (previous === null || !sameRunRecord(previous, stored)) {
+      writeRunRecord(runRecordPath(this.options.home), stored);
+      this.options.onUpdate?.(stored);
     }
   }
   /** Whether a record has a live process by the controller's liveness seam. */
@@ -1691,8 +1747,10 @@ var UpdateRunController = class {
    * Strong liveness: terminal/prepared records are never live; the pid must be
    * live and non-zombie; and the run's own files must have moved inside the
    * stall window — a recycled pid or a dead process behind a live-looking pid
-   * never blocks. Missing file evidence counts as live (never auto-heal on
-   * absent evidence).
+   * never blocks. The run log is the only progress evidence; missing log
+   * evidence is NOT live (a recycled pid behind deleted files must open every
+   * gate), except inside the launch window (RUN_START_GRACE_MS plus the stall
+   * window) where a just-started run has not written it yet.
    */
   isAliveRecord(record) {
     if (record.result !== null || isPreparedPhase(record.phase)) return false;
@@ -1705,7 +1763,10 @@ var UpdateRunController = class {
     const pid = effectivePid(this.options.home, record);
     if (pid === null || !probe(pid)) return false;
     const age = progressAgeMs([record.logPath], this.now().getTime());
-    return !isProgressStale(age);
+    if (isProgressStale(age)) return false;
+    if (age !== null) return true;
+    const startedAtMs = Date.parse(record.startedAt);
+    return Number.isFinite(startedAtMs) && this.now().getTime() - startedAtMs < RUN_START_GRACE_MS + RUN_STALE_WINDOW_MS;
   }
   /** Whether a run must block a new start/apply: strong liveness, or the engine's own live run matching it. */
   blockingRun(record) {
@@ -1727,6 +1788,18 @@ var UpdateRunController = class {
     const remove = this.options.removeJob ?? ((jobLabel) => removeLaunchdJob(jobLabel));
     try {
       remove(label);
+    } catch {
+    }
+  }
+  /**
+   * Drop the wrapper pid file once a run rests. `run.pid` names a live
+   * process only while that process exists; after a terminal persist the dead
+   * file would misdirect every liveness read (recon R1). Fail-soft: the file
+   * is a hint, never a gate.
+   */
+  removeRunPidFile() {
+    try {
+      rmSync(runPidPath(this.options.home), { force: true });
     } catch {
     }
   }
@@ -2146,6 +2219,7 @@ export {
   RUN_STEP_TOTAL,
   RunRefusedError,
   UPDATE_CHECK_NAMESPACE,
+  UPDATE_JOB_LABEL_ENV,
   UPDATE_JOB_LABEL_PREFIX,
   UPDATE_MODE_ENV,
   UpdateCheckCore,
@@ -2169,6 +2243,7 @@ export {
   isProcessAlive,
   isProcessLive,
   isProgressStale,
+  isRecoverableRun,
   isRunActive,
   isTerminalPhase,
   jitteredDelay,
@@ -2208,6 +2283,7 @@ export {
   resultFromMarkerPhase,
   runLogPath,
   runMarkerPath,
+  runMatchesMarker,
   runPidPath,
   runRecordPath,
   rungForMode,

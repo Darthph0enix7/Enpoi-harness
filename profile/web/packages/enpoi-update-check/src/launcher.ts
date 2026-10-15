@@ -145,6 +145,13 @@ export const RUN_HOME_ENV = 'DSH_HOME'
 /** Environment hook the engine reads to label a no-flag run in its marker (`one-shot`). */
 export const UPDATE_MODE_ENV = 'DSH_UPDATE_MODE'
 
+/**
+ * Environment hook carrying the submitted launchd job's label into the engine
+ * (darwin launchctl rung only). The engine best-effort removes that label
+ * when the run ends, so a KeepAlive job cannot relaunch it.
+ */
+export const UPDATE_JOB_LABEL_ENV = 'DSH_UPDATE_JOB_LABEL'
+
 /** A launch whose environment carries no usable Node.js runtime. */
 export class LaunchEnvironmentError extends Error {
   /** Every location the probe consulted, in order. */
@@ -347,6 +354,8 @@ export function launchWrapper(environment: LaunchEnvironment): string {
   ]
   const prefix = environment.env.PREFIX
   if (prefix !== undefined && prefix !== '') parts.push(`export PREFIX=${shellQuote(prefix)}`)
+  const jobLabel = environment.env[UPDATE_JOB_LABEL_ENV]
+  if (jobLabel !== undefined && jobLabel !== '') parts.push(`export ${UPDATE_JOB_LABEL_ENV}=${shellQuote(jobLabel)}`)
   parts.push('echo $$ > "$pid"', 'exec "$@" >>"$log" 2>&1')
   return parts.join('; ')
 }
@@ -407,18 +416,26 @@ export function launchPlan(input: LaunchPlanInput, environment: LaunchEnvironmen
     })
   }
   if (platform === 'darwin' && has('launchctl')) {
+    const label = updateJobLabel(input.runId)
+    // The submitted job's label travels into the engine environment so the
+    // engine can remove its own job at run end (fix-15a); the wrapper exports
+    // it because launchctl submit passes no environment flags.
+    const launchdEnvironment: LaunchEnvironment = {
+      ...environment,
+      env: { ...environment.env, [UPDATE_JOB_LABEL_ENV]: label },
+    }
     steps.push({
       rung: 'launchctl',
       command: 'launchctl',
-      unit: updateJobLabel(input.runId),
+      unit: label,
       args: [
         'submit',
-        '-l', updateJobLabel(input.runId),
+        '-l', label,
         '-o', input.logPath,
         '-e', input.logPath,
         '--',
         'sh',
-        ...args,
+        ...wrapperArgs(input, launchdEnvironment),
       ],
     })
   }
