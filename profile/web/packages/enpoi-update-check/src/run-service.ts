@@ -30,6 +30,11 @@
  * {@link RunRefusedError} when the precondition is missing (no update, a run
  * active, an update already prepared, nothing staged) or the launch fails.
  *
+ * The macOS launchctl rung submits a KeepAlive job, so every resting
+ * transition (prepared, terminal, a healed stale run, a relayed cancel)
+ * removes the job once the engine has exited, and a boot/pre-launch sweep
+ * removes leftover `com.dsh.update.*` jobs whose engine is not live.
+ *
  * @module dsh-enpoi-update-check/run-service
  */
 
@@ -39,7 +44,8 @@ import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { InstallIdentity } from './catalog.js'
 import {
-  defaultShimPath, launchUpdater, LaunchEnvironmentError, resolveRuntimePath, RUN_HOME_ENV,
+  defaultShimPath, launchUpdater, LaunchEnvironmentError, listLaunchdJobs, removeLaunchdJob, resolveRuntimePath,
+  RUN_HOME_ENV, UPDATE_JOB_LABEL_PREFIX, updateJobLabel,
   type LaunchOutcome, type LaunchRung, type LaunchUpdaterInput,
 } from './launcher.js'
 import { cancelEngineRun, type CancelEngineInput, type EngineCancelOutcome, type EngineCancelStatus } from './cancel.js'
@@ -129,6 +135,10 @@ export interface UpdateRunControllerOptions {
   readonly cancelEngine?: (input: CancelEngineInput) => Promise<EngineCancelOutcome>
   /** Engine-cancel bound, milliseconds (default 30 s). */
   readonly cancelTimeoutMs?: number
+  /** launchd-job removal seam; defaults to {@link removeLaunchdJob} (darwin-only, fail-soft). */
+  readonly removeJob?: (label: string) => boolean
+  /** launchd-job listing seam for the stale-job sweep; defaults to {@link listLaunchdJobs}. */
+  readonly listJobs?: () => readonly string[] | null
   /** Called after each record change (the plugin logs it). */
   readonly onUpdate?: (record: UpdateRunRecord) => void
 }
@@ -305,7 +315,10 @@ export class UpdateRunController {
       prefix: this.prefix,
       now: this.now,
     }, { live: false })
-    if (changed) this.persist(record)
+    if (changed) {
+      this.persist(record)
+      this.removeSubmittedJob(record)
+    }
     this.stopWatcher()
     try { rmSync(runPidPath(this.options.home), { force: true }) } catch { /* best effort */ }
   }
@@ -356,6 +369,10 @@ export class UpdateRunController {
    * @returns the reconciled record, or null when none exists.
    */
   reconcile(): UpdateRunRecord | null {
+    // Boot + pre-launch sweep: a submitted launchd job carries KeepAlive, so
+    // one whose engine exited would be relaunched forever. Skipped while the
+    // engine marker names a live, progressing run (that run owns its job).
+    this.sweepStaleLaunchdJobs()
     const current = this.loadOwn()
     if (current === null) return null
     if (current.result === null && !isPreparedPhase(current.phase) && this.blockingRun(current)) {
@@ -582,6 +599,9 @@ export class UpdateRunController {
         now: this.now,
       }, { live: false })
       this.persist(record)
+      // Nothing is live here (the guards above refused): the healed record is
+      // resting, so its submitted launchd job is removed too.
+      this.removeSubmittedJob(record)
       this.stopWatcher()
     }
     try { rmSync(runPidPath(this.options.home), { force: true }) } catch { /* best effort */ }
@@ -629,6 +649,10 @@ export class UpdateRunController {
     if (current !== null && current.observed !== true) {
       const next = this.terminalRecord(current, 'cancelled')
       this.persist(next)
+      // The engine reported the cancel only after the runner exited (it waits
+      // on the pid), so the submitted job is resting and must be removed: a
+      // KeepAlive job would relaunch the cancelled update every few seconds.
+      this.removeSubmittedJob(next)
       this.stopWatcher()
       return next
     }
@@ -650,6 +674,9 @@ export class UpdateRunController {
 
   /** Persist a fresh record for `mode`, launch its engine invocation, and watch it. */
   private begin(mode: UpdateRunMode, pin: { target: string; channel: string }): UpdateRunRecord {
+    // Pre-launch sweep: leftovers from an earlier run must not compete with
+    // (or be confused with) the job this run is about to submit.
+    this.sweepStaleLaunchdJobs()
     const shim = (this.options.resolveShim ?? resolveShimPath)(this.options.home)
     if (shim === null) {
       throw new RunRefusedError(
@@ -761,7 +788,12 @@ export class UpdateRunController {
   private tick(): void {
     const record = this.record
     if (record === null || record.result !== null) {
-      if (record !== null && !this.isAliveRecord(record)) this.stopWatcher()
+      // A terminal record is resting; the engine must be gone before its
+      // launchd job is removed (the removal also kills the job's process).
+      if (record !== null && !this.isAliveRecord(record) && !this.processLive(record)) {
+        this.removeSubmittedJob(record)
+        this.stopWatcher()
+      }
       return
     }
     const parsed = readRunLog(record.logPath)
@@ -784,27 +816,38 @@ export class UpdateRunController {
     }
 
     // The prepared resting state: nothing to watch while the marker exists; a
-    // vanished marker means a new update must be prepared from scratch.
+    // vanished marker means a new update must be prepared from scratch. A
+    // prepared record's process has exited by definition, so its launchd job
+    // is removed here too.
     if (isPreparedPhase(record.phase)) {
       if (staged) {
         this.persist(base)
+        this.removeSubmittedJob(base)
         this.stopWatcher()
         return
       }
       this.persist(this.failedRecord(base, 'the staged update disappeared before it was applied'))
+      this.removeSubmittedJob(base)
       this.stopWatcher()
       return
     }
 
     if (parsed.result !== null) {
       this.persist(this.terminalRecord(base, parsed.result))
-      if (!alive) this.stopWatcher()
+      if (!alive) {
+        // The engine exited with its outcome printed: the run rests, and the
+        // job must not be relaunched. A still-live engine is left alone; the
+        // later tick (record terminal, process gone) removes the job.
+        this.removeSubmittedJob(base)
+        this.stopWatcher()
+      }
       return
     }
 
     if (!alive && !withinGrace) {
       if (record.mode === 'prepare' && staged) {
         this.persist(preparedRecord(base, this.now))
+        this.removeSubmittedJob(base)
         this.stopWatcher()
         return
       }
@@ -814,6 +857,7 @@ export class UpdateRunController {
           ? `the ${record.mode} run exited before writing any output`
           : `the ${record.mode} run exited before reporting a result (last line: ${parsed.lastLine})`,
       ))
+      this.removeSubmittedJob(base)
       this.stopWatcher()
       return
     }
@@ -887,5 +931,68 @@ export class UpdateRunController {
   private blockingRun(record: UpdateRunRecord): boolean {
     if (record.result !== null || isPreparedPhase(record.phase)) return false
     return this.isAliveRecord(record) || this.engineRunActiveFor(record)
+  }
+
+  /**
+   * Raw process liveness for a resting record: the wrapper pid first (the
+   * wrapper `exec`s the engine, so that pid is the engine's own), then the
+   * record's launch pid. Used before removing a launchd job, whose removal
+   * also terminates the job's processes.
+   */
+  private processLive(record: UpdateRunRecord): boolean {
+    const pid = effectivePid(this.options.home, record)
+    return pid !== null && (this.options.isAlive ?? isProcessLive)(pid)
+  }
+
+  /** Remove one launchd job label through the seam; fail-soft. */
+  private removeLaunchdJobLabel(label: string): void {
+    const remove = this.options.removeJob ?? ((jobLabel: string) => removeLaunchdJob(jobLabel))
+    try {
+      remove(label)
+    } catch {
+      // A left-behind launchd job is cleaned by the next sweep; never let the
+      // removal path fail a run or a read.
+    }
+  }
+
+  /**
+   * Remove the submitted launchd job that ran one record. Only a run launched
+   * through the launchctl rung owns such a job. The caller must have
+   * established that the engine exited: the removal also stops the job's
+   * processes, and a KeepAlive job would otherwise relaunch the run forever.
+   */
+  private removeSubmittedJob(record: UpdateRunRecord): void {
+    if (record.launcher !== 'launchctl') return
+    this.removeLaunchdJobLabel(updateJobLabel(record.runId))
+  }
+
+  /**
+   * Remove leftover `com.dsh.update.*` launchd jobs (macOS only). A submitted
+   * job carries KeepAlive, so one whose engine already exited is relaunched
+   * every few seconds forever; a live, progressing run owns its job and the
+   * sweep is skipped then. Fail-soft and off-darwin: an unavailable
+   * `launchctl list` removes nothing (never blocks mount).
+   */
+  private sweepStaleLaunchdJobs(): void {
+    const list = this.options.listJobs ?? (() => listLaunchdJobs())
+    let labels: readonly string[] | null
+    try {
+      labels = list()
+    } catch {
+      return
+    }
+    if (labels === null) return
+    // A live run owns its job. The controller's own executing record covers
+    // the window before the engine writes its marker; the engine marker covers
+    // a run started outside the UI.
+    const own = this.record
+    if (own !== null && own.result === null && !isPreparedPhase(own.phase) && this.isAliveRecord(own)) return
+    const marker = readRunMarker(this.prefix)
+    if (marker !== null && isMarkerLive(marker, this.options.isAlive ?? isProcessLive, {
+      progressAgeMs: markerProgressAge(marker, this.prefix, this.now().getTime()),
+    })) return
+    for (const label of labels) {
+      if (label.startsWith(UPDATE_JOB_LABEL_PREFIX)) this.removeLaunchdJobLabel(label)
+    }
   }
 }

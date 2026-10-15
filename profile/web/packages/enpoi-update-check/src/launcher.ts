@@ -38,19 +38,39 @@
  * `systemd-run --user --wait` keeps the launcher client alive for the whole
  * unit lifetime, so its pid is a usable liveness anchor until the wrapper's
  * pid file appears; `launchctl submit` is the transient job the installer's
- * own service-guard uses on macOS. The final `spawn` rung starts `sh`
- * detached (a new session on POSIX) and is the everywhere-fallback.
+ * own service-guard uses on macOS. A submitted job carries KeepAlive on
+ * current macOS, so it is relaunched every few seconds until it is removed:
+ * the controller removes the job once the run rests ({@link removeLaunchdJob})
+ * and sweeps leftovers at boot/pre-launch ({@link listLaunchdJobs}). The final
+ * `spawn` rung starts `sh` detached (a new session on POSIX) and is the
+ * everywhere-fallback.
  *
  * @module dsh-enpoi-update-check/launcher
  */
 
-import { spawn as nodeSpawn, type SpawnOptions } from 'node:child_process'
+import { execFileSync, spawn as nodeSpawn, type SpawnOptions } from 'node:child_process'
 import { accessSync, constants, readdirSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { homedir } from 'node:os'
 
 /** Launch rungs, in ladder order per platform. */
 export type LaunchRung = 'systemd-run' | 'launchctl' | 'setsid' | 'spawn'
+
+/** Every launchd label this plugin submits starts with this prefix. */
+export const UPDATE_JOB_LABEL_PREFIX = 'com.dsh.update.'
+
+/**
+ * The launchd label for one run. A submitted job carries KeepAlive, so the
+ * controller must remove the job once the run rests; the label is derived
+ * from the run id on both sides (submit and removal), never reconstructed
+ * from launchctl output.
+ *
+ * @param runId - the run id recorded in `run.json`.
+ * @returns the submitted job's label.
+ */
+export function updateJobLabel(runId: string): string {
+  return `${UPDATE_JOB_LABEL_PREFIX}${runId}`
+}
 
 /** Where a resolved Node.js runtime came from. */
 export type RuntimeSource = 'prefix-runtime' | 'nvm' | 'path' | 'system'
@@ -390,10 +410,10 @@ export function launchPlan(input: LaunchPlanInput, environment: LaunchEnvironmen
     steps.push({
       rung: 'launchctl',
       command: 'launchctl',
-      unit: `com.dsh.update.${input.runId}`,
+      unit: updateJobLabel(input.runId),
       args: [
         'submit',
-        '-l', `com.dsh.update.${input.runId}`,
+        '-l', updateJobLabel(input.runId),
         '-o', input.logPath,
         '-e', input.logPath,
         '--',
@@ -474,6 +494,90 @@ export function launchUpdater(input: LaunchUpdaterInput): LaunchOutcome {
     }
   }
   throw lastError instanceof Error ? lastError : new Error('no launch rung could start the updater')
+}
+
+/**
+ * Remove one submitted launchd job (`launchctl remove <label>`). A job
+ * started with `launchctl submit` carries KeepAlive on current macOS, so a
+ * finished run's job is relaunched every few seconds until it is removed;
+ * the controller calls this only once the engine has exited, because the
+ * removal also terminates the job's processes.
+ *
+ * Darwin-only and fail-soft: the label is passed as a single argv element
+ * (never shell-interpolated), and a missing launchctl or a spawn failure
+ * returns false instead of throwing.
+ *
+ * @param label - the submitted job's label (see {@link updateJobLabel}).
+ * @param options - platform selector and spawn seam (tests).
+ * @returns true when the removal was spawned; false when not darwin or the
+ *   removal could not be spawned.
+ */
+export function removeLaunchdJob(
+  label: string,
+  options: { readonly platform?: string; readonly spawn?: LaunchSpawn } = {},
+): boolean {
+  if ((options.platform ?? process.platform) !== 'darwin') return false
+  const spawn = options.spawn ?? ((command, args, spawnOptions) => nodeSpawn(command, [...args], spawnOptions))
+  try {
+    const child = spawn('launchctl', ['remove', label], { detached: true, stdio: 'ignore' })
+    child.unref?.()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** One synchronous command's captured result (the listing probe). */
+export interface LaunchCommandResult {
+  /** Exit status, or null when the command never ran. */
+  readonly status: number | null
+  /** Captured stdout. */
+  readonly stdout: string
+}
+
+/** Synchronous command seam (tests inject a stub). */
+export type LaunchCommandRun = (command: string, args: readonly string[]) => LaunchCommandResult
+
+/** Default synchronous runner: `execFileSync` with stdout captured, fail-soft. */
+function defaultCommandRun(command: string, args: readonly string[]): LaunchCommandResult {
+  try {
+    const stdout = execFileSync(command, [...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    return { status: 0, stdout: typeof stdout === 'string' ? stdout : '' }
+  } catch (error) {
+    const failure = error as { status?: unknown; stdout?: unknown }
+    const stdout = typeof failure.stdout === 'string'
+      ? failure.stdout
+      : failure.stdout instanceof Uint8Array ? Buffer.from(failure.stdout).toString('utf8') : ''
+    return { status: typeof failure.status === 'number' ? failure.status : null, stdout }
+  }
+}
+
+/**
+ * Every submitted launchd label (`launchctl list`'s third column), or null
+ * when the platform is not darwin or the query fails. The caller filters for
+ * leftovers it owns ({@link UPDATE_JOB_LABEL_PREFIX}); the sweep is
+ * fail-soft because a missing launchctl only leaves stale jobs behind.
+ *
+ * @param options - platform selector and command seam (tests).
+ * @returns the labels, or null when the listing is unavailable.
+ */
+export function listLaunchdJobs(
+  options: { readonly platform?: string; readonly run?: LaunchCommandRun } = {},
+): string[] | null {
+  if ((options.platform ?? process.platform) !== 'darwin') return null
+  const run = options.run ?? defaultCommandRun
+  try {
+    const result = run('launchctl', ['list'])
+    if (result.status !== 0) return null
+    return result.stdout.split('\n')
+      .map(line => line.trim())
+      .filter(line => line !== '' && !line.startsWith('PID'))
+      // PID and status first, the label last; labels never contain whitespace.
+      .map(line => line.split(/\s+/).at(-1) ?? '')
+      .filter(label => label !== '')
+  } catch {
+    return null
+  }
 }
 
 /** Default `dsh` shim location when the install state records no binDir. */

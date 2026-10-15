@@ -15,11 +15,15 @@ import {
   launchUpdater,
   launchWrapper,
   LaunchEnvironmentError,
+  listLaunchdJobs,
+  removeLaunchdJob,
   resolveLaunchEnvironment,
   resolveRuntime,
   RUN_HOME_ENV,
   systemBinDirs,
+  UPDATE_JOB_LABEL_PREFIX,
   UPDATE_MODE_ENV,
+  updateJobLabel,
   wrapperArgs,
   type LaunchChild,
   type LaunchPlanInput,
@@ -289,6 +293,63 @@ describe('launchPlan', () => {
       'submit', '-l', 'com.dsh.update.run42', '-o', planInput.logPath, '-e', planInput.logPath, '--',
     ])
     expect(launchctl.args.slice(8, 11)).toEqual(['sh', '-c', expect.any(String)])
+  })
+})
+
+describe('launchd job removal and listing', () => {
+  it('submits the launchd job under the same label the removal targets', () => {
+    const root = scratch()
+    const planInput = input(root, { platform: 'darwin', hasCommand: () => true })
+    fakeNode(join(root, 'prefix', 'runtime', 'node', 'current', 'bin'))
+    const plan = launchPlan(planInput, resolveLaunchEnvironment(planInput))
+    const launchctl = plan[0]!
+    expect(launchctl.unit).toBe(updateJobLabel('run42'))
+    expect(launchctl.unit!.startsWith(UPDATE_JOB_LABEL_PREFIX)).toBe(true)
+    expect(launchctl.args).toContain(updateJobLabel('run42'))
+
+    const calls: { command: string; args: readonly string[] }[] = []
+    const removed = removeLaunchdJob(launchctl.unit!, {
+      platform: 'darwin',
+      spawn: (command, args) => {
+        calls.push({ command, args })
+        return { pid: 1 }
+      },
+    })
+    expect(removed).toBe(true)
+    expect(calls).toEqual([{ command: 'launchctl', args: ['remove', 'com.dsh.update.run42'] }])
+  })
+
+  it('never spawns the removal off darwin, and fails soft when the spawn fails', () => {
+    const spawn = vi.fn(() => ({ pid: 1 }))
+    expect(removeLaunchdJob(updateJobLabel('run42'), { platform: 'linux', spawn })).toBe(false)
+    expect(spawn).not.toHaveBeenCalled()
+    expect(removeLaunchdJob(updateJobLabel('run42'), {
+      platform: 'darwin',
+      spawn: () => { throw new Error('spawn launchctl ENOENT') },
+    })).toBe(false)
+  })
+
+  it('lists labels from launchctl list output, and stays quiet off darwin or on failure', () => {
+    const output = [
+      'PID\tStatus\tLabel',
+      '123\t0\tcom.dsh.update.run42',
+      '-\t0\tcom.dsh.update-guard.token1.123',
+      '\t0\tcom.example.other',
+    ].join('\n')
+    const run = vi.fn(() => ({ status: 0, stdout: output }))
+    expect(listLaunchdJobs({ platform: 'darwin', run })).toEqual([
+      'com.dsh.update.run42',
+      'com.dsh.update-guard.token1.123',
+      'com.example.other',
+    ])
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(run).toHaveBeenCalledWith('launchctl', ['list'])
+    // Off darwin the listing never runs; a failed or missing launchctl lists nothing.
+    const offPlatform = vi.fn(() => ({ status: 0, stdout: output }))
+    expect(listLaunchdJobs({ platform: 'linux', run: offPlatform })).toBeNull()
+    expect(offPlatform).not.toHaveBeenCalled()
+    expect(listLaunchdJobs({ platform: 'darwin', run: () => ({ status: 1, stdout: '' }) })).toBeNull()
+    expect(listLaunchdJobs({ platform: 'darwin', run: () => { throw new Error('spawn launchctl ENOENT') } })).toBeNull()
   })
 })
 

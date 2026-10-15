@@ -185,6 +185,10 @@ GUARD_BASELINE=""
 GUARD_TIMEOUT=""
 GUARD_EXPECT_RESTART=0
 GUARD_HOME=""
+# The launchd label that submitted this one-shot verifier (macOS only; empty
+# for the systemd/setsid path). The verifier removes its own job at exit so a
+# submitted job's KeepAlive can never relaunch it in a loop.
+GUARD_LAUNCHD_LABEL=""
 
 # Terminal styling (disabled when piped, non-TTY, dumb terminal, or NO_COLOR set)
 if [ -t 1 ] && [ -t 2 ] && [ "${TERM:-dumb}" != "dumb" ] && [ "${NO_COLOR:-0}" = "0" ]; then
@@ -787,6 +791,8 @@ while [ "$#" -gt 0 ]; do
     --guard-expect-restart) GUARD_EXPECT_RESTART=1; shift;;
     --guard-home) need_value "$@"; GUARD_HOME="$2"; shift 2;;
     --guard-home=*) GUARD_HOME="${arg#*=}"; shift;;
+    --guard-label) need_value "$@"; GUARD_LAUNCHD_LABEL="$2"; shift 2;;
+    --guard-label=*) GUARD_LAUNCHD_LABEL="${arg#*=}"; shift;;
     -h|--help) usage; exit 0;;
     --) shift; break;;
     *) die "unknown option: $arg (see --help)";;
@@ -4095,10 +4101,12 @@ spawn_service_guard() { # baseline expect_restart timeout
     darwin)
       label="com.dsh.update-guard.$token.$$"
       if command -v launchctl >/dev/null 2>&1; then
-        if launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1; then
-          log "service-guard: verifier $label is already loaded; reusing it"
-          return 0
-        fi
+        # A submitted job carries KeepAlive, so a same-label leftover (or a
+        # verifier that already exited) would be relaunched forever. Remove
+        # any same-label job first, and hand the label to the verifier so it
+        # removes its own job on every exit path.
+        launchctl remove "$label" >/dev/null 2>&1 || true
+        guard_args+=(--guard-label "$label")
         if launchctl submit -l "$label" -o "$guard_log" -e "$guard_log" -- /usr/bin/env -u DSH_INSTALL_LIB_ONLY /bin/bash "$script" "${guard_args[@]}" >/dev/null 2>&1; then
           log "service-guard: detached verifier submitted ($label)"
           return 0
@@ -4148,10 +4156,32 @@ delegate_service_restart() {
   return 0
 }
 
+# Remove the launchd job that ran this one-shot verifier (macOS). A submitted
+# job carries KeepAlive, so without this it would be relaunched every few
+# seconds after the verifier exits. A no-op on the systemd/setsid path (the
+# label is empty) and when launchctl is unavailable; never fails the caller.
+guard_remove_launchd_job() {
+  [ -n "${GUARD_LAUNCHD_LABEL:-}" ] || return 0
+  [ "${OS:-}" = darwin ] || return 0
+  command -v launchctl >/dev/null 2>&1 || return 0
+  launchctl remove "$GUARD_LAUNCHD_LABEL" >/dev/null 2>&1 || true
+  log "service-guard: removed launchd job $GUARD_LAUNCHD_LABEL (one-shot verifier finished)"
+  return 0
+}
+
 # The detached verifier (internal --service-guard mode): wait for the delegated
 # restart to activate the unit, then confirm the unit is up; when it is down,
-# start or bootstrap it and record the outcome in the install log.
+# start or bootstrap it and record the outcome in the install log. Every exit
+# path — success and failure — removes this one-shot verifier's launchd job.
 do_service_guard() {
+  local guard_rc=0
+  do_service_guard_run || guard_rc=$?
+  guard_remove_launchd_job
+  return "$guard_rc"
+}
+
+# The verifier body behind do_service_guard.
+do_service_guard_run() {
   local unit="$SERVICE_UNIT" timeout interval recover kick baseline generation
   local start now saw_outage=0
   timeout="${GUARD_TIMEOUT:-${DSH_SERVICE_GUARD_TIMEOUT:-180}}"

@@ -169,10 +169,14 @@ import { dirname as dirname2, join as join5 } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // src/launcher.ts
-import { spawn as nodeSpawn } from "node:child_process";
+import { execFileSync, spawn as nodeSpawn } from "node:child_process";
 import { accessSync, constants, readdirSync } from "node:fs";
 import { delimiter, join as join2 } from "node:path";
 import { homedir } from "node:os";
+var UPDATE_JOB_LABEL_PREFIX = "com.dsh.update.";
+function updateJobLabel(runId) {
+  return `${UPDATE_JOB_LABEL_PREFIX}${runId}`;
+}
 var RUN_HOME_ENV = "DSH_HOME";
 var UPDATE_MODE_ENV = "DSH_UPDATE_MODE";
 var LaunchEnvironmentError = class extends Error {
@@ -361,11 +365,11 @@ function launchPlan(input, environment) {
     steps.push({
       rung: "launchctl",
       command: "launchctl",
-      unit: `com.dsh.update.${input.runId}`,
+      unit: updateJobLabel(input.runId),
       args: [
         "submit",
         "-l",
-        `com.dsh.update.${input.runId}`,
+        updateJobLabel(input.runId),
         "-o",
         input.logPath,
         "-e",
@@ -405,6 +409,38 @@ function launchUpdater(input) {
     }
   }
   throw lastError instanceof Error ? lastError : new Error("no launch rung could start the updater");
+}
+function removeLaunchdJob(label, options = {}) {
+  if ((options.platform ?? process.platform) !== "darwin") return false;
+  const spawn3 = options.spawn ?? ((command, args, spawnOptions) => nodeSpawn(command, [...args], spawnOptions));
+  try {
+    const child = spawn3("launchctl", ["remove", label], { detached: true, stdio: "ignore" });
+    child.unref?.();
+    return true;
+  } catch {
+    return false;
+  }
+}
+function defaultCommandRun(command, args) {
+  try {
+    const stdout = execFileSync(command, [...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    return { status: 0, stdout: typeof stdout === "string" ? stdout : "" };
+  } catch (error) {
+    const failure = error;
+    const stdout = typeof failure.stdout === "string" ? failure.stdout : failure.stdout instanceof Uint8Array ? Buffer.from(failure.stdout).toString("utf8") : "";
+    return { status: typeof failure.status === "number" ? failure.status : null, stdout };
+  }
+}
+function listLaunchdJobs(options = {}) {
+  if ((options.platform ?? process.platform) !== "darwin") return null;
+  const run = options.run ?? defaultCommandRun;
+  try {
+    const result = run("launchctl", ["list"]);
+    if (result.status !== 0) return null;
+    return result.stdout.split("\n").map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("PID")).map((line) => line.split(/\s+/).at(-1) ?? "").filter((label) => label !== "");
+  } catch {
+    return null;
+  }
 }
 function defaultShimPath() {
   return join2(homedir(), ".local", "bin", "dsh");
@@ -501,7 +537,7 @@ function cancelEngineRun(input) {
 }
 
 // src/marker.ts
-import { execFileSync } from "node:child_process";
+import { execFileSync as execFileSync2 } from "node:child_process";
 import { readFileSync as readFileSync3 } from "node:fs";
 import { join as join4 } from "node:path";
 
@@ -833,7 +869,7 @@ function isProcessLive(pid, platform = process.platform) {
     }
   }
   try {
-    const out = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).trim();
+    const out = execFileSync2("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).trim();
     return out !== "" && !out.startsWith("Z") && !out.startsWith("X");
   } catch {
     return true;
@@ -1118,7 +1154,10 @@ var UpdateRunController = class {
       prefix: this.prefix,
       now: this.now
     }, { live: false });
-    if (changed) this.persist(record);
+    if (changed) {
+      this.persist(record);
+      this.removeSubmittedJob(record);
+    }
     this.stopWatcher();
     try {
       rmSync(runPidPath(this.options.home), { force: true });
@@ -1168,6 +1207,7 @@ var UpdateRunController = class {
    * @returns the reconciled record, or null when none exists.
    */
   reconcile() {
+    this.sweepStaleLaunchdJobs();
     const current = this.loadOwn();
     if (current === null) return null;
     if (current.result === null && !isPreparedPhase(current.phase) && this.blockingRun(current)) {
@@ -1366,6 +1406,7 @@ var UpdateRunController = class {
         now: this.now
       }, { live: false });
       this.persist(record);
+      this.removeSubmittedJob(record);
       this.stopWatcher();
     }
     try {
@@ -1414,6 +1455,7 @@ var UpdateRunController = class {
     if (current !== null && current.observed !== true) {
       const next = this.terminalRecord(current, "cancelled");
       this.persist(next);
+      this.removeSubmittedJob(next);
       this.stopWatcher();
       return next;
     }
@@ -1433,6 +1475,7 @@ var UpdateRunController = class {
   }
   /** Persist a fresh record for `mode`, launch its engine invocation, and watch it. */
   begin(mode, pin) {
+    this.sweepStaleLaunchdJobs();
     const shim = (this.options.resolveShim ?? resolveShimPath)(this.options.home);
     if (shim === null) {
       throw new RunRefusedError(
@@ -1538,7 +1581,10 @@ var UpdateRunController = class {
   tick() {
     const record = this.record;
     if (record === null || record.result !== null) {
-      if (record !== null && !this.isAliveRecord(record)) this.stopWatcher();
+      if (record !== null && !this.isAliveRecord(record) && !this.processLive(record)) {
+        this.removeSubmittedJob(record);
+        this.stopWatcher();
+      }
       return;
     }
     const parsed = readRunLog(record.logPath);
@@ -1560,21 +1606,27 @@ var UpdateRunController = class {
     if (isPreparedPhase(record.phase)) {
       if (staged) {
         this.persist(base);
+        this.removeSubmittedJob(base);
         this.stopWatcher();
         return;
       }
       this.persist(this.failedRecord(base, "the staged update disappeared before it was applied"));
+      this.removeSubmittedJob(base);
       this.stopWatcher();
       return;
     }
     if (parsed.result !== null) {
       this.persist(this.terminalRecord(base, parsed.result));
-      if (!alive) this.stopWatcher();
+      if (!alive) {
+        this.removeSubmittedJob(base);
+        this.stopWatcher();
+      }
       return;
     }
     if (!alive && !withinGrace) {
       if (record.mode === "prepare" && staged) {
         this.persist(preparedRecord(base, this.now));
+        this.removeSubmittedJob(base);
         this.stopWatcher();
         return;
       }
@@ -1582,6 +1634,7 @@ var UpdateRunController = class {
         base,
         parsed.lastLine === "" ? `the ${record.mode} run exited before writing any output` : `the ${record.mode} run exited before reporting a result (last line: ${parsed.lastLine})`
       ));
+      this.removeSubmittedJob(base);
       this.stopWatcher();
       return;
     }
@@ -1644,6 +1697,60 @@ var UpdateRunController = class {
   blockingRun(record) {
     if (record.result !== null || isPreparedPhase(record.phase)) return false;
     return this.isAliveRecord(record) || this.engineRunActiveFor(record);
+  }
+  /**
+   * Raw process liveness for a resting record: the wrapper pid first (the
+   * wrapper `exec`s the engine, so that pid is the engine's own), then the
+   * record's launch pid. Used before removing a launchd job, whose removal
+   * also terminates the job's processes.
+   */
+  processLive(record) {
+    const pid = effectivePid(this.options.home, record);
+    return pid !== null && (this.options.isAlive ?? isProcessLive)(pid);
+  }
+  /** Remove one launchd job label through the seam; fail-soft. */
+  removeLaunchdJobLabel(label) {
+    const remove = this.options.removeJob ?? ((jobLabel) => removeLaunchdJob(jobLabel));
+    try {
+      remove(label);
+    } catch {
+    }
+  }
+  /**
+   * Remove the submitted launchd job that ran one record. Only a run launched
+   * through the launchctl rung owns such a job. The caller must have
+   * established that the engine exited: the removal also stops the job's
+   * processes, and a KeepAlive job would otherwise relaunch the run forever.
+   */
+  removeSubmittedJob(record) {
+    if (record.launcher !== "launchctl") return;
+    this.removeLaunchdJobLabel(updateJobLabel(record.runId));
+  }
+  /**
+   * Remove leftover `com.dsh.update.*` launchd jobs (macOS only). A submitted
+   * job carries KeepAlive, so one whose engine already exited is relaunched
+   * every few seconds forever; a live, progressing run owns its job and the
+   * sweep is skipped then. Fail-soft and off-darwin: an unavailable
+   * `launchctl list` removes nothing (never blocks mount).
+   */
+  sweepStaleLaunchdJobs() {
+    const list = this.options.listJobs ?? (() => listLaunchdJobs());
+    let labels;
+    try {
+      labels = list();
+    } catch {
+      return;
+    }
+    if (labels === null) return;
+    const own = this.record;
+    if (own !== null && own.result === null && !isPreparedPhase(own.phase) && this.isAliveRecord(own)) return;
+    const marker = readRunMarker(this.prefix);
+    if (marker !== null && isMarkerLive(marker, this.options.isAlive ?? isProcessLive, {
+      progressAgeMs: markerProgressAge(marker, this.prefix, this.now().getTime())
+    })) return;
+    for (const label of labels) {
+      if (label.startsWith(UPDATE_JOB_LABEL_PREFIX)) this.removeLaunchdJobLabel(label);
+    }
   }
 };
 
@@ -2016,6 +2123,7 @@ export {
   RUN_STEP_TOTAL,
   RunRefusedError,
   UPDATE_CHECK_NAMESPACE,
+  UPDATE_JOB_LABEL_PREFIX,
   UPDATE_MODE_ENV,
   UpdateCheckCore,
   UpdateCheckService,
@@ -2044,6 +2152,7 @@ export {
   launchPlan,
   launchUpdater,
   launchWrapper,
+  listLaunchdJobs,
   markerProgressAge,
   modeFlag,
   modeFromMarker,
@@ -2066,6 +2175,7 @@ export {
   readRunRecord,
   readStagedApply,
   reconcileRunRecord,
+  removeLaunchdJob,
   resolveLaunchEnvironment,
   resolvePrefix,
   resolveRuntime,
@@ -2086,6 +2196,7 @@ export {
   systemBinDirs,
   terminalRecord,
   updateCheckDir,
+  updateJobLabel,
   wrapperArgs,
   writeDismissedVersion,
   writeRunRecord

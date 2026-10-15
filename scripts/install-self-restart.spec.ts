@@ -352,7 +352,11 @@ describe('delegated restart from inside the unit', () => {
     })
     expect(result.output).toContain('RC=0')
     const log = readLog(launchctl.log)
+    // A submitted job carries KeepAlive: any same-label leftover is removed
+    // before the new submit, so it can never be relaunched in a loop.
+    expect(log).toContain('remove com.dsh.update-guard.')
     expect(log).toContain('submit -l com.dsh.update-guard.')
+    expect(log.indexOf('remove com.dsh.update-guard.')).toBeLessThan(log.indexOf('submit -l com.dsh.update-guard.'))
     expect(log).toContain('kickstart -k gui/')
   })
 })
@@ -476,6 +480,109 @@ describe('detached verifier --service-guard', () => {
     expect(result.status).toBe(0)
     expect(result.systemctl).toContain('restart test.service')
     expect(result.log).toContain('restarting test.service from the detached verifier')
+  })
+
+  it('removes its own launchd job after a successful verification (macOS)', () => {
+    const root = tempRoot()
+    const home = join(root, 'home')
+    const prefix = join(root, 'prefix')
+    const launchctl = fakeLaunchctl(root)
+    const logFile = join(prefix, 'logs', 'install.log')
+    mkdirSync(join(prefix, 'logs'), { recursive: true })
+    const label = 'com.dsh.update-guard.token1.123'
+    const result = runLibrary([
+      'OS=darwin',
+      'SERVICE_UNIT=test.label',
+      `PREFIX=${prefix}`,
+      `DSH_HOME=${home}`,
+      `LOG_FILE=${logFile}`,
+      'GUARD_TIMEOUT=1',
+      'DSH_SERVICE_GUARD_INTERVAL=1',
+      `GUARD_LAUNCHD_LABEL=${label}`,
+      'PATH="$STUB_BIN:$PATH"',
+      'do_service_guard',
+      'printf "RC=%s\\n" "$?"',
+    ].join('\n'), {
+      home,
+      path: launchctl.binDir,
+      env: { LAUNCHCTL_LOG: launchctl.log, PRINT_PID: '1' },
+    })
+    expect(result.output).toContain('RC=0')
+    expect(readLog(launchctl.log)).toContain(`remove ${label}`)
+    expect(readFileSync(logFile, 'utf8')).toContain(`removed launchd job ${label} (one-shot verifier finished)`)
+  })
+
+  it('removes its own launchd job on the failure exit too (macOS)', () => {
+    const root = tempRoot()
+    const home = join(root, 'home')
+    const prefix = join(root, 'prefix')
+    const launchctl = fakeLaunchctl(root)
+    const logFile = join(prefix, 'logs', 'install.log')
+    mkdirSync(join(prefix, 'logs'), { recursive: true })
+    const label = 'com.dsh.update-guard.token1.456'
+    const result = runLibrary([
+      'OS=darwin',
+      'SERVICE_UNIT=test.label',
+      `PREFIX=${prefix}`,
+      `DSH_HOME=${home}`,
+      `LOG_FILE=${logFile}`,
+      'GUARD_TIMEOUT=1',
+      'DSH_SERVICE_GUARD_INTERVAL=1',
+      `GUARD_LAUNCHD_LABEL=${label}`,
+      'PATH="$STUB_BIN:$PATH"',
+      'do_service_guard',
+      'printf "RC=%s\\n" "$?"',
+    ].join('\n'), {
+      home,
+      path: launchctl.binDir,
+      // No pid and no plist: the unit never becomes active and cannot be
+      // started, so do_service_guard fails — and still removes its job.
+      env: { LAUNCHCTL_LOG: launchctl.log, PRINT_UNIT_EXIT: '1' },
+    })
+    expect(result.output).toContain('RC=1')
+    expect(readLog(launchctl.log)).toContain(`remove ${label}`)
+    expect(readFileSync(logFile, 'utf8')).toContain('ERROR: could not start or bootstrap test.label')
+    expect(readFileSync(logFile, 'utf8')).toContain(`removed launchd job ${label}`)
+  })
+
+  it('removes only its own labeled job, only on darwin, and is a no-op without a label', () => {
+    const root = tempRoot()
+    const home = join(root, 'home')
+    const launchctl = fakeLaunchctl(root)
+    mkdirSync(home, { recursive: true })
+    const label = 'com.dsh.update-guard.token1.789'
+
+    const removed = runLibrary([
+      'OS=darwin',
+      `LOG_FILE=${join(home, 'install.log')}`,
+      `GUARD_LAUNCHD_LABEL=${label}`,
+      'PATH="$STUB_BIN:$PATH"',
+      'guard_remove_launchd_job; printf "RC=%s\\n" "$?"',
+    ].join('\n'), { home, path: launchctl.binDir, env: { LAUNCHCTL_LOG: launchctl.log } })
+    expect(removed.output).toContain('RC=0')
+    expect(readLog(launchctl.log)).toContain(`remove ${label}`)
+    expect(readFileSync(join(home, 'install.log'), 'utf8')).toContain(`removed launchd job ${label}`)
+
+    // The systemd/setsid path carries no label, and a non-darwin OS never
+    // touches launchctl.
+    const unlabeledLog = join(root, 'launchctl-unlabeled.log')
+    const unlabeled = runLibrary([
+      'OS=darwin',
+      'PATH="$STUB_BIN:$PATH"',
+      'guard_remove_launchd_job; printf "RC=%s\\n" "$?"',
+    ].join('\n'), { home, path: launchctl.binDir, env: { LAUNCHCTL_LOG: unlabeledLog } })
+    expect(unlabeled.output).toContain('RC=0')
+    expect(existsSync(unlabeledLog)).toBe(false)
+
+    const linuxLog = join(root, 'launchctl-linux.log')
+    const linux = runLibrary([
+      'OS=linux',
+      `GUARD_LAUNCHD_LABEL=${label}`,
+      'PATH="$STUB_BIN:$PATH"',
+      'guard_remove_launchd_job; printf "RC=%s\\n" "$?"',
+    ].join('\n'), { home, path: launchctl.binDir, env: { LAUNCHCTL_LOG: linuxLog } })
+    expect(linux.output).toContain('RC=0')
+    expect(existsSync(linuxLog)).toBe(false)
   })
 
   it('bootstraps an unloaded macOS unit (the guard recovery primitive)', () => {

@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { InstallIdentity } from '../src/catalog.js'
 import type { EngineCancelOutcome } from '../src/cancel.js'
-import type { LaunchOutcome, LaunchUpdaterInput } from '../src/launcher.js'
+import { updateJobLabel, type LaunchOutcome, type LaunchUpdaterInput } from '../src/launcher.js'
 import { runMarkerPath, type EngineRunMarker } from '../src/marker.js'
 import { runLogPath, runPidPath, runRecordPath, stagedApplyPath, type UpdateRunRecord } from '../src/run.js'
 import {
@@ -78,6 +78,8 @@ interface Bench {
   controller: UpdateRunController
   ticks: ReturnType<typeof manualTimers>
   launches: LaunchUpdaterInput[]
+  /** Every launchd-job label the controller asked the removal seam to remove. */
+  removals: string[]
   home: string
   shim: string
 }
@@ -92,14 +94,23 @@ function bench(options: {
   probeCapability?: 'supported' | 'unsupported'
   probe?: () => Promise<{ capability: 'supported' | 'unsupported'; reason?: string }>
   cancelEngine?: () => Promise<EngineCancelOutcome>
+  /** launchd-job removal seam; the bench records every call by default. */
+  removeJob?: (label: string) => boolean
+  /** launchd-job listing seam; null (no listing) by default, like off-darwin. */
+  listJobs?: () => readonly string[] | null
 } = {}): Bench {
   const home = options.home ?? scratch()
   const ticks = manualTimers()
   const launches: LaunchUpdaterInput[] = []
+  const removals: string[] = []
   const shim = join(home, 'bin', 'dsh')
   const launch = options.launch ?? ((input: LaunchUpdaterInput) => {
     launches.push(input)
     return { rung: 'setsid', pid: 4242 }
+  })
+  const removeJob = options.removeJob ?? ((label: string) => {
+    removals.push(label)
+    return true
   })
   const controller = new UpdateRunController({
     home,
@@ -114,11 +125,13 @@ function bench(options: {
     probe: options.probe ?? (async () => (options.probeCapability === 'unsupported'
       ? { capability: 'unsupported', reason: 'engine help does not list --prepare (exit 0)' }
       : { capability: 'supported' })),
+    removeJob,
+    listJobs: options.listJobs ?? (() => null),
     ...(options.cancelEngine === undefined ? {} : { cancelEngine: options.cancelEngine }),
     ...(options.isAlive === undefined ? {} : { isAlive: options.isAlive }),
     ...(options.now === undefined ? {} : { now: options.now }),
   })
-  return { controller, ticks, launches, home, shim }
+  return { controller, ticks, launches, removals, home, shim }
 }
 
 async function deadPid(): Promise<number> {
@@ -889,6 +902,170 @@ describe('UpdateRunController clearStale', () => {
     expect(cleared).toMatchObject({ phase: 'prepared', result: null })
     const applied = b.controller.apply()
     expect(applied).toMatchObject({ mode: 'apply', target: '0.1.7-enpoi.2.87' })
+    b.controller.dispose()
+  })
+})
+
+describe('UpdateRunController launchd job removal', () => {
+  /** A launch outcome on the macOS launchctl rung (the run id the bench pins). */
+  function launchctlRung(): LaunchOutcome {
+    return { rung: 'launchctl', unit: updateJobLabel('run42'), pid: 4242 }
+  }
+
+  it('removes the submitted job when a launched run reaches a terminal result', async () => {
+    const b = bench({ launch: launchctlRung, isAlive: () => false })
+    await b.controller.start()
+    writeLog(b.home, '[1/9] environment\nEnpoi Harness successfully updated!\n')
+    writeFileSync(runPidPath(b.home), `${String(await deadPid())}\n`)
+    b.ticks.tick()
+    expect(b.controller.run()).toMatchObject({ result: 'success', launcher: 'launchctl' })
+    expect(b.removals).toEqual([updateJobLabel('run42')])
+    expect(b.ticks.active()).toBe(0)
+    b.controller.dispose()
+  })
+
+  it('never removes the job while the engine is alive; the later resting tick removes it', async () => {
+    const alive = { value: true }
+    const b = bench({ launch: launchctlRung, isAlive: () => alive.value })
+    await b.controller.start()
+    writeLog(b.home, 'Enpoi Harness successfully updated!\n')
+    b.ticks.tick()
+    expect(b.controller.run()).toMatchObject({ result: 'success' })
+    // The terminal line landed while the engine still ran: the job stays.
+    expect(b.removals).toEqual([])
+    expect(b.ticks.active()).toBe(1)
+    // The engine exits; the next tick sees a resting record, removes, stops.
+    alive.value = false
+    b.ticks.tick()
+    expect(b.removals).toEqual([updateJobLabel('run42')])
+    expect(b.ticks.active()).toBe(0)
+    b.controller.dispose()
+  })
+
+  it('removes the job when a prepare rests at prepared', async () => {
+    const b = bench({ launch: launchctlRung, isAlive: () => false })
+    await b.controller.start()
+    stageApply(b.home)
+    writeLog(b.home, '[7/9] home, dependencies and migrations\n')
+    writeFileSync(runPidPath(b.home), `${String(await deadPid())}\n`)
+    b.ticks.tick()
+    expect(b.controller.run()).toMatchObject({ phase: 'prepared', staged: true, launcher: 'launchctl' })
+    expect(b.removals).toEqual([updateJobLabel('run42')])
+    b.controller.dispose()
+  })
+
+  it('removes the job when the engine exits without a result', async () => {
+    const b = bench({ launch: launchctlRung, isAlive: () => false })
+    await b.controller.start()
+    writeLog(b.home, '[4/9] dependencies and build\nunpacking archive\n')
+    writeFileSync(runPidPath(b.home), `${String(await deadPid())}\n`)
+    b.ticks.tick()
+    expect(b.controller.run()).toMatchObject({ result: 'failed', launcher: 'launchctl' })
+    expect(b.removals).toEqual([updateJobLabel('run42')])
+    b.controller.dispose()
+  })
+
+  it('removes the job when a successful cancel relays into a cancelled record', async () => {
+    const b = bench({
+      launch: launchctlRung,
+      isAlive: () => true,
+      cancelEngine: async () => ({ status: 'cancelled', message: 'stopped', runId: 'run42', pid: 4242, phase: 'cancelled' }),
+    })
+    await b.controller.start()
+    const outcome = await b.controller.cancel()
+    expect(outcome.record).toMatchObject({ result: 'cancelled', launcher: 'launchctl' })
+    expect(b.removals).toEqual([updateJobLabel('run42')])
+    b.controller.dispose()
+  })
+
+  it('removes the job when a stale read heals the run (healStaleOwn)', async () => {
+    const home = scratch()
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: {
+        runId: 'run42',
+        phase: 'preparing',
+        step: 4,
+        launcher: 'launchctl',
+        startedAt: new Date(Date.now() - 30 * 60_000).toISOString(),
+      },
+    }).record, await deadPid())
+    const b = bench({ home })
+    expect(b.controller.run()).toMatchObject({ result: 'failed' })
+    expect(b.removals).toEqual([updateJobLabel('run42')])
+    b.controller.dispose()
+  })
+
+  it('removes the job when clearStale heals a dead run', async () => {
+    const home = scratch()
+    writeLiveRecord(home, recordFixture({
+      home,
+      record: {
+        runId: 'run42',
+        phase: 'preparing',
+        step: 4,
+        launcher: 'launchctl',
+        startedAt: new Date(Date.now() - 30 * 60_000).toISOString(),
+      },
+    }).record, await deadPid())
+    const b = bench({ home })
+    expect(b.controller.clearStale()).toMatchObject({ result: 'failed' })
+    expect(b.removals).toEqual([updateJobLabel('run42')])
+    b.controller.dispose()
+  })
+
+  it('sweeps leftover com.dsh.update.* jobs at boot when the marker is not live', () => {
+    const labels = [updateJobLabel('aaa'), 'com.other.job', 'com.dsh.update-guard.token.1', updateJobLabel('bbb')]
+    const b = bench({ listJobs: () => labels })
+    expect(b.controller.reconcile()).toBeNull()
+    // Only this plugin's own update jobs; unrelated and guard labels stay.
+    expect(b.removals).toEqual([updateJobLabel('aaa'), updateJobLabel('bbb')])
+    b.controller.dispose()
+  })
+
+  it('skips the sweep while the engine marker names a live run', () => {
+    const home = scratch()
+    const log = join(home, 'install.log')
+    writeFileSync(log, '[2/9] source\n')
+    mkdirSync(join(home, 'harness'), { recursive: true })
+    writeFileSync(runMarkerPath(home), JSON.stringify({
+      runId: 'ext-1', pid: process.pid, mode: 'plain', step: 2, steps: 9, phase: 'running',
+      startedAt: new Date().toISOString(), logPath: log, version: '', target: '',
+    }))
+    const b = bench({ home, listJobs: () => [updateJobLabel('ccc')] })
+    b.controller.reconcile()
+    expect(b.removals).toEqual([])
+    b.controller.dispose()
+  })
+
+  it('skips the sweep while the controller’s own launchd run is executing', async () => {
+    const alive = { value: true }
+    let listings = 0
+    const b = bench({
+      launch: launchctlRung,
+      isAlive: () => alive.value,
+      // start() lists twice (reconcile + begin) before anything exists; only
+      // the post-start reconcile sees labels, while the own run is executing.
+      listJobs: () => (++listings >= 3 ? [updateJobLabel('ccc')] : []),
+    })
+    await b.controller.start()
+    expect(listings).toBe(2)
+    expect(b.removals).toEqual([])
+    // The engine has not written its marker yet: the own executing record is
+    // the liveness evidence that keeps the sweep away from its job.
+    b.controller.reconcile()
+    expect(listings).toBe(3)
+    expect(b.removals).toEqual([])
+    b.controller.dispose()
+  })
+
+  it('runs the pre-launch sweep in begin() before launching a new run', async () => {
+    let listings = 0
+    const b = bench({ listJobs: () => (++listings === 2 ? [updateJobLabel('old')] : []) })
+    await b.controller.start()
+    // First listing from start()'s reconcile, second from begin() itself.
+    expect(listings).toBe(2)
+    expect(b.removals).toEqual([updateJobLabel('old')])
     b.controller.dispose()
   })
 })
