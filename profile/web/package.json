@@ -85,14 +85,5 @@
         "dsh-enpoi-commandcode-provider"
       ]
     }
-  },
-  "pnpm": {
-    "patchedDependencies": {
-      "@deepseek-ai/dsh-web-frontend@0.1.7-enpoi.1": "patches/@deepseek-ai__dsh-web-frontend@0.1.7-enpoi.1.patch"
-    },
-    "allowNonAppliedPatches": true,
-    "onlyBuiltDependencies": [
-      "esbuild"
-    ]
   }
 }
