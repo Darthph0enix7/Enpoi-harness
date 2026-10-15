@@ -1,8 +1,17 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-14T16:19:10.113Z",
+  "generatedAt": "2026-10-15T12:34:50.442Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.93",
+      "commit": "b3e4691",
+      "releasedAt": "2026-10-14T17:46:51.000Z",
+      "notes": [
+        "fix(update): pre-sign-off fix wave for the update system",
+        "docs(plan): consolidate the update-system reference and the 2.78-2.92 arc log"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.92",
       "commit": "93fd627",
@@ -342,14 +351,6 @@
       "releasedAt": "2026-10-10T12:34:49.000Z",
       "notes": [
         "fix(install): wrap-proof TTY progress frames (width-clamped, degradation ladder)"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.51",
-      "commit": "55273e6",
-      "releasedAt": "2026-10-10T11:44:17.000Z",
-      "notes": [
-        "fix(install): live update progress, per-step heartbeats, and no silent exec death"
       ]
     }
   ]
