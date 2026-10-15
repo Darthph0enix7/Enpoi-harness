@@ -106,6 +106,9 @@ importers:
       dsh-enpoi-runtime-probe:
         specifier: workspace:*
         version: link:packages/enpoi-runtime-probe
+      dsh-enpoi-skin-guard:
+        specifier: workspace:*
+        version: link:packages/enpoi-skin-guard
       dsh-enpoi-tool-groups:
         specifier: workspace:*
         version: link:packages/enpoi-tool-groups
@@ -246,6 +249,8 @@ importers:
         version: link:../enpoi-contracts
 
   packages/enpoi-runtime-probe: {}
+
+  packages/enpoi-skin-guard: {}
 
   packages/enpoi-tool-groups:
     dependencies:

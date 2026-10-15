@@ -1,0 +1,11 @@
+# dsh-enpoi-skin-guard bundle patch — enforces the frozen skin on every platform.
+#
+# ui-skin-center persists `active: null` when its catalog refresh momentarily
+# misses the active skin (or the stock selection is chosen), which reverts the
+# theme to stock. This guard rewrites only a null selection back to the
+# configured skin; a deliberate switch to another skin is never overridden.
+# An operator's systemd dsh-skin-guard.path unit, where installed, stays
+# belt-and-braces.
+- insert:
+    - id: enpoi-skin-guard
+      name: 'dsh-enpoi-skin-guard'

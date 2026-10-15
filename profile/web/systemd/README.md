@@ -14,7 +14,9 @@ serverlocal paths, node, IP, or hostnames (`/home/adam`, `100.122.163.25`,
 - `dsh-skin-guard.path` / `dsh-skin-guard.service` — watches
   `~/.dsh/skin-center-active.json` and restores the summer-liquid-glass skin
   (the script is `scripts/dsh-skin-guard.mjs`; the serverlocal unit expects it at
-  `~/.local/bin/dsh-skin-guard.mjs`).
+  `~/.local/bin/dsh-skin-guard.mjs`). The cross-platform guard is the in-process
+  `dsh-enpoi-skin-guard` profile plugin; these units stay serverlocal-only
+  belt-and-braces.
 
 ## Fresh installs
 
