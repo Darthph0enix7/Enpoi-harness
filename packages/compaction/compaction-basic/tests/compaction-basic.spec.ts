@@ -318,7 +318,7 @@ describe('compact configuration and defaults', () => {
     const resolved = resolveConfig({})
 
     expect(resolved).toEqual({
-      thresholdRatio: 0.8,
+      thresholdRatio: 0.6,
       headroomTokens: 65_536,
       retainRatio: 0.16,
       summarizationProvider: '',
@@ -369,7 +369,7 @@ describe('compact configuration and defaults', () => {
       retainTokens: 70,
     })
     expect(retentionOnly).toMatchObject({
-      thresholdRatio: 0.8,
+      thresholdRatio: 0.6,
       retainTokens: 70,
     })
     expect(retentionOnly).not.toHaveProperty('retainRatio')
@@ -435,11 +435,11 @@ describe('compact configuration and defaults', () => {
   })
 
   it.each([
-    [1_048_576, 256_000, 727_040, 126_812],
-    [1_000_000, 0, 800_000, 160_000],
-    [1_000_000, 100_000, 800_000, 144_000],
-    [1_000_000, 134_464, 800_000, 138_485],
-    [1_000_000, 256_000, 678_464, 119_040],
+    [1_048_576, 256_000, 629_145, 126_812],
+    [1_000_000, 0, 600_000, 160_000],
+    [1_000_000, 100_000, 600_000, 144_000],
+    [1_000_000, 134_464, 600_000, 138_485],
+    [1_000_000, 256_000, 600_000, 119_040],
   ])('reserves 64K headroom in window %i with output cap %i', (window, output, threshold, retained) => {
     const policy = resolveTargetPolicy(resolveConfig({}), { provider: MODEL, model: MODEL })
 
@@ -528,7 +528,7 @@ describe('compact configuration and defaults', () => {
       [{ summarizationModel: '' }, /must be set together/],
       [{ thresholdRatio: 0 }, /number in \(0, 1\]/],
       [{ thresholdRatio: 1.1 }, /number in \(0, 1\]/],
-      [{ retainRatio: 0.9 }, /retainRatio \(0.9\) must be less than the resolved thresholdRatio \(0.8\)/],
+      [{ retainRatio: 0.9 }, /retainRatio \(0.9\) must be less than the resolved thresholdRatio \(0.6\)/],
       [{ thresholdRatio: 0.1 }, /retainRatio \(0.16\) must be less than the resolved thresholdRatio \(0.1\)/],
       [{ retainTokens: -1 }, /non-negative integer/],
       [{ retainRatio: 0.2, retainTokens: 100 }, /mutually exclusive/],
@@ -558,7 +558,7 @@ describe('compact configuration and defaults', () => {
       ],
       [
         { modelPolicies: [{ provider: MODEL, model: MODEL, retainRatio: 0.9 }] },
-        /modelPolicies\[0\]: retainRatio \(0.9\).*thresholdRatio \(0.8\)/,
+        /modelPolicies\[0\]: retainRatio \(0.9\).*thresholdRatio \(0.6\)/,
       ],
       [{ modelPolicies: [{ provider: MODEL, model: MODEL }, { provider: MODEL, model: MODEL }] }, /duplicate model policy/],
       [{ models: { [MODEL]: { retainTokens: 10 } } }, /BasicCompactionConfig: unknown key "models"/],

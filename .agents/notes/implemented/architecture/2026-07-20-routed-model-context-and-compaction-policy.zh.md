@@ -24,7 +24,7 @@ Status: implemented
 
 ### Compact-basic 解析目标规格
 
-Compact-basic 拥有消费方策略。顶层字段定义默认值；`modelPolicies` 包含以精确 `{ provider, model }` 组合为键的部分覆盖。重复目标、未知字段或无效字段都会让插件加载失败。`thresholdRatio` 默认为 `0.8`，保留策略默认为 `retainRatio: 0.16`；调用方也可以改用绝对 `retainTokens`，但两种保留形式互斥。完成继承后，如果保留比例不小于阈值比例，插件也会加载失败，因为任何模型容量都无法让该策略有效。
+Compact-basic 拥有消费方策略。顶层字段定义默认值；`modelPolicies` 包含以精确 `{ provider, model }` 组合为键的部分覆盖。重复目标、未知字段或无效字段都会让插件加载失败。`thresholdRatio` 默认为 `0.6`，保留策略默认为 `retainRatio: 0.16`；调用方也可以改用绝对 `retainTokens`，但两种保留形式互斥。完成继承后，如果保留比例不小于阈值比例，插件也会加载失败，因为任何模型容量都无法让该策略有效。
 
 对于主动压力检查，compaction-basic 读取最新持久路由，解析适配器容量 `W`、请求输出预留 `O` 和精确目标策略。触发阈值为 `floor(min(W × thresholdRatio, W − O − headroomTokens))`，默认余量为 65,536 tokens。窗口比例限制历史增长，第二项则在一次完整输出后为压缩输入与生成留出额外空间；它无法限制任意工具结果的增长。保留预算独立按 `W − O` 缩放。`O` 取自生效信封的 `maxTokens`，否则取适配器按请求的默认值，再回退到零。每次检查都会重新解析，因此路由或输出上限变化会立即影响策略。若压力预算非正，或保留预算不低于触发阈值，会在目标容量允许比较时失败。
 

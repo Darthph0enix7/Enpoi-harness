@@ -34,7 +34,7 @@ Model-visible surface order (top to bottom): system prompt + tool list (frozen) 
 - **Seat:** `personas.compaction` is the designated summariser seat (Settings → Agent Models, group BACKGROUND & SUPERVISION). Unassigned it INHERITS the session model — nothing changes by default. A `chain` resolves to its first enabled link; a stale/disabled chain inherits instead of failing (`packages/compaction/compaction-basic/src/settings.ts:128-161`).
 - **Economics:** a different summariser model loses the prompt-prefix cache and pays full input price for the whole region, so only free/local routes are reliably cheaper (`role-registry.ts:161-167`, `AgentModelsBody.tsx:217`). The readout follows the seat assignment, else the catalog default (`compaction-policy.ts:75-131`).
 - **Settings** (`parameters.compaction`, read fresh per decision, fail-open per field — `settings.ts:97-126`; UI mirrors at `packages/client/ui-brand-enpoi/src/client/params-store.ts:77-90`):
-  - `thresholdRatio` 0.8 — pressure fraction; `retainRatio` 0.16 — verbatim tail as a fraction of (window − output reserve)
+  - `thresholdRatio` 0.6 — pressure fraction; `retainRatio` 0.16 — verbatim tail as a fraction of (window − output reserve)
   - `headroomTokens` 65 536 — output reservation/headroom; `retainTokens` 0 — absolute tail (wins over `retainRatio` when > 0)
   - `pruneThresholdChars` 8192, `pruneHeadChars` 4096, `pruneTailChars` 1024 — the pruner (§1)
   - Validation: ratios in (0,1], positive integers; an invalid field is ignored, never a failed turn; a retention ≥ the threshold falls back to the resolved config (`66…:564-571`). Per-model overrides exist only in the plugin Config `modelPolicies`, not in settings (`66…:581-583`).

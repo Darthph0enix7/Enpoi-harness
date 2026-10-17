@@ -243,6 +243,17 @@ describe('compaction settings reads', () => {
     expect(applySettingsOverrides(config, { thresholdRatio: 0.05 }))
       .toMatchObject({ thresholdRatio: 0.05, retainRatio: 0.16 })
   })
+
+  it('resolves the shipped 0.6 trigger default and lets a live settings edit win over it', () => {
+    const defaults = resolveConfig({})
+    expect(defaults.thresholdRatio).toBe(0.6)
+
+    // Operator settings (e.g. 0.9) still override the shipped default.
+    expect(applySettingsOverrides(defaults, { thresholdRatio: 0.9 }))
+      .toMatchObject({ thresholdRatio: 0.9, retainRatio: 0.16 })
+    expect(applySettingsOverrides(defaults, { thresholdRatio: 0.4 }))
+      .toMatchObject({ thresholdRatio: 0.4 })
+  })
 })
 
 describe('settings-driven engine policy', () => {

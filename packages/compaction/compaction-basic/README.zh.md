@@ -48,22 +48,22 @@ kind: "package-reference"
 ```yaml
 - name: '@deepseek-ai/dsh-compaction-basic'
   config:
-    thresholdRatio: 0.8
+    thresholdRatio: 0.6
     retainRatio: 0.16
     modelPolicies:
       - provider: local
         model: small-context
-        thresholdRatio: 0.7
+        thresholdRatio: 0.5
         retainTokens: 2048
 ```
 
 ### 调整压缩开始的时机
 
-所有设置都可选。设上下文窗口为 `W`、生效请求输出上限为 `O`、余量为 `B`，默认触发阈值为 `floor(min(W × 0.8, W − O − B))`，其中 `B = 65,536` tokens。逐字保留的近期历史预算仍为 `W − O` 的 16%。下表列出全部设置；生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-compaction-basic)还包含字段类型。
+所有设置都可选。设上下文窗口为 `W`、生效请求输出上限为 `O`、余量为 `B`，默认触发阈值为 `floor(min(W × 0.6, W − O − B))`，其中 `B = 65,536` tokens。逐字保留的近期历史预算仍为 `W − O` 的 16%。下表列出全部设置；生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-compaction-basic)还包含字段类型。
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
-| `thresholdRatio` | `0.8` | 用于 `floor(min(W × thresholdRatio, W − O − headroomTokens))` 的窗口比例。 |
+| `thresholdRatio` | `0.6` | 用于 `floor(min(W × thresholdRatio, W − O − headroomTokens))` 的窗口比例。 |
 | `headroomTokens` | `65536` | 路由请求输出预留之外的额外压力余量；必须为非负整数。 |
 | `retainRatio` | `0.16` | 以 `W − O` 的一部分表示逐字保留的近期对话；与 `retainTokens` 互斥。 |
 | `retainTokens` | — | 逐字保留的近期对话绝对预算；与 `retainRatio` 互斥，并且必须低于已解析阈值。 |
@@ -254,7 +254,7 @@ Rules:
 
 本开发备注是维护者的工作上下文，明确不具权威性；已交付行为以上文、包代码与所链接的 Agent Note 为准。
 
-- **默认比例，尚未决定**——`thresholdRatio: 0.8` 与 `retainRatio: 0.16` 是固定默认值；存在通过 `modelPolicies` 进行的按模型调优，但没有基于语料的理想值指引记录。
+- **触发比例，由所有者选定**——所有者为更早压缩选择了 `thresholdRatio: 0.6`；`retainRatio: 0.16` 仍是固定的保留默认值。仍可通过 `modelPolicies` 进行按模型调优，但没有基于语料的理想值指引记录。
 - **tokenizer 精确测量，暂缓**——token meter 每 token 四字符的启发式对 CJK 文本与 JSON Schema 定价偏低；精确 token 化仍是测量服务的开放方向。
 - **规范错误之外的溢出恢复，尚未决定**——恢复仅针对 `CONTEXT_WINDOW_EXCEEDED` 触发；其他提供方侧上下文失败不参与分类。
 
