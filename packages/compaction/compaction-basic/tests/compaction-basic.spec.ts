@@ -1061,6 +1061,8 @@ describe('compaction region transaction', () => {
       usage: compact.usage,
     })
     expect(summary?.data).not.toHaveProperty('llmStreamCall')
+    // The successful path records no failure cause: the field is additive-only.
+    expect(summary?.data).not.toHaveProperty('summarizationFailure')
     const head = session.deriveMessages()[0]!
     expect(head.content[0]?.type).toBe('text')
     expect(head.content[0]?.type === 'text' ? head.content[0].text : '').toContain('<compacted-summary>')
@@ -1240,7 +1242,28 @@ describe('compaction region transaction', () => {
     expect(text).toContain('session_event_search')
     expect(events.findLast(event => event.type === 'compaction/end')?.data).not.toHaveProperty('error')
     expect(events.findLast(event => event.type === 'compaction/summary')?.data)
-      .toMatchObject({ provider: '', model: '' })
+      .toMatchObject({
+        provider: '',
+        model: '',
+        summarizationFailure: { code: 'Error', message: 'summary unavailable' },
+      })
+  })
+
+  it('logs the compaction id and cause when the mechanical fallback fires', async () => {
+    const ctx = createContext()
+    const warnings: string[] = []
+    ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
+    const compact = service({ auto: false }, ctx)
+    compact.error = new Error('summary unavailable')
+    const session = conversation(2)
+    const nodes = session.surface.nodes
+
+    const result = await compact.compactRegion(nodes[0]!, nodes[2]!, agent(session, MODEL))
+
+    expect(warnings).toEqual([
+      `compaction ${result.compactionId}: summarization failed `
+      + '(Error: summary unavailable); replaced with the mechanical omission stub',
+    ])
   })
 
   it('lands the mechanical stub for non-Error summarizer failures', async () => {
@@ -1255,6 +1278,8 @@ describe('compaction region transaction', () => {
     )).resolves.toMatchObject({ summary: [expect.objectContaining({ type: 'text' })] })
     expect(session.snapshotEvents().findLast(event => event.type === 'compaction/end')?.data)
       .not.toHaveProperty('error')
+    expect(session.snapshotEvents().findLast(event => event.type === 'compaction/summary')?.data)
+      .toMatchObject({ summarizationFailure: { code: 'UNKNOWN', message: 'plain failure' } })
   })
 
   it('tolerates concurrent log-only appends while the selected surface is stable', async () => {
@@ -1310,8 +1335,11 @@ describe('compaction region transaction', () => {
       agent(session, MODEL),
     )
     expect(result.shadowedSeqs.length).toBeGreaterThan(0)
-    expect(session.snapshotEvents().findLast(event => event.type === 'compaction/summary')?.data)
-      .toMatchObject({ provider: '', model: '' })
+    const summaryEvent = session.snapshotEvents().findLast(event => event.type === 'compaction/summary')
+    expect(summaryEvent).toMatchObject({ data: { provider: '', model: '' } })
+    const failure = summaryEvent?.type === 'compaction/summary' ? summaryEvent.data.summarizationFailure : undefined
+    expect(failure?.code).toBe('SummaryNotSmallerError')
+    expect(failure?.message).toContain('not smaller')
     expect(session.snapshotEvents().findLast(event => event.type === 'compaction/end')?.data)
       .not.toHaveProperty('error')
   })

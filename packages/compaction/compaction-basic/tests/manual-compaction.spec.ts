@@ -406,6 +406,8 @@ describe('compactNow through the real loop', () => {
     expect(markers.map(event => event.type)).toEqual(['compaction/start', 'compaction/end'])
     expect(markers[1]?.type === 'compaction/end' && markers[1].data.error)
       .toContain('summarizer unavailable')
+    // Manual compaction stays fail-loud: no mechanical stub and no failure record.
+    expect(agent.session.snapshotEvents().some(event => event.type === 'compaction/summary')).toBe(false)
 
     agent.followup(createUserMessage({
       content: [{ type: 'text', text: 'runs after the failure' }],

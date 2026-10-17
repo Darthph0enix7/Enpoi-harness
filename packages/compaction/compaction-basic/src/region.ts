@@ -27,6 +27,8 @@ interface RegionDependencies {
   readonly meter: TokenMeter
   summarize(input: SummarizationInput, agent: Agent, signal?: AbortSignal): Promise<SummaryResult>
   recover(error: unknown, agent: Agent, sourceEventSeqs: readonly SessionSeq[], signal?: AbortSignal): boolean
+  /** Warn-level diagnostic sink; the engine binds it to the plugin logger. */
+  warn(line: string): void
 }
 
 /** One validated inclusive span of current surface positions. */
@@ -50,6 +52,16 @@ interface PreparedCompaction extends SurfaceSelection {
 
 type SummarizedCompaction = PreparedCompaction & SummaryResult & {
   readonly checkpointMessage: UserMessage
+  /** Bounded cause recorded when a summarization failure forced the mechanical stub. */
+  readonly summarizationFailure?: SummarizationFailure
+}
+
+/** Bounded, durable cause of the summarization failure that forced the mechanical fallback. */
+interface SummarizationFailure {
+  /** Stable failure class: the error's own `code` when present, else its constructor name. */
+  readonly code: string
+  /** Rendered failure message with its cause chain, truncated to a durable audit length. */
+  readonly message: string
 }
 
 interface CompactionTransactionOptions {
@@ -96,7 +108,50 @@ interface TransactionFailure {
 }
 
 /** A framed model summary is not smaller than the span it would replace. */
-class SummaryNotSmallerError extends Error {}
+class SummaryNotSmallerError extends Error {
+  constructor(message: string) {
+    super(message)
+    // Match the HarnessError convention so the class survives as the recorded
+    // failure code when the shrink guard selects the mechanical fallback.
+    this.name = 'SummaryNotSmallerError'
+  }
+}
+
+/** Durable audit bound for one recorded summarization-failure message. */
+const SUMMARIZATION_FAILURE_MESSAGE_MAX_CHARS = 500
+
+/**
+ * Classify one thrown summarization failure for the durable record. The own
+ * `code` data property wins when present — `LlmError`/`HarnessError` codes and
+ * the plain `MAX_TOKENS` classification — because it is the stable
+ * machine-routable class; otherwise the constructor name, or `UNKNOWN` for a
+ * non-Error throw. Reading the descriptor cannot invoke a hostile accessor, so
+ * recording the failure can never mask it.
+ * @param error - value thrown by the summarizer or the shrink guard.
+ * @returns the bounded code and message recorded on the summary event.
+ */
+function summarizationFailureCause(error: unknown): SummarizationFailure {
+  let code: string | undefined
+  if (error instanceof Error) {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(error, 'code')
+      if (descriptor !== undefined && 'value' in descriptor
+        && typeof descriptor.value === 'string' && descriptor.value.length > 0) {
+        code = descriptor.value
+      }
+    } catch (_hostileCodeAccessor) {
+      // The constructor name below still classifies the failure.
+    }
+  }
+  const name = error instanceof Error && error.name.length > 0 ? error.name : undefined
+  const message = errorChain(error)
+  return {
+    code: code ?? name ?? 'UNKNOWN',
+    message: message.length <= SUMMARIZATION_FAILURE_MESSAGE_MAX_CHARS
+      ? message
+      : `${message.slice(0, SUMMARIZATION_FAILURE_MESSAGE_MAX_CHARS - 1)}…`,
+  }
+}
 
 /**
  * The `system/message` holding surface node 0, or `undefined` when another
@@ -397,7 +452,9 @@ function prepareCompaction(
  * Run the summarizer and frame its replacement checkpoint. When the summary
  * path fails (or produces a non-shrinking frame) and the transaction is
  * automatic, the deterministic model-free omission is attempted before the
- * error is allowed to escape — the session remains promptable either way.
+ * error is allowed to escape — the session remains promptable either way, and
+ * the bounded failure cause lands on the mechanical summary event so a
+ * post-hoc reader can explain the stub without the live journal.
  */
 async function summarizeCompaction(
   dependencies: RegionDependencies,
@@ -431,14 +488,22 @@ async function summarizeCompaction(
         : prepared.shadowedSeqs
       if (!dependencies.recover(error, agent, replayedSeqs, signal)) {
         if (allowMechanicalFallback) {
+          const failure = summarizationFailureCause(error)
           const mechanical = mechanicalCompaction(
             dependencies,
             agent.session,
             prepared,
             compactionId,
             sourceCommandId,
+            failure,
           )
-          if (mechanical !== null) return mechanical
+          if (mechanical !== null) {
+            dependencies.warn(
+              `compaction ${compactionId}: summarization failed `
+              + `(${failure.code}: ${failure.message}); replaced with the mechanical omission stub`,
+            )
+            return mechanical
+          }
         }
         throw error
       }
@@ -485,8 +550,10 @@ function frameSummarizedCompaction(
  * stub citing the session log and the recall tools. The rest of the selected
  * span stays verbatim; the removed events stay in the log (surface `replace`
  * only), so the transcript is intact and the session is promptable.
- * @returns the committed replacement, or `null` when even the whole span is
- *   no larger than the stub (nothing can be freed; the caller rethrows).
+ * @param failure - bounded cause of the failure that selected this fallback.
+ * @returns the committed replacement carrying its failure record, or `null`
+ *   when even the whole span is no larger than the stub (nothing can be freed;
+ *   the caller rethrows).
  */
 function mechanicalCompaction(
   dependencies: RegionDependencies,
@@ -494,6 +561,7 @@ function mechanicalCompaction(
   prepared: PreparedCompaction,
   compactionId: CompactionResult['compactionId'],
   sourceCommandId: CommandId | undefined,
+  failure: SummarizationFailure,
 ): SummarizedCompaction | null {
   const probe = createUserMessage({
     content: frameMechanicalOmission(prepared.start, prepared.end, prepared.shadowedSeqs.length),
@@ -529,6 +597,8 @@ function mechanicalCompaction(
     // No model wrote this checkpoint; the empty route is the durable answer.
     provider: '',
     model: '',
+    // Why this level of the failure ladder ran outlives the live journal.
+    summarizationFailure: failure,
     checkpointMessage,
   }
 }
@@ -589,6 +659,7 @@ function commitCompactionBody(
     model,
     maxTokens,
     usage,
+    summarizationFailure,
     checkpointMessage,
   } = summarized
   const callRecord = summarized.llmStreamCall === true
@@ -608,6 +679,7 @@ function commitCompactionBody(
     model,
     ...maxTokens === undefined ? {} : { maxTokens },
     ...usage === undefined ? {} : { usage },
+    ...summarizationFailure === undefined ? {} : { summarizationFailure },
   })
   session.append('user/message', checkpointMessage, {
     surfaceOp: { op: 'replace', startSeq: start, endSeq: end },

@@ -53,6 +53,22 @@ declare module '@deepseek-ai/dsh-session/types' {
       maxTokens?: number
       /** Provider-reported token usage for the summarization request, when emitted. */
       usage?: TokenUsage
+      /**
+       * Bounded cause recorded when the summarizer failed and the deterministic
+       * model-free stub replaced it — absent on every model-written summary and
+       * on historical records. `code` is the stable failure class: the thrown
+       * error's own `code` when it carried one (an `LlmError`/`HarnessError`
+       * code), otherwise its constructor name, or `UNKNOWN` for a non-Error
+       * throw. `message` is the rendered cause chain, truncated to a durable
+       * audit length. Together they explain why a mechanical stub exists after
+       * the fact, without the live journal.
+       */
+      summarizationFailure?: {
+        /** Stable failure class: the error's own `code` when present, else its constructor name. */
+        code: string
+        /** Rendered failure message with its cause chain, truncated to a durable audit length. */
+        message: string
+      }
     } & (
       | {
         /** Complete provider output before the backend's safe summary projection. */

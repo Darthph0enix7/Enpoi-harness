@@ -115,7 +115,7 @@ function isCompactionCheckpointNode(session: Session, seq: SessionSeq): boolean 
   if (event?.type !== 'user/message') return false
   const op = event.surfaceOp
   if (typeof op !== 'object' || op === null || op.op !== 'replace') return false
-  return (event.sourceEventSeqs ?? []).some(source => {
+  return (event.sourceEventSeqs ?? []).some((source) => {
     // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     return session.eventAt(source)?.type === 'compaction/summary'
   })
@@ -583,6 +583,7 @@ export class BasicCompactionEngine extends CompactionEngine {
         error,
         ...signal === undefined ? {} : { signal },
       }, () => false),
+      warn: (line) => { this.ctx.logger.warn(line) },
     }
   }
 }

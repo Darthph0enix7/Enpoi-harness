@@ -380,11 +380,18 @@ describe('deterministic mechanical fallback', () => {
     expect(events.some(event => event.type === 'revert/state')).toBe(false)
     expect(events.findLast(event => event.type === 'compaction/end')?.data)
       .not.toHaveProperty('error')
+    // The fallback records its own cause once, and the summary event carries it.
+    expect(warnings
+      .filter(message => message.includes('replaced with the mechanical omission stub')))
+      .toEqual([expect.stringContaining('(Error: summarizer offline)')])
+    expect(events.findLast(event => event.type === 'compaction/summary')?.data)
+      .toMatchObject({ summarizationFailure: { code: 'Error', message: 'summarizer offline' } })
     // The turn survives every warning: nothing aborts the step. The pressure
     // guard's informational "cannot relieve pressure" warning is a refusal to
-    // retry, not an aborted step.
+    // retry, not an aborted step, and the fallback warning names the surviving path.
     expect(warnings
-      .filter(message => !message.includes('cannot relieve pressure'))
+      .filter(message => !message.includes('cannot relieve pressure')
+        && !message.includes('replaced with the mechanical omission stub'))
       .every(message => message.includes('continuing the turn'))).toBe(true)
   })
 
