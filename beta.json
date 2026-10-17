@@ -1,8 +1,18 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-17T17:17:40.099Z",
+  "generatedAt": "2026-10-17T20:26:20.046Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.98",
+      "commit": "c6f6bc6",
+      "releasedAt": "2026-10-17T19:38:05.000Z",
+      "notes": [
+        "fix(compaction): record the summarizer failure cause on the mechanical stub",
+        "fix(compaction): mirror the 60% trigger default in the settings panel",
+        "fix(compaction): ship a 60% trigger default"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.97",
       "commit": "5cd5373",
@@ -353,14 +363,6 @@
       "releasedAt": "2026-10-11T07:15:41.000Z",
       "notes": [
         "fix(ui-settings-models): converge new providers through the catalog sync"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.56",
-      "commit": "b259576",
-      "releasedAt": "2026-10-10T21:11:09.000Z",
-      "notes": [
-        "feat(peer-bridge): mid-follow reachability watchdog"
       ]
     }
   ]
