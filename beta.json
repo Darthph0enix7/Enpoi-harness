@@ -1,8 +1,23 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-15T19:32:09.775Z",
+  "generatedAt": "2026-10-17T17:17:40.099Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.97",
+      "commit": "5cd5373",
+      "releasedAt": "2026-10-17T16:44:57.000Z",
+      "notes": [
+        "fix(subagent): pin the dispatch delivery contract and stop the false interrupt card",
+        "fix(web): surface slot crashes — visible retryable failure faces, never a silent panel",
+        "docs(chat): record gesture-gated follow attribution in the scroll-ownership contract",
+        "fix(web): never leave a blank workspace — root boundary, self-heal watchdog, client diagnostics",
+        "fix(chat): keep pinned bottom-follow through streaming corrections",
+        "fix(chat): take back a failed turn — revert commit relaxation, receipt surfacing, rail jump fallback",
+        "fix(update): make a broken profile unable to take the web UI down — installer guards + reload fail-safe",
+        "feat(client): terminal copy/paste keyboard routing"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.96",
       "commit": "07ef2a5",
@@ -346,15 +361,6 @@
       "releasedAt": "2026-10-10T21:11:09.000Z",
       "notes": [
         "feat(peer-bridge): mid-follow reachability watchdog"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.55",
-      "commit": "7ee8d14",
-      "releasedAt": "2026-10-10T20:56:39.000Z",
-      "notes": [
-        "feat(peer-bridge): early-return approvals with resume; fix settled rendering",
-        "fix(subagent): audit the shared keep list; clarify one-shot continuation"
       ]
     }
   ]
