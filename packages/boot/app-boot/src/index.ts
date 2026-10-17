@@ -24,8 +24,13 @@ export {
   PROFILE_COMPATIBILITY_FILENAME, readProfileCompatibility, readProfileVersionExemptions,
   setProfileVersionExemption, type ProfileCompatibility,
 } from './profile-compatibility.ts'
-import { prepareProfilePatches } from './compatibility-preflight.ts'
-export { prepareProfileEntries, prepareProfilePatches } from './compatibility-preflight.ts'
+import {
+  prepareProfilePatches, prepareProfilePatchesReport, reloadAdmissionRefused, RELOAD_DENIAL_FLOOR, RELOAD_DENIAL_RATIO,
+} from './compatibility-preflight.ts'
+export {
+  prepareProfileEntries, prepareProfileEntriesReport, prepareProfilePatches, prepareProfilePatchesReport,
+  reloadAdmissionRefused, RELOAD_DENIAL_FLOOR, RELOAD_DENIAL_RATIO, type ProfileAdmissionReport,
+} from './compatibility-preflight.ts'
 export { readPluginMeta } from './package-meta.ts'
 export { generateConfigSchema, type ConfigSchemaDump, type NativeConfigSchema } from './config-schema/index.ts'
 export { createConfigProjector, LOADER_EXPRESSION_SCHEMA, type ConfigProjection } from './config-schema/projector.ts'
@@ -269,6 +274,8 @@ const userPatchesSchema = entryListSchema
  * @param binName Diagnostic prefix.
  * @param requiredIds Explicit enablement targets whose existing failures also reject reconciliation.
  * @returns Diagnostics for unchanged pre-existing inactive entries; new or changed failures reject.
+ * @throws When the admission denies a wholesale share of the rows (a broken profile, not a config
+ *   change): nothing is committed and the previous composition keeps running.
  */
 export async function reconcileProfilePatches(
   ctx: Context, patches: PatchOptions[], binName: string, requiredIds: readonly string[] = [],
@@ -285,8 +292,22 @@ export async function reconcileProfilePatches(
   const { patches: _previous, ...includeConfig } = entry.options.config as Include.Config
   // The recomposition judges the rows the launch judged, resolved from the file this Include read.
   const parentURL = new URL('.', new URL(includeConfig.path, entry.parent.tree.ctx.baseUrl)).href
-  const prepared = prepareProfilePatches(ctx, patches, parentURL, binName)
-  await entry.update({ config: { ...includeConfig, patches: prepared } })
+  // Admission is computed before the Loader commits the recomposition, so a
+  // refusal can throw while the previous tree is still fully live: everything
+  // above is observational, and `entry.update` is the first mutation.
+  const admission = prepareProfilePatchesReport(ctx, patches, parentURL, binName)
+  if (reloadAdmissionRefused(admission.denied, admission.checked)) {
+    // A pruned profile (node_modules gone, manual links lost) denies every row:
+    // reloading it would take the serving composition — including the web
+    // server row — down with no way back but a manual repair.
+    const dir = ctx.get('profileContext')?.dir ?? 'unknown'
+    const refusal = `refusing the profile reload: ${admission.denied} of ${admission.checked} plugin rows were denied admission`
+      + ` (limit: more than max(${String(RELOAD_DENIAL_FLOOR)}, ${String(RELOAD_DENIAL_RATIO * 100)}% of the rows));`
+      + ` the profile at ${dir} looks broken, so the previous composition keeps running — run "dsh repair" to diagnose and restore it`
+    process.stderr.write(`${binName}: ${refusal}\n`)
+    throw new Error(`${binName}: ${refusal}`)
+  }
+  await entry.update({ config: { ...includeConfig, patches: admission.patches } })
   const results = await Promise.allSettled(previousFibers.map(({ fiber }) => fiber.await()))
   await ctx.loader.await()
   const failures = await inactiveEntries(ctx)

@@ -709,12 +709,15 @@ describe('pre-switch failure restore', () => {
     const install = readFileSync(installSh, 'utf8')
     const doUpdate = /do_update\(\) \{[\s\S]*?\n\}/.exec(install)?.[0]
     expect(doUpdate).toBeDefined()
-    expect(doUpdate!.match(/restore_pre_switch "\$backup"/g)).toHaveLength(6)
-    // (the sixth is the post-update health-proof failure on the no-op path)
+    expect(doUpdate!.match(/restore_pre_switch "\$backup"/g)).toHaveLength(7)
+    // (the sixth is the post-update health-proof failure on the no-op path,
+    //  the seventh the no-op path's failed profile refresh)
     expect(doUpdate).toMatch(/if ! install_tree; then[\s\S]*?restore_pre_switch/)
     expect(doUpdate).toMatch(/if ! delta_prepare_full_fallback; then[\s\S]*?restore_pre_switch/)
     expect(doUpdate).toMatch(/if ! prepare_profile; then[\s\S]*?restore_pre_switch/)
     expect(doUpdate).toMatch(/if ! run_migrations; then[\s\S]*?restore_pre_switch/)
+    // A failed profile refresh on the no-op path restores before failing too.
+    expect(doUpdate).toMatch(/if ! profile_refresh; then[\s\S]*?restore_pre_switch/)
     // The no-op "already up to date" path arms the same restore around its
     // profile refresh, so its self-check failure cannot leave merged files.
     expect(doUpdate).toMatch(/already up to date[\s\S]*?PRE_SWITCH_RESTORE="\$backup"/)

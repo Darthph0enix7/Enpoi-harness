@@ -205,6 +205,26 @@ stamp_install_complete "$PREFIX/harness/0.1.7-enpoi.2.60" "0.1.7-enpoi.2.60" "aa
     expect(result.stdout).toContain('UNCHANGED={"version": "0.1.7-enpoi.2.60", "commit": "aa58eaf20bace6b3c082d40472bf07c175e9b460"')
     expect(result.stdout).toContain('STAMPED={"version": "0.1.7-enpoi.2.59", "commit": "c377')
   })
+
+  it('repair surfaces a recorded foreign dependency link that is missing (report-only)', () => {
+    const fixture = splitPrefix()
+    const profile = join(fixture.home, 'profiles/web')
+    mkdirSync(join(profile, 'node_modules'), { recursive: true })
+    writeFileSync(join(profile, 'package.json'), '{"name":"dsh-profile-web"}\n')
+    writeFileSync(join(profile, 'cordis.patch.yml'), '[]\n')
+    // What a previous deps install recorded after seeing a manual dev link.
+    writeFileSync(join(profile, '.dsh-foreign-links'), '@scope/workspace-plugin\t/packages/workspace-plugin\n')
+    const bin = join(fixture.prefix, 'bin')
+    const check = spawnSync('bash', [installSh, '--repair', '--check', '--prefix', fixture.prefix, '--bin-dir', bin], {
+      encoding: 'utf8',
+      env: { ...process.env, DSH_HOME: fixture.home },
+    })
+    const output = `${check.stdout}${check.stderr}`
+    expect(output).toContain('foreign dependency link @scope/workspace-plugin is missing from')
+    expect(output).toContain("ln -sfn '/packages/workspace-plugin'")
+    // Report-only: no link is created for the operator.
+    expect(existsSync(join(profile, 'node_modules/@scope/workspace-plugin'))).toBe(false)
+  })
 })
 
 describe.skipIf(win32)('pnpm store and pin', () => {

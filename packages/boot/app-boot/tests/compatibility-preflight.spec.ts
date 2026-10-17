@@ -9,8 +9,9 @@ import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import { load } from 'js-yaml'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import {
-  PROFILE_COMPATIBILITY_FILENAME, PluginPackages, boot, getDshRuntimeVersion,
-  prepareProfileEntries, prepareProfilePatches, type ProfileContext,
+  PROFILE_COMPATIBILITY_FILENAME, PluginPackages, RELOAD_DENIAL_FLOOR, RELOAD_DENIAL_RATIO, boot, getDshRuntimeVersion,
+  prepareProfileEntries, prepareProfilePatches, reconcileProfilePatches, reloadAdmissionRefused,
+  type ProfileContext,
 } from '../src/index.ts'
 
 const runtime = getDshRuntimeVersion()
@@ -70,7 +71,7 @@ export function apply() { record('apply:${name}') }
     return existsSync(effects) ? readFileSync(effects, 'utf8').trim().split('\n') : []
   }
 
-  return { dir, profile, configPath, warnings, plugin, exemptions, run }
+  return { dir, profile, configPath, warnings, plugin, exemptions, run, context: () => ctx }
 }
 
 const insert = (...names: string[]) => [{ insert: names.map((name, index) => ({ id: `row-${String(index)}`, name })) }]
@@ -351,6 +352,73 @@ describe('manifest resolution', () => {
       .toThrow('requires a resolution base')
   })
 
+})
+
+describe('reload admission guard', () => {
+  /** One insert patch carrying `id: row-N` for every name, in order. */
+  function rows(names: readonly string[]) {
+    return [{ insert: names.map((name, index) => ({ id: `row-${String(index)}`, name })) }]
+  }
+
+  const deniedNames = (count: number): string[] =>
+    Array.from({ length: count }, (_, index) => `denied-${String(index)}`)
+
+  it('refuses above max(10, a quarter of the rows) and admits at the boundary', () => {
+    expect(RELOAD_DENIAL_FLOOR).toBe(10)
+    expect(RELOAD_DENIAL_RATIO).toBe(0.25)
+    expect(reloadAdmissionRefused(10, 40)).toBe(false)
+    expect(reloadAdmissionRefused(11, 40)).toBe(true)
+    expect(reloadAdmissionRefused(1, 3)).toBe(false)
+    expect(reloadAdmissionRefused(300, 1_000)).toBe(true)
+    expect(reloadAdmissionRefused(250, 1_000)).toBe(false)
+    expect(reloadAdmissionRefused(0, 0)).toBe(false)
+  })
+
+  it('refuses a reload that would deny a wholesale share of rows and keeps the previous graph live', async () => {
+    const f = fixture()
+    f.plugin('allowed-plugin')
+    for (const name of deniedNames(12)) f.plugin(name, { peer: '^9.0.0' })
+    expect(await f.run(rows(['allowed-plugin']))).toEqual(['import:allowed-plugin', 'apply:allowed-plugin'])
+    const ctx = f.context()!
+    const before = [...ctx.loader.entries()].map(entry => entry.options.id)
+
+    // The next generation is the same compatible row plus a broken block whose
+    // admission denies every one of them (a pruned profile's shape).
+    const next = rows(['allowed-plugin', ...deniedNames(12)])
+    await expect(reconcileProfilePatches(ctx, next, 'preflight')).rejects.toThrow(/refusing the profile reload/)
+    expect(f.warnings.join('\n')).toContain('12 of 13 plugin rows were denied admission')
+    expect(f.warnings.join('\n')).toContain('run "dsh repair"')
+    expect(f.warnings.join('\n')).toContain(f.dir)
+    // Nothing was committed: the previous rows keep their live fibers.
+    expect([...ctx.loader.entries()].map(entry => entry.options.id)).toEqual(before)
+    const allowed = [...ctx.loader.entries()].find(entry => entry.options.id === 'row-0')
+    expect(allowed?.fiber?.uid).not.toBeNull()
+  })
+
+  it('lets a small denial count pass as per-row disable', async () => {
+    const f = fixture()
+    f.plugin('allowed-plugin')
+    f.plugin('denied-plugin', { peer: '^9.0.0' })
+    expect(await f.run(rows(['allowed-plugin']))).toEqual(['import:allowed-plugin', 'apply:allowed-plugin'])
+    const ctx = f.context()!
+    await expect(reconcileProfilePatches(ctx, rows(['allowed-plugin', 'denied-plugin']), 'preflight')).resolves.toBeDefined()
+    const entry = [...ctx.loader.entries()].find(item => item.options.name === 'denied-plugin')
+    expect(entry?.disabled).toBe(true)
+    // The compatible row was not disturbed by the recomposition.
+    const allowed = [...ctx.loader.entries()].find(item => item.options.id === 'row-0')
+    expect(allowed?.fiber?.uid).not.toBeNull()
+  })
+
+  it('keeps cold boot per-row disable: a broken profile still boots as far as it can', async () => {
+    const f = fixture()
+    f.plugin('allowed-plugin')
+    for (const name of deniedNames(12)) f.plugin(name, { peer: '^9.0.0' })
+    // No refusal at boot: every denied row is disabled individually and the
+    // composition starts with what remains.
+    expect(await f.run(rows(['allowed-plugin', ...deniedNames(12)]))).toEqual(['import:allowed-plugin', 'apply:allowed-plugin'])
+    expect(f.warnings.join('\n')).toContain('disabling profile plugin')
+    expect(f.warnings.join('\n')).not.toContain('refusing the profile reload')
+  })
 })
 
 it('reuses the documented literal Include dialect when reading included entries', async () => {

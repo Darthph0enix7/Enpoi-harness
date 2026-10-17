@@ -3695,6 +3695,80 @@ prepare_profile() {
   return 0
 }
 
+# ── Foreign node_modules links (profile dependency installs) ────────────────
+# pnpm packages a node_modules tree from the lockfile alone; a link it did not
+# create — a dev box's manual workspace link, exact case observed live: the
+# profile resolved ~328 packages through symlinks pointing outside the profile
+# — is pruned silently. The running harness only notices at the next profile
+# reload, where every row then fails admission. The installer snapshots those
+# links before the install and re-creates every snapshot entry that went
+# missing, on success and on failure alike. A durable copy also lands in
+# $PROFILE_DIR/.dsh-foreign-links (repair reports entries missing from it).
+
+# Resolve one symlink to an absolute target, without relying on `readlink -f`.
+# @param link - the symlink path.
+# @returns the absolute target, or empty when the link cannot be read.
+profile_link_target() {
+  local link="$1" target=""
+  target="$(readlink "$link" 2>/dev/null || true)"
+  [ -n "$target" ] || return 0
+  case "$target" in
+    /*) printf '%s' "$target";;
+    *) ( cd "$(dirname "$link")" 2>/dev/null && cd "$(dirname "$target")" 2>/dev/null \
+         && printf '%s/%s' "$(pwd -P)" "$(basename "$target")" ) ;;
+  esac
+}
+
+# Snapshot every node_modules symlink (top level plus one @scope/name level)
+# whose resolved target lies outside the profile directory.
+# @param out_file - receives `name<TAB>raw-target` lines; emptied first.
+profile_foreign_links_snapshot() {
+  local out="$1" link name target resolved real
+  : > "$out" 2>/dev/null || return 0
+  [ -d "$PROFILE_DIR/node_modules" ] || return 0
+  real="$(cd "$PROFILE_DIR" 2>/dev/null && pwd -P)" || real="$PROFILE_DIR"
+  for link in "$PROFILE_DIR/node_modules"/* "$PROFILE_DIR/node_modules"/@*/*; do
+    [ -L "$link" ] || continue
+    name="${link#"$PROFILE_DIR/node_modules"/}"
+    target="$(readlink "$link" 2>/dev/null || true)"
+    [ -n "$target" ] || continue
+    resolved="$(profile_link_target "$link")"
+    [ -n "$resolved" ] || continue
+    case "$resolved" in
+      "$real"|"$real"/*) continue;;
+    esac
+    printf '%s\t%s\n' "$name" "$target" >> "$out" || true
+  done
+  return 0
+}
+
+# Re-create every snapshot entry that is now missing; log the count. A link
+# that still exists (pnpm kept or re-created it) is never touched.
+# @param snapshot_file - the `name<TAB>target` list from the snapshot.
+profile_foreign_links_restore() {
+  local snapshot="$1" name target restored=0
+  [ -s "$snapshot" ] || return 0
+  while IFS="$(printf '\t')" read -r name target; do
+    [ -n "$name" ] || continue
+    [ -n "$target" ] || continue
+    # The name reaches a path expression: refuse anything but a plain
+    # (optionally scoped) package segment, whatever the file claims.
+    case "$name" in
+      ''|.|..|*..*|/*|*' '*) continue;;
+    esac
+    if [ ! -e "$PROFILE_DIR/node_modules/$name" ] && [ ! -L "$PROFILE_DIR/node_modules/$name" ]; then
+      mkdir -p "$(dirname "$PROFILE_DIR/node_modules/$name")" 2>/dev/null || true
+      if ln -sfn "$target" "$PROFILE_DIR/node_modules/$name" 2>/dev/null; then
+        restored=$((restored + 1))
+      fi
+    fi
+  done < "$snapshot"
+  if [ "$restored" -gt 0 ]; then
+    log "profile deps: restored $restored foreign symlink(s) pruned by install"
+  fi
+  return 0
+}
+
 profile_install() {
   resolve_home
   [ -n "$PROFILE_SOURCE" ] || return 0
@@ -3725,16 +3799,42 @@ profile_install() {
   # Non-interactive purge confirmation (same reason as the workspace install:
   # a profile node_modules recorded by another pnpm must never abort a detached
   # update with ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY).
+  # Snapshot the foreign links before pnpm can prune them; the restore below
+  # runs on success AND failure (pnpm may prune and still exit 0, or prune and
+  # fail). The durable copy feeds `dsh repair`'s profile-integrity hint.
+  local foreign_links="$PROFILE_DIR/.pnpm-foreign-links.$$" install_rc=0
+  profile_foreign_links_snapshot "$foreign_links"
+  if [ -s "$foreign_links" ]; then
+    cp -p "$foreign_links" "$PROFILE_DIR/.dsh-foreign-links" 2>/dev/null || true
+  else
+    rm -f "$PROFILE_DIR/.dsh-foreign-links" 2>/dev/null || true
+  fi
   # The completion-line rescue covers the observed pnpm linger: pnpm prints its
   # `Done in … using pnpm` summary when the work finished, then the process can
   # stay alive past the budget (a TERM-ignoring environmental transient). With
   # that line as the step's own last output, the step is complete.
-  if ! DSH_PROGRESS_INTERVAL="${DSH_PROFILE_PROGRESS_INTERVAL:-15}" \
-    run_logged --completed-regex '^Done in .+ using pnpm' "Installing Enpoi profile dependencies (pnpm install)" "$PROFILE_INSTALL_TIMEOUT" "$PROFILE_DIR" "$PNPM" install --prefer-offline --config.confirmModulesPurge=false --store-dir "${PNPM_STORE_DIR:-$PREFIX/.pnpm-store}"; then
+  DSH_PROGRESS_INTERVAL="${DSH_PROFILE_PROGRESS_INTERVAL:-15}" \
+    run_logged --completed-regex '^Done in .+ using pnpm' "Installing Enpoi profile dependencies (pnpm install)" "$PROFILE_INSTALL_TIMEOUT" "$PROFILE_DIR" "$PNPM" install --prefer-offline --config.confirmModulesPurge=false --store-dir "${PNPM_STORE_DIR:-$PREFIX/.pnpm-store}" \
+    || install_rc=$?
+  profile_foreign_links_restore "$foreign_links"
+  rm -f "$foreign_links" 2>/dev/null || true
+  if [ "$install_rc" != 0 ]; then
     warn "profile pnpm install failed"
     return 1
   fi
   [ -n "$deps_hash" ] && printf '%s\n' "$deps_hash" > "$hash_file" 2>/dev/null || true
+  return 0
+}
+
+# The already-up-to-date path's profile phase. A failed dependency install or
+# plugin verification must fail the phase: reporting "already up to date" on
+# top of a broken profile is exactly the shape whose next reload disabled
+# every plugin row (and the web server with them). The failure wording comes
+# from the step itself ("profile pnpm install failed" / "profile plugin build
+# failed"); the caller names the phase outcome.
+profile_refresh() {
+  profile_install || return 1
+  run_profile_plugin_build || return 1
   return 0
 }
 
@@ -8134,8 +8234,13 @@ do_update() {
     prepare_profile
     step "home: seeding $DSH_HOME and profile dependencies"
     seed_home
-    profile_install || warn "profile dependency refresh failed"
-    run_profile_plugin_build || warn "profile plugin build failed"
+    if ! profile_refresh; then
+      warn "profile refresh failed; $VERSION remains active"
+      restore_pre_switch "$backup" "the profile refresh"
+      write_diagnostics profile-failed
+      emit_json noop 0
+      exit 1
+    fi
     ensure_service
     ensure_tailnet_exposure
     step "switch, service and backfill: $VERSION already active"
@@ -8900,7 +9005,7 @@ EOF
 do_repair() {
   local state="$PREFIX/harness/install-state.json" recorded_home recorded_version active
   local target cand d name v shim unit en st code port url p pid b l rc peer_cli
-  local perm complete_any=0 fish_dir fsrc fdst rel
+  local perm complete_any=0 fish_dir fsrc fdst rel fl_name fl_target
 
   if [ "$DRY_RUN" = 1 ]; then CHECK_ONLY=1; fi
   detect_os_arch
@@ -9077,6 +9182,24 @@ do_repair() {
     done <<EOF
 $(find "$PROFILE_DIR/node_modules" -maxdepth 2 -type l 2>/dev/null)
 EOF
+    # Foreign links recorded by the deps install: pnpm packages node_modules
+    # from the lockfile alone, so an undeclared manual link disappears at the
+    # next install — and the next profile reload then disables every plugin
+    # row, the web server included. Report-only: the arrangement is the
+    # operator's, so the remedy is the exact ln command, never an automatic
+    # one.
+    if [ -f "$PROFILE_DIR/.dsh-foreign-links" ]; then
+      while IFS="$(printf '\t')" read -r fl_name fl_target; do
+        [ -n "$fl_name" ] || continue
+        [ -n "$fl_target" ] || continue
+        case "$fl_name" in
+          ''|.|..|*..*|/*|*' '*) continue;;
+        esac
+        if [ ! -e "$PROFILE_DIR/node_modules/$fl_name" ] && [ ! -L "$PROFILE_DIR/node_modules/$fl_name" ]; then
+          repair_fail "foreign dependency link $fl_name is missing from $PROFILE_DIR/node_modules (it pointed at $fl_target)" "ln -sfn '$fl_target' '$PROFILE_DIR/node_modules/$fl_name'  # or: re-run dsh update (it restores recorded foreign links)"
+        fi
+      done < "$PROFILE_DIR/.dsh-foreign-links"
+    fi
     if [ ! -f "$PROFILE_DIR/cordis.patch.yml" ]; then
       repair_fail "$PROFILE_DIR/cordis.patch.yml is missing (the config-editor document)" "restore it from a backup under $PROFILE_DIR/.backup-*/ or re-run the installer"
     fi

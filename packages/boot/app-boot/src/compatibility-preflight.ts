@@ -60,6 +60,32 @@ function manifestOf(ctx: Context, name: string | undefined, parentURL: string): 
   }
 }
 
+/** One admission pass's outcome: the prepared rows plus the counts the reload guard judges. */
+export interface ProfileAdmissionReport {
+  /** Detached rows with incompatible entries denied. */
+  readonly rows: EntryOptions[]
+  /** Rows whose compatibility was evaluated (an already-disabled non-group row and a group's children are skipped). */
+  readonly checked: number
+  /** Rows turned away by this pass (the Loader must not import their modules). */
+  readonly denied: number
+}
+
+/** A reload whose admission denies more than this share of rows is not a config change but a broken profile. */
+export const RELOAD_DENIAL_RATIO = 0.25
+/** …and the denial must also be non-trivial in absolute terms, so a one-plugin profile keeps per-row disable. */
+export const RELOAD_DENIAL_FLOOR = 10
+
+/** Whether a reload admission's denials mean the profile itself is wholesale broken.
+ * Denying a quarter of a non-trivial row set (a pruned node_modules disables every row this way)
+ * would tear down the serving composition for what is really a damaged install.
+ * @param denied - Rows denied by the admission pass.
+ * @param checked - Rows the admission pass evaluated.
+ * @returns true when the caller must refuse the reload and keep the previous composition.
+ */
+export function reloadAdmissionRefused(denied: number, checked: number): boolean {
+  return denied > Math.max(RELOAD_DENIAL_FLOOR, checked * RELOAD_DENIAL_RATIO)
+}
+
 /** Prepare profile or preset rows before the owning DSH caller passes them to Loader.
  * Only a compatibility conflict denies a row: an entry whose manifest cannot be resolved keeps
  * the Loader's own import failure. A denied ordinary row gains `disabled`; a native Include that
@@ -74,13 +100,26 @@ function manifestOf(ctx: Context, name: string | undefined, parentURL: string): 
 export function prepareProfileEntries(
   ctx: Context, entries: readonly EntryOptions[], parentURL: string | undefined, binName = 'dsh',
 ): EntryOptions[] {
+  return prepareProfileEntriesReport(ctx, entries, parentURL, binName).rows
+}
+
+/** Prepare profile or preset rows and report the admission's denial statistics.
+ * @param ctx Context carrying launcher-owned profile facts; non-profile contexts count nothing.
+ * @param entries Complete effective entry list, after patch composition.
+ * @param parentURL Resolution base of the tree that will import these rows.
+ * @param binName Diagnostic prefix for a denied row; defaults to `dsh`.
+ * @returns The prepared rows and the checked/denied counts of this pass.
+ */
+export function prepareProfileEntriesReport(
+  ctx: Context, entries: readonly EntryOptions[], parentURL: string | undefined, binName = 'dsh',
+): ProfileAdmissionReport {
   // Admission runs before the composed tree mounts, so no plugin-owned logger exporter exists yet;
   // composition-stage diagnostics go to stderr like the profile launcher's skipped-bundle report.
   return preflight(ctx, entries, parentURL, (row, reason) => {
     // Preset rows may omit ids, and a bundle row's name is its resolved module URL.
     const label = typeof row.id === 'string' ? `row ${JSON.stringify(row.id)}` : row.name
     process.stderr.write(`${binName}: disabling profile plugin ${label}: ${reason}\n`)
-  }).rows
+  })
 }
 
 /** Denial reporter invoked once per denied row. */
@@ -88,10 +127,10 @@ type DenialReporter = (row: EntryOptions, reason: string) => void
 
 function preflight(
   ctx: Context, entries: readonly EntryOptions[], parentURL: string | undefined, report: DenialReporter,
-) {
+): ProfileAdmissionReport {
   const rows = structuredClone(entries) as EntryOptions[]
   const profile = ctx.get('profileContext')
-  if (profile === undefined) return { rows, blocked: false }
+  if (profile === undefined) return { rows, checked: 0, denied: 0 }
   if (parentURL === undefined) throw new Error('Profile compatibility preflight requires a resolution base')
   // A damaged permission file authorizes nothing, but it must not stop the profile from starting.
   const { exemptions, warnings } = readProfileCompatibility(profile.dir)
@@ -99,8 +138,11 @@ function preflight(
   // One read per preflight: every row judges against the same running version.
   const runtimeVersion = getDshRuntimeVersion()
   const includes = new Set<string>()
+  let checked = 0
+  let denied = 0
   /** Only a compatibility conflict denies a row; every other failure keeps the Loader's own diagnosis. */
   const denial = (row: EntryOptions, base: string): string | undefined => {
+    checked += 1
     try {
       const manifest = manifestOf(ctx, row.name, base)
       if (manifest === undefined) return undefined
@@ -116,6 +158,7 @@ function preflight(
   const deny = (row: EntryOptions, reason: string): void => {
     row.disabled = true
     if (row.group) row.group = false
+    denied += 1
     report(row, reason)
   }
   const check = (rows: EntryOptions[], base: string): boolean => {
@@ -167,12 +210,12 @@ function preflight(
       includes.delete(filename)
     }
   }
-  return { rows, blocked: check(rows, parentURL) }
+  check(rows, parentURL)
+  return { rows, checked, denied }
 }
 
 /** Apply compatibility policy to the complete patch composition over a profile's empty root.
- * The caller passes every patch layer of the profile, because this returns one insertion patch for
- * that empty root: a non-empty root config would lose the caller's override patches by id.
+ * Same admission as {@link prepareProfilePatchesReport}, discarding the counts.
  * @param ctx Profile context prepared by the launcher.
  * @param patches Original ordered profile patches; these remain unchanged.
  * @param parentURL Root Include's resolution base.
@@ -182,8 +225,23 @@ function preflight(
 export function prepareProfilePatches(
   ctx: Context, patches: PatchOptions[], parentURL: string, binName = 'dsh',
 ): PatchOptions[] {
-  if (ctx.get('profileContext') === undefined) return patches
+  return prepareProfilePatchesReport(ctx, patches, parentURL, binName).patches
+}
+
+/** Apply compatibility policy to the complete patch composition and report its admission counts.
+ * The caller passes every patch layer of the profile, because this returns one insertion patch for
+ * that empty root: a non-empty root config would lose the caller's override patches by id.
+ * @param ctx Profile context prepared by the launcher.
+ * @param patches Original ordered profile patches; these remain unchanged.
+ * @param parentURL Root Include's resolution base.
+ * @param binName Diagnostic prefix for a denied row; defaults to `dsh`.
+ * @returns The prepared patch list plus the composition's checked/denied admission counts.
+ */
+export function prepareProfilePatchesReport(
+  ctx: Context, patches: PatchOptions[], parentURL: string, binName = 'dsh',
+): { readonly patches: PatchOptions[]; readonly checked: number; readonly denied: number } {
+  if (ctx.get('profileContext') === undefined) return { patches, checked: 0, denied: 0 }
   const entries = applyEntryPatches([], patches, patchWarning(ctx))
-  const rows = prepareProfileEntries(ctx, entries, parentURL, binName)
-  return rows.length === 0 ? [] : [{ insert: rows }]
+  const { rows, checked, denied } = prepareProfileEntriesReport(ctx, entries, parentURL, binName)
+  return { patches: rows.length === 0 ? [] : [{ insert: rows }], checked, denied }
 }
