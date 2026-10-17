@@ -34,6 +34,15 @@ const CATALOG: ModelCatalog = {
   failures: [],
 }
 
+describe('compaction parameter mirror', () => {
+  it('mirrors the compaction-basic shipped trigger default', () => {
+    // The panel displays this value as the "Fire at" percentage and a group
+    // reset persists it; it must track DEFAULT_THRESHOLD_RATIO in
+    // packages/compaction/compaction-basic/src/config.ts.
+    expect(PARAM_DEFAULTS.compaction.thresholdRatio).toBe(0.6)
+  })
+})
+
 describe('compaction model catalog indexing', () => {
   it('keys catalog models by provider/model', () => {
     const models = compactionModels(CATALOG)
@@ -51,12 +60,12 @@ describe('effective compaction policy derivation', () => {
       null,
       compactionModels(CATALOG),
       t)
-    // 1M window: reserve min(65536, 500000) = 65536; threshold min(800000, 868928).
+    // 1M window: reserve min(65536, 500000) = 65536; threshold min(600000, 868928).
     expect(readout).toMatchObject({
       route: 'alpha/big',
       contextWindow: 1_000_000,
       outputReserveTokens: 65_536,
-      thresholdTokens: 800_000,
+      thresholdTokens: 600_000,
       retainTokens: Math.floor((1_000_000 - 65_536) * 0.16),
     })
     expect(readout.problem).toBeUndefined()
@@ -70,7 +79,7 @@ describe('effective compaction policy derivation', () => {
       compactionModels(CATALOG),
       t)
     expect(readout.route).toBe('session model alpha/big')
-    expect(readout.thresholdTokens).toBe(800_000)
+    expect(readout.thresholdTokens).toBe(600_000)
 
     const unknown = deriveCompactionPolicy(PARAMS, null, null, new Map(), t)
     expect(unknown.route).toBe('session model')
@@ -111,7 +120,7 @@ describe('effective compaction policy derivation', () => {
       null,
       compactionModels(CATALOG),
       t)
-    expect(conflict.problem).toContain('must stay below the 800000-token threshold')
+    expect(conflict.problem).toContain('must stay below the 600000-token threshold')
 
     // The shipped 65,536 headroom exceeds a 32k window's pressure budget.
     const headroom = deriveCompactionPolicy(
@@ -144,7 +153,7 @@ describe('compaction policy store', () => {
       CATALOG,
       t)
     expect(getCompactionPolicy().route).toBe('alpha/big')
-    expect(seen.at(-1)?.thresholdTokens).toBe(800_000)
+    expect(seen.at(-1)?.thresholdTokens).toBe(600_000)
     unsubscribe()
     refreshCompactionPolicy(PARAMS, null, CATALOG.default, CATALOG, t)
     expect(getCompactionPolicy().route).toBe('session model alpha/big')

@@ -74,10 +74,12 @@ export const PARAM_DEFAULTS: OrchestrationParams = {
     claimsBatchSize: 8,
     claimsBatchMinutes: 5,
   },
-  // Mirrors the compaction-basic/pruner code defaults; the backend reads these
-  // only when set, so untouched values keep today's behaviour exactly.
+  // Mirrors the compaction-basic/pruner code defaults (thresholdRatio tracks
+  // DEFAULT_THRESHOLD_RATIO in packages/compaction/compaction-basic/src/config.ts);
+  // the backend reads these only when set, so untouched values keep today's
+  // behaviour exactly.
   compaction: {
-    thresholdRatio: 0.8,
+    thresholdRatio: 0.6,
     retainRatio: 0.16,
     headroomTokens: 65_536,
     retainTokens: 0,
