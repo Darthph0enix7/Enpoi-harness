@@ -2,6 +2,7 @@
 import { useLayoutEffect, useState } from 'react'
 import type { ChatScrollPosition, ChatViewSlotProps } from '../contract/slots.ts'
 import type { ChatViewport, ViewportLanding, ViewportScroll } from './use-chat-viewport.ts'
+import { READER_INTENT_WINDOW_MS } from './use-chat-viewport.ts'
 import { useScrollFollow, type ScrollFollow } from './use-scroll-follow.ts'
 
 const FOLLOW_THRESHOLD = 24
@@ -28,6 +29,7 @@ export class ChatReading {
   private sampleTimer: number | null = null
   private probeFrame: number | null = null
   private sampled: ((sample: ReadingSample) => void) | null = null
+  private consumedIntent = 0
 
   constructor(
     private readonly viewport: ChatViewport,
@@ -121,16 +123,30 @@ export class ChatReading {
 
   /**
    * Handle pinned layout movement and reader arrivals at the floor immediately.
+   * While follow is active only a fresh reader gesture classifies a delivery as
+   * reader movement; layout and virtualizer corrections re-pin the floor instead
+   * of releasing follow. Away from the floor, movement remains reader-attributed
+   * until its sample settles.
    * @param scroll - attributed scroll delivery; other reader movement remains pending until sampled.
    */
   readonly onScroll = (scroll: ViewportScroll): void => {
-    if ((!scroll.movedByReader && this.state.followingTail)
-      || (scroll.movedByReader && scroll.metrics.top >= scroll.metrics.floor)) {
+    const intent = this.viewport.intentSeq
+    const readerInput = intent !== this.consumedIntent
+    if (readerInput) this.consumedIntent = intent
+    const readerMoved = scroll.movedByReader
+      && (!this.state.followingTail || (readerInput && this.viewport.intentAge <= READER_INTENT_WINDOW_MS))
+    if (readerMoved && scroll.metrics.top >= scroll.metrics.floor) {
       this.followTail()
-      this.sampled?.({ position: null, movedByReader: scroll.movedByReader, followingTail: true })
+      this.sampled?.({ position: null, movedByReader: true, followingTail: true })
       return
     }
-    this.sampleTimer ??= window.setTimeout(this.flushSample, SCROLL_SAMPLE_INTERVAL_MS)
+    if (readerMoved || this.sampleTimer !== null) {
+      this.sampleTimer ??= window.setTimeout(this.flushSample, SCROLL_SAMPLE_INTERVAL_MS)
+      return
+    }
+    if (!this.state.followingTail) return
+    this.followTail()
+    this.sampled?.({ position: null, movedByReader: false, followingTail: true })
   }
 
   /** Settle pending reader movement at the browser's scrollend. */

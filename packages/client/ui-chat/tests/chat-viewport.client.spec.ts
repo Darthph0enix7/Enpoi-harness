@@ -457,6 +457,24 @@ it('gives paging compensation priority over an active inner follow animation', (
   expect(follow.sample(scrollMetrics(h.body))).toBe(true)
 })
 
+it('counts only reader input that can move the scrollport', () => {
+  const h = fixture()
+  const content = document.createElement('div')
+  h.column.append(content)
+  const before = h.viewport.intentSeq
+  content.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+  expect(h.viewport.intentSeq).toBe(before)
+  h.column.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+  expect(h.viewport.intentSeq).toBe(before + 1)
+  h.column.dispatchEvent(new Event('wheel', { bubbles: true }))
+  expect(h.viewport.intentSeq).toBe(before + 2)
+  h.column.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', bubbles: true }))
+  expect(h.viewport.intentSeq).toBe(before + 3)
+  h.column.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }))
+  expect(h.viewport.intentSeq).toBe(before + 3)
+  expect(h.viewport.intentAge).toBeLessThan(1_000)
+})
+
 it.each(['wheel', 'touchstart', 'pointerdown', 'keydown', 'beforematch'])(
   'retains the same paging anchor through later content resizes until %s', (intent) => {
     const h = nestedFixture(200, 400)

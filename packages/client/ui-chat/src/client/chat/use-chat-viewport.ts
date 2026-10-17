@@ -67,6 +67,13 @@ interface PagingPosition {
 const READING_INTENTS = ['wheel', 'touchstart', 'pointerdown', 'keydown', 'beforematch'] as const
 const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '])
 
+/**
+ * Elapsed-time bound for attributing a delivered position to the reader gesture
+ * that caused it. Momentum and key repeat refresh the gesture continuously, so
+ * only a gesture that moved nothing for this long stops qualifying.
+ */
+export const READER_INTENT_WINDOW_MS = 500
+
 /** Owns one Chat scrollport's DOM operations, event listeners, and size observer. */
 export class ChatViewport {
   private elements: ViewportElements | null = null
@@ -76,6 +83,8 @@ export class ChatViewport {
   private observation: { top: number; landing: ViewportLanding | null } = { top: 0, landing: null }
   private paging: PagingPosition | null = null
   private virtualWindow: ChatVirtualWindow | null = null
+  private intentCounter = 0
+  private intentStamp = 0
 
   /**
    * Bind to the containing scrollport and observe content and viewport sizes.
@@ -142,6 +151,18 @@ export class ChatViewport {
   setVirtualWindow(virtualWindow: ChatVirtualWindow | null): void {
     this.virtualWindow = virtualWindow
   }
+
+  /**
+   * Expose the reader-gesture generation for follow attribution.
+   * @returns a counter that increases on every gesture that can move this scrollport.
+   */
+  get intentSeq(): number { return this.intentCounter }
+
+  /**
+   * Expose the reader-gesture recency for follow attribution.
+   * @returns elapsed milliseconds since the latest gesture that can move this scrollport.
+   */
+  get intentAge(): number { return Date.now() - this.intentStamp }
 
   /**
    * Resolve the tail from the committed turn index.
@@ -502,6 +523,14 @@ export class ChatViewport {
     if (event.type === 'keydown' || event.type === 'pointerdown') {
       if (event.target instanceof Element && event.target.closest('[data-composer-seat]') !== null) return
       if (event.type === 'keydown' && (!(event instanceof KeyboardEvent) || !SCROLL_KEYS.has(event.key))) return
+    }
+    // Only input that can move this scrollport establishes reader ownership of
+    // it. A pointerdown on transcript content releases a paging anchor but is a
+    // click, not a scroll; the scrollport surface itself (scrollbar or empty
+    // area) is the drag surface and does count.
+    if (event.type !== 'pointerdown' || event.target === this.elements?.scroller) {
+      this.intentCounter += 1
+      this.intentStamp = Date.now()
     }
     if (this.paging === null) return
     this.stopPreserving()

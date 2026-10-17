@@ -3790,11 +3790,13 @@ describe('ChatView', () => {
     scroller.scrollTop = 700
     fireEvent.scroll(scroller)
     fireEvent(scroller, new Event('scrollend'))
+    fireEvent.wheel(scroller)
     scroller.scrollTop = 690
     fireEvent.scroll(scroller)
     metrics.setHeight(1_020)
     act(() => { notify?.() })
     expect(scroller.scrollTop).toBe(690)
+    fireEvent.wheel(scroller)
     scroller.scrollTop = 680
     fireEvent.scroll(scroller)
     fireEvent(scroller, new Event('scrollend'))
@@ -3862,6 +3864,7 @@ describe('ChatView', () => {
     const metrics = installScrollMetrics(scroller, 1_000, 300)
     scroller.scrollTop = 700
     fireEvent.scroll(scroller)
+    fireEvent.wheel(scroller)
     scroller.scrollTop = 500
     fireEvent.scroll(scroller)
     fireEvent(scroller, new Event('scrollend'))
@@ -3884,6 +3887,7 @@ describe('ChatView', () => {
       installScrollMetrics(scroller, 1_000, 300)
       scroller.scrollTop = 700
       fireEvent.scroll(scroller)
+      fireEvent.wheel(scroller)
       scroller.scrollTop = 500
       fireEvent.scroll(scroller)
       fireEvent(scroller, new Event('scrollend'))
@@ -3928,12 +3932,101 @@ describe('ChatView', () => {
     scroller.scrollTop = 700
     fireEvent.scroll(scroller)
 
-    // Chromium advances compositor geometry before delivering the event:
-    // attribution must compare against the observed-top ledger, never a
-    // baseline sampled from already-moved raw geometry.
+    // Chromium advances compositor geometry before delivering the event: the
+    // reader gesture precedes both, and attribution must compare against the
+    // observed-top ledger, never a baseline sampled from already-moved raw
+    // geometry.
+    fireEvent.wheel(scroller)
     scroller.scrollTop = 500
     fireEvent.scroll(scroller)
     fireEvent(scroller, new Event('scrollend'))
+    expect(view.getByLabelText('回到底部')).toBeTruthy()
+  })
+
+  it('re-pins a pinned delivery that carries no reader gesture', () => {
+    const h = makeHarness({ nodes: [user(1, 'q'), assistant(2, 'a')] })
+    const view = render(<h.ChatView {...h.props} />)
+    const scroller = view.container.querySelector('[data-chat-flow]')!.parentElement as HTMLDivElement
+    const metrics = installScrollMetrics(scroller, 1_000, 300)
+    readerScroll(scroller, 100)
+    fireEvent.click(view.getByLabelText('回到底部'))
+    expect(scroller.scrollTop).toBe(700)
+
+    // A virtualizer measurement correction moves the pinned offset up 48px and
+    // delivers its scroll without reader input: follow must re-pin instead of
+    // releasing intent.
+    metrics.setLayout(1_000, 652)
+    fireEvent.scroll(scroller)
+    fireEvent(scroller, new Event('scrollend'))
+    expect(scroller.scrollTop).toBe(700)
+    expect(view.container.querySelector('[data-chat-following-tail]')).not.toBeNull()
+    expect(view.queryByLabelText('回到底部')).toBeNull()
+
+    // The next growth keeps pinning the tail.
+    metrics.setHeight(1_200)
+    act(() => { h.setSession({ running: true }) })
+    expect(scroller.scrollTop).toBe(900)
+    expect(h.chatScroll.read()).toBeNull()
+  })
+
+  it('keeps the pinned floor through growth and gesture-free deliveries', () => {
+    let notify: (() => void) | undefined
+    class ResizeObserverStub {
+      constructor(callback: ResizeObserverCallback) {
+        notify = () => { callback([], this as unknown as ResizeObserver) }
+      }
+
+      observe = vi.fn()
+      disconnect = vi.fn()
+    }
+    vi.stubGlobal('ResizeObserver', ResizeObserverStub)
+    const h = makeHarness({ nodes: [user(1, 'q'), assistant(2, 'a')] })
+    const view = render(<h.ChatView {...h.props} />)
+    const scroller = view.container.querySelector('[data-chat-flow]')!.parentElement as HTMLDivElement
+    const metrics = installScrollMetrics(scroller, 1_200, 300)
+    expect(notify).toBeDefined()
+    readerScroll(scroller, 300)
+    fireEvent.click(view.getByLabelText('回到底部'))
+    const tops = [scroller.scrollTop]
+    // Each round delivers a measurement correction short of the grown floor
+    // without any reader gesture, then the observer reports the growth.
+    for (const round of [{ height: 1_260, corrected: 930 }, { height: 1_500, corrected: 990 }, { height: 1_760, corrected: 1_230 }]) {
+      metrics.setLayout(round.height, round.corrected)
+      fireEvent.scroll(scroller)
+      act(() => { notify?.() })
+      tops.push(scroller.scrollTop)
+      expect(view.queryByLabelText('回到底部')).toBeNull()
+      expect(view.container.querySelector('[data-chat-following-tail]')).not.toBeNull()
+    }
+    expect(tops).toEqual([900, 960, 1_200, 1_460])
+    expect(h.chatScroll.read()).toBeNull()
+  })
+
+  it('settles pending and away reader samples against gesture-free deliveries', () => {
+    const h = makeHarness({ nodes: [user(1, 'q'), assistant(2, 'a')] })
+    const view = render(<h.ChatView {...h.props} />)
+    const scroller = view.container.querySelector('[data-chat-flow]')!.parentElement as HTMLDivElement
+    const metrics = installScrollMetrics(scroller, 1_000, 300) // floor 700
+    // A reader gesture leaves a sub-threshold correction pending.
+    fireEvent.wheel(scroller)
+    scroller.scrollTop = 200
+    fireEvent.scroll(scroller)
+    metrics.setLayout(1_000, 0.25)
+    fireEvent.scroll(scroller)
+    metrics.setHeight(1_100)
+    act(() => { h.setSession({ running: true }) })
+    expect(scroller.scrollTop).toBe(0.25) // growth waits for the sample
+    fireEvent(scroller, new Event('scrollend'))
+    expect(scroller.scrollTop).toBe(800) // the sample settled on the baseline, so the floor re-pins
+    // An away reader settles, then a gesture-free no-movement delivery is inert.
+    fireEvent.wheel(scroller)
+    scroller.scrollTop = 100
+    fireEvent.scroll(scroller)
+    fireEvent(scroller, new Event('scrollend'))
+    expect(view.getByLabelText('回到底部')).toBeTruthy()
+    metrics.setLayout(1_000, 100.25)
+    fireEvent.scroll(scroller)
+    expect(scroller.scrollTop).toBe(100.25)
     expect(view.getByLabelText('回到底部')).toBeTruthy()
   })
 
