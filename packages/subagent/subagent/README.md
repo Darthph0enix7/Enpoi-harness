@@ -62,6 +62,10 @@ One-shot children run once and settle with a single result, plus an optional str
 
 Every exact live Agent can use `sendMessage()` with a direct continuable child; a resident continuable child can also use it with its direct parent. A working target receives the Agent message through Steer at its nearest step; an idle target starts a turn, and only a direct child can be cold-resumed. The parent can also interrupt a running descendant or list its children at any time. A browser continuation prompt independently selects Queue or Steer and may carry image parts: the Host admits and persists each image batch through the attachment store before the child inbox accepts the message, and refuses delivery when the child's declared model does not accept image input. Direct-child discovery reads the parent-owned `subagentCatalog` projection. `listChildren(parentSessionId, signal?)` owns a live-preferred Session observation and returns the catalog asynchronously without reading child logs. It forwards cancellation and releases the observation after materialization. Materialization preserves parent event order in O(D) time for D facts. Descendant discovery recursively reads those child catalogs in parent event order, observing each reachable Session once. It skips branches whose catalogs cannot be read and returns diagnostics for them; neither path loads or resumes a child Agent.
 
+### The dispatch-to-report workflow (never poll)
+
+A background dispatch is a handoff, not a wait: the tool returns `started subagent <childId>` — followed by the fixed contract line `You will be woken with its report when it settles — do not poll its status;` — and the parent's turn ends normally with nothing outstanding to watch. When the child settles, the outbox delivers exactly one notice into the parent's durable inbox carrying the outcome and the child's final report: an idle parent wakes into a new turn, a busy parent receives it through Steer, and a notice that cannot be placed is held and retried on the parent's next activation or idle transition. Delivery is idempotent by settlement key, so a duplicate settlement never produces a second notice, and the notice is the authoritative end of the dispatch — polling `list_agents` can only ever report the coarse `running`/`inactive` activity that the notice itself supersedes. The same law appears in the `list_agents` description (`You will be notified when a subagent finishes; there is no need to keep checking its status.`); a repeated identical `list_agents` call is answered by the generic repeat-tool reminder.
+
 ### Failure and recovery
 
 Requests that need a capability the chosen provider lacks fail loudly at start rather than being silently ignored. A failed child run returns a stop reason, and provider backends add a safe diagnostic; a cancelled request settles as `aborted`. Children are isolated: a crashed or misbehaving child cannot corrupt the parent's session.
@@ -157,6 +161,20 @@ One notice per settled Activation in the parent's request, sized by the child's 
 #### KV Cache effect
 
 Append-only in the parent: the notice follows its reusable request prefix. Reaching an idle parent starts one independent model request; reaching a busy one does not.
+
+### Dispatch-result delivery contract
+
+#### What the model sees
+
+The continuable background dispatch result is two lines: `started subagent <childId>` and the fixed line `You will be woken with its report when it settles — do not poll its status;`. The `list_agents` description repeats the law in its own words (`You will be notified when a subagent finishes; there is no need to keep checking its status.`), and the tool's own row format stays `running`/`inactive` only.
+
+#### Token effect
+
+One short fixed line appended to each continuable background dispatch result; a model that trusts it avoids the per-poll schema and row tokens entirely.
+
+#### KV Cache effect
+
+Append-only in the parent: the result follows the reusable request prefix.
 
 ### Child delegation-scope statement
 

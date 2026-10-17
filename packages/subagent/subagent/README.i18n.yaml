@@ -32,6 +32,9 @@
 /deepseek-ai-dsh-subagent/use-this-package/messaging-interrupting-and-discovering:
   en: ff41ac0e770ed865
   zh: 27dcf055badf217d
+/deepseek-ai-dsh-subagent/use-this-package/the-dispatch-to-report-workflow-never-poll:
+  en: 4e7833b41ba25efe
+  zh: 7e62df2052ffc577
 /deepseek-ai-dsh-subagent/use-this-package/failure-and-recovery:
   en: 782aaaf8639c211c
   zh: e2a873eece366e74
@@ -71,6 +74,18 @@
 /deepseek-ai-dsh-subagent/model-experience/settlement-notice/kv-cache-effect:
   en: d6b1d618083da79b
   zh: 9a28942b7d53c382
+/deepseek-ai-dsh-subagent/model-experience/dispatch-result-delivery-contract:
+  en: deea81b87d4a7c9b
+  zh: c469f29cfc0644f3
+/deepseek-ai-dsh-subagent/model-experience/dispatch-result-delivery-contract/what-the-model-sees:
+  en: a1b829ecad42d73d
+  zh: b2cd610cae9aee28
+/deepseek-ai-dsh-subagent/model-experience/dispatch-result-delivery-contract/token-effect:
+  en: 99c2069a6932d062
+  zh: a2793225256c3170
+/deepseek-ai-dsh-subagent/model-experience/dispatch-result-delivery-contract/kv-cache-effect:
+  en: 3d515aaf335f5a60
+  zh: d5b30bec50551ec8
 /deepseek-ai-dsh-subagent/model-experience/child-delegation-scope-statement:
   en: dc8544657916e194
   zh: b0feff0764b5d903

@@ -62,6 +62,10 @@ kind: "package-reference"
 
 每个确切在线 Agent 都可以对直接可继续 child 使用 `sendMessage()`；驻留的可继续 child 还可以对自己的直接 parent 使用它。正在工作的目标通过 Steer 在最近 step 接收 Agent 消息；空闲目标启动轮次，且只有直接 child 可以冷恢复。parent 也可以随时中断正在运行的后代或列举自己的子级。浏览器发出的继续执行 prompt 会独立选择 Queue 或 Steer，并且可以携带图片部分：Host 先通过附件存储完成整批图片的准入与持久化，子级 inbox 才接受这条消息；当子级声明的模型不接受图片输入时拒绝投递。 直接子级发现读取 parent 自有的 `subagentCatalog` projection。`listChildren(parentSessionId, signal?)` 持有一次优先实时来源的 Session 观察，异步返回目录，不读取子级日志。它转发取消信号，并在物化后释放观察。物化以 O(D) 时间保留 D 条事实的父日志事件顺序。后代发现按父事件顺序递归读取子级目录，每个可达 Session 观察一次。无法读取目录的分支会被跳过，并返回诊断；两条路径都不加载或恢复子级 Agent。
 
+### 派发到报告的流程（绝不轮询）
+
+后台派发是交接，不是等待：工具立即返回 `started subagent <childId>`，并附上固定契约行 `You will be woken with its report when it settles — do not poll its status;`，随后 parent 的轮次正常结束，没有任何需要盯守的在途事项。子级结算时，outbox 恰好向 parent 的持久 inbox 投递一条通知，携带结果与子级的最终报告：空闲的 parent 被唤醒进入新一轮，忙碌的 parent 通过 Steer 收到它；无法放置的通知会被保留，并在 parent 下次激活或回到空闲时重试。投递以结算键为幂等单位，重复的结算不会产生第二条通知；通知就是这次派发的权威终点——轮询 `list_agents` 只能报告粗略的 `running`/`inactive` 活动状态，而这些都会被通知本身取代。同一条法则也写在 `list_agents` 的描述里（`You will be notified when a subagent finishes; there is no need to keep checking its status.`）；重复的相同 `list_agents` 调用会由通用的重复工具提醒应答。
+
 ### 失败与恢复
 
 需要所选提供方不具备的能力的请求会在启动时明确报错，而不会被静默忽略。失败的子 agent 运行会返回停止原因，提供方后端还会附加安全诊断；被取消的请求以 `aborted` 结算。子 agent 相互隔离：崩溃或行为异常的子 agent 无法破坏父级会话。
@@ -157,6 +161,20 @@ kind: "package-reference"
 #### KV Cache 影响
 
 在父级中仅追加：通知位于其可复用请求前缀之后。到达空闲父级会启动一次独立的模型请求，到达繁忙父级则不会。
+
+### 派发结果的投递契约
+
+#### 模型看到什么
+
+可继续后台派发的结果是两行：`started subagent <childId>` 与固定契约行 `You will be woken with its report when it settles — do not poll its status;`。`list_agents` 的描述以自身措辞重申这条法则（`You will be notified when a subagent finishes; there is no need to keep checking its status.`），该工具的行格式始终只有 `running`/`inactive`。
+
+#### Token 影响
+
+每次可继续后台派发的结果追加一行短的固定文本；信任它的模型完全省去轮询带来的 schema 与行 token。
+
+#### KV Cache 影响
+
+在父级中仅追加：结果位于其可复用请求前缀之后。
 
 ### 子级委派范围声明
 

@@ -175,11 +175,15 @@ export function TheMarkTaskCardAdapter(props: TheMarkTaskCardAdapterProps) {
     ? agentOptions.model
     : assignedModel ?? undefined
 
-  const status: 'running' | 'settled' | 'failed' = running
+  const status: 'running' | 'settled' | 'interrupted' | 'failed' = running
     ? 'running'
-    : block.isError
-      ? 'failed'
-      : 'settled'
+    : block.error?.code === 'interrupted'
+      // An aborted turn freezes its undispatched tool calls with the synthetic
+      // `interrupted` error; the card must say so instead of calling it failed.
+      ? 'interrupted'
+      : block.isError
+        ? 'failed'
+        : 'settled'
 
   const durationMs = running
     ? undefined

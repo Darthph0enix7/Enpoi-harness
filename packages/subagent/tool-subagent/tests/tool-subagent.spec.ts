@@ -1246,9 +1246,12 @@ describe('dsh-tool-subagent continuable background mode', () => {
       { agent: parent },
     )
     expect(started.isError).toBe(false)
-    const match = /^started subagent (\S+)$/.exec(text(started))
+    // The dispatch result pins the delivery contract at the action moment:
+    // the settlement notice is the only status channel, so the parent never polls.
+    const match = /^started subagent (\S+)\n(.+)$/.exec(text(started))
     expect(match).not.toBeNull()
-    const [, childId] = match!
+    const [, childId, contractLine] = match!
+    expect(contractLine).toBe('You will be woken with its report when it settles — do not poll its status;')
     // No Task was created for the continuable child.
     expect(ctx.jobs.list(parent.id)).toEqual([])
 

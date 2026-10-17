@@ -186,8 +186,10 @@ export function TheMarkTaskCard({
         </div>
       </button>
 
-      {/* Zoom 2: Live Action Calligraphy Strip */}
-      {(status === 'running' || latchedTool) && (
+      {/* Zoom 2: Live Action Calligraphy Strip — running, or frozen on a real
+          interruption. A normally settled card shows nothing: the latched tool
+          is only an interruption artifact, never a completion badge. */}
+      {(status === 'running' || status === 'interrupted') && (
         <div className={styles.calligraphyStrip}>
           <span className={styles.calligraphyPrompt}>❯</span>
           {status === 'running' ? (

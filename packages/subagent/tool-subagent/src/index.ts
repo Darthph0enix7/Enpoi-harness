@@ -1294,7 +1294,11 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             text: value.kind === 'background'
               ? `started background subagent job ${value.jobId}`
               : value.kind === 'continuable'
-                ? `started subagent ${value.subagentId}`
+                // The dispatch result repeats the delivery contract at the
+                // exact moment the model would otherwise start polling: the
+                // settlement notice is the only status channel it needs.
+                ? `started subagent ${value.subagentId}\n`
+                  + 'You will be woken with its report when it settles — do not poll its status;'
                 : outputValueText(value.output),
           }],
         },
