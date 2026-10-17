@@ -16,6 +16,7 @@ import type {
   SessionIterationGroup,
   SessionRequestSnapshotRequest,
   SessionRequestSnapshotValue,
+  SessionRevertValue,
 } from '../../types.ts'
 import type { SessionFace } from './session.ts'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
@@ -166,14 +167,15 @@ export interface ISessions {
     reasoningEffort?: string
   }): Promise<{ selected: { provider: string; model: string; reasoningEffort?: string } }>
   /**
-   * Revert the conversation from a user message: everything after `atSeq`
+   * Revert the conversation from a user message: everything from `atSeq`
    * becomes reverted (hidden from the transcript and the model surface on the
    * next commit). Returns the reverted query text for the input card.
    * @param opts - session and the user-message seq anchoring the revert.
-   * @returns the reverted query text and the number of reverted messages.
+   * @returns the host receipt: the reverted query text and count, plus the
+   *   no-op compatibility fields an older host may set.
    * @throws when the host rejects the anchor.
    */
-  revert(opts: { sessionId: SessionId; atSeq: number }): Promise<{ revertedText: string; revertedCount: number }>
+  revert(opts: { sessionId: SessionId; atSeq: number }): Promise<SessionRevertValue>
   /**
    * Restore reverted messages: `restoreSeq` omitted restores everything;
    * `restoreSeq` set restores that message and everything after it.

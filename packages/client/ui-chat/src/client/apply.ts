@@ -257,21 +257,24 @@ export function apply(ctx: Context): void {
                 // Fork or child-title failure leaves the source view unchanged.
               })
           },
-          revertAt: (seq: number) => {
-            void ctx.sessions.revert({ sessionId, atSeq: seq })
-              .then(({ revertedText }) => {
-                // Populate the composer draft with the reverted query so the
-                // textarea updates live (the reverted text re-enters input).
-                const scoped = ctx.sessions.scope(sessionId)
-                if (scoped !== undefined) {
-                  const conversation = scoped.get('conversation')
-                  conversation?.input.for(scoped).setDraft(revertedText)
-                }
-              })
-              .catch((error: unknown) => {
-                // Surface the failure (e.g. the message is compaction-shadowed).
-                console.error('revert failed', error)
-              })
+          revertAt: async (seq: number) => {
+            const receipt = await ctx.sessions.revert({ sessionId, atSeq: seq })
+            // Older hosts report an unusable anchor as a receipt instead of
+            // rejecting: hand the no-op back so the Chat view can surface it.
+            if (receipt.noop === true) {
+              return {
+                noop: true,
+                ...(receipt.notice === undefined ? {} : { notice: receipt.notice }),
+              }
+            }
+            // Populate the composer draft with the reverted query so the
+            // textarea updates live (the reverted text re-enters input).
+            const scoped = ctx.sessions.scope(sessionId)
+            if (scoped !== undefined) {
+              const conversation = scoped.get('conversation')
+              conversation?.input.for(scoped).setDraft(receipt.revertedText)
+            }
+            return { noop: false }
           },
           loadIterationPreviews: (anchorSeq: number) =>
             ctx.sessions.revertIterations({ sessionId, anchorSeq }),

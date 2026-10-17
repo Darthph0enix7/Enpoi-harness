@@ -165,7 +165,7 @@ describe('SessionController revert RPC', () => {
     )).resolves.not.toBe('revert-invalid')
   })
 
-  it('makes a revert with an empty (failed) tail a no-op and writes no boundary', async () => {
+  it('arms on a failed tail and the next send replaces exactly the anchor message', async () => {
     const { ctx, controller, sessionId } = await composed()
     const session = ctx.sessions.get(sessionId)!
     // A turn whose provider failed leaves the user message as the last
@@ -188,15 +188,38 @@ describe('SessionController revert RPC', () => {
       accepted: true,
       revertedText: 'failed query',
       revertedCount: 0,
-      noop: true,
     })
-    expect(result.notice).toContain('no revert boundary was created')
-    // The wedge root cause: no revert/state boundary may be committed when
-    // there is no following surface node to shadow.
-    expect(session.snapshotEvents().some(e => e.type === 'revert/state')).toBe(false)
+    expect(result).not.toHaveProperty('noop')
+    const revertEvent = session.snapshotEvents().find(e => e.type === 'revert/state')!
+    expect(revertEvent.data).toMatchObject({ fromSeq: failedSeq, cause: 'revert' })
+
+    // The next send commits the boundary as a replacement spanning exactly the
+    // failed anchor: the message leaves the surface instead of wedging sends.
+    const followup = vi.fn()
+    Object.assign(ctx.agents.get(sessionId)!, { followup })
+    const signal = new AbortController().signal
+    await expect(controller.prompt({
+      requestId: 'failed-tail-commit' as never,
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text' as const, text: 'retry' }],
+      revertFromSeq: failedSeq,
+    }, signal)).resolves.toMatchObject({ accepted: true })
+
+    expect(followup).toHaveBeenCalledTimes(1)
+    const intent = followup.mock.calls[0]![1] as {
+      surfaceOp: { op: string; startSeq: number; endSeq: number }
+      sourceEventSeqs: readonly number[]
+      clearRevert: boolean
+    }
+    expect(intent.surfaceOp).toEqual({ op: 'replace', startSeq: failedSeq, endSeq: failedSeq })
+    expect(intent.sourceEventSeqs).toEqual([failedSeq])
+    expect(intent.clearRevert).toBe(true)
+    // No disarm marker: the commit itself consumes the boundary.
+    expect(session.snapshotEvents().filter(e => e.type === 'revert/state')).toHaveLength(1)
   })
 
-  it('clears a stored boundary that has nothing to shadow and admits the prompt', async () => {
+  it('commits a stored boundary whose tail is empty as a replace over the anchor', async () => {
     const { ctx, controller, sessionId } = await composed()
     const session = ctx.sessions.get(sessionId)!
     const failed = createUserMessage({
@@ -210,26 +233,28 @@ describe('SessionController revert RPC', () => {
       reason: { kind: 'error', error: { message: 'No API key for provider: fixture', code: 'PI_AI_ERROR' } },
     })
     const failedSeq = session.snapshotEvents().find(e => e.type === 'user/message' && e.data.id === failed.id)!.seq
-    // Simulate a boundary persisted by an older binary before the no-op fix.
+    // Simulate a boundary persisted by an older binary before this fix.
     session.append('revert/state', { fromSeq: failedSeq, cause: 'revert' })
     const followup = vi.fn()
     Object.assign(ctx.agents.get(sessionId)!, { followup })
 
     const signal = new AbortController().signal
     await expect(controller.prompt({
-      requestId: 'stale-boundary' as never,
+      requestId: 'stored-boundary' as never,
       sessionId,
       mode: 'queue',
       content: [{ type: 'text' as const, text: 'retry' }],
       revertFromSeq: failedSeq,
     }, signal)).resolves.toMatchObject({ accepted: true })
 
-    // The stale boundary is cleared atomically with admission, and the message
-    // is appended plainly (no replace span to shadow).
-    const lastRevert = session.snapshotEvents().filter(e => e.type === 'revert/state').at(-1)!
-    expect(lastRevert.data).toMatchObject({ fromSeq: null, cause: 'commit' })
+    // The boundary is consumed by a replace over the anchor itself; no disarm
+    // marker is written and the message is not appended plainly.
+    const reverts = session.snapshotEvents().filter(e => e.type === 'revert/state')
+    expect(reverts).toHaveLength(1)
+    expect(reverts[0]!.data).toMatchObject({ fromSeq: failedSeq, cause: 'revert' })
     expect(followup).toHaveBeenCalledTimes(1)
-    expect(followup.mock.calls[0]).toHaveLength(1)
+    const intent = followup.mock.calls[0]![1] as { surfaceOp: { op: string; startSeq: number; endSeq: number } }
+    expect(intent.surfaceOp).toEqual({ op: 'replace', startSeq: failedSeq, endSeq: failedSeq })
   })
 
   it('clears a stored boundary whose anchor is gone and admits the prompt', async () => {
@@ -251,6 +276,32 @@ describe('SessionController revert RPC', () => {
     const lastRevert = session.snapshotEvents().filter(e => e.type === 'revert/state').at(-1)!
     expect(lastRevert.data).toMatchObject({ fromSeq: null, cause: 'commit' })
     expect(followup).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears a stored boundary whose anchor is not a user message and admits the prompt', async () => {
+    const { ctx, controller, sessionId } = await composed()
+    const session = ctx.sessions.get(sessionId)!
+    // A corrupt boundary whose anchor is still a surface node but not a user
+    // message cannot become a replace target.
+    const assistantSeq = session.snapshotEvents().find(e => e.type === 'assistant/message')!.seq
+    session.append('revert/state', { fromSeq: assistantSeq, cause: 'revert' })
+    const followup = vi.fn()
+    Object.assign(ctx.agents.get(sessionId)!, { followup })
+
+    const signal = new AbortController().signal
+    await expect(controller.prompt({
+      requestId: 'non-user-anchor' as never,
+      sessionId,
+      mode: 'queue',
+      content: [{ type: 'text' as const, text: 'retry' }],
+      revertFromSeq: assistantSeq,
+    }, signal)).resolves.toMatchObject({ accepted: true })
+
+    // The unusable boundary is dropped and the message is appended plainly.
+    const lastRevert = session.snapshotEvents().filter(e => e.type === 'revert/state').at(-1)!
+    expect(lastRevert.data).toMatchObject({ fromSeq: null, cause: 'commit' })
+    expect(followup).toHaveBeenCalledTimes(1)
+    expect(followup.mock.calls[0]).toHaveLength(1)
   })
 
   it('restores an unusable stored boundary to promptable state', async () => {

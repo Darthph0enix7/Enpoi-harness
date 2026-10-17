@@ -23,6 +23,26 @@ export interface TurnRailItem {
     | { readonly kind: 'unloaded'; readonly seq: SessionSeq }
 }
 
+/**
+ * Revert-state visibility consulted while merging. A turn hidden by the
+ * active boundary or a landed shadow range has no reachable transcript row,
+ * so it must never become a mark; the Chat view owns the revert fold and
+ * supplies this projection at the merge call site.
+ */
+export interface TurnRailVisibility {
+  /**
+   * Resolve one loaded anchor key to its transcript seq.
+   * @param anchorKey - the loaded item's anchor key.
+   * @returns the node's anchor seq, or undefined when it no longer resolves.
+   */
+  anchorSeqOf(anchorKey: string): number | undefined
+  /**
+   * @param seq - one turn anchor seq.
+   * @returns whether the seq is hidden by the revert boundary or a shadow range.
+   */
+  isHidden(seq: number): boolean
+}
+
 const EMPTY_ITEMS: readonly TurnRailItem[] = []
 
 /**
@@ -58,16 +78,20 @@ function outlineEntries(outline: unknown): readonly unknown[] {
  * through. Result ascends by turn.
  * @param loaded - loaded-window rail items (timeline order).
  * @param outline - `turnOutline` projection value, treated as wire data.
+ * @param visibility - revert-state visibility; when present, hidden turns and
+ *   loaded anchors that no longer resolve are dropped before they become marks.
  * @returns every known turn, ascending; a stable empty array when none.
  */
 export function mergeTurnRailItems(
   loaded: readonly TurnNavigationItem[],
   outline: unknown,
+  visibility?: TurnRailVisibility,
 ): readonly TurnRailItem[] {
   const byTurn = new Map<number, TurnRailItem>()
   for (const raw of outlineEntries(outline)) {
     const entry = outlineEntry(raw)
     if (entry === undefined) continue
+    if (visibility?.isHidden(entry.seq) === true) continue
     byTurn.set(entry.turn, {
       turn: entry.turn,
       prompt: entry.prompt,
@@ -76,6 +100,12 @@ export function mergeTurnRailItems(
     })
   }
   for (const item of loaded) {
+    if (visibility !== undefined) {
+      const seq = visibility.anchorSeqOf(item.anchorKey)
+      // An unresolvable anchor cannot be proven visible, exactly as the
+      // transcript filter drops it; a jump to it would land nowhere.
+      if (seq === undefined || visibility.isHidden(seq)) continue
+    }
     const preview = byTurn.get(item.turn)
     byTurn.set(item.turn, {
       turn: item.turn,

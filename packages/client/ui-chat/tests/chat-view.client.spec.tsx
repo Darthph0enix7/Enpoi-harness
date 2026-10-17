@@ -309,6 +309,8 @@ function makeHarness(
     read: () => savedScroll,
   }
   const forkAt = vi.fn()
+  const revertAt = vi.fn<(seq: number) => Promise<{ noop: boolean; notice?: string }>>()
+    .mockResolvedValue({ noop: false })
   const loadIterationPreviews = vi.fn<(anchorSeq: number) => Promise<readonly SessionIterationGroup[]>>()
     .mockResolvedValue([])
   const restoreIteration = vi.fn<(variantSeq: number) => Promise<void>>().mockResolvedValue(undefined)
@@ -461,7 +463,7 @@ function makeHarness(
     loadImage: vi.fn(() => Promise.reject(new Error('not used'))),
     chatScroll,
     forkAt,
-    revertAt: () => {},
+    revertAt,
     loadIterationPreviews,
     restoreIteration,
     // Absent-service default; mention tests override with a real resolver.
@@ -490,7 +492,7 @@ function makeHarness(
     set, setSession: session.set, setChat: chatSource.set, ChatView, props,
     openFile, openSkill, loadOlder, loadThrough, openView,
     setOutline: (value: unknown) => { outlineValue = value },
-    chatScroll, forkAt, toolOwners,
+    chatScroll, forkAt, revertAt, toolOwners,
     setPerformanceUsage: (mode: 'compact' | 'detailed') => { performanceUsage.set(mode) },
     setGrouped: (value: ConversationGroupedView<ProcessGroupData> | undefined) => {
       grouped = value
@@ -621,6 +623,31 @@ describe('Chat node rendering', () => {
     expect(view.container.querySelector('[data-chat-node-key="fixture:user:1"]')).not.toBeNull()
     act(() => { h.setSession({ revertFromSeq: null }) })
     expect(view.container.querySelector('[data-chat-node-key="fixture:user:3"]')).not.toBeNull()
+  })
+
+  it('announces a no-op revert receipt instead of leaving the take-back silent', async () => {
+    const h = makeHarness({
+      nodes: [user(1, 'first'), assistant(2, 'answer', 1)],
+      turnEnds: new Map([[1, 2]]),
+    })
+    h.revertAt.mockResolvedValueOnce({ noop: true, notice: 'nothing after this message to revert' })
+    const view = render(<h.ChatView {...h.props} />)
+    fireEvent.click(view.getAllByRole('button', { name: '从此处回退' })[0]!)
+
+    expect((await screen.findByRole('alert')).textContent).toContain('nothing after this message to revert')
+
+    // An older host no-op without a notice falls back to localized copy.
+    h.revertAt.mockResolvedValueOnce({ noop: true })
+    fireEvent.click(view.getAllByRole('button', { name: '从此处回退' })[0]!)
+    await waitFor(() => { expect(screen.getByRole('alert').textContent).toContain('这条消息无法回退') })
+  })
+
+  it('announces a failed revert RPC instead of failing silently', async () => {
+    const h = makeHarness({ nodes: [user(1, 'first')] })
+    h.revertAt.mockRejectedValueOnce(new Error('gateway unavailable'))
+    const view = render(<h.ChatView {...h.props} />)
+    fireEvent.click(view.getAllByRole('button', { name: '从此处回退' })[0]!)
+    expect((await screen.findByRole('alert')).textContent).toContain('gateway unavailable')
   })
 
   it('navigates iteration versions as a preview and restores only on the explicit action', async () => {
@@ -1258,6 +1285,31 @@ describe('ChatView', () => {
     await waitFor(() => { expect(first.getAttribute('aria-busy')).toBeNull() })
     expect(h.loadThrough.mock.calls).toEqual([[0], [0]])
     expect(view.getByRole('button', { name: '跳转到第 3 轮' }).getAttribute('aria-current')).toBe('true')
+  })
+
+  it('drops rail turns hidden by the revert boundary or a shadow range', async () => {
+    const later = [userInTurn(8, 'third prompt', 3), assistant(9, 'third response', 3)]
+    const h = makeHarness({ nodes: later }, { hasMore: true })
+    h.setOutline([
+      { turn: 1, seq: 0, prompt: 'first', response: '' },
+      { turn: 2, seq: 4, prompt: 'second', response: '' },
+      { turn: 3, seq: 8, prompt: 'third', response: '' },
+    ])
+    const view = render(<h.ChatView {...h.props} />)
+    await view.findByRole('button', { name: '加载并跳转到第 1 轮' })
+    const labels = () => within(view.getByRole('navigation')).getAllByRole('button')
+      .map(mark => mark.getAttribute('aria-label'))
+    expect(labels()).toEqual(['加载并跳转到第 1 轮', '加载并跳转到第 2 轮', '跳转到第 3 轮'])
+
+    // Taking back turn 3 hides its loaded row and the matching outline turn:
+    // the hidden turn must not stay as a mark whose jump lands nowhere.
+    act(() => { h.setSession({ revertFromSeq: 8 }) })
+    expect(labels()).toEqual(['加载并跳转到第 1 轮', '加载并跳转到第 2 轮'])
+
+    // A landed shadow range over turn 2 removes exactly the outline turn it
+    // covers, while the loaded turn 3 becomes reachable again.
+    act(() => { h.setSession({ revertFromSeq: null, revertShadowRanges: [{ start: 4, end: 5 }] }) })
+    expect(labels()).toEqual(['加载并跳转到第 1 轮', '跳转到第 3 轮'])
   })
 
   it('uses a known turn landing without hit testing or consuming rail scroll as transcript input', async () => {

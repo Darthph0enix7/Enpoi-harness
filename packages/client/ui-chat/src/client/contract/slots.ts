@@ -243,6 +243,14 @@ export interface PerformanceUsageInjected {
   }
 }
 
+/** Host receipt of one take-back gesture, resolved after the RPC settles. */
+export interface RevertAtReceipt {
+  /** True when the host armed no boundary (older host: unusable anchor); the message stays. */
+  readonly noop: boolean
+  /** Operator-facing host reason when `noop` is set. */
+  readonly notice?: string
+}
+
 /** Business callbacks injected into the Chat view. */
 export interface ChatViewInjected {
   hooks: {
@@ -273,10 +281,11 @@ export interface ChatViewInjected {
   forkAt: (seq: number) => void
   /**
    * Revert the conversation from the user message anchored at `seq` (Enpoi
-   * Harness): everything after the boundary becomes reverted on commit; the
-   * reverted query text lands in the composer draft.
+   * Harness): everything from the boundary becomes reverted on commit; the
+   * reverted query text lands in the composer draft. Rejects when the RPC
+   * fails; resolves the host receipt otherwise (a no-op must be surfaced).
    */
-  revertAt: (seq: number) => void
+  revertAt: (seq: number) => Promise<RevertAtReceipt>
   /** Load bounded previews for one iteration group (◀ x/y ▶ navigation). */
   loadIterationPreviews: (anchorSeq: number) => Promise<readonly SessionIterationGroup[]>
   /** Restore one iteration variant as the active version. */

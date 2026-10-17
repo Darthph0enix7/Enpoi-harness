@@ -8,7 +8,7 @@ import type {
   AgentContext, ISessions, ProjectionsFace, SessionBinding, SessionFace, SessionIterationGroup,
   SessionListState, SessionEventLikeEntry, SessionLiveEventEntry, SessionSearchResultItem,
   SessionReference, SessionReferenceSource, SessionRetainInfo, SessionRetainOptions,
-  SessionSnapshot, SessionSummary, SessionTarget, SubmissionHandle,
+  SessionRevertValue, SessionSnapshot, SessionSummary, SessionTarget, SubmissionHandle,
 } from '@deepseek-ai/dsh-api-session-controller/client'
 import { scopeIdentityOf } from '@deepseek-ai/dsh-api-session-controller/src/client/scope.ts'
 import type {
@@ -729,9 +729,9 @@ export class TestSessions implements ISessions {
   }
 
   /** Fixture stub: records the call and returns the reverted query text. */
-  revert(opts: { sessionId: SessionId; atSeq: number }): Promise<{ revertedText: string; revertedCount: number }> {
+  revert(opts: { sessionId: SessionId; atSeq: number }): Promise<SessionRevertValue> {
     this.calls.push({ method: 'revert', args: [opts] })
-    return Promise.resolve({ revertedText: '', revertedCount: 0 })
+    return Promise.resolve({ accepted: true, revertedText: '', revertedCount: 0 })
   }
 
   /** Fixture stub: records the call. */

@@ -774,9 +774,13 @@ export interface SessionRevertValue {
   readonly accepted: true
   readonly revertedText: string
   readonly revertedCount: number
-  /** Set when the anchor had no following surface node to shadow; no boundary was written. */
+  /**
+   * Set only when the host could not arm a boundary. Current hosts reject an
+   * unusable anchor (`revert-invalid`) and arm every valid one, so this field
+   * is read-only compatibility for older hosts.
+   */
   readonly noop?: boolean
-  /** Operator-facing reason for a no-op revert. */
+  /** Operator-facing reason when `noop` is set. */
   readonly notice?: string
 }
 

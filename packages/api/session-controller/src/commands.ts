@@ -410,9 +410,10 @@ export class SessionCommandController {
 
   /**
    * Reject empty content, then admit one prompt after Agent and attachment
-   * validation. A prompt carrying a `revertFromSeq` that cannot shadow
-   * anything (anchor gone, or no following surface node) clears the stale
-   * boundary and appends the message plainly instead of rejecting.
+   * validation. A prompt carrying a `revertFromSeq` whose anchor is usable
+   * commits a replacement from that anchor through the last surface node (a
+   * failed or empty tail replaces the anchor itself); an unusable boundary
+   * clears and appends plainly instead of rejecting.
    * @param request - Session identity, prompt content, source metadata, and delivery mode.
    * @returns acknowledgement that the Agent accepted the prompt.
    */
@@ -492,12 +493,15 @@ export class SessionCommandController {
           const shadowable = startIdx !== -1
             && revertAnchorOf(liveSession, revertFromSeq) !== undefined
             && lastSurfaceSeq !== undefined
-            && (lastSurfaceSeq as number) > revertFromSeq
+            // A failed or empty turn tail leaves the anchor itself as the last
+            // surface node; the commit replaces exactly that node, which is
+            // how taking back a failed message removes it from the surface.
+            && (lastSurfaceSeq as number) >= revertFromSeq
           if (!shadowable) {
             // Always-promptable invariant: an unusable revert boundary (anchor
-            // gone, or an empty/failed tail with no following surface node)
-            // must not wedge sends. Clear the stale boundary and admit the
-            // message as a plain append instead of rejecting the prompt.
+            // gone or no longer a user-message surface node) must not wedge
+            // sends. Clear the stale boundary and admit the message as a plain
+            // append instead of rejecting the prompt.
             liveSession.append('revert/state', { fromSeq: null, cause: 'commit' })
             // Revert commits are queue-only (steer was rejected above by the
             // flow-narrowing guard), so the append always queues.
@@ -758,12 +762,15 @@ export class SessionCommandController {
   }
 
   /**
-   * Revert the conversation from a user message: everything after `atSeq`
-   * becomes reverted (hidden from the model surface on the next commit) and
-   * the reverted query text is returned for the input card. Appends the
-   * durable `revert/state { fromSeq, cause }` log event. An anchor with no
-   * following surface node (an empty or failed turn tail) is a no-op: no
-   * boundary is written, and the receipt carries `noop` with a `notice`.
+   * Revert the conversation from a user message: everything from `atSeq`
+   * becomes reverted (hidden from the transcript on commit and from the model
+   * surface on the next send) and the reverted query text is returned for the
+   * input card. Appends the durable `revert/state { fromSeq, cause }` log
+   * event. A user message with no following surface node (a failed or empty
+   * turn tail) still arms the boundary; the next send commits a replacement
+   * spanning exactly that message.
+   * @param request - Session identity and the user-message seq anchoring the revert.
+   * @returns the reverted query text and count for the input card.
    */
   async revert(request: SessionRevertRequest): Promise<SessionRevertValue> {
     // Attach on demand: reverting, restoring, switching a branch, and
@@ -792,19 +799,6 @@ export class SessionCommandController {
     const revertedCount = shadowedSeqs
       // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       .filter(seq => session.eventAt(seq)?.type === 'user/message').length
-    if (shadowedSeqs.length === 0) {
-      // Nothing after the anchor to shadow: an empty or failed turn tail. A
-      // revert/state boundary here could never be consumed by a revert commit,
-      // so committing one would block every later send. Report the no-op
-      // instead of writing an unusable boundary.
-      return {
-        accepted: true,
-        revertedText,
-        revertedCount,
-        noop: true,
-        notice: 'Nothing after this message to revert; no revert boundary was created.',
-      }
-    }
     session.append('revert/state', { fromSeq: request.atSeq, cause: 'revert' })
     return { accepted: true, revertedText, revertedCount }
   }

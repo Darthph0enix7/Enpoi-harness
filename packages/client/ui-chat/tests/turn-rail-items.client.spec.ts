@@ -74,4 +74,34 @@ describe('mergeTurnRailItems', () => {
       { turn: 6, prompt: 'kept', response: '', anchor: { kind: 'unloaded', seq: 7 } },
     ])
   })
+
+  it('drops turns hidden by the revert boundary or a landed shadow range from both sides', () => {
+    const anchorSeqs: Record<string, number> = { 'anchor-1': 10, 'anchor-2': 20, 'anchor-3': 30 }
+    const items = mergeTurnRailItems(
+      [loadedItem(1), loadedItem(2), loadedItem(3)],
+      [
+        { turn: 4, seq: 40, prompt: 'outline four', response: '' },
+        { turn: 5, seq: 50, prompt: 'outline five', response: '' },
+      ],
+      { anchorSeqOf: key => anchorSeqs[key], isHidden: seq => seq === 20 || seq === 50 },
+    )
+    // Turn 2 (shadowed loaded anchor) and turn 5 (boundary-hidden outline
+    // turn) have no reachable transcript row, so they never become marks.
+    expect(items).toEqual([
+      { turn: 1, prompt: 'p1', response: 'r1', anchor: { kind: 'loaded', key: 'anchor-1' } },
+      { turn: 3, prompt: 'p3', response: 'r3', anchor: { kind: 'loaded', key: 'anchor-3' } },
+      { turn: 4, prompt: 'outline four', response: '', anchor: { kind: 'unloaded', seq: 40 } },
+    ])
+  })
+
+  it('drops a loaded turn whose anchor no longer resolves while revert state is active', () => {
+    const items = mergeTurnRailItems(
+      [loadedItem(1), loadedItem(2)],
+      undefined,
+      { anchorSeqOf: key => (key === 'anchor-1' ? 10 : undefined), isHidden: () => false },
+    )
+    expect(items).toEqual([
+      { turn: 1, prompt: 'p1', response: 'r1', anchor: { kind: 'loaded', key: 'anchor-1' } },
+    ])
+  })
 })

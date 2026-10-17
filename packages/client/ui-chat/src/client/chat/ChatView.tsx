@@ -9,7 +9,7 @@ import type {
 import type { InboxState } from '@deepseek-ai/dsh-agent/types'
 import type { PendingSubmission } from '@deepseek-ai/dsh-api-session-controller/client'
 import {
-  Button, IconChevronDownOutlineRegular, MarkdownDelegateProvider, Modal,
+  Button, IconChevronDownOutlineRegular, IconWarningOutlineRegular, MarkdownDelegateProvider, Modal, Toast,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ChatViewSlotProps, OpenFileOptions } from '../contract/slots.ts'
 import type { ChatSnapshot } from '../contract/snapshot.ts'
@@ -29,8 +29,8 @@ import type { ChatVirtualWindow } from './use-chat-viewport.ts'
 import { fileMediaUrl, resolveWorkspacePath } from '@deepseek-ai/dsh-util-workspace-path'
 import css from './ChatView.module.css'
 
-/** Host/OS refusal text for the file-open dialog; empty throws keep a locale fallback. */
-function openFailureMessage(error: unknown, fallback: string): string {
+/** Resolved failure text for a user-facing dialog or banner; empty messages keep the locale fallback. */
+function failureMessage(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message : String(error)
   return message === '' ? fallback : message
 }
@@ -208,20 +208,18 @@ export function ChatView({
   // Revert boundary: hide nodes after the reverted-from message from the
   // transcript (the RevertTray reads them from the store directly), plus the
   // spans shadowed by landed revert-commits (stay hidden after commit).
+  // The same predicate filters the rail, so a hidden turn never keeps a mark.
+  const revertHidden = useCallback((anchorSeq: number): boolean => {
+    // The boundary message itself is reverted (its text went into the input
+    // card), so it hides with everything at or after the boundary.
+    if (revertFromSeq !== null && anchorSeq >= revertFromSeq) return true
+    return revertShadowRanges.some(range => anchorSeq >= range.start && anchorSeq < range.end)
+  }, [revertFromSeq, revertShadowRanges])
   const visibleOrder = useMemo(() => {
-    const ranges = revertShadowRanges
-    if (revertFromSeq === null && ranges.length === 0) return order
-    return order.filter((key) => {
-      const anchorSeq = nodeStore.get(key)?.anchorSeq ?? UNRESOLVED_NODE_ANCHOR
-      // Strictly less: the boundary message itself is reverted (its text went
-      // into the input card), so it hides with the span after it.
-      if (revertFromSeq !== null && anchorSeq >= revertFromSeq) return false
-      for (const range of ranges) {
-        if (anchorSeq >= range.start && anchorSeq < range.end) return false
-      }
-      return true
-    })
-  }, [order, nodeStore, revertFromSeq, revertShadowRanges])
+    if (revertFromSeq === null && revertShadowRanges.length === 0) return order
+    return order.filter(key =>
+      !revertHidden(nodeStore.get(key)?.anchorSeq ?? UNRESOLVED_NODE_ANCHOR))
+  }, [order, nodeStore, revertFromSeq, revertShadowRanges, revertHidden])
   const groupedEntries = useConversation(snapshot => snapshot.views.grouped('chat')?.entries)
   // A revert boundary falls back to the flat order: a group's members are
   // observed by its own seat, so a partially hidden group cannot be sliced here.
@@ -235,10 +233,15 @@ export function ChatView({
   // Host-computed whole-log outline; the merge is view-layer only (the
   // conversation snapshot never carries projection values).
   const turnOutline = useProjection('turnOutline')
-  const railItems = useMemo(
-    () => mergeTurnRailItems(turnNavigationItems, turnOutline),
-    [turnNavigationItems, turnOutline],
-  )
+  // A turn hidden by revert state has no transcript row, so it must not become
+  // a rail mark (the outline names every durable turn, including hidden ones).
+  const railItems = useMemo(() => mergeTurnRailItems(
+    turnNavigationItems,
+    turnOutline,
+    revertFromSeq === null && revertShadowRanges.length === 0
+      ? undefined
+      : { anchorSeqOf: key => nodeStore.get(key)?.anchorSeq, isHidden: revertHidden },
+  ), [turnNavigationItems, turnOutline, revertFromSeq, revertShadowRanges, nodeStore, revertHidden])
   const inbox = useProjection('inbox') as unknown as InboxState | undefined
   // Workspace root off the session list row: path summaries display relative to it.
   const cwd = useSessions(s => s.byId[sessionId]?.cwd)
@@ -256,6 +259,24 @@ export function ChatView({
   const loadingOlder = useSession(s => s.loadingOlder)
   const [fileOpenError, setFileOpenError] = useState<{ path: string; message: string } | null>(null)
   const [fileOpenBusy, setFileOpenBusy] = useState(false)
+  // One transient take-back notice owned by this view: an RPC failure or an
+  // older host's no-op receipt must never leave the gesture silent.
+  const [revertNotice, setRevertNotice] = useState<{ seq: number; text: string } | null>(null)
+  const revertNoticeSeq = useRef(0)
+  const requestRevert = useCallback((seq: number) => {
+    void revertAt(seq).then(
+      (receipt) => {
+        if (!receipt.noop) return
+        revertNoticeSeq.current += 1
+        setRevertNotice({ seq: revertNoticeSeq.current, text: receipt.notice ?? t('revert.noop') })
+      },
+      (error: unknown) => {
+        revertNoticeSeq.current += 1
+        setRevertNotice({ seq: revertNoticeSeq.current, text: failureMessage(error, t('revert.failed')) })
+      },
+    )
+  }, [revertAt, t])
+  const dismissRevertNotice = useCallback(() => { setRevertNotice(null) }, [])
   // Close/retry must ignore a settlement that started before the latest
   // gesture; otherwise a cancelled in-flight refusal reopens the dialog.
   const fileOpenRequest = useRef(0)
@@ -273,7 +294,7 @@ export function ChatView({
         if (id !== fileOpenRequest.current) return
         setFileOpenError({
           path,
-          message: openFailureMessage(
+          message: failureMessage(
             error,
             t('fileOpen.unknown'),
           ),
@@ -490,7 +511,7 @@ export function ChatView({
                 openSkill={openSkill}
                 inspectCall={inspectCall}
                 forkAt={forkAt}
-                revertAt={revertAt}
+                revertAt={requestRevert}
                 iterationGroups={iterationGroups}
                 loadIterationPreviews={loadIterationPreviews}
                 restoreIteration={restoreIteration}
@@ -526,6 +547,14 @@ export function ChatView({
           onClose={closeFileOpenError}
           onRetry={() => { requestOpenFile(fileOpenError.path) }}
           t={t}
+        />
+      )}
+      {revertNotice !== null && (
+        <Toast
+          key={revertNotice.seq}
+          text={revertNotice.text}
+          icon={<IconWarningOutlineRegular />}
+          onDone={dismissRevertNotice}
         />
       )}
     </div>

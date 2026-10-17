@@ -14,6 +14,7 @@ import type {
   SessionSummary,
   SessionRequestSnapshotRequest,
   SessionRequestSnapshotValue,
+  SessionRevertValue,
 } from '../../types.ts'
 import { mergeOrderedBaseline } from '../ordered-baseline.ts'
 import { isRemoteFailure } from '@deepseek-ai/dsh-api-gateway/client'
@@ -673,14 +674,15 @@ export class SessionManager {
   }
 
   /**
-   * Revert the conversation from a user message: everything after `atSeq`
+   * Revert the conversation from a user message: everything from `atSeq`
    * becomes reverted (hidden from the transcript and the model surface on the
    * next commit). Returns the reverted query text for the input card.
    * @param opts - session and the user-message seq anchoring the revert.
+   * @returns the host revert receipt, or the transport failure.
    */
   async revert(
     opts: { sessionId: SessionId; atSeq: number },
-  ): Promise<RemoteResult<{ revertedText: string; revertedCount: number }>> {
+  ): Promise<RemoteResult<SessionRevertValue>> {
     return await this.remote.session.revert({
       sessionId: opts.sessionId,
       atSeq: opts.atSeq,

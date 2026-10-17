@@ -11,6 +11,7 @@ import type {
   SessionRequestId,
   SessionRequestSnapshotRequest,
   SessionRequestSnapshotValue,
+  SessionRevertValue,
 } from '../../types.ts'
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import {
@@ -531,10 +532,11 @@ export class ClientSessions implements ISessions {
    * Revert the conversation from a user message. The reverted query text is
    * returned for the input card; the transcript truncates at the boundary.
    * @param opts - session and the user-message seq anchoring the revert.
-   * @returns the reverted query text and the count of reverted user queries.
+   * @returns the host receipt: the reverted query text and count, plus the
+   *   no-op compatibility fields an older host may set.
    * @throws {Error} when the host rejects the anchor.
    */
-  async revert(opts: { sessionId: SessionId; atSeq: number }): Promise<{ revertedText: string; revertedCount: number }> {
+  async revert(opts: { sessionId: SessionId; atSeq: number }): Promise<SessionRevertValue> {
     const result = await this.manager.revert({ sessionId: opts.sessionId, atSeq: opts.atSeq })
     if (!result.ok) throw new Error(`revert failed: ${result.error.code}: ${result.error.message}`)
     return result.value

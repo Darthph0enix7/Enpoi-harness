@@ -146,6 +146,54 @@ describe('revert-commit surface shadowing', () => {
     expect(derivedTexts).not.toContain('hello')
   })
 
+  it('replaces a failed-tail anchor itself from the transcript and the model surface', async () => {
+    const adapter = new MockAdapter([textResponse('first'), textResponse('second')])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(
+      SessionId('revert-failed-tail'),
+      { provider: 'mock', model: 'mock' },
+    )
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'hello' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    // The provider failed with no surface nodes after its user message: the
+    // failed query is the last surface node.
+    const failed = createUserMessage({ content: [{ type: 'text', text: 'failed query' }], source: { kind: 'user' } })
+    agent.session.append('user/message', failed, { surfaceOp: 'append' })
+    agent.session.append('turn/start', { turn: 2 })
+    agent.session.append('turn/end', {
+      turn: 2,
+      reason: { kind: 'error', error: { message: 'provider pool exhausted', code: 'QUOTA' } },
+    })
+    const failedSeq = agent.session.snapshotEvents().find(e => e.type === 'user/message' && e.data.id === failed.id)!.seq
+    agent.session.append('revert/state', { fromSeq: failedSeq, cause: 'revert' })
+
+    // The host commit for the empty tail: a replacement spanning exactly the
+    // anchor, with the iteration chain anchored at the same seq.
+    const commit = createUserMessage({ content: [{ type: 'text', text: 'retry' }], source: { kind: 'user' } })
+    agent.followup(commit, {
+      surfaceOp: { op: 'replace', startSeq: failedSeq, endSeq: failedSeq },
+      sourceEventSeqs: [failedSeq],
+      clearRevert: true,
+      iteration: { groupAnchor: failedSeq, previousSeq: failedSeq, startSeq: failedSeq, endSeq: failedSeq, cause: 'commit' },
+    })
+    await waitForIdle(ctx, agent)
+
+    const derivedTexts = agent.session.deriveMessages()
+      .filter(m => m.role === 'user')
+      .flatMap(m => m.content)
+      .filter(b => b.type === 'text')
+      .map(b => b.text)
+    expect(derivedTexts).toContain('hello')
+    expect(derivedTexts).toContain('retry')
+    expect(derivedTexts).not.toContain('failed query')
+    // The failed anchor leaves the surface; the commit message takes its place.
+    expect(agent.session.surface.nodes).not.toContain(failedSeq)
+    const commitSeq = agent.session.snapshotEvents().find(e => e.type === 'user/message' && e.data.id === commit.id)!.seq
+    expect(agent.session.surface.nodes).toContain(commitSeq)
+  })
+
   it('writes revert/state with the ignorable envelope marker', async () => {
     const adapter = new MockAdapter([textResponse('first')])
     const ctx = await harness(adapter)

@@ -69,7 +69,12 @@ export class ChatNavigation {
   readonly navigateToTurn = (item: TurnRailItem): void => {
     if (item.anchor.kind === 'loaded') {
       this.cancel()
+      // A loaded mark can outlive its row (for example the row is hidden by
+      // revert state that landed after the item): land on the nearest
+      // rendered turn at or after it rather than turning the jump into a
+      // dead click.
       const landing = this.viewport.scrollToTurn(item.turn)
+        ?? this.viewport.scrollToTurnAtOrAfter(item.turn)
       if (landing === null) return
       this.reading.acceptNavigation(landing)
       if (this.input.loadingOlder) this.viewport.beginPreserving(landing.position)

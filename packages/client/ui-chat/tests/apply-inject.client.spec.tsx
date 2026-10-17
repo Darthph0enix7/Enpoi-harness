@@ -420,4 +420,32 @@ describe('Chat inject API', () => {
     expect(injected.loadImage.peek?.(ATTACHMENT)).toBe(loaded)
     await b.runtime.dispose()
   })
+
+  it('lands the reverted text in the draft and hands older-host no-op receipts back', async () => {
+    const b = await bench()
+    const revert = vi.spyOn(b.runtime.sessions, 'revert').mockResolvedValue({
+      accepted: true, revertedText: 'take me back', revertedCount: 2,
+    })
+    try {
+      const { injected } = b.chatViewApi(b.rootReference)
+      await expect(injected.revertAt(7)).resolves.toEqual({ noop: false })
+      expect(revert).toHaveBeenCalledWith({ sessionId: ROOT, atSeq: 7 })
+      // The reverted query re-enters the composer draft.
+      const scope = b.runtime.sessions.scope(ROOT)!
+      expect(b.runtime.ctx.conversation.input.for(scope).state.getSnapshot().draft).toBe('take me back')
+
+      // An older host reports an unusable anchor as a receipt instead of
+      // rejecting; the Chat view must receive it to surface the notice.
+      revert.mockResolvedValueOnce({
+        accepted: true, revertedText: '', revertedCount: 0, noop: true, notice: 'nothing to shadow',
+      })
+      await expect(injected.revertAt(8)).resolves.toEqual({ noop: true, notice: 'nothing to shadow' })
+
+      revert.mockResolvedValueOnce({ accepted: true, revertedText: '', revertedCount: 0, noop: true })
+      await expect(injected.revertAt(9)).resolves.toEqual({ noop: true })
+    } finally {
+      revert.mockRestore()
+      await b.runtime.dispose()
+    }
+  })
 })

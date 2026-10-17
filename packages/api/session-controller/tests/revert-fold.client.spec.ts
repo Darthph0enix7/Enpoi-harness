@@ -55,6 +55,23 @@ function revertCommit(seq: number, text: string, shadowed: number[]): Record<str
   }
 }
 
+/** One failed-tail commit: a replacement spanning exactly its own anchor. */
+function failedTailCommit(seq: number, text: string, anchor: number): Record<string, unknown> {
+  return {
+    type: 'user/message',
+    seq,
+    time: Date.now(),
+    data: {
+      content: [{ type: 'text', text }],
+      source: { kind: 'user' },
+      role: 'user',
+      id: `msg-${seq}`,
+    },
+    surfaceOp: { op: 'replace', startSeq: SessionSeq(anchor), endSeq: SessionSeq(anchor) },
+    sourceEventSeqs: [SessionSeq(anchor)],
+  }
+}
+
 function userMessage(seq: number, text: string): Record<string, unknown> {
   return {
     type: 'user/message',
@@ -134,6 +151,24 @@ describe('revert shadow fold (B4: sequential commit cycles & range-based hiding)
       { start: 7, end: 19 },
       { start: 21, end: 33 },
     ])
+  })
+
+  it('shadows exactly the anchor when a failed-tail commit replaces the anchor itself', async () => {
+    // A failed turn leaves the user message as the last surface node: the next
+    // send commits `surfaceOp replace {startSeq: A, endSeq: A}`. The fold must
+    // cover the half-open span [A, A+1) so only that message disappears.
+    const events = [
+      userMessage(7, 'failed query'),
+      revertState(8, 7),
+      failedTailCommit(9, 'retry', 7),
+    ] as never[]
+    const session = await openWith(events, hostRevertFold(events, 9))
+    const snapshot = session.getSnapshot()
+    expect(snapshot.revertFromSeq).toBe(null)
+    expect(snapshot.revertShadowRanges).toEqual([{ start: 7, end: 8 }])
+    expect(hidden(snapshot, 7)).toBe(true)
+    expect(hidden(snapshot, 8)).toBe(false)
+    expect(hidden(snapshot, 9)).toBe(false)
   })
 
   it('keeps every row for replacements no revert boundary claims', async () => {

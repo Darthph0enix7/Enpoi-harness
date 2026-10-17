@@ -82,6 +82,7 @@ export type {
   SessionIterationGroup,
   SessionIterationVariant,
   SessionRevertShadowRange,
+  SessionRevertValue,
 } from '../types.ts'
 export type {
   SessionRequestSnapshotBodies,

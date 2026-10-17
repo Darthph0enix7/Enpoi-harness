@@ -482,8 +482,8 @@ export class SessionController extends TypertRemoteService {
   /**
    * Revert the conversation from a user message (revert-from-here).
    * @param request - session and the user-message seq anchoring the revert.
-   * @returns the reverted query text and count for the input card; a no-op
-   *   receipt (`noop`, `notice`) when the anchor has nothing to shadow.
+   * @returns the reverted query text and count for the input card; an unusable
+   *   anchor is rejected with `revert-invalid`.
    */
   @Remote('revert')
   revert(request: SessionRevertRequest): Promise<SessionRevertValue> {
