@@ -10,6 +10,7 @@ import type {
   BootManifest, ClientModuleCreateOptions, ClientModuleSystem, DshWindow,
 } from '@deepseek-ai/dsh-client-modules/client'
 import { installBootGate } from './boot-gate.ts'
+import { installClientHealth, type ClientHealth } from './client-health.ts'
 import { bootClient } from './boot-client.ts'
 import { BootPage } from './boot-page.ts'
 import { mountClient } from './mount.ts'
@@ -26,6 +27,7 @@ export class AppWebEntry {
   private readonly seams: BootSeams | undefined
   private readonly page: BootPage
   private ctx: Context | undefined
+  private health: ClientHealth | undefined
   private stopDragRecall: (() => void) | undefined
   private modules!: ClientModuleSystem
   private manifest!: BootManifest
@@ -48,6 +50,11 @@ export class AppWebEntry {
    * @returns Resolves after application mount or failure reporting.
    */
   async run(onFailure?: (reason: unknown) => void): Promise<void> {
+    // The page health net installs before the first await: a stalled boot, an
+    // error/rejection breadcrumb, or a fatal render crash all have one owner,
+    // and the boot deadline covers everything the failure rendering below
+    // cannot see.
+    const health = this.health ??= installClientHealth({ container: this.container })
     try {
       // Boot-readiness gate: whichever bootstrap applies the injection table
       // settles this deferred once every row has taken effect — the served
@@ -103,7 +110,11 @@ export class AppWebEntry {
       this.page.setHint('Preparing workspace…')
       await gate.settled()
       await mountClient(ctx, this.container)
+      health.markBootComplete()
     } catch (reason) {
+      // The failure is visible on the boot page (or the carrier's own surface);
+      // the watchdog must not reload in a loop over a deterministic failure.
+      health.markBootFailed()
       console.error(reason)
       if (onFailure !== undefined) onFailure(reason)
       else this.page.fail(reason instanceof Error ? reason.message : String(reason))
@@ -112,6 +123,8 @@ export class AppWebEntry {
 
   /** Dispose the client plugin tree and whichever page owns the mount point. */
   async dispose(): Promise<void> {
+    this.health?.dispose()
+    this.health = undefined
     this.stopDragRecall?.()
     this.stopDragRecall = undefined
     const ctx = this.ctx

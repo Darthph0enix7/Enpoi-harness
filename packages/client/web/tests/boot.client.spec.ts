@@ -22,6 +22,7 @@ afterEach(() => {
   delete win.__DSH_BOOT__
   delete win.__ModuleLoader__
   delete transportGlobal.__DSH_TRANSPORT__
+  delete (globalThis as Record<string, unknown>).__DSH_CLIENT_HEALTH__
   document.body.innerHTML = ''
 })
 
@@ -264,6 +265,20 @@ describe('plugin activation', () => {
     expect(container.textContent).toBe('mounted')
     await entry.dispose()
   })
+})
+
+it('installs the page health net synchronously and retracts it with the entry', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  const globals = globalThis as Record<string, unknown>
+  const container = document.createElement('div')
+  document.body.append(container)
+  const entry = new AppWebEntry(container)
+  const running = entry.run()
+  // Installed before the first await: a stalled boot still has its deadline owner.
+  expect(globals.__DSH_CLIENT_HEALTH__).toBeDefined()
+  await running
+  await entry.dispose()
+  expect(globals.__DSH_CLIENT_HEALTH__).toBeUndefined()
 })
 
 it('draws the shared boot page before Host injections and resumes without replacing the document', async () => {

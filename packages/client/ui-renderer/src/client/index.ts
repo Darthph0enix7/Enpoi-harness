@@ -9,6 +9,7 @@ import { createRoot, hydrateRoot, type Root } from 'react-dom/client'
 import type { Context } from '@deepseek-ai/cordis'
 import { createSlotRenderer } from './scoped-slots.tsx'
 import { buildRenderApp } from './app.tsx'
+import { RootErrorBoundary } from './root-boundary.tsx'
 import { SlotRegistry } from './registry.ts'
 
 export { SlotRegistry } from './registry.ts'
@@ -68,17 +69,44 @@ function BootHandoff(props: { app: () => ReactNode; boot: BootSnapshot }): React
   })
 }
 
-/** Mount React while preserving the framework-free boot DOM through hydration. */
+/** Render the application factory inside React so its failures land in the boundary. */
+function Application(props: { app: () => ReactNode }): ReactNode {
+  return props.app()
+}
+
+/** The visible residue of a fatal render crash: the boot surface that mounted it. */
+function mountFallback(boot: BootSnapshot | undefined): ReactNode {
+  if (boot === undefined) return createElement('div', { 'data-dsh-fatal-fallback': '' })
+  return createElement('div', {
+    className: boot.className,
+    'data-dsh-boot': '',
+    dangerouslySetInnerHTML: { __html: boot.html },
+  })
+}
+
+/**
+ * Mount React while preserving the framework-free boot DOM through hydration.
+ * Both arms sit under the root boundary, so a fatal render error keeps a
+ * visible surface mounted instead of collapsing the page to its background.
+ */
 function mountApp(container: HTMLElement, app: () => ReactNode): Root {
   const boot = container.querySelector<HTMLElement>(':scope > [data-dsh-boot]')
   if (boot !== null) {
-    return hydrateRoot(container, createElement(BootHandoff, {
-      app,
-      boot: { className: boot.className, html: boot.innerHTML },
-    }))
+    const snapshot = { className: boot.className, html: boot.innerHTML }
+    return hydrateRoot(container, createElement(
+      RootErrorBoundary,
+      { fallback: mountFallback(snapshot) },
+      createElement(BootHandoff, { app, boot: snapshot }),
+    ))
   }
   const root = createRoot(container)
-  flushSync(() => { root.render(app()) })
+  flushSync(() => {
+    root.render(createElement(
+      RootErrorBoundary,
+      { fallback: mountFallback(undefined) },
+      createElement(Application, { app }),
+    ))
+  })
   return root
 }
 
@@ -91,8 +119,30 @@ export function apply(ctx: Context): void {
   slots.install(createSlotRenderer())
   ctx.reflect.provide('uiRenderer', {
     mount: (container: HTMLElement): (() => void) => {
-      const root = mountApp(container, buildRenderApp({ ctx }))
-      return () => { root.unmount() }
+      let root: Root | undefined
+      const attach = (): void => {
+        if (root !== undefined) return
+        root = mountApp(container, buildRenderApp({ ctx }))
+      }
+      // Renderer replacement (a rebuilt-entry reload) remounts through a fresh
+      // SlotRegistry while the shell's 'root' registration is still being
+      // re-applied by its own fiber: rendering now would trip the renderSlot
+      // boot-order guard inside React and unmount the whole application. Wait
+      // for the declaration instead; the first boot has it registered already.
+      let unsubscribe = (): void => {}
+      if (slots.entries('root').length > 0) {
+        attach()
+      } else {
+        unsubscribe = slots.subscribe('root', () => {
+          if (slots.entries('root').length === 0) return
+          unsubscribe()
+          attach()
+        })
+      }
+      return () => {
+        unsubscribe()
+        root?.unmount()
+      }
     },
   })
 }

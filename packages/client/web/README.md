@@ -39,6 +39,10 @@ Boot runs in two stages: the module stage adopts the parser-loaded bootstrap bat
 
 The boot page uses plain DOM and local CSS, so bundle and plugin-activation failures remain visible: it shows one spinner node whose CSS arc grows as entries activate, and reports per-entry status. The spinner and its animation phase persist until the full UI replaces the boot page. A plugin that fails import or activation is reported by name with the reason (missing service, import failure, or state) instead of a blank page. The console contains the original import error.
 
+### Page health and self-healing
+
+The kernel installs one page-health monitor (`src/client-health.ts`) before the first boot await. Window `error` and `unhandledrejection` events post rate-limited, deduplicated breadcrumbs through the existing `diagnostics.report` RPC, so a client failure is named in the host's incident store instead of surfacing only in a closed tab's console. A watchdog probes the mount point on tab return, shortly after mount, and at a hard boot deadline: a blank or replaced-away workspace, a boot that never completes, or a fatal render crash reported by the renderer's root error boundary triggers one hard reload, guarded by a sessionStorage cooldown and a rolling attempt cap. When a reload is suppressed, or the guard storage is unavailable, a framework-free failure card states the reason instead — the page is never left blank. A deterministic boot failure keeps the boot page's own report and does not reload.
+
 ### The shared module table
 
 `PLATFORM_MODULES` (in `src/platform.ts`) names the shell-seeded shared modules — React, Cordis, and static UI libraries — and together with `PRELOADED_CLIENT_EXTERNALS` (the parser-preloaded runtime row) defines the implicit external baseline every dynamic bundle resolves against. `dsh.client.external` adds only exact non-baseline requests; see [shared modules and the module graph](../AGENTS.md#shared-modules-and-the-module-graph).
@@ -82,6 +86,7 @@ The boot kernel delegates manifest entry creation to Client Modules so live grap
 | [`src/boot-client.ts`](src/boot-client.ts) | `bootClient` / `assertEntriesActive`: Loader mount, one entry per manifest row, activation audit |
 | [`src/mount.ts`](src/mount.ts) | `mountClient`: renderer handoff through a `uiRenderer` dependency fiber |
 | [`src/boot-page.ts`](src/boot-page.ts) | Framework-free boot page: spinner, per-entry status, failure rendering |
+| [`src/client-health.ts`](src/client-health.ts) | Page health: error breadcrumbs, blank/stall watchdog, guarded auto-reload and fallback card |
 | [`src/platform.ts`](src/platform.ts) | `PLATFORM_MODULES` / `PRELOADED_CLIENT_EXTERNALS`: the implicit external baseline |
 | [`src/seed.ts`](src/seed.ts) | Static module table handed to the loader at boot |
 | [`src/window-drag/regions.ts`](src/window-drag/regions.ts) | The darwin app-region composition model, and the interactive selector `base.css` subtracts |

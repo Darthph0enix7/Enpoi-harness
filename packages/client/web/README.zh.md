@@ -39,6 +39,10 @@ kind: "package-library"
 
 启动页只使用原生 DOM 与本地 CSS，因此 bundle 与插件激活失败保持可见：它显示一个 spinner 节点，其 CSS 圆弧随 entry 激活而增长，并逐 entry 报告状态。spinner 及其动画相位会一直保留，直到完整 UI 替换启动页。导入或激活失败的插件会按名称报告并给出原因（缺失服务、导入失败或状态），而不是白屏。控制台包含原始导入错误。
 
+### 页面健康与自愈
+
+内核在首次启动 await 之前安装唯一的页面健康监视器（`src/client-health.ts`）。window 的 `error` 与 `unhandledrejection` 事件会通过既有的 `diagnostics.report` RPC 上报限速、去重的面包屑，使客户端失败在 Host 的事件存储中被点名，而不是只停留在已关闭标签页的控制台里。看门狗会在标签页返回、挂载后不久以及硬性启动截止期限三个时点探测挂载点：空白或被替换掉的工作区、始终未完成的启动、渲染器根错误边界上报的致命渲染崩溃，都会触发一次硬重载，并由 sessionStorage 冷却与滚动尝试上限加以约束。重载被抑制或守卫存储不可用时，改为显示无框架的失败卡片说明原因——页面绝不会保持空白。确定性的启动失败保留启动页自身的报告，不会重载。
+
 ### 共享模块表
 
 `PLATFORM_MODULES`（位于 `src/platform.ts`）列出外壳预置的共享模块——React、Cordis 与静态 UI 库——并与 `PRELOADED_CLIENT_EXTERNALS`（parser 预载的运行时行）一起定义每个动态 bundle 解析所依据的隐式 external 基座。`dsh.client.external` 只添加基座之外的精确请求；参见[共享模块与模块图](../AGENTS.md#shared-modules-and-the-module-graph)。
@@ -82,6 +86,7 @@ kind: "package-library"
 | [`src/boot-client.ts`](src/boot-client.ts) | `bootClient` / `assertEntriesActive`：挂载 Loader、每个 manifest 行一个 entry、激活审计 |
 | [`src/mount.ts`](src/mount.ts) | `mountClient`：经 `uiRenderer` 依赖 fiber 完成渲染器交接 |
 | [`src/boot-page.ts`](src/boot-page.ts) | 无框架启动页：spinner、逐 entry 状态、失败渲染 |
+| [`src/client-health.ts`](src/client-health.ts) | 页面健康：错误面包屑、空白/停滞看门狗、受守卫的自动重载与失败卡片 |
 | [`src/platform.ts`](src/platform.ts) | `PLATFORM_MODULES` / `PRELOADED_CLIENT_EXTERNALS`：隐式 external 基座 |
 | [`src/seed.ts`](src/seed.ts) | 启动时交给 loader 的静态模块表 |
 | [`src/window-drag/regions.ts`](src/window-drag/regions.ts) | darwin app-region 组合模型，以及 `base.css` 减除的交互元素选择器 |
