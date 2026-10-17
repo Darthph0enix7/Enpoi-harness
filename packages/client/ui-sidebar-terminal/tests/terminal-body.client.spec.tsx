@@ -34,6 +34,12 @@ class FakeTerminal {
   readonly dispose = vi.fn()
   readonly write = vi.fn((_data: string, callback: () => void) => { callback() })
   readonly loadAddon = vi.fn()
+  readonly attachCustomKeyEventHandler = vi.fn((_handler: (event: KeyboardEvent) => boolean) => {})
+  readonly hasSelection = vi.fn(() => false)
+  readonly getSelection = vi.fn(() => '')
+  readonly paste = vi.fn((_text: string) => {})
+  readonly selectAll = vi.fn()
+  readonly clear = vi.fn()
   constructor(options: object) { this.options = options; fake.terminals.push(this) }
   open(node: HTMLElement) { node.appendChild(this.textarea!) }
   onData(input: (data: string) => void) { this.input = input; return { dispose: this.disposeInput } }
@@ -155,6 +161,31 @@ it('keeps one emulator across rename and locale updates, applies snapshots and o
   expect(terminal.dispose).toHaveBeenCalledOnce()
   expect(terminal.disposeInput).toHaveBeenCalledOnce()
   expect(disconnect).toHaveBeenCalledOnce()
+})
+
+it('routes clipboard chords and DOM paste into the emulator', () => {
+  const h = mount({ ...idle, info, phase: 'connected', writable: true })
+  const terminal = fake.terminals[0]!
+  expect(terminal.attachCustomKeyEventHandler).toHaveBeenCalledOnce()
+  const handler = terminal.attachCustomKeyEventHandler.mock.calls[0]![0]
+  terminal.hasSelection.mockReturnValue(true)
+  terminal.getSelection.mockReturnValue('picked')
+  const copy = new KeyboardEvent('keydown', { code: 'KeyC', ctrlKey: true, shiftKey: true, cancelable: true })
+  expect(handler(copy)).toBe(false)
+  expect(copy.defaultPrevented).toBe(true)
+  const selectAll = new KeyboardEvent('keydown', { code: 'KeyA', ctrlKey: true, shiftKey: true, cancelable: true })
+  expect(handler(selectAll)).toBe(false)
+  expect(terminal.selectAll).toHaveBeenCalledOnce()
+  const clear = new KeyboardEvent('keydown', { code: 'KeyK', ctrlKey: true, shiftKey: true, cancelable: true })
+  expect(handler(clear)).toBe(false)
+  expect(terminal.clear).toHaveBeenCalledOnce()
+  const paste = new Event('paste', { bubbles: true, cancelable: true })
+  Object.defineProperty(paste, 'clipboardData', { value: { getData: () => 'pasted' } })
+  terminal.textarea!.dispatchEvent(paste)
+  expect(terminal.paste).toHaveBeenCalledExactlyOnceWith('pasted')
+  h.view.unmount()
+  terminal.textarea!.dispatchEvent(new Event('paste', { bubbles: true, cancelable: true }))
+  expect(terminal.paste).toHaveBeenCalledOnce()
 })
 
 it('displays disconnect, close and exit states and offers explicit reconnection and takeover', () => {

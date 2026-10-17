@@ -7,6 +7,9 @@ import { useEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import {
+  attachTerminalPaste, terminalClipboardKey, type TerminalClipboardTarget,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TerminalTabState } from './registry.ts'
 import css from './TerminalView.module.css'
 
@@ -40,6 +43,15 @@ export function TerminalView({ sessionId, tab, active, write, resize, subscribe,
     const fit = new FitAddon()
     terminal.loadAddon(fit)
     terminal.open(host)
+    const clipboard: TerminalClipboardTarget = {
+      hasSelection: () => terminal.hasSelection(),
+      selection: () => terminal.getSelection(),
+      paste: (text) => { terminal.paste(text) },
+      selectAll: () => { terminal.selectAll() },
+      clear: () => { terminal.clear() },
+    }
+    terminal.attachCustomKeyEventHandler(event => terminalClipboardKey(event, clipboard))
+    const detachClipboard = attachTerminalPaste(host, clipboard)
     const replay = read(sessionId, tab.id)
     if (replay.length > 0) terminal.write(replay)
     const unsubscribe = subscribe(sessionId, tab.id, (data) => { terminal.write(data) })
@@ -56,6 +68,7 @@ export function TerminalView({ sessionId, tab, active, write, resize, subscribe,
     return () => {
       observer?.disconnect()
       input.dispose()
+      detachClipboard()
       unsubscribe()
       terminal.dispose()
     }

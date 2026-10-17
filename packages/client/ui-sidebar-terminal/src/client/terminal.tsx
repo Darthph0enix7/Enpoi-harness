@@ -2,7 +2,10 @@
 import { useEffect, useLayoutEffect, useRef, type ReactNode } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import { Button, IconPlusOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  attachTerminalPaste, Button, IconPlusOutlineRegular, terminalClipboardKey,
+  type TerminalClipboardTarget,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TerminalViewState, TerminalView } from '@deepseek-ai/dsh-api-terminal-controller/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ThemeSnapshot } from '@deepseek-ai/dsh-client-ui-theme/client'
@@ -91,6 +94,15 @@ function TerminalScreen({ state, model, visible, label, theme }: {
     const addon = new FitAddon()
     xterm.loadAddon(addon)
     xterm.open(node)
+    const clipboard: TerminalClipboardTarget = {
+      hasSelection: () => xterm.hasSelection(),
+      selection: () => xterm.getSelection(),
+      paste: (text) => { xterm.paste(text) },
+      selectAll: () => { xterm.selectAll() },
+      clear: () => { xterm.clear() },
+    }
+    xterm.attachCustomKeyEventHandler(event => terminalClipboardKey(event, clipboard))
+    const detachClipboard = attachTerminalPaste(node, clipboard)
     const palette = new TerminalTheme(xterm)
     colors.current = palette
     const cursor = observeTerminalCursor(xterm, node, () => palette.cursor)
@@ -108,6 +120,7 @@ function TerminalScreen({ state, model, visible, label, theme }: {
     return () => {
       observer.disconnect()
       input.dispose()
+      detachClipboard()
       cursor.dispose()
       palette.dispose()
       xterm.dispose()
