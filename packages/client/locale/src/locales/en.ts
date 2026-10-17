@@ -18,6 +18,8 @@ export const en = {
   'copy.compactJson': 'Copy compact JSON',
   'copy.optionsHint': '{action}; right-click for copy options',
   'retry': 'Retry',
+  'slot.failed': 'This panel failed to load.',
+  'slot.failedPersistent': 'This panel cannot recover on its own. Reload the page.',
   'loading': 'Loading…',
   'load.failed': 'Failed to load',
   'submit': 'Submit',

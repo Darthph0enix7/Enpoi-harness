@@ -16,6 +16,8 @@ export const zh = {
   'copy.compactJson': '复制紧凑 JSON',
   'copy.optionsHint': '{action}；右键点击可选择复制方式',
   'retry': '重试',
+  'slot.failed': '此面板加载失败。',
+  'slot.failedPersistent': '此面板无法自行恢复，请刷新页面。',
   'loading': '加载中…',
   'load.failed': '加载失败',
   'submit': '提交',

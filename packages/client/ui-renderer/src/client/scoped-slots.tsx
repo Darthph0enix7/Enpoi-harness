@@ -19,6 +19,7 @@ import {
   useScopeBinding,
 } from './bindings.tsx'
 import { SlotAssemblyError } from './errors.ts'
+import css from './slot-crash.module.css'
 
 type InjectedProps = Record<string, unknown>
 
@@ -391,30 +392,111 @@ function sessionGenerationKeyOf(binding: ScopedStandardSourceBinding): number {
   return key
 }
 
+/** Page-health global face installed by the web kernel: the report-only breadcrumb seam. */
+interface ClientHealthReporter {
+  report?(kind: string, message: string, stack?: string): void
+}
+
+/** Retry actions a crash face offers before it switches to the reload hint. */
+const SLOT_CRASH_RETRIES = 1
+
+/**
+ * Breadcrumb one contained crash through the page-health reporter
+ * (`diagnostics.report`, installed by dsh-client-web as `__DSH_CLIENT_HEALTH__`).
+ * Fail-soft: reporting must never replace the original failure.
+ */
+function reportSlotCrash(target: string, error: unknown): void {
+  try {
+    const reporter = (globalThis as { __DSH_CLIENT_HEALTH__?: ClientHealthReporter }).__DSH_CLIENT_HEALTH__
+    const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+    const stack = error instanceof Error && typeof error.stack === 'string'
+      ? error.stack.slice(0, 1000)
+      : undefined
+    reporter?.report?.('renderer.slot-crash', `${target} crashed: ${reason}`, stack)
+  } catch {
+    // The console line in the boundary still names the cause; the breadcrumb is best-effort.
+  }
+}
+
+interface CrashFaceProps {
+  /** Slot key or factory name carried by the diagnostic marker and the breadcrumb. */
+  target: string
+  /** Marker attribute tooling and tests query, valued with {@link target}. */
+  marker: 'data-slot-error' | 'data-factory-error'
+  /** True once the retry budget is spent (or no retry exists): the reload hint. */
+  persistent: boolean
+  onRetry?: (() => void) | undefined
+}
+
+/**
+ * Visible, localized inline failure surface for a crashed slot entry or
+ * factory occurrence. It replaces the former unstyled marker, so a failed
+ * panel leaves an addressed, recoverable surface instead of silently
+ * disappearing; the marker attribute survives for tooling.
+ */
+function CrashFace({ target, marker, persistent, onRetry }: CrashFaceProps): ReactNode {
+  const host = useHost()
+  const face = host.locale
+  const t = face === undefined ? undefined : localeSeat(face, 'common')
+  const messageKey = persistent ? 'slot.failedPersistent' : 'slot.failed'
+  const actionKey = 'retry'
+  const markerProps = marker === 'data-slot-error'
+    ? { 'data-slot-error': target }
+    : { 'data-factory-error': target }
+  return (
+    <div className={css.crash} role="alert" {...markerProps}>
+      <span>{t === undefined ? messageKey : t(messageKey)}</span>
+      {persistent || onRetry === undefined
+        ? null
+        : <button type="button" className={css.action} onClick={onRetry}>{t === undefined ? actionKey : t(actionKey)}</button>}
+    </div>
+  )
+}
+
 /**
  * Per-entry isolation: one registrant crashing (component render or inject
  * factory) must not take down siblings. Assembly errors (missing providers)
  * rethrow — a miswired shell must fail loud, not degrade into fallbacks.
  * Every catch reports through `onEntryError` (the ledger's supervision
- * seam); for shadowing kinds the report abdicates the entry, the outlet
- * re-renders onto the cell's next survivor, and this boundary's crash face
- * only shows until that re-render lands (permanently once the cell is dry —
- * the outlet then owns the crash face).
+ * seam) and through the page-health breadcrumb; for shadowing kinds the report
+ * abdicates the entry, the outlet re-renders onto the cell's next survivor,
+ * and this boundary's crash face only shows until that re-render lands
+ * (permanently once the cell is dry — the outlet then owns the persistent
+ * crash face). The Retry action resets this boundary and remounts the
+ * subtree; after {@link SLOT_CRASH_RETRIES} failed retries the face switches
+ * to the reload hint instead of retrying again.
  */
 class SlotErrorBoundary extends Component<
   { slotKey: string; onEntryError: (error: unknown) => void; children: ReactNode }, { failed: boolean }
 > {
   override state = { failed: false }
+  /** Retry actions consumed by this boundary instance; dies with its keyed element. */
+  private retries = 0
   static getDerivedStateFromError(error: unknown): { failed: boolean } {
     if (error instanceof SlotAssemblyError) throw error
     return { failed: true }
   }
+  private readonly retry = (): void => {
+    if (this.retries >= SLOT_CRASH_RETRIES) return
+    this.retries += 1
+    this.setState({ failed: false })
+  }
   override componentDidCatch(error: unknown): void {
     console.error(`slot entry crashed in '${this.props.slotKey}':`, error)
+    reportSlotCrash(`slot '${this.props.slotKey}'`, error)
     this.props.onEntryError(error)
   }
   override render(): ReactNode {
-    if (this.state.failed) return <div data-slot-error={this.props.slotKey} />
+    if (this.state.failed) {
+      return (
+        <CrashFace
+          target={this.props.slotKey}
+          marker="data-slot-error"
+          persistent={this.retries >= SLOT_CRASH_RETRIES}
+          onRetry={this.retry}
+        />
+      )
+    }
     return this.props.children
   }
 }
@@ -425,16 +507,33 @@ class FactoryErrorBoundary extends Component<
   { name: string; onEntryError: (error: unknown) => void; children: ReactNode }, { failed: boolean }
 > {
   override state = { failed: false }
+  /** Retry actions consumed by this occurrence; dies with its keyed element. */
+  private retries = 0
   static getDerivedStateFromError(error: unknown): { failed: boolean } {
     if (error instanceof SlotAssemblyError) throw error
     return { failed: true }
   }
+  private readonly retry = (): void => {
+    if (this.retries >= SLOT_CRASH_RETRIES) return
+    this.retries += 1
+    this.setState({ failed: false })
+  }
   override componentDidCatch(error: unknown): void {
     console.error(`slot factory occurrence crashed in '${this.props.name}':`, error)
+    reportSlotCrash(`factory '${this.props.name}'`, error)
     this.props.onEntryError(error)
   }
   override render(): ReactNode {
-    if (this.state.failed) return <div data-factory-error={this.props.name} />
+    if (this.state.failed) {
+      return (
+        <CrashFace
+          target={this.props.name}
+          marker="data-factory-error"
+          persistent={this.retries >= SLOT_CRASH_RETRIES}
+          onRetry={this.retry}
+        />
+      )
+    }
     return this.props.children
   }
 }
@@ -1167,8 +1266,9 @@ function renderOutletContent(
   }
   // A cell whose every registration abdicated keeps the crash face: the
   // shadowing collapse ran out of survivors, which is a failure state, not
-  // the owner's natural-empty fallback.
-  const deadCell = () => <div data-slot-error={slotKey} />
+  // the owner's natural-empty fallback. No retry exists here (the abdicated
+  // entry cannot come back), so the persistent face names the reload path.
+  const deadCell = () => <CrashFace target={slotKey} marker="data-slot-error" persistent onRetry={undefined} />
 
   if (spec.kind === 'single') {
     const entry = host.entriesOfSlot(slotKey)[0]
@@ -1239,7 +1339,13 @@ function renderOutletContent(
     <>
       {list.map((item, i) => item.entry !== undefined
         ? guarded(item.entry, `e${entryKeyOf(item.entry)}`)
-        : <div data-slot-error={slotKey} key={`x${item.id ?? i}`} />)}
+        : <CrashFace
+          key={`x${item.id ?? i}`}
+          target={slotKey}
+          marker="data-slot-error"
+          persistent
+          onRetry={undefined}
+        />)}
     </>
   )
 }

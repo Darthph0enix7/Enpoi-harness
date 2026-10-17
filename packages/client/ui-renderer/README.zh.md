@@ -49,6 +49,10 @@ kind: "package-reference"
 
 插件在 `slots`、`sessions` 与 `layout` 就绪后激活；它安装 `createSlotRenderer()` 并 reflect `uiRenderer` 服务。`mountApp` 会查找启动内核的 `[data-dsh-boot]` 元素：存在时经 `BootHandoff`（一个保留加载 DOM 的单帧透传）hydrate，否则创建全新的根节点并同步提交渲染。两条路径都渲染在 `RootErrorBoundary` 之下。当注册表尚无 `root` entry 时（上述替换场景），挂载会订阅该键，并在注册落地后接入应用。
 
+### 崩溃界面
+
+崩溃的 slot entry 或 Factory occurrence 会在原位置渲染一个本地化的内联失败界面：一行短文案加一个「重试」操作，重试会重置边界并重新挂载子树；一次重试仍失败后，界面改为提示刷新页面，而不是继续重试。`data-slot-error`（entry）与 `data-factory-error`（occurrence）标记属性继续保留给工具使用。每次捕获还会带上 slot 或 Factory 名称，通过页面健康上报接口（`__DSH_CLIENT_HEALTH__.report`，由 web 内核安装）写入面包屑，使消失的面板在 Host 事件存储中留下证据。当一个 cell 的所有注册都已 abdicate 时，会保留同样的持久失败界面——这正是把「悄悄消失的面板」变成「可见面板」的关键。
+
 ### Slot 绑定
 
 `createSlotRenderer` 把 slot 注册表连接到 React：普通 entry list 与 Factory definition 成为响应式 source，每个 outlet 或 occurrence 经已安装的渲染器渲染。业务插件通过带类型的 `hooks` 传递裸 observable source；渲染器经 uSES 适配器在渲染位置完成绑定。Factory Store factory 保持 lazy，直到 occurrence 首次物化时才创建 handle；其 exclusive handle 拒绝持久化，渲染期记录保持弱引用，幂等 effect 仅强引用 mounted occurrences，同时在 effect replay 期间保留 identity。Factory 错误使用普通监督通道且不会 abdicate 共享 definition：definition 及其 fallback 局部 Component 的失败归属 definition，调用方所选局部 Component 的失败归属调用方 registration，每个边界随自身 scope incarnation 重置。

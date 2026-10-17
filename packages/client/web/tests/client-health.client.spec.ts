@@ -4,7 +4,10 @@ import {
   CLIENT_HEALTH_GLOBAL, installClientHealth, type ClientErrorReport, type ClientHealthOptions,
 } from '../src/client-health.ts'
 
-interface HealthGlobalFace { fatal(reason: unknown): void }
+interface HealthGlobalFace {
+  fatal(reason: unknown): void
+  report(kind: string, message: string, stack?: string): void
+}
 
 function healthGlobal(): HealthGlobalFace | undefined {
   return (globalThis as Record<string, unknown>)[CLIENT_HEALTH_GLOBAL] as HealthGlobalFace | undefined
@@ -294,6 +297,26 @@ describe('fatal recovery', () => {
     expect(reload).toHaveBeenCalledOnce()
     health.dispose()
     expect(healthGlobal()).toBeUndefined()
+  })
+
+  it('exposes a report-only breadcrumb face for contained failures', () => {
+    const { reports, reload, health, clock } = bench()
+    const face = healthGlobal()
+    expect(face).toBeDefined()
+    face?.report('renderer.slot-crash', "slot 'composer' crashed: boom", 'Error: boom\n  at panel.ts:1')
+    expect(reports).toHaveLength(1)
+    expect(reports[0]).toMatchObject({
+      kind: 'renderer.slot-crash',
+      message: "slot 'composer' crashed: boom",
+      stack: 'Error: boom\n  at panel.ts:1',
+    })
+    // Reporting is advisory: contained crashes never trigger the recovery reload.
+    expect(reload).not.toHaveBeenCalled()
+    clock.value += 1
+    face?.report('renderer.slot-crash', 'second contained crash')
+    expect(reports).toHaveLength(2)
+    expect(reload).not.toHaveBeenCalled()
+    health.dispose()
   })
 
   it('uses ambient sessionStorage by default', () => {

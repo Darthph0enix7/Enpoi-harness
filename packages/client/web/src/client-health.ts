@@ -63,13 +63,21 @@ export interface ClientErrorReport {
   readonly url?: string
 }
 
-/** The page-global recovery face the root error boundary calls. */
+/** The page-global recovery face the root error boundary and slot boundaries call. */
 export interface ClientHealthGlobal {
   /**
    * Recover from one fatal page failure (root boundary catch or watchdog verdict).
    * @param reason - the thrown value.
    */
   fatal(reason: unknown): void
+  /**
+   * Breadcrumb one contained failure that needs no recovery action (a crashed
+   * slot entry or factory occurrence the renderer already surfaced inline).
+   * @param kind - short classifier, e.g. `renderer.slot-crash`.
+   * @param message - bounded failure text naming the slot or factory.
+   * @param stack - optional bounded stack.
+   */
+  report(kind: string, message: string, stack?: string): void
 }
 
 /** Installable page health surface. */
@@ -301,7 +309,10 @@ class ClientHealthMonitor implements ClientHealth {
     this.postReport = options.postReport ?? ((report) => { void postDiagnosticsReport(report) })
     this.showFallback = options.showFallback ?? ((reason) => { this.drawDefaultFallback(reason) })
     this.startedAt = this.now()
-    this.face = { fatal: (reason) => { this.fatal(reason) } }
+    this.face = {
+      fatal: (reason) => { this.fatal(reason) },
+      report: (kind, message, stack) => { this.report(kind, message, stack) },
+    }
     this.win.addEventListener('error', this.onError)
     this.win.addEventListener('unhandledrejection', this.onRejection as EventListener)
     this.doc.addEventListener('visibilitychange', this.onVisibility)

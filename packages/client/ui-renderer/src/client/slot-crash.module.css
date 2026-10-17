@@ -1,0 +1,36 @@
+/* Inline failure surface for one crashed slot entry or factory occurrence.
+   It replaces an invisible marker, so it stays inside the crashed slot's own
+   layout footprint: a dashed strip with the standard label and action faces. */
+
+.crash {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 8px 12px;
+  border: 1px dashed var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.action {
+  flex: none;
+  padding: 0;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.action:hover {
+  color: var(--dsw-alias-brand-primary, var(--dsw-alias-label-primary));
+}

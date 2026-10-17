@@ -691,3 +691,80 @@ describe('Factory rendering', () => {
     await collisionRuntime.dispose()
   })
 })
+
+describe('factory crash faces', () => {
+  it('shows a localized face whose Retry remounts the occurrence', async () => {
+    const runtime = await SlotTestRuntime.create()
+    installLocale(runtime)
+    let broken = true
+    runtime.slots.registerFactory({ name: 'renderer.error-factory', scope: 'root' }, () => {
+      if (broken) throw new Error('factory boom')
+      return <span>factory back</span>
+    })
+    await runtime.root.declare({}, ({ renderFactorySlot }: PropsRuntime<'root'> & PropsRenderFactories) => (
+      <>{renderFactorySlot('renderer.error-factory', {})}</>
+    ))
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const view = runtime.renderRoot()
+    spy.mockRestore()
+
+    const face = view.container.querySelector('[data-factory-error="renderer.error-factory"]')
+    expect(face).not.toBeNull()
+    expect(face?.textContent).toContain('common:slot.failed')
+    broken = false
+    const settle = vi.spyOn(console, 'error').mockImplementation(() => {})
+    fireEvent.click(view.getByRole('button', { name: 'common:retry' }))
+    settle.mockRestore()
+    expect(view.container.textContent).toBe('factory back')
+    expect(view.container.querySelector('[data-factory-error]')).toBeNull()
+    await runtime.dispose()
+  })
+
+  it('switches to the persistent reload hint after one failed retry', async () => {
+    const runtime = await SlotTestRuntime.create()
+    installLocale(runtime)
+    runtime.slots.registerFactory({ name: 'renderer.error-factory', scope: 'root' }, () => {
+      throw new Error('always broken factory')
+    })
+    await runtime.root.declare({}, ({ renderFactorySlot }: PropsRuntime<'root'> & PropsRenderFactories) => (
+      <>{renderFactorySlot('renderer.error-factory', {})}</>
+    ))
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const view = runtime.renderRoot()
+    spy.mockRestore()
+
+    const settle = vi.spyOn(console, 'error').mockImplementation(() => {})
+    fireEvent.click(view.getByRole('button', { name: 'common:retry' }))
+    settle.mockRestore()
+    const face = view.container.querySelector('[data-factory-error="renderer.error-factory"]')
+    expect(face?.textContent).toContain('common:slot.failedPersistent')
+    expect(view.queryByRole('button', { name: 'common:retry' })).toBeNull()
+    await runtime.dispose()
+  })
+
+  it('breadcrumbs the crash with the factory name', async () => {
+    const runtime = await SlotTestRuntime.create()
+    const report = vi.fn()
+    const globals = globalThis as Record<string, unknown>
+    globals.__DSH_CLIENT_HEALTH__ = { fatal: vi.fn(), report }
+    try {
+      runtime.slots.registerFactory({ name: 'renderer.error-factory', scope: 'root' }, () => {
+        throw new Error('factory boom')
+      })
+      await runtime.root.declare({}, ({ renderFactorySlot }: PropsRuntime<'root'> & PropsRenderFactories) => (
+        <>{renderFactorySlot('renderer.error-factory', {})}</>
+      ))
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      runtime.renderRoot()
+      spy.mockRestore()
+    } finally {
+      delete globals.__DSH_CLIENT_HEALTH__
+    }
+    expect(report).toHaveBeenCalledWith(
+      'renderer.slot-crash',
+      expect.stringContaining("factory 'renderer.error-factory'"),
+      expect.stringContaining('factory boom'),
+    )
+    await runtime.dispose()
+  })
+})

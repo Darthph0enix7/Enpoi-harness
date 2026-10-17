@@ -16,7 +16,7 @@ import type { SessionReference } from '@deepseek-ai/dsh-api-session-controller/c
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import {
   SlotOwnershipError, StaleAuthorizationError,
-  type ActionsDecl, type SessionProviderComponent, type SlotEntryDef,
+  type ActionsDecl, type LocaleFace, type SessionProviderComponent, type SlotEntryDef,
   type SlotSpec, type StoreHandle, type StoredEntry,
 } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
@@ -87,7 +87,7 @@ function observable<T>(initial: T) {
  * the entry's real handle, cached per (entry x scope key) like the real
  * ledger; session bindings are identity-stable per id.
  */
-function makeHost() {
+function makeHost(options: { locale?: LocaleFace | undefined } = {}) {
   const entries = new Map<string, StoredEntry[]>()
   const specs = new Map<string, DeclaredSpec>()
   const versions = new Map<string, number>()
@@ -190,6 +190,7 @@ function makeHost() {
     root,
     scopeRevision,
     scope: () => activeScopeAdapter,
+    ...(options.locale === undefined ? {} : { locale: options.locale }),
   }
   return {
     host,
@@ -392,8 +393,11 @@ describe('child outlets and the renderSlot binding', () => {
     const { view } = mountRoot(h, { 'k.list': { kind: 'list', scope: 'root' } },
       renderSlot => renderSlot('k.list', {}))
     spy.mockRestore()
-    expect(view.container.textContent).toBe('alive')
-    expect(view.container.querySelector('[data-slot-error]')).not.toBeNull()
+    // The dry 'bad' cell keeps a visible failure surface; the sibling survives.
+    expect(view.container.textContent).toContain('alive')
+    const dead = view.container.querySelector('[data-slot-error="k.list"]')
+    expect(dead).not.toBeNull()
+    expect(dead?.textContent).not.toBe('')
   })
 })
 
@@ -1056,8 +1060,10 @@ describe('inject: execution point, parameter derivation, cache granularity', () 
     spy.mockRestore()
     // The failing entry blacks out alone; the sibling and the tree above survive.
     expect(view.container.querySelector('main')).not.toBeNull()
-    expect(view.container.textContent).toBe('alive')
-    expect(view.container.querySelector('[data-slot-error]')).not.toBeNull()
+    expect(view.container.textContent).toContain('alive')
+    const dead = view.container.querySelector('[data-slot-error="k.list"]')
+    expect(dead).not.toBeNull()
+    expect(dead?.textContent).not.toBe('')
   })
 
   it('merges kit, inject, and owner props with owner winning', () => {
@@ -1166,5 +1172,118 @@ describe('session-maybe adoption identity', () => {
       })
     })
     expect(view.container.textContent).toBe('replacement#1')
+  })
+})
+
+/** Locale face for crash-face copy: the common namespace resolves to distinct labels. */
+function crashLocale(): LocaleFace {
+  const dict: Record<string, string> = {
+    'slot.failed': 'PANEL FAILED',
+    'slot.failedPersistent': 'PANEL DEAD',
+    'retry': 'RETRY NOW',
+  }
+  return {
+    getSnapshot: () => ({ revision: 1 }),
+    subscribe: () => () => {},
+    bind: namespace => key => namespace === 'common' ? dict[key] ?? key : key,
+  }
+}
+
+describe('crash faces', () => {
+  it('shows a localized face with a working Retry for a chain entry, then remounts it', () => {
+    const h = makeHost({ locale: crashLocale() })
+    h.declare('k.chain', CHAIN_ROOT)
+    let broken = true
+    h.add('k.chain', chainEntryOf({
+      component: () => {
+        if (broken) throw new Error('composer boom')
+        return <b>composer back</b>
+      },
+      select: () => ({}),
+    }))
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { view } = mountChainRoot(h, { 'k.chain': CHAIN_ROOT }, renderSlotChain => renderSlotChain('k.chain', {}))
+    spy.mockRestore()
+
+    const face = view.container.querySelector('[data-slot-error="k.chain"]')
+    expect(face).not.toBeNull()
+    expect(face?.textContent).toContain('PANEL FAILED')
+    broken = false
+    const settle = vi.spyOn(console, 'error').mockImplementation(() => {})
+    fireEvent.click(view.getByRole('button', { name: 'RETRY NOW' }))
+    settle.mockRestore()
+    expect(view.container.textContent).toBe('composer back')
+    expect(view.container.querySelector('[data-slot-error]')).toBeNull()
+  })
+
+  it('switches to the persistent reload hint after the retry budget is spent', () => {
+    const h = makeHost({ locale: crashLocale() })
+    h.declare('k.chain', CHAIN_ROOT)
+    h.add('k.chain', chainEntryOf({
+      component: () => { throw new Error('always broken') },
+      select: () => ({}),
+    }))
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { view } = mountChainRoot(h, { 'k.chain': CHAIN_ROOT }, renderSlotChain => renderSlotChain('k.chain', {}))
+    spy.mockRestore()
+
+    const settle = vi.spyOn(console, 'error').mockImplementation(() => {})
+    fireEvent.click(view.getByRole('button', { name: 'RETRY NOW' }))
+    settle.mockRestore()
+    const face = view.container.querySelector('[data-slot-error="k.chain"]')
+    expect(face?.textContent).toContain('PANEL DEAD')
+    expect(view.queryByRole('button', { name: 'RETRY NOW' })).toBeNull()
+  })
+
+  it('leaves a persistent visible face when a single cell runs dry', async () => {
+    const h = makeHost({ locale: crashLocale() })
+    h.declare('k.single', SINGLE_ROOT)
+    h.add('k.single', { component: () => { throw new Error('panel boom') } })
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { view } = mountRoot(h, { 'k.single': SINGLE_ROOT }, renderSlot => renderSlot('k.single', {}))
+    spy.mockRestore()
+    await act(async () => {})
+
+    const dead = view.container.querySelector('[data-slot-error="k.single"]')
+    expect(dead).not.toBeNull()
+    expect(dead?.textContent).toContain('PANEL DEAD')
+    expect(view.container.querySelector('button')).toBeNull()
+  })
+
+  it('breadcrumbs every caught crash with the slot name', () => {
+    const report = vi.fn()
+    const globals = globalThis as Record<string, unknown>
+    globals.__DSH_CLIENT_HEALTH__ = { fatal: vi.fn(), report }
+    try {
+      const h = makeHost()
+      h.declare('k.chain', CHAIN_ROOT)
+      h.add('k.chain', chainEntryOf({
+        component: () => { throw new Error('composer boom') },
+        select: () => ({}),
+      }))
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+      mountChainRoot(h, { 'k.chain': CHAIN_ROOT }, renderSlotChain => renderSlotChain('k.chain', {}))
+      spy.mockRestore()
+    } finally {
+      delete globals.__DSH_CLIENT_HEALTH__
+    }
+    expect(report).toHaveBeenCalledWith(
+      'renderer.slot-crash',
+      expect.stringContaining("slot 'k.chain'"),
+      expect.stringContaining('composer boom'),
+    )
+  })
+
+  it('survives a missing page-health reporter', () => {
+    const h = makeHost()
+    h.declare('k.chain', CHAIN_ROOT)
+    h.add('k.chain', chainEntryOf({
+      component: () => { throw new Error('lonely boom') },
+      select: () => ({}),
+    }))
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const { view } = mountChainRoot(h, { 'k.chain': CHAIN_ROOT }, renderSlotChain => renderSlotChain('k.chain', {}))
+    spy.mockRestore()
+    expect(view.container.querySelector('[data-slot-error="k.chain"]')).not.toBeNull()
   })
 })
