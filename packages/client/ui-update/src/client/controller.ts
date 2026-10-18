@@ -35,7 +35,7 @@ export const RUN_POLL_MS = 2_000
 export const TRIGGER_MIN_GAP_MS = 1_000
 
 /** How long the post-success identity watch keeps re-reading the status. */
-export const RELOAD_WATCH_MS = 60_000
+export const RELOAD_WATCH_MS = 120_000
 
 /** Identity poll cadence while the reload watch runs. */
 export const RELOAD_WATCH_TICK_MS = 2_000
@@ -184,6 +184,7 @@ export class UpdateController {
   private reloadDeadline = 0
   private lastTriggerAt = Number.NEGATIVE_INFINITY
   private disposed = false
+  private runLoaded = false
   private pending: PendingMarker | undefined
 
   /**
@@ -304,6 +305,7 @@ export class UpdateController {
         return
       }
       const run = result.value as UpdateRunWire
+      this.runLoaded = true
       this.pinPending(status, run)
       this.update({ busy: false, run, dialogOpen: true })
       this.ensureRunPoll()
@@ -326,6 +328,7 @@ export class UpdateController {
         return
       }
       const applied = result.value as UpdateRunWire
+      this.runLoaded = true
       this.pinPending(status, applied)
       this.update({ busy: false, run: applied, dialogOpen: true })
       this.ensureRunPoll()
@@ -452,6 +455,7 @@ export class UpdateController {
     this.runInFlight = this.rpc('updateCheck.run', {}).then((result) => {
       if (this.disposed || !result.ok) return
       const run = result.value === null || result.value === undefined ? null : result.value as UpdateRunWire
+      this.runLoaded = true
       this.update({ run })
       this.maybeCompleteUpdate()
       if (run !== null && isExecutingPhase(run.phase)) this.ensureRunPoll()
@@ -474,10 +478,13 @@ export class UpdateController {
   /** Reload and announce the new version once the server reports it. */
   private maybeCompleteUpdate(): void {
     const { status, run } = this.store.getSnapshot()
-    if (this.pending === undefined || status === null) return
-    const version = status.current.version
-    // An empty `from` means the status was not loaded when the run started;
-    // only the run's own success can complete the update in that case.
+    if (this.pending === undefined || status === null || !this.runLoaded) return
+    // Never complete while the engine process is still executing (e.g. self-check or retention pruning).
+    if (run !== null && isExecutingPhase(run.phase)) return
+
+    const version = (run !== null && run.result === 'success' && run.target !== '')
+      ? run.target
+      : status.current.version
     const reached = this.pending.from !== '' && version !== '' && version !== this.pending.from
     const succeeded = run !== null && run.result === 'success'
     if (!reached && !succeeded) return

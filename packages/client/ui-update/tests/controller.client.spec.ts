@@ -745,6 +745,41 @@ describe('UpdateController restart detection', () => {
     fresh.controller.dispose()
   })
 
+  it('does not reload prematurely while the apply run is still executing step 9 or retention pruning', async () => {
+    let clock = 0
+    const storage = memoryStorage({ [PENDING_KEY]: JSON.stringify({ from: '0.1.7-enpoi.2.81', target: '0.1.7-enpoi.2.84' }) })
+    const executingApply = runWire({ mode: 'apply', phase: 'applying', step: 9, result: null, lastLine: 'retention: pruning old version 0.1.7-enpoi.2.81' })
+    const answers: Record<string, unknown> = {
+      'updateCheck.status': {
+        ...availableStatus,
+        state: 'current' as const,
+        latest: undefined,
+        current: { version: '0.1.7-enpoi.2.84', commit: 'def5678', channel: 'stable' },
+      },
+      'updateCheck.run': executingApply,
+    }
+    const b = bench({ storage, answers, now: () => clock })
+    b.controller.mount()
+    await settle()
+    // Service restarted, connection reset: status reports the new version, but the run is STILL executing!
+    b.controller.onConnectionReset()
+    await settle()
+    b.ticks.fireIntervals()
+    await settle()
+    // Must NOT reload yet!
+    expect(b.reload).not.toHaveBeenCalled()
+
+    // Now the run completes step 9 and retention pruning:
+    answers['updateCheck.run'] = runWire({ mode: 'apply', phase: 'success', result: 'success', step: 9, target: '0.1.7-enpoi.2.84' })
+    clock += 2_000
+    b.ticks.fireIntervals()
+    await settle()
+    // Now it reloads cleanly!
+    expect(b.reload).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(b.storage.values.get(TOAST_KEY)!)).toEqual({ version: '0.1.7-enpoi.2.84' })
+    b.controller.dispose()
+  })
+
   it('does not reload on an unrelated reconnect while a run is in flight', async () => {
     const b = bench({ answers: { 'updateCheck.status': availableStatus, 'updateCheck.start': executingRun } })
     b.controller.mount()

@@ -674,6 +674,41 @@ describe('UpdateIndicator dialog', () => {
     expect(document.querySelector('[data-dsh-update-success]')?.textContent).toBe('Updated to 0.1.7-enpoi.2.84')
   })
 
+  it('renders a clean success dialog with only a Close button when viewing a landed update', () => {
+    const landedStatus = {
+      state: 'current' as const,
+      current: { version: '0.1.7-enpoi.2.84', commit: 'def5678', channel: 'beta' },
+      latest: { version: '0.1.7-enpoi.2.84', commit: 'def5678', releasedAt: '2026-10-18T00:00:00Z', notes: ['fix: landed'] },
+    }
+    mount({
+      status: landedStatus,
+      run: run({ mode: 'apply', result: 'success', phase: 'success', step: 9, target: '0.1.7-enpoi.2.84' }),
+      dialogOpen: true,
+    })
+    expect(document.querySelector('[data-dsh-update-success]')?.textContent).toBe('Updated to 0.1.7-enpoi.2.84')
+    // Head shows only the current version without an arrow to itself.
+    expect(document.querySelector('[data-dsh-update-versions]')?.textContent).toBe('0.1.7-enpoi.2.84')
+    // Footer has only the Close button — no Update now, no Later, no Skip this version.
+    expect(screen.queryByRole('button', { name: en['action.updateNow'] })).toBeNull()
+    expect(screen.queryByRole('button', { name: en['action.later'] })).toBeNull()
+    expect(screen.queryByRole('button', { name: en['action.skip'] })).toBeNull()
+    expect(screen.getAllByRole('button', { name: en['action.close'] }).length).toBeGreaterThan(0)
+  })
+
+  it('renders only a Close button when the dialog is open and the system is already up to date', () => {
+    const upToDateStatus = {
+      state: 'current' as const,
+      current: { version: '0.1.7-enpoi.2.84', commit: 'def5678', channel: 'beta' },
+      latest: { version: '0.1.7-enpoi.2.84', commit: 'def5678', releasedAt: '2026-10-18T00:00:00Z', notes: ['fix: current'] },
+    }
+    mount({ status: upToDateStatus, dialogOpen: true })
+    expect(document.querySelector('[data-dsh-update-versions]')?.textContent).toBe('0.1.7-enpoi.2.84')
+    expect(screen.queryByRole('button', { name: en['action.updateNow'] })).toBeNull()
+    expect(screen.queryByRole('button', { name: en['action.later'] })).toBeNull()
+    expect(screen.queryByRole('button', { name: en['action.skip'] })).toBeNull()
+    expect(screen.getAllByRole('button', { name: en['action.close'] }).length).toBeGreaterThan(0)
+  })
+
   it('disables the offer actions while a call is in flight and shows the action error', () => {
     mount({ status: availableStatus, dialogOpen: true, busy: true, actionError: 'an update is already running' })
     expect(screen.getByRole('button', { name: en['action.updateNow'] }).hasAttribute('disabled')).toBe(true)

@@ -185,14 +185,16 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
         // the only path forward, never a replay of apply against a dead tree.
         <Button variant="primary" disabled={state.busy} onClick={actions.start}>{t('action.updateNow')}</Button>
       ) : null}
-      <Button disabled={state.busy} onClick={actions.close}>{t('action.close')}</Button>
+      <Button {...(failedRun.staged || canStart ? {} : { variant: 'primary' as const })} disabled={state.busy} onClick={actions.close}>{t('action.close')}</Button>
     </>
-  ) : (
+  ) : canStart ? (
     <>
-      <Button variant="primary" disabled={state.busy || !canStart} onClick={actions.start}>{t('action.updateNow')}</Button>
+      <Button variant="primary" disabled={state.busy} onClick={actions.start}>{t('action.updateNow')}</Button>
       <Button disabled={state.busy} onClick={actions.close}>{t('action.later')}</Button>
       <Button disabled={state.busy} onClick={actions.skip}>{t('action.skip')}</Button>
     </>
+  ) : (
+    <Button variant="primary" disabled={state.busy} onClick={actions.close}>{t('action.close')}</Button>
   )
 
   return (
@@ -239,7 +241,9 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
             <div className={css.head}>
               {latest !== undefined && (
                 <p className={css.versions} data-dsh-update-versions>
-                  {t('dialog.versions', { current: formatVersion(status.current.version, t), latest: latest.version })}
+                  {canStart && formatVersion(status.current.version, t) !== latest.version
+                    ? t('dialog.versions', { current: formatVersion(status.current.version, t), latest: latest.version })
+                    : formatVersion(status.current.version, t)}
                 </p>
               )}
               <div className={css.headMeta}>
