@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-17T20:26:20.046Z",
+  "generatedAt": "2026-10-18T07:15:37.522Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.99",
+      "commit": "2884c1f",
+      "releasedAt": "2026-10-18T06:58:35.000Z",
+      "notes": [
+        "fix(ui-update): prevent premature reload during step 9 pruning and fix completed-update dialog footer"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.98",
       "commit": "c6f6bc6",
@@ -355,14 +363,6 @@
       "releasedAt": "2026-10-11T09:34:38.000Z",
       "notes": [
         "feat(host/update-engine): preservation and merge engine for delta updates"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.57",
-      "commit": "c603947",
-      "releasedAt": "2026-10-11T07:15:41.000Z",
-      "notes": [
-        "fix(ui-settings-models): converge new providers through the catalog sync"
       ]
     }
   ]
