@@ -1,8 +1,19 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-10-18T07:15:37.490Z",
+  "generatedAt": "2026-10-21T18:26:57.780Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.100",
+      "commit": "6c94e94",
+      "releasedAt": "2026-10-21T18:03:11.000Z",
+      "notes": [
+        "fix(release): make the truncation, role, and tailnet-port contracts true for every composition",
+        "fix(subagent): require an explicit role, continue truncations, and keep settled children listed",
+        "feat(capabilities): protect tailnet infrastructure ports from tailscale serve hijacking",
+        "feat(orchestration): enforce delegation anti-duplication rule and fix subagent/oracle whiteboard visibility"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.99",
       "commit": "2884c1f",
@@ -355,14 +366,6 @@
       "releasedAt": "2026-10-11T11:20:06.000Z",
       "notes": [
         "feat(update): delta transport and preservation net wired into ds update"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.58",
-      "commit": "aa34d4a",
-      "releasedAt": "2026-10-11T09:34:38.000Z",
-      "notes": [
-        "feat(host/update-engine): preservation and merge engine for delta updates"
       ]
     }
   ]
