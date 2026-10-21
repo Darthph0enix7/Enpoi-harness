@@ -108,12 +108,20 @@
         and their notices arrive as each finishes.
       - Fleet capacity: at most 8 live children share this pool. A dispatch
         beyond capacity fails with ACTIVATION_LIMIT_REACHED and is NOT queued
-        — track running children from their settlement notices (or
-        `list_agents` running rows) and dispatch only into free slots; a slot
-        is free when its settlement notice arrives.
-      - While background children run the operator can keep interacting; end
-        the turn with a short report of what you dispatched — and what each
-        child should return.
+        — track running children from their settlement notices and dispatch
+        only into free slots; a slot is free when its settlement notice
+        arrives. Never poll list_agents to check child progress.
+      - Delegation Termination & Anti-Duplication Law:
+        When you dispatch background subagents (librarian, fixer, explorer, designer):
+        1. NEVER duplicate the subagent's task yourself while waiting. Do NOT
+           read files, run bash commands, or do research to answer what the
+           subagent is assigned to do.
+        2. NEVER poll or call list_agents to monitor running children; the
+           settlement notice will wake you automatically.
+        3. If you have no independent, non-overlapping work that must be done
+           immediately, you MUST end your turn now: write a short, clear message
+           stating what specialist was dispatched and what it is investigating,
+           and STOP. The settlement notice will wake you when the subagent finishes.
 
       ## Verification & Ambiguity
       - A tool result that already answers the question IS the verification.

@@ -121,10 +121,44 @@ function readLivingBrief(ctx, session) {
     return null;
   }
 }
-function buildInitialPackage(brief, args, scorecard) {
+function extractWhiteboardSummary(doc, sessionId, cwd) {
+  try {
+    const wb = doc?.whiteboard;
+    if (!wb?.docs) return null;
+    const entries = [];
+    const seen = /* @__PURE__ */ new Set();
+    const pushEntries = (rawList) => {
+      if (!Array.isArray(rawList)) return;
+      for (const e of rawList) {
+        const text = typeof e?.text === "string" ? e.text.trim() : "";
+        if (text.length === 0 || seen.has(text)) continue;
+        seen.add(text);
+        entries.push({
+          kind: typeof e.kind === "string" ? e.kind : "fact",
+          text,
+          pinned: e.pinned === true
+        });
+      }
+    };
+    pushEntries(wb.docs.global?.entries);
+    if (cwd && wb.docs.projects?.[cwd]?.entries) pushEntries(wb.docs.projects[cwd].entries);
+    if (sessionId && wb.docs.sessions?.[sessionId]?.entries) pushEntries(wb.docs.sessions[sessionId].entries);
+    if (entries.length === 0) return null;
+    entries.sort((a, b) => a.pinned === b.pinned ? 0 : a.pinned ? -1 : 1);
+    const lines = entries.map((e) => `- ${e.pinned ? "\u{1F4CC} " : ""}[${e.kind}] ${e.text}`);
+    return lines.join("\n");
+  } catch {
+    return null;
+  }
+}
+function buildInitialPackage(brief, args, scorecard, whiteboardText) {
   const lines = [];
   lines.push("You are the Oracle \u2014 the senior architectural supervisor and deep reviewer.");
   lines.push("This is a FRESH consultation session for the active user query. Review the request below against the current state.");
+  if (whiteboardText) {
+    lines.push("--- PINNED WHITEBOARD ---");
+    lines.push(whiteboardText);
+  }
   if (brief !== null) {
     lines.push("--- SESSION BRIEF ---");
     lines.push(brief);
@@ -143,8 +177,11 @@ function buildInitialPackage(brief, args, scorecard) {
   }
   return lines.join("\n");
 }
-function buildDelta(brief, args) {
+function buildDelta(brief, args, whiteboardText) {
   const lines = ["Follow-up review in the SAME query (delta turn). Your prior review and findings are in your conversation history above."];
+  if (whiteboardText) {
+    lines.push("--- PINNED WHITEBOARD ---", whiteboardText);
+  }
   if (brief !== null) {
     lines.push("--- CURRENT SESSION BRIEF ---", brief);
   }
@@ -507,9 +544,11 @@ function registerOracleTools(ctx, root) {
             if (e.type === "turn/end" && e.data.reason.kind === "aborted" && e.data.reason.reason?.kind === "user") bg?.abort();
           });
         }
+        const doc = readOrchestrationDocument(ctx.get("settings"));
+        const wbSummary = extractWhiteboardSummary(doc, parent.session?.id, parent.session?.header?.cwd);
         const prompt = [{
           type: "text",
-          text: fresh ? buildInitialPackage(brief, args, fiber.scorecard) : buildDelta(brief, args)
+          text: fresh ? buildInitialPackage(brief, args, fiber.scorecard, wbSummary) : buildDelta(brief, args, wbSummary)
         }];
         const { chainId, carryId, attempts: attemptModels } = resolveOracleChainAttempts(ctx, "oracle");
         const callSignal = () => bg?.signal ?? exec.signal;
@@ -827,6 +866,7 @@ export {
   apply,
   buildInitialPackage,
   deliverDetachedOracleVerdict,
+  extractWhiteboardSummary,
   inject,
   isExternalEvidenceTarget,
   name,

@@ -127,6 +127,29 @@ describe('enpoi-oracle scorecard rollover (doc 35 2.4)', () => {
     const out = buildInitialPackage('brief', { request: 'r' }, { files: [], verdicts: [] })
     expect(out).not.toContain('PRIOR REVIEWS')
   })
+
+  it('renders PINNED WHITEBOARD section when whiteboardText is supplied', async () => {
+    const { buildInitialPackage, extractWhiteboardSummary } = await import('../src/index.ts')
+    const doc = {
+      whiteboard: {
+        docs: {
+          global: { entries: [{ kind: 'rule', text: 'Global Invariant', pinned: true }] },
+          projects: { '/home/user/proj': { entries: [{ kind: 'fact', text: 'Project Fact', pinned: false }] } },
+          sessions: { 'session-1': { entries: [{ kind: 'task', text: 'Session Task', pinned: true }] } },
+        },
+      },
+    }
+    const summary = extractWhiteboardSummary(doc, 'session-1', '/home/user/proj')
+    expect(summary).toContain('- 📌 [rule] Global Invariant')
+    expect(summary).toContain('- 📌 [task] Session Task')
+    expect(summary).toContain('- [fact] Project Fact')
+
+    const out = buildInitialPackage('brief', { request: 'review architecture' }, { files: [], verdicts: [] }, summary)
+    expect(out).toContain('--- PINNED WHITEBOARD ---')
+    expect(out).toContain('Global Invariant')
+    expect(out).toContain('Session Task')
+    expect(out).toContain('--- SESSION BRIEF ---')
+  })
 })
 
 describe('request_evidence fact sheet parsing', () => {

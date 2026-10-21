@@ -71,6 +71,52 @@ describe('Enpoi Harness UI — Watchtower & TheMarkTaskCard', () => {
     expect(screen.getByText(/keeper idle/i)).toBeTruthy()
   })
 
+  it('subagent session inherits parent session whiteboard via useSessions parentId', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        result: {
+          ok: true,
+          value: {
+            namespaces: [{
+              ns: 'enpoi-orchestration',
+              value: {
+                whiteboard: {
+                  version: 5,
+                  docs: {
+                    global: { version: 1, entries: [], updatedAt: 1 },
+                    projects: {},
+                    sessions: {
+                      'parent-session-1': {
+                        version: 2,
+                        entries: [{ id: 'p1', kind: 'fact', text: 'Parent Fact 1', pinned: true, version: 1 }],
+                        updatedAt: 10,
+                      },
+                    },
+                  },
+                },
+              },
+            }],
+          },
+        },
+      }),
+    })))
+
+    render(
+      <WatchtowerView t={brandT}
+        sessionId="child-session-1"
+        useSession={selector => selector({ displayTitle: 'Child Subagent', sessionId: 'child-session-1' })}
+        useSessions={selector => selector({ byId: { 'child-session-1': { parentId: 'parent-session-1' } } })}
+        useProjection={<T,>(): T => undefined as T}
+      />,
+    )
+
+    await vi.waitFor(() => {
+      expect(screen.getByText('Parent Fact 1')).toBeTruthy()
+    })
+    vi.unstubAllGlobals()
+  })
+
   it('TheMarkTaskCard freezes calligraphy on interrupt/park (UI-4)', () => {
     const { rerender } = render(
       <TheMarkTaskCard t={brandT}

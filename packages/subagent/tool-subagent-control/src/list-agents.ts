@@ -129,7 +129,7 @@ export function apply(ctx: Context): void {
       + 'running means it is working; inactive means it is not currently working. '
       + 'Running children are listed first, then inactive ones by most recent creation. '
       + `The result shows at most ${String(DEFAULT_LIST_AGENTS_LIMIT)} rows (set \`limit\`, max ${String(MAX_LIST_AGENTS_LIMIT)}) and a footer with the totals when rows are omitted. `
-      + 'You will be notified when a subagent finishes; there is no need to keep checking its status. '
+      + 'You will be notified when a subagent finishes; there is no need to keep checking its status. NEVER call this tool repeatedly to poll or wait for running children — the settlement notice will wake you automatically. '
       + 'Use send_message to continue the conversation.',
     parameters: {
       scope: {

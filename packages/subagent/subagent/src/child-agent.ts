@@ -179,7 +179,8 @@ export const SUBAGENT_DELEGATION_CONTEXT
     + '(bash -c with python3/node -e) to read, decode, or pretty-print a file — those commands require '
     + 'approval, while the dedicated file tools are the supported, approval-free path. '
     + 'A bash command that outlives the executor timeout keeps running as a background job owned by '
-    + 'this session; collect its output with job_output (wait: true) instead of re-running the command.'
+    + 'this session; collect its output with job_output (wait: true) instead of re-running the command. '
+    + 'Your session inherits the parent\'s pinned whiteboard (key project paths, rules, and facts) in your runtime context; use whiteboard_read if you need to query the full board.'
 
 /**
  * Compose one child inside its creation window: join its parent's preset,

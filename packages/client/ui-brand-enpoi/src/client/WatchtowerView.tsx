@@ -67,6 +67,7 @@ interface MemoryLedgerLike { readonly committedCount?: number }
 
 export interface WatchtowerViewProps {
   useSession?: <S>(selector: (s: SessionLike) => S) => S
+  useSessions?: <S>(selector: (s: { byId?: Record<string, { parentId?: string; parentSessionId?: string }> }) => S) => S
   sessionId?: string
   useProjection?: <T>(key: string, selector?: (v: unknown) => T) => T
   useWorkspaces?: <S>(selector: (w: WorkspaceLike) => S) => S
@@ -153,7 +154,9 @@ function SectionBlock({ icon, label, lines }: { icon: string; label: string; lin
   )
 }
 
-export function WatchtowerView({ useSession, sessionId, useProjection, useWorkspaces, useSessionStatus, t }: WatchtowerViewProps) {
+export function WatchtowerView({
+  useSession, useSessions, sessionId, useProjection, useWorkspaces, useSessionStatus, t,
+}: WatchtowerViewProps) {
   const session = typeof useSession === 'function' ? useSession(s => s) : undefined
   const workspaces = typeof useWorkspaces === 'function' ? useWorkspaces(w => w) : undefined
 
@@ -286,7 +289,13 @@ export function WatchtowerView({ useSession, sessionId, useProjection, useWorksp
 
   const projectId = session?.cwd ?? workspaces?.activeWorkspace?.path
   const boardSessionId = sessionId ?? session?.sessionId ?? session?.id
-  const parentSessionId = session?.subagent?.address?.parentSessionId
+  const summaryParentId = typeof useSessions === 'function' && boardSessionId !== undefined
+    ? useSessions(s => s?.byId?.[boardSessionId]?.parentId
+      ?? (s?.byId?.[boardSessionId] as { parentSessionId?: string } | undefined)?.parentSessionId)
+    : undefined
+  const sessionParentId = (session as { parentSessionId?: string; parentId?: string } | undefined)?.parentSessionId
+    ?? (session as { parentSessionId?: string; parentId?: string } | undefined)?.parentId
+  const parentSessionId = session?.subagent?.address?.parentSessionId ?? sessionParentId ?? summaryParentId
   const boardFacts: WhiteboardScopeFacts = {
     ...(boardSessionId === undefined ? {} : { sessionId: boardSessionId }),
     ...(parentSessionId === undefined ? {} : { parentSessionId }),

@@ -1251,7 +1251,7 @@ describe('dsh-tool-subagent continuable background mode', () => {
     const match = /^started subagent (\S+)\n(.+)$/.exec(text(started))
     expect(match).not.toBeNull()
     const [, childId, contractLine] = match!
-    expect(contractLine).toBe('You will be woken with its report when it settles — do not poll its status;')
+    expect(contractLine).toBe('You will be woken with its report when it settles — do not poll its status, track files, or duplicate its work. Conclude your turn to await the report;')
     // No Task was created for the continuable child.
     expect(ctx.jobs.list(parent.id)).toEqual([])
 

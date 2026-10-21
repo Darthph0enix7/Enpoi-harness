@@ -172,14 +172,64 @@ function readLivingBrief(ctx: Context, session: Session): string | null {
   }
 }
 
+/**
+ * Extract a compact markdown list of pinned whiteboard entries from the
+ * shared `enpoi-orchestration` document for one session.
+ */
+export function extractWhiteboardSummary(
+  doc: Record<string, unknown> | undefined,
+  sessionId?: string,
+  cwd?: string,
+): string | null {
+  try {
+    const wb = doc?.whiteboard as {
+      docs?: {
+        global?: { entries?: Array<{ kind?: string; text?: string; pinned?: boolean }> }
+        projects?: Record<string, { entries?: Array<{ kind?: string; text?: string; pinned?: boolean }> }>
+        sessions?: Record<string, { entries?: Array<{ kind?: string; text?: string; pinned?: boolean }> }>
+      }
+    } | undefined
+    if (!wb?.docs) return null
+    const entries: Array<{ kind: string; text: string; pinned: boolean }> = []
+    const seen = new Set<string>()
+    const pushEntries = (rawList?: Array<{ kind?: string; text?: string; pinned?: boolean }>) => {
+      if (!Array.isArray(rawList)) return
+      for (const e of rawList) {
+        const text = typeof e?.text === 'string' ? e.text.trim() : ''
+        if (text.length === 0 || seen.has(text)) continue
+        seen.add(text)
+        entries.push({
+          kind: typeof e.kind === 'string' ? e.kind : 'fact',
+          text,
+          pinned: e.pinned === true,
+        })
+      }
+    }
+    pushEntries(wb.docs.global?.entries)
+    if (cwd && wb.docs.projects?.[cwd]?.entries) pushEntries(wb.docs.projects[cwd].entries)
+    if (sessionId && wb.docs.sessions?.[sessionId]?.entries) pushEntries(wb.docs.sessions[sessionId].entries)
+    if (entries.length === 0) return null
+    entries.sort((a, b) => (a.pinned === b.pinned ? 0 : a.pinned ? -1 : 1))
+    const lines = entries.map(e => `- ${e.pinned ? '📌 ' : ''}[${e.kind}] ${e.text}`)
+    return lines.join('\n')
+  } catch {
+    return null
+  }
+}
+
 export function buildInitialPackage(
   brief: string | null,
   args: { request: string; files?: string[] },
   scorecard: OracleFiber['scorecard'],
+  whiteboardText?: string | null,
 ): string {
   const lines: string[] = []
   lines.push('You are the Oracle — the senior architectural supervisor and deep reviewer.')
   lines.push('This is a FRESH consultation session for the active user query. Review the request below against the current state.')
+  if (whiteboardText) {
+    lines.push('--- PINNED WHITEBOARD ---')
+    lines.push(whiteboardText)
+  }
   if (brief !== null) {
     lines.push('--- SESSION BRIEF ---')
     lines.push(brief)
@@ -199,8 +249,15 @@ export function buildInitialPackage(
   return lines.join('\n')
 }
 
-function buildDelta(brief: string | null, args: { request: string; files?: string[] }): string {
+function buildDelta(
+  brief: string | null,
+  args: { request: string; files?: string[] },
+  whiteboardText?: string | null,
+): string {
   const lines: string[] = ['Follow-up review in the SAME query (delta turn). Your prior review and findings are in your conversation history above.']
+  if (whiteboardText) {
+    lines.push('--- PINNED WHITEBOARD ---', whiteboardText)
+  }
   if (brief !== null) {
     lines.push('--- CURRENT SESSION BRIEF ---', brief)
   }
@@ -695,11 +752,14 @@ function registerOracleTools(ctx: Context, root: Context): void {
           })
         }
 
+        const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
+        const wbSummary = extractWhiteboardSummary(doc, parent.session?.id, parent.session?.header?.cwd)
+
         const prompt: Array<{ type: 'text'; text: string }> = [{
           type: 'text',
           text: fresh
-            ? buildInitialPackage(brief, args, fiber.scorecard)
-            : buildDelta(brief, args),
+            ? buildInitialPackage(brief, args, fiber.scorecard, wbSummary)
+            : buildDelta(brief, args, wbSummary),
         }]
 
         // Chain snapshot at consultation start (doc 60): the ordered routes are

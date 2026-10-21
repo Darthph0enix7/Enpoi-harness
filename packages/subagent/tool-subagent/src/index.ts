@@ -1298,7 +1298,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
                 // exact moment the model would otherwise start polling: the
                 // settlement notice is the only status channel it needs.
                 ? `started subagent ${value.subagentId}\n`
-                  + 'You will be woken with its report when it settles — do not poll its status;'
+                  + 'You will be woken with its report when it settles — do not poll its status, track files, or duplicate its work. Conclude your turn to await the report;'
                 : outputValueText(value.output),
           }],
         },
