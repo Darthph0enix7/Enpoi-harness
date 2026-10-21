@@ -1719,6 +1719,9 @@ WantedBy=default.target
     mkdirSync(bin, { recursive: true })
     writeFileSync(join(bin, 'socat'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
     writeFileSync(join(bin, 'hostname'), "#!/bin/sh\nprintf 'testhost\\n'\n", { mode: 0o755 })
+    // No tailscale on the test host: the FQDN must come from the stub in the
+    // one test that provides it, never from the machine running the suite.
+    writeFileSync(join(bin, 'tailscale'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
     writeFileSync(join(bin, 'systemctl'), [
       '#!/bin/sh',
       'printf \'%s\\n\' "$*" >> "$SYSTEMCTL_LOG"',
@@ -1829,6 +1832,40 @@ WantedBy=default.target
     expect(second.output).toContain('already current (dsh-tailnet.service)')
     expect(readFileSync(forwarder, 'utf8')).toBe(forwarderText)
     expect(forwarderText.match(/TCP-LISTEN:3080/g)).toHaveLength(1)
+  })
+
+  it('claims the tailnet HTTPS port and trusts its MagicDNS FQDN', () => {
+    const { home, unitPath } = unitHome(GENERATED_UNIT)
+    const bin = stubDirectory()
+    const tailscaleLog = join(home, 'tailscale.log')
+    writeFileSync(join(bin, 'tailscale'), [
+      '#!/bin/sh',
+      'printf \'%s\\n\' "$*" >> "$TAILSCALE_LOG"',
+      'case "$*" in',
+      '  "ip -4") printf \'100.101.102.103\\n\';;',
+      '  "status --json") printf \'{"Self":{"DNSName":"testhost.tail1234.ts.net."}}\\n\';;',
+      'esac',
+      'exit 0',
+      '',
+    ].join('\n'), { mode: 0o755 })
+    const result = runExpose(home, bin, {
+      SYSTEMCTL_LOG: join(home, 'systemctl.log'),
+      TAILSCALE_LOG: tailscaleLog,
+      DSH_TAILNET_PORT: '9443',
+    })
+    expect(result.status).toBe(0)
+    const unitText = readFileSync(unitPath, 'utf8')
+    expect(unitText).toContain('--trusted-host 100.101.102.103:3080')
+    expect(unitText).toContain('--trusted-host testhost.tail1234.ts.net:9443')
+    const forwarder = readFileSync(join(home, '.config', 'systemd', 'user', 'dsh-tailnet.service'), 'utf8')
+    // The claim re-takes the port on every start and tolerates a missing or
+    // logged-out tailscale: `off`, then the `--bg` HTTPS mapping.
+    expect(forwarder).toContain(`ExecStartPost=-${join(bin, 'tailscale')} serve --https=9443 off`)
+    expect(forwarder).toContain(`ExecStartPost=-${join(bin, 'tailscale')} serve --bg --https=9443 http://127.0.0.1:3080`)
+    const calls = readFileSync(tailscaleLog, 'utf8')
+    expect(calls).toContain('serve --https=9443 off')
+    expect(calls).toContain('serve --bg --https=9443 http://127.0.0.1:3080')
+    expect(result.output).toContain('claimed HTTPS :9443')
   })
 
   it('reports an operator-managed unit with the exact flags instead of rewriting it', () => {

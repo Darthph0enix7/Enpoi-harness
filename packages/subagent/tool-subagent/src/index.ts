@@ -319,14 +319,14 @@ interface DelegationRunSpec {
 
 
 /**
- * Resolve the child route from Settings > enpoi-orchestration.personas for the
- * role resolved for this delegation (the explicit `role` argument or the
- * task-text suggestion that resolved to a registry role). A persona assigned to
- * a chain resolves through the live chains document to the first enabled link,
- * so the child is recorded on the route it actually runs and a stale or
- * disabled chain falls back to the parent's route instead of failing the spawn.
+ * Resolve the child route from `enpoi-orchestration.personas` for the explicit
+ * `role` this delegation selected; nothing here reads task-text suggestions.
+ * A persona assigned to a chain resolves through the live chains document to
+ * the first enabled link, so the child is recorded on the route it actually
+ * runs and a stale or disabled chain falls back to the parent's route instead
+ * of failing the spawn.
  * @param personas - the namespace's per-role child routes.
- * @param role - the resolved role for this delegation.
+ * @param role - the selected role for this delegation.
  * @param chains - the namespace's model-group chains, keyed by chain id.
  * @returns the selected role's child route, or undefined when none is configured.
  */
@@ -393,7 +393,7 @@ const ROLE_PERSONAS: Record<string, string> = {
  * Shipped roles the generic delegation tool must never spawn. The Oracle is a
  * TOOL with its own protocol (`oracle_review`: query-bound lifecycle, brief
  * injection at call #1, verdict contract, scorecard), not a worker, so a
- * `subagent(role='oracle')` call is refused and no delegation text can infer
+ * `subagent(role='oracle')` call is refused and no delegation text suggests
  * it. Reversible by data: a settings entry with `spawnable: true` re-enables
  * delegation for the id, and any other role can opt out with `spawnable: false`.
  */
@@ -418,38 +418,53 @@ function spawnableRoleIds(registry: Record<string, ResolvedRole>): string[] {
   return Object.values(registry).filter(entry => entry.spawnable).map(entry => entry.id)
 }
 
+/** The settings pointer appended only where the orchestration document is readable. */
+const CUSTOM_ROLE_POINTER
+  = ' Define a custom role with an `enpoi-orchestration.roles` entry (Settings → Dynamic → Roles) to delegate it.'
+
 /**
- * The corrective refusal for a delegation with no explicit `role`. Names the
- * live delegatable roster and the settings entry that defines a custom role,
- * and repeats the task-text suggestion as advice rather than acting on it: the
- * child's persona, tool surface, and model route all follow the role, so the
- * delegating model must choose it.
+ * The corrective refusal for a delegation with no explicit `role`. Always
+ * states the rule and the live delegatable roster, and repeats the task-text
+ * suggestion as advice rather than acting on it: the child's persona, tool
+ * surface, and model route all follow the role, so the delegating model must
+ * choose it. The custom-role settings pointer is appended only when the
+ * `enpoi-orchestration` document is actually readable, so a headless or
+ * settings-less composition never advertises a settings surface it lacks.
  * @param registry - the live role registry.
  * @param suggestion - the role the task text hints at, if any.
+ * @param hasOrchestrationDocument - whether the settings document resolved.
  * @returns the model-facing refusal text.
  */
 function roleRequiredMessage(
   registry: Record<string, ResolvedRole>,
   suggestion?: string | undefined,
+  hasOrchestrationDocument = false,
 ): string {
   const roster = spawnableRoleIds(registry)
   return 'subagent delegation requires an explicit `role`'
     + (suggestion === undefined ? '' : ` — the task reads like "${suggestion}"`)
     + (roster.length === 0 ? ' — this deployment defines no delegatable role' : `; available roles: ${roster.join(', ')}`)
-    + '. Define a custom role with an `enpoi-orchestration.roles` entry (Settings → Dynamic → Roles) to delegate it.'
+    + '.'
+    + (hasOrchestrationDocument ? CUSTOM_ROLE_POINTER : '')
 }
 
 /**
  * The corrective refusal for an explicit `role` id the registry does not
- * define. Lists the delegatable roster and how to add a role.
+ * define. Lists the delegatable roster and, only where the orchestration
+ * document is readable, how to add a role.
  * @param requested - the unresolvable role id the call passed.
  * @param registry - the live role registry.
+ * @param hasOrchestrationDocument - whether the settings document resolved.
  * @returns the model-facing refusal text.
  */
-function unknownRoleMessage(requested: string, registry: Record<string, ResolvedRole>): string {
+function unknownRoleMessage(
+  requested: string,
+  registry: Record<string, ResolvedRole>,
+  hasOrchestrationDocument = false,
+): string {
   const roster = spawnableRoleIds(registry)
-  return `unknown subagent role "${requested}"; available roles: ${roster.length === 0 ? 'none' : roster.join(', ')}. `
-    + 'Define a custom role with an `enpoi-orchestration.roles` entry (Settings → Dynamic → Roles) to delegate it.'
+  return `unknown subagent role "${requested}"; available roles: ${roster.length === 0 ? 'none' : roster.join(', ')}.`
+    + (hasOrchestrationDocument ? CUSTOM_ROLE_POINTER : '')
 }
 
 /**
@@ -541,7 +556,7 @@ export const SHARED_CHILD_KEEP: readonly string[] = [
 ]
 
 /**
- * Extra tools denied per inferred specialist role, unioned with
+ * Extra tools denied per selected specialist role, unioned with
  * {@link SHARED_CHILD_DENY}. Each role keeps only the surface its work needs:
  * explorers read and search but never mutate; fixers and designers implement
  * but never run code or reach the web. A role outside this map (e.g. `oracle`)
@@ -684,7 +699,7 @@ export interface RoleRegistryEntry {
    * Whether the generic delegation tool may spawn this role by name. `false`
    * keeps the role listed (seat, permissions surface, and its own tool path
    * stay untouched) but refuses a `subagent` spawn and removes the id from
-   * text inference. Absent → the shipped default: the Oracle is tool-only.
+   * the refusal suggestion. Absent → the shipped default: the Oracle is tool-only.
    */
   spawnable?: boolean
   /** Child tool surface for this role. */
@@ -711,7 +726,7 @@ export interface ResolvedRole {
   /**
    * Whether the generic delegation tool may spawn this role. `false` means the
    * role is tool-only: it stays listed (seat and permissions surface intact)
-   * but `subagent` refuses it and text inference never selects it.
+   * but `subagent` refuses it and the refusal never suggests it.
    */
   spawnable: boolean
   /**
@@ -1064,8 +1079,9 @@ function roleAvailableAllowlist(
 }
 
 /**
- * Task-type fallback signals; a signal only selects a role the registry still
- * has. The vocabulary is the common delegation register: review/audit/verify/
+ * Task-type suggestion signals; a signal only names a role the registry still
+ * has, and the name is printed in the refusal rather than used to select.
+ * The vocabulary is the common delegation register: review/audit/verify/
  * compare/map/analyze read as exploration, design/UI reads as design,
  * implement/fix/refactor reads as implementation, and research/document reads
  * as library research. Explorer precedes fixer on purpose: "review then fix X"
@@ -1079,13 +1095,14 @@ const ROLE_SIGNALS: ReadonlyArray<readonly [string, RegExp]> = [
 ]
 
 /**
- * Detect the specialist role named in a delegation description or prompt. This
- * is a suggestion, never a default: the id it returns is always a spawnable
- * registry id, and a call that reaches no id is refused with the roster.
+ * Detect the specialist role a delegation description or prompt hints at. This
+ * is only the suggestion printed by a role-less refusal, never a default or a
+ * selection: the id it returns is always a spawnable registry id, and the call
+ * still fails without an explicit `role`.
  * @param registry - the live role registry; its ids are the explicit names.
  * @param description - the delegated task description.
  * @param prompt - the delegated task prompt.
- * @returns the selected role id, or undefined when nothing matches.
+ * @returns the suggested role id, or undefined when nothing matches.
  */
 export function detectSubagentRole(
   registry: Record<string, ResolvedRole>,
@@ -1100,9 +1117,8 @@ export function detectSubagentRole(
     const re = new RegExp(`\\b${escapeRegExp(role)}\\b`, 'i')
     if (re.test(text)) return role
   }
-  // 2. Task-type heuristics as a fallback — the delegating model often strips
-  // the role name from the prompt, so infer the specialist from the work. A
-  // retired or tool-only role is never inferred.
+  // 2. Task-type heuristics shape the refusal suggestion. A retired or
+  // tool-only role is never suggested.
   for (const [role, re] of ROLE_SIGNALS) {
     const candidate = registry[role]
     if (candidate !== undefined && candidate.spawnable && re.test(text)) return role
@@ -1208,11 +1224,10 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
       // the schema text stays static: mounting the tool must not consume a
       // settings read, and stale wording would outlive an operator edit anyway.
       // A refused call answers with the live roster, which is what corrects it.
-      const roleDescription = ' A required `role` names the child\'s specialist identity from the operator role registry '
-        + '(the shipped roles are librarian, fixer, explorer, and designer; the Oracle is consulted via `oracle_review`, not delegated). '
-        + 'Operator-defined roles (Settings → Dynamic → Roles, the `enpoi-orchestration.roles` document) are first-class ids. '
-        + 'Omit `role` only to let the tool infer one from the task text; a call whose role is omitted and unresolvable, unknown, '
-        + 'or tool-only is refused with the live roster and how to define one.'
+      const roleDescription = ' A REQUIRED `role` selects the child\'s specialist identity from the live role registry: '
+        + 'it decides the persona, tool surface, and model route. '
+        + 'Shipped roles: librarian, fixer, explorer, designer (the Oracle is consulted via `oracle_review`, not delegated). '
+        + 'The tool never infers `role`: a missing, unknown, or tool-only id is refused with the live roster.'
       const disposeTool = runtimeCtx.tools.register(advertiseRequiredRole(defineTool({
         name: toolName,
         description: wording.description + roleDescription + (backgroundEnabled
@@ -1236,10 +1251,9 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
           },
           role: {
             type: 'string' as const,
-            description: 'Required specialist role id for the child: a shipped role (librarian, fixer, explorer, designer) '
-              + 'or any custom role defined under `enpoi-orchestration.roles` (Settings → Dynamic → Roles). '
-              + 'Omit only to let the tool infer one from the description and prompt. An unknown id, a tool-only id (the Oracle), or an omission '
-              + 'that resolves to no registry role is refused with the live roster.',
+            description: 'REQUIRED specialist role id; it decides the child\'s persona, tool surface, and model route. '
+              + 'Shipped ids: librarian, fixer, explorer, designer; custom ids come from the live role registry. '
+              + 'The tool never infers it: a missing, unknown, or tool-only id (the Oracle) is refused with the live roster.',
           },
           ...modelSelectionEnabled ? {
             provider: {
@@ -1336,13 +1350,16 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
           const registry = listRoleRegistry(settingsHandle, { document })
           const role = args.role
           if (role === undefined) {
-            throw new Error(roleRequiredMessage(registry, detectSubagentRole(registry, args.description, args.prompt)))
+            throw new Error(roleRequiredMessage(
+              registry,
+              detectSubagentRole(registry, args.description, args.prompt),
+              document !== undefined,
+            ))
           }
           const roleEntry = registry[role]
           if (roleEntry === undefined) {
-            // An explicit id the registry does not define; an inferred id
-            // resolves by construction.
-            throw new Error(unknownRoleMessage(role, registry))
+            // An explicit id the registry does not define.
+            throw new Error(unknownRoleMessage(role, registry, document !== undefined))
           }
           // Tool-only roles (the Oracle) keep their registry row, seat, and
           // permissions surface, but the generic delegation tool never spawns

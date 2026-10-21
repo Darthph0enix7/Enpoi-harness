@@ -38,10 +38,18 @@ describe('dsh-tool-subagent settings role registry', () => {
     const ctx = await setup({ provider: 'mock' })
     const schema = ctx.tools.schemas().find(candidate => candidate.name === 'subagent')
     const parameters = schema?.parameters as
-      | { required?: readonly string[]; properties?: Record<string, unknown> }
+      | { required?: readonly string[]; properties?: Record<string, { description?: string }> }
       | undefined
     expect(parameters?.required).toContain('role')
     expect(parameters?.properties).toHaveProperty('role')
+    // The text must leave no escape hatch: REQUIRED, never inferred, no
+    // omission path that would have the tool choose the role.
+    const roleDescription = parameters?.properties?.role?.description ?? ''
+    expect(roleDescription).toContain('REQUIRED')
+    expect(roleDescription).toContain('never infers')
+    expect(roleDescription).not.toContain('Omit')
+    expect(schema?.description).toContain('never infers `role`')
+    expect(schema?.description).not.toContain('Omit `role`')
   })
 
   it('resolves the five code-default roles without a settings handle', () => {
@@ -186,7 +194,9 @@ describe('dsh-tool-subagent settings role registry', () => {
     expect(text(result)).not.toContain('librarian')
   })
 
-  it('refuses a role-less delegation that resolves no registry role and lists how to define one', async () => {
+  it('refuses a role-less delegation that resolves no registry role with a neutral roster', async () => {
+    // No settings document: the refusal must not advertise an enpoi settings
+    // surface the composition does not have.
     const ctx = await setup({ provider: 'mock' })
     const result = await callSubagent(ctx, { description: 'Do the thing', prompt: 'work', inferRole: true })
     expect(result.isError).toBe(true)
@@ -194,6 +204,15 @@ describe('dsh-tool-subagent settings role registry', () => {
     expect(text(result)).not.toContain('the task reads like')
     expect(text(result)).toContain('librarian')
     expect(text(result)).toContain('fixer')
+    expect(text(result)).not.toContain('enpoi-orchestration.roles')
+    expect(text(result)).not.toContain('Settings → Dynamic → Roles')
+  })
+
+  it('names how to define a role only when the orchestration document is readable', async () => {
+    const ctx = await setup({ provider: 'mock', settingsDocument: {} })
+    const result = await callSubagent(ctx, { description: 'Do the thing', prompt: 'work', inferRole: true })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('requires an explicit `role`')
     expect(text(result)).toContain('enpoi-orchestration.roles')
   })
 

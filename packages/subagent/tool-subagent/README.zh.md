@@ -56,7 +56,7 @@ kind: "package-reference"
 
 ### 使用专家角色委派
 
-该工具接受一个可选的 `role` 参数来指定专家。角色是数据而非代码：设置命名空间 `enpoi-orchestration.roles` 保存一份合并到内置默认值（librarian、fixer、explorer、designer、oracle）之上的注册表，因此运维者可以覆盖内置角色的 persona 或工具面、将其停用，或新增角色。角色条目形如 `{ label?, persona?, group?, seat?, tools?: { available?: string[] } }`：
+该工具要求一个 `role` 参数来指定专家。角色是数据而非代码：设置命名空间 `enpoi-orchestration.roles` 保存一份合并到内置默认值（librarian、fixer、explorer、designer、oracle）之上的注册表，因此运维者可以覆盖内置角色的 persona 或工具面、将其停用，或新增角色。角色条目形如 `{ label?, persona?, group?, seat?, tools?: { available?: string[] } }`：
 
 ```yaml
 enpoi-orchestration:
@@ -69,7 +69,7 @@ enpoi-orchestration:
         available: [read, glob, grep, web_search]
 ```
 
-`role` 优先于推断。未提供时，工具会从委派文本推断角色（先匹配注册表中的显式名称，再使用任务启发式）。未知的 `role` 会让调用失败并列出可用的 id。角色的 `tools.available` 列表会替换其工具面，并始终受共享子级下限约束；librarian 与 Oracle 随附内置允许列表（`ROLE_CHILD_ALLOW`，即服务器实时权限面在代码中的默认值），在 permissions 与注册表都未设置时填充同一层。模型路由在每次派生时都会重新读取 `enpoi-orchestration.personas[<role>]`，因此分配或清除席位模型会在下一次委派时生效，无需重启。由于存储的列表、内置允许列表与共享 keep 列表都依赖注册表，每个名称在派生时都会对照实时注册表检查：无法解析的名称会被丢弃并给出 `role "…" stores unavailable tool "…"`（或 `child keep list names unavailable tool "…"`）警告，子 agent 以已知子集启动，因此 profile 中的工具改名不会让角色无法派发。由代码编写的 `toolFilter` 配置保持严格的 `tools.restrict()` 契约：未知的 allow 名称仍会抛出。
+`role` 是唯一的选择：它决定子 agent 的 persona、工具面与模型路由，因此工具绝不会从任务文本推断它。缺少 `role` 的调用会失败并列出可委派名册；当任务文本暗示某个角色时，还会说明它读起来像哪个角色——委派模型需用显式 id 重试。未知的 `role` 会让调用失败并列出可用 id。角色的 `tools.available` 列表会替换其工具面，并始终受共享子级下限约束；librarian 与 Oracle 随附内置允许列表（`ROLE_CHILD_ALLOW`，即服务器实时权限面在代码中的默认值），在 permissions 与注册表都未设置时填充同一层。模型路由在每次派生时都会重新读取 `enpoi-orchestration.personas[<role>]`，因此分配或清除席位模型会在下一次委派时生效，无需重启。由于存储的列表、内置允许列表与共享 keep 列表都依赖注册表，每个名称在派生时都会对照实时注册表检查：无法解析的名称会被丢弃并给出 `role "…" stores unavailable tool "…"`（或 `child keep list names unavailable tool "…"`）警告，子 agent 以已知子集启动，因此 profile 中的工具改名不会让角色无法派发。由代码编写的 `toolFilter` 配置保持严格的 `tools.restrict()` 契约：未知的 allow 名称仍会抛出。
 
 运维者也可以就地编辑已编译的列表，而不是整体替换：`enpoi-orchestration.extendBuiltins` 携带 `{ add?, remove? }` 编辑——按角色放在 `roles.<id>` 下，作用于该角色的内置允许列表；`sharedDeny`/`sharedKeep` 作用于共享下限。角色编辑仅在内置列表是生效层时应用：显式的 `tools.available` 或 `permissions.agents[<role>].available` 条目会整体替换该角色的内置工具面及其扩展。新增的角色允许列表或 `sharedKeep` 名称会像它加入的内置条目一样接受注册表审计；共享编辑始终应用，因为每个子级工具面都会并入共享下限。
 

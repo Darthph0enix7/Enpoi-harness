@@ -1,3 +1,10 @@
+# NON-RUNTIME SNAPSHOT — do not edit for behavior.
+# No loader or installer reads this tree. The live composition is the inline
+# `preset-<id>` row in ../../cordis.patch.yml (`config.plugins`), and
+# scripts/install.sh deliberately skips `presets/` when seeding the profile.
+# Retained only as a fixture/reference for profile tests; the only file read
+# is agent.cordis.yml, by profile/web/packages/enpoi-debug/tests/tools.spec.ts.
+# Edits here do not affect a running deployment.
 # The `creator` agent preset: Enpoi Harness Creator — ONLY touches the harness itself.
 #
 # Purpose: repair and configure the DeepSeek Harness when it breaks — its

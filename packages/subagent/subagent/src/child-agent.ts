@@ -14,6 +14,7 @@ import type { SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { ToolRestriction } from '@deepseek-ai/dsh-tools'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 // Type-only: make `ctx.get('sandboxPolicy')`, `ctx.get('approval')`, and
 // `ctx.get('permissionPresets')` resolve to their services when composed — delegation consumes them
 // opportunistically (the documented `ctx.get` pattern), never as a hard dep —
@@ -168,6 +169,8 @@ export interface ChildComposition {
  * Model-facing delegation-scope statement for every in-process child. A
  * runtime-context contribution rather than a system-prompt section, so the
  * deployment's system prompt stays uniform across parents and children.
+ * Framework-neutral: no tool name is promised here unless the child's composed
+ * surface resolves it (see {@link SUBAGENT_WHITEBOARD_GUIDANCE}).
  */
 export const SUBAGENT_DELEGATION_CONTEXT
   = 'You are a delegated subagent: your permission scope was fixed when you were started and cannot be '
@@ -179,8 +182,21 @@ export const SUBAGENT_DELEGATION_CONTEXT
     + '(bash -c with python3/node -e) to read, decode, or pretty-print a file — those commands require '
     + 'approval, while the dedicated file tools are the supported, approval-free path. '
     + 'A bash command that outlives the executor timeout keeps running as a background job owned by '
-    + 'this session; collect its output with job_output (wait: true) instead of re-running the command. '
-    + 'Your session inherits the parent\'s pinned whiteboard (key project paths, rules, and facts) in your runtime context; use whiteboard_read if you need to query the full board.'
+    + 'this session; collect its output with job_output (wait: true) instead of re-running the command.'
+
+/**
+ * Whiteboard guidance appended to {@link SUBAGENT_DELEGATION_CONTEXT} only when
+ * the child's final composed tool surface resolves `whiteboard_read`. The
+ * whiteboard is a profile plugin: a headless, SDK, ACP, or whiteboard-free
+ * composition must never be told to use a tool it does not have.
+ */
+export const SUBAGENT_WHITEBOARD_GUIDANCE
+  = 'Your session inherits the parent\'s pinned whiteboard (key project paths, rules, and facts) in your runtime context; use whiteboard_read if you need to query the full board.'
+
+/** Whether the child's composed surface (after its tool filter) resolves the whiteboard read tool. */
+function hasWhiteboardTool(childCtx: Context): boolean {
+  return childCtx.get('tools')?.get('whiteboard_read', scopeOf(childCtx)) !== undefined
+}
 
 /**
  * Compose one child inside its creation window: join its parent's preset,
@@ -210,10 +226,15 @@ export function applyChildComposition(
   composition: ChildComposition,
 ): void {
   childCtx.get('agentPresets')?.composeFrom(childCtx, parent.ctx)
+  // The filter is applied before the prompt rows so the whiteboard gate reads
+  // the child's FINAL surface: a role that denies the board or a composition
+  // that never mounts it must not be told to call it.
+  if (composition.toolFilter !== undefined) childCtx.tools.restrict(composition.toolFilter)
   childCtx.systemPrompt.context({
     name: 'subagent:delegation',
     order: childCtx.systemPrompt.getContextOrder('SUBAGENT_DELEGATION'),
-    text: SUBAGENT_DELEGATION_CONTEXT,
+    text: SUBAGENT_DELEGATION_CONTEXT
+      + (hasWhiteboardTool(childCtx) ? ` ${SUBAGENT_WHITEBOARD_GUIDANCE}` : ''),
   })
   if (composition.persona !== undefined) {
     childCtx.systemPrompt.section({
@@ -232,7 +253,6 @@ export function applyChildComposition(
       text: '',
     })
   }
-  if (composition.toolFilter !== undefined) childCtx.tools.restrict(composition.toolFilter)
 }
 
 /** Policy seeded onto a child session's log at the delegation boundary. */

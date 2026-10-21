@@ -21,7 +21,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { foldConsumedWork } from '@deepseek-ai/dsh-agent'
 import { SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionId, SessionLogOffset as SessionLogOffsetType } from '@deepseek-ai/dsh-session'
-import { finalAssistantOutput } from './assistant-output.ts'
+import { finalAssistantOutput, joinedAssistantText } from './assistant-output.ts'
 import { SubagentRunId } from './types.ts'
 import type { SubagentResult, SubagentRun, SubagentRunEndInfo, SubagentRunInfo } from './types.ts'
 
@@ -53,8 +53,19 @@ export interface ActivationObserver {
    * registered, because handle disposal unregisters it and consumers resolve it
    * to read the child's own log and scope.
    * @param child - the quiescent child agent about to be released.
+   * @param joinTurns - join every assistant message of the epoch instead of
+   *   selecting the last one, for an epoch the harness continued after an
+   *   output-budget truncation.
    */
-  capture(child: Agent): void
+  capture(child: Agent, joinTurns?: boolean): void
+  /**
+   * Whether this epoch's latest settled turn was cut off by the model's output
+   * budget. The owning registry asks before releasing a quiescent child, so a
+   * truncated epoch can run its remaining continuation turns instead of
+   * reporting a half answer as finished.
+   * @param child - the quiescent child agent, whose log suffix bounds this epoch.
+   */
+  truncated(child: Agent): boolean
   /**
    * Resolve the terminal facts {@link settle} will publish, without publishing
    * them. The manager's parent delivery must run before the ownership release
@@ -197,14 +208,18 @@ export function createActivationObserver(
       boundary = child.session.seq
       emit('subagent/start', identity, parent)
     },
-    capture: (child: Agent): void => {
+    capture: (child: Agent, joinTurns = false): void => {
       // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       const own = child.session.snapshotEvents(boundary)
-      const output = finalAssistantOutput(own)
+      const output = (joinTurns ? joinedAssistantText(own) : finalAssistantOutput(own)) ?? undefined
       captured = {
         stopReason: epochStopReason(own),
         ...output === undefined ? {} : { output },
       }
+    },
+    truncated: (child: Agent): boolean => {
+      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+      return epochStopReason(child.session.snapshotEvents(boundary)) === 'max-tokens'
     },
     terminal,
     settle: (failure: unknown): void => {

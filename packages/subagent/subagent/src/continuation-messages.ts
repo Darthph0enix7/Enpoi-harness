@@ -147,7 +147,11 @@ function settlementSummary(
       case 'aborted':
         return `${subject} was stopped before it finished — ${recovery}.`
       case 'max-tokens':
-        return `${subject} ran out of room before it finished — ${recovery}.`
+        // The epoch already ran its automatic continuations; seeing this notice
+        // means that ceiling is spent, so finishing the answer is the parent's
+        // decision now.
+        return `${subject} hit the output token limit and used up its automatic continuations `
+          + 'before it finished — continue it with a follow-up.'
       // A pre-step rejection — a hook deny, a policy plugin — discarded input
       // the child had claimed, so the parent must not treat the task as done.
       case 'refusal':

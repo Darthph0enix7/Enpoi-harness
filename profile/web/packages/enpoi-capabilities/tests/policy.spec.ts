@@ -430,6 +430,15 @@ describe('danger-list always-allow pins the exact command', () => {
     expect(matchBashPattern('tailscale serve reset*', 'tailscale serve reset')).toBe(true)
     expect(matchBashPattern('tailscale serve clear*', 'tailscale serve clear 8443')).toBe(true)
     expect(matchBashPattern('tailscale serve *8443*', 'tailscale serve --bg --https=8445 http://127.0.0.1:5001')).toBe(false)
+    // The flag form the shipped helper actually runs must not fall to `*`.
+    expect(matchBashPattern('tailscale serve reset*', 'tailscale serve --reset')).toBe(false)
+    expect(matchBashPattern('tailscale serve *--reset*', 'tailscale serve --reset')).toBe(true)
+    expect(matchBashPattern('tailscale serve *--https=*', 'tailscale serve --https=9443 off')).toBe(true)
+    expect(matchBashPattern('tailscale serve *--https=*', 'tailscale serve --https=9443 on')).toBe(true)
+    const reset = resolvePolicy({ toolName: 'bash', command: 'tailscale serve --reset', config: EMPTY })
+    expect(reset).toMatchObject({ kind: 'ask', source: 'pattern:tailscale serve *--reset*' })
+    // An unrelated tailscale command still runs free.
+    expect(resolvePolicy({ toolName: 'bash', command: 'tailscale status', config: EMPTY })).toMatchObject({ kind: 'allow', source: 'pattern:*' })
   })
 
   it('the card copy states the exact scope of "Always allow" for a danger rail only', () => {

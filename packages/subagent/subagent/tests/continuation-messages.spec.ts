@@ -58,7 +58,7 @@ describe('continuable settlement content', () => {
 
   it.each([
     ['aborted', `${subject} was stopped before it finished — inspect its session ${childId} or continue it with a follow-up.`],
-    ['max-tokens', `${subject} ran out of room before it finished — inspect its session ${childId} or continue it with a follow-up.`],
+    ['max-tokens', `${subject} hit the output token limit and used up its automatic continuations before it finished — continue it with a follow-up.`],
     ['refusal', `${subject} declined the task — inspect its session ${childId} or continue it with a follow-up.`],
     ['error', `${subject} failed before it finished — inspect its session ${childId} or continue it with a follow-up.`],
   ] as const)('names the session and the continue-by-id option for a child stopped with %s', (stopReason, expected) => {

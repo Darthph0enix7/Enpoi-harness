@@ -4,7 +4,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
-import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
+import SystemPrompt, { renderContextSnapshot, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
+import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import { applyChildComposition, resolveChildAgentOptions, SUBAGENT_DELEGATION_CONTEXT } from '../src/child-agent.ts'
 
 function parentAgent(): Agent {
@@ -163,5 +164,60 @@ describe('delegation scope guidance (honest tool surface)', () => {
     expect(SUBAGENT_DELEGATION_CONTEXT).toContain('never infer around it')
     expect(SUBAGENT_DELEGATION_CONTEXT).not.toContain('rejected automatically')
     expect(SUBAGENT_DELEGATION_CONTEXT).not.toContain('auto-denied')
+  })
+})
+
+describe('whiteboard guidance is gated by the composed tool surface', () => {
+  /** Compose one real child scope and return its rendered context. */
+  async function renderChildContext(
+    options: { withTool: boolean; toolFilter?: { deny: string[] } },
+  ): Promise<string> {
+    const ctx = new Context()
+    const key = { id: `child-whiteboard-${options.withTool}-${options.toolFilter ? 'denied' : 'open'}` }
+    const scopes: Array<ReturnType<typeof createScope>> = []
+    try {
+      await ctx.plugin(SystemPrompt)
+      await ctx.plugin(ToolRuntime)
+      if (options.withTool) {
+        ctx.tools.register(defineContentToolFixture({
+          name: 'whiteboard_read',
+          description: 'stub whiteboard read',
+          parameters: {},
+          execute: () => Promise.resolve([]),
+        }))
+      }
+      let childScope!: ReturnType<typeof createScope>
+      await ctx.plugin(Object.assign(
+        (inner: Context) => {
+          childScope = createScope(inner, key)
+          scopes.push(childScope)
+        },
+        { inject: ['tools', 'systemPrompt'] },
+      ))
+      applyChildComposition(childScope.ctx, {} as Agent, options.toolFilter === undefined
+        ? {}
+        : { toolFilter: options.toolFilter })
+      return renderContextSnapshot(await ctx.systemPrompt.assemble({ scope: key }))
+    } finally {
+      for (const scope of scopes) await scope.dispose()
+      await ctx.fiber.dispose()
+    }
+  }
+
+  it('keeps the guidance when the child resolves whiteboard_read', async () => {
+    const rendered = await renderChildContext({ withTool: true })
+    expect(rendered).toContain('whiteboard_read')
+    expect(rendered).toContain('pinned whiteboard')
+  })
+
+  it('emits nothing about the whiteboard when the composition mounts none', async () => {
+    const rendered = await renderChildContext({ withTool: false })
+    expect(rendered).toContain('delegated subagent')
+    expect(rendered).not.toContain('whiteboard')
+  })
+
+  it('drops the guidance when the child tool filter denies the board', async () => {
+    const rendered = await renderChildContext({ withTool: true, toolFilter: { deny: ['whiteboard_read'] } })
+    expect(rendered).not.toContain('whiteboard')
   })
 })

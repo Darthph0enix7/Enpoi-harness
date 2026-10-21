@@ -2037,7 +2037,7 @@ Source: [`packages/subagent/tool-subagent/src/list-models.ts`](../packages/subag
 
 ### `subagent`
 
-Delegate a self-contained task to a subagent (a separate agent that works in its own context) to offload focused, independent work — research, a scoped implementation, an analysis — so it does not consume this conversation's context. The subagent returns its result, not its intermediate steps. An optional `role` names the child's specialist identity from the operator role registry (for example `librarian`, `fixer`, `explorer`); omit it to infer the role from the task. Tool-only roles (for example the Oracle, consulted via `oracle_review`) are refused by design. This call waits for the result by default. Set `run_in_background: true` to return a job id; collect with `job_output` and stop with `job_kill`.
+Delegate a self-contained task to a subagent (a separate agent that works in its own context) to offload focused, independent work — research, a scoped implementation, an analysis — so it does not consume this conversation's context. The subagent returns its result, not its intermediate steps. A REQUIRED `role` selects the child's specialist identity from the live role registry: it decides the persona, tool surface, and model route. Shipped roles: librarian, fixer, explorer, designer (the Oracle is consulted via `oracle_review`, not delegated). The tool never infers `role`: a missing, unknown, or tool-only id is refused with the live roster. This call waits for the result by default. Set `run_in_background: true` to return a job id; collect with `job_output` and stop with `job_kill`.
 
 ```json
 {
@@ -2053,7 +2053,7 @@ Delegate a self-contained task to a subagent (a separate agent that works in its
     },
     "role": {
       "type": "string",
-      "description": "Optional specialist role id for the child, naming a delegatable role in the operator role registry. Omit to infer the role from the description and prompt. An unknown or tool-only id is rejected and lists the configured roles."
+      "description": "REQUIRED specialist role id; it decides the child's persona, tool surface, and model route. Shipped ids: librarian, fixer, explorer, designer; custom ids come from the live role registry. The tool never infers it: a missing, unknown, or tool-only id (the Oracle) is refused with the live roster."
     },
     "run_in_background": {
       "type": "boolean",
@@ -2062,7 +2062,8 @@ Delegate a self-contained task to a subagent (a separate agent that works in its
   },
   "required": [
     "description",
-    "prompt"
+    "prompt",
+    "role"
   ]
 }
 ```
@@ -2098,7 +2099,7 @@ Source: [`packages/subagent/tool-subagent-control/src/index.ts`](../packages/sub
 
 ### `list_agents`
 
-List subagents you started, with their ids, labels, and status. running means it is working; inactive means it is not currently working. Running children are listed first, then inactive ones by most recent creation. The result shows at most 20 rows (set `limit`, max 100) and a footer with the totals when rows are omitted. You will be notified when a subagent finishes; there is no need to keep checking its status. Use send_message to continue the conversation.
+List the continuable subagents you started, with their ids, labels, and status; one-shot delegations are not listed. running means it is working; inactive means it is not currently working. Running children are listed first, then inactive ones by most recent creation. The result shows at most 20 rows (set `limit`, max 100) and a footer with the totals when rows are omitted. You will be notified when a subagent finishes; there is no need to keep checking its status. NEVER call this tool repeatedly to poll or wait for running children — the settlement notice will wake you automatically. Use send_message to continue the conversation.
 
 ```json
 {

@@ -2047,7 +2047,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `subagent`
 
-将一项自包含任务委派给 subagent（在自身上下文中工作的独立 agent），用它卸载聚焦且独立的工作，例如研究、限定范围的实现或分析，以免消耗当前对话的上下文。subagent 会返回结果，但不会返回中间步骤。此调用默认等待结果。
+将一项自包含任务委派给 subagent（在自身上下文中工作的独立 agent），用它卸载聚焦且独立的工作，例如研究、限定范围的实现或分析，以免消耗当前对话的上下文。subagent 会返回结果，但不会返回中间步骤。`role` 为必填参数，用于从实时角色注册表中选择子 agent 的专家身份：它决定 persona、工具面与模型路由。内置角色：librarian、fixer、explorer、designer（Oracle 通过 `oracle_review` 咨询，不可委派）。工具绝不会推断 `role`：缺失、未知或仅限工具的 id 会被拒绝，并附上实时名册。此调用默认等待结果。
 
 ```json
 {
@@ -2063,7 +2063,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
     },
     "role": {
       "type": "string",
-      "description": "Optional specialist role id for the child, naming a delegatable role in the operator role registry. Omit to infer the role from the description and prompt. An unknown or tool-only id is rejected and lists the configured roles."
+      "description": "REQUIRED specialist role id; it decides the child's persona, tool surface, and model route. Shipped ids: librarian, fixer, explorer, designer; custom ids come from the live role registry. The tool never infers it: a missing, unknown, or tool-only id (the Oracle) is refused with the live roster."
     },
     "run_in_background": {
       "type": "boolean",
@@ -2072,7 +2072,8 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
   },
   "required": [
     "description",
-    "prompt"
+    "prompt",
+    "role"
   ]
 }
 ```
@@ -2108,7 +2109,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `list_agents`
 
-列出你启动的 subagent 及其 id、标签和状态。running 表示正在工作；inactive 表示当前未在工作。运行中的子级排在最前，随后按最近创建时间排列非活动子级。结果最多显示 20 行（可设置 `limit`，上限 100），并在省略行时显示带总计的页脚。subagent 完成时你会收到通知，无需反复查看状态。使用 send_message 继续对话。
+列出你启动的 continuable subagent 及其 id、标签和状态；一次性委派不会列出。running 表示正在工作；inactive 表示当前未在工作。运行中的子级排在最前，随后按最近创建时间排列非活动子级。结果最多显示 20 行（可设置 `limit`，上限 100），并在省略行时显示带总计的页脚。subagent 完成时你会收到通知，无需反复查看状态。绝不要反复调用此工具来轮询或等待运行中的子级——结算通知会自动唤醒你。使用 send_message 继续对话。
 
 ```json
 {

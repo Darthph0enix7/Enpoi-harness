@@ -882,11 +882,17 @@ var init_policy = __esm({
       { pattern: "find * -delete*", policy: "ask" },
       { pattern: "find * -exec rm*", policy: "ask" },
       { pattern: "find * -execdir rm*", policy: "ask" },
-      // Critical infrastructure and port collision rails:
+      // Critical infrastructure and port collision rails. The harness owns its
+      // tailnet HTTPS port and the `:3080` peer forwarder, so claiming, releasing,
+      // or resetting either is an operator decision. `--reset` is the flag form
+      // `ds serve-off` and newer CLIs use; `reset`/`clear` are the legacy
+      // subcommands, and `--https=<port>` covers `off`/`on` on any configured port.
       { pattern: "tailscale serve *8443*", policy: "ask" },
       { pattern: "tailscale serve *3080*", policy: "ask" },
+      { pattern: "tailscale serve *--https=*", policy: "ask" },
       { pattern: "tailscale serve reset*", policy: "ask" },
       { pattern: "tailscale serve clear*", policy: "ask" },
+      { pattern: "tailscale serve *--reset*", policy: "ask" },
       // The OpenCode catch-all: every command not explicitly listed runs free.
       // Only the dangerous list above asks.
       { pattern: "*", policy: "allow" }

@@ -1,11 +1,16 @@
 [Unit]
-Description=Enpoi Harness tailnet forwarder (Tailscale IP :3080 -> 127.0.0.1:3080)
+Description=Enpoi Harness tailnet forwarder (Tailscale IP :3080 -> 127.0.0.1:3080; HTTPS :8443)
 After=dsh-web.service network-online.target tailscaled.service
 Requires=dsh-web.service
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/socat TCP-LISTEN:3080,bind=100.122.163.25,fork,reuseaddr TCP:127.0.0.1:3080
+# Own the tailnet HTTPS port: `off` displaces any other owner, `--bg` leaves the
+# mapping in tailscaled, and `-` keeps a missing/logged-out tailscale from
+# failing the forwarder. Mirrors the installer-generated unit.
+ExecStartPost=-/usr/bin/tailscale serve --https=8443 off
+ExecStartPost=-/usr/bin/tailscale serve --bg --https=8443 http://127.0.0.1:3080
 Restart=on-failure
 RestartSec=3s
 StandardOutput=journal

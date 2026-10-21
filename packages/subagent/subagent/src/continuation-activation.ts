@@ -16,7 +16,7 @@ import type {
   AgentOptions,
   CreateAgentOptions,
 } from '@deepseek-ai/dsh-agent'
-import { errorChain } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
 import type { MessageId } from '@deepseek-ai/dsh-llm'
 import type {
   SessionEvent,
@@ -38,6 +38,7 @@ import type { SubagentDelivery } from './inbox.ts'
 import type { ActivationObserver, ActivationTerminal } from './lifecycle.ts'
 import { SettlementNoticeOutbox } from './settlement-outbox.ts'
 import type { NoticePlacement } from './settlement-outbox.ts'
+import { TRUNCATION_CONTINUATION, TRUNCATION_CONTINUATIONS } from './truncation.ts'
 import type { SubagentResult } from './types.ts'
 
 /** Process-local slots shared through uninterrupted continuable parent links. */
@@ -119,6 +120,18 @@ export interface Activation {
    */
   finalFlushFailed: boolean
   /**
+   * Whether an authority interrupted this epoch. A cancelled epoch is never
+   * auto-continued: the operator asked for it to stop, and an idle no-op
+   * cancellation would otherwise still let the truncation loop reopen work.
+   */
+  cancelled: boolean
+  /**
+   * Continuation turns this epoch already granted after truncated turns.
+   * Counted per residency epoch so the ceiling survives every settlement
+   * re-check and no truncated turn can re-enter the loop twice.
+   */
+  continuations: number
+  /**
    * Whether settlement notices and child-to-parent messages are suppressed for
    * this Activation (quiet deliberation fibers). Persisted in the descriptor so
    * a cold resume restores it.
@@ -166,7 +179,7 @@ interface Materialization {
 }
 
 /** Residency state observed by the natural-settlement watcher. */
-type SettlementState = 'closed' | 'retry' | 'wait' | 'ready'
+type SettlementState = 'closed' | 'retry' | 'wait' | 'ready' | 'continue'
 
 /** Result of the final child-lock settlement decision. */
 type SettlementAttempt =
@@ -386,6 +399,10 @@ export class ContinuableActivationRegistry {
     // Disposal already stopped the target with a whole-Activation teardown;
     // a second cancel would be a redundant signal on a closing handle.
     if (activation.inbox.closing !== undefined) return
+    // A cancelled epoch is never auto-continued: an interrupt that lands in the
+    // idle window between a truncated turn and its continuation is a no-op on
+    // the Agent, so the epoch itself must remember the stop request.
+    activation.cancelled = true
     activation.handle.agent.cancel(
       authority.kind === 'user' ? { kind: 'user' } : { kind: 'parent' },
       { keepInbox: true },
@@ -730,6 +747,8 @@ export class ContinuableActivationRegistry {
       observer,
       announced: false,
       finalFlushFailed: false,
+      cancelled: false,
+      continuations: 0,
       quiet: inputs.quiet ?? false,
       poke: Promise.withResolvers<void>(),
     }
@@ -822,6 +841,10 @@ export class ContinuableActivationRegistry {
           if (activation.handle.agent.session.seq !== finalSeq) {
             return Promise.resolve('retry')
           }
+          // A truncated turn is one cut-off message, not a finished task. The
+          // child keeps its own log, so a bounded continuation turn lets it
+          // finish before this epoch is reported to the parent.
+          if (this.continueTruncated(activation)) return Promise.resolve('continue')
           // The task starts synchronously, so idle ownership and Inbox closure share one turn.
           let done!: Promise<void>
           try {
@@ -838,6 +861,7 @@ export class ContinuableActivationRegistry {
 
         if (attempt === 'closed') return
         if (attempt === 'retry') continue
+        if (attempt === 'continue') continue
         if (attempt === 'wait') {
           await idleObservation.promise
           continue
@@ -865,6 +889,50 @@ export class ContinuableActivationRegistry {
     return 'ready'
   }
 
+  /**
+   * Grant one continuation turn when this epoch's latest settled turn was cut
+   * off by the model's output budget and the bounded ceiling still allows one.
+   * Runs under the child lock after quiescence is established, so it competes
+   * with ordinary delivery and disposal exactly like any other same-child
+   * write; the per-epoch counter makes two truncations of the same turn unable
+   * to re-enter the loop.
+   * @param activation - the quiescent residency epoch observed at settlement.
+   * @returns whether a continuation turn was enqueued.
+   */
+  private continueTruncated(activation: Activation): boolean {
+    if (activation.continuations >= TRUNCATION_CONTINUATIONS) return false
+    // A cancelled epoch, a draining registry, or a closing child must release,
+    // never reopen work.
+    if (activation.cancelled || this.draining || activation.inbox.closing !== undefined) return false
+    // A child whose parent is gone, or whose host teardown has begun, has
+    // nobody left to continue for.
+    const parent = this.ctx.agents.get(activation.parentSession)
+    if (parent === undefined || this.closingTeardownFor(parent) !== undefined) return false
+    const parentActivation = this.resident.get(activation.parentSession)
+    if (parentActivation !== undefined && parentActivation.inbox.closing !== undefined) return false
+    const child = activation.handle.agent
+    // Another delivery may have opened a turn between the idle observation and
+    // this lock; a continuation turn is never stacked onto live work.
+    if (child.status !== 'idle') return false
+    if (!activation.observer.truncated(child)) return false
+    try {
+      activation.inbox.deliver(createUserMessage({
+        content: [{ type: 'text', text: TRUNCATION_CONTINUATION }],
+        source: { kind: 'user' },
+      }), 'queue')
+    } catch (error: unknown) {
+      /* v8 ignore next 4 -- the close cutoff is read under this same lock, so only a
+       * reentrant inbox observer can reject here; the epoch then settles. */
+      this.ctx.logger.warn(
+        `subagent "${activation.childId}" truncation continuation was not accepted: ${errorChain(error)}`,
+      )
+      return false
+    }
+    activation.continuations += 1
+    this.wake(activation)
+    return true
+  }
+
   /** Propagate stop synchronously, then finish the child-first release. */
   private async finishDisposal(activation: Activation, finalStateFlushed: boolean): Promise<void> {
     this.wake(activation)
@@ -872,7 +940,7 @@ export class ContinuableActivationRegistry {
     const failures: SubagentError[] = []
     if (finalStateFlushed) {
       try {
-        activation.observer.capture(activation.handle.agent)
+        activation.observer.capture(activation.handle.agent, activation.continuations > 0)
       } catch (error: unknown) {
         failures.push(new SubagentError(
           `subagent "${childId}" activation teardown failed: ${errorChain(error)}`,
@@ -905,7 +973,7 @@ export class ContinuableActivationRegistry {
         }
         await idle
         await this.flushFinalState(activation)
-        activation.observer.capture(activation.handle.agent)
+        activation.observer.capture(activation.handle.agent, activation.continuations > 0)
       } catch (error: unknown) {
         failures.push(new SubagentError(
           `subagent "${childId}" activation teardown failed: ${errorChain(error)}`,

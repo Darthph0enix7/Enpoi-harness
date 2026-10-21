@@ -7,6 +7,11 @@
  * select the accumulated assistant text. Selection is independent of the
  * run's stop reason.
  *
+ * A run the harness CONTINUED after its output budget cut a turn off is the one
+ * exception: its answer spans turns, so both surfaces report
+ * {@link joinedAssistantText} instead of the last message. Every other run keeps
+ * the single-message rule unchanged.
+ *
  * @module @deepseek-ai/dsh-subagent/assistant-output
  */
 
@@ -72,4 +77,41 @@ export function finalAssistantOutput(events: readonly SessionEvent[]): readonly 
   const fold = new AssistantOutputFold()
   for (const event of events) fold.push(event)
   return fold.collect()
+}
+
+/**
+ * Join every assistant message of one child-owned suffix into one answer.
+ *
+ * {@link finalAssistantOutput} selects the LAST non-empty message, which is the
+ * whole answer for a single-turn run. A run the harness continued after its
+ * output budget cut it off has the answer split across turns, so reporting only
+ * the last message would hand the parent the post-truncation tail.
+ * @param events - the child-owned events (after any seed or epoch boundary).
+ * @returns the non-text blocks in log order plus one text block joining every
+ *   assistant text, or `undefined` when the child produced neither.
+ */
+export function joinedAssistantText(events: readonly SessionEvent[]): readonly ContentBlock[] | undefined {
+  const out: ContentBlock[] = []
+  const pending: string[] = []
+  const flush = (): void => {
+    if (pending.length === 0) return
+    out.push({ type: 'text', text: pending.join('\n\n') })
+    pending.length = 0
+  }
+  for (const event of events) {
+    if (event.type !== 'assistant/message') continue
+    for (const block of event.data.message.content) {
+      if (block.type === 'text') {
+        const text = block.text.trim()
+        if (text.length > 0) pending.push(text)
+        continue
+      }
+      // Keep the log order: text written before a tool call or image stays
+      // before it, so the joined answer reads like the run that produced it.
+      flush()
+      out.push(block)
+    }
+  }
+  flush()
+  return out.length === 0 ? undefined : out
 }

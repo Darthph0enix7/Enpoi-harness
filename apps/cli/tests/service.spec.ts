@@ -8,19 +8,21 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { probeManagedService, readInstallState, renderLaunchdPlist, renderSystemdUnit, resolveUnit, runService, type InstallState, type UnitSpec } from '../src/service.ts'
+import { probeManagedService, readInstallState, parseTailnetExposure, renderLaunchdPlist, renderSystemdUnit, resolveUnit, runService, tailnetHttpsPort, type InstallState, type ServiceDeps, type UnitSpec } from '../src/service.ts'
 
 const dirs: string[] = []
 
 beforeEach(() => {
   delete process.env.DSH_SERVICE_UNIT
   delete process.env.DSH_INSTALL_STATE
+  delete process.env.DSH_TAILNET_PORT
 })
 
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
   delete process.env.DSH_HOME
   delete process.env.DSH_SERVICE_UNIT
+  delete process.env.DSH_TAILNET_PORT
 })
 
 /** A temp dir for one test. */
@@ -63,6 +65,9 @@ const spec: UnitSpec = {
   binDir: '/tmp/prefix/bin',
 }
 
+/** No Tailscale in these tests: install/restart must never read this host's tailnet. */
+const NO_TAILNET = { capture: () => undefined } as const
+
 describe('unit rendering', () => {
   it('renders a marker-guarded systemd unit that always serves in the foreground', () => {
     const text = renderSystemdUnit(spec)
@@ -84,6 +89,81 @@ describe('unit rendering', () => {
     expect(text).toContain('<key>PATH</key><string>/tmp/prefix/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>')
     expect(text).toContain('<key>DSH_HOME</key><string>/tmp/dshhome</string>')
     expect(text).toContain('<key>StandardOutPath</key><string>/tmp/dshhome/logs/web.log</string>')
+  })
+
+  it('renders the tailnet trusted hosts into both unit forms', () => {
+    const trustedHosts = ['100.64.0.9:3080', 'box:3080', 'box.tail.ts.net:9443']
+    const systemd = renderSystemdUnit({ ...spec, trustedHosts })
+    expect(systemd).toContain('--no-open --trusted-host 100.64.0.9:3080 --trusted-host box:3080 --trusted-host box.tail.ts.net:9443')
+    const plist = renderLaunchdPlist({ ...spec, label: 'l', logPath: '/tmp/x', trustedHosts })
+    expect(plist.match(/<string>--trusted-host<\/string>/g)).toHaveLength(3)
+    expect(plist).toContain('<string>box.tail.ts.net:9443</string>')
+  })
+})
+
+describe('tailnet exposure', () => {
+  const quietCalls: string[] = []
+  const capture: NonNullable<ServiceDeps['capture']> = (_command, args) => {
+    // The release step is captured only to keep its expected "handler does not
+    // exist" error out of the install output; record it for assertions.
+    if (args[0] === 'serve') {
+      quietCalls.push(args.join(' '))
+      return undefined
+    }
+    return args[0] === 'ip' ? '100.101.102.103\n' : JSON.stringify({ Self: { DNSName: 'testhost.tail1234.ts.net.' } })
+  }
+  beforeEach(() => { quietCalls.length = 0 })
+
+  it('derives authorities from the CLI output and honors DSH_TAILNET_PORT', () => {
+    expect(parseTailnetExposure(
+      '100.101.102.103\n',
+      '{"Self":{"DNSName":"testhost.tail1234.ts.net."}}',
+      'testhost.example',
+      8443,
+    )).toEqual({
+      httpsPort: 8443,
+      trustedHosts: ['100.101.102.103:3080', 'testhost:3080', 'testhost.tail1234.ts.net:8443'],
+    })
+    // A logged-out CLI has no address and no name: nothing to expose.
+    expect(parseTailnetExposure(undefined, undefined, 'testhost', 8443)).toBeUndefined()
+    expect(parseTailnetExposure('192.168.1.5\n', 'not json', 'testhost', 8443)).toBeUndefined()
+    // The FQDN alone still yields the HTTPS authority.
+    expect(parseTailnetExposure(undefined, '{"Self":{"DNSName":"only.tail.ts.net."}}', 'testhost', 9443))
+      .toEqual({ httpsPort: 9443, trustedHosts: ['testhost:3080', 'only.tail.ts.net:9443'] })
+    expect(tailnetHttpsPort('9443')).toBe(9443)
+    expect(tailnetHttpsPort('abc')).toBe(8443)
+    expect(tailnetHttpsPort('0')).toBe(8443)
+    expect(tailnetHttpsPort('70000')).toBe(8443)
+  })
+
+  it('install writes the authorities and claims the port after the unit starts', async () => {
+    process.env.DSH_TAILNET_PORT = '9443'
+    const home = tempDir()
+    const statePath = join(home, 'install-state.json')
+    writeFileSync(statePath, '{}')
+    const { calls, run } = recorder()
+    const out = sink()
+    expect(await runService(['install'], { ...NO_TAILNET, capture, platform: 'linux', home, statePath, run, stdout: out })).toBe(0)
+    const unit = readFileSync(join(home, '.config', 'systemd', 'user', 'dsh-web.service'), 'utf8')
+    expect(unit).toContain('--trusted-host 100.101.102.103:3080')
+    expect(unit).toContain('--trusted-host testhost.tail1234.ts.net:9443')
+    expect(quietCalls).toEqual(['serve --https=9443 off'])
+    expect(calls.filter(call => call.command === 'tailscale').map(call => call.args.join(' '))).toEqual([
+      'serve --bg --https=9443 http://127.0.0.1:3080',
+    ])
+    expect(out.text()).toContain('claimed tailnet HTTPS :9443')
+  })
+
+  it('restart re-claims a port another service displaced', async () => {
+    const home = tempDir()
+    const statePath = join(home, 'install-state.json')
+    writeFileSync(statePath, JSON.stringify({ serviceUnit: 'dsh-web.service' }))
+    const { calls, run } = recorder()
+    expect(await runService(['restart'], { ...NO_TAILNET, capture, platform: 'linux', home, statePath, run, stdout: sink() })).toBe(0)
+    expect(quietCalls).toEqual(['serve --https=8443 off'])
+    expect(calls.filter(call => call.command === 'tailscale').map(call => call.args.join(' '))).toEqual([
+      'serve --bg --https=8443 http://127.0.0.1:3080',
+    ])
   })
 })
 
@@ -243,7 +323,7 @@ describe('runService', () => {
     writeFileSync(statePath, JSON.stringify({ prefix: '/tmp/prefix', node: '/usr/bin/node', binDir: '/tmp/prefix/bin', dshHome: '/tmp/dshhome', serviceInstall: false }))
     const { calls, run } = recorder()
     const out = sink()
-    const code = await runService(['install'], { platform: 'linux', home, statePath, run, stdout: out })
+    const code = await runService(['install'], { ...NO_TAILNET, platform: 'linux', home, statePath, run, stdout: out })
     expect(code).toBe(0)
     const unitPath = join(home, '.config', 'systemd', 'user', 'dsh-web.service')
     expect(readFileSync(unitPath, 'utf8')).toContain('--foreground')
@@ -261,7 +341,7 @@ describe('runService', () => {
     const statePath = join(home, 'install-state.json')
     writeFileSync(statePath, '{}')
     const { calls, run } = recorder()
-    await runService(['install', '--no-start'], { platform: 'linux', home, statePath, run, stdout: sink() })
+    await runService(['install', '--no-start'], { ...NO_TAILNET, platform: 'linux', home, statePath, run, stdout: sink() })
     expect(calls.some(call => call.args[1] === 'restart')).toBe(false)
   })
 
@@ -274,11 +354,11 @@ describe('runService', () => {
     writeFileSync(unitPath, '[Unit]\nDescription=hand-written dev unit\n')
     const err = sink()
     const { calls, run } = recorder()
-    expect(await runService(['install'], { platform: 'linux', home, statePath, run, stderr: err })).toBe(1)
+    expect(await runService(['install'], { ...NO_TAILNET, platform: 'linux', home, statePath, run, stderr: err })).toBe(1)
     expect(err.text()).toContain('--force')
     expect(calls).toEqual([])
     const out = sink()
-    expect(await runService(['install', '--force'], { platform: 'linux', home, statePath, run, stdout: out })).toBe(0)
+    expect(await runService(['install', '--force'], { ...NO_TAILNET, platform: 'linux', home, statePath, run, stdout: out })).toBe(0)
     expect(readFileSync(unitPath, 'utf8')).toContain('Generated by dsh service install')
     // The replaced foreign unit stays recoverable.
     expect(readFileSync(`${unitPath}.backup`, 'utf8')).toContain('hand-written dev unit')
@@ -294,7 +374,7 @@ describe('runService', () => {
     writeFileSync(statePath, JSON.stringify({ prefix: '/tmp/prefix', node: '/usr/bin/node', serviceUnit: '' }))
     mkdirSync(join(home, '.config', 'systemd', 'user'), { recursive: true })
     const { run } = recorder()
-    expect(await runService(['install', '--no-start'], { platform: 'linux', home, statePath, run, stdout: sink() })).toBe(0)
+    expect(await runService(['install', '--no-start'], { ...NO_TAILNET, platform: 'linux', home, statePath, run, stdout: sink() })).toBe(0)
     expect(readFileSync(join(home, '.config', 'systemd', 'user', 'dsh-web.service'), 'utf8')).toContain('Generated by dsh service install')
   })
 
@@ -322,7 +402,7 @@ describe('runService', () => {
     const { calls, run } = recorder((_command, args) => (args[0] === '--user' && args[1] === 'status' ? 3 : 0))
     expect(await runService(['start'], { platform: 'linux', home, statePath, run, stdout: sink() })).toBe(0)
     expect(await runService(['stop'], { platform: 'linux', home, statePath, run, stdout: sink() })).toBe(0)
-    expect(await runService(['restart'], { platform: 'linux', home, statePath, run, stdout: sink() })).toBe(0)
+    expect(await runService(['restart'], { ...NO_TAILNET, platform: 'linux', home, statePath, run, stdout: sink() })).toBe(0)
     expect(await runService(['status'], { platform: 'linux', home, statePath, run, stdout: sink() })).toBe(3)
     expect(await runService(['logs', '--lines', '5'], { platform: 'linux', home, statePath, run, stdout: sink() })).toBe(0)
     expect(calls.map(call => `${call.command} ${call.args.join(' ')}`)).toEqual([
@@ -345,6 +425,7 @@ describe('runService', () => {
       return 0
     })
     const deps = {
+      ...NO_TAILNET,
       platform: 'darwin' as const,
       home,
       statePath,
@@ -373,6 +454,7 @@ describe('runService', () => {
     const { run } = recorder((command, args) => (command === 'launchctl' && args[0] === 'bootstrap' ? 2 : 0))
     const err = sink()
     const code = await runService(['install'], {
+      ...NO_TAILNET,
       platform: 'darwin',
       home,
       statePath,
@@ -399,6 +481,7 @@ describe('runService', () => {
     const { run } = recorder((command, args) => (command === 'launchctl' && args[0] === 'bootstrap' ? 5 : 0))
     const err = sink()
     const code = await runService(['install'], {
+      ...NO_TAILNET,
       platform: 'darwin',
       home,
       statePath,
@@ -439,6 +522,7 @@ describe('runService', () => {
     writeFileSync(statePath, JSON.stringify({ serviceUnit: 'com.example.dsh' }))
     const { calls, run } = recorder()
     const code = await runService(['install', '--no-start'], {
+      ...NO_TAILNET,
       platform: 'darwin',
       home,
       statePath,
@@ -460,7 +544,7 @@ describe('runService', () => {
     writeFileSync(unit.path, unit.content)
     const { calls, run } = recorder()
     const out = sink()
-    const code = await runService(['install'], { platform: 'darwin', home, statePath, run, stdout: out, probeLoaded: () => true })
+    const code = await runService(['install'], { ...NO_TAILNET, platform: 'darwin', home, statePath, run, stdout: out, probeLoaded: () => true })
     expect(code).toBe(0)
     expect(calls).toEqual([])
     expect(out.text()).toContain('installed and started')
@@ -484,6 +568,7 @@ describe('runService', () => {
     })
     const err = sink()
     const code = await runService(['install'], {
+      ...NO_TAILNET,
       platform: 'darwin',
       home,
       statePath,
@@ -505,7 +590,7 @@ describe('runService', () => {
     writeFileSync(statePath, '{}')
     const { calls, run } = recorder((_command, args) => (args[1] === 'enable' ? 1 : 0))
     const err = sink()
-    const code = await runService(['install'], { platform: 'linux', home, statePath, run, stdout: sink(), stderr: err })
+    const code = await runService(['install'], { ...NO_TAILNET, platform: 'linux', home, statePath, run, stdout: sink(), stderr: err })
     expect(code).toBe(0)
     expect(err.text()).toContain('will not start at login')
     expect(calls.some(call => call.args[1] === 'restart')).toBe(true)
@@ -520,7 +605,7 @@ describe('runService', () => {
       chmodSync(statePath, 0o444)
       const err = sink()
       const { run } = recorder()
-      const code = await runService(['install', '--no-start'], { platform: 'linux', home, statePath, run, stdout: sink(), stderr: err })
+      const code = await runService(['install', '--no-start'], { ...NO_TAILNET, platform: 'linux', home, statePath, run, stdout: sink(), stderr: err })
       expect(code).toBe(0)
       expect(err.text()).toContain('could not record')
     },
@@ -531,7 +616,7 @@ describe('runService', () => {
     const statePath = join(home, 'install-state.json')
     writeFileSync(statePath, '{}')
     const { run } = recorder()
-    await runService(['install', '--no-start'], { platform: 'linux', home, statePath, run, stdout: sink() })
+    await runService(['install', '--no-start'], { ...NO_TAILNET, platform: 'linux', home, statePath, run, stdout: sink() })
     const unitPath = join(home, '.config', 'systemd', 'user', 'dsh-web.service')
     expect(readFileSync(unitPath, 'utf8')).toContain('Generated by')
     expect(await runService(['uninstall'], { platform: 'linux', home, statePath, run, stdout: sink() })).toBe(0)

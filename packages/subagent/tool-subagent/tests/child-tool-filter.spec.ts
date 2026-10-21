@@ -109,7 +109,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     const result = await callSubagent(ctx, { description: 'Do the thing', prompt: 'work', inferRole: true })
     expect(result.isError).toBe(true)
     expect(text(result)).toContain('requires an explicit `role`')
-    expect(text(result)).toContain('enpoi-orchestration.roles')
+    expect(text(result)).not.toContain('enpoi-orchestration.roles')
   })
 
   it('composes the librarian built-in allowlist (server permissions parity) with the shared floor', async () => {

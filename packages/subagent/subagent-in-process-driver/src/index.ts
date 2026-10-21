@@ -4,9 +4,10 @@
  * the returned AgentHandle is the one quiescent lifecycle owner held by the
  * provider's caller.
  *
- * Continuable children never come through here: the continuation manager
- * composes and drives them directly, so this driver owns exactly one turn with
- * one result.
+ * This driver drives exactly one one-shot run. The truncation-continuation
+ * policy itself is shared: both this driver and the continuable activation
+ * settlement loop import its ceiling and order from `@deepseek-ai/dsh-subagent`,
+ * so a truncated child continues the same way whichever path owns it.
  *
  * @module @deepseek-ai/dsh-subagent-in-process-driver
  */
@@ -26,8 +27,11 @@ import {
   captureDelegatedPolicyOverrides,
   childSessionMeta,
   finalAssistantOutput,
+  joinedAssistantText,
   resolveChildAgentOptions,
   resolveChildDepth,
+  TRUNCATION_CONTINUATION,
+  TRUNCATION_CONTINUATIONS,
 } from '@deepseek-ai/dsh-subagent'
 import type {
   ResolvedSubagentStartRequest,
@@ -65,20 +69,6 @@ function toStopReason(reason: TurnEndReason | undefined): SubagentStopReason {
       return 'error'
   }
 }
-
-/**
- * Extra child turns this driver grants after the model's output budget cut a
- * turn off. An output limit truncates one response, not the task: the child
- * keeps its own log, so the next turn continues from what it already wrote.
- * Two is the ceiling because a third truncation means the requested answer does
- * not fit the route's budget at all, and the parent must decide what to drop.
- */
-const TRUNCATION_CONTINUATIONS = 2
-
-/** The continuation order appended after a truncated turn. */
-const TRUNCATION_CONTINUATION = 'Your previous message was cut off by the output token limit before it finished. '
-  + 'Continue from exactly where it stopped: do not restart the task and do not repeat what you already wrote. '
-  + 'If the remaining work cannot fit in one response, finish with what matters most and state what is still missing.'
 
 /** Extra inputs the spawn and fork providers supply to the shared driver. */
 export interface InProcessRunOptions {
@@ -242,32 +232,6 @@ function lastTurnReason(child: Agent, boundary: SessionLogOffsetType): TurnEndRe
   return foldConsumedWork(child.session.snapshotEvents(boundary)).end?.data.reason
 }
 
-/**
- * Join every non-empty assistant message text of the child-owned suffix.
- *
- * The canonical selection rule picks the LAST message, which is the whole
- * answer for a one-turn run. A run this driver continued after truncation has
- * two halves of one answer, so the parent must receive both.
- * @param events - the child-owned events.
- * @returns the assistant text in log order, separated by a blank line.
- */
-function joinedAssistantText(events: readonly SessionEvent[]): ContentBlock[] {
-  const parts: string[] = []
-  const others: ContentBlock[] = []
-  for (const event of events) {
-    if (event.type !== 'assistant/message') continue
-    for (const block of event.data.message.content) {
-      if (block.type !== 'text') {
-        others.push(block)
-        continue
-      }
-      const text = block.text.trim()
-      if (text.length > 0) parts.push(text)
-    }
-  }
-  return parts.length === 0 ? others : [...others, { type: 'text', text: parts.join('\n\n') }]
-}
-
 /** Read one settled child's result from events after its activation boundary. */
 function readResult(
   child: Agent,
@@ -288,7 +252,7 @@ function readResult(
   // text instead of only the post-truncation tail.
   const output: readonly ContentBlock[] = continuations === 0
     ? finalAssistantOutput(own) ?? []
-    : joinedAssistantText(own)
+    : joinedAssistantText(own) ?? []
   const recorded = toStopReason(lastEnd?.data.reason)
   // Disposal can tear the owner down before the loop records its ordinary
   // `aborted` end, yielding `disposed` instead.

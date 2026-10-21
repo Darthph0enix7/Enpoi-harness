@@ -82,7 +82,7 @@ import { deliverSubagentPrompt } from './internal.ts'
 
 export type {} from './catalog.ts'
 export * from './out-of-process.ts'
-export { AssistantOutputFold, finalAssistantOutput } from './assistant-output.ts'
+export { AssistantOutputFold, finalAssistantOutput, joinedAssistantText } from './assistant-output.ts'
 export { SubagentRunId } from './types.ts'
 export type {
   ContinuableCreateRequest,
@@ -130,6 +130,7 @@ export {
 export type { ChildComposition, DelegatedPolicyOverrides } from './child-agent.ts'
 export type { AgentMessageSource, SubagentSettledMessageSource } from './continuation-messages.ts'
 export { CHILD_TOOL_BUDGET, withChildBudgetGuidance } from './continuation-messages.ts'
+export { TRUNCATION_CONTINUATION, TRUNCATION_CONTINUATIONS } from './truncation.ts'
 export type * from './control-types.ts'
 export type { SubagentDescendantListEntry, SubagentListEntry } from './list-children.ts'
 export type { SubagentRunEndInfo, SubagentRunInfo } from './types.ts'

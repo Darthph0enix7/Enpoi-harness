@@ -12,6 +12,37 @@ function __ds_short_host
     printf '%s' "$host"
 end
 
+# Report whether the installed web service trusts the tailnet HTTPS authority.
+# Reads the service definition only: a rewrite needs a restart, which this
+# helper never performs behind the operator's back.
+function __ds_tailnet_trust_check --argument-names fqdn port
+    if test -z "$fqdn"
+        echo "  ⚠️  Could not derive the MagicDNS FQDN; if the HTTPS origin answers 403, add --trusted-host <device>.<tailnet>.ts.net:$port to the web command."
+        return 0
+    end
+    set -l unit ""
+    if test $g_is_linux -eq 1
+        set unit "$HOME/.config/systemd/user/dsh-web.service"
+    else
+        set -l candidates $HOME/Library/LaunchAgents/*dsh*.plist
+        if test (count $candidates) -ge 1; and test -f "$candidates[1]"
+            set unit "$candidates[1]"
+        end
+    end
+    if test -z "$unit"; or not test -f "$unit"
+        echo "  ⚠️  No web service file found to verify the trusted host; if the HTTPS origin answers 403, add --trusted-host $fqdn:$port."
+        return 0
+    end
+    if grep -qF -- "--trusted-host $fqdn:$port" "$unit"; or grep -qF -- "<string>$fqdn:$port</string>" "$unit"
+        echo "  ✔ Web service trusts $fqdn:$port"
+        return 0
+    end
+    echo "  ⚠️  The web service does not trust $fqdn:$port; the HTTPS origin will answer 403."
+    echo "      Fix: dsh service install   (regenerates the unit with --trusted-host $fqdn:$port and restarts)"
+    echo "      Operator-managed unit? Add --trusted-host $fqdn:$port to its web command and restart it."
+    return 0
+end
+
 function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Controller"
     set -g g_dsh_home "$HOME/.dsh"
     set -g g_local_url "http://127.0.0.1:3080"
@@ -21,9 +52,10 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
     # Tailnet endpoints are per-device: DSH_TAILNET_URL wins, otherwise derive
     # this node's MagicDNS name and IPv4 from Tailscale. No Tailscale on this
     # machine → both stay empty and the CLI falls back to the local URL.
-    # DSH_TAILNET_PORT (default 8443) is the HTTPS port for both the derived
-    # URL and `ds serve`, so a second HTTPS service can move this one instead
-    # of colliding silently.
+    # DSH_TAILNET_PORT (default 8443) is the HTTPS port the harness OWNS on this
+    # device: `ds serve` claims it and the installer's dsh-tailnet unit
+    # re-claims it on every start. Another service holding the port is a
+    # misconfiguration, not a reason to move the harness.
     set -g g_tailnet_port 8443
     if set -q DSH_TAILNET_PORT; and test -n "$DSH_TAILNET_PORT"
         set g_tailnet_port "$DSH_TAILNET_PORT"
@@ -272,12 +304,48 @@ function ds --description "Enpoi Harness (DeepSeek Harness) CLI & Service Contro
             echo "═══════════════════════════════════════════════════════════════"
 
         case "serve"
-            echo "Configuring Tailscale HTTPS serve on port $g_tailnet_port..."
-            tailscale serve --https=$g_tailnet_port http://127.0.0.1:3080
+            if not command -v tailscale >/dev/null 2>&1
+                echo "✖ tailscale CLI not found; install Tailscale and run 'tailscale up' first."
+                return 1
+            end
+            # The served origin is the node's MagicDNS name, not a
+            # DSH_TAILNET_URL override (which may name a reverse proxy).
+            set -l fqdn ""
+            set -l ts_dns (string match -r '"DNSName"\s*:\s*"([^"]+)"' (tailscale status --json 2>/dev/null))
+            if test (count $ts_dns) -ge 2
+                set fqdn (string replace -r '\.$' '' -- $ts_dns[2])
+            end
+            echo "Claiming Tailscale HTTPS port $g_tailnet_port (owned by the harness)..."
+            # Release any stale or foreign mapping first: without `off`, a port
+            # another process grabbed makes `--bg` fail instead of re-taking it.
+            tailscale serve --https=$g_tailnet_port off >/dev/null 2>&1
+            if not tailscale serve --bg --https=$g_tailnet_port http://127.0.0.1:3080
+                echo "✖ Tailscale serve failed; port $g_tailnet_port was not claimed. Check 'tailscale status' and that HTTPS is enabled for the tailnet."
+                return 1
+            end
+            set -l shown $fqdn
+            if test -z "$shown"
+                set shown "<device>.<tailnet>.ts.net"
+            end
+            echo "✔ Claimed https://$shown:$g_tailnet_port"
+            __ds_tailnet_trust_check "$fqdn" "$g_tailnet_port"
 
         case "serve-off"
-            echo "Resetting Tailscale serve..."
-            tailscale serve --reset
+            if not command -v tailscale >/dev/null 2>&1
+                echo "✖ tailscale CLI not found; nothing to release."
+                return 1
+            end
+            echo "Releasing Tailscale HTTPS port $g_tailnet_port..."
+            # `off` is scoped to the harness port, so other serve mappings
+            # survive; it reports an error when nothing was mapped.
+            tailscale serve --https=$g_tailnet_port off >/dev/null 2>&1
+            if tailscale serve status 2>/dev/null | grep -qE ":$g_tailnet_port([^0-9]|\$)"
+                echo "✖ Tailscale still serves port $g_tailnet_port; run 'tailscale serve status' to inspect."
+                return 1
+            end
+            echo "✔ Port $g_tailnet_port is no longer served."
+            echo "  The web unit's --trusted-host <fqdn>:$g_tailnet_port entry stays; it is harmless while no tailnet origin serves that port."
+            echo "  dsh-tailnet.service re-claims the port on its next start (systemctl --user restart dsh-tailnet)."
 
         case "doctor"
             # Full diagnostic report lives in the standalone Node script, shared
@@ -837,8 +905,8 @@ case "pull"
             echo "  ds status           Show systemd service status"
             echo "  ds web              Open web UI in default browser"
             echo "  ds urls             Show local & Tailscale endpoints"
-            echo "  ds serve            Enable Tailscale HTTPS serve (DSH_TAILNET_PORT, default 8443)"
-            echo "  ds serve-off        Reset Tailscale serve"
+            echo "  ds serve            Claim the harness Tailscale HTTPS port (DSH_TAILNET_PORT, default 8443)"
+            echo "  ds serve-off        Release the harness Tailscale HTTPS port"
             echo ""
             echo "Diagnostics & Health:"
             echo "  ds doctor           Comprehensive system diagnostic"

@@ -199,13 +199,27 @@ sync with the installer's `copy_profile_tree`.
    ```
 5. **ds CLI** (fish users only): `cp ~/dotfiles/dsh-dotfiles/fish/ds.fish ~/.config/fish/functions/`
    and `cp ~/dotfiles/dsh-dotfiles/fish/completions/ds.fish ~/.config/fish/completions/`.
-   `ds serve` publishes the local web UI over Tailscale HTTPS on
-   `DSH_TAILNET_PORT` (default 8443); the derived
-   `https://<device>.<tailnet>.ts.net:<port>` URL honors the same variable, so a
-   second HTTPS service can take 8443 and this one move without a silent
-   collision. Any `--trusted-host <device>.<tailnet>.ts.net:<port>` entry in a
-   web unit must name the same port.
+   `ds serve` claims the harness's tailnet HTTPS port (`DSH_TAILNET_PORT`,
+   default 8443) for `http://127.0.0.1:3080` and verifies the matching
+   `--trusted-host <device>.<tailnet>.ts.net:<port>` in the web service (it
+   prints the exact `dsh service install` step when the entry is missing or the
+   unit is operator-managed). The installer and `dsh service install` write the
+   entry themselves. The derived `https://<device>.<tailnet>.ts.net:<port>`
+   URL honors the same variable.
 6. Configure your own providers in Settings → Models, then `ds sync` to create your device patch.
+
+**The harness owns its tailnet port.** The installer and `dsh service install`
+both claim `<DSH_TAILNET_PORT>` (default 8443): they run
+`tailscale serve --https=<port> off` and then
+`tailscale serve --bg --https=<port> http://127.0.0.1:3080`; the claim is
+re-asserted by every install, by the Linux `dsh-tailnet` unit at boot, and by
+`dsh service restart`, and the generated web unit trusts
+`<device>.<tailnet>.ts.net:<port>`. Another service claiming
+that port is a misconfiguration, not a supported way to move the harness. To
+recover after one does, run `dsh service restart` (macOS and Linux) or
+`systemctl --user restart dsh-tailnet` (Linux, where that unit carries the
+claim), then `ds serve` to re-assert the port and check the trusted host. Do not
+add a firewall rule: `tailscale serve` is tailnet-only by design.
 
 **Personal bits never shared**: `settings.yaml` (providers/personas),
 `device-patches/` (per-host overlays such as `serverlocal.yaml`),

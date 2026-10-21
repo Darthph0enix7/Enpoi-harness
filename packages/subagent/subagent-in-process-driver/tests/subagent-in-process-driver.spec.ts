@@ -235,8 +235,9 @@ describe('startInProcessRun', () => {
     const result = await run.result
     expect(result.stopReason).toBe('completed')
     // The empty usage-only message never replaces the text streamed before it,
-    // and the continuation's own answer joins the same report.
-    expect(text(result.output)).toBe('partial one\n\nfinished')
+    // and the continuation's own answer joins the same report in log order.
+    expect(result.output.map(block => block.type === 'text' ? block.text : `<${block.type}>`))
+      .toEqual(['partial one', '<tool-call>', 'finished'])
     await run.dispose()
     disposeNoop()
   })

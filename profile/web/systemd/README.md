@@ -10,7 +10,10 @@ serverlocal paths, node, IP, or hostnames (`/home/adam`, `100.122.163.25`,
 - `dsh-web.service` — source-checkout web service on `127.0.0.1:3080` with the
   serverlocal trusted-host list, the lockfile `ExecStartPre`, and the skin-guard
   `ExecStartPre`.
-- `dsh-tailnet.service` — `socat` forwarder binding the serverlocal Tailscale IP.
+- `dsh-tailnet.service` — `socat` forwarder binding the serverlocal Tailscale IP;
+  its `ExecStartPost` also claims the tailnet HTTPS port (`tailscale serve
+  --https=8443 off` then `--bg`), the same shape the installer generates with
+  the configured port.
 - `dsh-skin-guard.path` / `dsh-skin-guard.service` — watches
   `~/.dsh/skin-center-active.json` and restores the summer-liquid-glass skin
   (the script is `scripts/dsh-skin-guard.mjs`; the serverlocal unit expects it at
@@ -29,8 +32,14 @@ dsh service install
 ```
 
 which writes a unit generated for the local user (`dsh` refuses non-loopback
-binds by design; expose the port with your own reverse proxy / Tailscale serve
-if you need remote access).
+binds by design). When the Tailscale CLI is present and logged in,
+`dsh service install` also writes the
+`--trusted-host <device>.<tailnet>.ts.net:<port>` entry (port from
+`DSH_TAILNET_PORT`, default 8443) and claims that HTTPS port with
+`tailscale serve --bg`. On Linux the canonical installer additionally installs
+its own generated `dsh-tailnet.service`, whose `ExecStartPost` re-claims the
+port after the forwarder starts, so the claim is re-taken on boot and on
+`systemctl --user restart dsh-tailnet`.
 
 The generated unit never pins a Node version: it prefers the installer's
 version-independent link `<prefix>/runtime/node/current/bin/node` when that
@@ -43,7 +52,11 @@ operator-copy by design, not shipped input.
 The serverlocal web unit also carries
 `--trusted-host serverlocal.pike-acrux.ts.net:8443`; that port must match the
 `DSH_TAILNET_PORT` used by `ds serve` (default 8443), or the Host/Origin fence
-answers 403 for the served HTTPS origin.
+answers 403 for the served HTTPS origin. The harness owns that port: another
+service claiming it is a misconfiguration. Recover with
+`systemctl --user restart dsh-tailnet` (the generated unit re-takes the port),
+`dsh service restart`, or `ds serve`; do not add a firewall rule, because
+`tailscale serve` is tailnet-only by design.
 
 ## Sync guard
 

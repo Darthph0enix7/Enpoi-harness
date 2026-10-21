@@ -24,6 +24,8 @@ import { MockAdapter, maxTokensResponse, textResponse, toolCallResponse } from '
 import SubagentRuntime, {
   SubagentError,
   SUBAGENT_DESCRIPTOR_VERSION,
+  TRUNCATION_CONTINUATION,
+  TRUNCATION_CONTINUATIONS,
 } from '../src/index.ts'
 import type { SubagentRunEndInfo, SubagentRunInfo } from '../src/index.ts'
 import type { SubagentPromptRequestId } from '../src/control-types.ts'
@@ -2207,12 +2209,13 @@ describe('continuable review regressions', () => {
   })
 
   it('reports the child\'s own terminal reason, not teardown success', async () => {
-    // The child hits its token ceiling; teardown still succeeds.
+    // The child hits its token ceiling on every turn, so the automatic
+    // continuations are exhausted and the epoch ends truncated; teardown still
+    // succeeds.
     const { ctx, parent } = await setupWith(new MockAdapter([
-      [{ type: 'block-start', index: 0, blockType: 'text' },
-        { type: 'text-delta', index: 0, text: 'partial' },
-        { type: 'block-end', index: 0, block: { type: 'text', text: 'partial' } },
-        { type: 'finish', reason: { kind: 'max-tokens' } }],
+      maxTokensResponse('partial one'),
+      maxTokensResponse('partial two'),
+      maxTokensResponse('partial three'),
     ]))
     const ends: SubagentRunEndInfo[] = []
     ctx.on('subagent/end', (info) => { ends.push(info) })
@@ -2270,18 +2273,23 @@ describe('continuable review regressions', () => {
 
   it('keeps the epoch\'s earlier text past a final empty usage-only message', async () => {
     // A tool-only max-tokens step records an empty assistant/message for
-    // usage. The terminal event retains the previous assistant content,
-    // including its tool call but not the intervening tool result.
+    // usage. Every continuation turn truncates the same way, and the terminal
+    // event retains the previous assistant content, including its tool call but
+    // not the intervening tool result.
+    const truncatedToolStep: StreamChunk[] = [
+      { type: 'block-start', index: 0, blockType: 'tool-call' as const },
+      { type: 'tool-call-delta', index: 0, id: ToolCallId('t2'), name: 'noop', argumentsDelta: '{}' },
+      { type: 'block-end', index: 0, block: { type: 'tool-call' as const, id: ToolCallId('t2'), name: 'noop', arguments: '{}' } },
+      { type: 'usage', usage: { inputTokens: 20, outputTokens: 5 } },
+      { type: 'finish', reason: { kind: 'max-tokens' as const } },
+    ]
     const { ctx, parent } = await setup([
       toolCallResponse('t1', 'noop', {}, 'partial one'),
-      [
-        { type: 'block-start', index: 0, blockType: 'tool-call' },
-        { type: 'tool-call-delta', index: 0, id: ToolCallId('t2'), name: 'noop', argumentsDelta: '{}' },
-        { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('t2'), name: 'noop', arguments: '{}' } },
-        { type: 'usage', usage: { inputTokens: 20, outputTokens: 5 } },
-        { type: 'finish', reason: { kind: 'max-tokens' } },
-      ],
+      truncatedToolStep,
+      truncatedToolStep,
+      truncatedToolStep,
     ])
+    parkParent(ctx, parent)
     ctx.tools.register(defineTool({
       name: 'noop',
       description: 'does nothing',
@@ -2864,15 +2872,104 @@ describe('continuable settlement delivery', () => {
   })
 
   it('delivers the terminal reason when the child never had a chance to report', async () => {
-    const { ctx, parent } = await setup([maxTokensResponse('half an ans'), textResponse('parent ack')])
+    // Three truncated turns: the first answer plus the two shared-policy
+    // continuations all hit the output ceiling.
+    const { ctx, parent } = await setup([
+      maxTokensResponse('half an ans'),
+      maxTokensResponse('still cut'),
+      maxTokensResponse('nothing more fits'),
+      textResponse('parent ack'),
+    ])
     const started = await ctx.subagents.startContinuable(startSpec(parent))
     await waitNoActivation(ctx, started.childId)
 
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} ran out of room before it finished — inspect its session ${started.childId} or continue it with a follow-up.`
-      + '\nIts closing message:\nhalf an ans',
+      `Background subagent ${started.childId} hit the output token limit and used up its automatic `
+      + 'continuations before it finished — continue it with a follow-up.'
+      + '\nIts closing message:\nhalf an ans\n\nstill cut\n\nnothing more fits',
     )
+  })
+
+  it('continues a truncated child inside its epoch and reports the joined answer', async () => {
+    const { ctx, parent, adapter } = await setup([
+      maxTokensResponse('first half'),
+      textResponse('second half'),
+      textResponse('parent ack'),
+    ])
+    const ends: SubagentRunEndInfo[] = []
+    ctx.on('subagent/end', (info) => { ends.push(info) })
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(ends).toHaveLength(1) })
+
+    // The truncated turn continued inside the same Activation epoch.
+    expect(adapter.requests.filter(request => request.sessionId === started.childId)).toHaveLength(2)
+    expect(ends[0]!.stopReason).toBe('completed')
+    // One answer split by the ceiling: the report carries both halves, never
+    // only the post-continuation tail.
+    expect(ends[0]!.lastAssistantMessage).toEqual([{ type: 'text', text: 'first half\n\nsecond half' }])
+
+    const child = await loadStoredSession(ctx.sessionPersistence, started.childId)
+    expect(hasUserText(child.events, TRUNCATION_CONTINUATION)).toBe(true)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(settlementNotices(parent)[0]!.text).toContain('Its closing message:\nfirst half\n\nsecond half')
+  })
+
+  it('stops at the shared continuation ceiling and reports the truncated final turn', async () => {
+    const { ctx, parent, adapter } = await setup([
+      maxTokensResponse('part one'),
+      maxTokensResponse('part two'),
+      maxTokensResponse('part three'),
+    ])
+    parkParent(ctx, parent)
+    const ends: SubagentRunEndInfo[] = []
+    ctx.on('subagent/end', (info) => { ends.push(info) })
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(ends).toHaveLength(1) })
+
+    // One initial turn plus the two-turn ceiling: a fourth request must never
+    // be made.
+    expect(adapter.requests).toHaveLength(3)
+    expect(ends[0]!.stopReason).toBe('max-tokens')
+    expect(ends[0]!.lastAssistantMessage).toEqual([{ type: 'text', text: 'part one\n\npart two\n\npart three' }])
+    const child = await loadStoredSession(ctx.sessionPersistence, started.childId)
+    const continuations = child.events.filter(event =>
+      event.type === 'user/message'
+      && event.data.content.some(block => block.type === 'text' && block.text === TRUNCATION_CONTINUATION))
+    expect(continuations).toHaveLength(TRUNCATION_CONTINUATIONS)
+  })
+
+  it('does not continue an interrupted truncated epoch', async () => {
+    const { ctx, parent, adapter } = await setup([maxTokensResponse('cut off')])
+    parkParent(ctx, parent)
+    const ends: SubagentRunEndInfo[] = []
+    ctx.on('subagent/end', (info) => { ends.push(info) })
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    const child = await vi.waitFor(() => {
+      const live = ctx.agents.get(started.childId)
+      expect(live).toBeDefined()
+      return live!
+    })
+    // Hold the settlement lock across the truncated turn's idle window, so the
+    // interrupt lands after the turn ended but before the continuation decides.
+    const lock = await holdChildLock(ctx, started.childId)
+    await vi.waitFor(() => { expect(child.status).toBe('idle') })
+    ctx.subagents.interrupt(started.childId, { kind: 'user', parentSessionId: parent.id })
+    lock.release()
+    await lock.held
+
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(ends).toHaveLength(1) })
+    // The cancelled epoch released instead of opening another turn.
+    expect(adapter.requests).toHaveLength(1)
+    expect(ends[0]!.stopReason).toBe('max-tokens')
+    const loaded = await loadStoredSession(ctx.sessionPersistence, started.childId)
+    expect(hasUserText(loaded.events, TRUNCATION_CONTINUATION)).toBe(false)
   })
 
   it('tells the parent a policy-rejected delivery was declined, not finished', async () => {
