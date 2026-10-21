@@ -882,6 +882,11 @@ var init_policy = __esm({
       { pattern: "find * -delete*", policy: "ask" },
       { pattern: "find * -exec rm*", policy: "ask" },
       { pattern: "find * -execdir rm*", policy: "ask" },
+      // Critical infrastructure and port collision rails:
+      { pattern: "tailscale serve *8443*", policy: "ask" },
+      { pattern: "tailscale serve *3080*", policy: "ask" },
+      { pattern: "tailscale serve reset*", policy: "ask" },
+      { pattern: "tailscale serve clear*", policy: "ask" },
       // The OpenCode catch-all: every command not explicitly listed runs free.
       // Only the dangerous list above asks.
       { pattern: "*", policy: "allow" }

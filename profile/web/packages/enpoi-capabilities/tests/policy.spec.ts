@@ -423,6 +423,13 @@ describe('danger-list always-allow pins the exact command', () => {
     // A pattern that names a path keeps literal matching.
     expect(matchBashPattern('/usr/bin/rm', '/usr/bin/rm -rf /tmp/x')).toBe(true)
     expect(matchBashPattern('/usr/bin/rm', '/bin/rm -rf /tmp/x')).toBe(false)
+
+    // Tailscale serve critical port protection
+    expect(matchBashPattern('tailscale serve *8443*', 'tailscale serve --bg --https=8443 http://127.0.0.1:5001')).toBe(true)
+    expect(matchBashPattern('tailscale serve *3080*', 'tailscale serve --bg 3080')).toBe(true)
+    expect(matchBashPattern('tailscale serve reset*', 'tailscale serve reset')).toBe(true)
+    expect(matchBashPattern('tailscale serve clear*', 'tailscale serve clear 8443')).toBe(true)
+    expect(matchBashPattern('tailscale serve *8443*', 'tailscale serve --bg --https=8445 http://127.0.0.1:5001')).toBe(false)
   })
 
   it('the card copy states the exact scope of "Always allow" for a danger rail only', () => {
