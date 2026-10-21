@@ -153,12 +153,13 @@ describe('startInProcessRun', () => {
     expect(ctx.sessions.list()).toHaveLength(beforeSessions)
   })
   it('reports the turn outcome when later metadata is appended during flush', async () => {
-    const { ctx, parent } = await setup([maxTokensResponse('partial answer')])
+    const { ctx, parent } = await setup([maxTokensResponse('partial answer'), textResponse('finished answer')])
     let injected = false
-    ctx.on('session/flush', (session) => {
+    // A child-owned log observation appends trailing metadata right after the
+    // truncated turn end, exactly what a late flush would leave behind.
+    ctx.on('session/event', (session, event) => {
       if (injected || session.header.parentSession === undefined) return
-      const lastEnd = session.snapshotEvents().findLast(event => event.type === 'turn/end')
-      if (lastEnd?.type !== 'turn/end' || lastEnd.data.reason.kind !== 'max-tokens') return
+      if (event.type !== 'turn/end' || event.data.reason.kind !== 'max-tokens') return
       injected = true
       session.append('user/message', createUserMessage({
         content: [{ type: 'text', text: 'late metadata' }],
@@ -170,10 +171,45 @@ describe('startInProcessRun', () => {
     const result = await run.result
     const child = ctx.agents.get(run.id)!
 
-    expect(injected).toBe(false)
+    // The truncated turn earned a continuation turn, so the recorded outcome is
+    // the continuation's own end rather than the metadata appended after the
+    // first one.
+    expect(injected).toBe(true)
     expect(child.session.snapshotEvents().findLast(event => event.type === 'turn/end'))
-      .toMatchObject({ data: { reason: { kind: 'max-tokens' } } })
+      .toMatchObject({ data: { reason: { kind: 'completed' } } })
+    expect(result.stopReason).toBe('completed')
+    await run.dispose()
+  })
+
+  it('continues a child whose answer the output budget cut off', async () => {
+    const { ctx, parent, adapter } = await setup([maxTokensResponse('first half'), textResponse('second half')])
+    const run = await startInProcessRun(request(parent), {})
+    const result = await run.result
+
+    expect(result.stopReason).toBe('completed')
+    // Both halves of the one answer reach the parent.
+    expect(text(result.output)).toBe('first half\n\nsecond half')
+    const child = ctx.agents.get(run.id)!
+    const continuation = child.session.snapshotEvents()
+      .filter(event => event.type === 'user/message')
+      .at(-1)
+    expect(JSON.stringify(continuation)).toContain('cut off by the output token limit')
+    expect(adapter.requests).toHaveLength(2)
+    await run.dispose()
+  })
+
+  it('stops continuing after the truncation budget and reports the unfinished run', async () => {
+    const { parent, adapter } = await setup([
+      maxTokensResponse('part one'),
+      maxTokensResponse('part two'),
+      maxTokensResponse('part three'),
+    ])
+    const run = await startInProcessRun(request(parent), {})
+    const result = await run.result
+
     expect(result.stopReason).toBe('max-tokens')
+    expect(text(result.output)).toBe('part one\n\npart two\n\npart three')
+    expect(adapter.requests).toHaveLength(3)
     await run.dispose()
   })
 
@@ -189,6 +225,7 @@ describe('startInProcessRun', () => {
         { type: 'usage', usage: { inputTokens: 20, outputTokens: 5 } },
         { type: 'finish', reason: { kind: 'max-tokens' } },
       ],
+      textResponse('finished'),
     ])
     const disposeNoop = ctx.tools.register(defineContentToolFixture({
       name: 'noop', description: 'probe', parameters: {},
@@ -196,8 +233,10 @@ describe('startInProcessRun', () => {
     }))
     const run = await startInProcessRun(request(parent), {})
     const result = await run.result
-    expect(result.stopReason).toBe('max-tokens')
-    expect(text(result.output)).toBe('partial one')
+    expect(result.stopReason).toBe('completed')
+    // The empty usage-only message never replaces the text streamed before it,
+    // and the continuation's own answer joins the same report.
+    expect(text(result.output)).toBe('partial one\n\nfinished')
     await run.dispose()
     disposeNoop()
   })

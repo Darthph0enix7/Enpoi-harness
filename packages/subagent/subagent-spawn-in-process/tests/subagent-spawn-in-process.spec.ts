@@ -157,8 +157,22 @@ describe('dsh-subagent-spawn-in-process', () => {
       .rejects.toThrow('subagent depth 1 exceeds maxDepth 0')
   })
 
-  it('maps a child that hit its token ceiling to stopReason "max-tokens"', async () => {
-    const { ctx, parent } = await setup([maxTokensResponse('cut off')])
+  it('continues a child the token ceiling cut off, then completes', async () => {
+    const { ctx, parent } = await setup([maxTokensResponse('cut off'), textResponse('finished')])
+    const run = await start(ctx, 'spawn', { prompt: [{ type: 'text', text: 'p' }], parent })
+    const result = await run.result
+    expect(result.stopReason).toBe('completed')
+    expect(result.output.filter(block => block.type === 'text').map(block => block.text).join(''))
+      .toContain('finished')
+    await run.dispose()
+  })
+
+  it('maps a child that exhausts the continuation budget to stopReason "max-tokens"', async () => {
+    const { ctx, parent } = await setup([
+      maxTokensResponse('cut one'),
+      maxTokensResponse('cut two'),
+      maxTokensResponse('cut three'),
+    ])
     const run = await start(ctx, 'spawn', { prompt: [{ type: 'text', text: 'p' }], parent })
     const result = await run.result
     expect(result.stopReason).toBe('max-tokens')

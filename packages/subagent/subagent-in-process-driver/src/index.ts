@@ -66,6 +66,20 @@ function toStopReason(reason: TurnEndReason | undefined): SubagentStopReason {
   }
 }
 
+/**
+ * Extra child turns this driver grants after the model's output budget cut a
+ * turn off. An output limit truncates one response, not the task: the child
+ * keeps its own log, so the next turn continues from what it already wrote.
+ * Two is the ceiling because a third truncation means the requested answer does
+ * not fit the route's budget at all, and the parent must decide what to drop.
+ */
+const TRUNCATION_CONTINUATIONS = 2
+
+/** The continuation order appended after a truncated turn. */
+const TRUNCATION_CONTINUATION = 'Your previous message was cut off by the output token limit before it finished. '
+  + 'Continue from exactly where it stopped: do not restart the task and do not repeat what you already wrote. '
+  + 'If the remaining work cannot fit in one response, finish with what matters most and state what is still missing.'
+
 /** Extra inputs the spawn and fork providers supply to the shared driver. */
 export interface InProcessRunOptions {
   /** Completed-turn seed for fork, or undefined for a fresh spawn. */
@@ -177,15 +191,29 @@ function drivePublishedRun(
 
   const result: Promise<SubagentResult> = (async () => {
     try {
+      let continuations = 0
       if (!flags.cancelled) {
         child.followup(createUserMessage({ content: prompt, source: { kind: 'user' } }))
         await child.whenIdle()
+        // A truncated response is one cut-off message, not a finished task: the
+        // child keeps its own log, so bounded continuation turns let it finish
+        // instead of handing the parent half an answer.
+        while (continuations < TRUNCATION_CONTINUATIONS && !flags.cancelled
+          && lastTurnReason(child, boundary)?.kind === 'max-tokens') {
+          continuations += 1
+          child.followup(createUserMessage({
+            content: [{ type: 'text', text: TRUNCATION_CONTINUATION }],
+            source: { kind: 'user' },
+          }))
+          await child.whenIdle()
+        }
       }
       return readResult(
         child,
         boundary,
         flags.cancelled,
         structured ? { captured: structured.captured() } : undefined,
+        continuations,
       )
     } finally {
       signal.removeEventListener('abort', onAbort)
@@ -208,12 +236,45 @@ function drivePublishedRun(
   }
 }
 
+/** The recorded end reason of the child's latest settled turn, when it has one. */
+function lastTurnReason(child: Agent, boundary: SessionLogOffsetType): TurnEndReason | undefined {
+  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+  return foldConsumedWork(child.session.snapshotEvents(boundary)).end?.data.reason
+}
+
+/**
+ * Join every non-empty assistant message text of the child-owned suffix.
+ *
+ * The canonical selection rule picks the LAST message, which is the whole
+ * answer for a one-turn run. A run this driver continued after truncation has
+ * two halves of one answer, so the parent must receive both.
+ * @param events - the child-owned events.
+ * @returns the assistant text in log order, separated by a blank line.
+ */
+function joinedAssistantText(events: readonly SessionEvent[]): ContentBlock[] {
+  const parts: string[] = []
+  const others: ContentBlock[] = []
+  for (const event of events) {
+    if (event.type !== 'assistant/message') continue
+    for (const block of event.data.message.content) {
+      if (block.type !== 'text') {
+        others.push(block)
+        continue
+      }
+      const text = block.text.trim()
+      if (text.length > 0) parts.push(text)
+    }
+  }
+  return parts.length === 0 ? others : [...others, { type: 'text', text: parts.join('\n\n') }]
+}
+
 /** Read one settled child's result from events after its activation boundary. */
 function readResult(
   child: Agent,
   boundary: SessionLogOffsetType,
   cancelled: boolean,
   structured?: { captured?: { value: unknown } | undefined },
+  continuations = 0,
 ): SubagentResult {
   // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
   const own = child.session.snapshotEvents(boundary)
@@ -223,7 +284,11 @@ function readResult(
   // `error` through `toStopReason(undefined)`, which never overstates success.
   const lastEnd = foldConsumedWork(own).end
   // The seam's canonical selection rule; a partial answer survives cancel and truncation.
-  const output: readonly ContentBlock[] = finalAssistantOutput(own) ?? []
+  // A continued run's answer is split across turns, so it reports the joined
+  // text instead of only the post-truncation tail.
+  const output: readonly ContentBlock[] = continuations === 0
+    ? finalAssistantOutput(own) ?? []
+    : joinedAssistantText(own)
   const recorded = toStopReason(lastEnd?.data.reason)
   // Disposal can tear the owner down before the loop records its ordinary
   // `aborted` end, yielding `disposed` instead.

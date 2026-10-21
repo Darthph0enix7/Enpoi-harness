@@ -157,11 +157,18 @@ function mentionedRole(registry: RoleRegistryMap, title: string): string | undef
  * @returns the leading label and the remaining session title.
  */
 function nodeDisplay(node: TreeRow, registry: RoleRegistryMap, t: BrandT): { label: string; cleanTitle: string } {
-  const persona = node.subagentLabel === undefined ? undefined : personaFromLabel(node.subagentLabel)
+  // The child's own durable descriptor label (`Designer: design watch controls`)
+  // is what the session ran as, so its role prefix beats every later guess —
+  // the card in the parent transcript reads the same role, and the two surfaces
+  // must never name different specialists.
+  const identity = node.subagentLabel === undefined ? undefined : rolePrefixFromTitle(node.subagentLabel)
+  const identityRole = identity !== undefined && registry[identity.role] !== undefined ? identity : undefined
   const prefix = rolePrefixFromTitle(node.title)
-  if (prefix !== undefined && registry[prefix.role] !== undefined) {
-    return { label: persona ?? registryRoleLabel(registry, prefix.role), cleanTitle: prefix.rest }
+  const labelled = identityRole ?? (prefix !== undefined && registry[prefix.role] !== undefined ? prefix : undefined)
+  if (labelled !== undefined) {
+    return { label: registryRoleLabel(registry, labelled.role), cleanTitle: labelled.rest }
   }
+  const persona = node.subagentLabel === undefined ? undefined : personaFromLabel(node.subagentLabel)
   if (persona !== undefined) {
     return { label: persona, cleanTitle: node.title }
   }
@@ -379,22 +386,45 @@ export function SubagentSessionsBody({
   const currentId = sessionId === '' ? undefined : sessionId
   const lineage = useMemo(() => {
     const nodes: LineageNode[] = []
+    const known = new Set<SessionId>()
     for (const summary of Object.values(byId)) {
+      known.add(summary.id as SessionId)
       nodes.push({
-        id: summary.id,
+        id: summary.id as SessionId,
         title: summary.displayTitle,
         subagentLabel: summary.projectionValues?.subagent?.label,
-        parentId: summary.parentId,
+        parentId: summary.parentId as SessionId | undefined,
         origin: summary.origin,
         running: summary.running,
         // The merged SessionSummary carries `running` (upstream dropped the
         // durable `completed` bit): a no-longer-running child reads as done.
         completed: !summary.running,
-        updatedAt: summary.updatedAt,
+        updatedAt: summary.updatedAt ?? 0,
       })
     }
+    // The parent's durable catalog is the authoritative record of every child it
+    // dispatched. A child the current list snapshot no longer returns (a settled
+    // one-shot child whose live scope is gone) stays on this panel, so a failed
+    // or finished run never vanishes from the operator's view.
+    for (const [parentSessionId, projection] of Object.entries(projections)) {
+      for (const entry of projection.values.subagentCatalog ?? []) {
+        const childId = entry.id as SessionId
+        if (known.has(childId)) continue
+        known.add(childId)
+        nodes.push({
+          id: childId,
+          title: entry.label ?? childId,
+          subagentLabel: entry.label,
+          parentId: parentSessionId as SessionId,
+          origin: 'subagent',
+          running: false,
+          completed: true,
+          updatedAt: entry.createdAt ?? 0,
+        })
+      }
+    }
     return buildLineage(nodes, currentId)
-  }, [byId, currentId])
+  }, [byId, currentId, projections])
 
   // A pending list snapshot (reconnect, the first pull after a switch) can
   // arrive with no rows for a moment. The last non-empty tree stays drawn

@@ -164,7 +164,7 @@ describe('dsh-tool-subagent', () => {
   it.each([
     { stopReason: 'aborted' as const, fragment: 'cancelled' },
     { stopReason: 'error' as const, fragment: 'failed' },
-    { stopReason: 'max-tokens' as const, fragment: 'token limit' },
+    { stopReason: 'max-tokens' as const, fragment: 'cut off by the model output limit' },
     { stopReason: 'refusal' as const, fragment: 'declined' },
   ])('maps stop reason $stopReason to an isError result (not partial success)', async ({ stopReason, fragment }) => {
     const ctx = await setup({ provider: 'mock' }, { stopReason })
@@ -1431,7 +1431,7 @@ describe('depth budget configuration', () => {
   it('defaults maxDepth to 1 and forwards it in the start request', async () => {
     const { ctx, requests } = await captureSetup()
     await callSubagent(ctx, { description: 'd', prompt: 'p' })
-    // The label carries the resolved role when the description does not name it.
+    // The label carries the delegated role when the description does not name it.
     expect(requests[0]?.label).toBe('Fixer: d')
     // Upstream 0.1.6 resolves delegation depth through the subagent service
     // (editable limits); the enpoi fork still composes its worker deny floor

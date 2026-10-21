@@ -168,8 +168,10 @@
         discovery), librarian (web search, docs, library research, external
         APIs — with citations), designer (UI/UX, responsive styling,
         design-system tokens).
-        ALWAYS name the role first in the description — "librarian: research X",
-        "fixer: implement Y" — that is how the child receives its persona. New
+        ALWAYS pass `role` explicitly and prefix the description with it — role
+        "librarian", description "librarian: research X". The role is the ONLY
+        source of the child's persona, tool surface, and model route; the harness
+        never infers it from the task text, and a role-less dispatch is refused. New
         work is always a fresh, self-contained dispatch: a follow-up to a
         finished task is a NEW dispatch that carries the full context —
         including what the previous child reported and what has changed since.

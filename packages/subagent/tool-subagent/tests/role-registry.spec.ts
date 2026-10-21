@@ -12,13 +12,13 @@ function settingsHandle(document: Record<string, unknown>): tool.OrchestrationSe
 
 /**
  * Spawn one foreground delegation and return the request the provider saw.
- * `inferRole: true` opts out of {@link callSubagent}'s harness default so the
- * tool resolves the role from text; `args` may pass an explicit id instead.
+ * The role is explicit: the tool never resolves it from the task text, so the
+ * id decides the persona, tool surface, and model route.
  */
 async function captureRequest(
   description: string,
   document: Record<string, unknown> | undefined,
-  args: Record<string, unknown> = {},
+  role: string,
 ): Promise<SubagentStartRequest> {
   let seen: SubagentStartRequest | undefined
   const ctx = await setup(
@@ -28,7 +28,7 @@ async function captureRequest(
     },
     { onStart: (request) => { seen = request } },
   )
-  await callSubagent(ctx, { description, prompt: `Task: ${description}`, inferRole: true, ...args })
+  await callSubagent(ctx, { description, prompt: `Task: ${description}`, role })
   if (seen === undefined) throw new Error('scripted provider never saw a start request')
   return seen
 }
@@ -57,7 +57,7 @@ describe('dsh-tool-subagent settings role registry', () => {
   })
 
   it('keeps built-in personas and tool surfaces when the registry is empty', async () => {
-    const request = await captureRequest('Librarian: research the API documentation', undefined)
+    const request = await captureRequest('Librarian: research the API documentation', undefined, 'librarian')
     expect(request.persona).toContain('You are the Librarian')
     // The librarian carries its built-in allowlist (the server's live surface);
     // the generic mutating editor is never part of it.
@@ -69,7 +69,7 @@ describe('dsh-tool-subagent settings role registry', () => {
   it('merges a settings entry over a built-in persona', async () => {
     const request = await captureRequest('Librarian: research the API documentation', {
       roles: { librarian: { persona: 'You are the Archive Keeper.', label: 'Archive' } },
-    })
+    }, 'librarian')
     expect(request.persona).toBe('You are the Archive Keeper.')
     // Fields the entry omits keep their built-in definition (the allowlist).
     expect(request.toolFilter?.allow).toBeDefined()
@@ -86,7 +86,7 @@ describe('dsh-tool-subagent settings role registry', () => {
           tools: { available: ['read', 'bash'] },
         },
       },
-    }, { role: 'auditor' })
+    }, 'auditor')
     expect(request.persona).toBe('You are the Auditor.')
     expect(request.label).toBe('Auditor: Review the parser diff')
     // The whiteboard keep list is unioned into every explicit allow surface.
@@ -100,12 +100,12 @@ describe('dsh-tool-subagent settings role registry', () => {
     const request = await captureRequest('Review the parser diff', {
       roles: { auditor: { persona: 'You are the Auditor.' } },
       personas: { auditor: { provider: 'alpha', model: 'fast-model' } },
-    }, { role: 'auditor' })
+    }, 'auditor')
     expect(request.agentOptions).toEqual({ provider: 'alpha', model: 'fast-model' })
   })
 
   it('carries the delegation budget clause on a foreground child start prompt', async () => {
-    const request = await captureRequest('Fix the parser bug', {})
+    const request = await captureRequest('Fix the parser bug', {}, 'fixer')
     const promptText = request.prompt
       .map(part => part.type === 'text' ? part.text : '')
       .join('')
@@ -126,7 +126,7 @@ describe('dsh-tool-subagent settings role registry', () => {
           ],
         },
       },
-    }, { role: 'auditor' })
+    }, 'auditor')
     expect(request.agentOptions).toEqual({ provider: 'alpha', model: 'fast-model', chain: 'grp' })
   })
 
@@ -134,13 +134,13 @@ describe('dsh-tool-subagent settings role registry', () => {
     const missing = await captureRequest('Review the parser diff', {
       roles: { auditor: { persona: 'You are the Auditor.' } },
       personas: { auditor: { provider: 'stale', model: 'stale-model', chain: 'gone' } },
-    }, { role: 'auditor' })
+    }, 'auditor')
     expect(missing.agentOptions).toBeUndefined()
     const disabled = await captureRequest('Review the parser diff', {
       roles: { auditor: { persona: 'You are the Auditor.' } },
       personas: { auditor: { provider: 'stale', model: 'stale-model', chain: 'grp' } },
       chains: { grp: { links: [{ provider: 'alpha', model: 'fast-model' }], disabled: true } },
-    }, { role: 'auditor' })
+    }, 'auditor')
     expect(disabled.agentOptions).toBeUndefined()
   })
 
@@ -149,7 +149,7 @@ describe('dsh-tool-subagent settings role registry', () => {
       roles: { auditor: { persona: 'You are the Auditor.' } },
       // The stored document materializes cleared seats as explicit nulls.
       personas: { auditor: null, fixer: null },
-    }, { role: 'auditor' })
+    }, 'auditor')
     expect(cleared.agentOptions).toBeUndefined()
   })
 
@@ -167,20 +167,21 @@ describe('dsh-tool-subagent settings role registry', () => {
   it('still spawns a role whose seat is hidden', async () => {
     const request = await captureRequest('Design the empty state for the settings page', {
       roles: { designer: { seat: false } },
-    })
+    }, 'designer')
     expect(request.persona).toContain('Designer')
   })
 
-  it('refuses a role-less task whose only signal role is retired, listing the live roster', async () => {
+  it('refuses a role-less task whose signal role is retired, listing the live roster', async () => {
     const ctx = await setup({
       provider: 'mock',
       settingsDocument: { roles: { librarian: { disabled: true } } },
     })
     const result = await callSubagent(ctx, { description: 'Research the SQLite documentation', prompt: 'work', inferRole: true })
-    // The retired librarian is not a fallback role: the signal resolves to no
-    // registry entry, so no child starts and the live roster answers.
+    // The retired librarian is neither a suggestion nor a roster entry: the
+    // signal names no live role, so no child starts and the live roster answers.
     expect(result.isError).toBe(true)
-    expect(text(result)).toContain('requires a role')
+    expect(text(result)).toContain('requires an explicit `role`')
+    expect(text(result)).not.toContain('the task reads like "librarian"')
     expect(text(result)).toContain('fixer')
     expect(text(result)).not.toContain('librarian')
   })
@@ -189,13 +190,23 @@ describe('dsh-tool-subagent settings role registry', () => {
     const ctx = await setup({ provider: 'mock' })
     const result = await callSubagent(ctx, { description: 'Do the thing', prompt: 'work', inferRole: true })
     expect(result.isError).toBe(true)
-    expect(text(result)).toContain('requires a role')
+    expect(text(result)).toContain('requires an explicit `role`')
+    expect(text(result)).not.toContain('the task reads like')
     expect(text(result)).toContain('librarian')
     expect(text(result)).toContain('fixer')
     expect(text(result)).toContain('enpoi-orchestration.roles')
   })
 
-  it('resolves the broadened task-type signals to shipped roles only', () => {
+  it('refuses a role-less delegation and repeats the task-text role as a suggestion', async () => {
+    const ctx = await setup({ provider: 'mock' })
+    const result = await callSubagent(ctx, { description: 'Research the SQLite documentation', prompt: 'work', inferRole: true })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain('requires an explicit `role`')
+    expect(text(result)).toContain('the task reads like "librarian"')
+    expect(text(result)).toContain('available roles: librarian')
+  })
+
+  it('detects the broadened task-type suggestions for shipped roles only', () => {
     const registry = tool.listRoleRegistry(undefined)
     expect(tool.detectSubagentRole(registry, 'Research the SQLite docs')).toBe('librarian')
     expect(tool.detectSubagentRole(registry, 'Document the settings API')).toBe('librarian')
@@ -210,19 +221,19 @@ describe('dsh-tool-subagent settings role registry', () => {
     expect(tool.detectSubagentRole(registry, 'Fix the crash')).toBe('fixer')
     expect(tool.detectSubagentRole(registry, 'Refactor the loader')).toBe('fixer')
     expect(tool.detectSubagentRole(registry, 'Do the thing')).toBeUndefined()
-    // A retired role is never inferred even when its signal word is present.
+    // A retired role is never suggested even when its signal word is present.
     const retired = tool.listRoleRegistry(settingsHandle({ roles: { explorer: { disabled: true } } }))
     expect(tool.detectSubagentRole(retired, 'Review the delegation diff')).toBeUndefined()
   })
 
   it('does not adopt a stray persona key for a role with no configured route', async () => {
-    // The persona scan keys on the resolved role only (doc: no stray-word
+    // The persona scan keys on the delegated role only (doc: no stray-word
     // matching), so a task text that happens to name another role's id must
     // not pull in that role's model route.
     const request = await captureRequest('Review the fixer output', {
       roles: { auditor: { persona: 'You are the Auditor.' } },
       personas: { fixer: { provider: 'alpha', model: 'fast-model' } },
-    }, { role: 'auditor' })
+    }, 'auditor')
     expect(request.agentOptions).toBeUndefined()
   })
 
@@ -245,10 +256,10 @@ describe('dsh-tool-subagent settings role registry', () => {
     expect(text(result)).toContain('not spawned as a worker')
   })
 
-  it('never infers the tool-only Oracle from delegation text', async () => {
-    const request = await captureRequest('Oracle: architecture review', undefined)
-    // Naming the tool-only Oracle is not a role selection: the review signal
-    // resolves the shipped explorer, and the Oracle identity stays closed.
+  it('keeps the tool-only Oracle closed when the task text names it', async () => {
+    const request = await captureRequest('Oracle: architecture review', undefined, 'explorer')
+    // The explicit role wins: naming the tool-only Oracle in the task text is
+    // not a role selection, and the Oracle identity stays closed.
     expect(request.persona).toContain('You are the Explorer')
     expect(request.persona).not.toContain('You are the Oracle')
     expect(request.label).toBe('Explorer: Oracle: architecture review')
@@ -256,12 +267,12 @@ describe('dsh-tool-subagent settings role registry', () => {
     expect(request.toolFilter?.deny).toContain('edit')
   })
 
-  it('does not route a text-named tool-only role through its personas route', async () => {
-    // A generic delegation that merely mentions the Oracle must not inherit
+  it('does not route an explicit role through a text-named role\'s persona route', async () => {
+    // A delegation whose task text merely mentions the Oracle must not inherit
     // the Oracle seat's model route; the route stays on the oracle_review path.
     const request = await captureRequest('Oracle: architecture review', {
       personas: { oracle: { provider: 'alpha', model: 'fast-model' } },
-    })
+    }, 'explorer')
     expect(request.agentOptions).toBeUndefined()
   })
 
@@ -273,19 +284,19 @@ describe('dsh-tool-subagent settings role registry', () => {
     const result = await callSubagent(ctx, { description: 'Audit the parser diff', prompt: 'work', role: 'auditor' })
     expect(result.isError).toBe(true)
     expect(text(result)).toContain('spawnable: false')
-    // Text inference skips the marked id: the name resolves no role by itself,
-    // and the task signal selects the shipped explorer instead of the auditor.
-    const inferred = await captureRequest('Auditor: audit the parser diff', {
+    // The marker only gates spawning by that id: it does not affect another
+    // explicit role, which keeps its own persona and surface.
+    const sibling = await captureRequest('Auditor: audit the parser diff', {
       roles: { auditor: { persona: 'You are the Auditor.', spawnable: false } },
-    })
-    expect(inferred.persona).toContain('You are the Explorer')
-    expect(inferred.persona).not.toContain('You are the Auditor')
+    }, 'explorer')
+    expect(sibling.persona).toContain('You are the Explorer')
+    expect(sibling.persona).not.toContain('You are the Auditor')
   })
 
   it('lets spawnable:true re-enable the Oracle (the marker is reversible data)', async () => {
     const request = await captureRequest('Oracle: architecture review', {
       roles: { oracle: { spawnable: true } },
-    })
+    }, 'oracle')
     expect(request.persona).toContain('You are the Oracle')
     // The re-enabled Oracle keeps its built-in allowlist and its delegation
     // exception in the child filter.

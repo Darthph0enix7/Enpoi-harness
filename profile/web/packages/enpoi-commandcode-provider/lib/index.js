@@ -528,6 +528,9 @@ function buildRequest(input) {
     messages,
     tools: [...input.tools ?? []],
     system,
+    // The adapter resolves the catalog's output ceiling as the call default
+    // (`resolveModel().defaultMaxTokens`); this literal only covers a route
+    // whose catalog declares no capacity.
     max_tokens: input.maxTokens ?? 16384,
     stream: true,
     ...input.reasoningEffort === void 0 ? {} : { reasoning_effort: input.reasoningEffort },
@@ -999,12 +1002,14 @@ var CommandCodeAdapter = class extends LlmAdapter {
     const entry = entryFor(entries, model);
     const efforts = effortsOf(entry);
     const context = contextWindowOf(entry);
+    const output = maxOutputTokensOf(entry);
     return {
       provider,
       id: model,
       name: entry?.name ?? model,
       ...modalitiesOf(entry) === void 0 ? {} : { inputModalities: modalitiesOf(entry) },
       ...context === void 0 ? {} : { context: { contextWindow: context } },
+      ...output === void 0 ? {} : { defaultMaxTokens: output },
       ...efforts.length === 0 ? {} : {
         reasoning: {
           efforts: efforts.map((effort) => ({ id: effort, name: effort }))

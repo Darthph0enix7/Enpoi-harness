@@ -50,6 +50,22 @@ it('registers each configured route in the Keys-card directory with pool operati
   await expect(ctx.llm.poolStatus('commandcode-provider', 'commandcode')).resolves.toEqual([])
 })
 
+it('advertises the catalog output ceiling as the route default budget', async () => {
+  // Without a resolved budget the request envelope fell back to the protocol
+  // minimum, so a reasoning turn spent the whole allowance on thinking and
+  // returned a truncated answer.
+  const ctx = await mount({
+    catalog: { snapshot: 'pin' },
+    providers: { commandcode: { baseURL: 'https://api.commandcode.ai', keyless: false, apiKeyEnv: 'NOPE_UNUSED' } },
+  })
+
+  const info = await ctx.llm.resolveModelInfo('commandcode', 'deepseek/deepseek-v4.1-flash')
+  const snapshot: readonly { id: string; limit?: { output?: number } }[] =
+    JSON.parse(readFileSync(new URL('../catalog.snapshot.json', import.meta.url), 'utf8'))
+  const entry = snapshot.find(candidate => candidate.id === 'deepseek/deepseek-v4.1-flash')
+  expect(info.defaultMaxTokens).toBe(entry?.limit?.output)
+})
+
 it('withdraws the directory entry when the plugin fiber is disposed', async () => {
   const ctx = new Context()
   contexts.push(ctx)

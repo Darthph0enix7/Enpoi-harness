@@ -6,6 +6,7 @@ import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import { TheMarkTaskCard } from './TheMarkTaskCard.tsx'
 import type { BrandT } from './locales.ts'
 import { getPersonaAssignments } from './persona-store.ts'
+import { normalizeRoleId, titleCaseRoleId } from './role-registry.ts'
 
 export interface TheMarkTaskCardInjected {
   openSession?: ((sessionId: SessionId) => void) | undefined
@@ -34,52 +35,92 @@ interface PersonaInfo {
   roleKey?: string
 }
 
+/** Dictionary label of one delegatable role, in the same vocabulary the seat rows use. */
+function personaForRole(role: string, t: BrandT): PersonaInfo {
+  switch (role) {
+    case 'oracle':
+      return { label: t('markPersonaOracle'), roleKey: 'oracle' }
+    case 'librarian':
+      return { label: t('markPersonaLibrarian'), roleKey: 'librarian' }
+    case 'fixer':
+      return { label: t('markPersonaFixer'), roleKey: 'fixer' }
+    case 'explorer':
+      return { label: t('markPersonaExplorer'), roleKey: 'explorer' }
+    case 'designer':
+      return { label: t('markPersonaDesigner'), roleKey: 'designer' }
+    case 'referee':
+      return { label: t('markPersonaReferee'), roleKey: 'referee' }
+    case 'chair':
+      return { label: t('markPersonaChair'), roleKey: 'chair' }
+    case 'visionary':
+      return { label: t('markPersonaVisionary'), roleKey: 'visionary' }
+    case 'architect':
+      return { label: t('markPersonaArchitect'), roleKey: 'architect' }
+    case 'skeptic':
+      return { label: t('markPersonaSkeptic'), roleKey: 'skeptic' }
+    case 'pragmatist':
+      return { label: t('markPersonaPragmatist'), roleKey: 'pragmatist' }
+    default:
+      // An operator-defined role carries its id as the only name this surface
+      // knows; the seat panel owns its label, and the card must never invent one.
+      return { label: titleCaseRoleId(role), roleKey: role }
+  }
+}
+
 /**
- * Infer a human-friendly role name, icon, and roleKey from tool arguments, prompt keywords, and stems.
+ * Resolve the card's persona.
+ *
+ * The delegating call's own `role` is the only authority: it decides the
+ * child's persona, tool surface, and model route, so the card must show that
+ * role. Keyword matching the task text is a legacy fallback for calls that
+ * carried no role, and it reads the short description only — the prompt is the
+ * task body, and matching words inside it produced cards naming a specialist
+ * the session never ran as.
  */
 function inferPersona(toolName: string, args: Record<string, unknown>, t: BrandT): PersonaInfo {
   if (toolName === 'oracle_review') return { label: t('markPersonaOracle'), roleKey: 'oracle' }
   if (toolName === 'roundtable') return { label: t('markPersonaRoundtable') }
   if (toolName === 'chorus') return { label: t('markPersonaChorus') }
 
-  const explicitRole = typeof args.role === 'string' ? args.role.toLowerCase() : ''
+  const explicitRole = typeof args.role === 'string'
+    ? normalizeRoleId(args.role)
+    : typeof args.subagent_type === 'string' ? normalizeRoleId(args.subagent_type) : ''
+  if (explicitRole !== '') return personaForRole(explicitRole, t)
+
   const desc = typeof args.description === 'string' ? args.description.toLowerCase() : ''
-  const prompt = typeof args.prompt === 'string' ? args.prompt.toLowerCase() : ''
-  const subagentType = typeof args.subagent_type === 'string' ? args.subagent_type.toLowerCase() : ''
-  const combined = `${explicitRole} ${subagentType} ${desc} ${prompt}`
 
   // Check role stems and keywords
-  if (/\b(librarian|research|docs?|web|lookup|fetch|api\s*reference)\b/i.test(combined)) {
+  if (/\b(librarian|research|docs?|web|lookup|fetch|api\s*reference)\b/i.test(desc)) {
     return { label: t('markPersonaLibrarian'), roleKey: 'librarian' }
   }
-  if (/\b(fixer|fix|bug|patch|repair|refactor|error|issue)\b/i.test(combined)) {
+  if (/\b(fixer|fix|bug|patch|repair|refactor|error|issue)\b/i.test(desc)) {
     return { label: t('markPersonaFixer'), roleKey: 'fixer' }
   }
-  if (/\b(explorer|explore|codebase|map|survey|find|grep|search)\b/i.test(combined)) {
+  if (/\b(explorer|explore|codebase|map|survey|find|grep|search)\b/i.test(desc)) {
     return { label: t('markPersonaExplorer'), roleKey: 'explorer' }
   }
-  if (/\b(designer|design|ui|ux|style|css|theme|layout|visual)\b/i.test(combined)) {
+  if (/\b(designer|design|ui|ux|style|css|theme|layout|visual)\b/i.test(desc)) {
     return { label: t('markPersonaDesigner'), roleKey: 'designer' }
   }
-  if (/\b(oracle|review|architecture|audit)\b/i.test(combined)) {
+  if (/\b(oracle|review|architecture|audit)\b/i.test(desc)) {
     return { label: t('markPersonaOracle'), roleKey: 'oracle' }
   }
-  if (/\b(referee|arbiter|adjudicat)\b/i.test(combined)) {
+  if (/\b(referee|arbiter|adjudicat)\b/i.test(desc)) {
     return { label: t('markPersonaReferee'), roleKey: 'referee' }
   }
-  if (/\b(chair|synthesis|compil)\b/i.test(combined)) {
+  if (/\b(chair|synthesis|compil)\b/i.test(desc)) {
     return { label: t('markPersonaChair'), roleKey: 'chair' }
   }
-  if (/\b(visionary|moonshot|horizon)\b/i.test(combined)) {
+  if (/\b(visionary|moonshot|horizon)\b/i.test(desc)) {
     return { label: t('markPersonaVisionary'), roleKey: 'visionary' }
   }
-  if (/\b(architect|structure|topology)\b/i.test(combined)) {
+  if (/\b(architect|structure|topology)\b/i.test(desc)) {
     return { label: t('markPersonaArchitect'), roleKey: 'architect' }
   }
-  if (/\b(skeptic|adversarial)\b/i.test(combined)) {
+  if (/\b(skeptic|adversarial)\b/i.test(desc)) {
     return { label: t('markPersonaSkeptic'), roleKey: 'skeptic' }
   }
-  if (/\b(pragmatist|practical)\b/i.test(combined)) {
+  if (/\b(pragmatist|practical)\b/i.test(desc)) {
     return { label: t('markPersonaPragmatist'), roleKey: 'pragmatist' }
   }
 

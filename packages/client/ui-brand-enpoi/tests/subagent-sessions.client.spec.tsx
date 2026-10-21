@@ -228,6 +228,39 @@ describe('SubagentSessionsBody — agent identity rows', () => {
     expect(within(bare).getByText('Subagent')).toBeTruthy()
   })
 
+  it('names the role the child actually ran as, not a guess from the task text', () => {
+    const { list } = mount([
+      row('main', 'Main Session'),
+      row('child', 'Compact one-hand watch gesture map', {
+        parentId: 'main',
+        origin: 'subagent',
+        // The descriptor label the host froze at dispatch: the child ran as the
+        // Designer, and no later surface may name another specialist.
+        projectionValues: { subagent: { mode: 'one-shot', label: 'Designer: Compact one-hand watch gesture map', seq: 5 } },
+      }),
+    ])
+
+    const child = list().getByText('Designer').closest('button') as HTMLElement
+    expect(child.textContent).toContain('Compact one-hand watch gesture map')
+    expect(child.textContent).not.toContain('Designer: Compact')
+  })
+
+  it('keeps a settled child listed from the parent catalog when the list drops it', () => {
+    const { list } = mount(
+      [row('main', 'Main Session'), row('current', 'Current child', { parentId: 'main', origin: 'subagent' })],
+      'current',
+      'ready',
+      { main: { values: { subagentCatalog: [childEntry('current', 'continuable', 'Explorer: Map it'), childEntry('gone', 'one-shot', 'Designer: Design watch controls')] } } },
+    )
+
+    // The failed child no longer has a live row in the list projection, yet the
+    // parent's durable catalog keeps it on the panel with its role intact.
+    const failed = list().getByText('Designer').closest('button') as HTMLElement
+    expect(failed.textContent).toContain('Design watch controls')
+    // Settled, not running: the panel never claims a dead child is still alive.
+    expect(failed.querySelector('[data-state="done"]')).toBeTruthy()
+  })
+
   it('keeps the lineage on screen when opening a row lands on a pending snapshot', () => {
     const { openSession, refreshSessions, list, rerender } = mount([
       row('main', 'Main Session'),

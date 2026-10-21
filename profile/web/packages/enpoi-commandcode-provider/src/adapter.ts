@@ -53,7 +53,7 @@ import {
 import type { PoolEngine, PoolFailureClass } from '@deepseek-ai/dsh-llm-pi-ai'
 import { parseQuotaHeaders, ROTATING_CLASSES } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { CatalogEntry } from './catalog.js'
-import { CatalogStore, contextWindowOf, effortsOf, entryFor, isLoopbackBaseURL, modalitiesOf, visionOf } from './catalog.js'
+import { CatalogStore, contextWindowOf, effortsOf, entryFor, isLoopbackBaseURL, maxOutputTokensOf, modalitiesOf, visionOf } from './catalog.js'
 import type { CcEnvelope, CcInputMessage, CcInputPart, CcTool } from './convert.js'
 import { buildRequest } from './convert.js'
 import { classifyCommandCodeError } from './errors.js'
@@ -351,12 +351,17 @@ export class CommandCodeAdapter extends LlmAdapter {
     const entry: CatalogEntry | undefined = entryFor(entries, model)
     const efforts = effortsOf(entry)
     const context = contextWindowOf(entry)
+    // The catalog's output ceiling is the call's default budget: without it the
+    // envelope falls back to the protocol minimum, and a reasoning call spends
+    // that whole budget on thinking and returns a truncated answer.
+    const output = maxOutputTokensOf(entry)
     return {
       provider,
       id: model,
       name: entry?.name ?? model,
       ...modalitiesOf(entry) === undefined ? {} : { inputModalities: modalitiesOf(entry) },
       ...context === undefined ? {} : { context: { contextWindow: context } },
+      ...output === undefined ? {} : { defaultMaxTokens: output },
       ...efforts.length === 0
         ? {}
         : {

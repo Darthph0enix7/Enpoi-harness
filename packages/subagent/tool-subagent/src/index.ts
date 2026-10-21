@@ -186,7 +186,11 @@ function stopReasonError(result: SubagentResult): string | undefined {
     case 'error':
       return 'subagent run failed'
     case 'max-tokens':
-      return 'subagent run hit its token limit before finishing'
+      // The output budget cut the answer off even after the driver's own
+      // continuation turns: the child's session holds everything it wrote, and
+      // a follow-up turn there is the recovery path.
+      return 'subagent answer was cut off by the model output limit before it finished; '
+        + 'its session holds the partial work — continue it with a follow-up message'
     case 'refusal':
       return 'subagent declined the task'
     // Merge-extensible union: a backend may add stop reasons. Treat an unknown
@@ -415,16 +419,23 @@ function spawnableRoleIds(registry: Record<string, ResolvedRole>): string[] {
 }
 
 /**
- * The corrective refusal for a delegation with no explicit `role` whose task
- * text resolves to no registry role. Names the live delegatable roster and the
- * settings entry that defines a custom role, so the caller can retry.
+ * The corrective refusal for a delegation with no explicit `role`. Names the
+ * live delegatable roster and the settings entry that defines a custom role,
+ * and repeats the task-text suggestion as advice rather than acting on it: the
+ * child's persona, tool surface, and model route all follow the role, so the
+ * delegating model must choose it.
  * @param registry - the live role registry.
+ * @param suggestion - the role the task text hints at, if any.
  * @returns the model-facing refusal text.
  */
-function roleRequiredMessage(registry: Record<string, ResolvedRole>): string {
+function roleRequiredMessage(
+  registry: Record<string, ResolvedRole>,
+  suggestion?: string | undefined,
+): string {
   const roster = spawnableRoleIds(registry)
-  return 'subagent delegation requires a role: pass `role` naming a delegatable role'
-    + (roster.length === 0 ? ' — this deployment defines none' : `; available roles: ${roster.join(', ')}`)
+  return 'subagent delegation requires an explicit `role`'
+    + (suggestion === undefined ? '' : ` — the task reads like "${suggestion}"`)
+    + (roster.length === 0 ? ' — this deployment defines no delegatable role' : `; available roles: ${roster.join(', ')}`)
     + '. Define a custom role with an `enpoi-orchestration.roles` entry (Settings → Dynamic → Roles) to delegate it.'
 }
 
@@ -1316,16 +1327,16 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
           const parentOptions = parentAgentOptionsForDelegation(parent)
           // Role selection is settings-backed and read fresh per spawn: the
           // registry supplies explicit names, personas, and tool surfaces. The
-          // explicit `role` argument wins; an omitted one falls back to the
-          // task-text suggestion. Both must resolve to a registry role — a call
-          // that reaches no role, or an id the registry does not define, is
-          // refused with the live roster before any child starts.
+          // `role` argument is the only selection: it decides the child's
+          // persona, tool surface, model route, and the identity every surface
+          // shows, so a task-text guess would silently change all four. An
+          // omitted role is refused with the roster and the task-text hint.
           const settingsHandle = runtimeCtx.get('settings') as OrchestrationSettingsHandle | undefined
           const document = readOrchestrationDocument(settingsHandle, (message) => { runtimeCtx.logger.warn(message) })
           const registry = listRoleRegistry(settingsHandle, { document })
-          const role = args.role ?? detectSubagentRole(registry, args.description, args.prompt)
+          const role = args.role
           if (role === undefined) {
-            throw new Error(roleRequiredMessage(registry))
+            throw new Error(roleRequiredMessage(registry, detectSubagentRole(registry, args.description, args.prompt)))
           }
           const roleEntry = registry[role]
           if (roleEntry === undefined) {
@@ -1425,7 +1436,9 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
             // starter can spawn, and the task-owned signal covers startup.
             const id = jobs.start({
               kind: 'subagent',
-              label: args.description,
+              // The job card and the child's session both read this label, so it
+              // carries the role the delegation actually resolved.
+              label: formattedLabel,
               owner: parent.id,
               run: () => {
                 const controller = new AbortController()

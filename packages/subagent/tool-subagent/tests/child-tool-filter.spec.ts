@@ -61,11 +61,11 @@ function auditedBuiltin(role: 'librarian' | 'fixer' | 'designer' | 'oracle'): st
 
 /**
  * Spawn one foreground delegation and return the request the provider saw.
- * `inferRole: true` opts out of {@link callSubagent}'s harness default so the
- * tool resolves the role from text; a per-role catalog test asserts the catalog
- * the resolved role composes.
+ * The role is explicit: the tool never resolves it from the task text, so the
+ * per-role catalog test asserts the catalog this id composes.
  */
 async function captureRequest(
+  role: string,
   description: string,
   toolConfig: Omit<Parameters<typeof setup>[0], 'provider'> = {},
   mockConfig: Parameters<typeof setup>[1] = {},
@@ -75,7 +75,7 @@ async function captureRequest(
     { provider: 'mock', ...toolConfig },
     { ...mockConfig, onStart: (request) => { seen = request } },
   )
-  await callSubagent(ctx, { description, prompt: `Task: ${description}`, inferRole: true })
+  await callSubagent(ctx, { description, prompt: `Task: ${description}`, role })
   if (seen === undefined) throw new Error('scripted provider never saw a start request')
   return seen
 }
@@ -86,7 +86,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     ['explorer (review signal)', 'Review the parser diff'],
     ['explorer (audit signal)', 'Audit the migration plan'],
   ])('denies the shared worker set plus %s mutations at spawn', async (_role, description) => {
-    const request = await captureRequest(description)
+    const request = await captureRequest('explorer', description)
     // The explorer is deny-only: its surface is the shared floor plus the
     // mutation veto, with no allowlist to widen it.
     expect(request.toolFilter).toEqual({ deny: [...SHARED_DENY, ...EXPLORER_EXTRAS] })
@@ -96,7 +96,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     ['fixer', 'Fixer: patch the parser bug'],
     ['designer', 'Designer: restyle the settings page'],
   ])('scopes the %s to its built-in allowlist plus the shared floor', async (role, description) => {
-    const request = await captureRequest(description)
+    const request = await captureRequest(role, description)
     expect(request.toolFilter?.allow).toEqual([
       ...auditedBuiltin(role as 'fixer' | 'designer'),
       ...SHARED_CHILD_KEEP,
@@ -108,12 +108,12 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     const ctx = await setup({ provider: 'mock' })
     const result = await callSubagent(ctx, { description: 'Do the thing', prompt: 'work', inferRole: true })
     expect(result.isError).toBe(true)
-    expect(text(result)).toContain('requires a role')
+    expect(text(result)).toContain('requires an explicit `role`')
     expect(text(result)).toContain('enpoi-orchestration.roles')
   })
 
   it('composes the librarian built-in allowlist (server permissions parity) with the shared floor', async () => {
-    const request = await captureRequest('Librarian: research the API documentation')
+    const request = await captureRequest('librarian', 'Librarian: research the API documentation')
     // The built-in allowlist is audited against the live registry, so the test
     // composition keeps only the registered names; the whiteboard keep list is
     // unioned into every explicit allow surface and de-duplicated.
@@ -133,9 +133,9 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     )
     ctx.logger.warn = (message: unknown) => { warnings.push(String(message)) }
     const result = await callSubagent(ctx, {
+      role: 'librarian',
       description: 'Librarian: research the API documentation',
       prompt: 'work',
-      inferRole: true,
     })
     expect(result.isError).toBe(false)
     expect(seen?.toolFilter?.allow).toEqual([...new Set([...auditedBuiltin('librarian'), ...SHARED_CHILD_KEEP])])
@@ -144,7 +144,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
   })
 
   it('composes the Oracle built-in allowlist when spawnable re-enables it', async () => {
-    const request = await captureRequest('Oracle: architecture review', {
+    const request = await captureRequest('oracle', 'Oracle: architecture review', {
       settingsDocument: { roles: { oracle: { spawnable: true } } },
     })
     expect(request.toolFilter?.allow).toEqual([...new Set([...auditedBuiltin('oracle'), ...SHARED_CHILD_KEEP])])
@@ -152,13 +152,13 @@ describe('dsh-tool-subagent per-child tool filter', () => {
   })
 
   it('keeps the generic subagent for the librarian research fan-out and denies it to other workers', async () => {
-    const librarian = await captureRequest('Librarian: research the API documentation')
+    const librarian = await captureRequest('librarian', 'Librarian: research the API documentation')
     expect(librarian.toolFilter?.allow).toContain('subagent')
     expect(librarian.toolFilter?.deny).not.toContain('subagent')
     // Only the generic delegation tool survives; the provider-specific
     // variants stay on the shared floor.
     expect(librarian.toolFilter?.deny).toEqual(expect.arrayContaining(['subagent_fork', 'subagent_codex', 'subagent_claude_code']))
-    const fixer = await captureRequest('Fixer: patch the parser bug')
+    const fixer = await captureRequest('fixer', 'Fixer: patch the parser bug')
     expect(fixer.toolFilter?.deny).toContain('subagent')
   })
 
@@ -176,7 +176,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
   })
 
   it('merges an existing configured deny list first and de-duplicates the union', async () => {
-    const request = await captureRequest('Explorer: map the delegation surface', {
+    const request = await captureRequest('explorer', 'Explorer: map the delegation surface', {
       toolFilter: { deny: ['bash', 'send_message', 'dangerous'] },
     })
     const deny = request.toolFilter?.deny ?? []
@@ -195,13 +195,15 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     // Structural: the pinned board is available to every delegated child
     // (allowlisted and deny-only alike), so no built-in role deny map may
     // strip it.
-    for (const description of [
-      'Fixer: patch the parser bug',
-      'Librarian: research the API documentation',
-      'Explorer: map the delegation surface',
-      'Oracle: architecture review',
-    ]) {
-      const request = await captureRequest(description)
+    const requests = [
+      await captureRequest('fixer', 'Fixer: patch the parser bug'),
+      await captureRequest('librarian', 'Librarian: research the API documentation'),
+      await captureRequest('explorer', 'Explorer: map the delegation surface'),
+      await captureRequest('oracle', 'Oracle: architecture review', {
+        settingsDocument: { roles: { oracle: { spawnable: true } } },
+      }),
+    ]
+    for (const request of requests) {
       for (const tool of SHARED_CHILD_KEEP) {
         expect(request.toolFilter?.deny ?? []).not.toContain(tool)
       }
@@ -211,7 +213,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
   it('preserves a configured allow list while composing the deny policy', async () => {
     // The explorer is deny-only: the configured allow list passes through and
     // the composed deny list appends the shared floor plus the role extras.
-    const request = await captureRequest('Explorer: map the delegation surface', {
+    const request = await captureRequest('explorer', 'Explorer: map the delegation surface', {
       toolFilter: { allow: ['read'], deny: ['dangerous'] },
     })
     expect(request.toolFilter?.allow).toEqual(['read', ...SHARED_CHILD_KEEP])
@@ -222,7 +224,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     // Layer precedence (doc 61 WP-S6): Permissions → availability is the hard
     // gate; the Dynamic → Roles surface is the fallback; the shared anti-leak
     // floor is always unioned in, and the whiteboard keep list survives it.
-    const request = await captureRequest('Fixer: patch the parser bug', {
+    const request = await captureRequest('fixer', 'Fixer: patch the parser bug', {
       settingsDocument: {
         roles: { fixer: { tools: { available: ['read', 'grep'] } } },
         permissions: { agents: { fixer: { available: ['read'] } } },
@@ -234,7 +236,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
   })
 
   it('falls back to the registry tools.available when permissions sets no allowlist', async () => {
-    const request = await captureRequest('Fixer: patch the parser bug', {
+    const request = await captureRequest('fixer', 'Fixer: patch the parser bug', {
       settingsDocument: { roles: { fixer: { tools: { available: ['read', 'grep'] } } } },
     })
     // Whiteboard keep list unioned in; the registry surface order is kept.
@@ -256,9 +258,9 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     )
     ctx.logger.warn = (message: unknown) => { warnings.push(String(message)) }
     const result = await callSubagent(ctx, {
+      role: 'librarian',
       description: 'Librarian: research the API documentation',
       prompt: 'work',
-      inferRole: true,
     })
     expect(result.isError).toBe(false)
     // The removal applies to the built-in list; the addition is registry-audited
@@ -271,7 +273,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
   })
 
   it('merges extendBuiltins shared deny edits into the shared floor', async () => {
-    const request = await captureRequest('Explorer: map the delegation surface', {
+    const request = await captureRequest('explorer', 'Explorer: map the delegation surface', {
       settingsDocument: {
         extendBuiltins: { roles: {}, sharedDeny: { remove: ['roundtable'] } },
       },
@@ -285,7 +287,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
   })
 
   it('appends extendBuiltins shared deny additions after the compiled floor', async () => {
-    const request = await captureRequest('Explorer: map the delegation surface', {
+    const request = await captureRequest('explorer', 'Explorer: map the delegation surface', {
       settingsDocument: {
         extendBuiltins: { sharedDeny: { add: ['dangerous_probe'] } },
       },
@@ -294,7 +296,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
   })
 
   it('applies extendBuiltins sharedKeep edits to the keep union', async () => {
-    const request = await captureRequest('Explorer: map the delegation surface', {
+    const request = await captureRequest('explorer', 'Explorer: map the delegation surface', {
       toolFilter: { allow: ['read'] },
       settingsDocument: {
         extendBuiltins: { sharedKeep: { remove: ['whiteboard_pin'] } },
@@ -354,7 +356,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
   })
 
   it('lets a stored allowlist replace the built-in list and its extendBuiltins edit', async () => {
-    const request = await captureRequest('Fixer: patch the parser bug', {
+    const request = await captureRequest('fixer', 'Fixer: patch the parser bug', {
       settingsDocument: {
         roles: { fixer: { tools: { available: ['read', 'grep'] } } },
         extendBuiltins: { roles: { fixer: { add: ['write'], remove: ['read'] } } },
@@ -382,9 +384,9 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     )
     ctx.logger.warn = (message: unknown) => { warnings.push(String(message)) }
     const result = await callSubagent(ctx, {
+      role: 'librarian',
       description: 'Librarian: research the API documentation',
       prompt: 'work',
-      inferRole: true,
     })
     expect(result.isError).toBe(false)
     expect(seen?.toolFilter?.allow).toEqual(['read', ...SHARED_CHILD_KEEP])
@@ -419,7 +421,7 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     // The strict contract is unchanged for code-authored filters: config.toolFilter
     // is build-time data, so the audit never drops its names — the real child
     // composition still throws in tools.restrict() for an unknown allow name.
-    const request = await captureRequest('Explorer: map the delegation surface', {
+    const request = await captureRequest('explorer', 'Explorer: map the delegation surface', {
       toolFilter: { allow: ['read', 'not_a_registered_tool'] },
     })
     expect(request.toolFilter?.allow).toContain('not_a_registered_tool')

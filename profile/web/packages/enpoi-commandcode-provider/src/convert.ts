@@ -580,6 +580,9 @@ export function buildRequest(input: BuildRequestInput): CcEnvelope {
     messages,
     tools: [...(input.tools ?? [])],
     system,
+    // The adapter resolves the catalog's output ceiling as the call default
+    // (`resolveModel().defaultMaxTokens`); this literal only covers a route
+    // whose catalog declares no capacity.
     max_tokens: input.maxTokens ?? 16384,
     stream: true,
     ...input.reasoningEffort === undefined ? {} : { reasoning_effort: input.reasoningEffort },
