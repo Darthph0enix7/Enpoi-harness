@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-22T16:30:18.073Z",
+  "generatedAt": "2026-10-22T18:27:45.222Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.102",
+      "commit": "fde7255",
+      "releasedAt": "2026-10-22T17:54:18.000Z",
+      "notes": [
+        "fix(update): display staged target version, aggregate changelog, and bypass catalog CDN cache"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.101",
       "commit": "34b9177",
@@ -357,15 +365,6 @@
       "releasedAt": "2026-10-11T16:18:08.000Z",
       "notes": [
         "fix(update): identity reconciliation, live progress, sandbox-safe pnpm"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.60",
-      "commit": "aa58eaf",
-      "releasedAt": "2026-10-11T14:02:23.000Z",
-      "notes": [
-        "fix(profile): wallpaper off by default; skin-center patch delivery",
-        "feat(update): merge-base retention, flags and delivery hardening; docs for the new system"
       ]
     }
   ]
