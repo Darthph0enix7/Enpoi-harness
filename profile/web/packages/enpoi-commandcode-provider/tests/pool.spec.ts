@@ -464,3 +464,71 @@ it('a single-key direct route sends the CLI headers and dual auth (no pool)', as
   // A direct request is sanitized at the conversion seam even without a pool.
   expect(scripted.calls[0]?.body.includes(big)).toBe(false)
 })
+
+it('rejects a 500 carrying a dangling-tool-call sentence without rotating', async () => {
+  const upstream = 'Tool result is missing for tool call call_00_9boejr0piu3rhreimujs7766.'
+  const scripted = scriptedFetch([
+    () => jsonResponse(500, JSON.stringify({ type: 'server_error', message: upstream })),
+  ])
+  const adapter = makeAdapter({ fetchImpl: scripted.fetchImpl })
+
+  const { error } = await run(adapter, optionsFor('m'))
+  expect(errorCode(error)).toBe('INVALID_REQUEST')
+  // Exactly one identity is tried: a malformed body fails identically on all.
+  expect(scripted.calls).toHaveLength(1)
+  expect(scripted.calls[0]?.headers.authorization).toBe('Bearer key-a')
+  expect(engine.cooldownRemaining('commandcode', 'a', 'm')).toBe(0)
+
+  const message = (error as Error).message
+  expect(message).toContain(upstream)
+  expect(message).toContain('rejected')
+  expect(message).not.toContain('pool exhausted')
+  expect(message).not.toContain('credential')
+})
+
+it('rejects an in-band dangling-tool-call error without rotating', async () => {
+  const upstream = 'Tool result is missing for tool call call_00_9boejr0piu3rhreimujs7766.'
+  const scripted = scriptedFetch([
+    () => sseResponse(`data: ${JSON.stringify({ type: 'error', message: upstream })}\n`),
+  ])
+  const adapter = makeAdapter({ fetchImpl: scripted.fetchImpl })
+
+  const { error } = await run(adapter, optionsFor('m'))
+  expect(errorCode(error)).toBe('INVALID_REQUEST')
+  expect(scripted.calls).toHaveLength(1)
+  const message = (error as Error).message
+  expect(message).toContain(upstream)
+  expect(message).toContain('rejected')
+  expect(message).not.toContain('pool exhausted')
+  expect(message).not.toContain('credential')
+})
+
+it('still rotates on a plain transient 500', async () => {
+  const scripted = scriptedFetch([
+    () => jsonResponse(500, JSON.stringify({ message: 'internal error' })),
+    () => sseResponse(SSE_OK),
+  ])
+  const adapter = makeAdapter({ fetchImpl: scripted.fetchImpl })
+
+  const { error } = await run(adapter, optionsFor('m'))
+  expect(error).toBeUndefined()
+  expect(scripted.calls).toHaveLength(2)
+  expect(scripted.calls[0]?.headers.authorization).toBe('Bearer key-a')
+  expect(scripted.calls[1]?.headers.authorization).toBe('Bearer key-b')
+})
+
+it.each([
+  [429, JSON.stringify({ error: { message: 'Too many requests' } })],
+  [402, JSON.stringify({ error: { message: 'payment required' } })],
+])('rotates a %i through every identity and ends in PROVIDER_POOL_EXHAUSTED', async (status, body) => {
+  const scripted = scriptedFetch([
+    () => jsonResponse(status, body),
+    () => jsonResponse(status, body),
+  ])
+  const adapter = makeAdapter({ fetchImpl: scripted.fetchImpl })
+
+  const { error } = await run(adapter, optionsFor('m'))
+  expect(errorCode(error)).toBe('PROVIDER_POOL_EXHAUSTED')
+  // Both identities were tried before the pool declared exhaustion.
+  expect(scripted.calls).toHaveLength(2)
+})

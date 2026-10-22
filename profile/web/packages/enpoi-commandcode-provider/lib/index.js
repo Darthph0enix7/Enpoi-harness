@@ -582,6 +582,19 @@ function errorMessageFromBody(body) {
   }
   return body.trim().slice(0, 600);
 }
+var REQUEST_SHAPE_PATTERNS = [
+  // Gateway sentence for a history whose assistant tool call has no result.
+  /tool result is missing for tool call/i,
+  // Tool-result pairing/schema validation.
+  /tool_call_id/i,
+  // Provider-style message-array validation ("messages[2]: must be an object").
+  // Plural only: the JSON key `"message"` plus a value starting with "Invalid"
+  // must not match, or a transient 5xx like `{"message":"Invalid upstream
+  // response"}` would stop rotating.
+  /\bmessages\b[^.!?\n]{0,80}\b(?:must|required|invalid)\b/i,
+  // OpenAI-shaped client-error type the gateway passes through.
+  /invalid_request_error/i
+];
 function classifyCommandCodeError(status, body) {
   const message = errorMessageFromBody(body);
   const detail = `${status} ${message}`;
@@ -599,6 +612,11 @@ function classifyCommandCodeError(status, body) {
   }
   if (status === 401 || status === 402 || status === 403) return { code: "AUTH", message };
   if (status === 429) return { code: "RATE_LIMIT", message };
+  const shapeText = `${detail}
+${body}`;
+  if (REQUEST_SHAPE_PATTERNS.some((pattern) => pattern.test(shapeText))) {
+    return { code: "INVALID_REQUEST", message };
+  }
   if (status >= 500) return { code: "SERVER", message };
   if (status === 0) return { code: "SERVER", message };
   return { code: "INVALID_REQUEST", message };
@@ -873,6 +891,9 @@ function poolFailureClassOf(code, status) {
   if (code === "PROXY_USE_DETECTED") return "POLICY";
   if (code === "SERVER") return status === 503 || status === 529 ? "CAPACITY" : "UPSTREAM";
   return "UPSTREAM";
+}
+function rejectedRequestMessage(code, upstream) {
+  return `Command Code request rejected (${code}): ${upstream}`;
 }
 function toCcTools(tools) {
   return (tools ?? []).map((tool) => ({
@@ -1245,16 +1266,13 @@ var CommandCodeAdapter = class extends LlmAdapter {
         const errorBody = await response.text().catch(() => "");
         const failure = classifyCommandCodeError(response.status, errorBody);
         if (response.status === 413 || failure.code === CONTEXT_WINDOW_EXCEEDED_CODE2 || failure.code === "INVALID_REQUEST") {
-          throw new LlmError2(`Command Code API error (${String(response.status)}): ${failure.message}`, failure.code);
+          throw new LlmError2(rejectedRequestMessage(failure.code, failure.message), failure.code);
         }
         const failureClass2 = poolFailureClassOf(failure.code, response.status);
         engine.recordFailure(options.provider, identity.id, options.model, failureClass2, failure.message, response.status);
         lastFailure = failure.message;
         if (!ROTATING_CLASSES.has(failureClass2)) {
-          throw new LlmError2(
-            `Command Code route "${options.provider}" request failed without failover (${failureClass2}): ${failure.message}`,
-            failure.code
-          );
+          throw new LlmError2(rejectedRequestMessage(failure.code, failure.message), failure.code);
         }
         attemptController.abort("commandcode pool rotated to the next identity");
         this.options.log?.(`commandcode-provider: identity "${identity.id}" failed (${failureClass2}); rotating`);
@@ -1346,10 +1364,7 @@ var CommandCodeAdapter = class extends LlmAdapter {
       );
       lastFailure = midFailure.message;
       if (!ROTATING_CLASSES.has(failureClass)) {
-        throw new LlmError2(
-          `Command Code route "${options.provider}" request failed without failover (${failureClass}): ${midFailure.message}`,
-          midFailure.code
-        );
+        throw new LlmError2(rejectedRequestMessage(midFailure.code, midFailure.message), midFailure.code);
       }
       attemptController.abort("commandcode pool rotated to the next identity");
       this.options.log?.(`commandcode-provider: identity "${identity.id}" failed (${failureClass}); rotating`);

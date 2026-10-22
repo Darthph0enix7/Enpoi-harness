@@ -44,6 +44,7 @@ import { RuntimeContextProjection } from './runtime-context.ts'
 import { AssistantStreamAttempt } from './assistant-stream.ts'
 import { SystemPromptProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
+import { orderToolBatches } from './request-order.ts'
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -908,7 +909,11 @@ export class ReactLoopAgent implements Agent {
 
     // canonicalHeader is shallow; append logs a detached snapshot, not these local values.
     deepFreeze(header)
-    const boundaryMessages = session.deriveMessages()
+    // Repair tool-batch adjacency on the wire only: an injected message that
+    // landed between an assistant's tool calls and their results would be
+    // rejected by strict providers, and would poison every later turn because
+    // the durable order never changes. Persisted events stay untouched.
+    const boundaryMessages = orderToolBatches(session.deriveMessages())
     for (const message of boundaryMessages) {
       if (this.frozenMessages.has(message)) continue
       deepFreeze(message)

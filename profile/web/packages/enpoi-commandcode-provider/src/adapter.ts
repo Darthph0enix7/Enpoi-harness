@@ -194,6 +194,19 @@ export function poolFailureClassOf(code: string, status?: number): PoolFailureCl
   return 'UPSTREAM'
 }
 
+/**
+ * Message for a failure that no other identity can fix. It names the provider,
+ * carries the upstream sentence verbatim, and deliberately mentions neither
+ * credentials nor failover: rotating keys cannot repair a malformed request,
+ * so pointing the user at the pool would be false advice.
+ * @param code - the provider's own classification, also used as the `LlmError` code.
+ * @param upstream - the gateway's message, unchanged.
+ * @returns the user-facing rejection sentence.
+ */
+function rejectedRequestMessage(code: string, upstream: string): string {
+  return `Command Code request rejected (${code}): ${upstream}`
+}
+
 /** The harness tool declarations mapped to the Command Code wire shape. */
 export function toCcTools(tools: readonly ToolSchema[] | undefined): CcTool[] {
   return (tools ?? []).map(tool => ({
@@ -654,16 +667,19 @@ export class CommandCodeAdapter extends LlmAdapter {
         // request-level: every identity rejects the same bytes, so the pass
         // stops without cooling a healthy key.
         if (response.status === 413 || failure.code === CONTEXT_WINDOW_EXCEEDED_CODE || failure.code === 'INVALID_REQUEST') {
-          throw new LlmError(`Command Code API error (${String(response.status)}): ${failure.message}`, failure.code)
+          // The `LlmError` code stays the provider's own classification, so the
+          // runtime sees INVALID_REQUEST/CONTEXT_WINDOW_EXCEEDED, never the
+          // pool's vocabulary.
+          throw new LlmError(rejectedRequestMessage(failure.code, failure.message), failure.code)
         }
         const failureClass = poolFailureClassOf(failure.code, response.status)
         engine.recordFailure(options.provider, identity.id, options.model, failureClass, failure.message, response.status)
         lastFailure = failure.message
         if (!ROTATING_CLASSES.has(failureClass)) {
-          throw new LlmError(
-            `Command Code route "${options.provider}" request failed without failover (${failureClass}): ${failure.message}`,
-            failure.code,
-          )
+          // Non-rotating: the failure class is a property of the request (or
+          // route), so no other identity is tried. Preserve the provider code
+          // and surface the upstream sentence without pool jargon.
+          throw new LlmError(rejectedRequestMessage(failure.code, failure.message), failure.code)
         }
         attemptController.abort('commandcode pool rotated to the next identity')
         this.options.log?.(`commandcode-provider: identity "${identity.id}" failed (${failureClass}); rotating`)
@@ -766,15 +782,20 @@ export class CommandCodeAdapter extends LlmAdapter {
       )
       lastFailure = midFailure.message
       if (!ROTATING_CLASSES.has(failureClass)) {
-        throw new LlmError(
-          `Command Code route "${options.provider}" request failed without failover (${failureClass}): ${midFailure.message}`,
-          midFailure.code,
-        )
+        // An in-band rejection (status 0) is likewise request-level. Keep the
+        // stream's own code (`midFailure.code`) as the `LlmError` code.
+        throw new LlmError(rejectedRequestMessage(midFailure.code, midFailure.message), midFailure.code)
       }
       attemptController.abort('commandcode pool rotated to the next identity')
       this.options.log?.(`commandcode-provider: identity "${identity.id}" failed (${failureClass}); rotating`)
     }
 
+    // Invariant: this throw is reachable only from failures in
+    // ROTATING_CLASSES (auth, quota, capacity, entitlement, upstream) — every
+    // request-shape rejection above throws its own code before reaching here.
+    // Exhaustion therefore means identities were tried and each failed for a
+    // reason another identity could plausibly fix, so the wording is honest by
+    // construction.
     throw new LlmError(
       `Command Code credential pool exhausted after ${attempts} attempt(s): ${lastFailure}`,
       'PROVIDER_POOL_EXHAUSTED',

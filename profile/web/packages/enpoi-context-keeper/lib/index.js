@@ -44,7 +44,7 @@ var __callDispose = (stack, error, hasError) => {
   return next();
 };
 
-// src/index.ts
+// packages/enpoi-context-keeper/src/index.ts
 import { SessionLogOffset } from "@deepseek-ai/dsh-session";
 import { BlockAssembler, createUserMessage, isContextWindowExceededError } from "@deepseek-ai/dsh-llm";
 import { deadline } from "@deepseek-ai/dsh-timeout";
@@ -644,6 +644,40 @@ function latestCheckpointMessageSeq(session) {
   }
   return found;
 }
+function toolResultCallId(data) {
+  if (data === null || typeof data !== "object") return null;
+  const record = data;
+  const candidates = [record.message?.toolCallId, record.toolCallId, record.callId];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.length > 0) return candidate;
+  }
+  return null;
+}
+var openBatchCursors = /* @__PURE__ */ new WeakMap();
+function openToolBatch(session) {
+  const known = openBatchCursors.get(session);
+  if (known !== void 0 && session.seq <= known.seq) return known.open.size > 0;
+  const from = known?.seq ?? 0;
+  const open = known?.open ?? /* @__PURE__ */ new Set();
+  try {
+    for (const event of session.snapshotEvents(SessionLogOffset(from))) {
+      if (event.type === "tool/call") {
+        const callId = event.data.callId;
+        if (typeof callId === "string" && callId.length > 0) open.add(callId);
+      } else if (event.type === "tool/result") {
+        const callId = toolResultCallId(event.data);
+        if (callId !== null) open.delete(callId);
+      } else if (event.type === "step/start" || event.type === "turn/start") {
+        open.clear();
+      }
+    }
+  } catch (error) {
+    diag(`openToolBatch: read failed (${String(error)})`);
+    return true;
+  }
+  openBatchCursors.set(session, { seq: session.seq, open });
+  return open.size > 0;
+}
 function commitCheckpointMessage(session, text) {
   const append = session.append;
   const message = createUserMessage({
@@ -670,6 +704,14 @@ var CheckpointService = class {
     this.config = config;
   }
   cache = new BoundedSessionCache();
+  /**
+   * Rendered checkpoints whose surface commit was deferred because a tool batch
+   * was open. Entries are transient (cleared on flush or disposal), so a plain
+   * map is enough — an LRU eviction would silently lose a refresh.
+   */
+  pending = /* @__PURE__ */ new Map();
+  /** Sessions with a flush microtask already queued (coalesces event bursts). */
+  flushQueued = /* @__PURE__ */ new Set();
   /** Live cache entries (diagnostics/tests; the map is LRU-bounded). */
   get cacheSize() {
     return this.cache.size;
@@ -682,6 +724,78 @@ var CheckpointService = class {
    */
   forget(sessionId) {
     this.cache.delete(sessionId);
+    this.pending.delete(sessionId);
+    this.flushQueued.delete(sessionId);
+  }
+  /**
+   * Commit a checkpoint that was deferred while a tool batch was open.
+   *
+   * Safe to call from any wake (the on-demand path, a lifecycle listener, a
+   * queued microtask):
+   * - a still-open batch leaves the text pending (commit is never allowed
+   *   between a call and its result);
+   * - a newer `state/checkpoint` already committed wins — the pending record is
+   *   dropped instead of resurrecting stale text through `surfaceOp: replace`;
+   * - a re-entered append (a session-event publication is still open) restores
+   *   the pending record so the next wake retries, never losing the refresh.
+   * @param session - the session holding a possible deferred commit.
+   * @returns whether a deferred checkpoint was committed now.
+   */
+  flushPendingCheckpoint(session) {
+    const pending = this.pending.get(session.id);
+    if (pending === void 0) return false;
+    if (openToolBatch(session)) return false;
+    const latest = latestCheckpoint(session);
+    const superseded = latest !== null && (latest.version > pending.data.version || latest.version === pending.data.version && latest.basedOnSeq > pending.data.basedOnSeq);
+    if (superseded) {
+      this.pending.delete(session.id);
+      const current = this.cache.get(session.id);
+      if (current !== void 0 && (current.version < latest.version || current.version === latest.version && current.basedOnSeq < latest.basedOnSeq)) {
+        this.cache.set(session.id, {
+          version: latest.version,
+          basedOnSeq: latest.basedOnSeq,
+          basedOnStructuralCount: latest.basedOnStructuralCount,
+          text: latest.text,
+          model: latest.model,
+          via: latest.via,
+          createdAt: latest.createdAt,
+          inFlight: current.inFlight
+        });
+      }
+      diag(`flushPendingCheckpoint: session=${session.id} \u2014 dropping v${pending.data.version} (v${latest.version} already committed)`);
+      return false;
+    }
+    this.pending.delete(session.id);
+    try {
+      commitCheckpointMessage(session, pending.text);
+    } catch (error) {
+      this.pending.set(session.id, pending);
+      diag(`flushPendingCheckpoint: session=${session.id} \u2014 commit failed, kept pending (${String(error)})`);
+      return false;
+    }
+    diag(`flushPendingCheckpoint: session=${session.id} \u2014 committed deferred checkpoint v${pending.data.version}`);
+    return true;
+  }
+  /**
+   * Queue one microtask flush of the session's deferred checkpoint. The
+   * `session/event` hook runs INSIDE `Session.append`'s publication boundary,
+   * where a nested append is rejected ("cannot reenter while another append is
+   * being published"), so the commit is deferred to the next microtask; the
+   * first event after the batch closes is therefore the flush edge.
+   * @param session - the session to flush when its batch is closed.
+   */
+  schedulePendingFlush(session) {
+    if (!this.pending.has(session.id)) return;
+    if (this.flushQueued.has(session.id)) return;
+    this.flushQueued.add(session.id);
+    queueMicrotask(() => {
+      this.flushQueued.delete(session.id);
+      try {
+        this.flushPendingCheckpoint(session);
+      } catch (error) {
+        diag(`schedulePendingFlush: session=${session.id} \u2014 flush failed (${String(error)})`);
+      }
+    });
   }
   /**
    * Ensure the session's state checkpoint is fresh.
@@ -696,6 +810,11 @@ var CheckpointService = class {
    */
   async ensureCheckpoint(session, opts = {}) {
     if (!keeperEnabled(this.ctx)) return { ok: false, text: null, reason: "keeper-disabled" };
+    try {
+      this.flushPendingCheckpoint(session);
+    } catch (error) {
+      diag(`ensureCheckpoint: session=${session.id} \u2014 deferred flush failed (${String(error)})`);
+    }
     const cfg = resolveKeeperParams(this.ctx, this.config);
     const key = session.id;
     const now = Date.now();
@@ -793,9 +912,16 @@ var CheckpointService = class {
       telemetry: checkpointTelemetry(session, { seq: snapshotSeq, model, via }),
       createdAt: Date.now()
     };
+    const rendered = renderCheckpointBlock(data);
     try {
       appendCheckpoint(session, data);
-      commitCheckpointMessage(session, renderCheckpointBlock(data));
+      if (openToolBatch(session)) {
+        this.pending.set(session.id, { data, text: rendered });
+        diag(`ensureCheckpoint: session=${session.id} \u2014 checkpoint v${version} deferred (open tool batch)`);
+      } else {
+        this.pending.delete(session.id);
+        commitCheckpointMessage(session, rendered);
+      }
     } catch (error) {
       diag(`ensureCheckpoint: session=${session.id} \u2014 commit failed (${String(error)})`);
       return { ok: false, text: null, reason: "refreshed" };
@@ -915,6 +1041,7 @@ function apply(ctx, config) {
     if (event.type === "state/checkpoint") {
       checkpointCursors.set(session, { seq: event.seq + 1, data: event.data });
     }
+    ownedCheckpoint.schedulePendingFlush(session);
     if ((event.type === "compaction/end" || event.type === "compaction/summary") && keeperEnabled(ctx)) {
       void ownedCheckpoint.ensureCheckpoint(session, { force: true }).catch(() => {
       });
@@ -1511,6 +1638,7 @@ export {
   latestCheckpoint,
   latestCheckpointMessageSeq,
   name,
+  openToolBatch,
   renderCheckpointBlock,
   resetKeeperRouteHealth,
   resolveKeeperParams,

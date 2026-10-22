@@ -1015,6 +1015,81 @@ export function latestCheckpointMessageSeq(session: Session): number | null {
 }
 
 /**
+ * Read the tool-call id a `tool/result` event resolves. The durable payload is
+ * `{ turn, step, message: ToolResultMessage }` and the canonical id lives on
+ * `message.toolCallId`; the flat spellings are accepted too so a structural
+ * caller (or a pre-fork fixture) still matches its call.
+ * @param data - the `tool/result` event payload.
+ * @returns the resolved call id, or null for a malformed payload.
+ */
+function toolResultCallId(data: unknown): string | null {
+  if (data === null || typeof data !== 'object') return null
+  const record = data as { toolCallId?: unknown; callId?: unknown; message?: { toolCallId?: unknown } }
+  const candidates = [record.message?.toolCallId, record.toolCallId, record.callId]
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.length > 0) return candidate
+  }
+  return null
+}
+
+/**
+ * Per-session incremental open-batch cursor: events already folded, plus the
+ * call ids still awaiting a result. Keyed on the Session object (WeakMap), so a
+ * disposed session takes its cursor with it.
+ */
+const openBatchCursors = new WeakMap<Session, { seq: number; open: Set<string> }>()
+
+/**
+ * Whether the session's tail has a tool batch open — at least one `tool/call`
+ * without its matching `tool/result`.
+ *
+ * A checkpoint `user/message` committed here would land BETWEEN a call and its
+ * result and a strict provider rejects every later turn with "Tool result is
+ * missing for tool call …"; the checkpoint producer therefore never commits
+ * while this answers true.
+ *
+ * An unresolved id is cleared only by a matching result, or by a `step/start` /
+ * `turn/start` barrier: a new step/turn begins only after the loop has awaited
+ * every started call of the previous one, so a call still unmatched at a barrier
+ * can never receive a result from this process. `step/end` / `turn/end` are NOT
+ * barriers — the scheduler-failure path appends `step/end` with started calls
+ * unresolved, and clearing there would let a commit land between a call and the
+ * synthetic result the resume-repair path appends later.
+ *
+ * Incremental: only events appended since the last probe are folded, so the
+ * cost is O(new events) and a per-assembly caller stays cheap.
+ * @param session - the session to probe.
+ * @returns whether any tool call id is unresolved.
+ */
+export function openToolBatch(session: Session): boolean {
+  const known = openBatchCursors.get(session)
+  if (known !== undefined && session.seq <= known.seq) return known.open.size > 0
+  const from = known?.seq ?? 0
+  const open = known?.open ?? new Set<string>()
+  try {
+    for (const event of session.snapshotEvents(SessionLogOffset(from))) {
+      if (event.type === 'tool/call') {
+        const callId = (event.data as { callId?: unknown }).callId
+        if (typeof callId === 'string' && callId.length > 0) open.add(callId)
+      } else if (event.type === 'tool/result') {
+        const callId = toolResultCallId(event.data)
+        if (callId !== null) open.delete(callId)
+      } else if (event.type === 'step/start' || event.type === 'turn/start') {
+        // New work began: every started call of the closed step/turn was
+        // awaited before this event, so anything still unmatched is dead.
+        open.clear()
+      }
+    }
+  } catch (error) {
+    // A read failure must never make the producer commit into an open batch.
+    diag(`openToolBatch: read failed (${String(error)})`)
+    return true
+  }
+  openBatchCursors.set(session, { seq: session.seq, open })
+  return open.size > 0
+}
+
+/**
  * Commit the checkpoint to the surface: one plugin-sourced user message whose
  * `surfaceOp` replaces the previous checkpoint node in place (append-only log,
  * never an in-place mutation). The replaced node leaves the priced surface, so
@@ -1058,12 +1133,32 @@ interface CheckpointEntry {
 }
 
 /**
+ * A refresh rendered while a tool batch was open: the `state/checkpoint` event
+ * is already durable, only its surface message waits for the batch to close.
+ * Newest-wins per session (a later refresh replaces the whole record).
+ */
+interface PendingCheckpointCommit {
+  data: CheckpointData
+  text: string
+}
+
+/**
  * The checkpoint writer. Owns the per-session freshness cache and the
  * single-flight refresh; the session log is the durable source of truth, so a
  * cold reopen rehydrates the cache from the newest event.
  */
 export class CheckpointService {
   private readonly cache = new BoundedSessionCache<CheckpointEntry>()
+
+  /**
+   * Rendered checkpoints whose surface commit was deferred because a tool batch
+   * was open. Entries are transient (cleared on flush or disposal), so a plain
+   * map is enough — an LRU eviction would silently lose a refresh.
+   */
+  private readonly pending = new Map<string, PendingCheckpointCommit>()
+
+  /** Sessions with a flush microtask already queued (coalesces event bursts). */
+  private readonly flushQueued = new Set<string>()
 
   constructor(
     private readonly ctx: Context,
@@ -1083,6 +1178,93 @@ export class CheckpointService {
    */
   forget(sessionId: string): void {
     this.cache.delete(sessionId)
+    this.pending.delete(sessionId)
+    this.flushQueued.delete(sessionId)
+  }
+
+  /**
+   * Commit a checkpoint that was deferred while a tool batch was open.
+   *
+   * Safe to call from any wake (the on-demand path, a lifecycle listener, a
+   * queued microtask):
+   * - a still-open batch leaves the text pending (commit is never allowed
+   *   between a call and its result);
+   * - a newer `state/checkpoint` already committed wins — the pending record is
+   *   dropped instead of resurrecting stale text through `surfaceOp: replace`;
+   * - a re-entered append (a session-event publication is still open) restores
+   *   the pending record so the next wake retries, never losing the refresh.
+   * @param session - the session holding a possible deferred commit.
+   * @returns whether a deferred checkpoint was committed now.
+   */
+  flushPendingCheckpoint(session: Session): boolean {
+    const pending = this.pending.get(session.id)
+    if (pending === undefined) return false
+    if (openToolBatch(session)) return false
+    const latest = latestCheckpoint(session)
+    // A newer committed checkpoint wins. The version alone misses a concurrent
+    // writer that derived the same version from the same base (two mounted
+    // services): a later `basedOnSeq` — a later snapshot — is newer evidence.
+    const superseded = latest !== null && (
+      latest.version > pending.data.version
+      || (latest.version === pending.data.version && latest.basedOnSeq > pending.data.basedOnSeq)
+    )
+    if (superseded) {
+      this.pending.delete(session.id)
+      // Align the freshness cache with the winning checkpoint: keeping the
+      // deferred snapshot here would let a cache-hit hand back stale text.
+      const current = this.cache.get(session.id)
+      if (current !== undefined && (current.version < latest.version
+        || (current.version === latest.version && current.basedOnSeq < latest.basedOnSeq))) {
+        this.cache.set(session.id, {
+          version: latest.version,
+          basedOnSeq: latest.basedOnSeq,
+          basedOnStructuralCount: latest.basedOnStructuralCount,
+          text: latest.text,
+          model: latest.model,
+          via: latest.via,
+          createdAt: latest.createdAt,
+          inFlight: current.inFlight,
+        })
+      }
+      diag(`flushPendingCheckpoint: session=${session.id} — dropping v${pending.data.version} (v${latest.version} already committed)`)
+      return false
+    }
+    // Clear BEFORE appending: the commit publishes a `user/message` and a
+    // re-entrant flush must observe an empty pending set.
+    this.pending.delete(session.id)
+    try {
+      commitCheckpointMessage(session, pending.text)
+    } catch (error) {
+      // Re-entered append (event publication still open) or a transient write
+      // failure: keep the newest text for the next wake.
+      this.pending.set(session.id, pending)
+      diag(`flushPendingCheckpoint: session=${session.id} — commit failed, kept pending (${String(error)})`)
+      return false
+    }
+    diag(`flushPendingCheckpoint: session=${session.id} — committed deferred checkpoint v${pending.data.version}`)
+    return true
+  }
+
+  /**
+   * Queue one microtask flush of the session's deferred checkpoint. The
+   * `session/event` hook runs INSIDE `Session.append`'s publication boundary,
+   * where a nested append is rejected ("cannot reenter while another append is
+   * being published"), so the commit is deferred to the next microtask; the
+   * first event after the batch closes is therefore the flush edge.
+   * @param session - the session to flush when its batch is closed.
+   */
+  schedulePendingFlush(session: Session): void {
+    if (!this.pending.has(session.id)) return
+    if (this.flushQueued.has(session.id)) return
+    this.flushQueued.add(session.id)
+    queueMicrotask(() => {
+      this.flushQueued.delete(session.id)
+      try {
+        this.flushPendingCheckpoint(session)
+      } catch (error) {
+        diag(`schedulePendingFlush: session=${session.id} — flush failed (${String(error)})`)
+      }
+    })
   }
 
   /**
@@ -1098,6 +1280,14 @@ export class CheckpointService {
    */
   async ensureCheckpoint(session: Session, opts: { force?: boolean } = {}): Promise<CheckpointResult> {
     if (!keeperEnabled(this.ctx)) return { ok: false, text: null, reason: 'keeper-disabled' }
+    // Never lose a deferred refresh: a session that produced no further event
+    // after its batch closed still commits the newest text on this wake. A
+    // still-open batch keeps it pending; the event hook flushes when it closes.
+    try {
+      this.flushPendingCheckpoint(session)
+    } catch (error) {
+      diag(`ensureCheckpoint: session=${session.id} — deferred flush failed (${String(error)})`)
+    }
     const cfg = resolveKeeperParams(this.ctx, this.config)
     const key = session.id
     const now = Date.now()
@@ -1195,9 +1385,25 @@ export class CheckpointService {
       telemetry: checkpointTelemetry(session, { seq: snapshotSeq, model, via }),
       createdAt: Date.now(),
     }
+    const rendered = renderCheckpointBlock(data)
     try {
+      // The durable `state/checkpoint` event is log-only (ignorable, no message
+      // projection), so it is safe mid-batch; it also carries the newest
+      // version so a later refresh is stamped above this one.
       appendCheckpoint(session, data)
-      commitCheckpointMessage(session, renderCheckpointBlock(data))
+      if (openToolBatch(session)) {
+        // Producer fix: never commit the checkpoint `user/message` between a
+        // `tool/call` and its `tool/result` — a strict provider rejects every
+        // later turn with "Tool result is missing for tool call …". Keep the
+        // newest rendered block and let the event hook commit it once the
+        // batch closes (or the next ensureCheckpoint, if no event ever comes).
+        this.pending.set(session.id, { data, text: rendered })
+        diag(`ensureCheckpoint: session=${session.id} — checkpoint v${version} deferred (open tool batch)`)
+      } else {
+        // A directly committable checkpoint supersedes any older deferred one.
+        this.pending.delete(session.id)
+        commitCheckpointMessage(session, rendered)
+      }
     } catch (error) {
       diag(`ensureCheckpoint: session=${session.id} — commit failed (${String(error)})`)
       return { ok: false, text: null, reason: 'refreshed' }
@@ -1375,6 +1581,14 @@ export function apply(ctx: Context, config: Config): void {
     if (event.type === 'state/checkpoint') {
       checkpointCursors.set(session, { seq: event.seq + 1, data: event.data as CheckpointData })
     }
+    // Deferred checkpoint commit (tool-batch producer fix): a refresh that
+    // landed between a `tool/call` and its `tool/result` stored its rendered
+    // block as pending. Every event is a candidate flush edge — the probe
+    // decides — so the FIRST event after the batch closes commits it. The
+    // commit is queued as a microtask because this hook runs inside
+    // `Session.append`'s publication boundary, where a nested append is
+    // rejected; entry is O(1) when nothing is pending.
+    ownedCheckpoint.schedulePendingFlush(session)
     // Trigger 1 — segment cut: the compaction engine commits a boundary
     // (compaction/end | compaction/summary); refresh the state checkpoint now,
     // because the boundary already busts the prompt cache.
