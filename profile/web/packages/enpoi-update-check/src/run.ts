@@ -647,11 +647,17 @@ export function reconcileRunRecord(
     return { record: next, changed: true }
   }
   if (isPreparedPhase(record.phase) && staged) {
-    if (record.staged) return { record, changed: false }
-    return { record: { ...record, staged: true }, changed: true }
+    const stagedRecord = readStagedApply(context.prefix)
+    const target = stagedRecord?.version ?? record.target
+    const channel = stagedRecord?.channel ?? record.channel
+    if (record.staged && record.target === target && record.channel === channel) return { record, changed: false }
+    return { record: { ...record, staged: true, target, channel }, changed: true }
   }
   if (record.mode === 'prepare' && staged) {
-    return { record: { ...preparedRecord(record), lastLine: parsed.lastLine === '' ? record.lastLine : parsed.lastLine, logTail: parsed.logTail }, changed: true }
+    const stagedRecord = readStagedApply(context.prefix)
+    const target = stagedRecord?.version ?? record.target
+    const channel = stagedRecord?.channel ?? record.channel
+    return { record: { ...preparedRecord(record, now), target, channel, lastLine: parsed.lastLine === '' ? record.lastLine : parsed.lastLine, logTail: parsed.logTail }, changed: true }
   }
   // The engine's own terminal phase outranks the install identity: a
   // genuinely-applied update whose state write lagged still reports the

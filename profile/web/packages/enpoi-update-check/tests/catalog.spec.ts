@@ -66,6 +66,21 @@ describe('parseCatalogDocument', () => {
 })
 
 describe('fetchCatalog', () => {
+  it('passes cache-busting query parameter and headers to bypass CDN caching', async () => {
+    let capturedUrl: string | undefined
+    let capturedHeaders: Record<string, string> | undefined
+    const mockFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      capturedUrl = String(input)
+      capturedHeaders = init?.headers as Record<string, string>
+      return new Response(JSON.stringify(document({ channel: 'stable' })), { status: 200 })
+    }) as typeof fetch
+
+    const entries = await fetchCatalog('stable', mockFetch)
+    expect(entries).toHaveLength(1)
+    expect(capturedUrl).toMatch(/^https:\/\/raw\.githubusercontent\.com\/.*\/stable\.json\?t=\d+$/)
+    expect(capturedHeaders?.['cache-control']).toBe('no-cache, no-store')
+  })
+
   it('returns the validated entries from a 200 response', async () => {
     const entries = await fetchCatalog('beta', fakeFetch(200, JSON.stringify(document({ channel: 'beta' }))))
     expect(entries).toHaveLength(1)

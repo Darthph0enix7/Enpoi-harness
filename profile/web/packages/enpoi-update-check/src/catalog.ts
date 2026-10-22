@@ -173,8 +173,12 @@ export async function fetchCatalog(
   channel: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<CatalogEntry[]> {
-  const response = await fetchImpl(catalogUrl(channel), {
-    headers: { accept: 'application/json' },
+  const url = `${catalogUrl(channel)}?t=${Date.now()}`
+  const response = await fetchImpl(url, {
+    headers: {
+      accept: 'application/json',
+      'cache-control': 'no-cache, no-store',
+    },
     signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS),
   })
   if (!response.ok) throw new Error(`catalog fetch failed: HTTP ${response.status}`)

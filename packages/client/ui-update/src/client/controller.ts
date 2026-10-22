@@ -243,6 +243,7 @@ export class UpdateController {
   /** Open the dialog and make sure a run's state has been read once. */
   open(): void {
     this.update({ dialogOpen: true, actionError: null, checkError: null })
+    void this.refreshStatus(true, true)
     void this.refreshRun()
   }
 

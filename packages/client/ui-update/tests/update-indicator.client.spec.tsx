@@ -426,7 +426,7 @@ describe('UpdateIndicator dialog', () => {
     expect(document.querySelector('[data-dsh-update-indicator]')?.getAttribute('data-dsh-update-indicator')).toBe('available')
   })
 
-  it('renders the prepared hint and [Restart to update] calling apply', () => {
+  it('renders the prepared hint, [Restart to update] calling apply, and keeps the changelog visible', () => {
     const { actions } = mount({
       status: availableStatus,
       run: run({ phase: 'prepared', step: 7, staged: true }),
@@ -434,10 +434,23 @@ describe('UpdateIndicator dialog', () => {
     })
     expect(document.querySelector('[data-dsh-update-prepared]')).not.toBeNull()
     expect(screen.getByText(en['progress.prepared'])).toBeTruthy()
+    // The changelog notes remain visible when prepared so the user can see what they are about to apply.
+    expect(document.querySelector('[data-dsh-update-notes]')).not.toBeNull()
     fireEvent.click(screen.getByRole('button', { name: en['action.restart'] }))
     expect(actions.apply).toHaveBeenCalledTimes(1)
     // No offer actions while prepared: the staged tree is applied, not replaced.
     expect(screen.queryByRole('button', { name: en['action.updateNow'] })).toBeNull()
+  })
+
+  it('renders the staged target version in the header when an update is prepared even if status.latest lags', () => {
+    mount({
+      status: { ...availableStatus, latest: { ...availableStatus.latest, version: '0.1.7-enpoi.2.100' } },
+      run: run({ phase: 'prepared', step: 7, staged: true, target: '0.1.7-enpoi.2.101' }),
+      dialogOpen: true,
+    })
+    const versions = document.querySelector('[data-dsh-update-versions]')
+    expect(versions?.textContent).toContain('0.1.7-enpoi.2.101')
+    expect(versions?.textContent).toContain('0.1.7-enpoi.2.81')
   })
 
   it('offers Cancel while the run can still be stopped and hides it past the switch', () => {

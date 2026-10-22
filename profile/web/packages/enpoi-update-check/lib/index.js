@@ -117,8 +117,12 @@ function parseCatalogDocument(value, channel) {
   return releases.length === 0 ? null : releases;
 }
 async function fetchCatalog(channel, fetchImpl = fetch) {
-  const response = await fetchImpl(catalogUrl(channel), {
-    headers: { accept: "application/json" },
+  const url = `${catalogUrl(channel)}?t=${Date.now()}`;
+  const response = await fetchImpl(url, {
+    headers: {
+      accept: "application/json",
+      "cache-control": "no-cache, no-store"
+    },
     signal: AbortSignal.timeout(CATALOG_FETCH_TIMEOUT_MS)
   });
   if (!response.ok) throw new Error(`catalog fetch failed: HTTP ${response.status}`);
@@ -824,11 +828,17 @@ function reconcileRunRecord(record, identity, context, options = {}) {
     return { record: next, changed: true };
   }
   if (isPreparedPhase(record.phase) && staged) {
-    if (record.staged) return { record, changed: false };
-    return { record: { ...record, staged: true }, changed: true };
+    const stagedRecord = readStagedApply(context.prefix);
+    const target = stagedRecord?.version ?? record.target;
+    const channel = stagedRecord?.channel ?? record.channel;
+    if (record.staged && record.target === target && record.channel === channel) return { record, changed: false };
+    return { record: { ...record, staged: true, target, channel }, changed: true };
   }
   if (record.mode === "prepare" && staged) {
-    return { record: { ...preparedRecord(record), lastLine: parsed.lastLine === "" ? record.lastLine : parsed.lastLine, logTail: parsed.logTail }, changed: true };
+    const stagedRecord = readStagedApply(context.prefix);
+    const target = stagedRecord?.version ?? record.target;
+    const channel = stagedRecord?.channel ?? record.channel;
+    return { record: { ...preparedRecord(record, now), target, channel, lastLine: parsed.lastLine === "" ? record.lastLine : parsed.lastLine, logTail: parsed.logTail }, changed: true };
   }
   const marker = context.marker;
   if (marker !== void 0 && marker !== null && marker.phase === "done" && runMatchesMarker(record, marker)) {
@@ -1124,16 +1134,30 @@ var UpdateRunController = class {
   }
   /**
    * The `staged` flag is derived truth: it must match the staged record and
-   * its tree on disk at read time. The engine archives a rolled-back tree as
-   * `<dir>.failed-<ts>` while keeping the staged record, so a persisted
-   * record that still reads `staged: true` (or a legacy `false` against a
-   * complete tree) is corrected and persisted here — the UI's Retry/recover
-   * decision must never be based on a stale flag.
+   * its tree on disk at read time. When the staged tree is ready, a prepared
+   * record's target is aligned with the version actually staged on disk. When
+   * the staged tree is gone (archived by rollback or consumed by apply),
+   * `staged` is set to false.
    */
   stagedTruth(record) {
     const staged = stagedApplyReady(this.prefix);
-    if (record.staged === staged) return record;
-    const next = { ...record, staged };
+    if (!staged) {
+      if (!record.staged) return record;
+      const next2 = { ...record, staged: false };
+      this.persist(next2);
+      return next2;
+    }
+    const stagedRecord = readStagedApply(this.prefix);
+    const target = stagedRecord?.version ?? record.target;
+    const channel = stagedRecord?.channel ?? record.channel;
+    if (isPreparedPhase(record.phase)) {
+      if (record.staged && record.target === target) return record;
+      const next2 = { ...record, staged: true, target, channel };
+      this.persist(next2);
+      return next2;
+    }
+    if (record.staged) return record;
+    const next = { ...record, staged: true };
     this.persist(next);
     return next;
   }
@@ -1320,13 +1344,16 @@ var UpdateRunController = class {
         `updateCheck.start: no update is available (state=${status.state})`
       );
     }
+    const pin = { target: status.latest.version, channel: status.current.channel };
     const current = this.run();
     if (current !== null && current.result === null) {
       if (isPreparedPhase(current.phase)) {
-        throw new RunRefusedError(
-          "already-prepared",
-          `updateCheck.start: update ${current.target} is already prepared; apply it instead`
-        );
+        if (current.target === pin.target) {
+          throw new RunRefusedError(
+            "already-prepared",
+            `updateCheck.start: update ${current.target} is already prepared; apply it instead`
+          );
+        }
       }
       if (this.blockingRun(current)) {
         if (current.observed === true) return current;
@@ -1336,15 +1363,16 @@ var UpdateRunController = class {
         );
       }
     }
-    const pin = { target: status.latest.version, channel: status.current.channel };
     const capability = await this.probe();
     const afterProbe = this.run();
     if (afterProbe !== null && afterProbe.result === null) {
       if (isPreparedPhase(afterProbe.phase)) {
-        throw new RunRefusedError(
-          "already-prepared",
-          `updateCheck.start: update ${afterProbe.target} is already prepared; apply it instead`
-        );
+        if (afterProbe.target === pin.target) {
+          throw new RunRefusedError(
+            "already-prepared",
+            `updateCheck.start: update ${afterProbe.target} is already prepared; apply it instead`
+          );
+        }
       }
       if (this.blockingRun(afterProbe)) {
         if (afterProbe.observed === true) return afterProbe;
@@ -1683,7 +1711,10 @@ var UpdateRunController = class {
     }
     if (!alive && !withinGrace) {
       if (record.mode === "prepare" && staged) {
-        this.persist(preparedRecord(base, this.now));
+        const stagedRecord = readStagedApply(this.prefix);
+        const target = stagedRecord?.version ?? base.target;
+        const channel = stagedRecord?.channel ?? base.channel;
+        this.persist({ ...preparedRecord(base, this.now), target, channel });
         this.removeSubmittedJob(base);
         this.stopWatcher();
         return;
@@ -1943,6 +1974,20 @@ function errorText(error) {
 function cloneNotes(notes) {
   return [...notes];
 }
+function collectUpdateNotes(entries, currentVersion) {
+  if (entries.length === 0) return [];
+  const newest = entries[0];
+  if (newest === void 0) return [];
+  if (currentVersion === "") return cloneNotes(newest.notes);
+  const notes = [];
+  for (const entry of entries) {
+    if (compareVersions(currentVersion, entry.version) !== -1) {
+      break;
+    }
+    notes.push(...entry.notes);
+  }
+  return notes.length > 0 ? notes : cloneNotes(newest.notes);
+}
 var UpdateCheckCore = class {
   options;
   now;
@@ -2003,7 +2048,7 @@ var UpdateCheckCore = class {
             version: newest.version,
             commit: newest.commit,
             releasedAt: newest.releasedAt,
-            notes: cloneNotes(newest.notes)
+            notes: collectUpdateNotes(entries, this.options.identity.version)
           },
           checkedAt
         };
@@ -2025,7 +2070,7 @@ var UpdateCheckCore = class {
           version: newest.version,
           commit: newest.commit,
           releasedAt: newest.releasedAt,
-          notes: cloneNotes(newest.notes)
+          notes: collectUpdateNotes(entries, this.options.identity.version)
         },
         checkedAt
       };

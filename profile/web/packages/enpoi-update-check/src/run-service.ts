@@ -235,16 +235,30 @@ export class UpdateRunController {
 
   /**
    * The `staged` flag is derived truth: it must match the staged record and
-   * its tree on disk at read time. The engine archives a rolled-back tree as
-   * `<dir>.failed-<ts>` while keeping the staged record, so a persisted
-   * record that still reads `staged: true` (or a legacy `false` against a
-   * complete tree) is corrected and persisted here — the UI's Retry/recover
-   * decision must never be based on a stale flag.
+   * its tree on disk at read time. When the staged tree is ready, a prepared
+   * record's target is aligned with the version actually staged on disk. When
+   * the staged tree is gone (archived by rollback or consumed by apply),
+   * `staged` is set to false.
    */
   private stagedTruth(record: UpdateRunRecord): UpdateRunRecord {
     const staged = stagedApplyReady(this.prefix)
-    if (record.staged === staged) return record
-    const next = { ...record, staged }
+    if (!staged) {
+      if (!record.staged) return record
+      const next = { ...record, staged: false }
+      this.persist(next)
+      return next
+    }
+    const stagedRecord = readStagedApply(this.prefix)
+    const target = stagedRecord?.version ?? record.target
+    const channel = stagedRecord?.channel ?? record.channel
+    if (isPreparedPhase(record.phase)) {
+      if (record.staged && record.target === target) return record
+      const next = { ...record, staged: true, target, channel }
+      this.persist(next)
+      return next
+    }
+    if (record.staged) return record
+    const next = { ...record, staged: true }
     this.persist(next)
     return next
   }
@@ -453,13 +467,16 @@ export class UpdateRunController {
         `updateCheck.start: no update is available (state=${status.state})`,
       )
     }
+    const pin = { target: status.latest.version, channel: status.current.channel }
     const current = this.run()
     if (current !== null && current.result === null) {
       if (isPreparedPhase(current.phase)) {
-        throw new RunRefusedError(
-          'already-prepared',
-          `updateCheck.start: update ${current.target} is already prepared; apply it instead`,
-        )
+        if (current.target === pin.target) {
+          throw new RunRefusedError(
+            'already-prepared',
+            `updateCheck.start: update ${current.target} is already prepared; apply it instead`,
+          )
+        }
       }
       // Strong liveness or the engine's own live run; a stale record was
       // already healed by run(), so this only refuses for something real. A
@@ -473,17 +490,18 @@ export class UpdateRunController {
         )
       }
     }
-    const pin = { target: status.latest.version, channel: status.current.channel }
     const capability = await this.probe()
     // The probe await is a real gap: an engine run started elsewhere (or a
     // settled sibling call) can appear in it, so re-check before begin.
     const afterProbe = this.run()
     if (afterProbe !== null && afterProbe.result === null) {
       if (isPreparedPhase(afterProbe.phase)) {
-        throw new RunRefusedError(
-          'already-prepared',
-          `updateCheck.start: update ${afterProbe.target} is already prepared; apply it instead`,
-        )
+        if (afterProbe.target === pin.target) {
+          throw new RunRefusedError(
+            'already-prepared',
+            `updateCheck.start: update ${afterProbe.target} is already prepared; apply it instead`,
+          )
+        }
       }
       if (this.blockingRun(afterProbe)) {
         // Same attach rule as the pre-probe check: the engine started a live
@@ -886,7 +904,10 @@ export class UpdateRunController {
 
     if (!alive && !withinGrace) {
       if (record.mode === 'prepare' && staged) {
-        this.persist(preparedRecord(base, this.now))
+        const stagedRecord = readStagedApply(this.prefix)
+        const target = stagedRecord?.version ?? base.target
+        const channel = stagedRecord?.channel ?? base.channel
+        this.persist({ ...preparedRecord(base, this.now), target, channel })
         this.removeSubmittedJob(base)
         this.stopWatcher()
         return

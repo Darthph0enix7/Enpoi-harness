@@ -69,6 +69,31 @@ function cloneNotes(notes: readonly string[]): string[] {
 }
 
 /**
+ * Collect release notes for all catalog entries strictly newer than
+ * `currentVersion`, preserving newest-first order.
+ *
+ * When `currentVersion` is empty or uncomparable, falls back to the newest
+ * entry's notes.
+ */
+export function collectUpdateNotes(
+  entries: readonly CatalogEntry[],
+  currentVersion: string,
+): string[] {
+  if (entries.length === 0) return []
+  const newest = entries[0]
+  if (newest === undefined) return []
+  if (currentVersion === '') return cloneNotes(newest.notes)
+  const notes: string[] = []
+  for (const entry of entries) {
+    if (compareVersions(currentVersion, entry.version) !== -1) {
+      break
+    }
+    notes.push(...entry.notes)
+  }
+  return notes.length > 0 ? notes : cloneNotes(newest.notes)
+}
+
+/**
  * Owns the status snapshot. `checkNow` is single-flight: concurrent callers
  * (the boot timer and an operator's explicit refresh) share one fetch.
  */
@@ -139,7 +164,7 @@ export class UpdateCheckCore {
             version: newest.version,
             commit: newest.commit,
             releasedAt: newest.releasedAt,
-            notes: cloneNotes(newest.notes),
+            notes: collectUpdateNotes(entries, this.options.identity.version),
           },
           checkedAt,
         }
@@ -163,7 +188,7 @@ export class UpdateCheckCore {
           version: newest.version,
           commit: newest.commit,
           releasedAt: newest.releasedAt,
-          notes: cloneNotes(newest.notes),
+          notes: collectUpdateNotes(entries, this.options.identity.version),
         },
         checkedAt,
       }

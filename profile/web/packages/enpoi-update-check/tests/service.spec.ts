@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { CatalogEntry } from '../src/catalog.js'
-import { jitteredDelay, startUpdateCheckSchedule, UpdateCheckCore } from '../src/service.js'
+import { collectUpdateNotes, jitteredDelay, startUpdateCheckSchedule, UpdateCheckCore } from '../src/service.js'
 
 function entry(version: string, notes: string[] = ['note'], commit = 'def5678'): CatalogEntry {
   return { version, commit, releasedAt: '2026-10-13T12:00:00.000Z', notes }
@@ -312,5 +312,38 @@ describe('startUpdateCheckSchedule', () => {
     expect(jitteredDelay(30_000, 300_000, () => 0.999999)).toBe(329_999)
     expect(jitteredDelay(30_000, 0, () => 0.5)).toBe(30_000)
     expect(jitteredDelay(30_000, -5, () => 0.5)).toBe(30_000)
+  })
+})
+
+describe('collectUpdateNotes', () => {
+  const catalog = [
+    entry('0.1.7-enpoi.2.101', ['fix(session): heal split tool batches']),
+    entry('0.1.7-enpoi.2.100', ['fix(release): truncation', 'fix(subagent): role']),
+    entry('0.1.7-enpoi.2.99', ['fix(ui-update): reload fix']),
+    entry('0.1.7-enpoi.2.98', ['fix(compaction): 60 percent']),
+  ]
+
+  it('aggregates notes from all releases strictly newer than currentVersion', () => {
+    const notes = collectUpdateNotes(catalog, '0.1.7-enpoi.2.99')
+    expect(notes).toEqual([
+      'fix(session): heal split tool batches',
+      'fix(release): truncation',
+      'fix(subagent): role',
+    ])
+  })
+
+  it('falls back to newest notes when already up to date or ahead', () => {
+    const current = collectUpdateNotes(catalog, '0.1.7-enpoi.2.101')
+    expect(current).toEqual(['fix(session): heal split tool batches'])
+    const ahead = collectUpdateNotes(catalog, '0.1.7-enpoi.2.102')
+    expect(ahead).toEqual(['fix(session): heal split tool batches'])
+  })
+
+  it('falls back to newest notes when currentVersion is empty', () => {
+    expect(collectUpdateNotes(catalog, '')).toEqual(['fix(session): heal split tool batches'])
+  })
+
+  it('returns empty array when catalog has no entries', () => {
+    expect(collectUpdateNotes([], '0.1.7-enpoi.2.99')).toEqual([])
   })
 })

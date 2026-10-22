@@ -132,6 +132,7 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
   // record persists — the old unscoped guard hid the pill forever after any
   // successful update.
   const landedOffering = landedRun !== null && latest !== undefined && landedRun.target === latest.version
+  const targetVersion = preparedRun?.target ?? activeRun?.target ?? latest?.version
   const showPill = executing || prepared || (available && !landedOffering)
   const percent = activeRun === null ? 0 : barPercent(activeRun)
   const pillMode = executing ? 'updating' : prepared ? 'prepared' : 'available'
@@ -239,10 +240,10 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
         <div className={css.content}>
           {status !== null && (
             <div className={css.head}>
-              {latest !== undefined && (
+              {targetVersion !== undefined && (
                 <p className={css.versions} data-dsh-update-versions>
-                  {canStart && formatVersion(status.current.version, t) !== latest.version
-                    ? t('dialog.versions', { current: formatVersion(status.current.version, t), latest: latest.version })
+                  {(canStart || prepared) && formatVersion(status.current.version, t) !== targetVersion
+                    ? t('dialog.versions', { current: formatVersion(status.current.version, t), latest: targetVersion })
                     : formatVersion(status.current.version, t)}
                 </p>
               )}
@@ -321,7 +322,7 @@ export function UpdateIndicator({ useUpdate, actions, t }: UpdateIndicatorProps)
               {t('result.success', { version: landedRun.target })}
             </p>
           )}
-          {!executing && !prepared && failedRun === null && latest !== undefined && (
+          {!executing && failedRun === null && latest !== undefined && (
             <section className={css.section}>
               <p className={css.logHead}>{t('dialog.notes')}</p>
               {latest.notes.length > 0 && (
