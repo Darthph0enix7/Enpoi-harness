@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-21T18:26:57.832Z",
+  "generatedAt": "2026-10-22T16:30:18.073Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.101",
+      "commit": "34b9177",
+      "releasedAt": "2026-10-22T15:59:23.000Z",
+      "notes": [
+        "fix(session): heal split tool batches so a poisoned history can send again"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.100",
       "commit": "6c94e94",
@@ -358,14 +366,6 @@
       "notes": [
         "fix(profile): wallpaper off by default; skin-center patch delivery",
         "feat(update): merge-base retention, flags and delivery hardening; docs for the new system"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.59",
-      "commit": "c377833",
-      "releasedAt": "2026-10-11T11:20:06.000Z",
-      "notes": [
-        "feat(update): delta transport and preservation net wired into ds update"
       ]
     }
   ]
