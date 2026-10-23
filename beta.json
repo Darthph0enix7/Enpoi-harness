@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-23T17:10:59.960Z",
+  "generatedAt": "2026-10-23T17:45:56.332Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.105",
+      "commit": "1944e61",
+      "releasedAt": "2026-10-23T17:18:48.000Z",
+      "notes": [
+        "fix(updates): make pinning and recall reach installs the merge cannot touch"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.104",
       "commit": "6dfd8f7",
@@ -363,14 +371,6 @@
       "releasedAt": "2026-10-11T19:43:51.000Z",
       "notes": [
         "feat(update): persistent scan index - steady-state updates hash nothing"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.63",
-      "commit": "c984282",
-      "releasedAt": "2026-10-11T18:49:13.000Z",
-      "notes": [
-        "perf(update): selective merge-base extraction with reuse and ticker"
       ]
     }
   ]
