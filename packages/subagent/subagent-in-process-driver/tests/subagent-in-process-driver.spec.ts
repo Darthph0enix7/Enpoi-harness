@@ -198,6 +198,21 @@ describe('startInProcessRun', () => {
     await run.dispose()
   })
 
+  it('leaves truncation continuation to the driver even when the loop policy is enabled', async () => {
+    // The mounted loop carries its owner default (one continuation). A child
+    // session is `origin: 'subagent'`, so the driver alone continues it.
+    const { ctx, parent, adapter } = await setup([maxTokensResponse('first half'), textResponse('second half')])
+    const run = await startInProcessRun(request(parent), {})
+    const result = await run.result
+    const child = ctx.agents.get(run.id)!
+
+    expect(result.stopReason).toBe('completed')
+    expect(adapter.requests).toHaveLength(2)
+    expect(child.session.snapshotEvents().some(event =>
+      event.type === 'user/message' && event.data.source.kind === 'max-tokens-continuation')).toBe(false)
+    await run.dispose()
+  })
+
   it('stops continuing after the truncation budget and reports the unfinished run', async () => {
     const { parent, adapter } = await setup([
       maxTokensResponse('part one'),

@@ -5,6 +5,7 @@ import { registerCommandConversationNode } from './command.ts'
 import { registerCompactionConversationNode } from './compaction.ts'
 import { registerUnknownConversationFallback } from './fallback.ts'
 import { registerInboxConversationNodes } from './inbox.ts'
+import { registerMaxTokensContinuationConversationNode } from './max-tokens-continuation.ts'
 import { registerMessageConversationNode } from './message.ts'
 import { registerRequestPromptConversationNode } from './request-prompt.ts'
 import { registerRetryConversationNode } from './retry.ts'
@@ -31,6 +32,7 @@ export function registerConversationNodes(ctx: Context): void {
   registerRetryConversationNode(ctx)
   registerTurnErrorConversationNode(ctx)
   registerTurnMaxTokensConversationNode(ctx)
+  registerMaxTokensContinuationConversationNode(ctx)
   registerTurnTailConversationNode(ctx)
   registerUnknownConversationFallback(ctx)
   registerChatConversationView(ctx)

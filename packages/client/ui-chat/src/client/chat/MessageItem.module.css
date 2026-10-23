@@ -307,6 +307,17 @@
   font: var(--dsw-font-markdown-code-block-small);
 }
 
+.continuationRow {
+  padding: 2px 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  line-height: calc(20px + var(--dsh-content-font-delta-secondary, 0px));
+}
+
+.continuationText {
+  font-style: italic;
+}
+
 .maxTokensTitle {
   margin-right: 6px;
   color: var(--dsw-alias-state-warn-primary);

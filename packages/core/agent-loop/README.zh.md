@@ -46,6 +46,7 @@ kind: "package-reference"
 | 字段 | 默认值 | 含义 |
 |---|---|---|
 | `maxParallelToolCalls` | `10` | 每个步骤同时在途的并行安全工具调用数；`1` 为串行 |
+| `maxTokensContinuations` | `1` | 会话主体的一轮以 `max-tokens` 结束后自动续写的轮数上限；`0` 表示关闭 |
 | `agents[].id` | 必填 | 稳定标签；未设置 `sessionId` 时，全新会话会生成 `${id}-session-<uuid>` |
 | `agents[].provider` / `agents[].model` | — | 模型路由；分发前两者都必须存在 |
 | `agents[].reasoningEffort` | — | 非空的初始推理强度；`agent/request` 可以覆盖它 |
@@ -54,7 +55,9 @@ kind: "package-reference"
 | `agents[].sessionId` | — | 确切身份：首次使用创建，重新挂载时恢复已实体化的历史 |
 | `agents[].resumeSessionId` | — | 加载这个持久化会话而不是创建新会话；与 `sessionId` 互斥 |
 
-生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-agent-loop) 列出所有接受的字段。`maxParallelToolCalls` 是在下一个工具组开始时读取的 volatile Config 字段；`agents` 仍是启动配置。
+生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-agent-loop) 列出所有接受的字段。`maxParallelToolCalls` 与 `maxTokensContinuations` 都是 volatile Config 字段，分别在下一个工具组开始和下一轮结束时读取；`agents` 仍是启动配置。
+
+当会话主体的一轮以 `max-tokens` 结束时，循环最多授予 `maxTokensContinuations` 个普通后续轮次，每轮都由一条已记录的 `user/message` 播种，其来源类型为 `max-tokens-continuation`。该提示要求模型从恰好停止的位置继续，不要重复已写内容，也不要重新规划；压缩、预算和审批与普通轮次一样适用于每个后续轮次。只有该预算耗尽后才会显示截断横幅。子智能体会话不适用此策略，因为其驱动或激活管理器负责相同的续写策略。
 
 ### 以编程方式创建或恢复 agent
 
@@ -93,6 +96,10 @@ const handle = await ctx.agents.create({
 `agent/request` 返回后，`ctx.llm.prepareCall()` 会在活跃轮次信号下校验适配器持有的字段，并解析推理强度和输出 token 默认值。循环会在解析、`request/header` 记录与分派期间保留同一个适配器。循环会为首次请求、变化的 envelope（配置或工具——提示词不属于 header）、显式消息序列起点、surface 替换或图片省略决定后的请求及恢复写入完整 header；同一序列内内容未变的步骤、重试与普通后续轮次继承最新 header，历史内追加提示词不是替换，因此紧随其后的请求同样继承 header。在 header 之外，循环还会记录 `request/context`——提供方、模型、`contextWindow` 以及来自 `prepareCall()` 的路由 `systemPromptUpdate` 模式——且仅在其中任何一项与最新快照不同时记录。下一次 waterfall 分发前，循环移除适配器默认字段，使当前路由重新解析它们；显式设置则保留。未处理的路由仍以 `NO_ADAPTER` 失败。
 
 循环在每个派生消息对象首次进入请求时执行深冻结，并且仅在同一 agent 内复用该证明。恢复的消息保留对象身份；构造请求不会冻结包含消息的事件包装对象。每个请求都会冻结本地规范化 header、新消息数组和请求封装，同时保留取消信号的可变性。[请求冻结决策](../../../.agents/notes/implemented/simplification/2026-09-06-agent-request-freeze-evidence.zh.md)解释了所有权与测量依据。
+
+### 请求边界上的工具批次排序
+
+`buildRequest` 在冻结前把派生历史传入 `orderToolBatches`（`src/request-order.ts`）。对于每条携带工具调用的 assistant 消息，它会按调用顺序输出该批次的结果，并把插件在批次打开期间插入的任何消息（例如上下文检查点提交）移到结果之后。该归一化器是纯函数、幂等的，且绝不创造或丢弃消息：不完整的批次会完全保持日志中的原样，因为会话修复路径负责为中断的调用合成结果。持久日志保留其真实顺序；只有线上顺序被归一化。
 
 ### 源码地图
 

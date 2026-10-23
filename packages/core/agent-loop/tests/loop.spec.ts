@@ -8,7 +8,10 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent, type AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 
-import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import AgentLoop, {
+  MAX_TOKENS_CONTINUATION,
+  MAX_TOKENS_CONTINUATION_SOURCE,
+} from '@deepseek-ai/dsh-agent-loop'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { MockAdapter, maxTokensResponse, textResponse, toolCallResponse } from './mock-adapter.ts'
 
@@ -28,7 +31,11 @@ function driverDone(agent: Agent): Promise<void> {
   return (agent as Agent & { done: Promise<void> }).done
 }
 
-async function harness(adapter: MockAdapter, persona = '') {
+async function harness(
+  adapter: MockAdapter,
+  persona = '',
+  config: { maxTokensContinuations?: number } = {},
+) {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
@@ -36,7 +43,8 @@ async function harness(adapter: MockAdapter, persona = '') {
   await ctx.plugin(SystemPrompt, { personaPrefix: persona })
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
-  await ctx.plugin(AgentLoop, { agents: [] })
+  // Continuation policy is exercised explicitly; the owned default is 1.
+  await ctx.plugin(AgentLoop, { agents: [], maxTokensContinuations: 0, ...config })
   ctx.llm.registerAdapter(['mock'], adapter)
   return ctx
 }
@@ -1306,6 +1314,125 @@ describe('agent loop', () => {
     // Assert the durable row, not only the live listener.
     const turnEnd = agent.session.snapshotEvents().findLast(e => e.type === 'turn/end')
     expect(turnEnd!.data.reason).toEqual({ kind: 'max-tokens' })
+  })
+
+  it('continues a truncated owner turn once with a logged continuation seed', async () => {
+    const adapter = new MockAdapter([maxTokensResponse('first half'), textResponse('second half')])
+    const ctx = await harness(adapter, '', { maxTokensContinuations: 1 })
+    const agent = await ctx.agentLoop.create(SessionId('continued-turn'), { provider: 'mock', model: 'mock' })
+
+    const reasons: TurnEndReason[] = []
+    ctx.on('session/event', (_s, event) => { if (event.type === 'turn/end') reasons.push(event.data.reason) })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+
+    expect(adapter.requests).toHaveLength(2)
+    expect(reasons).toEqual([{ kind: 'max-tokens' }, { kind: 'completed' }])
+    const userMessages = agent.session.snapshotEvents().filter(event => event.type === 'user/message')
+    expect(userMessages).toHaveLength(2)
+    expect(userMessages[1]!.data.source).toMatchObject({ kind: MAX_TOKENS_CONTINUATION_SOURCE })
+    expect(userMessages[1]!.data.content).toEqual([{ type: 'text', text: MAX_TOKENS_CONTINUATION }])
+    // The continuation is model-visible through the logged user message, and
+    // the second request derives from it instead of repeating the first prompt.
+    expect(adapter.requests[1]!.messages.slice(1)).toEqual([
+      {
+        id: expect.any(String) as unknown,
+        role: 'user',
+        content: [{ type: 'text', text: 'go' }],
+        source: { kind: 'user' },
+      },
+      {
+        id: expect.any(String) as unknown,
+        role: 'assistant',
+        content: [{ type: 'text', text: 'first half' }],
+        source: { kind: 'model', provider: 'mock', model: 'mock' },
+      },
+      {
+        id: expect.any(String) as unknown,
+        role: 'user',
+        content: [{ type: 'text', text: MAX_TOKENS_CONTINUATION }],
+        source: expect.objectContaining({ kind: MAX_TOKENS_CONTINUATION_SOURCE }) as unknown,
+      },
+    ])
+    expect(agent.inbox.nextTurn).toHaveLength(0)
+    // The seed is spliced before the truncated turn/end, so a UI reading that
+    // ending can tell the turn is being continued rather than exhausted.
+    const events = agent.session.snapshotEvents()
+    const splice = events.find(event => event.type === 'agent/inbox/spliced'
+      && event.data.inserted.some(message => message.source.kind === MAX_TOKENS_CONTINUATION_SOURCE))
+    const firstEnd = events.find(event => event.type === 'turn/end')
+    expect(splice?.seq).toBeLessThan(firstEnd?.seq ?? Number.NEGATIVE_INFINITY)
+  })
+
+  it('stops at the continuation bound and leaves the final truncated ending honest', async () => {
+    const adapter = new MockAdapter([maxTokensResponse('first'), maxTokensResponse('second')])
+    const ctx = await harness(adapter, '', { maxTokensContinuations: 1 })
+    const agent = await ctx.agentLoop.create(SessionId('bounded-continuation'), { provider: 'mock', model: 'mock' })
+
+    const reasons: TurnEndReason[] = []
+    ctx.on('session/event', (_s, event) => { if (event.type === 'turn/end') reasons.push(event.data.reason) })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+
+    // One continuation only: the second truncation is the honest terminal one.
+    expect(adapter.requests).toHaveLength(2)
+    expect(reasons).toEqual([{ kind: 'max-tokens' }, { kind: 'max-tokens' }])
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'user/message')).toHaveLength(2)
+    expect(agent.inbox.nextTurn).toHaveLength(0)
+  })
+
+  it('disables continuation when the configured budget is zero', async () => {
+    const adapter = new MockAdapter([maxTokensResponse('truncated')])
+    const ctx = await harness(adapter, '', { maxTokensContinuations: 0 })
+    const agent = await ctx.agentLoop.create(SessionId('disabled-continuation'), { provider: 'mock', model: 'mock' })
+
+    const reasons: TurnEndReason[] = []
+    ctx.on('session/event', (_s, event) => { if (event.type === 'turn/end') reasons.push(event.data.reason) })
+
+    send(agent, 'go')
+    await waitForIdle(ctx, agent)
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(reasons).toEqual([{ kind: 'max-tokens' }])
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'user/message')).toHaveLength(1)
+  })
+
+  it('does not continue a turn the operator aborted', async () => {
+    const adapter = new MockAdapter(['hang'])
+    const ctx = await harness(adapter, '', { maxTokensContinuations: 1 })
+    const agent = await ctx.agentLoop.create(SessionId('aborted-continuation'), { provider: 'mock', model: 'mock' })
+
+    const reasons: TurnEndReason[] = []
+    ctx.on('session/event', (_s, event) => { if (event.type === 'turn/end') reasons.push(event.data.reason) })
+
+    send(agent, 'go')
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    agent.cancel({ kind: 'user' })
+    await waitForIdle(ctx, agent)
+
+    expect(reasons).toEqual([{ kind: 'aborted', reason: { kind: 'user' } }])
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'user/message')).toHaveLength(1)
+  })
+
+  it('starts a fresh continuation budget for each operator turn', async () => {
+    const adapter = new MockAdapter([
+      maxTokensResponse('one'),
+      textResponse('two'),
+      maxTokensResponse('three'),
+      textResponse('four'),
+    ])
+    const ctx = await harness(adapter, '', { maxTokensContinuations: 1 })
+    const agent = await ctx.agentLoop.create(SessionId('fresh-continuation-budget'), { provider: 'mock', model: 'mock' })
+
+    send(agent, 'first')
+    await waitForIdle(ctx, agent)
+    send(agent, 'second')
+    await waitForIdle(ctx, agent)
+
+    expect(adapter.requests).toHaveLength(4)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'user/message')).toHaveLength(4)
   })
 
   it('a max-tokens step earlier in a turn still surfaces as max-tokens after a later completed step', async () => {

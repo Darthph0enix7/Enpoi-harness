@@ -4,6 +4,7 @@ export type {} from './conversation-nodes/assistant.ts'
 export type {} from './conversation-nodes/command.ts'
 export type {} from './conversation-nodes/compaction.ts'
 export type {} from './conversation-nodes/fallback.ts'
+export type {} from './conversation-nodes/max-tokens-continuation.ts'
 export type {} from './conversation-nodes/message.ts'
 export type {} from './conversation-nodes/request-prompt.ts'
 export type {} from './conversation-nodes/retry.ts'
@@ -17,7 +18,7 @@ export type {
   AssistantBlock, AssistantMessageNode, AssistantProviderMetadataView, AssistantRequestConfig,
   AssistantTiming, ChatLocationNodeIndex, ChatNodeProcessSource, ChatNodeSource, ChatNodeStore,
   ChatSnapshot, ChatTurnNavigationIndex, ChatTurnProcessPresentation,
-  CommandNode, CompactionSummaryNode, ContextMessageNode, ConversationNode,
+  CommandNode, CompactionSummaryNode, ContextMessageNode, ConversationNode, MaxTokensContinuationNode,
   LegacyConversationSlice, ModelRetryNode, PartialAssistant, PreparingToolCall, RunningToolCall, StartedToolCall,
   SteeringMessageNode, ToolCallBlock, ToolResultNode, TurnErrorNode, TurnMaxTokensNode,
   TurnNavigationItem, UnknownSurfaceNode, UserMessageNode,

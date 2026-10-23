@@ -57,6 +57,19 @@ function materializePending(state: PendingState): InboxIdentity[] {
   return pending
 }
 
+/**
+ * Whether one still-pending Inbox message carries the given durable source
+ * kind. A continuation seed is spliced before the truncated `turn/end` it
+ * explains, so a reader at that ending can tell the turn is being continued.
+ * @param state - latest assembled Inbox State, when one is loaded.
+ * @param kind - durable `MessageSource.kind` to look for.
+ * @returns whether a pending message has that source kind.
+ */
+export function hasPendingSource(state: InboxState | undefined, kind: string): boolean {
+  return state !== undefined
+    && materializePending(state.pending).some(message => message.source.kind === kind)
+}
+
 function withoutInserted(
   claimed: ReadonlySet<string>,
   inserted: readonly InboxIdentity[],

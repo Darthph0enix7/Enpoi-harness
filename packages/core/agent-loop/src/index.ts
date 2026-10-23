@@ -33,7 +33,7 @@ import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persis
 import type { SessionHandle, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { ReactLoopAgent } from './agent.ts'
 import { inboxProjectionDefinition } from './inbox.ts'
-import { DEFAULT_MAX_PARALLEL_TOOL_CALLS } from './constants.ts'
+import { DEFAULT_MAX_PARALLEL_TOOL_CALLS, DEFAULT_MAX_TOKENS_CONTINUATIONS } from './constants.ts'
 import type {} from './runtime-context.ts'
 
 /** Fiber states that cannot own or serve a new lifecycle. */
@@ -239,7 +239,17 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-export { DEFAULT_MAX_PARALLEL_TOOL_CALLS }
+export {
+  DEFAULT_MAX_PARALLEL_TOOL_CALLS,
+  DEFAULT_MAX_TOKENS_CONTINUATIONS,
+} from './constants.ts'
+export {
+  MAX_TOKENS_CONTINUATION,
+  MAX_TOKENS_CONTINUATION_SOURCE,
+  MAX_TOKENS_CONTINUATION_SUMMARY,
+  createMaxTokensContinuationMessage,
+} from './max-tokens-continuation.ts'
+export type { MaxTokensContinuationSource } from './max-tokens-continuation.ts'
 
 /**
  * One launcher-selected session identity for a configured agent. `resume`
@@ -295,6 +305,13 @@ export interface Config {
    * omission defaults to {@link DEFAULT_MAX_PARALLEL_TOOL_CALLS}.
    */
   maxParallelToolCalls: Volatile<number>
+  /**
+   * Bounded automatic continuation turns granted to an owner session after a
+   * turn ends `max-tokens`. `0` disables the policy; omission defaults to
+   * {@link DEFAULT_MAX_TOKENS_CONTINUATIONS}. Subagent children never use this
+   * loop-level policy because their own driver continues them.
+   */
+  maxTokensContinuations: Volatile<number>
   /** Agents created or resumed at plugin startup. */
   agents: (AgentOptions & {
     /** Stable config label used in logs and as the fresh combined-id prefix. */
@@ -331,8 +348,14 @@ export class AgentLoop extends Service implements AgentFactory {
   static inject = ['agents', 'sessions', 'llm', 'tools', 'systemPrompt', 'sessionProjections']
 
   /** Runtime schema for declarative agents. */
-  static Config: z<{ agents?: Config['agents']; maxParallelToolCalls?: number }, Config> = z.object({
+  static Config: z<{
+    agents?: Config['agents']
+    maxParallelToolCalls?: number
+    maxTokensContinuations?: number
+  }, Config> = z.object({
     maxParallelToolCalls: z.number().step(1).min(1).default(DEFAULT_MAX_PARALLEL_TOOL_CALLS).volatile(),
+    maxTokensContinuations: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER)
+      .default(DEFAULT_MAX_TOKENS_CONTINUATIONS).volatile(),
     agents: z.array(z.object({
       id: z.string().required(),
       sessionId: z.string().min(1),
@@ -343,7 +366,11 @@ export class AgentLoop extends Service implements AgentFactory {
       cwd: z.string(),
       resumeSessionId: z.string(),
     })).default([]),
-  }) as z<{ agents?: Config['agents']; maxParallelToolCalls?: number }, Config>
+  }) as z<{
+    agents?: Config['agents']
+    maxParallelToolCalls?: number
+    maxTokensContinuations?: number
+  }, Config>
 
   /** Validated configuration owned by the agent-loop service. */
   readonly config: Config
@@ -357,6 +384,7 @@ export class AgentLoop extends Service implements AgentFactory {
     this.config = {
       agents: applyLauncherIdentities(config.agents, ctx.get(CONFIGURED_AGENT_IDENTITIES_KEY)),
       maxParallelToolCalls: config.maxParallelToolCalls,
+      maxTokensContinuations: config.maxTokensContinuations,
     }
     validateConfiguredAgents(this.config.agents)
     // Register only after every config validation above has passed, so a

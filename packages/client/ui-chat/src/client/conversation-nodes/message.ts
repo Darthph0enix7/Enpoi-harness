@@ -6,6 +6,7 @@ import { isAppendSurfaceEvent, isReplacementSurfaceEvent } from '@deepseek-ai/ds
 import type { InboxState } from './inbox.ts'
 import { chatNode } from './common.ts'
 import { contextForm, contextProducer } from './event-projection.ts'
+import { MAX_TOKENS_CONTINUATION_SOURCE } from './max-tokens-continuation.ts'
 
 interface ReferencedUserMessageNode extends UserMessageNode {
   /** Labels cited by the immediately following session-reference context. */
@@ -40,6 +41,13 @@ function isCompactionCheckpoint(event: Parameters<ConversationNodeDefinition['ma
   if (event.type !== 'user/message' || !isReplacementSurfaceEvent(event)) return false
   const source = event.data.source as { kind?: unknown }
   return source.kind === 'compact-checkpoint'
+}
+
+/** Automatic continuation seeds own a quiet inline note, not a context row. */
+function isMaxTokensContinuation(event: Parameters<ConversationNodeDefinition['match']>[0]): boolean {
+  // The host-only source declaration is not mounted by this client.
+  return event.type === 'user/message'
+    && (event.data.source as { kind?: unknown }).kind === MAX_TOKENS_CONTINUATION_SOURCE
 }
 
 /** Context presentation shared by user-role injections and developer messages. */
@@ -77,9 +85,10 @@ export const messageDefinition: ConversationNodeDefinition<MessageNode> = {
       // superseded message is never removed from the transcript by a
       // background rewrite. Compaction never adds or removes a row.
       const visibleReplacement = isReplacementSurfaceEvent(event)
-        && VISIBLE_REPLACEMENT_SOURCES.has(String(event.data.source.kind))
-      return (isAppendSurfaceEvent(event) || visibleReplacement) && !isCompactionCheckpoint(event)
-        ? { id: String(event.data.id), role: 'start' }
+        && VISIBLE_REPLACEMENT_SOURCES.has(event.data.source.kind)
+      return (isAppendSurfaceEvent(event) || visibleReplacement)
+        && !isCompactionCheckpoint(event) && !isMaxTokensContinuation(event)
+        ? { id: event.data.id, role: 'start' }
         : null
     }
     return null

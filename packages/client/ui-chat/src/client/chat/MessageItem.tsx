@@ -510,9 +510,27 @@ export const TurnErrorNodeView = memo(function TurnErrorNodeView({ node, t }: Ch
   return <TurnErrorItem node={node.data} t={t} />
 })
 
+/** Quiet inline note for the seed of an automatic max-tokens continuation. */
+function MaxTokensContinuationItem({ t }: {
+  t: ChatViewSlotProps['t']
+}) {
+  return (
+    <div className={css.continuationRow} role="status">
+      <span className={css.continuationText}>{t('message.maxTokens.continued')}</span>
+    </div>
+  )
+}
+
 /** Max-tokens turn-end notice keyed Chat renderer. */
 export const TurnMaxTokensNodeView = memo(function TurnMaxTokensNodeView({ t }: ChatNodeViewProps<'turn-max-tokens'>) {
   return <TurnMaxTokensItem t={t} />
+})
+
+/** Automatic continuation seed keyed Chat renderer. */
+export const MaxTokensContinuationNodeView = memo(function MaxTokensContinuationNodeView({
+  t,
+}: ChatNodeViewProps<'max-tokens-continuation'>) {
+  return <MaxTokensContinuationItem t={t} />
 })
 
 /** Explicit unknown-surface keyed Chat renderer. */

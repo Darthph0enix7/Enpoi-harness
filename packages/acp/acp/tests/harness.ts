@@ -234,7 +234,9 @@ export async function makeBridgeHarness(options: {
   await ctx.plugin(JsonlSessionPersistence, { root: persistenceRoot, compression: 'none' })
   await ctx.plugin(TokenMeter)
   if (options.attachments !== false) await ctx.plugin(MemoryAttachmentStore)
-  const loopFiber = await ctx.plugin(AgentLoop, { agents: [] })
+  // These bridge tests pin single-turn wire behavior; continuation is covered
+  // by the loop's own suite.
+  const loopFiber = await ctx.plugin(AgentLoop, { agents: [], maxTokensContinuations: 0 })
   const primaryAdapter = ctx.llm.registerAdapter(['mock'], adapter)
 
   const agentToClient = new TransformStream<Uint8Array, Uint8Array>()

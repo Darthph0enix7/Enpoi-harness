@@ -45,6 +45,7 @@ import { AssistantStreamAttempt } from './assistant-stream.ts'
 import { SystemPromptProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
 import { orderToolBatches } from './request-order.ts'
+import { MAX_TOKENS_CONTINUATION_SOURCE, createMaxTokensContinuationMessage } from './max-tokens-continuation.ts'
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -200,6 +201,19 @@ export class ReactLoopAgent implements Agent {
     iteration?: AgentIterationIntent
   }>()
 
+  /**
+   * Continuation turns already granted to the current owner-task chain. A
+   * turn seeded by a max-tokens continuation keeps the chain; any other turn
+   * resets it, so the budget is per owner turn rather than per session.
+   */
+  private continuationChain = 0
+  /**
+   * Whether the current turn belongs to an interactive owner task: it was
+   * seeded by operator input or by one of this policy's own continuations.
+   * Goal rounds, scheduled deliveries, and other autonomous seeds are not
+   * continued here even though they run through the same loop.
+   */
+  private continuationEligible = false
   /** Whether this loop instance has appended its initial/resume request anchor. */
   private requestHeaderLogged = false
   /** Surface generation at attachment or the preceding built request. */
@@ -379,6 +393,12 @@ export class ReactLoopAgent implements Agent {
     if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": pre-step outside running phase`)
     const signal = this.phase.abort.signal
     const claimed = this.inbox.claim(target, position.turn)
+    if (position.step === 1) {
+      const continuationSeeded = claimed.some(message => message.source.kind === MAX_TOKENS_CONTINUATION_SOURCE)
+      this.continuationEligible = continuationSeeded
+        || claimed.some(message => message.source.kind === 'user')
+      if (!continuationSeeded) this.continuationChain = 0
+    }
     const assembly = await this.loopCtx.systemPrompt.assemble(assembleContextFor(this, signal))
     signal.throwIfAborted()
     const sections = renderContextSections(assembly)
@@ -454,7 +474,10 @@ export class ReactLoopAgent implements Agent {
           await this.dispatch.serial('agent/turn-stopping', { turn, signal })
           signal.throwIfAborted()
         }
-        if (turnEnds && this.inbox.nextStep.length === 0) break
+        if (turnEnds && this.inbox.nextStep.length === 0) {
+          this.continueTruncatedTurn(turnEnds)
+          break
+        }
         target = 'next-step'
       }
     } catch (error: unknown) {
@@ -488,6 +511,43 @@ export class ReactLoopAgent implements Agent {
     phase.wakeRequested = false
     phase.step = 0
     return true
+  }
+
+  /**
+   * Grant one bounded continuation after a turn stopped at the output cap.
+   * The seed is queued before `turn/end` is recorded, so the log states the
+   * intent before the ending it explains and the next ordinary turn admits the
+   * model-visible `user/message`. Owner work already queued wins instead; a
+   * subagent child is left to the driver that owns its truncation policy.
+   * @param turnEnds - this turn's settled outcome.
+   */
+  private continueTruncatedTurn(turnEnds: TurnEndReason): void {
+    if (turnEnds.kind !== 'max-tokens') {
+      this.continuationChain = 0
+      return
+    }
+    const budget = this.loopCtx.agentLoop.config.maxTokensContinuations.get()
+    if (!this.continuationEligible
+      || this.session.header.origin === 'subagent'
+      || budget <= 0
+      || this.continuationChain >= budget
+      || this.inbox.nextTurn.length > 0
+      || this.inbox.nextStep.length > 0) {
+      this.continuationChain = 0
+      return
+    }
+    try {
+      this.followup(createMaxTokensContinuationMessage())
+    } catch (error: unknown) {
+      // A rejected queue write must not rewrite the turn outcome: the turn
+      // still ended at the output cap and the operator sees its honest banner.
+      this.ctx.logger.warn(
+        `agent "${this.id}" max-tokens continuation was not accepted: ${errorChain(error)}`,
+      )
+      this.continuationChain = 0
+      return
+    }
+    this.continuationChain += 1
   }
 
   private async step(decision: Extract<PreparedStep, { kind: 'enter' }>): Promise<StepEndReason | null> {

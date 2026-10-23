@@ -3,6 +3,8 @@ import type {
   ConversationMatch, ConversationNodeContext, ConversationNodeDefinition, TurnMaxTokensNode,
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { CHAT_SYNTHETIC_SEQ_OFFSETS, chatNode } from './common.ts'
+import { hasPendingSource, type InboxState } from './inbox.ts'
+import { MAX_TOKENS_CONTINUATION_SOURCE } from './max-tokens-continuation.ts'
 
 declare module '../contract/chat-nodes.ts' {
   interface ChatNodeDataMap {
@@ -15,6 +17,8 @@ interface TurnMaxTokensState {
   readonly turn: number
   readonly seq: number
   readonly time: number
+  /** A logged continuation seed already owns the next turn. */
+  readonly continued: boolean
 }
 
 function lastStep(context: ConversationNodeContext<TurnMaxTokensState>): number {
@@ -40,7 +44,12 @@ function noticeAnchor(context: ConversationNodeContext<TurnMaxTokensState>, seq:
 
 function stateFrom(match: ConversationMatch): TurnMaxTokensState | undefined {
   if (match.event.type !== 'turn/end' || match.event.data.reason.kind !== 'max-tokens') return undefined
-  return { turn: match.event.data.turn, seq: match.event.seq, time: match.event.time }
+  return {
+    turn: match.event.data.turn,
+    seq: match.event.seq,
+    time: match.event.time,
+    continued: false,
+  }
 }
 
 /** Notice Definition for a turn the provider ended at its output-token cap. */
@@ -53,10 +62,18 @@ export const turnMaxTokensDefinition: ConversationNodeDefinition<TurnMaxTokensSt
     }
     return null
   },
-  start: (_context, match) => {
+  start: (_context, match, reader) => {
     const state = stateFrom(match)
     if (state === undefined) throw new Error('turn-max-tokens start requires a max-tokens turn/end')
-    return state
+    // The loop splices the continuation seed before recording this ending, so
+    // the banner belongs only to a genuinely exhausted turn.
+    return {
+      ...state,
+      continued: hasPendingSource(
+        reader.previous<InboxState>('inbox-next-turn')?.state,
+        MAX_TOKENS_CONTINUATION_SOURCE,
+      ),
+    }
   },
   update: context => context.state,
   buildViewNode: (context) => {
@@ -69,7 +86,9 @@ export const turnMaxTokensDefinition: ConversationNodeDefinition<TurnMaxTokensSt
       turn: state.turn,
       step: lastStep(context),
     }
-    return chatNode(context, 'turn-max-tokens', noticeAnchor(context, state.seq), node)
+    return chatNode(context, 'turn-max-tokens', noticeAnchor(context, state.seq), node, {
+      visibility: state.continued ? 'hidden' : 'visible',
+    })
   },
 }
 

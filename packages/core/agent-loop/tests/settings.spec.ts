@@ -35,3 +35,15 @@ it('updates future scheduler budgets while preserving composed agents and the ru
   await expect(live.update({ maxParallelToolCalls: 0 })).rejects.toThrow()
   expect(ctx.agentLoop.config.maxParallelToolCalls.get()).toBe(1)
 })
+
+it('defaults and validates the max-tokens continuation budget', async () => {
+  const { ctx, live } = await boot()
+  expect(ctx.agentLoop.config.maxTokensContinuations.get()).toBe(1)
+  await live.update({ maxTokensContinuations: 3 })
+  expect(ctx.agentLoop.config.maxTokensContinuations.get()).toBe(3)
+  await live.update({ maxTokensContinuations: 0 })
+  expect(ctx.agentLoop.config.maxTokensContinuations.get()).toBe(0)
+  await expect(live.update({ maxTokensContinuations: -1 })).rejects.toThrow()
+  await expect(live.update({ maxTokensContinuations: 1.5 })).rejects.toThrow()
+  expect(ctx.agentLoop.config.maxTokensContinuations.get()).toBe(0)
+})

@@ -46,6 +46,7 @@ Agents declared in the config start automatically when the plugin loads. Each en
 | Field | Default | Meaning |
 |---|---|---|
 | `maxParallelToolCalls` | `10` | Parallel-safe tool calls in flight per step; `1` is serial |
+| `maxTokensContinuations` | `1` | Automatic continuation turns after an owner turn ends `max-tokens`; `0` disables them |
 | `agents[].id` | required | Stable label; a fresh session mints `${id}-session-<uuid>` unless `sessionId` is set |
 | `agents[].provider` / `agents[].model` | — | Model route; both required before dispatch |
 | `agents[].reasoningEffort` | — | Non-empty initial reasoning effort; `agent/request` may override it |
@@ -54,7 +55,9 @@ Agents declared in the config start automatically when the plugin loads. Each en
 | `agents[].sessionId` | — | Exact identity: first use creates, a remount resumes materialized history |
 | `agents[].resumeSessionId` | — | Load this persisted session instead of creating one; mutually exclusive with `sessionId` |
 
-The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-agent-loop) lists every accepted field. `maxParallelToolCalls` is a volatile Config field sampled for the next tool group; `agents` remains startup configuration.
+The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-agent-loop) lists every accepted field. `maxParallelToolCalls` and `maxTokensContinuations` are volatile Config fields sampled for the next tool group and the next turn ending, respectively; `agents` remains startup configuration.
+
+When an owner turn ends `max-tokens`, the loop grants up to `maxTokensContinuations` ordinary follow-up turns, each seeded by a logged `user/message` whose source kind is `max-tokens-continuation`. The seed tells the model to continue exactly where it stopped without repeating or re-planning; compaction, budgets, and approvals apply to each follow-up like any other turn. The truncation banner appears only when that budget is exhausted. Subagent children are excluded because their driver or activation manager owns the same continuation policy.
 
 ### Create or resume agents programmatically
 

@@ -159,6 +159,19 @@ export interface TurnMaxTokensNode {
   step: number
 }
 
+/** Quiet inline note for the durable seed of an automatic max-tokens continuation. */
+export interface MaxTokensContinuationNode {
+  kind: 'max-tokens-continuation'
+  /** Seq of the seeding `user/message` event. */
+  seq: number
+  /** Unix epoch ms from the seeding `user/message` event. */
+  time: number
+  turn: number
+  step: number
+  /** Stable identity of the seeding user message. */
+  messageId: MessageId
+}
+
 /** A tool result paired (when in-window) with its call head. */
 export interface ToolResultNode {
   kind: 'tool-result'
@@ -260,6 +273,7 @@ export type ConversationNode =
   | ModelRetryNode
   | TurnErrorNode
   | TurnMaxTokensNode
+  | MaxTokensContinuationNode
   | ToolResultNode
   | CommandNode
   | CompactionSummaryNode

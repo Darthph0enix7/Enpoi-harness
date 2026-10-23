@@ -176,7 +176,7 @@ description: "Chat 过程分组与活动摘要的明细业务规则。"
 |---|---|
 | 非空白 Assistant 推理 | 将该 Assistant 的一个 `reasoning` 引用加入当前组，必要时创建组。 |
 | Assistant 回复 | 结束前面的组，输出独立的 `response` 引用。同一 Node 含有推理时，先将推理加入组，再结束该组。 |
-| `user`、`steering`、`turn-trigger`、`model-retry`、`turn-error`、`turn-max-tokens`、`turn-tail` | 结束前面的组，Node 作为独立根引用保留。 |
+| `user`、`steering`、`turn-trigger`、`max-tokens-continuation`、`model-retry`、`turn-error`、`turn-max-tokens`、`turn-tail` | 结束前面的组，Node 作为独立根引用保留。 |
 | `turn-process` | 控件作为独立根引用保留，不结束当前组。 |
 | 轮次内其他可见 Node，包括工具 | 将整个 Node 加入当前组，必要时创建组。 |
 | 另一轮次或没有轮次归属的 Node | 截断同轮次序列。无轮次 Node 保持独立，Assistant 也不拆分。 |

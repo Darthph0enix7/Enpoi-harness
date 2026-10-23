@@ -28,6 +28,7 @@ import { requestPromptDefinition, systemMessageDefinition } from '../src/client/
 import { retryDefinition } from '../src/client/conversation-nodes/retry.ts'
 import { toolDefinition } from '../src/client/conversation-nodes/tool.ts'
 import { turnErrorDefinition } from '../src/client/conversation-nodes/turn-error.ts'
+import { maxTokensContinuationDefinition } from '../src/client/conversation-nodes/max-tokens-continuation.ts'
 import { turnMaxTokensDefinition } from '../src/client/conversation-nodes/turn-max-tokens.ts'
 import { turnTailDefinition } from '../src/client/conversation-nodes/turn-tail.ts'
 import { turnProcessDefinition } from '../src/client/conversation-nodes/turn-process.ts'
@@ -50,6 +51,7 @@ const DEFINITIONS: readonly ConversationNodeDefinition[] = [
   retryDefinition,
   turnErrorDefinition,
   turnMaxTokensDefinition,
+  maxTokensContinuationDefinition,
   turnTailDefinition,
 ]
 
@@ -2698,6 +2700,7 @@ describe('built-in conversation node Definitions', () => {
     ])
     const notice = node(snapshot(value), 'turn-max-tokens')
     expect(notice?.data).toMatchObject({ kind: 'turn-max-tokens', seq: 5, turn: 1, step: 1 })
+    expect(notice?.visibility).toBe('visible')
     expect(node(snapshot(value), 'turn-error')).toBeUndefined()
     // The tail stays the turn's last node so its branch action survives; the
     // notice slots between the truncated closing Assistant and the tail.
@@ -2720,6 +2723,60 @@ describe('built-in conversation node Definitions', () => {
     ])
     expect(node(snapshot(failed), 'turn-max-tokens')).toBeUndefined()
     expect(node(snapshot(failed), 'turn-error')).toBeDefined()
+  })
+
+  it('renders a continuation seed as a quiet note and never as user input', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'assistant/message', {
+        turn: 1, step: 1, message: assistantMessage('a1', 'truncated answer'),
+      }, { surfaceOp: 'append' }),
+      at(4, 'step/end', { turn: 1, step: 1 }),
+      at(5, 'turn/end', { turn: 1, reason: { kind: 'max-tokens' } }),
+      at(6, 'turn/start', { turn: 2 }),
+      at(7, 'step/start', { turn: 2, step: 1 }),
+      at(8, 'user/message', {
+        id: 'continuation-1',
+        role: 'user',
+        content: [{ type: 'text', text: 'continue from where you stopped' }],
+        source: { kind: 'max-tokens-continuation', form: 'notice', summary: 'continuing' },
+      }, { surfaceOp: 'append' }),
+      at(9, 'step/end', { turn: 2, step: 1 }),
+      at(10, 'turn/end', { turn: 2, reason: { kind: 'completed' } }),
+    ])
+    const current = snapshot(value)
+    const continuation = node(current, 'max-tokens-continuation')
+    expect(continuation?.data).toMatchObject({
+      kind: 'max-tokens-continuation', seq: 8, turn: 2, step: 1, messageId: 'continuation-1',
+    })
+    expect(node(current, 'user')).toBeUndefined()
+    expect(node(current, 'context')).toBeUndefined()
+  })
+
+  it('hides the max-tokens banner while a logged continuation seed owns the next turn', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'assistant/message', {
+        turn: 1, step: 1, message: assistantMessage('a1', 'truncated answer'),
+      }, { surfaceOp: 'append' }),
+      at(4, 'step/end', { turn: 1, step: 1 }),
+      at(5, 'agent/inbox/spliced', {
+        target: 'next-turn',
+        start: 0,
+        inserted: [{ id: 'continuation-1', source: { kind: 'max-tokens-continuation' } }],
+      }),
+      at(6, 'turn/end', { turn: 1, reason: { kind: 'max-tokens' } }),
+    ])
+    const current = snapshot(value)
+    expect(node(current, 'turn-max-tokens')?.visibility).toBe('hidden')
+    // The honest banner is for the exhausted state only.
+    const exhausted = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'turn/end', { turn: 1, reason: { kind: 'max-tokens' } }),
+    ])
+    expect(node(snapshot(exhausted), 'turn-max-tokens')?.visibility).toBe('visible')
   })
 
   it('keeps the max-tokens notice when the window starts after the owning turn/start', () => {
