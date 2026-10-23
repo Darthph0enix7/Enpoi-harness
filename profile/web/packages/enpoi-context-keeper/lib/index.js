@@ -44,7 +44,7 @@ var __callDispose = (stack, error, hasError) => {
   return next();
 };
 
-// packages/enpoi-context-keeper/src/index.ts
+// src/index.ts
 import { SessionLogOffset } from "@deepseek-ai/dsh-session";
 import { BlockAssembler, createUserMessage, isContextWindowExceededError } from "@deepseek-ai/dsh-llm";
 import { deadline } from "@deepseek-ai/dsh-timeout";

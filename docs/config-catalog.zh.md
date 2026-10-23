@@ -458,7 +458,7 @@ export type Config = LocalConfig
 ## `@deepseek-ai/dsh-client-connection`
 
 - `inject`: `credentials`
-- `source`: [`packages/client/connection/src/index.ts:92`](../packages/client/connection/src/index.ts)
+- `source`: [`packages/client/connection/src/index.ts:99`](../packages/client/connection/src/index.ts)
 
 ```ts config-catalog
 /** Browser authentication, request limits, and connection recovery configuration. */
@@ -695,6 +695,16 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
   modelPolicies?: ModelCompactPolicyConfig[]
   /** Enable automatic step-boundary pressure and overflow-recovery listeners. Defaults to `true`. */
   auto?: boolean
+  /** Text block appended after `</compacted-summary>` when every `recallFooterTools` entry resolves; empty disables it. */
+  recallFooter?: string
+  /** Tool names that must all resolve in the compacting agent's scope for `recallFooter` to be appended. */
+  recallFooterTools?: string[]
+  /** Leading `user/message` surface nodes kept verbatim after the system head. Non-negative; defaults to `0`. */
+  pinLeadingUserMessages?: number
+  /** Per-message price ceiling for a pinned leading message; the first failure stops the pin run. Defaults to `4000`. */
+  pinLeadingMaxTokens?: number
+  /** Where pinning applies: child sessions only (default) or every session. */
+  pinScope?: 'child' | 'all'
 }
 
 /** Policy fields shared by the default policy and exact model overrides. */
@@ -1204,6 +1214,52 @@ export interface Config {
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-experimental-tool-agent-team -->
 
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-feedback-submit -->
+<a id="deepseek-aidsh-feedback-submit"></a>
+
+## `@deepseek-ai/dsh-feedback-submit`
+
+- `source`: [`packages/feedback/feedback-submit/src/index.ts:22`](../packages/feedback/feedback-submit/src/index.ts)
+
+```ts config-catalog
+/** Validated deployment choices for the submit client. */
+export interface Config {
+  /** Whether submission runs at all; the local record always happens. */
+  enabled?: boolean
+  /** Endpoint the payload is posted to. */
+  endpoint?: string
+  /** Deadline for one attempt, in milliseconds. */
+  timeoutMs?: number
+  /** Delay before the single retry, in milliseconds. */
+  retryDelayMs?: number
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-feedback-submit -->
+
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-feedback-triage -->
+<a id="deepseek-aidsh-feedback-triage"></a>
+
+## `@deepseek-ai/dsh-feedback-triage`
+
+- `source`: [`packages/feedback/feedback-triage/src/index.ts:295`](../packages/feedback/feedback-triage/src/index.ts)
+
+```ts config-catalog
+/** Validated deployment choices for the triage session. */
+export interface Config {
+  /** Provider route the triage agent runs on. */
+  provider?: string
+  /** Model id on that route. */
+  model?: string
+  /** Agent preset mounted for the triage session. */
+  preset?: string
+  /** Permission preset enforced for the triage session. */
+  permissionPreset?: string
+  /** Hard bound on one triage run, in minutes. */
+  timeoutMinutes?: number
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-feedback-triage -->
+
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-file-reference-local -->
 <a id="deepseek-aidsh-file-reference-local"></a>
 
@@ -1410,6 +1466,35 @@ export interface Config {
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-host-directory-picker-browse -->
 
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-host-enpoi-terminal -->
+<a id="deepseek-aidsh-host-enpoi-terminal"></a>
+
+## `@deepseek-ai/dsh-host-enpoi-terminal`
+
+- `inject`: `webServer` · `connection`
+- `source`: [`packages/host/enpoi-terminal/src/index.ts:62`](../packages/host/enpoi-terminal/src/index.ts)
+
+```ts config-catalog
+/**
+ * Plugin configuration: the deployment-varying terminal tunables. Wire
+ * constants stay frozen and are deliberately not configurable:
+ * `MAX_BODY_BYTES` bounds every API request body and
+ * `TERMINAL_WS_UNKNOWN_KEY` (4404) is the socket close code the browser
+ * branches on, so both are protocol surface.
+ */
+export interface Config {
+  /** Concurrent terminals allowed per conversation (default 8). */
+  maxPerSession: number
+  /** How long a process outlives its last attached socket (default 90,000 ms). */
+  disconnectGraceMs: number
+  /** Replay transcript bound per terminal in bytes (default 512 KiB; the head is dropped). */
+  transcriptLimitBytes: number
+  /** Login shell; defaults to `$SHELL`, then `/bin/bash` (`powershell.exe` on Windows). */
+  shell: string
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-host-enpoi-terminal -->
+
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-host-first-run -->
 <a id="deepseek-aidsh-host-first-run"></a>
 
@@ -1417,7 +1502,7 @@ export interface Config {
 
 - `inject`: `settings`
 - `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/host/first-run/src/index.ts:30`](../packages/host/first-run/src/index.ts)
+- `source`: [`packages/host/first-run/src/index.ts:41`](../packages/host/first-run/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: the seeded route, and the marker read back on later boots. */
@@ -1428,6 +1513,16 @@ export interface Config {
   provider: string
   /** Model the route serves and the session default points at. */
   model: string
+  /** Display name written into the route profile. */
+  displayName: string
+  /** llm-pi-ai wire protocol the route profile declares. */
+  api: string
+  /** Gateway endpoint the route profile names. */
+  baseURL: string
+  /** Credential reference the route profile names. */
+  apiKeyEnv: string
+  /** Whether the route accepts keyless requests. */
+  keyless: boolean
   /** Marker; any stored value means the seed already ran. */
   seedVersion: Volatile<string | undefined>
 }
@@ -1524,7 +1619,7 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-host-webserver`
 
-- `source`: [`packages/host/webserver/src/index.ts:59`](../packages/host/webserver/src/index.ts)
+- `source`: [`packages/host/webserver/src/index.ts:60`](../packages/host/webserver/src/index.ts)
 
 ```ts config-catalog
 /** Web server listen and response-compression config. */
@@ -1641,7 +1736,7 @@ export interface Config extends ProtocolConfig {
 
 - `inject`: `llm`
 - `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · [`ModelModality`](../packages/llm/llm/src/index.ts) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:273`](../packages/llm/llm-pi-ai/src/config.ts)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:284`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -1652,6 +1747,10 @@ export interface Config {
    * and registers them the moment a settings section supplies profiles.
    */
   providers: Volatile<Record<string, PiAiProviderProfile>>
+  /** Wall-clock budget for one model-listing interrogation (default 15,000 ms). */
+  modelDiscoveryTimeoutMs: number
+  /** Largest model-listing reply accepted, in bytes (default 4 MiB). */
+  modelDiscoveryMaxResponseBytes: number
 }
 
 /** Configuration for one pi-ai provider route; the `providers` dict key IS the route. */
@@ -3188,7 +3287,7 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 ## `@deepseek-ai/dsh-subagent`
 
 - `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/subagent/subagent/src/index.ts:193`](../packages/subagent/subagent/src/index.ts)
+- `source`: [`packages/subagent/subagent/src/index.ts:194`](../packages/subagent/subagent/src/index.ts)
 
 ```ts config-catalog
 /** Host configuration for continuable subagent capacity. */
@@ -3421,7 +3520,7 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-system-prompt`
 
-- `source`: [`packages/core/system-prompt/src/index.ts:247`](../packages/core/system-prompt/src/index.ts)
+- `source`: [`packages/core/system-prompt/src/index.ts:261`](../packages/core/system-prompt/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: the deployment-authored fragment of the system prompt (see {@link Config.personaPrefix} for its contract). */
@@ -4646,6 +4745,7 @@ export interface Config {
 | `@deepseek-ai/dsh-client-ui-subagent` | — | [`packages/client/ui-subagent/src/index.ts`](../packages/client/ui-subagent/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-tool` | — | [`packages/client/ui-tool/src/index.ts`](../packages/client/ui-tool/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-trajectory` | — | [`packages/client/ui-trajectory/src/index.ts`](../packages/client/ui-trajectory/src/index.ts) |
+| `@deepseek-ai/dsh-client-ui-update` | — | [`packages/client/ui-update/src/index.ts`](../packages/client/ui-update/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-user-questions` | — | [`packages/client/ui-user-questions/src/index.ts`](../packages/client/ui-user-questions/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-workflow-run` | — | [`packages/client/ui-workflow-run/src/index.ts`](../packages/client/ui-workflow-run/src/index.ts) |
 | `@deepseek-ai/dsh-client-ui-workspace` | — | [`packages/client/ui-workspace/src/index.ts`](../packages/client/ui-workspace/src/index.ts) |
@@ -4662,12 +4762,12 @@ export interface Config {
 | `@deepseek-ai/dsh-experimental-client-ui-agent-team` | — | [`packages/experimental/client-ui-agent-team/src/index.ts`](../packages/experimental/client-ui-agent-team/src/index.ts) |
 | `@deepseek-ai/dsh-experimental-client-ui-voice-input` | — | [`packages/experimental/client-ui-voice-input/src/index.ts`](../packages/experimental/client-ui-voice-input/src/index.ts) |
 | `@deepseek-ai/dsh-experimental-computer-use-cua-driver-native` | `computerUse` · `tools` · `systemPrompt` | [`packages/experimental/computer-use-cua-driver-native/src/index.ts`](../packages/experimental/computer-use-cua-driver-native/src/index.ts) |
+| `@deepseek-ai/dsh-feedback-collect` | — | [`packages/feedback/feedback-collect/src/index.ts`](../packages/feedback/feedback-collect/src/index.ts) |
 | `@deepseek-ai/dsh-fs-observation-policy` | — | [`packages/fs/fs-observation-policy/src/index.ts`](../packages/fs/fs-observation-policy/src/index.ts) |
 | `@deepseek-ai/dsh-fs-ssh` | `ssh` · `sandboxPolicy` | [`packages/ssh/fs-ssh/src/index.ts`](../packages/ssh/fs-ssh/src/index.ts) |
 | `@deepseek-ai/dsh-goal-round-driver` | `agents` · `goals` · `sessions` | [`packages/goal/goal-round-driver/src/index.ts`](../packages/goal/goal-round-driver/src/index.ts) |
 | `@deepseek-ai/dsh-host-directory-picker-auto` | `webServer` · `loader` | [`packages/host/directory-picker-auto/src/index.ts`](../packages/host/directory-picker-auto/src/index.ts) |
 | `@deepseek-ai/dsh-host-directory-picker-native` | — | [`packages/host/directory-picker-native/src/index.ts`](../packages/host/directory-picker-native/src/index.ts) |
-| `@deepseek-ai/dsh-host-enpoi-terminal` | `webServer` · `connection` | [`packages/host/enpoi-terminal/src/index.ts`](../packages/host/enpoi-terminal/src/index.ts) |
 | `@deepseek-ai/dsh-host-plugin-inventory` | `loader` | [`packages/host/plugin-inventory/src/index.ts`](../packages/host/plugin-inventory/src/index.ts) |
 | `@deepseek-ai/dsh-llm` | — | [`packages/llm/llm/src/index.ts`](../packages/llm/llm/src/index.ts) |
 | `@deepseek-ai/dsh-lsp` | — | [`packages/lsp/lsp/src/index.ts`](../packages/lsp/lsp/src/index.ts) |
@@ -4750,6 +4850,7 @@ export interface Config {
 | `@deepseek-ai/dsh-fake-openai` | — | [`packages/support/fake-openai/src/index.ts`](../packages/support/fake-openai/src/index.ts) |
 | `@deepseek-ai/dsh-home-paths` | — | [`packages/util/home-paths/src/index.ts`](../packages/util/home-paths/src/index.ts) |
 | `@deepseek-ai/dsh-hook-protocol` | — | [`packages/hooks/hook-protocol/src/index.ts`](../packages/hooks/hook-protocol/src/index.ts) |
+| `@deepseek-ai/dsh-host-update-engine` | — | [`packages/host/update-engine/src/index.ts`](../packages/host/update-engine/src/index.ts) |
 | `@deepseek-ai/dsh-http-proxy` | — | [`packages/util/http-proxy/src/index.ts`](../packages/util/http-proxy/src/index.ts) |
 | `@deepseek-ai/dsh-launch-environment` | — | [`packages/util/launch-environment/src/index.ts`](../packages/util/launch-environment/src/index.ts) |
 | `@deepseek-ai/dsh-lazy-require` | — | [`packages/util/lazy-require/src/index.ts`](../packages/util/lazy-require/src/index.ts) |

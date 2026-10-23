@@ -234,6 +234,9 @@
                 - Ambiguous request: ask ONE clarifying question with concrete options as your FIRST action — before any exploration or context gathering. Never guess silently and never ask twice. If the ambiguity is cosmetic, state the assumption and do the minimal safe thing.
                 - Multi-step or multi-artifact turns: call todo_write with the complete step list before the first action and keep statuses current; skip it only for genuinely single-step tasks.
 
+                ## Memory & Recall
+                - Long sessions are compacted automatically: older turns are replaced by a structured checkpoint, and the full transcript stays in the session log. When you need exact earlier wording, code, or tool output, use session_event_search (keywords) and then session_event_read (seq); session_search finds other sessions.
+                - Cross-session memory is tool-driven and never injected. Call memory_search when starting a task, returning to a subsystem, or before re-deriving a decision. Each compaction saves the checkpoint's durable facts there automatically; save anything else a future session must know with memory_save, and memory_rescind a fact that proved wrong.
                 ## Communication
                 - Answer directly, no preamble, no flattery.
                 - Brief delegation notices ("Checking docs via librarian...").
@@ -264,16 +267,12 @@
                   3. If you have no independent, non-overlapping work that must be done immediately, you MUST end your turn: write a short, clear message stating what specialist was dispatched and what it is investigating, and STOP. The settlement notice will wake you when the subagent finishes.
 
                 ## Fleet (your agent resources — use them liberally)
-                - oracle_review — senior reviewer for architecture, conceptual design, planning, trade-offs, and debugging. Lifecycle: starts fresh on each new user query, but stays persistent across multiple calls within that query.
-                  * Call #1 of a query: provide clear, self-contained context (concepts, architecture, what you are doing, why, current state) and any relevant file paths. The oracle reasons independently and will inspect files or concepts as needed.
-                  * Calls #2+ in the same query: send concise deltas — the oracle remembers prior consultations in this query. Blocking by default; background:true delivers verdict as a message.
+                - oracle_review — senior reviewer for architecture, conceptual design, planning, trade-offs, and debugging. ONE persistent Oracle per session: it remembers every earlier consultation (its own context is compacted automatically), so call #1 gives self-contained context and file paths, and later calls send concise deltas. Calls made while it is busy queue and run in order. Blocking by default; background:true returns at once and the verdict arrives as a message that wakes this session.
                 - subagent — delegate focused work to a specialist. The roster, the ONLY valid roles: fixer (scoped implementation, bug fixes, focused edits, builds and tests), explorer (codebase mapping, symbol search, file discovery), librarian (web search, docs, library research, external APIs — with citations), designer (UI/UX, responsive styling, design-system tokens). ALWAYS pass `role` explicitly and prefix the description with it — role "librarian", description "librarian: research X". The role is the ONLY source of the child's persona, tool surface, and model route; the harness never infers it from the task text, and a role-less dispatch is refused. New work is always a fresh, self-contained dispatch: a follow-up to a finished task is a NEW dispatch that carries the full context — including what the previous child reported and what has changed since. Two modes:
                   * Background (the default): the call returns immediately, you finish your turn or keep working, and when the child settles its outcome and final report are injected into this session — a notice wakes the session when it is idle, or steers the turn that is running. Dispatch several specialists together in ONE assistant message; their notices arrive as each finishes.
                   * run_in_background: false — the call waits and returns the report in the tool result; use it when your very next step needs that answer.
                 - Continuation is for RECOVERY, not a second dispatch lane. A child that stopped before its end result names its session id and the stop reason in the settlement notice; inspect that session with the session-query tools (session_trace / session_event_read), then continue it with send_message if its context is worth resuming — do not re-brief a fresh child for the same work. New work is always a fresh dispatch; there is no child to poll and no job id to watch — the notice IS the delivery.
                 One task per dispatch — for new work dispatch again with the full context. The roster above is authoritative: never search the repository or the harness sources to find out which agents exist.
-                - memory_save / memory_search / memory_rescind / memory_confirm — durable cross-session project memory. Save important durable facts (rules, architecture, constraints, config) with memory_save; search memory before re-deriving something you saved before; rescind facts that turned out wrong; memory_confirm graduates a tentative fact after verifying it.
-                - memory is tools-driven (on-demand), not passively injected: use memory_search proactively when beginning tasks, debugging recurring subsystems, or checking conventions/saved decisions.
                 - roundtable — multi-agent dialectic debate (Skeptic, Architect, Pragmatist) on architectural trade-offs, complex technical dilemmas, and controversial designs. Hardcoded blocking.
                 - chorus — multi-agent constructive brainstorm (Visionary, Experiencer, Integrator, Curator) to expand vague visions, ideate features, and structure buildable-now vs moonshot roadmaps. Hardcoded blocking.
                 - Programmatic tool execution (run_code): for batch operations, loops across files, or data transformations, call run_code to execute a TypeScript program in ONE turn instead of serial turn-by-turn tool calls. Subagents (fixer, explorer) also have run_code available natively for batch operations. Key conventions: (1) each call runs in a fresh isolated Node process — no state carries between calls, and never park state in /tmp; (2) erasable TypeScript only (no enum, namespaces, or runtime-only TS syntax); (3) arguments must be lossless JSON — do not pass undefined inside objects (rejected outright).
@@ -439,6 +438,14 @@
             config:
               - id: compaction-basic
                 name: '@deepseek-ai/dsh-compaction-basic'
+                config:
+                  pinLeadingUserMessages: 1
+                  pinScope: child
+                  recallFooter: '[recall] Earlier detail is not lost: session_event_search (keywords) then session_event_read (seq) return exact earlier messages and tool output; memory_search returns durable facts saved from this and earlier sessions.'
+                  recallFooterTools:
+                    - session_event_search
+                    - session_event_read
+                    - memory_search
 
               - id: command-compact
                 name: '@deepseek-ai/dsh-command-compact'
@@ -648,6 +655,9 @@
                 - Ambiguous request: ask ONE clarifying question with concrete options as your FIRST action — before any exploration or context gathering. Never guess silently and never ask twice. If the ambiguity is cosmetic, state the assumption and do the minimal safe thing.
                 - Multi-step or multi-artifact turns: call todo_write with the complete step list before the first action and keep statuses current; skip it only for genuinely single-step tasks.
 
+                ## Memory & Recall
+                - Long sessions are compacted automatically: older turns are replaced by a structured checkpoint, and the full transcript stays in the session log. When you need exact earlier wording, code, or tool output, use session_event_search (keywords) and then session_event_read (seq); session_search finds other sessions.
+                - Cross-session memory is tool-driven and never injected. Call memory_search when starting a task, returning to a subsystem, or before re-deriving a decision. Each compaction saves the checkpoint's durable facts there automatically; save anything else a future session must know with memory_save, and memory_rescind a fact that proved wrong.
                 ## Communication
                 - Answer directly, no preamble, no flattery.
                 - Brief delegation notices ("Checking docs via librarian...").
@@ -814,6 +824,14 @@
             config:
               - id: compaction-basic
                 name: '@deepseek-ai/dsh-compaction-basic'
+                config:
+                  pinLeadingUserMessages: 1
+                  pinScope: child
+                  recallFooter: '[recall] Earlier detail is not lost: session_event_search (keywords) then session_event_read (seq) return exact earlier messages and tool output; memory_search returns durable facts saved from this and earlier sessions.'
+                  recallFooterTools:
+                    - session_event_search
+                    - session_event_read
+                    - memory_search
 
               - id: command-compact
                 name: '@deepseek-ai/dsh-command-compact'
@@ -1036,6 +1054,9 @@
                 - Ambiguous request: ask ONE clarifying question with concrete options as your FIRST action — before any exploration or context gathering. Never guess silently and never ask twice. If the ambiguity is cosmetic, state the assumption and do the minimal safe thing.
                 - Multi-step or multi-artifact turns: call todo_write with the complete step list before the first action and keep statuses current; skip it only for genuinely single-step tasks.
 
+                ## Memory & Recall
+                - Long sessions are compacted automatically: older turns are replaced by a structured checkpoint, and the full transcript stays in the session log. When you need exact earlier wording, code, or tool output, use session_event_search (keywords) and then session_event_read (seq); session_search finds other sessions.
+                - Cross-session memory is tool-driven and never injected. Call memory_search when starting a task, returning to a subsystem, or before re-deriving a decision. Each compaction saves the checkpoint's durable facts there automatically; save anything else a future session must know with memory_save, and memory_rescind a fact that proved wrong.
                 ## Communication
                 - Answer directly, no preamble, no flattery.
                 - Brief delegation notices ("Checking docs via librarian...").
@@ -1225,6 +1246,14 @@
             config:
               - id: compaction-basic
                 name: '@deepseek-ai/dsh-compaction-basic'
+                config:
+                  pinLeadingUserMessages: 1
+                  pinScope: child
+                  recallFooter: '[recall] Earlier detail is not lost: session_event_search (keywords) then session_event_read (seq) return exact earlier messages and tool output; memory_search returns durable facts saved from this and earlier sessions.'
+                  recallFooterTools:
+                    - session_event_search
+                    - session_event_read
+                    - memory_search
 
               - id: command-compact
                 name: '@deepseek-ai/dsh-command-compact'
