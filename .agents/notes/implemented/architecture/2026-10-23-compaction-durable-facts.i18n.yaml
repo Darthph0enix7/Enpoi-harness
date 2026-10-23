@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for 2026-10-23-compaction-durable-facts.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-10-23-compaction-durable-facts.md
+/agent-note-compaction-facts-ride-inside-the-summary-text:
+  en: 9b50b61809fdc8b3
+  zh: aa4b46e103b26b4e
+/agent-note-compaction-facts-ride-inside-the-summary-text/problem:
+  en: be37312055c2fbed
+  zh: e0a2b6a74bcfd8e5
+/agent-note-compaction-facts-ride-inside-the-summary-text/decision:
+  en: 1672f4b6b88f65af
+  zh: a910dc32825f8056
+/agent-note-compaction-facts-ride-inside-the-summary-text/consequences:
+  en: 580541a68d1ac8fb
+  zh: 10e5f751de0f81f4
+/agent-note-compaction-facts-ride-inside-the-summary-text/alternatives-rejected:
+  en: c8b775897c53277d
+  zh: ae203b7ed0d5c5a2
