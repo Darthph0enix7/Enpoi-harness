@@ -281,6 +281,11 @@ export function apply(ctx: Context, config: Config = Config({})): void {
         bindings: [{ code: 'Slash', modifiers: [] }], group: 'input' },
       { id: 'fixed.mention' as ShortcutCommandId, label: () => t('shortcut.mention'), keys: ['@'],
         bindings: [{ code: 'Digit2', modifiers: ['shift'] }], group: 'input' },
+      { id: 'fixed.agent-next' as ShortcutCommandId, label: () => t('shortcut.agentNext'), keys: ['Tab'],
+        bindings: [{ code: 'Tab', modifiers: [] }], group: 'input' },
+      { id: 'fixed.agent-previous' as ShortcutCommandId, label: () => t('shortcut.agentPrevious'),
+        keys: scope.shortcuts.describeBinding({ code: 'Tab', modifiers: ['shift'] }).keys,
+        bindings: [{ code: 'Tab', modifiers: ['shift'] }], group: 'input' },
     ]
     for (const command of fixedInputs) {
       scope.effect(() => scope.shortcuts.registerFixed(command), `ui-conversation: ${command.id}`)
@@ -492,6 +497,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
       const bridge = hostPathBridge()
       return {
         keyboard: shell,
+        cycleAgentPreset: direction => conversation.dispatchComposerTab(sessionId, direction),
         addFiles: (files, directories = new Set()) => {
           if (sessions.binding(sessionId) === undefined) return t('file.sessionUnavailable')
           if (shell.snapshot.phase === 'adjudicating' || shell.snapshot.phase === 'submitting') {

@@ -198,6 +198,15 @@ export class AgentPresetSeatController {
     this.set({ introduce: false })
   }
 
+  /**
+   * Report a refused gesture on this seat (the composer's Tab cue when the
+   * session is running). Cleared by the next pick, stage, or load.
+   * @param message - localized refusal copy.
+   */
+  refuse(message: string): void {
+    this.set({ error: message })
+  }
+
   /** Refresh the session's live preset from the current session summary. */
   refreshSessionPreset(): void {
     const session = this.currentSession()

@@ -141,4 +141,61 @@ describe('keymap keydown routing', () => {
     fireEvent.keyDown(root, { key: 'Tab', keyCode: 9, shiftKey: true })
     expect(arbitrate).toHaveBeenLastCalledWith('tabBack', false)
   })
+
+  it('cycles the agent preset on an unclaimed Tab and leaves composition native', () => {
+    const editor = createEditor({ namespace: 'keymap-tab-cycle', onError: (e) => { throw e } })
+    const root = document.createElement('div')
+    root.contentEditable = 'true'
+    document.body.appendChild(root)
+    onTestFinished(() => { editor.setRootElement(null); root.remove() })
+    editor.setRootElement(root)
+    onTestFinished(registerPlainText(editor))
+    const cyclePreset = vi.fn<(direction: 'next' | 'previous') => boolean>(() => true)
+    onTestFinished(registerComposerKeymap(editor, {
+      arbitrate: () => 'pass',
+      space: () => false,
+      dismissPopup: () => {},
+      canSubmit: () => false,
+      submit: () => {},
+      intakeFiles: () => {},
+      pasteText: () => {},
+      cyclePreset,
+    }))
+
+    const next = fireEvent.keyDown(root, { key: 'Tab', keyCode: 9 })
+    expect(cyclePreset).toHaveBeenLastCalledWith('next')
+    expect(next).toBe(false) // consumed: preventDefault fired
+    const previous = fireEvent.keyDown(root, { key: 'Tab', keyCode: 9, shiftKey: true })
+    expect(cyclePreset).toHaveBeenLastCalledWith('previous')
+    expect(previous).toBe(false)
+
+    // A handler that declines leaves today's focus traversal intact.
+    cyclePreset.mockReturnValue(false)
+    expect(fireEvent.keyDown(root, { key: 'Tab', keyCode: 9 })).toBe(true)
+
+    // IME composition never reaches the preset hand-off.
+    cyclePreset.mockClear()
+    fireEvent.compositionStart(root)
+    expect(fireEvent.keyDown(root, { key: 'Tab', keyCode: 9 })).toBe(true)
+    expect(cyclePreset).not.toHaveBeenCalled()
+  })
+
+  it('keeps an open completion menu before the preset cycle owner', () => {
+    const editor = createEditor({ namespace: 'keymap-tab-menu-first', onError: (e) => { throw e } })
+    const root = document.createElement('div')
+    root.contentEditable = 'true'
+    document.body.appendChild(root)
+    onTestFinished(() => { editor.setRootElement(null); root.remove() })
+    editor.setRootElement(root)
+    onTestFinished(registerPlainText(editor))
+    const arbitrate = vi.fn<(key: string, composing: boolean) => 'consumed' | 'pick-highlighted' | 'pass'>()
+      .mockReturnValue('pick-highlighted')
+    const cyclePreset = vi.fn(() => true)
+    onTestFinished(registerComposerKeymap(editor, {
+      arbitrate, space: () => false, dismissPopup: () => {}, canSubmit: () => false,
+      submit: () => {}, intakeFiles: () => {}, pasteText: () => {}, cyclePreset,
+    }))
+    expect(fireEvent.keyDown(root, { key: 'Tab', keyCode: 9 })).toBe(false)
+    expect(cyclePreset).not.toHaveBeenCalled()
+  })
 })

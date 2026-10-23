@@ -27,6 +27,7 @@ import type {
 import type { QueueAction } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { ComposerBlocks } from './contract/composer-blocks.ts'
+import type { ComposerTabDirection, ComposerTabHandler } from './contract/composer-tab.ts'
 import type {
   DraftAttachmentId, DraftAttachmentSerializationResult, SessionInputResolver, SubmitAttachment, SubmitOutcome,
 } from './contract/input.ts'
@@ -45,6 +46,13 @@ export interface IConversation {
    * cannot import makes a session's input inert with its own reason.
    */
   readonly blocks: ComposerBlocks
+  /**
+   * Claim the composer's unclaimed Tab gesture (agent-preset cycling). One
+   * live handler at a time; registering a second throws.
+   * @param handler - owner of the Tab gesture.
+   * @returns disposer releasing the claim.
+   */
+  registerComposerTab(handler: ComposerTabHandler): () => void
   /**
    * Send a prompt into the caller scope's session (queued turn).
    * @param text - prompt text, sent verbatim as one text block.
@@ -156,6 +164,8 @@ export class ConversationController extends Service implements IConversation {
   readonly input: SessionInputResolver
   /** The per-session composer-block registry. */
   readonly blocks: ComposerBlocks
+  /** The one owner currently claiming unclaimed Tab gestures in the composer. */
+  private composerTab: ComposerTabHandler | undefined
   /** Live upload state per file-kind draft; images never appear here. */
   readonly fileUploads: SnapshotStore<Record<string, DraftFileUpload>> = createSnapshotStore<Record<string, DraftFileUpload>>({})
   private readonly draftAttachments = new Map<DraftAttachmentId, ComposerAttachment>()
@@ -199,6 +209,32 @@ export class ConversationController extends Service implements IConversation {
       this.draftAttachments.clear()
       this.fileUploads.set({})
     }, 'conversation draft attachments')
+  }
+
+  /**
+   * Claim the composer's unclaimed Tab gesture for one live handler.
+   * @param handler - owner of the Tab gesture.
+   * @returns disposer releasing the claim.
+   * @throws when another handler is already registered.
+   */
+  registerComposerTab(handler: ComposerTabHandler): () => void {
+    if (this.composerTab !== undefined) {
+      throw new Error('conversation.registerComposerTab: a composer Tab handler is already registered')
+    }
+    this.composerTab = handler
+    return () => {
+      if (this.composerTab === handler) this.composerTab = undefined
+    }
+  }
+
+  /**
+   * Route one Tab gesture that no completion menu claimed to the registered owner.
+   * @param sessionId - the composer's Session; absent on a session-less surface.
+   * @param direction - next (Tab) or previous (Shift+Tab).
+   * @returns whether the gesture was consumed; false without an owner.
+   */
+  dispatchComposerTab(sessionId: SessionId | undefined, direction: ComposerTabDirection): boolean {
+    return this.composerTab?.handle(sessionId, direction) ?? false
   }
 
   /**

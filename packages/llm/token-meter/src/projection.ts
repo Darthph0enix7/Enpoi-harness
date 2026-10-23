@@ -65,6 +65,40 @@ export interface ContextBreakdownProjection {
   messageTokens: number
 }
 
+/**
+ * Durable compaction history for visibility surfaces.
+ *
+ * Only committed summarizing compactions are counted: a `compaction/end`
+ * without an error whose in-flight lifecycle produced a summary. Mechanical
+ * stubs are successful compactions whose deterministic fallback replaced the
+ * summarizer, so they belong to `count` and are also reported separately.
+ * Failed attempts never enter `count`; they are only `failedCount`. `last`
+ * describes the newest committed compaction and stays absent until one lands.
+ */
+export interface ContextCompactionsProjection {
+  /** Committed summarizing compactions. */
+  readonly count: number
+  /** Of `count`, compactions whose summary was the model-free stub (`provider === ''`). */
+  readonly mechanicalCount: number
+  /** Compaction lifecycles that ended with an error. */
+  readonly failedCount: number
+  /** Newest committed compaction, absent until the first one lands. */
+  readonly last?: {
+    /** Seq of the committing `compaction/end`. */
+    readonly endSeq: number
+    /** Epoch milliseconds of the committing `compaction/end`. */
+    readonly at: number
+    /** Number of surface nodes the checkpoint replaced. */
+    readonly shadowedNodes: number
+    /** Heuristic tokens of the replaced surface span. */
+    readonly shadowedTokens: number
+    /** Whether a human command started the compaction. */
+    readonly manual: boolean
+    /** Whether a deterministic model-free stub supplied the summary. */
+    readonly mechanical: boolean
+  }
+}
+
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionMap {
     /** Provider-reported usage accumulated across the complete durable log. */
@@ -73,5 +107,7 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     contextPressure: ContextPressureProjection
     /** Heuristic system/tools/message composition of the next request. */
     contextBreakdown: ContextBreakdownProjection
+    /** Committed summarizing compactions and their newest shadow span. */
+    contextCompactions: ContextCompactionsProjection
   }
 }

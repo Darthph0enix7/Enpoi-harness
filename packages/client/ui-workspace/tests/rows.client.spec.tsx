@@ -972,6 +972,106 @@ describe('workspace browser rows', () => {
     // No leading marker: the grayed row alone carries the archived look.
     expect(screen.queryByRole('img', { name: '已归档' })).toBeNull()
   })
+
+  it('shows no compaction badge without compaction projections', () => {
+    const node: SessionNode = {
+      id: sid('plain'), title: 'Plain Session', blank: false, running: false,
+      runningSubagentCount: 0, completed: false, updatedAt: 0, pinned: false, archived: false,
+    }
+    render(<SessionNodeItem node={node} currentId={undefined} now={0} onOpen={vi.fn()} t={t} />)
+    expect(screen.getByRole('treeitem').textContent).not.toContain('⟲')
+    expect(screen.queryByRole('img', { name: /已压缩/ })).toBeNull()
+  })
+
+  it('hides the compaction badge when the session never compacted', () => {
+    const node: SessionNode = {
+      id: sid('fresh'), title: 'Fresh Session', blank: false, running: false,
+      runningSubagentCount: 0, completed: false, updatedAt: 0, pinned: false, archived: false,
+    }
+    const view = render(<SessionNodeItem
+      node={node}
+      currentId={undefined}
+      now={0}
+      onOpen={vi.fn()}
+      projectionValues={{ contextCompactions: { count: 0, mechanicalCount: 0, failedCount: 0 } }}
+      t={t}
+    />)
+    expect(screen.queryByRole('img', { name: /已压缩/ })).toBeNull()
+    // A published slice without a compaction key hides the badge too.
+    view.rerender(<SessionNodeItem
+      node={node}
+      currentId={undefined}
+      now={0}
+      onOpen={vi.fn()}
+      projectionValues={{}}
+      t={t}
+    />)
+    expect(screen.queryByRole('img', { name: /已压缩/ })).toBeNull()
+  })
+
+  it('shows the compaction count and its context percentage without fetching', () => {
+    const node: SessionNode = {
+      id: sid('compacted'), title: 'Compacted Session', blank: false, running: false,
+      runningSubagentCount: 0, completed: false, updatedAt: 0, pinned: false, archived: false,
+    }
+    render(<SessionNodeItem
+      node={node}
+      currentId={undefined}
+      now={0}
+      onOpen={vi.fn()}
+      projectionValues={{
+        contextCompactions: {
+          count: 2,
+          mechanicalCount: 1,
+          failedCount: 0,
+          last: { shadowedNodes: 4, shadowedTokens: 1_200 },
+        },
+        contextPressure: { pressureTokens: 32_000, projectedTokens: 16_000, contextWindow: 128_000 },
+      }}
+      t={t}
+    />)
+    // The projected figure wins, matching the composer's occupancy reading.
+    const badge = screen.getByRole('img', { name: '已压缩 2 次 · 上下文已用 13%' })
+    expect(badge.textContent).toBe('⟲2')
+    fireEvent.focus(badge)
+    expect(screen.getByRole('tooltip').textContent).toBe('已压缩 2 次 · 上下文已用 13%')
+  })
+
+  it('omits the context percentage when pressure cannot resolve it', () => {
+    const node: SessionNode = {
+      id: sid('compacted'), title: 'Compacted Session', blank: false, running: false,
+      runningSubagentCount: 0, completed: false, updatedAt: 0, pinned: false, archived: false,
+    }
+    render(<SessionNodeItem
+      node={node}
+      currentId={undefined}
+      now={0}
+      onOpen={vi.fn()}
+      projectionValues={{
+        contextCompactions: { count: 1, mechanicalCount: 0, failedCount: 0 },
+        contextPressure: { pressureTokens: 32_000 },
+      }}
+      t={tEn}
+    />)
+    expect(screen.getByRole('img', { name: 'Compacted 1×' })).toBeTruthy()
+    expect(screen.getByRole('img').textContent).toBe('⟲1')
+  })
+
+  it('omits the context percentage when no pressure projection is published', () => {
+    const node: SessionNode = {
+      id: sid('compacted'), title: 'Compacted Session', blank: false, running: false,
+      runningSubagentCount: 0, completed: false, updatedAt: 0, pinned: false, archived: false,
+    }
+    render(<SessionNodeItem
+      node={node}
+      currentId={undefined}
+      now={0}
+      onOpen={vi.fn()}
+      projectionValues={{ contextCompactions: { count: 3, mechanicalCount: 0, failedCount: 0 } }}
+      t={t}
+    />)
+    expect(screen.getByRole('img', { name: '已压缩 3 次' })).toBeTruthy()
+  })
 })
 
 describe('session row schedule seats', () => {

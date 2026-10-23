@@ -14,6 +14,7 @@ import { LocaleRuntime } from '@deepseek-ai/dsh-client-locale/client'
 import { createSnapshotStore, type ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import { RemoteError, TestRemote } from '@deepseek-ai/dsh-client-test-runtime'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import type { ComposerTabHandler } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { apply as settingsApply, inject as settingsInject } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { apply, inject } from '@deepseek-ai/dsh-client-ui-agent-preset/client'
 import { AgentPresetLabel } from '../src/client/AgentPresetLabel.tsx'
@@ -192,6 +193,26 @@ function declareConversation(slots: SlotRegistry): () => void {
   } as never, () => null)
 }
 
+/** A conversation face that records the one composer Tab claim. */
+function conversationDouble() {
+  let handler: ComposerTabHandler | undefined
+  let released = 0
+  return {
+    face: {
+      registerComposerTab: (value: ComposerTabHandler) => {
+        if (handler !== undefined) throw new Error('composer Tab handler already registered')
+        handler = value
+        return () => {
+          released += 1
+          handler = undefined
+        }
+      },
+    },
+    handler: () => handler,
+    released: () => released,
+  }
+}
+
 /** A Workspace UI double recording new-session starts. */
 function uiWorkspaceDouble() {
   const starts: unknown[] = []
@@ -207,6 +228,7 @@ function sessionsDouble(ctx: Context, state: {
   byId: Record<string, {
     id: string
     blank: boolean
+    running?: boolean
     projectionValues?: { agentPreset?: string | null }
   }>
 }) {
@@ -223,6 +245,7 @@ function sessionsDouble(ctx: Context, state: {
     ])),
   })
   return {
+    state,
     list: {
       getSnapshot: snapshot,
       subscribe: (fn: () => void) => {
@@ -398,7 +421,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots, calls } = await bench()
     declareRoot(slots)
     const conversation = declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     ctx.provide('sessions', sessionsDouble(ctx, { byId: {} }) as never)
     ctx.provide('uiWorkspace', uiWorkspaceDouble() as never)
     await ctx.plugin({ inject: [...inject], apply }).await()
@@ -432,7 +455,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots } = await bench()
     declareRoot(slots)
     const conversation = declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     ctx.provide('sessions', sessionsDouble(ctx, { byId: {} }) as never)
     ctx.provide('uiWorkspace', uiWorkspaceDouble() as never)
     const fiber = ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'uiWorkspace'], apply })
@@ -458,7 +481,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots, calls } = await bench()
     declareRoot(slots)
     const conversation = declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     const sessions = sessionsDouble(ctx, {
       current: 's1',
       byId: {
@@ -487,7 +510,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots, moveDefault, remote } = await bench()
     declareRoot(slots)
     const conversation = declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     ctx.provide('sessions', sessionsDouble(ctx, { byId: {} }) as never)
     ctx.provide('uiWorkspace', uiWorkspaceDouble() as never)
     await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'uiWorkspace'], apply }).await()
@@ -519,7 +542,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots, calls, remote } = await bench()
     declareRoot(slots)
     declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     const state: {
       current?: string
       byId: Record<string, {
@@ -561,7 +584,7 @@ describe('ui-agent-preset apply', () => {
     try {
       declareRoot(slots)
       declareConversation(slots)
-      ctx.provide('conversation', {} as never)
+      ctx.provide('conversation', conversationDouble().face as never)
       const state = {
         current: 's1',
         byId: { s1: { id: 's1', blank: true, projectionValues: {} as { agentPreset?: string } } },
@@ -611,7 +634,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots, calls } = await bench()
     declareRoot(slots)
     declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     const sessions = sessionsDouble(ctx, {
       byId: { s1: { id: 's1', blank: true, projectionValues: { agentPreset: 'standard' } } },
     })
@@ -631,7 +654,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots, calls } = await bench()
     declareRoot(slots)
     const conversation = declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     const sessionState = {
       current: 's1',
       byId: {
@@ -684,7 +707,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots, calls } = await bench()
     declareRoot(slots)
     declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     const state: {
       current?: string
       byId: Record<string, {
@@ -722,7 +745,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots, calls } = await bench()
     declareRoot(slots)
     declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     const sessions = sessionsDouble(ctx, {
       current: 's1',
       byId: { s1: { id: 's1', blank: true } },
@@ -745,7 +768,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots, calls } = await bench()
     declareRoot(slots)
     declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     const state = {
       current: 's1',
       byId: {
@@ -775,7 +798,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots, calls, setDeveloperTools } = await bench()
     declareRoot(slots)
     const conversation = declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     const state: {
       current?: string
       byId: Record<string, { id: string; blank: boolean; projectionValues?: { agentPreset?: string | null } }>
@@ -836,7 +859,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots } = await bench()
     declareRoot(slots)
     declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     ctx.provide('sessions', sessionsDouble(ctx, { byId: {} }) as never)
     ctx.provide('uiWorkspace', uiWorkspaceDouble() as never)
     await ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'uiWorkspace'], apply }).await()
@@ -852,7 +875,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots } = await bench()
     declareRoot(slots)
     const conversation = declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     ctx.provide('sessions', sessionsDouble(ctx, { byId: {} }) as never)
     const uiWorkspace = uiWorkspaceDouble()
     ctx.provide('uiWorkspace', uiWorkspace as never)
@@ -887,7 +910,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots, calls } = await bench()
     declareRoot(slots)
     const conversation = declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     const sessions = sessionsDouble(ctx, {
       current: 's1',
       byId: { s1: { id: 's1', blank: true, projectionValues: { agentPreset: 'standard' } } },
@@ -915,7 +938,7 @@ describe('ui-agent-preset apply', () => {
     const { ctx, slots, calls } = await bench()
     declareRoot(slots)
     const conversation = declareConversation(slots)
-    ctx.provide('conversation', {} as never)
+    ctx.provide('conversation', conversationDouble().face as never)
     const state: {
       current?: string
       byId: Record<string, {
@@ -1152,5 +1175,155 @@ describe('AgentPresetSeatController reconciliation', () => {
     // roster's own "preset X failed to mount" frame would say it twice.
     expect(await controller.select('broken')).toBe(reason)
     expect(controller.store.getSnapshot().error).toBe(reason)
+  })
+})
+
+describe('composer Tab cycling', () => {
+  /** Apply the plugin over one started Session and return its seat + Tab owner. */
+  async function tabBench(options: { running?: boolean } = {}) {
+    const b = await bench()
+    declareRoot(b.slots)
+    const conversation = declareConversation(b.slots)
+    const tabs = conversationDouble()
+    b.ctx.provide('conversation', tabs.face as never)
+    // Two presets in roster order: standard, then the minimal default.
+    b.moveDefault()
+    const sessions = sessionsDouble(b.ctx, {
+      current: 's1',
+      byId: {
+        s1: {
+          id: 's1',
+          blank: false,
+          running: options.running ?? false,
+          projectionValues: { agentPreset: 'standard' },
+        },
+      },
+    })
+    b.ctx.provide('sessions', sessions as never)
+    b.ctx.provide('uiWorkspace', uiWorkspaceDouble() as never)
+    const fiber = b.ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'uiWorkspace'], apply })
+    await fiber.await()
+    const picker = (b.slots.entries('conversation.input.agent')[0]!
+      .inject as unknown as (sessionId: SessionId) => AgentPresetSeatInjected)(SessionId('s1'))
+    await picker.load()
+    return { ...b, conversation, tabs, picker, sessions, fiber }
+  }
+
+  it('cycles the preset in roster order on Tab and wraps past either end', async () => {
+    const b = await tabBench()
+    try {
+      const handler = b.tabs.handler()
+      expect(handler).toBeDefined()
+      expect(handler!.handle(SessionId('s1'), 'next')).toBe(true)
+      await vi.waitFor(() => {
+        expect(b.picker.hooks.agentPresetSeat.getSnapshot().sessionPreset).toBe('minimal')
+      })
+      // The Host converges the Session summary before the next gesture; the
+      // double publishes that convergence the way the list store would.
+      b.sessions.state.byId.s1!.projectionValues = { agentPreset: 'minimal' }
+      expect(handler!.handle(SessionId('s1'), 'next')).toBe(true)
+      await vi.waitFor(() => {
+        expect(b.picker.hooks.agentPresetSeat.getSnapshot().sessionPreset).toBe('standard')
+      })
+      b.sessions.state.byId.s1!.projectionValues = { agentPreset: 'standard' }
+      expect(handler!.handle(SessionId('s1'), 'previous')).toBe(true)
+      await vi.waitFor(() => {
+        expect(b.picker.hooks.agentPresetSeat.getSnapshot().sessionPreset).toBe('minimal')
+      })
+      expect(b.calls.filter(call => call.startsWith('select:')))
+        .toEqual(['select:minimal', 'select:standard', 'select:minimal'])
+    } finally {
+      await b.ctx.fiber.dispose()
+    }
+    b.conversation()
+  })
+
+  it('refuses a running Session and leaves its seat hint standing', async () => {
+    const b = await tabBench({ running: true })
+    try {
+      const snapshot = b.picker.hooks.agentPresetSeat.getSnapshot()
+      expect(snapshot.options.map(option => option.id)).toEqual(['standard', 'minimal'])
+      expect(b.tabs.handler()!.handle(SessionId('s1'), 'next')).toBe(true)
+      expect(b.calls.filter(call => call.startsWith('select:'))).toEqual([])
+      expect(b.picker.hooks.agentPresetSeat.getSnapshot().error).toBe('会话空闲时才能切换 Agent 预设')
+    } finally {
+      await b.ctx.fiber.dispose()
+    }
+    b.conversation()
+  })
+
+  it('is a consumed no-op with fewer than two presets', async () => {
+    const b = await bench()
+    declareRoot(b.slots)
+    const conversation = declareConversation(b.slots)
+    const tabs = conversationDouble()
+    b.ctx.provide('conversation', tabs.face as never)
+    const sessions = sessionsDouble(b.ctx, {
+      current: 's1',
+      byId: { s1: { id: 's1', blank: false, projectionValues: { agentPreset: 'standard' } } },
+    })
+    b.ctx.provide('sessions', sessions as never)
+    b.ctx.provide('uiWorkspace', uiWorkspaceDouble() as never)
+    const fiber = b.ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'uiWorkspace'], apply })
+    await fiber.await()
+    const picker = (b.slots.entries('conversation.input.agent')[0]!
+      .inject as unknown as (sessionId: SessionId) => AgentPresetSeatInjected)(SessionId('s1'))
+    await picker.load()
+    try {
+      expect(tabs.handler()!.handle(SessionId('s1'), 'next')).toBe(true)
+      expect(b.calls.filter(call => call.startsWith('select:'))).toEqual([])
+    } finally {
+      await fiber.dispose()
+    }
+    conversation()
+  })
+
+  it('passes the gesture through when Developer tools are off', async () => {
+    const b = await tabBench()
+    try {
+      await b.setDeveloperTools(false)
+      expect(b.tabs.handler()!.handle(SessionId('s1'), 'next')).toBe(false)
+      expect(b.calls.filter(call => call.startsWith('select:'))).toEqual([])
+    } finally {
+      await b.ctx.fiber.dispose()
+    }
+    b.conversation()
+  })
+
+  it('stages the hero choice for a session-less composer', async () => {
+    const b = await bench()
+    declareRoot(b.slots)
+    const conversation = declareConversation(b.slots)
+    const tabs = conversationDouble()
+    b.ctx.provide('conversation', tabs.face as never)
+    b.moveDefault()
+    b.ctx.provide('sessions', sessionsDouble(b.ctx, { byId: {} }) as never)
+    b.ctx.provide('uiWorkspace', uiWorkspaceDouble() as never)
+    const fiber = b.ctx.plugin({ inject: [...inject, 'conversation', 'sessions', 'uiWorkspace'], apply })
+    await fiber.await()
+    const chip = (b.slots.entries('conversation.hero.agentPreset')[0]!
+      .inject as unknown as () => AgentPresetSeatInjected)()
+    await chip.load()
+    try {
+      // The roster default opens the chip; Tab wraps it to the first preset.
+      expect(chip.hooks.agentPresetSeat.getSnapshot().current).toBe('minimal')
+      expect(tabs.handler()!.handle(undefined, 'next')).toBe(true)
+      await vi.waitFor(() => {
+        expect(chip.hooks.agentPresetSeat.getSnapshot().current).toBe('standard')
+      })
+      expect(b.calls.filter(call => call.startsWith('select:'))).toEqual([])
+    } finally {
+      await fiber.dispose()
+    }
+    conversation()
+  })
+
+  it('releases the composer Tab claim with the plugin fiber', async () => {
+    const b = await tabBench()
+    expect(b.tabs.released()).toBe(0)
+    await b.ctx.fiber.dispose()
+    expect(b.tabs.released()).toBe(1)
+    expect(b.tabs.handler()).toBeUndefined()
+    b.conversation()
   })
 })

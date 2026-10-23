@@ -484,6 +484,33 @@ describe('ConversationController', () => {
     const orphan = bare.get('conversation') as ConversationController
     await expect(orphan.send('x')).rejects.toThrow(/sessions service unavailable/)
   })
+
+  it('owns one composer Tab handler at a time across both service scopes', async () => {
+    const b = await bench()
+    try {
+      const handle = vi.fn(() => true)
+      const release = b.scoped.registerComposerTab({ handle })
+      // The scoped claim is the root singleton's claim: the composer reaches
+      // it through the root concrete service.
+      expect(b.root.dispatchComposerTab('s1' as SessionId, 'next')).toBe(true)
+      expect(handle).toHaveBeenCalledWith('s1', 'next')
+      expect(() => b.root.registerComposerTab({ handle: () => false }))
+        .toThrow(/already registered/)
+      release()
+      expect(b.root.dispatchComposerTab(undefined, 'previous')).toBe(false)
+
+      // A stale disposer must not clear the handler that replaced it.
+      const second = vi.fn(() => true)
+      const firstRelease = b.root.registerComposerTab({ handle: () => false })
+      firstRelease()
+      b.root.registerComposerTab({ handle: second })
+      firstRelease()
+      expect(b.root.dispatchComposerTab(undefined, 'next')).toBe(true)
+      expect(second).toHaveBeenCalledWith(undefined, 'next')
+    } finally {
+      await b.runtime.dispose()
+    }
+  })
 })
 
 describe('sendSession submission echo', () => {

@@ -14,6 +14,8 @@
 // Type-only: pulls the Session Controller service merge (ctx.sessions).
 import type { SessionBinding } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+// Type-only: pulls the conversation service merge (ctx.conversation.registerComposerTab).
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { WeakMapWithValues } from '@deepseek-ai/dsh-util-values'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -203,6 +205,36 @@ export function apply(ctx: ClientContext): void {
         label()
       }
     }, 'ui-agent-preset: new-session chip, input picker and header label')
+
+    // Composer gesture: an unclaimed Tab cycles this session's preset in
+    // roster order (Shift+Tab previous). An open completion menu owns Tab
+    // before this owner; Developer tools gate selection, a single-preset
+    // roster is a deliberate no-op, and a running session refuses with the
+    // seat's standing hint instead of racing a recomposition.
+    scope.effect(() => scope.conversation.registerComposerTab({
+      handle: (sessionId, direction) => {
+        if (!ctx.configForms.developerTools.enabled.getSnapshot()) return false
+        const binding = sessionId === undefined ? undefined : ctx.sessions.binding(sessionId)
+        const seat = binding === undefined ? unboundSeat : seatFor(binding)
+        const snapshot = seat.store.getSnapshot()
+        if (snapshot.options.length < 2 || snapshot.busy) return true
+        const running = sessionId !== undefined
+          && ctx.sessions.list.getSnapshot().byId[sessionId]?.running === true
+        if (running) {
+          seat.refuse(ctx.locale.bind('settings.agentPreset')('agentSwitchIdle'))
+          return true
+        }
+        const live = snapshot.sessionPreset !== '' ? snapshot.sessionPreset : snapshot.current
+        const at = snapshot.options.findIndex(option => option.id === live)
+        const next = at === -1
+          ? snapshot.options[direction === 'next' ? 0 : snapshot.options.length - 1]
+          : snapshot.options[(at + (direction === 'next' ? 1 : -1) + snapshot.options.length)
+            % snapshot.options.length]
+        if (next === undefined) return true
+        void seat.select(next.id)
+        return true
+      },
+    }), 'ui-agent-preset: composer Tab cycling')
   })
 
   /** Capture the exact blank Session one Settings action may update. */

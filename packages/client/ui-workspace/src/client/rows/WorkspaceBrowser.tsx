@@ -37,6 +37,7 @@ import {
   pinCurrentBlank, reconcileManualOrder, sessionMemberIds, UNGROUPED_KEY, visibleSessionIds,
 } from '../tree.ts'
 import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './Rows.tsx'
+import type { SessionRowProjections } from './Rows.tsx'
 import { AnimatedRows } from './AnimatedRows.tsx'
 import { FLAT_SESSION_ORDER_KEY, type SessionGroupBy } from '../stores.ts'
 import { WorkspacePickFlow } from '../WorkspacePicker.tsx'
@@ -304,6 +305,25 @@ function SessionListError({ message, t }: Pick<SessionTreeProps, 't'> & { messag
       <div>{message}</div>
     </div>
   )
+}
+
+/**
+ * Row-facing slice of a session's projection values. The list snapshot already
+ * carries every published projection, so the badge never fetches; only the
+ * compaction history and context pressure keys are read.
+ * @param list - current session-list snapshot.
+ * @param sessionId - session whose row is being built.
+ * @returns the projection slice, or undefined before the first projection arrives.
+ */
+function rowProjections(
+  list: SessionListState,
+  sessionId: SessionId,
+): SessionRowProjections | undefined {
+  // This package does not load the token-meter client augmentation, so the
+  // shared projection map erases to no known keys; the slice restores the two
+  // keys row presentation reads and the host wire schema validates them.
+  // oxlint-disable-next-line typescript/no-unnecessary-type-assertion
+  return list.projectionsBySession[sessionId]?.values as SessionRowProjections | undefined
 }
 
 /** The list-empty placeholder — a glyph over the text; the archived-only view names its filter and offers the way back. */
@@ -662,6 +682,7 @@ function SessionTree({
               onMoveToFolder={onMoveToFolder}
               onDelete={onDelete}
               drag={dragProps}
+              projectionValues={rowProjections(list, node.id)}
               t={t}
             />
           )
@@ -807,6 +828,7 @@ function FlatList({
               onExportMarkdown={onExportMarkdown}
               onMoveToFolder={onMoveToFolder}
               onDelete={onDelete}
+              projectionValues={rowProjections(list, node.id)}
               drag={{
                 start: () => {
                   dropCommitted.current = false

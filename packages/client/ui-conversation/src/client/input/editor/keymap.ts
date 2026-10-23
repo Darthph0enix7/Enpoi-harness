@@ -21,6 +21,7 @@ import {
 } from 'lexical'
 import { mergeRegister } from '@lexical/utils'
 import type { ArbitrateKey, ArbitrateOutcome } from '../../contract/draft-editor.ts'
+import type { ComposerTabDirection } from '../../contract/composer-tab.ts'
 
 /** The bar-supplied behavior behind each intercepted gesture. */
 export interface ComposerKeymapHandlers {
@@ -42,6 +43,11 @@ export interface ComposerKeymapHandlers {
   intakeFiles(files: readonly File[], directories?: ReadonlySet<File>): void
   /** Pasted plain text (sanitized insertion through the shell). */
   pasteText(text: string): void
+  /**
+   * Cycle the composer's agent preset after an unclaimed Tab; true = consumed.
+   * Absent (or false) leaves the gesture to native focus traversal.
+   */
+  cyclePreset?(direction: ComposerTabDirection): boolean
 }
 
 /** Composition state a keydown can trust (see the module doc's Safari note). */
@@ -104,13 +110,21 @@ export function registerComposerKeymap(editor: LexicalEditor, handlers: Composer
     editor.registerUpdateListener(syncComposition),
     editor.registerCommand(KEY_ARROW_UP_COMMAND, arrow('up'), COMMAND_PRIORITY_CRITICAL),
     editor.registerCommand(KEY_ARROW_DOWN_COMMAND, arrow('down'), COMMAND_PRIORITY_CRITICAL),
-    // Tab settles the highlighted completion and passes without one, keeping
-    // native focus traversal; Shift+Tab leaves the menu like Escape whenever it
-    // is open, highlight or not, so the two Tab gestures never disagree about
-    // consuming the draft.
+    // Tab settles the highlighted completion and passes without one; Shift+Tab
+    // leaves the menu like Escape whenever it is open, highlight or not, so the
+    // two Tab gestures never disagree about consuming the draft. An unclaimed
+    // Tab then cycles the agent preset (Shift+Tab previous); without a cycle
+    // owner it keeps native focus traversal, and composition never cycles.
     editor.registerCommand(
       KEY_TAB_COMMAND,
-      event => arrow(event.shiftKey ? 'tabBack' : 'tab')(event),
+      (event) => {
+        const direction: ComposerTabDirection = event.shiftKey ? 'previous' : 'next'
+        if (arrow(event.shiftKey ? 'tabBack' : 'tab')(event)) return true
+        if (isComposingEvent(event, recentlyComposing)) return false
+        if (handlers.cyclePreset?.(direction) !== true) return false
+        event.preventDefault()
+        return true
+      },
       COMMAND_PRIORITY_CRITICAL,
     ),
     editor.registerCommand(KEY_ESCAPE_COMMAND, (event) => {

@@ -6,6 +6,21 @@
   flex: none;
 }
 
+/* Transient live-compaction notice beside the ring: same line height as the
+   trigger, tinted like a quiet inline status rather than a toast. */
+.notice {
+  flex: none;
+  align-self: center;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--dsh-content-font-size-secondary, 13px);
+  line-height: calc(20px + var(--dsh-content-font-delta-secondary, 0px));
+  white-space: nowrap;
+}
+
 .trigger {
   display: inline-flex;
   align-items: center;
@@ -133,6 +148,16 @@
 
 .rows {
   margin: 6px 0 0;
+}
+
+/* Newest compaction summary below the composition rows, separated because it
+   describes the retained surface rather than the current request. */
+.compacted {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 0.5px solid var(--dsw-alias-border-l3);
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 
 .row {

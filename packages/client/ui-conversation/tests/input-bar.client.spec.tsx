@@ -607,7 +607,7 @@ describe('image draft rail', () => {
 describe('Enter semantics', () => {
   it('advertises the empty-draft whole-queue steering gesture when it is available', () => {
     const { placeholder } = bench({ running: true, queue: [row('q-1')], steerQueue: vi.fn() })
-    expect(placeholder).toBe('Cmd/Ctrl+Enter 插话发送全部排队消息')
+    expect(placeholder).toBe('Enter 再次插话发送排队消息')
     expect(bench({
       running: true,
       queue: [row('q-1')],
@@ -615,7 +615,7 @@ describe('Enter semantics', () => {
         address: { parentSessionId: 'parent' as SessionId, childSessionId: SID, mode: 'continuable' },
         parentAvailable: true,
       },
-    }).placeholder).toBe('Cmd/Ctrl+Enter 插话发送全部排队消息')
+    }).placeholder).toBe('Enter 再次插话发送排队消息')
   })
 
   it('keeps the owning placeholder or ordinary guidance when whole-queue steering is unavailable', () => {
@@ -640,7 +640,7 @@ describe('Enter semantics', () => {
       running: true,
       queue: [row('q-1')],
       plan: { active: true, pending: false },
-    }).placeholder).toBe('Cmd/Ctrl+Enter 插话发送全部排队消息')
+    }).placeholder).toBe('Enter 再次插话发送排队消息')
   })
 
   it('an open command menu withholds the whole-queue steering gesture', () => {
@@ -698,6 +698,14 @@ describe('Enter semantics', () => {
     expect(busyMeta.sink).toHaveBeenCalledWith('steer with cmd', [], 'steer', expect.any(AbortSignal))
   })
 
+  it('plain Enter on an empty draft steers the queued message (Enter again)', () => {
+    const steerQueue = vi.fn()
+    const benchRow = bench({ running: true, queue: [row('q-1')], steerQueue })
+    fireEvent.keyDown(benchRow.textarea, { key: 'Enter' })
+    expect(benchRow.steerQueue).toHaveBeenCalledTimes(1)
+    expect(benchRow.sink).not.toHaveBeenCalled()
+  })
+
   it('empty-draft Cmd/Ctrl+Enter steers the whole queue instead of submitting', () => {
     const steerQueue = vi.fn()
     const queue = [row('q-1'), row('q-2')]
@@ -719,11 +727,13 @@ describe('Enter semantics', () => {
     expect(idle.steerQueue).not.toHaveBeenCalled()
     expect(idle.sink).not.toHaveBeenCalled()
 
-    // Plain Enter never steers the queue, even under the busy Steer preference.
-    const plain = bench({ running: true, busyEnter: 'steer', queue: [row('q-1')], steerQueue: vi.fn() })
-    fireEvent.keyDown(plain.textarea, { key: 'Enter' })
-    expect(plain.steerQueue).not.toHaveBeenCalled()
-    expect(plain.sink).not.toHaveBeenCalled()
+    // Plain Enter steers too (Enter again), under either busy preference.
+    for (const busyEnter of ['queue', 'steer'] as const) {
+      const plain = bench({ running: true, busyEnter, queue: [row('q-1')], steerQueue: vi.fn() })
+      fireEvent.keyDown(plain.textarea, { key: 'Enter' })
+      expect(plain.steerQueue).toHaveBeenCalledTimes(1)
+      expect(plain.sink).not.toHaveBeenCalled()
+    }
 
     // Continuable children expose the same steering face as ordinary Sessions.
     const subagent = {

@@ -17,6 +17,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 import type { ComposerBlock } from './composer-blocks.ts'
 import type { DraftAttachmentId, InputActions, InputNotice, InputState } from './input.ts'
+import type { ComposerTabDirection } from './composer-tab.ts'
 import type { ComposerKeyboard, EditSelection } from './draft-editor.ts'
 import type { createConversationStore } from '../stores.ts'
 import type { BusyEnterBehavior } from './composer-submission.ts'
@@ -405,6 +406,12 @@ export interface ComposerBarOwnerProps {
 /** Package-private operations injected into the resident composer bar. */
 export interface ComposerBarInjected {
   keyboard: ComposerKeyboard | undefined
+  /**
+   * Cycle the addressed Session's agent preset after an unclaimed Tab; absent
+   * without a registered composer Tab owner (the browser keeps focus
+   * traversal). Owner: agent-preset through `ctx.conversation`.
+   */
+  cycleAgentPreset?: ((direction: ComposerTabDirection) => boolean) | undefined
   /**
    * Register one picked batch; resolves to the rejection copy or null. Where
    * the browser shell reports host paths (the Desktop application), files

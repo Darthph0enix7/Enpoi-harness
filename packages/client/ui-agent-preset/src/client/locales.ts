@@ -25,6 +25,7 @@ export type AgentPresetSettingsKey =
   | 'noDescription'
   | 'brokenBadge'
   | 'switchRefused'
+  | 'agentSwitchIdle'
   | 'close'
   | 'creatorDraft'
   | 'enableDevToolsToSetDefault'
@@ -88,6 +89,8 @@ export const en: Record<AgentPresetSettingsKey, string> = {
   brokenBadge: 'Failed to load',
 
   switchRefused: 'Could not switch to {name}: {reason}',
+
+  agentSwitchIdle: 'Agent switching is available when the session is idle',
 
   close: 'Close',
 
@@ -153,6 +156,8 @@ export const zh: Record<AgentPresetSettingsKey, string> = {
   brokenBadge: '加载失败',
 
   switchRefused: '无法切换到「{name}」：{reason}',
+
+  agentSwitchIdle: '会话空闲时才能切换 Agent 预设',
 
   close: '关闭',
 

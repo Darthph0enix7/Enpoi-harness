@@ -46,7 +46,7 @@ export type InputBarProps = ComposerBarProps
 
 export const InputBar = memo(function InputBar({
   useSession, useInput, inputActions, keyboard, addFiles, removeAttachment, resolveDraftAttachments,
-  retryFileUpload,
+  retryFileUpload, cycleAgentPreset,
   toggleCommandMenu, stop, stopAll, t,
   renderSlot, useBusyEnter, useFileUploads, useNotices, useLexicon, useMenuLauncher, useStopShortcut,
   useProjection, useSessions, useSessionStatus, sessionId, variant, disabled: inert = false, blocked,
@@ -276,10 +276,12 @@ export const InputBar = memo(function InputBar({
   // registration survives re-renders without re-arming per keystroke.
   const gate = useRef({
     locked, machineBusy, canSteerQueue, running, steeringAvailable, busyEnter,
+    childComposer: subagent !== null, cycleAgentPreset,
     intakeFiles, uploadsPending, showToast, t, canAcceptDrop,
   })
   gate.current = {
     locked, machineBusy, canSteerQueue, running, steeringAvailable, busyEnter,
+    childComposer: subagent !== null, cycleAgentPreset,
     intakeFiles, uploadsPending, showToast, t, canAcceptDrop,
   }
 

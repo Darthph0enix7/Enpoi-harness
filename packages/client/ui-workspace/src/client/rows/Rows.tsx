@@ -140,6 +140,56 @@ function timeLabel(updatedAt: number, now: number, t: RowTranslate): string {
   return unit === 'now' ? t('time.now') : t(`time.${unit}`, { n })
 }
 
+/**
+ * Session projection values a row reads. Only token-meter's compaction
+ * history and occupancy are consumed; every other projection key is ignored
+ * and the browser passes the whole value through unchanged.
+ */
+export interface SessionRowProjections {
+  readonly contextCompactions?: {
+    readonly count: number
+    readonly mechanicalCount: number
+    readonly failedCount: number
+    readonly last?: {
+      readonly shadowedNodes: number
+      readonly shadowedTokens: number
+    }
+  } | undefined
+  readonly contextPressure?: {
+    readonly pressureTokens?: number
+    readonly projectedTokens?: number
+    readonly contextWindow?: number
+  } | undefined
+}
+
+/**
+ * Compaction badge copy for one row: `⟲{n}` when the session has committed
+ * compactions, with the current context percentage in its tooltip when the
+ * pressure projection can resolve one. Absent projection or zero count hides
+ * the badge, and the row never fetches it.
+ * @param projections - session projection values supplied by the browser.
+ * @param t - the browser root's locale seat.
+ * @returns badge text and tooltip, or undefined when nothing compacted.
+ */
+function compactionBadge(
+  projections: SessionRowProjections | undefined,
+  t: RowTranslate,
+): { text: string; label: string } | undefined {
+  const compaction = projections?.contextCompactions
+  if (projections === undefined || compaction === undefined || compaction.count <= 0) return undefined
+  const pressure = projections.contextPressure
+  const used = pressure?.projectedTokens ?? pressure?.pressureTokens
+  const percent = used === undefined || pressure?.contextWindow === undefined
+    ? undefined
+    : Math.min(100, Math.round(used / pressure.contextWindow * 100))
+  return {
+    text: t('row.compacted.badge', { n: compaction.count }),
+    label: percent === undefined
+      ? t('row.compacted.tooltipNoContext', { n: compaction.count })
+      : t('row.compacted.tooltip', { n: compaction.count, percent: `${percent}%` }),
+  }
+}
+
 /** Hover-card variant: distances wrap in the ago template; the now bucket stays bare (no "now ago"). */
 function hoverTimeLabel(updatedAt: number, now: number, t: RowTranslate): string {
   const { unit, n } = relativeTime(updatedAt, now)
@@ -539,12 +589,13 @@ export function SearchResultItem({ result, currentId, onOpen, onUnarchive, t }: 
  * its leading decoration, and its hover-card section.
  * @param props.onReveal - scroll this row into view after search navigation, then acknowledge it.
  * @param props.drag - optional row-drag target wiring; blank rows cannot start a drag.
+ * @param props.projectionValues - session projection values; drives the compaction badge and its tooltip.
  * @param props.t - the browser root's locale seat.
  * @returns the session row.
  */
 export function SessionNodeItem({
   node, currentId, now, onOpen, onRenameRequest, renderSlot, onReveal, drag,
-  onCopyId, onDownload, onExportMarkdown, onMoveToFolder, onDelete, t,
+  onCopyId, onDownload, onExportMarkdown, onMoveToFolder, onDelete, projectionValues, t,
 }: {
   node: SessionNode
   currentId: string | undefined
@@ -566,6 +617,8 @@ export function SessionNodeItem({
   onMoveToFolder?: ((id: SessionNode['id']) => void) | undefined
   /** Open the delete-confirmation dialog for this session (fork row verb). */
   onDelete?: ((id: SessionNode['id']) => void) | undefined
+  /** Session projection values; the compaction badge hides when absent or empty. */
+  projectionValues?: SessionRowProjections | undefined
   t: RowTranslate
 } & PropsRenderSlots<
   | 'sidebar.workspaces.session.menu.item'
@@ -579,6 +632,7 @@ export function SessionNodeItem({
   const statuses = sessionStatuses(node, t)
   const primaryStatus = statuses[0]
   const showStatus = primaryStatus.state !== 'idle'
+  const compacted = compactionBadge(projectionValues, t)
   // Archived rows hold their in-place grayed slot, so manual reorder cannot
   // move them. Pinned rows drag within the pinned block: the browser gates
   // their drop targets to fellow pinned rows.
@@ -689,6 +743,15 @@ export function SessionNodeItem({
       >
         {title}
       </span>
+      {/* The compaction badge names accumulated checkpoint rows without
+          claiming chat content; its tooltip carries the live occupancy. */}
+      {!row.blank && compacted !== undefined && (
+        <Tooltip label={compacted.label} side="bottom" align="end" delayMs={500}>
+          <span className={css.compactionBadge} role="img" aria-label={compacted.label} tabIndex={0}>
+            {compacted.text}
+          </span>
+        </Tooltip>
+      )}
       {/* A blank New Session row is a provisional placeholder: nothing has
           happened in it yet, so a "now" timestamp and the row verbs
           (rename/fork/archive) would all act on content that does not

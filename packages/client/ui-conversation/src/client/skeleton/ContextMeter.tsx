@@ -7,8 +7,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { UseProjection } from '@deepseek-ai/dsh-api-session-controller/client'
-// Type-only: the `contextPressure` / `contextBreakdown` projection key merges.
-import type {} from '@deepseek-ai/dsh-token-meter/client'
+// Type-only: the `contextPressure` / `contextBreakdown` / `contextCompactions` projection key merges.
+import type { ContextCompactionsProjection } from '@deepseek-ai/dsh-token-meter/client'
 import { Tooltip, useAnchoredPosition, useDismissOnOutsidePointer } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ComposerBarProps } from '../contract/slots.ts'
 import { contextOccupancy } from '../context-occupancy.ts'
@@ -17,6 +17,36 @@ import css from './ContextMeter.module.css'
 /** Ring geometry: 14px viewBox, 2px stroke. */
 const RADIUS = 5.5
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS
+
+/** How long a live compaction notice stays beside the ring. */
+const NOTICE_MS = 6_000
+
+/** Distinct live-notice copy for each committed-compaction outcome. */
+type CompactionNotice = 'summarized' | 'mechanical' | 'failed'
+
+const NOTICE_KEYS = {
+  summarized: 'context.compacted.notice',
+  mechanical: 'context.compacted.notice.mechanical',
+  failed: 'context.compacted.notice.failed',
+} as const
+
+/**
+ * Classify a live compaction increment. A mechanical stub commits `count` and
+ * `mechanicalCount` together, so it outranks the plain summarized notice;
+ * failures are reported even when the same fold also committed something.
+ * @param previous - last observed compaction projection.
+ * @param next - newly published compaction projection.
+ * @returns the notice kind, or undefined when only non-compaction fields moved.
+ */
+function compactionNotice(
+  previous: ContextCompactionsProjection,
+  next: ContextCompactionsProjection,
+): CompactionNotice | undefined {
+  if (next.failedCount > previous.failedCount) return 'failed'
+  if (next.mechanicalCount > previous.mechanicalCount) return 'mechanical'
+  if (next.count > previous.count) return 'summarized'
+  return undefined
+}
 
 /**
  * Marker the localized occupancy sentence is split on, so the panel headline
@@ -56,7 +86,11 @@ export interface ContextMeterProps {
 export function ContextMeter({ useProjection, t }: ContextMeterProps) {
   const pressure = useProjection('contextPressure')
   const breakdown = useProjection('contextBreakdown')
+  const compactions = useProjection('contextCompactions')
   const [open, setOpen] = useState(false)
+  const [notice, setNotice] = useState<CompactionNotice | null>(null)
+  const observedCompactions = useRef<ContextCompactionsProjection | undefined>(undefined)
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
   const context = contextOccupancy(pressure)
@@ -86,12 +120,34 @@ export function ContextMeter({ useProjection, t }: ContextMeterProps) {
     return () => { document.removeEventListener('keydown', onKeyDown) }
   }, [available, open])
 
+  // The first defined projection is the baseline: a session opened after
+  // several compactions must not announce old ones. Only a later increase
+  // raises the transient notice.
+  useEffect(() => {
+    const previous = observedCompactions.current
+    observedCompactions.current = compactions
+    if (previous === undefined || compactions === undefined) return
+    const kind = compactionNotice(previous, compactions)
+    if (kind === undefined) return
+    setNotice(kind)
+    if (noticeTimer.current !== null) clearTimeout(noticeTimer.current)
+    noticeTimer.current = setTimeout(() => { setNotice(null) }, NOTICE_MS)
+  }, [compactions])
+
+  useEffect(() => () => {
+    if (noticeTimer.current !== null) clearTimeout(noticeTimer.current)
+  }, [])
+
   if (context === null) return null
   const percent = context.percent
   const reading = `${percent}%`
   const [headBefore = '', headAfter = ''] = t('context.aria', { percent: READING_SLOT })
     .split(READING_SLOT)
     .map(part => part.trim())
+  const compactionSuffix = compactions !== undefined && compactions.count > 0
+    ? t('context.compacted.tooltip', { n: compactions.count })
+    : ''
+  const lastCompaction = compactions?.last
 
   // The bar's overall length stays the provider-exact percent; the heuristic
   // breakdown only proportions its colored parts. A zero-width part is dropped
@@ -107,7 +163,7 @@ export function ContextMeter({ useProjection, t }: ContextMeterProps) {
 
   return (
     <span ref={rootRef} className={css.root}>
-      <Tooltip label={t('context.aria', { percent: reading })} side="top" delayMs={200} disabled={open}>
+      <Tooltip label={`${t('context.aria', { percent: reading })}${compactionSuffix}`} side="top" delayMs={200} disabled={open}>
         <button
           type="button"
           className={css.trigger}
@@ -130,6 +186,11 @@ export function ContextMeter({ useProjection, t }: ContextMeterProps) {
           <span>{reading}</span>
         </button>
       </Tooltip>
+      {notice !== null && (
+        <span className={css.notice} role="status" aria-live="polite">
+          {t(NOTICE_KEYS[notice])}
+        </span>
+      )}
       {open && createPortal(
         <div
           ref={panelRef}
@@ -171,6 +232,15 @@ export function ContextMeter({ useProjection, t }: ContextMeterProps) {
                 </div>
               ))}
             </dl>
+          )}
+          {compactions !== undefined && compactions.count > 0 && lastCompaction !== undefined && (
+            <div className={css.compacted}>
+              {t('context.compacted.row', {
+                n: compactions.count,
+                messages: lastCompaction.shadowedNodes,
+                tokens: formatTokens(lastCompaction.shadowedTokens, t),
+              })}
+            </div>
           )}
         </div>,
         document.body,

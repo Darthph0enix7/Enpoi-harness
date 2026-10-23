@@ -3,6 +3,7 @@ import type { MouseEvent, MutableRefObject, RefObject } from 'react'
 import type { LexicalEditor } from 'lexical'
 import type { ComposerKeyboard } from '../../contract/draft-editor.ts'
 import type { ComposerBarProps } from '../../contract/slots.ts'
+import type { ComposerTabDirection } from '../../contract/composer-tab.ts'
 import type { BusyEnterBehavior } from '../../contract/composer-submission.ts'
 import { resolveSubmitMode } from '../submission-policy.ts'
 import { registerComposerKeymap } from './keymap.ts'
@@ -14,6 +15,10 @@ interface DraftViewGate {
   running: boolean
   steeringAvailable: boolean
   busyEnter: BusyEnterBehavior
+  /** A child/subagent composer owns its Tab (no preset cycling there). */
+  childComposer: boolean
+  /** Cycle the addressed session's agent preset; absent without a tab owner. */
+  cycleAgentPreset?: ((direction: ComposerTabDirection) => boolean) | undefined
   intakeFiles: (files: readonly File[], directories?: ReadonlySet<File>) => void
   uploadsPending: boolean
   showToast: (text: string) => void
@@ -118,10 +123,11 @@ export function installDraftKeymap(
     canSubmit: () => !gate.current.locked && !gate.current.machineBusy,
     submit: (accelerated) => {
       const g = gate.current
-      // Empty-draft accelerated Enter acts on the queue instead of the
-      // (empty) draft: the machine rejects empty drafts, so the gesture
-      // steers every still-pending queued message into the running turn.
-      if (accelerated && g.canSteerQueue) {
+      // Empty-draft Enter acts on the queue instead of the (empty) draft: the
+      // machine rejects empty drafts, so pressing Enter again after a message
+      // was queued steers the still-pending queue into the running turn —
+      // the same operation as the dock's Steer row and the Cmd/Ctrl chord.
+      if (g.canSteerQueue) {
         keyboard.steerQueue()
         return
       }
@@ -140,6 +146,13 @@ export function installDraftKeymap(
     pasteText: (text) => {
       if (gate.current.machineBusy || gate.current.locked) return
       keyboard.paste(text)
+    },
+    cyclePreset: (direction) => {
+      const g = gate.current
+      // A locked/busy composer and a child/subagent composer keep Tab native;
+      // an unregistered owner also leaves the gesture to the browser.
+      if (g.locked || g.machineBusy || g.childComposer) return false
+      return g.cycleAgentPreset?.(direction) === true
     },
   })
 }

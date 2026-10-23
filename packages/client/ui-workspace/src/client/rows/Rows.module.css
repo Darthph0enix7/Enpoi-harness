@@ -226,6 +226,25 @@
   color: var(--dsw-alias-label-tertiary);
 }
 
+/* Accumulated compaction count sits with the time in the row's trailing
+   cells; numerals stay aligned so the badge never shifts the title cell. */
+.compactionBadge {
+  flex: none;
+  margin-right: 6px;
+  padding: 0 4px;
+  border-radius: var(--dsw-radius-sm);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: default;
+}
+
+.compactionBadge:hover,
+.compactionBadge:focus-visible {
+  color: var(--dsw-alias-label-secondary);
+}
+
 .pinIndicator {
   display: inline-flex;
   flex: none;
