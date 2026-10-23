@@ -1,8 +1,18 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-23T17:45:56.332Z",
+  "generatedAt": "2026-10-23T19:35:35.567Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.106",
+      "commit": "c4fda65",
+      "releasedAt": "2026-10-23T19:07:39.000Z",
+      "notes": [
+        "chore(providers): rebuild the heavy-providers bundle for the Meridian row",
+        "feat(providers): list Claude Code (Meridian) as an opt-in heavy provider",
+        "feat(loop): continue a turn the output ceiling cut off"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.105",
       "commit": "1944e61",
@@ -363,14 +373,6 @@
       "releasedAt": "2026-10-11T22:37:28.000Z",
       "notes": [
         "fix(update): bounded v2 journal - real-tree applies in minutes, not hours"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.64",
-      "commit": "3afc430",
-      "releasedAt": "2026-10-11T19:43:51.000Z",
-      "notes": [
-        "feat(update): persistent scan index - steady-state updates hash nothing"
       ]
     }
   ]
