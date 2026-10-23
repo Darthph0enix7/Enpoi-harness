@@ -18,7 +18,7 @@ import { SHIPPED_PROVIDER_TEMPLATES, providerDashboardUrls } from '../src/client
 
 it('the manifest table is structurally complete', () => {
   expect(heavyProviderProblems()).toEqual([])
-  expect([...HEAVY_PRESET_IDS]).toEqual(['freellmapi', 'antigravity', 'commandcode'])
+  expect([...HEAVY_PRESET_IDS]).toEqual(['freellmapi', 'antigravity', 'commandcode', 'meridian'])
 })
 
 it('an uninstalled heavy provider is listed in Add Provider with its manifest', () => {
@@ -261,4 +261,31 @@ it('dashboard URLs cover both modes and deduplicate to the loopback dashboard', 
   expect(providerDashboardUrls('freellmapi')).toEqual(heavyDashboardUrls(manifest))
   // An ordinary API provider with no declared console yields no fake URL.
   expect(providerDashboardUrls('openai')).toEqual([])
+})
+
+it('meridian is listed as a keyless loopback OpenAI-compatible service before any install', () => {
+  const manifest = fallbackHeavyManifest('meridian')!
+  expect(manifest.label).toBe('Claude Code (Meridian)')
+  expect(manifest.protocol).toBe('openai-completions')
+  expect(manifest.delivery).toBe('service')
+  expect(manifest.auth).toEqual({ kind: 'none', keyless: true })
+  expect(manifest.defaultPort).toBe(3456)
+  expect(manifest.reuse.baseURL).toBe('http://127.0.0.1:3456/v1')
+  expect(manifest.reuse.health.url).toBe('http://127.0.0.1:3456/health')
+  expect(manifest.local.baseURL).toBe('http://127.0.0.1:3456/v1')
+  expect(manifest.local.health.url).toBe('http://127.0.0.1:3456/health')
+  expect(manifest.dashboardUrl).toBe('http://127.0.0.1:3456')
+  expect(manifest.requiresBrowser.join('\n')).toContain('claude auth login --claudeai')
+  expect(manifest.quirks.join('\n')).toContain('Docker is never required')
+  const local = manifest.local
+  expect(resolveHeavyInstall(local, 'linux').steps.map(step => step.command).join('\n'))
+    .toContain('systemctl --user enable --now meridian.service')
+  expect(resolveHeavyInstall(local, 'darwin').steps.map(step => step.command).join('\n'))
+    .toContain('launchctl bootstrap')
+  expect(resolveHeavyInstall(local, 'win32')).toMatchObject({ label: 'Not supported on Windows', steps: [] })
+  // Listing a heavy provider installs nothing: the row is a template only.
+  const template = SHIPPED_PROVIDER_TEMPLATES.find(entry => entry.id === 'meridian')
+  expect(template?.name).toBe(manifest.label)
+  expect(template?.keyless).toBe(true)
+  expect(template?.heavy?.id).toBe('meridian')
 })

@@ -120,7 +120,7 @@ it('the operator overlay disables and overrides fallback rows before any host re
   expect(resolveHeavyManifest('commandcode')).toEqual(fallbackHeavyManifest('commandcode'))
   // The listing renders the overlaid table, not the compiled copy.
   expect(liveProviderTemplates().filter(template => template.heavy !== undefined).map(template => template.id))
-    .toEqual(['antigravity', 'commandcode'])
+    .toEqual(['antigravity', 'commandcode', 'meridian'])
 })
 
 it('a host reply replaces the overlay-applied fallback wholesale', () => {
@@ -139,5 +139,5 @@ it('a host reply replaces the overlay-applied fallback wholesale', () => {
 it('keeps the shipped fallback when no overlay is published', () => {
   resetHeavyManifestSource()
   expect(heavyManifestState().manifests).toEqual([...FALLBACK_HEAVY_PROVIDER_MANIFESTS])
-  expect(heavyManifestState().manifests.map(manifest => manifest.id)).toEqual(['freellmapi', 'antigravity', 'commandcode'])
+  expect(heavyManifestState().manifests.map(manifest => manifest.id)).toEqual(['freellmapi', 'antigravity', 'commandcode', 'meridian'])
 })

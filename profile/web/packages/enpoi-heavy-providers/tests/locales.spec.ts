@@ -3,7 +3,7 @@
  * the machine-copy boundary, and the settings/environment locale resolution.
  */
 import { describe, expect, it } from 'vitest'
-import { manifestById, resolveHeavyInstall } from '../src/manifests.js'
+import { HEAVY_MANIFESTS, manifestById, resolveHeavyInstall } from '../src/manifests.js'
 import {
   en, zh, hostLocale, localeFromPreference, localizeHeavyManifest, localizeHeavyPreflight,
   localizeHeavySteps, settingsLocale,
@@ -13,6 +13,32 @@ import { chooseLocalPath } from '../src/planner.js'
 describe('heavy-provider locale copy', () => {
   it('declares the same keys in zh and en', () => {
     expect(Object.keys(en).sort()).toEqual(Object.keys(zh).sort())
+  })
+
+  it('carries zh copy for every shipped manifest summary, path, and step', () => {
+    const dictionary = zh as Record<string, string>
+    for (const manifest of HEAVY_MANIFESTS) {
+      expect(dictionary[`summary.${manifest.id}`], `${manifest.id} summary`).toBeDefined()
+      expect(dictionary[`reuse.${manifest.id}.label`], `${manifest.id} reuse label`).toBeDefined()
+      expect(dictionary[`reuse.${manifest.id}.note`], `${manifest.id} reuse note`).toBeDefined()
+      expect(dictionary[`local.${manifest.id}.label`], `${manifest.id} local label`).toBeDefined()
+      for (const platform of ['default', 'linux', 'darwin', 'win32'] as const) {
+        const variant = manifest.local.install[platform]
+        if (variant === undefined) continue
+        // `default` carries no locale key of its own: it inherits the local
+        // label unless a manifest overrides it, and antigravity's override is
+        // the one shipped variant whose default label falls back to English.
+        if (variant.label !== undefined && platform !== 'default') {
+          expect(dictionary[`local.${manifest.id}.${platform}.label`], `${manifest.id} ${platform} label`).toBeDefined()
+        }
+        variant.steps.forEach((_step, index) => {
+          expect(dictionary[`${manifest.id}.${platform}.${index}`], `${manifest.id} ${platform} step ${String(index)}`).toBeDefined()
+        })
+      }
+      manifest.removal.steps.forEach((_step, index) => {
+        expect(dictionary[`${manifest.id}.removal.${index}`], `${manifest.id} removal step ${String(index)}`).toBeDefined()
+      })
+    }
   })
 
   it('localizes summaries, path labels, and step labels; machine copy stays English', () => {

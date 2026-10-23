@@ -18,11 +18,11 @@
   en: 97318c5a115199ff
   zh: 0c455e4232cf0265
 /configure-models/add-a-self-hosted-heavy-provider:
-  en: b3ce1cb53b91cad1
-  zh: 23e4d48575f63bb8
+  en: d6730a02dfad589f
+  zh: 79d9142d140f897f
 /configure-models/add-a-self-hosted-heavy-provider/point-a-service-provider-at-a-custom-instance:
-  en: 8593de172eea8097
-  zh: b659fbaa4553f18c
+  en: 18ee90f10e692224
+  zh: d503f445291b5b9e
 /configure-models/add-a-self-hosted-heavy-provider/antigravity-proxy:
   en: 8da85a6211ac0c61
   zh: a4e6937e6d3e3a78
@@ -32,6 +32,9 @@
 /configure-models/add-a-self-hosted-heavy-provider/command-code:
   en: 8bcdd3b3c60a648a
   zh: 63ff1f3f7e90fbad
+/configure-models/add-a-self-hosted-heavy-provider/claude-code-meridian:
+  en: 281cc1012676d925
+  zh: ba5984b34811e335
 /configure-models/select-a-model:
   en: 6a94264c99535caf
   zh: f97bb0dc6a40c0d3

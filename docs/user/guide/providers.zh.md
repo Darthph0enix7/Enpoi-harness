@@ -34,7 +34,7 @@ Provider ID 是永久的，因为请求、已保存会话、模型默认值和�
 
 ## 添加自托管（重型）提供商
 
-重型提供商是自托管服务或厂商直连路由，由 harness 端到端管理：它会出现在添加提供商的列表中，添加前不安装任何东西；添加时会检测或安装本机端点、探测健康状态、写入路由及其模型列表，并在你要求时连同路由一起移除本地安装。目前内置三个：**FreeLLMAPI**、**Antigravity Proxy** 和 **Command Code**。
+重型提供商是自托管服务或厂商直连路由，由 harness 端到端管理：它会出现在添加提供商的列表中，添加前不安装任何东西；添加时会检测或安装本机端点、探测健康状态、写入路由及其模型列表，并在你要求时连同路由一起移除本地安装。目前内置四个：**FreeLLMAPI**、**Antigravity Proxy**、**Command Code** 和 **Claude Code (Meridian)**。
 
 打开**设置 → 模型**，选择**添加模型提供商**；选择器中的**自托管 / 重型**分组列出重型卡片（搜索也能找到）。未配置的卡片显示**已列出 — 添加后配置**；路由存在后，提供商会出现在提供商列表里自己的**自托管 / 重型**分组中，并带有健康状态圆点和控制台链接。
 
@@ -42,7 +42,7 @@ Provider ID 是永久的，因为请求、已保存会话、模型默认值和�
 
 ### 将服务型提供商指向自定义实例
 
-在**使用检测到的实例**模式下，服务型提供商（Antigravity Proxy 或 FreeLLMAPI）会提供**自定义实例 URL（可选）**字段。留空则使用自动检测和声明的环回端点；当实例运行在检测无法到达的位置时填入地址——本机的另一个端口，或 Tailscale 网络或局域网中的另一台机器。地址必须是绝对的 `http` 或 `https` URL，不能内嵌凭据、查询串或片段；末尾斜杠会被去掉。路由会写入该地址，并在该地址探测提供商的健康路径。不响应的地址仍会被保存——健康徽标显示**无法访问**直到它能响应，而不是阻止添加。非环回地址会让该路由通向本机之外，因此请保持在可信网络上。**Command Code** 是厂商直连路由，不提供自定义实例字段。
+在**使用检测到的实例**模式下，服务型提供商（Antigravity Proxy、FreeLLMAPI 或 Meridian）会提供**自定义实例 URL（可选）**字段。留空则使用自动检测和声明的环回端点；当实例运行在检测无法到达的位置时填入地址——本机的另一个端口，或 Tailscale 网络或局域网中的另一台机器。地址必须是绝对的 `http` 或 `https` URL，不能内嵌凭据、查询串或片段；末尾斜杠会被去掉。路由会写入该地址，并在该地址探测提供商的健康路径。不响应的地址仍会被保存——健康徽标显示**无法访问**直到它能响应，而不是阻止添加。非环回地址会让该路由通向本机之外，因此请保持在可信网络上。**Command Code** 是厂商直连路由，不提供自定义实例字段。
 
 ### Antigravity Proxy
 
@@ -77,6 +77,18 @@ Provider ID 是永久的，因为请求、已保存会话、模型默认值和�
 如果用过旧的 `:8899` keypool 代理，请迁移而不是重新录入密钥：在 profile 根目录运行 `node packages/enpoi-commandcode-provider/scripts/import-keypool-keys.mjs`。它读取 `~/.config/opencode/keypool/pools.json`（或用 `--pools` 指定的路径），打印要放入路由设置 YAML 的 `pool:` 块以及每个密钥对应 Keys 卡片上的哪个身份，且从不打印密钥内容。仍指向环回 keypool 的路由会继续工作，直到你切换它：把基础 URL 设为 `https://api.commandcode.ai`，添加导入的身份，然后停用代理。
 
 路由的模型列表来自提供商包内置的目录快照——包含能力、上下文窗口、套餐徽标和推理等级——厂商直连路由无需网络调用或 `/models` 请求即可解析它。
+
+### Claude Code (Meridian)
+
+**Claude Code (Meridian)** 是一个本地代理，通过 Anthropic 官方的 Agent SDK 把你的 Claude Pro/Max 订阅作为 OpenAI 兼容端点 `http://127.0.0.1:3456/v1` 提供，健康检查为 `GET /health`，控制台位于 `http://127.0.0.1:3456`。它驱动已安装的 `claude` CLI，因此计费走订阅的用量窗口，不读取也不重放任何 OAuth 令牌。添加时不会写入任何凭据：按安装状态，该代理只对本机开放。
+
+安装会先检查两个前提，然后才写入任何内容：Node.js 22 或更高版本及 npm，以及已安装并登录订阅的 `@anthropic-ai/claude-code` CLI（`env -u ANTHROPIC_API_KEY claude auth login --claudeai`）。该登录是浏览器流程，API 密钥会话不算数：当 `auth status` 报告的不是 `claude.ai` 时，安装会停止并给出登录命令。登录时请保持 `ANTHROPIC_API_KEY` 未设置。Linux 上安装会写入 `~/.config/systemd/user/meridian.service` 并启用它；macOS 上写入 `~/Library/LaunchAgents/dev.meridian.proxy.plist` 并引导该代理。两者都运行 `node <解析后的>/dist/cli.js` 而不是 `meridian` bin——后者的 shebang 在服务化 PATH 下无法解析——并设置 `MERIDIAN_HOST=127.0.0.1`、`MERIDIAN_PORT=3456`、`MERIDIAN_PASSTHROUGH=1` 和 `MERIDIAN_ENFORCE_MAX_TOKENS=1`，同时把 npm 全局 bin 放进 `PATH`，以便 SDK 能启动 `claude`。Windows 没有受支持的本地安装；拒绝原因会列出需要手动执行的命令。
+
+模型目录随每个 Meridian 版本一同发布，因此 `/v1/models` 由构建产物作答，而不是实时查询 CLI；比该版本更新的模型 ID 仍会透传给 SDK。`MERIDIAN_ENFORCE_MAX_TOKENS=1` 让路由的 `max_tokens` 成为硬性预算。`x-session-affinity` 是可选的，只对仅追加历史的客户端有意义：不发送时，每次请求都会在一个新的 SDK 会话上运行，并把历史打包进系统提示。升级方式是 `npm install -g @rynfar/meridian@latest` 后重启服务；重新运行内置安装会同时完成这两步。
+
+**从另一台设备访问。** 按安装状态，代理绑定 `127.0.0.1`。要服务 Tailscale 或局域网，请在单元（或 plist）中修改 `MERIDIAN_HOST` 并重新加载服务，然后在另一台机器上添加该提供商，并在**自定义实例 URL（可选）**中填入本机地址。当除你之外还有别的对象能访问该端口时，请设置 `MERIDIAN_API_KEY`；客户端随后会以 Bearer 令牌发送它。切勿在公网主机上绑定 `0.0.0.0`。
+
+**移除。** 勾选本地卸载后，清理会停止并禁用 `meridian.service`（或 bootout launchd 代理）、删除单元或 plist，并删除 macOS 日志。它从不卸载 npm 全局包：`@rynfar/meridian` 与 `@anthropic-ai/claude-code` 都会保留，因为该 CLI 是共用工具，而 Meridian 可能是唯一副本——当没有其他工具使用它们时，请自行用 `npm uninstall -g` 移除。`~/.config/meridian`（配置档、设置、定价）和 `~/.cache/meridian`（会话）会留在原处，`~/.claude` 中的 CLI 登录存储也绝不会被触碰。不勾选时，移除只清理 DSH 侧状态。
 
 ## 选择模型
 

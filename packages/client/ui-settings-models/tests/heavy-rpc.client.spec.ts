@@ -39,7 +39,7 @@ it('drops a malformed entry with no local copy', () => {
 
 it('a non-object payload falls back to the whole labelled local copy', () => {
   const table = sanitizeHeavyManifests('not a table')
-  expect(table.items).toEqual([fallbackHeavyManifest('freellmapi'), fallbackHeavyManifest('antigravity'), fallbackHeavyManifest('commandcode')])
+  expect(table.items).toEqual([fallbackHeavyManifest('freellmapi'), fallbackHeavyManifest('antigravity'), fallbackHeavyManifest('commandcode'), fallbackHeavyManifest('meridian')])
   expect(table.problems.join('\n')).toContain('rendering the labelled local copy')
 })
 

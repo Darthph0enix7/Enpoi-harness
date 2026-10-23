@@ -475,5 +475,207 @@
       ]
     },
     "fallbackModel": "deepseek/deepseek-v4.1-flash"
+  },
+  {
+    "id": "meridian",
+    "label": "Claude Code (Meridian)",
+    "summary": "Local proxy that serves the operator's Claude subscription through the official Agent SDK as an OpenAI-compatible endpoint.",
+    "protocol": "openai-completions",
+    "delivery": "service",
+    "auth": {
+      "kind": "none",
+      "keyless": true
+    },
+    "dashboardUrl": "http://127.0.0.1:3456",
+    "docsUrl": "https://www.npmjs.com/package/@rynfar/meridian",
+    "defaultPort": 3456,
+    "requiresBrowser": [
+      "Signing the Claude Code CLI in to the subscription (`claude auth login --claudeai`) is a browser flow that writes the CLI login store; on a headless host the printed URL must be opened on a machine with a browser"
+    ],
+    "quirks": [
+      "Local install dependencies: Node.js >= 22 and npm (both packages are global npm installs behind a systemd or launchd user service); Docker is never required, and Windows has no supported local install — run the process manually or point the route at a proxy running elsewhere",
+      "The @anthropic-ai/claude-code CLI must be installed and signed in to a Claude subscription (`claude auth login --claudeai`); ANTHROPIC_API_KEY must be unset during that login or the CLI can authenticate against API billing instead",
+      "ExecStart must be `node <resolved>/dist/cli.js`, never the `meridian` bin: its `#!/usr/bin/env node` shebang does not resolve under systemd",
+      "The unit PATH must contain the npm global bin (where `claude` lives), or the Agent SDK cannot spawn the CLI",
+      "The model catalog ships inside each Meridian release: /v1/models answers from the build, not from a live CLI query, but an unknown model id still passes through to the SDK",
+      "MERIDIAN_ENFORCE_MAX_TOKENS=1 is set here, so a harness that relies on max_tokens gets a hard budget",
+      "x-session-affinity is optional and only matters for append-only clients; a request without it runs a fresh SDK session with the history packed into the system prompt",
+      "Billing draws from the operator's own Claude subscription usage windows (like `claude -p`) — Meridian drives the official CLI/SDK and never reads or replays OAuth tokens"
+    ],
+    "reuse": {
+      "label": "Use a detected instance",
+      "baseURL": "http://127.0.0.1:3456/v1",
+      "note": "Zero install: uses a Meridian proxy already running on this device and its Claude subscription login.",
+      "health": {
+        "url": "http://127.0.0.1:3456/health",
+        "timeoutMs": 5000
+      }
+    },
+    "local": {
+      "label": "Install locally (npm + user service)",
+      "baseURL": "http://127.0.0.1:3456/v1",
+      "deps": [
+        "Node.js >= 22",
+        "A reachable systemd user session (systemctl --user) on the default path"
+      ],
+      "diskHint": "Two global npm packages and one Node process; no GPU, no Docker",
+      "dashboardUrl": "http://127.0.0.1:3456",
+      "runtime": "node",
+      "install": {
+        "default": {
+          "steps": [
+            {
+              "label": "Check Node.js and npm",
+              "command": "command -v node >/dev/null && command -v npm >/dev/null || { echo \"Meridian needs Node.js >= 22 with npm on PATH\"; exit 1; }; major=\"$(node -p 'process.versions.node.split(\".\")[0]')\"; [ \"$major\" -ge 22 ] || { echo \"Meridian needs Node.js >= 22 (found $(node -v))\"; exit 1; }"
+            },
+            {
+              "label": "Install the Claude Code CLI when it is missing or older than 2.1.293",
+              "command": "GLOBAL_BIN=\"$(npm prefix -g)/bin\" && export PATH=\"$GLOBAL_BIN:$PATH\"; have=\"$(claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -1)\"; if [ -n \"$have\" ] && node -e 'const [a,b,c]=process.argv[1].split(\".\").map(Number); process.exit(a>2||(a===2&&(b>1||(b===1&&c>=293)))?0:1)' \"$have\"; then echo \"Claude Code CLI $have is installed\"; else npm install -g @anthropic-ai/claude-code; fi",
+              "weight": 2
+            },
+            {
+              "label": "Require a Claude subscription login",
+              "command": "GLOBAL_BIN=\"$(npm prefix -g)/bin\" && export PATH=\"$GLOBAL_BIN:$PATH\"; env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN claude auth status 2>/dev/null | grep -q '\"claude.ai\"' || { echo \"the Claude Code CLI is not signed in to a Claude subscription\"; echo \"run: env -u ANTHROPIC_API_KEY claude auth login --claudeai\"; echo \"then re-run this install\"; exit 1; }",
+              "weight": 2
+            },
+            {
+              "label": "Install Meridian",
+              "command": "npm install -g @rynfar/meridian@latest",
+              "weight": 2
+            },
+            {
+              "label": "Write the systemd user unit",
+              "command": "mkdir -p {config}/systemd/user && NODE_BIN=\"$(command -v node)\" && GLOBAL_BIN=\"$(npm prefix -g)/bin\" && ENTRY=\"$(node -e 'console.log(require(\"fs\").realpathSync(process.argv[1]))' \"$(npm root -g)/@rynfar/meridian/dist/cli.js\")\" || { echo \"could not resolve @rynfar/meridian/dist/cli.js under $(npm root -g 2>/dev/null); run the Meridian install step first\"; exit 1; }; cat > {config}/systemd/user/meridian.service <<EOF\n[Unit]\nDescription=Meridian — standalone API bridge for the Claude subscription (official Agent SDK)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\n# node plus the resolved cli.js: the bin's #!/usr/bin/env node shebang does not resolve here\nExecStart=$NODE_BIN $ENTRY\nRestart=on-failure\nRestartSec=10s\nStandardOutput=journal\nStandardError=journal\nEnvironment=HOME=%h\nEnvironment=MERIDIAN_HOST=127.0.0.1\nEnvironment=MERIDIAN_PORT=3456\nEnvironment=MERIDIAN_PASSTHROUGH=1\nEnvironment=MERIDIAN_ENFORCE_MAX_TOKENS=1\n# the Agent SDK spawns claude, which lives in the npm global bin\nEnvironment=PATH=$GLOBAL_BIN:{home}/.local/bin:/usr/local/bin:/usr/bin:/bin\n\n[Install]\nWantedBy=default.target\nEOF"
+            },
+            {
+              "label": "Enable and start the unit",
+              "command": "systemctl --user daemon-reload && systemctl --user enable --now meridian.service"
+            },
+            {
+              "label": "Wait for Meridian",
+              "command": "for i in {1..30}; do curl -fsS http://127.0.0.1:3456/health >/dev/null && exit 0; sleep 2; done; echo \"Meridian did not answer /health within 60s — check the user service log (systemctl --user status meridian.service, or launchctl print gui/$(id -u)/dev.meridian.proxy)\"; exit 1"
+            }
+          ]
+        },
+        "linux": {
+          "label": "Install locally (npm + systemd user unit)",
+          "steps": [
+            {
+              "label": "Check Node.js and npm",
+              "command": "command -v node >/dev/null && command -v npm >/dev/null || { echo \"Meridian needs Node.js >= 22 with npm on PATH\"; exit 1; }; major=\"$(node -p 'process.versions.node.split(\".\")[0]')\"; [ \"$major\" -ge 22 ] || { echo \"Meridian needs Node.js >= 22 (found $(node -v))\"; exit 1; }"
+            },
+            {
+              "label": "Install the Claude Code CLI when it is missing or older than 2.1.293",
+              "command": "GLOBAL_BIN=\"$(npm prefix -g)/bin\" && export PATH=\"$GLOBAL_BIN:$PATH\"; have=\"$(claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -1)\"; if [ -n \"$have\" ] && node -e 'const [a,b,c]=process.argv[1].split(\".\").map(Number); process.exit(a>2||(a===2&&(b>1||(b===1&&c>=293)))?0:1)' \"$have\"; then echo \"Claude Code CLI $have is installed\"; else npm install -g @anthropic-ai/claude-code; fi",
+              "weight": 2
+            },
+            {
+              "label": "Require a Claude subscription login",
+              "command": "GLOBAL_BIN=\"$(npm prefix -g)/bin\" && export PATH=\"$GLOBAL_BIN:$PATH\"; env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN claude auth status 2>/dev/null | grep -q '\"claude.ai\"' || { echo \"the Claude Code CLI is not signed in to a Claude subscription\"; echo \"run: env -u ANTHROPIC_API_KEY claude auth login --claudeai\"; echo \"then re-run this install\"; exit 1; }",
+              "weight": 2
+            },
+            {
+              "label": "Install Meridian",
+              "command": "npm install -g @rynfar/meridian@latest",
+              "weight": 2
+            },
+            {
+              "label": "Write the systemd user unit",
+              "command": "mkdir -p {config}/systemd/user && NODE_BIN=\"$(command -v node)\" && GLOBAL_BIN=\"$(npm prefix -g)/bin\" && ENTRY=\"$(node -e 'console.log(require(\"fs\").realpathSync(process.argv[1]))' \"$(npm root -g)/@rynfar/meridian/dist/cli.js\")\" || { echo \"could not resolve @rynfar/meridian/dist/cli.js under $(npm root -g 2>/dev/null); run the Meridian install step first\"; exit 1; }; cat > {config}/systemd/user/meridian.service <<EOF\n[Unit]\nDescription=Meridian — standalone API bridge for the Claude subscription (official Agent SDK)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\n# node plus the resolved cli.js: the bin's #!/usr/bin/env node shebang does not resolve here\nExecStart=$NODE_BIN $ENTRY\nRestart=on-failure\nRestartSec=10s\nStandardOutput=journal\nStandardError=journal\nEnvironment=HOME=%h\nEnvironment=MERIDIAN_HOST=127.0.0.1\nEnvironment=MERIDIAN_PORT=3456\nEnvironment=MERIDIAN_PASSTHROUGH=1\nEnvironment=MERIDIAN_ENFORCE_MAX_TOKENS=1\n# the Agent SDK spawns claude, which lives in the npm global bin\nEnvironment=PATH=$GLOBAL_BIN:{home}/.local/bin:/usr/local/bin:/usr/bin:/bin\n\n[Install]\nWantedBy=default.target\nEOF"
+            },
+            {
+              "label": "Enable and start the unit",
+              "command": "systemctl --user daemon-reload && systemctl --user enable --now meridian.service"
+            },
+            {
+              "label": "Wait for Meridian",
+              "command": "for i in {1..30}; do curl -fsS http://127.0.0.1:3456/health >/dev/null && exit 0; sleep 2; done; echo \"Meridian did not answer /health within 60s — check the user service log (systemctl --user status meridian.service, or launchctl print gui/$(id -u)/dev.meridian.proxy)\"; exit 1"
+            }
+          ]
+        },
+        "darwin": {
+          "label": "Install locally (npm + launchd agent)",
+          "deps": [
+            "Node.js >= 22",
+            "macOS 11+ (launchd)"
+          ],
+          "diskHint": "Two global npm packages and one Node process; no GPU, no Docker; logs in ~/Library/Logs",
+          "steps": [
+            {
+              "label": "Check Node.js and npm",
+              "command": "command -v node >/dev/null && command -v npm >/dev/null || { echo \"Meridian needs Node.js >= 22 with npm on PATH\"; exit 1; }; major=\"$(node -p 'process.versions.node.split(\".\")[0]')\"; [ \"$major\" -ge 22 ] || { echo \"Meridian needs Node.js >= 22 (found $(node -v))\"; exit 1; }"
+            },
+            {
+              "label": "Install the Claude Code CLI when it is missing or older than 2.1.293",
+              "command": "GLOBAL_BIN=\"$(npm prefix -g)/bin\" && export PATH=\"$GLOBAL_BIN:$PATH\"; have=\"$(claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -1)\"; if [ -n \"$have\" ] && node -e 'const [a,b,c]=process.argv[1].split(\".\").map(Number); process.exit(a>2||(a===2&&(b>1||(b===1&&c>=293)))?0:1)' \"$have\"; then echo \"Claude Code CLI $have is installed\"; else npm install -g @anthropic-ai/claude-code; fi",
+              "weight": 2
+            },
+            {
+              "label": "Require a Claude subscription login",
+              "command": "GLOBAL_BIN=\"$(npm prefix -g)/bin\" && export PATH=\"$GLOBAL_BIN:$PATH\"; env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN claude auth status 2>/dev/null | grep -q '\"claude.ai\"' || { echo \"the Claude Code CLI is not signed in to a Claude subscription\"; echo \"run: env -u ANTHROPIC_API_KEY claude auth login --claudeai\"; echo \"then re-run this install\"; exit 1; }",
+              "weight": 2
+            },
+            {
+              "label": "Install Meridian",
+              "command": "npm install -g @rynfar/meridian@latest",
+              "weight": 2
+            },
+            {
+              "label": "Write the launchd agent",
+              "command": "mkdir -p {home}/Library/LaunchAgents {home}/Library/Logs && NODE_BIN=\"$(command -v node)\" && GLOBAL_BIN=\"$(npm prefix -g)/bin\" && ENTRY=\"$(node -e 'console.log(require(\"fs\").realpathSync(process.argv[1]))' \"$(npm root -g)/@rynfar/meridian/dist/cli.js\")\" || { echo \"could not resolve @rynfar/meridian/dist/cli.js under $(npm root -g 2>/dev/null); run the Meridian install step first\"; exit 1; }; cat > {home}/Library/LaunchAgents/dev.meridian.proxy.plist <<EOF\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key>\n  <string>dev.meridian.proxy</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>$NODE_BIN</string>\n    <string>$ENTRY</string>\n  </array>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>HOME</key>\n    <string>{home}</string>\n    <key>MERIDIAN_HOST</key>\n    <string>127.0.0.1</string>\n    <key>MERIDIAN_PORT</key>\n    <string>3456</string>\n    <key>MERIDIAN_PASSTHROUGH</key>\n    <string>1</string>\n    <key>MERIDIAN_ENFORCE_MAX_TOKENS</key>\n    <string>1</string>\n    <key>PATH</key>\n    <string>$GLOBAL_BIN:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>\n  </dict>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>KeepAlive</key>\n  <true/>\n  <key>StandardOutPath</key>\n  <string>{home}/Library/Logs/meridian.log</string>\n  <key>StandardErrorPath</key>\n  <string>{home}/Library/Logs/meridian.err.log</string>\n</dict>\n</plist>\nEOF"
+            },
+            {
+              "label": "Load and start the agent",
+              "command": "launchctl bootout gui/$(id -u)/dev.meridian.proxy 2>/dev/null || true; launchctl bootstrap gui/$(id -u) {home}/Library/LaunchAgents/dev.meridian.proxy.plist 2>/dev/null || launchctl load -w {home}/Library/LaunchAgents/dev.meridian.proxy.plist; launchctl kickstart -k gui/$(id -u)/dev.meridian.proxy"
+            },
+            {
+              "label": "Wait for Meridian",
+              "command": "for i in {1..30}; do curl -fsS http://127.0.0.1:3456/health >/dev/null && exit 0; sleep 2; done; echo \"Meridian did not answer /health within 60s — check the user service log (systemctl --user status meridian.service, or launchctl print gui/$(id -u)/dev.meridian.proxy)\"; exit 1"
+            }
+          ]
+        },
+        "win32": {
+          "label": "Not supported on Windows",
+          "unsupported": "The Meridian local install needs a POSIX user service (systemd or launchd) to keep the proxy running; this profile has no supported Windows provisioning path. Install Node.js 22, run `npm install -g @anthropic-ai/claude-code` and sign in with `env -u ANTHROPIC_API_KEY claude auth login --claudeai`, then `npm install -g @rynfar/meridian` and start `node <npm root -g>/@rynfar/meridian/dist/cli.js` yourself with MERIDIAN_HOST=127.0.0.1, MERIDIAN_PORT=3456, MERIDIAN_PASSTHROUGH=1 and MERIDIAN_ENFORCE_MAX_TOKENS=1 — or point the route at a Meridian proxy running elsewhere.",
+          "steps": []
+        }
+      },
+      "health": {
+        "url": "http://127.0.0.1:3456/health",
+        "timeoutMs": 5000
+      }
+    },
+    "removal": {
+      "steps": [
+        {
+          "label": "Stop and disable the user service",
+          "optional": true,
+          "command": "if command -v systemctl >/dev/null 2>&1; then systemctl --user disable --now meridian.service 2>/dev/null || true; fi; if command -v launchctl >/dev/null 2>&1; then launchctl bootout gui/$(id -u)/dev.meridian.proxy 2>/dev/null || true; fi"
+        },
+        {
+          "label": "Remove the user service file",
+          "optional": true,
+          "command": "rm -f {config}/systemd/user/meridian.service {home}/Library/LaunchAgents/dev.meridian.proxy.plist; if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload 2>/dev/null || true; fi"
+        },
+        {
+          "label": "Remove the macOS agent logs",
+          "optional": true,
+          "command": "test \"$(uname -s)\" = Darwin || exit 0; rm -f \"{home}/Library/Logs/meridian.log\" \"{home}/Library/Logs/meridian.err.log\"; exit 0"
+        },
+        {
+          "label": "Leave the global npm packages installed (@rynfar/meridian and @anthropic-ai/claude-code are not uninstalled)",
+          "optional": true,
+          "command": "echo \"Meridian and the Claude Code CLI stay installed; remove them yourself with: npm uninstall -g @rynfar/meridian @anthropic-ai/claude-code\""
+        }
+      ],
+      "warnings": [
+        "Meridian and the Claude Code CLI stay installed as npm global packages — uninstall them yourself when no other tool uses them",
+        "~/.config/meridian (profiles, settings, model pricing) and ~/.cache/meridian (sessions) are left in place; they hold no credentials, but delete them by hand if the install is not coming back",
+        "The Claude CLI login store (~/.claude) belongs to the CLI and is never touched by this removal",
+        "Any other tool pointed at the proxy stops working when the service is removed",
+        "If a dotfiles/config repository manages the unit file (systemd unit or launchd plist), remove it there too or the next sync resurrects it",
+        "Turns already served drew from the Claude subscription usage windows and are not refunded"
+      ]
+    }
   }
 ]

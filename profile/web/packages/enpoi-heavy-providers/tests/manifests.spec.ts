@@ -7,15 +7,15 @@
 import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { expect, it } from 'vitest'
 import { COMMAND_CODE_CLI_HEADERS, COMMAND_CODE_CLI_VERSION } from '../../enpoi-commandcode-provider/src/headers.js'
 import { HEAVY_MANIFESTS, manifestById, manifestProblems, platformUnsupported, resolveHeavyInstall } from '../src/manifests.js'
 import { substitute } from '../src/planner.js'
 
-it('declares the three heavy providers with no structural problems', () => {
+it('declares the four heavy providers with no structural problems', () => {
   expect(manifestProblems()).toEqual([])
-  expect(HEAVY_MANIFESTS.map(manifest => manifest.id)).toEqual(['freellmapi', 'antigravity', 'commandcode'])
+  expect(HEAVY_MANIFESTS.map(manifest => manifest.id)).toEqual(['freellmapi', 'antigravity', 'commandcode', 'meridian'])
 })
 
 it('declares a key pool only on routes served by their own settings namespace', () => {
@@ -587,4 +587,237 @@ it('the antigravity teardown removes the proxy state directory and only the pack
   } finally {
     rmSync(scratch, { recursive: true, force: true })
   }
+})
+
+it('meridian is a loopback keyless OpenAI-compatible service route on port 3456', () => {
+  const manifest = manifestById('meridian')!
+  expect(manifest.label).toBe('Claude Code (Meridian)')
+  expect(manifest.protocol).toBe('openai-completions')
+  expect(manifest.delivery).toBe('service')
+  // llm-pi-ai serves this route: no custom namespace, and an llm-pi-ai route
+  // must never declare a credential pool.
+  expect(manifest.settingsNs).toBeUndefined()
+  expect(manifest.pool).toBeUndefined()
+  expect(JSON.stringify(manifest)).not.toContain('"pool"')
+  // The proxy is loopback-gated as shipped and its own credential is the CLI
+  // login, so the route is written keyless.
+  expect(manifest.auth).toEqual({ kind: 'none', keyless: true })
+  expect(manifest.defaultPort).toBe(3456)
+  expect(manifest.reuse.baseURL).toBe('http://127.0.0.1:3456/v1')
+  expect(manifest.reuse.health.url).toBe('http://127.0.0.1:3456/health')
+  expect(manifest.local.baseURL).toBe('http://127.0.0.1:3456/v1')
+  expect(manifest.local.health).toEqual(manifest.reuse.health)
+  expect(manifest.local.dashboardUrl).toBe('http://127.0.0.1:3456')
+  expect(manifest.local.runtime).toBe('node')
+  // /v1/models is the release catalog, so discovery supplies every model and
+  // no id is fabricated here.
+  expect(manifest.fallbackModel).toBeUndefined()
+})
+
+it('meridian badges the subscription login as a browser flow and carries the documented quirks', () => {
+  const manifest = manifestById('meridian')!
+  expect(manifest.requiresBrowser.join('\n')).toContain('claude auth login --claudeai')
+  const quirks = manifest.quirks.join('\n')
+  expect(quirks).toContain('Local install dependencies:')
+  expect(quirks).toContain('Docker is never required')
+  expect(quirks).toContain('Node.js >= 22')
+  expect(quirks).toContain('ANTHROPIC_API_KEY must be unset')
+  expect(quirks).toContain('node <resolved>/dist/cli.js')
+  expect(quirks).toContain('npm global bin')
+  expect(quirks).toContain('/v1/models')
+  expect(quirks).toContain('MERIDIAN_ENFORCE_MAX_TOKENS=1')
+  expect(quirks).toContain('x-session-affinity')
+  expect(quirks).toContain('subscription usage windows')
+})
+
+it('the meridian install checks node and the subscription, installs both packages, then starts the unit', () => {
+  const manifest = manifestById('meridian')!
+  const linux = resolveHeavyInstall(manifest.local, 'linux')
+  expect(linux.label).toBe('Install locally (npm + systemd user unit)')
+  expect(linux.steps.map(step => step.label)).toEqual([
+    'Check Node.js and npm',
+    'Install the Claude Code CLI when it is missing or older than 2.1.293',
+    'Require a Claude subscription login',
+    'Install Meridian',
+    'Write the systemd user unit',
+    'Enable and start the unit',
+    'Wait for Meridian',
+  ])
+  const [node, cli, login, install, unit, enable, health] = linux.steps.map(step => step.command)
+  expect(node).toContain('command -v node')
+  expect(node).toContain('command -v npm')
+  expect(node).toContain('-ge 22')
+  // The CLI install is skipped only when a sufficient version is present.
+  expect(cli).toContain('claude --version')
+  expect(cli).toContain('npm install -g @anthropic-ai/claude-code')
+  expect(cli).toContain('c>=293')
+  expect(cli).toContain('GLOBAL_BIN="$(npm prefix -g)/bin"')
+  // Subscription login, not API-key auth; both env refs are unset for the probe.
+  expect(login).toContain('env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN claude auth status')
+  expect(login).toContain('"claude.ai"')
+  expect(login).toContain('claude auth login --claudeai')
+  expect(install).toBe('npm install -g @rynfar/meridian@latest')
+  // The unit names the resolved cli.js (not the bin) and the documented env.
+  expect(unit).toContain('realpathSync')
+  expect(unit).toContain('ExecStart=$NODE_BIN $ENTRY')
+  expect(unit).not.toContain('ExecStart=/usr')
+  expect(unit).toContain('Environment=HOME=%h')
+  expect(unit).toContain('Environment=MERIDIAN_HOST=127.0.0.1')
+  expect(unit).toContain('Environment=MERIDIAN_PORT=3456')
+  expect(unit).toContain('Environment=MERIDIAN_PASSTHROUGH=1')
+  expect(unit).toContain('Environment=MERIDIAN_ENFORCE_MAX_TOKENS=1')
+  expect(unit).toContain('Environment=PATH=$GLOBAL_BIN:')
+  expect(enable).toContain('systemctl --user daemon-reload')
+  expect(enable).toContain('systemctl --user enable --now meridian.service')
+  expect(health).toContain('curl -fsS http://127.0.0.1:3456/health')
+  expect(health).toContain('sleep 2')
+  // The default variant is the systemd path: an unknown POSIX platform never
+  // receives the launchd agent.
+  expect(resolveHeavyInstall(manifest.local, 'freebsd').steps).toEqual(linux.steps)
+})
+
+it('the meridian macOS path writes the launchd agent and bootstraps it', () => {
+  const manifest = manifestById('meridian')!
+  const darwin = resolveHeavyInstall(manifest.local, 'darwin')
+  expect(darwin.label).toBe('Install locally (npm + launchd agent)')
+  const commands = darwin.steps.map(step => step.command).join('\n')
+  expect(commands).toContain('{home}/Library/LaunchAgents/dev.meridian.proxy.plist')
+  expect(commands).toContain('<key>MERIDIAN_PORT</key>')
+  expect(commands).toContain('<string>3456</string>')
+  expect(commands).toContain('launchctl bootstrap')
+  expect(commands).toContain('launchctl kickstart')
+  expect(commands).toContain('curl -fsS http://127.0.0.1:3456/health')
+  // The macOS path never writes or enables a systemd unit; the health hint
+  // names both service managers in one platform-neutral line.
+  expect(commands).not.toContain('{config}/systemd/user')
+  expect(commands).not.toContain('systemctl --user enable')
+  // Windows is refused before any step runs, with the manual path named.
+  const reason = platformUnsupported(manifest, 'win32') ?? ''
+  expect(reason).toContain('Windows')
+  expect(reason).toContain('claude auth login --claudeai')
+  expect(reason).toContain('npm install -g @rynfar/meridian')
+  expect(resolveHeavyInstall(manifest.local, 'win32').steps).toEqual([])
+  expect(platformUnsupported(manifest, 'linux')).toBeUndefined()
+  expect(platformUnsupported(manifest, 'darwin')).toBeUndefined()
+})
+
+it('every meridian step is one shell command that names placeholders instead of a literal home', () => {
+  const manifest = manifestById('meridian')!
+  const install = (['default', 'linux', 'darwin', 'win32'] as const)
+    .flatMap(platform => resolveHeavyInstall(manifest.local, platform).steps.map(step => step.command))
+  const commands = [...install, ...manifest.removal.steps.map(step => step.command)]
+  expect(commands.length).toBeGreaterThan(0)
+  for (const command of commands) {
+    expect(command.trim()).toBe(command)
+    expect(command).not.toMatch(/\/home\/[A-Za-z0-9._-]+/)
+    expect(command).not.toContain('~/')
+    expect(command).not.toContain('{home}/.dsh')
+  }
+  // Only the unit and the plist span lines, and each is one heredoc: the rest
+  // are single-line shell commands. (The unit is shared by `default` and
+  // `linux`, so it appears twice in the resolved lists.)
+  const multiline = [...new Set(commands.filter(command => command.includes('\n')))]
+  expect(multiline).toHaveLength(2)
+  for (const command of multiline) {
+    expect(command).toContain('<<EOF')
+    expect(command.endsWith('\nEOF')).toBe(true)
+  }
+})
+
+it('the meridian teardown removes the user service but never uninstalls the npm packages', () => {
+  const manifest = manifestById('meridian')!
+  const commands = manifest.removal.steps.map(step => step.command).join('\n')
+  expect(commands).toContain('systemctl --user disable --now meridian.service')
+  expect(commands).toContain('launchctl bootout gui/$(id -u)/dev.meridian.proxy')
+  expect(commands).toContain('rm -f {config}/systemd/user/meridian.service {home}/Library/LaunchAgents/dev.meridian.proxy.plist')
+  // No step removes the packages: the CLI is a shared tool and Meridian may be
+  // the operator's only copy, so the last step states that instead.
+  expect(manifest.removal.steps.some(step => /^\s*npm\s+(?:uninstall|rm)\b/.test(step.command))).toBe(false)
+  const leave = manifest.removal.steps.at(-1)!
+  expect(leave.label).toContain('not uninstalled')
+  expect(leave.label).toContain('@rynfar/meridian')
+  expect(leave.label).toContain('@anthropic-ai/claude-code')
+  const warnings = manifest.removal.warnings.join('\n')
+  expect(warnings).toContain('~/.claude')
+  expect(warnings).toContain('usage windows')
+})
+
+/** Run one rendered Meridian step in a scratch home with a stubbed npm global prefix. */
+function runMeridianStep(
+  home: string,
+  platform: 'linux' | 'darwin',
+  stepIndex: number,
+): { status: number; stdout: string } {
+  const bin = join(home, 'stub-bin')
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(
+    join(bin, 'npm'),
+    '#!/usr/bin/env bash\ncase "$*" in\n  "prefix -g") printf "%s\\n" "$HOME/stub-prefix" ;;\n  "root -g") printf "%s\\n" "$HOME/stub-prefix/lib/node_modules" ;;\n  *) exit 0 ;;\nesac\n',
+    'utf8',
+  )
+  chmodSync(join(bin, 'npm'), 0o755)
+  const entry = join(home, 'stub-prefix', 'lib', 'node_modules', '@rynfar', 'meridian', 'dist', 'cli.js')
+  mkdirSync(dirname(entry), { recursive: true })
+  writeFileSync(entry, '//', 'utf8')
+  const step = resolveHeavyInstall(manifestById('meridian')!.local, platform).steps[stepIndex]!
+  try {
+    const stdout = execFileSync('/bin/bash', ['-c', substitute(step.command, home, join(home, '.dsh'))], {
+      env: { PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: home },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    return { status: 0, stdout }
+  } catch (error) {
+    const failure = error as { status?: number; stdout?: string }
+    return { status: failure.status ?? 1, stdout: failure.stdout ?? '' }
+  }
+}
+
+it('the meridian service file resolves the real cli.js and renders the documented environment', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'heavy-meridian-unit-'))
+  try {
+    const home = join(scratch, 'home')
+    const entry = join(home, 'stub-prefix', 'lib', 'node_modules', '@rynfar', 'meridian', 'dist', 'cli.js')
+
+    const linux = runMeridianStep(home, 'linux', 4)
+    expect(linux.status, linux.stdout).toBe(0)
+    const unit = readFileSync(join(home, '.config', 'systemd', 'user', 'meridian.service'), 'utf8')
+    // `node <realpath>` — never a bin shim whose shebang would not resolve.
+    const exec = unit.split('\n').find(line => line.startsWith('ExecStart='))!
+    expect(exec).toMatch(/^ExecStart=\/\S*\/node /)
+    expect(exec.endsWith(` ${entry}`)).toBe(true)
+    expect(unit).toContain('Environment=HOME=%h')
+    expect(unit).toContain('Environment=MERIDIAN_HOST=127.0.0.1')
+    expect(unit).toContain('Environment=MERIDIAN_PORT=3456')
+    expect(unit).toContain('Environment=MERIDIAN_PASSTHROUGH=1')
+    expect(unit).toContain('Environment=MERIDIAN_ENFORCE_MAX_TOKENS=1')
+    expect(unit).toContain(`Environment=PATH=${join(home, 'stub-prefix', 'bin')}:`)
+    expect(unit).toContain('WantedBy=default.target')
+
+    const darwin = runMeridianStep(home, 'darwin', 4)
+    expect(darwin.status, darwin.stdout).toBe(0)
+    const plist = readFileSync(join(home, 'Library', 'LaunchAgents', 'dev.meridian.proxy.plist'), 'utf8')
+    expect(plist).toContain(`<string>${entry}</string>`)
+    expect(plist).toContain('<key>MERIDIAN_PORT</key>\n    <string>3456</string>')
+    expect(plist).toContain('<key>MERIDIAN_ENFORCE_MAX_TOKENS</key>\n    <string>1</string>')
+    expect(plist).toContain('<key>RunAtLoad</key>')
+    expect(plist).toContain('<key>KeepAlive</key>')
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+it('the meridian display copy carries the same id, label, protocol, auth, and endpoint as the manifest', () => {
+  const fixture = JSON.parse(readFileSync(
+    new URL('../../../../../packages/client/ui-settings-models/tests/expected/heavy-provider-mirror.json', import.meta.url),
+    'utf8',
+  )) as ReadonlyArray<{ id: string; label: string; protocol: string; auth: { keyless: boolean }; reuse: { baseURL: string; health: { url: string } } }>
+  const manifest = manifestById('meridian')!
+  const row = fixture.find(entry => entry.id === manifest.id)
+  expect(row).toBeDefined()
+  expect(row?.label).toBe(manifest.label)
+  expect(row?.protocol).toBe(manifest.protocol)
+  expect(row?.auth.keyless).toBe(true)
+  expect(row?.reuse.baseURL).toBe(manifest.reuse.baseURL)
+  expect(row?.reuse.health.url).toBe(manifest.reuse.health.url)
 })

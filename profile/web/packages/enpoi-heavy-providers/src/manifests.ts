@@ -413,6 +413,190 @@ const COMMANDCODE_INSTALL_STEP: HeavyStep = {
   weight: 3,
 }
 
+/**
+ * Port Meridian listens on (its documented default). The unit, the launchd
+ * agent, and the health wait all render this one value; a deployment that
+ * moves the service retargets the route through the operator overlay.
+ */
+const MERIDIAN_PORT = 3456
+
+/** launchd label for the Meridian user agent (macOS). */
+const MERIDIAN_LAUNCHD_LABEL = 'dev.meridian.proxy'
+
+/** The npm packages the install resolves; the teardown leaves both installed. */
+const MERIDIAN_CLAUDE_CLI_PACKAGE = '@anthropic-ai/claude-code'
+const MERIDIAN_PACKAGE = '@rynfar/meridian'
+
+/** The Meridian health probe, shared by every platform variant. */
+const MERIDIAN_HEALTH: HeavyHealth = { url: `http://127.0.0.1:${MERIDIAN_PORT}/health`, timeoutMs: 5000 }
+
+/**
+ * Node + npm preflight: both packages are npm global installs and the SDK
+ * needs Node >= 22. A shell without either fails here with the requirement
+ * instead of partway through the npm steps.
+ */
+const MERIDIAN_NODE_STEP: HeavyStep = {
+  label: 'Check Node.js and npm',
+  command: 'command -v node >/dev/null && command -v npm >/dev/null || { echo "Meridian needs Node.js >= 22 with npm on PATH"; exit 1; }; major="$(node -p \'process.versions.node.split(".")[0]\')"; [ "$major" -ge 22 ] || { echo "Meridian needs Node.js >= 22 (found $(node -v))"; exit 1; }',
+}
+
+/**
+ * The Claude Code CLI install: skipped when a sufficient version is present.
+ * 2.1.293 is the documented floor for the current model line; an older CLI
+ * keeps working for older models but fails on the newest Haiku.
+ */
+const MERIDIAN_CLI_STEP: HeavyStep = {
+  label: 'Install the Claude Code CLI when it is missing or older than 2.1.293',
+  command: `GLOBAL_BIN="$(npm prefix -g)/bin" && export PATH="$GLOBAL_BIN:$PATH"; have="$(claude --version 2>/dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -1)"; if [ -n "$have" ] && node -e 'const [a,b,c]=process.argv[1].split(".").map(Number); process.exit(a>2||(a===2&&(b>1||(b===1&&c>=293)))?0:1)' "$have"; then echo "Claude Code CLI $have is installed"; else npm install -g ${MERIDIAN_CLAUDE_CLI_PACKAGE}; fi`,
+  weight: 2,
+}
+
+/**
+ * The subscription-login precheck. `auth status` reports `"claude.ai"` only
+ * for a subscription session; an API-key session (or no login) fails here,
+ * before Meridian is installed, with the exact login command. Both Anthropic
+ * environment variables are unset for the probe so an ambient API key cannot
+ * mask the subscription store.
+ */
+const MERIDIAN_LOGIN_STEP: HeavyStep = {
+  label: 'Require a Claude subscription login',
+  command: 'GLOBAL_BIN="$(npm prefix -g)/bin" && export PATH="$GLOBAL_BIN:$PATH"; env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN claude auth status 2>/dev/null | grep -q \'"claude.ai"\' || { echo "the Claude Code CLI is not signed in to a Claude subscription"; echo "run: env -u ANTHROPIC_API_KEY claude auth login --claudeai"; echo "then re-run this install"; exit 1; }',
+  weight: 2,
+}
+
+/** The Meridian npm install: always `@latest`, so a re-run is the upgrade path. */
+const MERIDIAN_INSTALL_STEP: HeavyStep = {
+  label: 'Install Meridian',
+  command: `npm install -g ${MERIDIAN_PACKAGE}@latest`,
+  weight: 2,
+}
+
+/**
+ * The systemd user unit, written fresh on every run so an upgrade that moves
+ * the package (or the Node version) updates both paths.
+ *
+ * ExecStart is `node <resolved dist/cli.js>` and never the `meridian` bin: the
+ * bin's `#!/usr/bin/env node` shebang does not resolve under systemd's PATH.
+ * The unit's PATH carries the npm global bin because the Agent SDK spawns
+ * `claude`, and HOME is the user's home so the SDK reads the CLI login store.
+ */
+const MERIDIAN_SYSTEMD_UNIT_STEP: HeavyStep = {
+  label: 'Write the systemd user unit',
+  command: `mkdir -p {config}/systemd/user && NODE_BIN="$(command -v node)" && GLOBAL_BIN="$(npm prefix -g)/bin" && ENTRY="$(node -e 'console.log(require("fs").realpathSync(process.argv[1]))' "$(npm root -g)/${MERIDIAN_PACKAGE}/dist/cli.js")" || { echo "could not resolve ${MERIDIAN_PACKAGE}/dist/cli.js under $(npm root -g 2>/dev/null); run the Meridian install step first"; exit 1; }; cat > {config}/systemd/user/meridian.service <<EOF
+[Unit]
+Description=Meridian — standalone API bridge for the Claude subscription (official Agent SDK)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# node plus the resolved cli.js: the bin's #!/usr/bin/env node shebang does not resolve here
+ExecStart=$NODE_BIN $ENTRY
+Restart=on-failure
+RestartSec=10s
+StandardOutput=journal
+StandardError=journal
+Environment=HOME=%h
+Environment=MERIDIAN_HOST=127.0.0.1
+Environment=MERIDIAN_PORT=${MERIDIAN_PORT}
+Environment=MERIDIAN_PASSTHROUGH=1
+Environment=MERIDIAN_ENFORCE_MAX_TOKENS=1
+# the Agent SDK spawns claude, which lives in the npm global bin
+Environment=PATH=$GLOBAL_BIN:{home}/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
+EOF`,
+}
+
+/** Enable the unit through the user manager; a systemd-like host only. */
+const MERIDIAN_SYSTEMD_ENABLE_STEP: HeavyStep = {
+  label: 'Enable and start the unit',
+  command: 'systemctl --user daemon-reload && systemctl --user enable --now meridian.service',
+}
+
+/**
+ * The launchd agent, written fresh on every run with the resolved node and
+ * entry paths (the doc's plist, with the paths resolved instead of hardcoded).
+ * HOME is the real home so the SDK reads the CLI login store, and PATH carries
+ * the npm global bin for `claude`.
+ */
+const MERIDIAN_LAUNCHD_WRITE_STEP: HeavyStep = {
+  label: 'Write the launchd agent',
+  command: `mkdir -p {home}/Library/LaunchAgents {home}/Library/Logs && NODE_BIN="$(command -v node)" && GLOBAL_BIN="$(npm prefix -g)/bin" && ENTRY="$(node -e 'console.log(require("fs").realpathSync(process.argv[1]))' "$(npm root -g)/${MERIDIAN_PACKAGE}/dist/cli.js")" || { echo "could not resolve ${MERIDIAN_PACKAGE}/dist/cli.js under $(npm root -g 2>/dev/null); run the Meridian install step first"; exit 1; }; cat > {home}/Library/LaunchAgents/${MERIDIAN_LAUNCHD_LABEL}.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${MERIDIAN_LAUNCHD_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$NODE_BIN</string>
+    <string>$ENTRY</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>{home}</string>
+    <key>MERIDIAN_HOST</key>
+    <string>127.0.0.1</string>
+    <key>MERIDIAN_PORT</key>
+    <string>${MERIDIAN_PORT}</string>
+    <key>MERIDIAN_PASSTHROUGH</key>
+    <string>1</string>
+    <key>MERIDIAN_ENFORCE_MAX_TOKENS</key>
+    <string>1</string>
+    <key>PATH</key>
+    <string>$GLOBAL_BIN:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>{home}/Library/Logs/meridian.log</string>
+  <key>StandardErrorPath</key>
+  <string>{home}/Library/Logs/meridian.err.log</string>
+</dict>
+</plist>
+EOF`,
+}
+
+/** Bootstrap (or reload) the agent and then force one start. */
+const MERIDIAN_LAUNCHD_LOAD_STEP: HeavyStep = {
+  label: 'Load and start the agent',
+  command: `launchctl bootout gui/$(id -u)/${MERIDIAN_LAUNCHD_LABEL} 2>/dev/null || true; launchctl bootstrap gui/$(id -u) {home}/Library/LaunchAgents/${MERIDIAN_LAUNCHD_LABEL}.plist 2>/dev/null || launchctl load -w {home}/Library/LaunchAgents/${MERIDIAN_LAUNCHD_LABEL}.plist; launchctl kickstart -k gui/$(id -u)/${MERIDIAN_LAUNCHD_LABEL}`,
+}
+
+/** Bounded health wait: the unit starts the proxy, this waits for /health. */
+const MERIDIAN_WAIT_STEP: HeavyStep = {
+  label: 'Wait for Meridian',
+  command: `for i in {1..30}; do curl -fsS http://127.0.0.1:${MERIDIAN_PORT}/health >/dev/null && exit 0; sleep 2; done; echo "Meridian did not answer /health within 60s — check the user service log (systemctl --user status meridian.service, or launchctl print gui/$(id -u)/dev.meridian.proxy)"; exit 1`,
+}
+
+/** Linux (and systemd-like) Meridian provisioning. */
+const MERIDIAN_SYSTEMD_STEPS: readonly HeavyStep[] = [
+  MERIDIAN_NODE_STEP,
+  MERIDIAN_CLI_STEP,
+  MERIDIAN_LOGIN_STEP,
+  MERIDIAN_INSTALL_STEP,
+  MERIDIAN_SYSTEMD_UNIT_STEP,
+  MERIDIAN_SYSTEMD_ENABLE_STEP,
+  MERIDIAN_WAIT_STEP,
+]
+
+/** macOS Meridian provisioning: the same packages behind a LaunchAgent. */
+const MERIDIAN_LAUNCHD_STEPS: readonly HeavyStep[] = [
+  MERIDIAN_NODE_STEP,
+  MERIDIAN_CLI_STEP,
+  MERIDIAN_LOGIN_STEP,
+  MERIDIAN_INSTALL_STEP,
+  MERIDIAN_LAUNCHD_WRITE_STEP,
+  MERIDIAN_LAUNCHD_LOAD_STEP,
+  MERIDIAN_WAIT_STEP,
+]
+
 /** The three heavy providers v1 ships. */
 export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
   {
@@ -780,6 +964,111 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
       ],
     },
     fallbackModel: 'deepseek/deepseek-v4.1-flash',
+  },
+  {
+    id: 'meridian',
+    label: 'Claude Code (Meridian)',
+    summary: 'Local proxy that serves the operator\'s Claude subscription through the official Agent SDK as an OpenAI-compatible endpoint.',
+    protocol: 'openai-completions',
+    // A service instance on this device: detection and the health probe use
+    // the loopback endpoint, and an operator's own host belongs in the
+    // private server overlay.
+    delivery: 'service',
+    // The proxy needs no client key: as shipped it is loopback-gated, and it
+    // forwards no credential of its own (it drives the CLI login store).
+    // llm-pi-ai serves keyless openai-completions routes, so the route is
+    // written keyless and no stored or ambient key reaches the wire. An
+    // operator who sets MERIDIAN_API_KEY retargets the route through the
+    // server overlay with a unified key; the shipped table stays keyless.
+    auth: { kind: 'none', keyless: true },
+    dashboardUrl: `http://127.0.0.1:${MERIDIAN_PORT}`,
+    docsUrl: `https://www.npmjs.com/package/${MERIDIAN_PACKAGE}`,
+    defaultPort: MERIDIAN_PORT,
+    requiresBrowser: [
+      'Signing the Claude Code CLI in to the subscription (`claude auth login --claudeai`) is a browser flow that writes the CLI login store; on a headless host the printed URL must be opened on a machine with a browser',
+    ],
+    quirks: [
+      'Local install dependencies: Node.js >= 22 and npm (both packages are global npm installs behind a systemd or launchd user service); Docker is never required, and Windows has no supported local install — run the process manually or point the route at a proxy running elsewhere',
+      'The @anthropic-ai/claude-code CLI must be installed and signed in to a Claude subscription (`claude auth login --claudeai`); ANTHROPIC_API_KEY must be unset during that login or the CLI can authenticate against API billing instead',
+      'ExecStart must be `node <resolved>/dist/cli.js`, never the `meridian` bin: its `#!/usr/bin/env node` shebang does not resolve under systemd',
+      'The unit PATH must contain the npm global bin (where `claude` lives), or the Agent SDK cannot spawn the CLI',
+      'The model catalog ships inside each Meridian release: /v1/models answers from the build, not from a live CLI query, but an unknown model id still passes through to the SDK',
+      'MERIDIAN_ENFORCE_MAX_TOKENS=1 is set here, so a harness that relies on max_tokens gets a hard budget',
+      'x-session-affinity is optional and only matters for append-only clients; a request without it runs a fresh SDK session with the history packed into the system prompt',
+      'Billing draws from the operator\'s own Claude subscription usage windows (like `claude -p`) — Meridian drives the official CLI/SDK and never reads or replays OAuth tokens',
+    ],
+    reuse: {
+      label: 'Use a detected instance',
+      baseURL: `http://127.0.0.1:${MERIDIAN_PORT}/v1`,
+      note: 'Zero install: uses a Meridian proxy already running on this device and its Claude subscription login.',
+      health: MERIDIAN_HEALTH,
+    },
+    local: {
+      label: 'Install locally (npm + user service)',
+      baseURL: `http://127.0.0.1:${MERIDIAN_PORT}/v1`,
+      deps: ['Node.js >= 22', 'A reachable systemd user session (systemctl --user) on the default path'],
+      diskHint: 'Two global npm packages and one Node process; no GPU, no Docker',
+      dashboardUrl: `http://127.0.0.1:${MERIDIAN_PORT}`,
+      runtime: 'node',
+      install: {
+        // The npm packages are cross-platform; the user-service wrapper is
+        // not. Linux (and systemd-like hosts) keeps the systemd unit, macOS
+        // gets the launchd agent, and Windows has no POSIX user service.
+        default: { steps: MERIDIAN_SYSTEMD_STEPS },
+        linux: { label: 'Install locally (npm + systemd user unit)', steps: MERIDIAN_SYSTEMD_STEPS },
+        darwin: {
+          label: 'Install locally (npm + launchd agent)',
+          deps: ['Node.js >= 22', 'macOS 11+ (launchd)'],
+          diskHint: 'Two global npm packages and one Node process; no GPU, no Docker; logs in ~/Library/Logs',
+          steps: MERIDIAN_LAUNCHD_STEPS,
+        },
+        win32: {
+          label: 'Not supported on Windows',
+          unsupported: `The Meridian local install needs a POSIX user service (systemd or launchd) to keep the proxy running; this profile has no supported Windows provisioning path. Install Node.js 22, run \`npm install -g ${MERIDIAN_CLAUDE_CLI_PACKAGE}\` and sign in with \`env -u ANTHROPIC_API_KEY claude auth login --claudeai\`, then \`npm install -g ${MERIDIAN_PACKAGE}\` and start \`node <npm root -g>/${MERIDIAN_PACKAGE}/dist/cli.js\` yourself with MERIDIAN_HOST=127.0.0.1, MERIDIAN_PORT=${MERIDIAN_PORT}, MERIDIAN_PASSTHROUGH=1 and MERIDIAN_ENFORCE_MAX_TOKENS=1 — or point the route at a Meridian proxy running elsewhere.`,
+          steps: [],
+        },
+      },
+      health: MERIDIAN_HEALTH,
+    },
+    removal: {
+      // Platform-neutral like the antigravity teardown: it touches whichever
+      // user-service file the platform wrote. The two npm global packages are
+      // deliberately never uninstalled — the Claude Code CLI is a shared tool,
+      // and Meridian may be the operator's only copy — so the last step states
+      // that in its label instead of removing them.
+      steps: [
+        {
+          label: 'Stop and disable the user service',
+          optional: true,
+          command: `if command -v systemctl >/dev/null 2>&1; then systemctl --user disable --now meridian.service 2>/dev/null || true; fi; if command -v launchctl >/dev/null 2>&1; then launchctl bootout gui/$(id -u)/${MERIDIAN_LAUNCHD_LABEL} 2>/dev/null || true; fi`,
+        },
+        {
+          label: 'Remove the user service file',
+          optional: true,
+          command: `rm -f {config}/systemd/user/meridian.service {home}/Library/LaunchAgents/${MERIDIAN_LAUNCHD_LABEL}.plist; if command -v systemctl >/dev/null 2>&1; then systemctl --user daemon-reload 2>/dev/null || true; fi`,
+        },
+        {
+          label: 'Remove the macOS agent logs',
+          optional: true,
+          command: 'test "$(uname -s)" = Darwin || exit 0; rm -f "{home}/Library/Logs/meridian.log" "{home}/Library/Logs/meridian.err.log"; exit 0',
+        },
+        {
+          label: `Leave the global npm packages installed (${MERIDIAN_PACKAGE} and ${MERIDIAN_CLAUDE_CLI_PACKAGE} are not uninstalled)`,
+          optional: true,
+          command: `echo "Meridian and the Claude Code CLI stay installed; remove them yourself with: npm uninstall -g ${MERIDIAN_PACKAGE} ${MERIDIAN_CLAUDE_CLI_PACKAGE}"`,
+        },
+      ],
+      warnings: [
+        'Meridian and the Claude Code CLI stay installed as npm global packages — uninstall them yourself when no other tool uses them',
+        '~/.config/meridian (profiles, settings, model pricing) and ~/.cache/meridian (sessions) are left in place; they hold no credentials, but delete them by hand if the install is not coming back',
+        'The Claude CLI login store (~/.claude) belongs to the CLI and is never touched by this removal',
+        'Any other tool pointed at the proxy stops working when the service is removed',
+        'If a dotfiles/config repository manages the unit file (systemd unit or launchd plist), remove it there too or the next sync resurrects it',
+        'Turns already served drew from the Claude subscription usage windows and are not refunded',
+      ],
+    },
+    // No fallbackModel: /v1/models is the catalog shipped in the release, so
+    // discovery is the only model source and nothing is fabricated.
   },
 ]
 

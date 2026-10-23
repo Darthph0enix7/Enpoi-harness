@@ -59,7 +59,7 @@ One line per term, harness-specific meaning first. `$DSH_HOME` is the user's har
 - **keyless** — a route that serves requests without a credential (`keyless: true`; e.g. Kilo Gateway). Supplying a key switches to BYOK.
 - **gated / gate reason** — a model the provider lists as unavailable without sign-in/paid plan; the picker dims it with `sign-in required`.
 - **pool / identity** — embedded multi-key pool for one provider; each identity has `priority`, `enabled`, `credentialRef`, a cooldown, and a last status. Strategy `priority-sticky` (default) rides the top identity.
-- **heavy provider** — FreeLLMAPI / Antigravity / Command Code: listed but nothing installed until the operator adds one; install/health/remove are manifest-driven, and removal cleans route, credential, pool, cache, chains.
+- **heavy provider** — FreeLLMAPI / Antigravity / Command Code / Meridian: listed but nothing installed until the operator adds one; install/health/remove are manifest-driven, and removal cleans route, credential, pool, cache, chains.
 - **model group / chain** — ordered links (`provider/model`) with `attempts` and `onCut: failover`; assigning a chain to a seat routes through its first enabled link.
 - **rules engine** — `enpoi-catalog-rules`: evaluates `catalogRules` against every catalogue entry and publishes only non-default decisions.
 - **visibility decision** — per-model resolve: `visible|hidden`, `reason`, `source: default|manual|rule|gated`; precedence manual hidden > manual shown

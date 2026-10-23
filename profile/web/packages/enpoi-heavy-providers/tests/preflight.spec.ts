@@ -267,7 +267,7 @@ it('the overlay disables a provider and overrides label, summary, links, steps, 
 
   // The effective host table drops disabled providers and applies the rest.
   const effective = effectiveHeavyManifests(HEAVY_MANIFESTS, overlay)
-  expect(effective.map(manifest => manifest.id)).toEqual(['antigravity', 'commandcode'])
+  expect(effective.map(manifest => manifest.id)).toEqual(['antigravity', 'commandcode', 'meridian'])
   expect(effective[1]?.fallbackModel).toBeUndefined()
 })
 

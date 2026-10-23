@@ -31,9 +31,10 @@ it('derives the shipped popular order and keyless set from the generated rows', 
   for (const [index, id] of SHIPPED_POPULAR_PROVIDERS.entries()) {
     expect(providerPreset(id)?.popular).toBe(index + 1)
   }
-  // `antigravity` joins the shipped mainstream keyless rows because its heavy
-  // manifest declares a keyless route (llm-pi-ai serves keyless anthropic).
-  expect(SHIPPED_KEYLESS_PROVIDERS).toEqual(new Set(['kilo', 'lmstudio', 'ollama', 'antigravity']))
+  // `antigravity` and `meridian` join the shipped mainstream keyless rows
+  // because their heavy manifests declare keyless routes (llm-pi-ai serves
+  // keyless anthropic and openai-completions).
+  expect(SHIPPED_KEYLESS_PROVIDERS).toEqual(new Set(['kilo', 'lmstudio', 'ollama', 'antigravity', 'meridian']))
   // The verdict lives on the row, not only in the derived set.
   expect(providerPreset('kilo')?.keyless).toBe(true)
   expect(providerPreset('ollama')?.keyless).toBe(true)

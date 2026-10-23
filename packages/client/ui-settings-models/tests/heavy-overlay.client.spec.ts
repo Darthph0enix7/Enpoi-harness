@@ -41,7 +41,7 @@ it('disables a manifest and overrides label, summary, and links', () => {
     },
   })
   const effective = applyHeavyOverlay(FALLBACK_HEAVY_PROVIDER_MANIFESTS, overlay)
-  expect(effective.map(manifest => manifest.id)).toEqual(['antigravity', 'commandcode'])
+  expect(effective.map(manifest => manifest.id)).toEqual(['antigravity', 'commandcode', 'meridian'])
   const antigravity = effective.find(manifest => manifest.id === 'antigravity')!
   expect(antigravity.label).toBe('Antigravity (operator)')
   expect(antigravity.summary).toBe('Operator summary')
@@ -124,5 +124,5 @@ it('returns the table unchanged without an overlay and reads the page global', (
   vi.stubGlobal(HEAVY_OVERLAY_GLOBAL, { providers: { freellmapi: { disabled: true } } })
   expect(readHeavyOverlayGlobal().providers.freellmapi).toEqual({ disabled: true })
   expect(applyHeavyOverlay(FALLBACK_HEAVY_PROVIDER_MANIFESTS, readHeavyOverlayGlobal()).map(manifest => manifest.id))
-    .toEqual(['antigravity', 'commandcode'])
+    .toEqual(['antigravity', 'commandcode', 'meridian'])
 })
