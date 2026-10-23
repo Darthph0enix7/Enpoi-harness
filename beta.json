@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-23T15:55:26.733Z",
+  "generatedAt": "2026-10-23T17:10:59.960Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.104",
+      "commit": "6dfd8f7",
+      "releasedAt": "2026-10-23T16:47:23.000Z",
+      "notes": [
+        "docs(memory): say when to save and what a search actually returns"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.103",
       "commit": "3e59450",
@@ -363,14 +371,6 @@
       "releasedAt": "2026-10-11T18:49:13.000Z",
       "notes": [
         "perf(update): selective merge-base extraction with reuse and ticker"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.62",
-      "commit": "112f5ab",
-      "releasedAt": "2026-10-11T17:50:58.000Z",
-      "notes": [
-        "perf(update): one ticked tree-walk per update; scoped snapshot; liveness everywhere"
       ]
     }
   ]
