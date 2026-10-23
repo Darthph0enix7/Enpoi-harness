@@ -92,6 +92,9 @@
 /deepseek-ai-dsh-compaction-basic/model-experience/auxiliary-summarizer-request/kv-cache-effect:
   en: cdc4ceace61fccf4
   zh: c0919ebe9fa98fe0
+/deepseek-ai-dsh-compaction-basic/model-experience/pinned-leading-messages-and-the-recall-footer:
+  en: 7107191b9cf4d07b
+  zh: fc795d15041d65d5
 /deepseek-ai-dsh-compaction-basic/known-limitations-and-deferred-work:
   en: 8f459fa26e079883
   zh: 4acdcefa71ebb409

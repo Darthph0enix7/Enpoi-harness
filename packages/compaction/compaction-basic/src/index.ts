@@ -9,13 +9,15 @@ import z from '@deepseek-ai/schemastery'
 import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
 import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
-// Type-only: makes the optional sibling service available to `ctx.get()`.
+// Type-only: makes the optional sibling services available to `ctx.get()`.
 import type {} from '@deepseek-ai/dsh-compaction-tool-result-pruner'
+import type {} from '@deepseek-ai/dsh-tools'
 import {
   applySettingsOverrides,
   resolveCompactSpec,
@@ -28,6 +30,7 @@ import {
   compactSurfaceRegion,
   selectCompactableRange,
 } from './region.ts'
+import type { PinLeadingOptions, RecallFraming } from './region.ts'
 import { readCompactionSettings, resolveCompactionSeat } from './settings.ts'
 import { resolveSummarizationTarget, summarizeWithLlm } from './summarizer.ts'
 import type { SummarizationInput, SummarizationFraming, SummaryConfig, SummaryResult } from './summarizer.ts'
@@ -114,6 +117,9 @@ function isCompactionCheckpointNode(session: Session, seq: SessionSeq): boolean 
   const event = session.eventAt(seq)
   if (event?.type !== 'user/message') return false
   const op = event.surfaceOp
+  // `SurfaceOp` also has the plain-string form; the object guard is required at
+  // runtime even where the static type has already narrowed.
+  // oxlint-disable-next-line typescript/no-unnecessary-condition
   if (typeof op !== 'object' || op === null || op.op !== 'replace') return false
   return (event.sourceEventSeqs ?? []).some((source) => {
     // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
@@ -179,6 +185,11 @@ export class BasicCompactionEngine extends CompactionEngine {
     maxOverflowRetries: maxOverflowRetriesSchema,
     modelPolicies: z.array(modelPolicy),
     auto: z.boolean(),
+    recallFooter: z.string(),
+    recallFooterTools: z.array(z.string()),
+    pinLeadingUserMessages: z.number().step(1).min(0),
+    pinLeadingMaxTokens: z.number().step(1).min(1),
+    pinScope: z.union(['child', 'all'] as const),
   })
 
   /** Resolved and validated compaction configuration. */
@@ -356,6 +367,38 @@ export class BasicCompactionEngine extends CompactionEngine {
     return applySettingsOverrides(this.config, readCompactionSettings(this.ctx))
   }
 
+  /** Leading user messages pinned for this session under the configured scope. */
+  private pinLeading(session: Session): PinLeadingOptions {
+    const count = this.config.pinScope === 'all'
+      || session.header.parentSession !== undefined
+      ? this.config.pinLeadingUserMessages
+      : 0
+    return { count, maxTokens: this.config.pinLeadingMaxTokens }
+  }
+
+  /** Whether one named tool resolves in the compacting agent's own scope. */
+  private toolVisible(agent: Agent, name: string): boolean {
+    // A structural or headless agent without its own scoped context is read
+    // through the plugin context, which is the same global view in a real boot.
+    const agentContext = (agent.ctx as Context | undefined) ?? this.ctx
+    return this.ctx.get('tools')?.get(name, scopeOf(agentContext)) !== undefined
+  }
+
+  /**
+   * Resolve the recall wording for one compaction. The last omission sentence
+   * needs both recall tools; the configured footer needs every tool it names.
+   * A composition that lacks them is never told to use a tool it cannot call.
+   */
+  private recallFraming(agent: Agent): RecallFraming {
+    const searchRead = this.toolVisible(agent, 'session_event_search')
+      && this.toolVisible(agent, 'session_event_read')
+    const footer = this.config.recallFooter.length > 0
+      && this.config.recallFooterTools.every(name => this.toolVisible(agent, name))
+      ? this.config.recallFooter
+      : undefined
+    return { searchRead, ...footer === undefined ? {} : { footer } }
+  }
+
   /**
    * Compact for replayed step-boundary pressure or one provider-confirmed context
    * overflow. Both triggers price the latest durable routed request envelope;
@@ -396,7 +439,12 @@ export class BasicCompactionEngine extends CompactionEngine {
         prune.pruneSession(agent.session)
         measurement = meter.measure(agent.session)
       }
-      const range = selectCompactableRange(agent.session, measurement, 0)
+      const range = selectCompactableRange(
+        agent.session,
+        measurement,
+        0,
+        this.pinLeading(agent.session),
+      )
       if (range === null) return null
       return this.compactRegion(range.start, range.end, agent, signal)
     }
@@ -428,7 +476,12 @@ export class BasicCompactionEngine extends CompactionEngine {
 
     let result: CompactionResult | null = null
     for (let attempt = 0; attempt <= spec.compactionRetries; attempt += 1) {
-      const range = selectCompactableRange(agent.session, measurement, spec.retainTokens)
+      const range = selectCompactableRange(
+        agent.session,
+        measurement,
+        spec.retainTokens,
+        this.pinLeading(agent.session),
+      )
       if (range === null) {
         /* v8 ignore else -- concrete replacement preserves a compactable checkpoint; subclass hooks cannot mutate it. */
         if (result === null) return null
@@ -532,6 +585,7 @@ export class BasicCompactionEngine extends CompactionEngine {
             agent.session,
             this.ctx.tokenMeter.measure(agent.session),
             0,
+            this.pinLeading(agent.session),
           )
           if (range === null) return null
           return await compactSurfaceRegion(
@@ -584,6 +638,7 @@ export class BasicCompactionEngine extends CompactionEngine {
         ...signal === undefined ? {} : { signal },
       }, () => false),
       warn: (line) => { this.ctx.logger.warn(line) },
+      framing: agent => this.recallFraming(agent),
     }
   }
 }

@@ -85,8 +85,17 @@ function createContext(contextWindow = 1_000): Context {
   // projection units register in the constructor); mount it synchronously.
   new SessionProjectionRegistry(ctx)
   void new TokenMeter(ctx)
+  provideTools(ctx, ['session_event_search', 'session_event_read'])
   ctx.llm.registerAdapter([MODEL, 'actual', 'unlisted-provider'], new ContextAdapter(contextWindow))
   return ctx
+}
+
+/** Structural tools service: only the named tools resolve, as one scope would see them. */
+function provideTools(ctx: Context, names: readonly string[]): void {
+  const visible = new Set(names)
+  ctx.reflect.provide('tools', {
+    get: (name: string) => visible.has(name) ? { name } : undefined,
+  })
 }
 
 function agent(session: Session, model?: string): Agent {
@@ -326,6 +335,11 @@ describe('compact configuration and defaults', () => {
       maxTokens: 65_536,
       compactionRetries: 1,
       maxOverflowRetries: 1,
+      recallFooter: '',
+      recallFooterTools: [],
+      pinLeadingUserMessages: 0,
+      pinLeadingMaxTokens: 4_000,
+      pinScope: 'child',
       modelPolicies: [],
       auto: true,
     })

@@ -215,11 +215,15 @@ Output EXACTLY the Markdown structure below: keep every section, in order. Use t
 - [the single next action, directly in line with the most recent request, or "(none)"]
 
 ## Critical Context
-- [decisions and their rationale, constraints, user preferences, open questions, data needed to continue]
+- [open questions, in-flight rationale, and transient data needed to continue; durable items belong in Durable Facts]
+
+## Durable Facts
+- [decision|constraint|requirement|fact] [one self-contained sentence a future session in this workspace needs: a decision with its reason, a constraint, an explicit user requirement or preference, or an exact path / identifier / command / config value. At most 12 items, each under 300 characters. Write "(none)" when nothing qualifies.]
 
 Rules:
 - Write concise English engineering prose. Preserve exact file paths, commands, error strings, identifiers, numeric values, function signatures, and syntax fragments.
 - Capture user feedback and explicit instructions faithfully, especially corrections.
+- Durable Facts must stay true beyond the current task and make sense without this conversation (no "this", "above", "the current file"). Never include credentials, tokens, keys, passwords, or personal data.
 - Do NOT mention this summarization request or that the context was compacted.
 - Output only the checkpoint text: do not call any tool or take any other action.
 - If the conversation already contains a <compacted-summary> block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure.
@@ -233,6 +237,14 @@ Rules:
 
 已回放系统提示词、工具与已遮蔽区域消息与会话最后一个已路由请求逐字匹配，因此辅助请求是会话直到尾随指令之前的真正前缀。该前缀能否复用取决于提供方行为：严格前缀缓存可复用至指令之前；按请求精确匹配键控的提供方对截断形状的回放复用很少（在 antigravity 路由的 Gemini 上测得：摘要调用 0–30%，线性热轮次 79–96%）。将摘要器路由到不同提供方／模型，或压缩非头部范围，都会放弃该回放的前缀关系。
 
+
+### 固定开头的用户消息与召回尾注
+
+`pinLeadingUserMessages` 会把紧跟系统头之后的连续 `user/message` 节点排除在每次压缩范围之外，因此任务说明——子代理的第一条提示，或操作者的初始需求——会原样保留，而不会退化成摘要散文。被固定的节点还会作为前置上下文重放给摘要模型，使辅助请求在固定段之前与对话保持字节相同的公共前缀。`pinScope: child`（默认）只对子代理会话生效；`all` 对所有会话生效；`0` 完全恢复固定前的边界。
+
+压缩检查点中还会包含摘要模型写出的 `## Durable Facts` 小节：带原因的决定、约束、明确的操作者要求，以及确切的路径、标识符或配置值。它只是检查点文本，因此不涉及会话格式变更；需要这些事实的消费方（例如跨会话记忆插件）在 `compaction/end` 成功之后解析它。该小节每次压缩大约多消耗 150–400 个输出 token。
+
+`recallFooter` 会在 `</compacted-summary>` 之后追加一行由部署配置的文本，而无模型的省略提示只有在 `recallFooterTools` 中每个工具都能在压缩代理的作用域内解析时才会点名召回工具。没有这些工具的组合永远不会被告知去调用它们，只会得知完整记录保留在会话日志中。
 ## 已知限制与暂缓事项
 
 <a id="known-limitations-and-deferred-work"></a>

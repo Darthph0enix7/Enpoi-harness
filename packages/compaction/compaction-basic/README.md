@@ -215,11 +215,15 @@ Output EXACTLY the Markdown structure below: keep every section, in order. Use t
 - [the single next action, directly in line with the most recent request, or "(none)"]
 
 ## Critical Context
-- [decisions and their rationale, constraints, user preferences, open questions, data needed to continue]
+- [open questions, in-flight rationale, and transient data needed to continue; durable items belong in Durable Facts]
+
+## Durable Facts
+- [decision|constraint|requirement|fact] [one self-contained sentence a future session in this workspace needs: a decision with its reason, a constraint, an explicit user requirement or preference, or an exact path / identifier / command / config value. At most 12 items, each under 300 characters. Write "(none)" when nothing qualifies.]
 
 Rules:
 - Write concise English engineering prose. Preserve exact file paths, commands, error strings, identifiers, numeric values, function signatures, and syntax fragments.
 - Capture user feedback and explicit instructions faithfully, especially corrections.
+- Durable Facts must stay true beyond the current task and make sense without this conversation (no "this", "above", "the current file"). Never include credentials, tokens, keys, passwords, or personal data.
 - Do NOT mention this summarization request or that the context was compacted.
 - Output only the checkpoint text: do not call any tool or take any other action.
 - If the conversation already contains a <compacted-summary> block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure.
@@ -233,6 +237,14 @@ This is a separate model call: the replayed conversation prefix plus the fixed i
 
 The replayed system prompt, tools, and shadowed-region messages match the conversation's last routed request byte-for-byte, so the auxiliary request is a genuine prefix of the conversation up to the trailing instruction. Reuse of that prefix is provider behavior: strict prefix caches reuse it up to the instruction, while providers that key on exact request matches can reuse little of a truncation-shaped replay (measured on Gemini via the antigravity route: 0–30% on the summarizer call versus 79–96% on linear warm turns). Routing the summarizer to a different provider/model, or compacting a non-head range, forgoes the replay's prefix relation entirely.
 
+
+### Pinned leading messages and the recall footer
+
+`pinLeadingUserMessages` keeps the contiguous `user/message` nodes directly after the system head out of every compacted range, so a task brief — a child's first prompt, or the operator's opening requirements — survives verbatim instead of degrading into prose. The pinned nodes are replayed to the summarizer as leading context, so the auxiliary request stays a byte-identical prefix of the conversation up to the pinned run. `pinScope: child` (the default) applies the pin to subagent sessions only; `all` applies it everywhere; `0` restores the pre-pin boundary exactly.
+
+The checkpoint also carries a `## Durable Facts` section written by the summarizer: decisions with their reasons, constraints, explicit user requirements, and exact paths, identifiers, or config values. It is ordinary checkpoint text, so no session-format change is involved; a consumer that wants those facts (for example a cross-session memory plugin) parses them after `compaction/end` succeeds. The section costs roughly 150–400 output tokens per compaction.
+
+`recallFooter` appends one deployment-authored line after `</compacted-summary>`, and the model-free omission notice names the recall tools, only when every tool in `recallFooterTools` resolves in the compacting agent's scope. A composition without those tools is never told to call them; it only learns that the complete transcript is preserved in the session log.
 ## Known Limitations and Deferred Work
 
 <a id="known-limitations-and-deferred-work"></a>

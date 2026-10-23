@@ -67,11 +67,15 @@ const COMPACTION_INSTRUCTION = [
   '- [the single next action, directly in line with the most recent request, or "(none)"]',
   '',
   '## Critical Context',
-  '- [decisions and their rationale, constraints, user preferences, open questions, data needed to continue]',
+  '- [open questions, in-flight rationale, and transient data needed to continue; durable items belong in Durable Facts]',
+  '',
+  '## Durable Facts',
+  '- [decision|constraint|requirement|fact] [one self-contained sentence a future session in this workspace needs: a decision with its reason, a constraint, an explicit user requirement or preference, or an exact path / identifier / command / config value. At most 12 items, each under 300 characters. Write "(none)" when nothing qualifies.]',
   '',
   'Rules:',
   '- Write concise English engineering prose. Preserve exact file paths, commands, error strings, identifiers, numeric values, function signatures, and syntax fragments.',
   '- Capture user feedback and explicit instructions faithfully, especially corrections.',
+  '- Durable Facts must stay true beyond the current task and make sense without this conversation (no "this", "above", "the current file"). Never include credentials, tokens, keys, passwords, or personal data.',
   '- Do NOT mention this summarization request or that the context was compacted.',
   '- Output only the checkpoint text: do not call any tool or take any other action.',
   `- If the conversation already contains a ${SUMMARY_OPEN_TAG} block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure.`,
@@ -87,7 +91,15 @@ const CHECKPOINT_PREAMBLE =
  * how to recover detail, so the resumed model can ask for what it needs.
  */
 const OMISSION_PREAMBLE =
-  'This is an automatically generated omission notice. No model summary was available, so the oldest part of an earlier conversation span was removed from the live context to keep the session within its context budget. The complete transcript is preserved in the session log. Recover anything you need from the removed span with session_event_search (keywords), session_event_read (seq), or session_search.'
+  'This is an automatically generated omission notice. No model summary was available, so the oldest part of an earlier conversation span was removed from the live context to keep the session within its context budget. The complete transcript is preserved in the session log.'
+
+/**
+ * Recovery sentence appended to {@link OMISSION_PREAMBLE} only when the
+ * compacting agent can actually call the recall tools; a surface without them
+ * is never told to use a tool it does not have.
+ */
+const OMISSION_RECALL_SENTENCE =
+  'Recover anything you need from the removed span with session_event_search (keywords), session_event_read (seq), or session_search.'
 
 /** Audit text recorded as the `compaction/summary` body for a mechanical omission. */
 export const MECHANICAL_SUMMARY_TEXT =
@@ -102,13 +114,22 @@ export const MECHANICAL_SUMMARY_TEXT =
 export interface SummarizationInput {
   /** The conversation's tool schemas, reused for prefix-cache alignment; absent when the request carried none. */
   readonly tools?: readonly ToolSchema[]
-  /** The derived system head, when present, followed by the shadowed region in surface order. */
+  /** The derived system head, when present, then the pinned leading surface messages, then the shadowed region in surface order. */
   readonly messages: readonly Message[]
   /**
+   * Length of the pinned leading-message run directly after the optional
+   * system head (surface nodes the compaction keeps verbatim). The window cap
+   * keeps these messages together with the head and only clips region
+   * messages, so a cached prefix survives even an unusually large pin.
+   * `0`/absent replays exactly the pre-pin shape.
+   */
+  readonly leadingCount?: number
+  /**
    * Durable seqs of the region messages, parallel to the tail of `messages`
-   * after the optional system head. The engine replays a subset when the
-   * summariser window clips the oldest region messages, so recovery needs the
-   * exact seqs the failed request carried — not the whole selected span.
+   * after the optional system head and the pinned leading messages. The engine
+   * replays a subset when the summariser window clips the oldest region
+   * messages, so recovery needs the exact seqs the failed request carried —
+   * not the whole selected span.
    */
   readonly regionSeqs?: readonly SessionSeq[]
 }
@@ -229,6 +250,7 @@ function clipReplayToBudget(
   ctx: Context,
   messages: readonly Message[],
   regionSeqs: readonly SessionSeq[] | undefined,
+  leadingCount: number,
   fixedTokens: number,
   budgetTokens: number,
 ): { messages: readonly Message[]; regionSeqs: readonly SessionSeq[] | undefined; windowClipped: boolean } {
@@ -237,12 +259,18 @@ function clipReplayToBudget(
   if (total <= budgetTokens) return { messages, regionSeqs, windowClipped: false }
 
   // The system head stays pinned: it is the conversation's identity and the
-  // anchor the region's newer messages are read against.
+  // anchor the region's newer messages are read against. The leading run the
+  // range keeps verbatim is pinned with it for the same prefix-cache reason;
+  // only region messages are ever dropped here.
   const head = messages[0]?.role === 'system' ? messages[0] : undefined
-  const firstRegion = head === undefined ? 0 : 1
+  const firstLeading = head === undefined ? 0 : 1
+  const firstRegion = Math.min(messages.length, firstLeading + Math.max(0, leadingCount))
+  const leading = messages.slice(firstLeading, firstRegion)
   const kept: Message[] = []
   const keptSeqs: SessionSeq[] = []
-  let spent = head === undefined ? fixedTokens : fixedTokens + replayPrice(ctx, head)
+  let spent = fixedTokens
+  if (head !== undefined) spent += replayPrice(ctx, head)
+  for (const message of leading) spent += replayPrice(ctx, message)
   for (let index = messages.length - 1; index >= firstRegion; index -= 1) {
     // oxlint-disable-next-line typescript/no-non-null-assertion -- index is a valid position.
     const message = messages[index]!
@@ -254,7 +282,7 @@ function clipReplayToBudget(
     spent += price
   }
   return {
-    messages: head === undefined ? kept : [head, ...kept],
+    messages: [...(head === undefined ? [] : [head]), ...leading, ...kept],
     regionSeqs: regionSeqs === undefined ? undefined : keptSeqs,
     windowClipped: true,
   }
@@ -302,7 +330,14 @@ export async function summarizeWithLlm(
   const budget = framing?.inputBudgetTokens
   const replay = budget === undefined || budget <= 0
     ? { messages: input.messages, regionSeqs: input.regionSeqs, windowClipped: false }
-    : clipReplayToBudget(ctx, input.messages, input.regionSeqs, fixedTokens, budget)
+    : clipReplayToBudget(
+      ctx,
+      input.messages,
+      input.regionSeqs,
+      input.leadingCount ?? 0,
+      fixedTokens,
+      budget,
+    )
 
   const dispatch = async (
     replayMessages: readonly Message[],
@@ -374,37 +409,48 @@ export async function summarizeWithLlm(
 /**
  * Wrap raw summary blocks in the durable checkpoint framing, optionally with a
  * code-assembled coverage note (the window-capped summary documents which
- * seqs it did not condense and how to retrieve them).
+ * seqs it did not condense and how to retrieve them) and a deployment recall
+ * footer (appended after the close tag only when its tools resolve).
  * @param summary - safe text-only model output.
  * @param coverageNote - deterministic note appended inside the checkpoint, when present.
+ * @param recallFooter - deployment recall guidance appended after the close tag, when present.
  * @returns content for the synthesized replacement user message.
  */
-export function frameSummary(summary: readonly ContentBlock[], coverageNote?: string): ContentBlock[] {
+export function frameSummary(
+  summary: readonly ContentBlock[],
+  coverageNote?: string,
+  recallFooter?: string,
+): ContentBlock[] {
   return [
     { type: 'text', text: `${CHECKPOINT_PREAMBLE}\n\n${SUMMARY_OPEN_TAG}` },
     ...summary,
     ...(coverageNote === undefined ? [] : [{ type: 'text' as const, text: `\n[compaction coverage] ${coverageNote}` }]),
     { type: 'text', text: SUMMARY_CLOSE_TAG },
+    ...(recallFooter === undefined ? [] : [{ type: 'text' as const, text: recallFooter }]),
   ]
 }
 
 /**
  * Frame the deterministic, model-free omission stub that replaces the oldest
- * part of a span whose summary failed. It points at the session log and the
- * recall tools so every shadowed byte stays reachable.
+ * part of a span whose summary failed. It points at the session log and — only
+ * when the compacting agent can actually call them — the recall tools, so
+ * every shadowed byte stays reachable.
  * @param start - first shadowed surface seq.
  * @param end - last shadowed surface seq.
  * @param count - number of shadowed surface nodes.
+ * @param recallTools - whether `session_event_search` and `session_event_read` resolve in this scope.
  * @returns content for the synthesized replacement user message.
  */
 export function frameMechanicalOmission(
   start: SessionSeq,
   end: SessionSeq,
   count: number,
+  recallTools = true,
 ): ContentBlock[] {
+  const preamble = recallTools ? `${OMISSION_PREAMBLE} ${OMISSION_RECALL_SENTENCE}` : OMISSION_PREAMBLE
   return [{
     type: 'text',
-    text: `${OMISSION_PREAMBLE}\n\n<compacted-omission>\nRemoved surface seqs ${start}–${end} (${count} messages).\n</compacted-omission>`,
+    text: `${preamble}\n\n<compacted-omission>\nRemoved surface seqs ${start}–${end} (${count} messages).\n</compacted-omission>`,
   }]
 }
 

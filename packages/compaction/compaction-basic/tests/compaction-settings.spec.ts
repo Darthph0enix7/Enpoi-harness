@@ -58,7 +58,16 @@ function createContext(): Context {
   void new LlmRuntime(ctx)
   new SessionProjectionRegistry(ctx)
   void new TokenMeter(ctx)
+  provideTools(ctx, ['session_event_search', 'session_event_read'])
   return ctx
+}
+
+/** Structural tools service: only the named tools resolve, as one scope would see them. */
+function provideTools(ctx: Context, names: readonly string[]): void {
+  const visible = new Set(names)
+  ctx.reflect.provide('tools', {
+    get: (name: string) => visible.has(name) ? { name } : undefined,
+  })
 }
 
 /** Recording adapter: known window, deterministic text summary. */

@@ -29,6 +29,24 @@ interface RegionDependencies {
   recover(error: unknown, agent: Agent, sourceEventSeqs: readonly SessionSeq[], signal?: AbortSignal): boolean
   /** Warn-level diagnostic sink; the engine binds it to the plugin logger. */
   warn(line: string): void
+  /** Recall wording and footer resolved against the compacting agent's visible tools. */
+  framing(agent: Agent): RecallFraming
+}
+
+/** Deterministic recall wording for the compacting agent's tool scope. */
+export interface RecallFraming {
+  /** Whether `session_event_search` and `session_event_read` both resolve in this scope. */
+  readonly searchRead: boolean
+  /** Configured footer text; present only when every configured footer tool resolves. */
+  readonly footer?: string
+}
+
+/** Leading `user/message` surface nodes to keep verbatim after the system head. */
+export interface PinLeadingOptions {
+  /** Maximum number of leading user messages to pin; `0` disables pinning. */
+  readonly count: number
+  /** Per-message price ceiling; the first failing message stops the pin run. */
+  readonly maxTokens: number
 }
 
 /** One validated inclusive span of current surface positions. */
@@ -169,19 +187,23 @@ function systemHead(session: Session, headSeq: SessionSeq): SessionEvent<'system
 }
 
 /**
- * Resolve the next range starting at the first non-system surface node while
- * retaining a priced recent tail and never splitting an assistant
+ * Resolve the next range starting at the first non-system, non-pinned surface
+ * node while retaining a priced recent tail and never splitting an assistant
  * tool-call/result pair. A `system/message` at surface node 0 is never inside
- * the range; without one the range starts at node 0.
+ * the range; without one the range starts at node 0. Pinned messages are the
+ * contiguous `user/message` run directly after the system head whose price is
+ * at most `pin.maxTokens`; a checkpoint or any other node ends the run.
  * @param session - session supplying authoritative current surface positions.
  * @param measurement - unified pressure and surface measurement from the conversation meter.
  * @param retainTokens - minimum recent tail budget retained verbatim.
+ * @param pin - leading user messages to keep verbatim; `0` restores the pre-pin selection exactly.
  * @returns the inclusive positional seq range to compact, or `null`.
  */
 export function selectCompactableRange(
   session: Session,
   measurement: TokenMeasurement,
   retainTokens: number,
+  pin: PinLeadingOptions = { count: 0, maxTokens: 0 },
 ): { start: SessionSeq; end: SessionSeq } | null {
   const pricedNodes = measurement.nodes
   if (pricedNodes.length === 0) return null
@@ -194,6 +216,23 @@ export function selectCompactableRange(
   // oxlint-disable-next-line typescript/no-non-null-assertion
   const firstIdx = systemHead(session, surfaceNodes[0]!) === undefined ? 0 : 1
 
+  // Pinned nodes are surface nodes the next request keeps byte-identical, so
+  // the summarizer's replay can reuse their cache prefix.
+  let pinned = 0
+  for (let index = firstIdx; index < pricedNodes.length && pinned < pin.count; index += 1) {
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    const seq = surfaceNodes[index]!
+    // Existing Session history read; migration deferred.
+    // oxlint-disable-next-line typescript/no-deprecated
+    const event = session.eventAt(seq)
+    if (event?.type !== 'user/message') break
+    if (isCheckpointMessage(event.data)) break
+    // oxlint-disable-next-line typescript/no-non-null-assertion
+    if (pricedNodes[index]!.tokens > pin.maxTokens) break
+    pinned += 1
+  }
+  const firstCompactableIdx = firstIdx + pinned
+
   let accumulated = 0
   let keepFromIdx = pricedNodes.length
   for (let index = pricedNodes.length - 1; index >= 0; index -= 1) {
@@ -202,20 +241,25 @@ export function selectCompactableRange(
     keepFromIdx = index
     if (accumulated >= retainTokens) break
   }
-  if (keepFromIdx <= firstIdx) return null
+  if (keepFromIdx <= firstCompactableIdx) return null
 
-  while (keepFromIdx > firstIdx) {
+  while (keepFromIdx > firstCompactableIdx) {
     // oxlint-disable-next-line typescript/no-non-null-assertion
     if (toolPairingBalancedBefore(session, surfaceNodes[keepFromIdx]!)) break
     keepFromIdx -= 1
   }
-  if (keepFromIdx <= firstIdx) return null
+  if (keepFromIdx <= firstCompactableIdx) return null
 
   // oxlint-disable-next-line typescript/no-non-null-assertion
-  const first = surfaceNodes[firstIdx]!
+  const first = surfaceNodes[firstCompactableIdx]!
   // oxlint-disable-next-line typescript/no-non-null-assertion
   const cutoff = surfaceNodes[keepFromIdx - 1]!
   return { start: first, end: cutoff }
+}
+
+/** Whether one `user/message` is a compaction-produced replacement checkpoint. */
+function isCheckpointMessage(data: { readonly source?: { readonly kind?: string } }): boolean {
+  return data.source?.kind === 'compact-checkpoint'
 }
 
 /**
@@ -434,6 +478,9 @@ function prepareCompaction(
     || selectedNodes.some((node, index) => node.seq !== selection.shadowedSeqs[index])) {
     throw new SurfaceChangedError('compaction: selected surface changed before summarization began')
   }
+  const surfaceNodes = session.surface.nodes
+  // oxlint-disable-next-line typescript/no-non-null-assertion
+  const headIdx = systemHead(session, surfaceNodes[0]!) === undefined ? 0 : 1
   return {
     ...selection,
     measurement,
@@ -444,7 +491,11 @@ function prepareCompaction(
     // route-priced `tokens` instead.
     shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.heuristicTokens, 0),
     shadowedRouteTokenCount: selectedNodes.reduce((total, node) => total + node.tokens, 0),
-    input: buildSummarizationInput(session, selection.shadowedSeqs),
+    input: buildSummarizationInput(
+      session,
+      surfaceNodes.slice(headIdx, selection.startIdx),
+      selection.shadowedSeqs,
+    ),
   }
 }
 
@@ -474,6 +525,7 @@ async function summarizeCompaction(
         dependencies,
         prepared,
         summaryResult,
+        agent,
         compactionId,
         sourceCommandId,
       )
@@ -493,6 +545,7 @@ async function summarizeCompaction(
             dependencies,
             agent.session,
             prepared,
+            agent,
             compactionId,
             sourceCommandId,
             failure,
@@ -518,14 +571,18 @@ function frameSummarizedCompaction(
   dependencies: RegionDependencies,
   prepared: PreparedCompaction,
   summaryResult: SummaryResult,
+  agent: Agent,
   compactionId: CompactionResult['compactionId'],
   sourceCommandId: CommandId | undefined,
 ): SummarizedCompaction {
+  const framing = dependencies.framing(agent)
   const coverageNote = summaryResult.windowClipped === true
-    ? `the summariser's context window was smaller than this span, so only its newest messages were condensed; seqs ${prepared.start}–${prepared.end} remain retrievable with session_event_search / session_event_read`
+    ? framing.searchRead
+      ? `the summariser's context window was smaller than this span, so only its newest messages were condensed; seqs ${prepared.start}–${prepared.end} remain retrievable with session_event_search / session_event_read`
+      : `the summariser's context window was smaller than this span, so only its newest messages were condensed; seqs ${prepared.start}–${prepared.end}. The complete transcript is preserved in the session log.`
     : undefined
   const checkpointMessage = createUserMessage({
-    content: frameSummary(summaryResult.summary, coverageNote),
+    content: frameSummary(summaryResult.summary, coverageNote, framing.footer),
     source: compactCheckpointSource(compactionId, sourceCommandId),
   })
   // The checkpoint is text-only, so its fixed-heuristic price IS its route
@@ -550,6 +607,7 @@ function frameSummarizedCompaction(
  * stub citing the session log and the recall tools. The rest of the selected
  * span stays verbatim; the removed events stay in the log (surface `replace`
  * only), so the transcript is intact and the session is promptable.
+ * @param agent - compacting agent whose tool scope gates the recall wording.
  * @param failure - bounded cause of the failure that selected this fallback.
  * @returns the committed replacement carrying its failure record, or `null`
  *   when even the whole span is no larger than the stub (nothing can be freed;
@@ -559,12 +617,19 @@ function mechanicalCompaction(
   dependencies: RegionDependencies,
   session: Session,
   prepared: PreparedCompaction,
+  agent: Agent,
   compactionId: CompactionResult['compactionId'],
   sourceCommandId: CommandId | undefined,
   failure: SummarizationFailure,
 ): SummarizedCompaction | null {
+  const framing = dependencies.framing(agent)
   const probe = createUserMessage({
-    content: frameMechanicalOmission(prepared.start, prepared.end, prepared.shadowedSeqs.length),
+    content: frameMechanicalOmission(
+      prepared.start,
+      prepared.end,
+      prepared.shadowedSeqs.length,
+      framing.searchRead,
+    ),
     source: compactCheckpointSource(compactionId, sourceCommandId),
   })
   const stubTokenCount = dependencies.meter.estimateMessage(probe)
@@ -585,7 +650,12 @@ function mechanicalCompaction(
   const selection = validateSurfaceRegion(session, prepared.start, cut)
   const dropped = prepareCompaction(dependencies, session, selection)
   const checkpointMessage = createUserMessage({
-    content: frameMechanicalOmission(dropped.start, dropped.end, dropped.shadowedSeqs.length),
+    content: frameMechanicalOmission(
+      dropped.start,
+      dropped.end,
+      dropped.shadowedSeqs.length,
+      framing.searchRead,
+    ),
     source: compactCheckpointSource(compactionId, sourceCommandId),
   })
   if (dependencies.meter.estimateMessage(checkpointMessage) >= dropped.shadowedRouteTokenCount) {
@@ -710,17 +780,20 @@ function completeCompaction(
 /**
  * Reconstruct the last routed request's cacheable prefix for the shadowed
  * region: the system prompt held by the `system/message` at surface node 0,
- * the header's tool schemas, then the region's own derived messages in surface
- * order. The summarizer appends only the compaction instruction after this, so
- * the call is a genuine prefix of the conversation and reuses the provider's
- * KV cache. A surface without a system head, or whose head projects to no
- * message, contributes no leading system message.
+ * the header's tool schemas, the pinned leading messages between the head and
+ * the region, then the region's own derived messages in surface order. The
+ * summarizer appends only the compaction instruction after this, so the call
+ * is a genuine prefix of the conversation and reuses the provider's KV cache.
+ * A surface without a system head, or whose head projects to no message,
+ * contributes no leading system message.
  * @param session - session supplying the surface head, request header, and per-node projection.
+ * @param leadingSeqs - surface-node seqs between the system head and the range start, in order.
  * @param shadowedSeqs - the surface-node seqs, in order, being compacted.
  * @returns the replayed conversation prefix to condense.
  */
 function buildSummarizationInput(
   session: Session,
+  leadingSeqs: readonly SessionSeq[],
   shadowedSeqs: readonly SessionSeq[],
 ): SummarizationInput {
   const header = session.requestHeader()
@@ -728,15 +801,28 @@ function buildSummarizationInput(
   // oxlint-disable-next-line typescript/no-non-null-assertion
   const head = systemHead(session, session.surface.nodes[0]!)
   const system = head === undefined ? null : session.deriveEventMessage(head)
-  const region = shadowedSeqs
-    // shadowedSeqs are current surface seqs, so each is a valid log index.
+  const derived = (seq: SessionSeq): Message | null => {
+    // Surface seqs are current log indexes; a missing event means a stale
+    // selection, which the surface-stability check already rejects earlier.
     // Existing Session history read; migration deferred.
-    // oxlint-disable-next-line typescript/no-non-null-assertion, typescript/no-deprecated
-    .map(seq => ({ seq, message: session.deriveEventMessage(session.eventAt(seq)!) }))
+    // oxlint-disable-next-line typescript/no-deprecated
+    const event = session.eventAt(seq)
+    return event === undefined ? null : session.deriveEventMessage(event)
+  }
+  const leading = leadingSeqs
+    .map(seq => ({ seq, message: derived(seq) }))
+    .filter((entry): entry is { seq: SessionSeq; message: Message } => entry.message !== null)
+  const region = shadowedSeqs
+    .map(seq => ({ seq, message: derived(seq) }))
     .filter((entry): entry is { seq: SessionSeq; message: Message } => entry.message !== null)
   return {
     ...header?.tools === undefined ? {} : { tools: header.tools },
-    messages: system === null ? region.map(entry => entry.message) : [system, ...region.map(entry => entry.message)],
+    messages: [
+      ...(system === null ? [] : [system]),
+      ...leading.map(entry => entry.message),
+      ...region.map(entry => entry.message),
+    ],
+    ...leading.length === 0 ? {} : { leadingCount: leading.length },
     regionSeqs: region.map(entry => entry.seq),
   }
 }

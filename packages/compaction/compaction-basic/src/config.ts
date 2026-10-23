@@ -13,6 +13,7 @@ import type {
   ModelCompactPolicyConfig,
   ResolvedCompactSpec,
   ResolvedConfig,
+  ResolvedContextUxConfig,
   ResolvedRetention,
   ResolvedTargetPolicy,
 } from './types.ts'
@@ -22,6 +23,9 @@ const DEFAULT_THRESHOLD_RATIO = 0.6
 
 /** Default verbatim-tail fraction for every routed model. */
 const DEFAULT_RETAIN_RATIO = 0.16
+
+/** Default per-pinned-message price ceiling. */
+const DEFAULT_PIN_LEADING_MAX_TOKENS = 4_000
 
 /** Fields shared by top-level defaults and exact-target overrides. */
 const POLICY_CONFIG_KEYS = [
@@ -41,6 +45,11 @@ const BASIC_COMPACT_CONFIG_KEYS: ReadonlySet<string> = new Set([
   ...POLICY_CONFIG_KEYS,
   'modelPolicies',
   'auto',
+  'recallFooter',
+  'recallFooterTools',
+  'pinLeadingUserMessages',
+  'pinLeadingMaxTokens',
+  'pinScope',
 ])
 
 /** Complete exact-target override key set. */
@@ -72,6 +81,7 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
   if (config.auto !== undefined && typeof config.auto !== 'boolean') {
     throw new Error('BasicCompactionConfig: auto must be a boolean')
   }
+  validateContextUx(config)
 
   const headroomTokens = config.headroomTokens ?? 65_536
   const maxTokens = config.maxTokens ?? headroomTokens
@@ -105,6 +115,7 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
     maxTokens,
     compactionRetries: config.compactionRetries ?? 1,
     maxOverflowRetries: config.maxOverflowRetries ?? 1,
+    ...resolveContextUx(config),
     modelPolicies,
     auto: config.auto ?? true,
   })
@@ -143,6 +154,11 @@ export function applySettingsOverrides(
     maxTokens: config.maxTokens,
     compactionRetries: config.compactionRetries,
     maxOverflowRetries: config.maxOverflowRetries,
+    recallFooter: config.recallFooter,
+    recallFooterTools: config.recallFooterTools,
+    pinLeadingUserMessages: config.pinLeadingUserMessages,
+    pinLeadingMaxTokens: config.pinLeadingMaxTokens,
+    pinScope: config.pinScope,
     modelPolicies: config.modelPolicies,
     auto: config.auto,
   }
@@ -401,5 +417,52 @@ function assertNonNegativeInteger(name: string, value: unknown): asserts value i
 function assertRatio(name: string, value: unknown): asserts value is number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value > 1) {
     throw new Error(`${name} (${String(value)}) must be a number in (0, 1]`)
+  }
+}
+
+/**
+ * Validate the top-level context-UX fields before a default can hide a stale
+ * value. Pinning and the recall footer are deployment options, not per-model
+ * policy, so they are rejected outside the service-wide config object.
+ * @param config - untrusted plugin configuration after Loader normalization.
+ */
+function validateContextUx(config: BasicCompactionConfig): void {
+  if (config.recallFooter !== undefined && typeof config.recallFooter !== 'string') {
+    throw new Error('BasicCompactionConfig.recallFooter must be a string')
+  }
+  if (config.recallFooterTools !== undefined) {
+    if (!Array.isArray(config.recallFooterTools)) {
+      throw new Error('BasicCompactionConfig.recallFooterTools must be an array of tool names')
+    }
+    for (const [index, name] of config.recallFooterTools.entries()) {
+      if (typeof name !== 'string' || name.length === 0) {
+        throw new Error(
+          `BasicCompactionConfig.recallFooterTools[${index}] must be a non-empty string`,
+        )
+      }
+    }
+  }
+  if (config.pinLeadingUserMessages !== undefined) {
+    assertNonNegativeInteger(
+      'BasicCompactionConfig.pinLeadingUserMessages',
+      config.pinLeadingUserMessages,
+    )
+  }
+  if (config.pinLeadingMaxTokens !== undefined) {
+    assertPositiveInteger('BasicCompactionConfig.pinLeadingMaxTokens', config.pinLeadingMaxTokens)
+  }
+  if (config.pinScope !== undefined && config.pinScope !== 'child' && config.pinScope !== 'all') {
+    throw new Error('BasicCompactionConfig.pinScope must be "child" or "all"')
+  }
+}
+
+/** Detach the validated context-UX fields with their shipped defaults. */
+function resolveContextUx(config: BasicCompactionConfig): ResolvedContextUxConfig {
+  return {
+    recallFooter: config.recallFooter ?? '',
+    recallFooterTools: [...(config.recallFooterTools ?? [])],
+    pinLeadingUserMessages: config.pinLeadingUserMessages ?? 0,
+    pinLeadingMaxTokens: config.pinLeadingMaxTokens ?? DEFAULT_PIN_LEADING_MAX_TOKENS,
+    pinScope: config.pinScope ?? 'child',
   }
 }

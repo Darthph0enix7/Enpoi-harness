@@ -35,6 +35,12 @@
     },
     {
       "path": "../compaction-tool-result-pruner"
+    },
+    {
+      "path": "../../core/scope"
+    },
+    {
+      "path": "../../core/tools"
     }
   ]
 }

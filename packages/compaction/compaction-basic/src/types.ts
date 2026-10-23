@@ -42,6 +42,28 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
   modelPolicies?: ModelCompactPolicyConfig[]
   /** Enable automatic step-boundary pressure and overflow-recovery listeners. Defaults to `true`. */
   auto?: boolean
+  /** Text block appended after `</compacted-summary>` when every `recallFooterTools` entry resolves; empty disables it. */
+  recallFooter?: string
+  /** Tool names that must all resolve in the compacting agent's scope for `recallFooter` to be appended. */
+  recallFooterTools?: string[]
+  /** Leading `user/message` surface nodes kept verbatim after the system head. Non-negative; defaults to `0`. */
+  pinLeadingUserMessages?: number
+  /** Per-message price ceiling for a pinned leading message; the first failure stops the pin run. Defaults to `4000`. */
+  pinLeadingMaxTokens?: number
+  /** Where pinning applies: child sessions only (default) or every session. */
+  pinScope?: 'child' | 'all'
+}
+
+/** Where leading-message pinning applies. */
+export type PinScope = NonNullable<BasicCompactionConfig['pinScope']>
+
+/** Validated pin and recall-footer configuration. */
+export interface ResolvedContextUxConfig {
+  readonly recallFooter: string
+  readonly recallFooterTools: readonly string[]
+  readonly pinLeadingUserMessages: number
+  readonly pinLeadingMaxTokens: number
+  readonly pinScope: PinScope
 }
 
 /** Exactly one validated retention form. */
@@ -61,7 +83,7 @@ interface ResolvedPolicyFields {
 }
 
 /** Validated immutable config whose target-specific defaults remain unresolved. */
-export type ResolvedConfig = ResolvedPolicyFields & ResolvedRetention & {
+export type ResolvedConfig = ResolvedPolicyFields & ResolvedRetention & ResolvedContextUxConfig & {
   readonly modelPolicies: readonly Readonly<ModelCompactPolicyConfig>[]
   readonly auto: boolean
 }
