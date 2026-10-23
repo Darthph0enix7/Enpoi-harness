@@ -1,8 +1,22 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-10-22T18:27:45.172Z",
+  "generatedAt": "2026-10-23T15:55:26.696Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.103",
+      "commit": "3e59450",
+      "releasedAt": "2026-10-23T15:23:47.000Z",
+      "notes": [
+        "docs(context): record the compaction-facts decision and the new knobs",
+        "chore(gates): drop the stale durable-facts path alias and trim the driver README summary",
+        "feat(profile): wire prompt pinning, recall footer and a shared memory doctrine",
+        "feat(oracle): one persistent reviewer per session",
+        "feat(ui): visible compaction, Enter-again steering, Tab agent cycling",
+        "feat(memory): compaction facts become searchable memory; recall tools always on",
+        "feat(compaction): pin leading prompts, durable facts, and a recall footer"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.102",
       "commit": "fde7255",
@@ -357,14 +371,6 @@
       "releasedAt": "2026-10-11T17:50:58.000Z",
       "notes": [
         "perf(update): one ticked tree-walk per update; scoped snapshot; liveness everywhere"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.61",
-      "commit": "01867a5",
-      "releasedAt": "2026-10-11T16:18:08.000Z",
-      "notes": [
-        "fix(update): identity reconciliation, live progress, sandbox-safe pnpm"
       ]
     }
   ]
