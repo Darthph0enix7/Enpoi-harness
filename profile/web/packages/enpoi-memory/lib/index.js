@@ -473,10 +473,12 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
   ctx.tools.register({
     name: "memory_save",
     description: [
-      "Save a durable project fact to cross-session memory.",
-      "Use for: project rules, architecture decisions, constraints, config values, naming conventions,",
-      "facts a FUTURE session must know. The fact is stored with operator trust (authoritative).",
-      "Keep it short (\u2264400 chars) and self-contained."
+      "Save one durable project fact to cross-session memory (operator trust: authoritative).",
+      "Call it when the session settles something a FUTURE session must know and would otherwise re-derive:",
+      "a project rule, an architecture decision with its reason, a constraint, a config value, a naming convention,",
+      "or an exact path/command/identifier. Compaction already saves the checkpoint's durable facts automatically;",
+      "save what it cannot see \u2014 a decision you just made, a correction from the operator, a verified command.",
+      "One self-contained sentence, \u2264400 chars, no secrets or personal data."
     ].join(" "),
     parameters: {
       type: "object",
@@ -518,7 +520,12 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
   });
   ctx.tools.register({
     name: "memory_search",
-    description: "Search cross-session memory for facts relevant to a query. Returns matching facts (never injects).",
+    description: [
+      "Search cross-session memory. Call it when starting a task, returning to a subsystem,",
+      "or before re-deriving a decision: it returns saved facts plus the durable facts each compaction extracted,",
+      "each with id, category, origin (memory_save | compaction | keeper) and save date so you can weigh them.",
+      "Nothing is injected \u2014 this is the only way memory reaches you. Compaction facts are scoped to the caller's workspace."
+    ].join(" "),
     parameters: {
       type: "object",
       properties: {
