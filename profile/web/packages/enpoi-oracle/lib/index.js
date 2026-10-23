@@ -1,16 +1,175 @@
 // src/index.ts
-import { queueHostSubagentPrompt } from "@deepseek-ai/dsh-subagent/internal";
-import { createUserMessage } from "@deepseek-ai/dsh-llm";
+import Schema from "@deepseek-ai/schemastery";
+import { createUserMessage, ReasoningEffortId } from "@deepseek-ai/dsh-llm";
+import { queueHostSubagentPrompt as queueHostSubagentPrompt2 } from "@deepseek-ai/dsh-subagent/internal";
 import { getBriefService } from "dsh-enpoi-context-keeper";
 import { readOrchestrationDocument } from "dsh-enpoi-contracts";
+
+// src/ask-child.ts
+import { queueHostSubagentPrompt } from "@deepseek-ai/dsh-subagent/internal";
+var ChildTurnTimeoutError = class extends Error {
+  /**
+   * @param childId - the still-running child whose turn was abandoned.
+   * @param messageId - the prompt message that never settled.
+   */
+  constructor(childId, messageId) {
+    super(`child ${childId} did not settle message ${messageId} before the deadline`);
+    this.childId = childId;
+    this.messageId = messageId;
+    this.name = "ChildTurnTimeoutError";
+  }
+};
+function textOfContent(blocks) {
+  if (!Array.isArray(blocks)) return "";
+  return blocks.map((block) => {
+    if (typeof block !== "object" || block === null || !("text" in block)) return "";
+    const blockType = block.type;
+    return blockType === "text" || blockType === void 0 ? String(block.text) : "";
+  }).filter((text) => text.length > 0).join(" ");
+}
+var STOP_REASONS = /* @__PURE__ */ new Set(["completed", "error", "aborted", "max-tokens", "refusal"]);
+function stopReasonOf(reason) {
+  const kind = String(reason.kind);
+  return STOP_REASONS.has(kind) ? kind : "error";
+}
+function errorOf(reason) {
+  if (reason.kind !== "error") return void 0;
+  return reason.error.message;
+}
+async function readSettledTurn(ctx, childId, messageId) {
+  const persistence = ctx.get("sessionPersistence");
+  if (persistence === void 0) return void 0;
+  const handle = await persistence.open(childId, "read");
+  let events;
+  try {
+    events = (await handle.read(0, void 0)).events;
+  } finally {
+    await handle.close();
+  }
+  const start = events.findIndex((event) => event.type === "user/message" && event.data.id === messageId);
+  if (start < 0) return void 0;
+  const parts = [];
+  for (let index = start + 1; index < events.length; index += 1) {
+    const event = events[index];
+    if (event.type === "assistant/message") {
+      const text = textOfContent(event.data.message.content);
+      if (text.length > 0) parts.push(text);
+      continue;
+    }
+    if (event.type === "turn/end") {
+      const error = errorOf(event.data.reason);
+      return {
+        messageId,
+        text: parts.join("\n"),
+        stopReason: stopReasonOf(event.data.reason),
+        ...error === void 0 ? {} : { error }
+      };
+    }
+    if (event.type === "user/message") return void 0;
+  }
+  return void 0;
+}
+function abortError(signal) {
+  return signal.reason instanceof Error ? signal.reason : new Error("aborted");
+}
+async function waitForChildMessageTurn(ctx, childId, messageId, options) {
+  const { signal, deadline, pollMs } = options;
+  if (ctx.get("sessionPersistence") === void 0) {
+    throw new Error("waitForChildMessageTurn requires the sessionPersistence service");
+  }
+  let wake;
+  const nudge = () => {
+    wake?.();
+  };
+  const onEnd = (info) => {
+    if (info.id === childId) nudge();
+  };
+  const off = ctx.on("subagent/end", onEnd);
+  signal.addEventListener("abort", nudge, { once: true });
+  try {
+    for (; ; ) {
+      if (signal.aborted) throw abortError(signal);
+      if (ctx.agents.get(childId) === void 0) {
+        const settled = await readSettledTurn(ctx, childId, messageId);
+        if (settled !== void 0) return settled;
+      }
+      if (signal.aborted) throw abortError(signal);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new ChildTurnTimeoutError(childId, messageId);
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, Math.max(1, Math.min(pollMs, remaining)));
+        wake = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+      });
+    }
+  } finally {
+    off();
+    signal.removeEventListener("abort", nudge);
+  }
+}
+async function askChild(ctx, parent, childId, content, options) {
+  const messageId = await queueHostSubagentPrompt(
+    ctx.subagents,
+    parent,
+    childId,
+    content,
+    { kind: "user" },
+    options.signal
+  );
+  return waitForChildMessageTurn(ctx, childId, messageId, options);
+}
+
+// src/queue.ts
+var ParentFifoQueue = class {
+  tails = /* @__PURE__ */ new Map();
+  /**
+   * Run one task after every earlier task enqueued under the same key settled.
+   * @param key - parent session id owning the lane.
+   * @param task - work that must not overlap another task on this lane.
+   * @returns the task's value or rejection, unchanged.
+   */
+  async run(key, task) {
+    const previous = this.tails.get(key) ?? Promise.resolve();
+    let release = () => {
+    };
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => gate);
+    this.tails.set(key, tail);
+    try {
+      await previous;
+      return await task();
+    } finally {
+      release();
+      if (this.tails.get(key) === tail) this.tails.delete(key);
+    }
+  }
+  /**
+   * Read whether tasks are queued or running on one lane.
+   * @param key - parent session id.
+   * @returns whether a lane entry exists.
+   */
+  isBusy(key) {
+    return this.tails.has(key);
+  }
+};
+
+// src/index.ts
 var name = "enpoi-oracle";
-var inject = ["tools", "subagents", "sessionPersistence", "sessions", "agents"];
+var inject = ["tools", "subagents", "sessionPersistence", "agents"];
+var Config = Schema.object({
+  childPollMs: Schema.number().min(100).default(1e3)
+});
+var ORACLE_LABEL = "oracle";
 var ORACLE_PERSONA = [
   "You are the Oracle \u2014 senior architectural supervisor, conceptual thinker, and deep reviewer.",
   "You reason independently and deeply: you evaluate architecture, concepts, system trade-offs, logic, race conditions, and code.",
   "You are an advisor, not a dictator: if a plan is flawed, over-engineered, or heading in the wrong direction, say so plainly.",
   "When reviewing code, inspect relevant files directly using your search/read tools as needed to understand the broader context. When reviewing concepts or plans, evaluate feasibility, modularity, and trade-offs.",
-  "This is a continuing reviewer session within the active query: reuse your accumulated context and memory from prior turns.",
+  "This is a persistent reviewer session for the whole operator session: reuse your accumulated context and earlier verdicts across consultations; when a consultation names a new operator query, re-ground on it.",
   "You may call request_evidence(target, question) at any point \u2014 it sends a research child (codebase explorer or web librarian) to fetch ground truth and returns a short cited fact sheet. Ask as many or as few questions as your judgment requires; use it whenever first-hand verification would sharpen your review, and ignore it entirely when you already know enough.",
   "You never write or edit files. You never paste whole files back \u2014 you summarize, explain, and cite.",
   "End every review with a VERDICT BLOCK in exactly this JSON \u2014 the orchestrator parses it mechanically, so it must be the LAST thing you output and must be valid JSON:",
@@ -84,21 +243,21 @@ function isExternalEvidenceTarget(target) {
 }
 function lastHumanUserMessageSeq(events) {
   for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (e?.type === "user/message") {
-      const src = e.data?.source;
-      if (src?.kind === "user") return e.seq;
-    }
+    const event = events[i];
+    if (event?.type !== "user/message") continue;
+    if (event.data.source?.kind === "user") return event.seq;
   }
   return 0;
 }
-function textOfContent(blocks) {
-  if (!Array.isArray(blocks)) return "";
-  return blocks.map((block) => {
-    if (typeof block !== "object" || block === null || !("text" in block)) return "";
-    const blockType = block.type;
-    return blockType === "text" || blockType === void 0 ? String(block.text) : "";
-  }).filter((text) => text.length > 0).join(" ");
+function latestOperatorQuery(events) {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i];
+    if (event?.type !== "user/message") continue;
+    if (event.data.source?.kind !== "user") continue;
+    const text = textOfContent(event.data.content).trim();
+    return text.length > 1e3 ? text.slice(0, 1e3) : text;
+  }
+  return "";
 }
 function readLivingBrief(ctx, session) {
   try {
@@ -115,7 +274,7 @@ function readLivingBrief(ctx, session) {
       Array.isArray(view.openThreads) && view.openThreads.length > 0 ? `Open threads: ${view.openThreads.map((t) => t.text).join("; ")}` : null,
       prose !== null ? `Keeper synthesis: ${String(prose.text)}` : null,
       `Brief freshness: ${freshness}`
-    ].filter((p) => p !== null);
+    ].filter((part) => part !== null);
     return parts.length > 0 ? parts.join("\n") : null;
   } catch {
     return null;
@@ -151,51 +310,70 @@ function extractWhiteboardSummary(doc, sessionId, cwd) {
     return null;
   }
 }
-function buildInitialPackage(brief, args, scorecard, whiteboardText) {
-  const lines = [];
-  lines.push("You are the Oracle \u2014 the senior architectural supervisor and deep reviewer.");
-  lines.push("This is a FRESH consultation session for the active user query. Review the request below against the current state.");
-  if (whiteboardText) {
-    lines.push("--- PINNED WHITEBOARD ---");
-    lines.push(whiteboardText);
-  }
-  if (brief !== null) {
-    lines.push("--- SESSION BRIEF ---");
-    lines.push(brief);
-  }
-  if (scorecard.verdicts.length > 0) {
-    lines.push("--- PRIOR REVIEWS IN RECENT SESSIONS (condensed scorecard) ---");
-    for (const v of scorecard.verdicts.slice(-3)) {
-      lines.push(`- ${v.approved ? "approved" : "concerns"}: ${v.concerns.join("; ") || "no concerns noted"}`);
-    }
-  }
-  lines.push("--- REVIEW REQUEST ---");
-  lines.push(args.request);
-  if (Array.isArray(args.files) && args.files.length > 0) {
+function buildInitialPackage(input) {
+  const lines = [
+    "You are the Oracle \u2014 the senior architectural supervisor and deep reviewer.",
+    "This is a persistent consultation session for this operator session; later consultations arrive as deltas."
+  ];
+  if (input.whiteboard) lines.push("--- PINNED WHITEBOARD ---", input.whiteboard);
+  if (input.brief !== null && input.brief !== void 0) lines.push("--- SESSION BRIEF ---", input.brief);
+  lines.push("--- REVIEW REQUEST ---", input.request);
+  if (input.files !== void 0 && input.files.length > 0) {
     lines.push("--- READING LIST (read these files directly) ---");
-    for (const f of args.files) lines.push(`- ${f}`);
+    for (const file of input.files) lines.push(`- ${file}`);
   }
   return lines.join("\n");
 }
-function buildDelta(brief, args, whiteboardText) {
-  const lines = ["Follow-up review in the SAME query (delta turn). Your prior review and findings are in your conversation history above."];
-  if (whiteboardText) {
-    lines.push("--- PINNED WHITEBOARD ---", whiteboardText);
-  }
-  if (brief !== null) {
-    lines.push("--- CURRENT SESSION BRIEF ---", brief);
-  }
-  lines.push("--- DELTA REQUEST ---", args.request);
-  if (Array.isArray(args.files) && args.files.length > 0) {
+function buildDelta(input) {
+  const lines = [];
+  if (input.operatorQuery) lines.push("--- NEW OPERATOR QUERY ---", input.operatorQuery);
+  if (input.whiteboard) lines.push("--- PINNED WHITEBOARD ---", input.whiteboard);
+  if (input.brief) lines.push("--- CURRENT SESSION BRIEF ---", input.brief);
+  lines.push("--- REVIEW REQUEST ---", input.request);
+  if (input.files !== void 0 && input.files.length > 0) {
     lines.push("--- CHANGED/NEW FILES TO READ ---");
-    for (const f of args.files) lines.push(`- ${f}`);
+    for (const file of input.files) lines.push(`- ${file}`);
   }
   return lines.join("\n");
+}
+function routeIdentity(route) {
+  return [route.provider ?? "", route.model ?? "", route.reasoningEffort ?? "", route.chainId ?? ""].join("/");
+}
+function hashText(text) {
+  if (text === null || text === "") return null;
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
+async function discoverOracleChild(ctx, parentId) {
+  let entries;
+  try {
+    entries = await ctx.subagents.listChildren(parentId);
+  } catch {
+    return void 0;
+  }
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry.mode === "continuable" && entry.label === ORACLE_LABEL) return entry.id;
+  }
+  return void 0;
+}
+function resolveOracleTimeoutMs(ctx) {
+  try {
+    const doc = readOrchestrationDocument(ctx.get("settings"));
+    const value = doc?.parameters?.oracle?.timeoutMs;
+    if (typeof value === "number" && !Number.isNaN(value)) return Math.min(3e5, Math.max(3e4, value));
+  } catch {
+  }
+  return 12e4;
 }
 var ORACLE_BRIEF_WAIT_MS = 4e3;
 async function ensureBriefWithin(parent, signal) {
   const brief = getBriefService();
-  if (brief === void 0) return;
+  if (brief === null || brief === void 0) return;
   const pending = brief.ensureFreshBrief(parent.session, signal).catch(() => {
     return null;
   });
@@ -209,15 +387,6 @@ async function ensureBriefWithin(parent, signal) {
     if (timer !== void 0) clearTimeout(timer);
   }
   if (signal.aborted) throw signal.reason ?? new Error("aborted");
-}
-function resolveOracleTimeoutMs(ctx) {
-  try {
-    const doc = readOrchestrationDocument(ctx.get("settings"));
-    const v = doc?.parameters?.oracle?.timeoutMs;
-    if (typeof v === "number" && !Number.isNaN(v)) return Math.min(3e5, Math.max(3e4, v));
-  } catch {
-  }
-  return 12e4;
 }
 function resolvePersonaModel(ctx, persona) {
   try {
@@ -272,7 +441,11 @@ function resolveOracleChainAttempts(ctx, persona) {
     const entry = doc?.personas?.[key];
     const snapshot = resolveChainSnapshot(ctx, entry?.chain);
     if (snapshot !== void 0) {
-      const active = entry != null && entry.provider && entry.model ? { provider: entry.provider, model: entry.model } : { ...snapshot.links[0] };
+      const active = entry != null && entry.provider && entry.model ? {
+        provider: entry.provider,
+        model: entry.model,
+        ...entry.reasoningEffort ? { effort: entry.reasoningEffort } : {}
+      } : { ...snapshot.links[0] };
       const links = [
         active,
         ...snapshot.links.filter((link) => !(link.provider === active.provider && link.model === active.model))
@@ -281,7 +454,11 @@ function resolveOracleChainAttempts(ctx, persona) {
       return {
         chainId: snapshot.id,
         carryId: head.provider === active.provider && head.model === active.model,
-        attempts: links.map((link) => ({ provider: link.provider, model: link.model }))
+        attempts: links.map((link) => ({
+          provider: link.provider,
+          model: link.model,
+          ...link.effort !== void 0 ? { reasoningEffort: link.effort } : {}
+        }))
       };
     }
   } catch {
@@ -289,30 +466,12 @@ function resolveOracleChainAttempts(ctx, persona) {
   const personaModel = resolvePersonaModel(ctx, persona);
   return {
     carryId: false,
-    attempts: personaModel !== void 0 ? [{ provider: personaModel.provider, model: personaModel.model }] : [{}]
+    attempts: personaModel !== void 0 ? [{
+      provider: personaModel.provider,
+      model: personaModel.model,
+      ...personaModel.reasoningEffort !== void 0 ? { reasoningEffort: personaModel.reasoningEffort } : {}
+    }] : [{}]
   };
-}
-function applyPersonaModel(ctx, childId, persona) {
-  try {
-    const entry = resolvePersonaModel(ctx, persona);
-    if (entry && entry.provider && entry.model) {
-      const sessions = ctx.get("sessions");
-      const childSession = sessions?.get?.(childId);
-      if (childSession && typeof childSession.append === "function") {
-        childSession.append("request/header", {
-          header: {
-            config: {
-              provider: entry.provider,
-              model: entry.model,
-              ...entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}
-            }
-          },
-          reason: "custom"
-        });
-      }
-    }
-  } catch {
-  }
 }
 function parseVerdict(text) {
   const matches = [...text.matchAll(/\{(?:[^{}]|\{[^{}]*\})*\}/g)];
@@ -337,126 +496,56 @@ function parseVerdict(text) {
   const blockers = sentences.filter((s) => /blocker|blocked|prevent|fails? closed|cannot|incompatible/i.test(s)).slice(0, 4);
   return { approved, concerns, unverified: [], blockers };
 }
-var OracleTimeoutError = class extends Error {
-  /**
-   * @param childId - the still-running oracle child the wait abandoned.
-   * @param timeoutMs - the exceeded wait budget.
-   */
-  constructor(childId, timeoutMs) {
-    super(`oracle consultation timed out after ${timeoutMs}ms`);
-    this.childId = childId;
-    this.timeoutMs = timeoutMs;
-    this.name = "OracleTimeoutError";
+function verdictHeadline(turn) {
+  if (turn.stopReason !== "completed" && turn.stopReason !== "max-tokens") {
+    const detail = turn.error === void 0 ? "" : `: ${turn.error}`;
+    return `\u{1F4EC} Oracle consultation ended (${turn.stopReason})${detail}.`;
   }
-};
-async function waitForChildTurn(ctx, childId, signal, timeoutMs = 12e4, pollMs = 100) {
-  const started = Date.now();
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  signal.addEventListener("abort", onAbort, { once: true });
-  try {
-    for (; ; ) {
-      if (signal.aborted) throw new Error("oracle consultation aborted");
-      if (Date.now() - started > timeoutMs) throw new OracleTimeoutError(childId, timeoutMs);
-      if (ctx.agents.get(childId) === void 0) {
-        const persistence = ctx.get("sessionPersistence");
-        if (persistence !== void 0) {
-          const handle = await persistence.open(childId, "read");
-          let events;
-          try {
-            events = (await handle.read(0, void 0)).events;
-          } finally {
-            await handle.close();
-          }
-          const lastUser = [...events].reverse().find((e) => e.type === "user/message");
-          const since = lastUser === void 0 ? 0 : lastUser.seq;
-          const messages = events.filter((e) => e.type === "assistant/message" && e.seq > since);
-          if (messages.length > 0) {
-            const extracted = messages.map((m) => {
-              const data = m.data;
-              return textOfContent(data.message?.content ?? data.content);
-            }).filter((t) => t.length > 0).join("\n").trim();
-            if (extracted.length > 0) {
-              return extracted;
-            }
-          }
-          const turnEnd = events.find((e) => e.type === "turn/end" && e.seq > since);
-          if (turnEnd !== void 0) {
-            const reason = turnEnd.data?.reason;
-            if (reason?.kind === "error") {
-              const errMsg = reason.error?.message ?? reason.failure?.message ?? "Model execution failed";
-              throw new Error(`Turn failed: ${errMsg}`);
-            }
-            if (reason?.kind === "aborted") {
-              const abortCause = reason.reason?.kind ?? "cancelled";
-              throw new Error(`Turn was aborted (${abortCause})`);
-            }
-            if (reason?.kind === "completed" && messages.length === 0) {
-              return "[NO_OUTPUT: oracle returned empty content]";
-            }
-          }
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, pollMs));
-    }
-  } finally {
-    signal.removeEventListener("abort", onAbort);
-  }
+  const verdict = parseVerdict(turn.text);
+  return `\u{1F4EC} Oracle finished \u2014 ${verdict.approved ? "APPROVED" : "CONCERNS"} (${verdict.concerns.length} concern(s)).`;
 }
-async function deliverDetachedOracleVerdict(options) {
-  const { ctx, parent, childId, fiber, key, busy } = options;
-  try {
-    const text = await waitForChildTurn(
-      ctx,
-      childId,
-      new AbortController().signal,
-      Number.POSITIVE_INFINITY,
-      options.pollMs ?? 1e3
-    );
-    const verdict = parseVerdict(text);
-    fiber.consultations += 1;
-    fiber.scorecard.verdicts.push({ approved: verdict.approved, concerns: verdict.concerns });
-    const agent = ctx.get("agents")?.get(parent.session.id);
-    if (agent !== void 0) {
-      agent.inject(createUserMessage({
-        content: [{
-          type: "text",
-          text: `\u{1F4EC} Oracle (detached after timeout) finished \u2014 ${verdict.approved ? "APPROVED" : "CONCERNS"} (${verdict.concerns.length} concern(s)).
+function deliverOracleVerdict(ctx, parentId, capturedHumanSeq, turn) {
+  const agent = ctx.get("agents")?.get(parentId);
+  if (agent === void 0) return false;
+  const message = createUserMessage({
+    content: [{ type: "text", text: `${verdictHeadline(turn)}
 
-${text}`
-        }],
-        source: { kind: "enpoi-oracle" }
-      }));
-    }
-  } catch {
-  } finally {
-    busy.delete(key);
-  }
+${turn.text}` }],
+    source: { kind: "enpoi-oracle" }
+  });
+  const currentHumanSeq = lastHumanUserMessageSeq(agent.session.snapshotEvents());
+  if (currentHumanSeq !== capturedHumanSeq) agent.send(message, "next-turn", false);
+  else if (agent.status === "idle") agent.followup(message);
+  else agent.steer(message);
+  return true;
 }
-function apply(ctx) {
-  ctx.inject(["tools", "subagents", "sessionPersistence", "sessions"], (injected) => {
-    registerOracleTools(injected, ctx);
+function apply(ctx, config = {}) {
+  const pollMs = Math.max(100, Math.trunc(typeof config.childPollMs === "number" ? config.childPollMs : 1e3));
+  ctx.inject(["tools", "subagents", "sessionPersistence", "agents"], (injected) => {
+    registerOracleTools(injected, ctx, pollMs);
   });
 }
-function registerOracleTools(ctx, root) {
+function registerOracleTools(ctx, root, pollMs) {
   ctx = root;
-  const fibers = /* @__PURE__ */ new Map();
-  const rolloverScorecards = /* @__PURE__ */ new Map();
-  const busy = /* @__PURE__ */ new Set();
+  const children = /* @__PURE__ */ new Map();
+  const queue = new ParentFifoQueue();
+  ctx.on("session/disposed", (session) => {
+    children.delete(session.id);
+  });
   ctx.tools.register({
     name: "oracle_review",
     description: [
       "Consult the Oracle (senior reviewer for architecture, conceptual design, planning, trade-offs, code reviews, and debugging).",
-      "The Oracle reasons independently about concepts and code. LIFECYCLE: Starts fresh on each new user query, but stays persistent across follow-up calls within that query.",
-      "Call #1 of a query: provide self-contained context (what you are building/fixing, architecture, decisions) and any relevant file paths if applicable. On follow-ups: send concise deltas.",
-      "Blocking by default; background:true delivers verdict as a message."
+      "One persistent Oracle per session remembers every earlier consultation; first call: self-contained context and relevant file paths; later calls: concise deltas.",
+      "Calls made while it is busy queue in order.",
+      "Blocking by default; background:true delivers the verdict as a message that wakes this session."
     ].join(" "),
     parameters: {
       type: "object",
       properties: {
         request: {
           type: "string",
-          description: "What to review or consult on. On Call #1 of a query, provide clear self-contained context (concepts, problem, approach, state). On follow-ups in the same query, provide a concise delta."
+          description: "What to review or consult on. First call: self-contained context (concepts, problem, approach, state). Later calls: a concise delta."
         },
         files: {
           type: "array",
@@ -466,6 +555,10 @@ function registerOracleTools(ctx, root) {
         background: {
           type: "boolean",
           description: "Run in the background \u2014 returns immediately; the verdict arrives as a delivered message. Omit for blocking."
+        },
+        fresh: {
+          type: "boolean",
+          description: "Start a brand-new Oracle child instead of continuing the persistent one. Use only when the earlier consultation history would mislead."
         }
       },
       required: ["request"]
@@ -499,231 +592,9 @@ function registerOracleTools(ctx, root) {
     async execute(args, exec) {
       const parent = exec.agent;
       if (parent === void 0) throw new Error("oracle_review requires a calling agent");
-      const key = parent.session.id;
-      if (busy.has(key)) {
-        return {
-          approved: false,
-          concerns: [],
-          unverified: [],
-          blockers: ["CONCURRENT_CALL_REJECTED: another oracle consultation is already running for this session"],
-          summary: "Rejected by the single-flight mutex (I7): another oracle consultation is already running for this session.",
-          rejected: true
-        };
-      }
-      busy.add(key);
-      let bg = null;
-      let stopWatch = null;
-      let handedOff = false;
-      try {
-        const lastUserSeq = lastHumanUserMessageSeq(parent.session.snapshotEvents());
-        let fiber = fibers.get(key);
-        let rolloverScorecard = null;
-        if (fiber !== void 0 && (fiber.lastParentUserSeq !== lastUserSeq || fiber.childId === null)) {
-          rolloverScorecard = fiber.scorecard;
-          fibers.delete(key);
-          fiber = void 0;
-        } else if (fiber === void 0 && rolloverScorecards.has(key)) {
-          rolloverScorecard = rolloverScorecards.get(key);
-        }
-        const fresh = fiber === void 0;
-        if (fresh) {
-          await ensureBriefWithin(parent, exec.signal);
-          fiber = {
-            childId: null,
-            consultations: 0,
-            lastParentUserSeq: lastUserSeq,
-            scorecard: rolloverScorecard ?? { files: [], verdicts: [] },
-            brief: readLivingBrief(ctx, parent.session)
-          };
-        }
-        const brief = fiber.brief;
-        if (args.background === true) {
-          bg = new AbortController();
-          stopWatch = ctx.on("session/event", (s, e) => {
-            if (s.id !== parent.session.id) return;
-            if (e.type === "turn/end" && e.data.reason.kind === "aborted" && e.data.reason.reason?.kind === "user") bg?.abort();
-          });
-        }
-        const doc = readOrchestrationDocument(ctx.get("settings"));
-        const wbSummary = extractWhiteboardSummary(doc, parent.session?.id, parent.session?.header?.cwd);
-        const prompt = [{
-          type: "text",
-          text: fresh ? buildInitialPackage(brief, args, fiber.scorecard, wbSummary) : buildDelta(brief, args, wbSummary)
-        }];
-        const { chainId, carryId, attempts: attemptModels } = resolveOracleChainAttempts(ctx, "oracle");
-        const callSignal = () => bg?.signal ?? exec.signal;
-        const spawnOracleChild = async (attempt, carriedChainId) => {
-          const denied = ORACLE_TOOL_FILTER.deny;
-          const started = await ctx.subagents.startContinuable({
-            provider: "spawn",
-            label: `oracle review: ${args.request.slice(0, 60)}`,
-            quiet: true,
-            request: {
-              prompt,
-              parent,
-              persona: ORACLE_PERSONA,
-              quiet: true,
-              toolFilter: denied.length > 0 ? { deny: denied } : void 0,
-              ...attempt.provider !== void 0 ? {
-                agentOptions: {
-                  provider: attempt.provider,
-                  model: attempt.model,
-                  ...carriedChainId !== void 0 ? { chain: carriedChainId } : {}
-                }
-              } : {}
-            },
-            signal: callSignal()
-          });
-          if (!started.childId || started.childId === "null" || !started.childId.includes("-")) {
-            throw new Error(`oracle spawn returned an invalid child id: ${String(started.childId)}`);
-          }
-          return started.childId;
-        };
-        const waitWithChainAdvance = async (firstChildId, advance) => {
-          let childId = firstChildId;
-          let lastError;
-          for (let index = 0; index < attemptModels.length; index += 1) {
-            try {
-              return await waitForChildTurn(ctx, childId, callSignal(), resolveOracleTimeoutMs(ctx));
-            } catch (error) {
-              lastError = error;
-              if (callSignal().aborted) throw error;
-              if (error instanceof OracleTimeoutError) throw error;
-              const current = attemptModels[index];
-              const next = advance ? attemptModels[index + 1] : void 0;
-              if (next === void 0) break;
-              const message = error instanceof Error ? error.message : String(error);
-              process.stderr.write(`[model-chain] ${chainId ?? "oracle"}: link ${index + 1} (${current.provider ?? "default"}/${current.model ?? "default"}) FAILED \u2192 link ${index + 2} (${next.provider ?? "default"}/${next.model ?? "default"}): ${message}
-`);
-              try {
-                await ctx.get("sessions")?.delete(childId);
-              } catch {
-              }
-              childId = await spawnOracleChild(next, chainId);
-              fiber.childId = childId;
-              fibers.set(key, fiber);
-            }
-          }
-          throw lastError instanceof Error ? lastError : new Error(String(lastError));
-        };
-        if (fresh) {
-          try {
-            const childId = await spawnOracleChild(attemptModels[0], carryId ? chainId : void 0);
-            fiber.childId = childId;
-            applyPersonaModel(ctx, childId, "oracle");
-            fibers.set(key, fiber);
-            if (rolloverScorecard !== null && rolloverScorecards.has(key)) {
-              rolloverScorecards.delete(key);
-            }
-          } catch (err) {
-            fibers.delete(key);
-            throw err;
-          }
-        } else {
-          await queueHostSubagentPrompt(
-            ctx.subagents,
-            parent,
-            fiber.childId,
-            prompt,
-            { kind: "user" },
-            bg?.signal ?? exec.signal
-          );
-        }
-        if (bg !== null) {
-          handedOff = true;
-          const childId = fiber.childId;
-          void (async () => {
-            try {
-              let t;
-              try {
-                t = await waitWithChainAdvance(childId, fresh);
-              } catch (error) {
-                if (!(error instanceof OracleTimeoutError)) throw error;
-                t = await waitForChildTurn(ctx, error.childId, new AbortController().signal, Number.POSITIVE_INFINITY, 1e3);
-              }
-              const v = parseVerdict(t);
-              fiber.consultations += 1;
-              fiber.scorecard.verdicts.push({ approved: v.approved, concerns: v.concerns });
-              if (Array.isArray(args.files)) fiber.scorecard.files.push(...args.files);
-              if (fiber.consultations >= 10) {
-                rolloverScorecards.set(key, fiber.scorecard);
-                fibers.delete(key);
-              }
-              const agent = ctx.get("agents")?.get(parent.session.id);
-              if (agent !== void 0) {
-                agent.inject(createUserMessage({
-                  content: [{
-                    type: "text",
-                    text: `\u{1F4EC} Oracle (background) finished \u2014 ${v.approved ? "APPROVED" : "CONCERNS"} (${v.concerns.length} concern(s)).
-
-${t}`
-                  }],
-                  source: { kind: "enpoi-oracle" }
-                }));
-              }
-            } catch {
-            } finally {
-              stopWatch?.();
-              busy.delete(key);
-            }
-          })();
-          return {
-            approved: false,
-            concerns: [],
-            unverified: [],
-            blockers: [],
-            summary: `Background consultation started (${childId}) \u2014 the verdict will be delivered as a message when the oracle finishes.`,
-            background: true
-          };
-        }
-        let verdictText = "";
-        try {
-          verdictText = await waitWithChainAdvance(fiber.childId, fresh);
-        } catch (err) {
-          if (err instanceof OracleTimeoutError) {
-            handedOff = true;
-            void deliverDetachedOracleVerdict({ ctx, parent, childId: err.childId, fiber, key, busy });
-            return {
-              approved: false,
-              concerns: [`Oracle consultation timed out after ${err.timeoutMs}ms; the oracle child is still running.`],
-              unverified: [],
-              blockers: [`ORACLE_TIMEOUT_DETACHED: oracle child ${err.childId} was NOT cancelled \u2014 its verdict will be delivered as a message when it finishes.`],
-              summary: `Oracle consultation timed out after ${err.timeoutMs}ms. The oracle child ${err.childId} was NOT cancelled and is still working; its verdict will be delivered as a message when it finishes.`,
-              rejected: true
-            };
-          }
-          const errMsg = err instanceof Error ? err.message : String(err);
-          fibers.delete(key);
-          return {
-            approved: false,
-            concerns: [`Oracle consultation failed: ${errMsg}`],
-            unverified: [],
-            blockers: [`ORACLE_MODEL_ERROR: ${errMsg}`],
-            summary: `Oracle consultation failed: ${errMsg}`,
-            rejected: true
-          };
-        }
-        const verdict = parseVerdict(verdictText);
-        fiber.consultations += 1;
-        fiber.scorecard.verdicts.push({ approved: verdict.approved, concerns: verdict.concerns });
-        if (Array.isArray(args.files)) fiber.scorecard.files.push(...args.files);
-        if (fiber.consultations >= 10) {
-          rolloverScorecards.set(key, fiber.scorecard);
-          fibers.delete(key);
-        }
-        return {
-          approved: verdict.approved,
-          concerns: verdict.concerns,
-          unverified: verdict.unverified,
-          blockers: verdict.blockers,
-          summary: verdictText
-        };
-      } finally {
-        if (!handedOff) {
-          stopWatch?.();
-          busy.delete(key);
-        }
-      }
+      const parentId = parent.session.id;
+      const deadline = Date.now() + resolveOracleTimeoutMs(ctx);
+      return queue.run(parentId, () => consult(parent, args, exec.signal, deadline, pollMs, children, ctx));
     }
   });
   ctx.tools.register({
@@ -771,6 +642,7 @@ FACTS: ${value.facts}` : `NOT FINDABLE \u2014 ${value.facts}`
       const retrievedBy = isExternalEvidenceTarget(target) ? "librarian" : "explorer";
       const personaModel = resolvePersonaModel(ctx, retrievedBy);
       let childId = null;
+      let messageId = null;
       try {
         const started = await ctx.subagents.startContinuable({
           provider: "spawn",
@@ -791,30 +663,204 @@ Produce the FACT SHEET now.` }],
           },
           signal: exec.signal
         });
-        if (!started.childId || started.childId === "null" || !String(started.childId).includes("-")) {
-          throw new Error(`evidence research child spawn returned an invalid id: ${String(started.childId)}`);
-        }
         childId = started.childId;
-        const text = await waitForChildTurn(ctx, childId, exec.signal, 24e4);
-        const sheet = parseEvidenceSheet(text);
+        messageId = started.messageId;
+        const turn = await waitForChildMessageTurn(ctx, childId, messageId, {
+          signal: exec.signal,
+          deadline: Number.POSITIVE_INFINITY,
+          pollMs
+        });
+        const sheet = parseEvidenceSheet(turn.text);
         if (sheet === null) {
-          return { found: false, citation: "n/a", facts: `the research child returned no parseable fact sheet; raw tail: ${text.slice(-300)}`, confidence: "low" };
+          return { found: false, citation: "n/a", facts: `the research child returned no parseable fact sheet; raw tail: ${turn.text.slice(-300)}`, confidence: "low" };
         }
         const notFindable = /NOT FINDABLE/i.test(sheet.facts);
         return { found: !notFindable, citation: sheet.citation, facts: sheet.facts, confidence: sheet.confidence };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { found: false, citation: "n/a", facts: `evidence retrieval failed: ${msg}`, confidence: "low" };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { found: false, citation: "n/a", facts: `evidence retrieval failed: ${message}`, confidence: "low" };
       } finally {
         if (childId !== null) {
           try {
-            await ctx.get("sessions")?.delete(childId);
+            await ctx.subagents.drainContinuableChildren(requester, [childId]);
           } catch {
           }
         }
       }
     }
   });
+}
+async function consult(parent, args, signal, deadline, pollMs, children, ctx) {
+  const parentId = parent.session.id;
+  const events = parent.session.snapshotEvents();
+  const lastHumanSeq = lastHumanUserMessageSeq(events);
+  const operatorQuery = latestOperatorQuery(events);
+  const { chainId, carryId, attempts } = resolveOracleChainAttempts(ctx, "oracle");
+  const active = attempts[0] ?? {};
+  const route = {
+    ...active.provider !== void 0 ? { provider: active.provider } : {},
+    ...active.model !== void 0 ? { model: active.model } : {},
+    ...active.reasoningEffort !== void 0 ? { reasoningEffort: ReasoningEffortId(active.reasoningEffort) } : {},
+    ...carryId && chainId !== void 0 ? { chainId } : {}
+  };
+  const identity = routeIdentity(route);
+  let state = children.get(parentId);
+  const routeChanged = state !== void 0 && state.route !== identity;
+  if (args.fresh === true) {
+    children.delete(parentId);
+    state = void 0;
+  } else if (routeChanged) {
+    children.delete(parentId);
+    state = void 0;
+  } else if (state === void 0) {
+    const rediscovered = await discoverOracleChild(ctx, parentId);
+    if (rediscovered !== void 0) {
+      state = { childId: rediscovered, route: identity, lastHumanSeq: 0, wbHash: null, briefHash: null };
+    }
+  }
+  const doc = readOrchestrationDocument(ctx.get("settings"));
+  const whiteboard = extractWhiteboardSummary(doc, parent.session?.id, parent.session?.header?.cwd);
+  const whiteboardHash = hashText(whiteboard);
+  const spawn = state === void 0;
+  const brief = spawn ? await ensureBriefWithin(parent, signal).then(() => readLivingBrief(ctx, parent.session)) : readLivingBrief(ctx, parent.session);
+  const briefHash = hashText(brief);
+  const files = Array.isArray(args.files) ? args.files : void 0;
+  const newQuery = state !== void 0 && lastHumanSeq !== state.lastHumanSeq;
+  const whiteboardChanged = state !== void 0 && whiteboardHash !== state.wbHash;
+  const briefChanged = state !== void 0 && newQuery && brief !== null && briefHash !== state.briefHash;
+  let content;
+  if (spawn || state === void 0) {
+    content = [{
+      type: "text",
+      text: buildInitialPackage({ request: args.request, ...files !== void 0 ? { files } : {}, whiteboard, brief })
+    }];
+  } else {
+    content = [{
+      type: "text",
+      text: buildDelta({
+        request: args.request,
+        ...files !== void 0 ? { files } : {},
+        operatorQuery: newQuery ? operatorQuery : "",
+        whiteboard: whiteboardChanged ? whiteboard : null,
+        brief: briefChanged ? brief : null
+      })
+    }];
+  }
+  let childId;
+  let messageId;
+  if (spawn || state === void 0) {
+    const agentOptions = active.provider !== void 0 ? {
+      provider: active.provider,
+      ...active.model !== void 0 ? { model: active.model } : {},
+      ...active.reasoningEffort !== void 0 ? { reasoningEffort: ReasoningEffortId(active.reasoningEffort) } : {},
+      ...carryId && chainId !== void 0 ? { chain: chainId } : {}
+    } : void 0;
+    const started = await ctx.subagents.startContinuable({
+      provider: "spawn",
+      label: ORACLE_LABEL,
+      quiet: true,
+      request: {
+        prompt: content,
+        parent,
+        persona: ORACLE_PERSONA,
+        quiet: true,
+        toolFilter: { deny: ORACLE_TOOL_FILTER.deny },
+        ...agentOptions !== void 0 ? { agentOptions } : {}
+      },
+      signal
+    });
+    childId = started.childId;
+    messageId = started.messageId;
+    children.set(parentId, { childId, route: identity, lastHumanSeq, wbHash: whiteboardHash, briefHash });
+  } else {
+    const current = state;
+    childId = current.childId;
+    messageId = await queueHostSubagentPrompt2(ctx.subagents, parent, childId, content, { kind: "user" }, signal);
+    children.set(parentId, {
+      ...current,
+      lastHumanSeq,
+      wbHash: whiteboardChanged ? whiteboardHash : current.wbHash,
+      briefHash: briefChanged ? briefHash : current.briefHash
+    });
+  }
+  if (args.background === true) {
+    void (async () => {
+      try {
+        const turn = await waitForChildMessageTurn(ctx, childId, messageId, {
+          signal: new AbortController().signal,
+          deadline: Number.POSITIVE_INFINITY,
+          pollMs
+        });
+        deliverOracleVerdict(ctx, parentId, lastHumanSeq, turn);
+      } catch {
+      }
+    })();
+    return {
+      approved: false,
+      concerns: [],
+      unverified: [],
+      blockers: [],
+      summary: `Background consultation started (${childId}) \u2014 the verdict will be delivered as a message when the oracle finishes.`,
+      background: true
+    };
+  }
+  try {
+    const turn = await waitForChildMessageTurn(ctx, childId, messageId, { signal, deadline, pollMs });
+    if (turn.stopReason === "error" || turn.stopReason === "aborted" || turn.stopReason === "refusal") {
+      const detail = turn.error ?? `turn ended ${turn.stopReason}`;
+      return {
+        approved: false,
+        concerns: [`Oracle consultation failed: ${detail}`],
+        unverified: [],
+        blockers: [`ORACLE_MODEL_ERROR: ${detail}`],
+        summary: `Oracle consultation failed: ${detail}`,
+        rejected: true
+      };
+    }
+    const verdict = parseVerdict(turn.text);
+    return {
+      approved: verdict.approved,
+      concerns: verdict.concerns,
+      unverified: verdict.unverified,
+      blockers: verdict.blockers,
+      summary: turn.text
+    };
+  } catch (error) {
+    if (error instanceof ChildTurnTimeoutError) {
+      void (async () => {
+        try {
+          const turn = await waitForChildMessageTurn(ctx, error.childId, error.messageId, {
+            signal: new AbortController().signal,
+            deadline: Number.POSITIVE_INFINITY,
+            pollMs
+          });
+          deliverOracleVerdict(ctx, parentId, lastHumanSeq, turn);
+        } catch {
+        }
+      })();
+      return {
+        approved: false,
+        concerns: [],
+        unverified: [],
+        blockers: ["ORACLE_PENDING"],
+        summary: `ORACLE_PENDING: the Oracle is still working on ${error.childId}; the verdict will be delivered as a message.`,
+        rejected: true
+      };
+    }
+    if (signal.aborted) {
+      ctx.subagents.interrupt(childId, { kind: "ancestor", agent: parent });
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      approved: false,
+      concerns: [`Oracle consultation failed: ${message}`],
+      unverified: [],
+      blockers: [`ORACLE_MODEL_ERROR: ${message}`],
+      summary: `Oracle consultation failed: ${message}`,
+      rejected: true
+    };
+  }
 }
 var EVIDENCE_CHILD_DENY = [
   "send_message",
@@ -860,20 +906,30 @@ var EVIDENCE_CHILD_DENY = [
   "review_run"
 ];
 export {
+  ChildTurnTimeoutError,
+  Config,
   EVIDENCE_CHILD_DENY,
+  ORACLE_LABEL,
+  ORACLE_PERSONA,
   ORACLE_TOOL_FILTER,
-  OracleTimeoutError,
+  ParentFifoQueue,
   apply,
+  askChild,
+  buildDelta,
   buildInitialPackage,
-  deliverDetachedOracleVerdict,
+  deliverOracleVerdict,
+  discoverOracleChild,
   extractWhiteboardSummary,
+  hashText,
   inject,
   isExternalEvidenceTarget,
+  lastHumanUserMessageSeq,
   name,
   parseEvidenceSheet,
   resolveOracleChainAttempts,
   resolveOracleTimeoutMs,
   resolvePersonaModel,
+  routeIdentity,
   textOfContent,
-  waitForChildTurn
+  waitForChildMessageTurn
 };

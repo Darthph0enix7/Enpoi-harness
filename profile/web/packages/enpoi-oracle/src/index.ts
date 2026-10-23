@@ -1,55 +1,82 @@
 /**
  * Enpoi Harness — `oracle_review` tool.
  *
- * The Oracle is the senior architectural supervisor and deep reviewer: a
- * per-session continuable fiber that reviews plans, logic, and edge cases.
- * Call #1 receives the full package (Living Brief + request + reading-list
- * artifacts); calls #2+ are delta-only continuation turns, so the fiber's KV
- * prefix stays warm. Verdicts are structured text the tool parses
- * mechanically.
+ * The Oracle is the senior architectural supervisor and deep reviewer: one
+ * persistent, quiet continuable child per parent session (contract C8). Call
+ * #1 receives the full package (Living Brief + whiteboard + request + reading
+ * list); later calls send only the delta — a new operator query, a changed
+ * whiteboard, a changed brief, the request, and changed files — so the child's
+ * KV prefix and its earlier verdicts stay warm. Verdicts are structured text
+ * the tool parses mechanically.
  *
- * Design notes (frozen in ~/dsh-migration/31-35):
- * - Blocking tool (I13-oracle: the orchestrator awaits the verdict).
- * - Per-session fiber, query-bound: a new user message resets it (I13).
- * - Scorecard rollover: after 10 consultations the fiber is disposed and a
- *   fresh one seeds with the condensed scorecard (doc 35 2.4).
- * - Single-flight mutex (I7): a parallel `[oracle_review, oracle_review]`
- *   tool batch is rejected with CONCURRENT_CALL_REJECTED.
+ * Design notes (frozen in ~/dsh-migration/context-ux-spec.md, C8/C9):
+ * - Blocking by default; `background: true` acknowledges and delivers the
+ *   verdict through the parent's inbox, waking it.
+ * - One child per parent = the newest `listChildren()` entry with
+ *   `mode === 'continuable'` and the exact label `'oracle'`; the in-memory
+ *   state is re-discovered after a plugin remount.
+ * - Per-parent FIFO queue: overlapping calls run in order, never rejected.
+ * - A different resolved route (persona chain/link change) starts a new child.
+ * - `fresh: true` starts a new child on purpose.
  * - Reading-list rule: the tool passes file paths, never pasted code (OMO).
+ * - Timeouts never cancel the child: the verdict is delivered later as a
+ *   message that wakes the parent (`ORACLE_PENDING`).
+ *
+ * @module dsh-enpoi-oracle
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { Session, SessionId, SessionEvent } from '@deepseek-ai/dsh-session'
+import Schema from '@deepseek-ai/schemastery'
+import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { createUserMessage, ReasoningEffortId, type ContentBlock, type ContextFormed, type MessageId } from '@deepseek-ai/dsh-llm'
+import type { SubagentCatalogEntry } from '@deepseek-ai/dsh-subagent'
 import { queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
-import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
-import { createUserMessage, type ContextFormed } from '@deepseek-ai/dsh-llm'
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
-    /** Enpoi Oracle: the background verdict delivered into the parent session. */
+    /** Enpoi Oracle: the delivered verdict (background, timeout handoff, or waking consult). */
     'enpoi-oracle': { kind: 'enpoi-oracle' } & ContextFormed
   }
 }
 import { getBriefService } from 'dsh-enpoi-context-keeper'
 import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
+import { ChildTurnTimeoutError, textOfContent, waitForChildMessageTurn } from './ask-child.ts'
+import type { ChildTurnResult } from './ask-child.ts'
+import { ParentFifoQueue } from './queue.ts'
+
+export { askChild, ChildTurnTimeoutError, textOfContent, waitForChildMessageTurn } from './ask-child.ts'
+export type { ChildTurnOptions, ChildTurnResult } from './ask-child.ts'
+export { ParentFifoQueue } from './queue.ts'
 
 export const name = 'enpoi-oracle'
 
-export const inject = ['tools', 'subagents', 'sessionPersistence', 'sessions', 'agents']
+export const inject = ['tools', 'subagents', 'sessionPersistence', 'agents']
 
-const ORACLE_PERSONA = [
+/** Plugin configuration (schemastery-validated by the loader). */
+export interface Config {
+  /** Fallback wake cadence while waiting for a child turn, in milliseconds (>=100). */
+  childPollMs?: number
+}
+
+export const Config: Schema<Config> = Schema.object({
+  childPollMs: Schema.number().min(100).default(1000),
+})
+
+/** The exact label every Oracle child carries; rediscovery matches it exactly (C8). */
+export const ORACLE_LABEL = 'oracle'
+
+export const ORACLE_PERSONA = [
   'You are the Oracle — senior architectural supervisor, conceptual thinker, and deep reviewer.',
   'You reason independently and deeply: you evaluate architecture, concepts, system trade-offs, logic, race conditions, and code.',
   'You are an advisor, not a dictator: if a plan is flawed, over-engineered, or heading in the wrong direction, say so plainly.',
   'When reviewing code, inspect relevant files directly using your search/read tools as needed to understand the broader context. When reviewing concepts or plans, evaluate feasibility, modularity, and trade-offs.',
-  'This is a continuing reviewer session within the active query: reuse your accumulated context and memory from prior turns.',
+  'This is a persistent reviewer session for the whole operator session: reuse your accumulated context and earlier verdicts across consultations; when a consultation names a new operator query, re-ground on it.',
   'You may call request_evidence(target, question) at any point — it sends a research child (codebase explorer or web librarian) to fetch ground truth and returns a short cited fact sheet. Ask as many or as few questions as your judgment requires; use it whenever first-hand verification would sharpen your review, and ignore it entirely when you already know enough.',
   'You never write or edit files. You never paste whole files back — you summarize, explain, and cite.',
   'End every review with a VERDICT BLOCK in exactly this JSON — the orchestrator parses it mechanically, so it must be the LAST thing you output and must be valid JSON:',
   '{"approved":true|false,"concerns":["..."],"unverified":["..."],"blockers":["..."]}',
 ].join('\n')
 
-/** Read-only surface for the oracle fiber. */
+/** Read-only surface for the oracle child. */
 export const ORACLE_TOOL_FILTER = {
   // Read-only review surface. Passed UNCONDITIONALLY: the fork's
   // `tools.restrict()` skips unknown deny names, while the previous
@@ -113,38 +140,26 @@ interface Verdict {
   blockers: string[]
 }
 
-export interface OracleFiber {
-  childId: SessionId | null
-  consultations: number
-  lastParentUserSeq: number
-  scorecard: { files: string[]; verdicts: Array<{ approved: boolean; concerns: string[] }> }
-  /** The Living Brief package frozen at call #1 (doc 35 amendment 6). */
-  brief: string | null
-}
-
-function lastHumanUserMessageSeq(events: readonly SessionEvent[]): number {
+/** Seq of the newest direct human prompt, or `0` when the session has none. */
+export function lastHumanUserMessageSeq(events: readonly SessionEvent[]): number {
   for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i]
-    if (e?.type === 'user/message') {
-      const src = (e.data as { source?: { kind?: string } })?.source
-      if (src?.kind === 'user') return e.seq
-    }
+    const event = events[i]
+    if (event?.type !== 'user/message') continue
+    if (event.data.source?.kind === 'user') return event.seq
   }
   return 0
 }
 
-export function textOfContent(blocks: unknown): string {
-  if (!Array.isArray(blocks)) return ''
-  // Only the child's REPORT blocks reach the parent: reasoning and tool-call
-  // blocks are its private deliberation, not the answer.
-  return blocks
-    .map(block => {
-      if (typeof block !== 'object' || block === null || !('text' in block)) return ''
-      const blockType = (block as { type?: unknown }).type
-      return blockType === 'text' || blockType === undefined ? String((block as { text: unknown }).text) : ''
-    })
-    .filter(text => text.length > 0)
-    .join(' ')
+/** Text of the newest direct human prompt, capped at 1000 characters. */
+function latestOperatorQuery(events: readonly SessionEvent[]): string {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const event = events[i]
+    if (event?.type !== 'user/message') continue
+    if (event.data.source?.kind !== 'user') continue
+    const text = textOfContent(event.data.content).trim()
+    return text.length > 1000 ? text.slice(0, 1000) : text
+  }
+  return ''
 }
 
 /** Read the Living Brief projection snapshot for the caller's session. */
@@ -165,9 +180,10 @@ function readLivingBrief(ctx: Context, session: Session): string | null {
         ? `Open threads: ${view.openThreads.map((t: { text: string }) => t.text).join('; ')}` : null,
       prose !== null ? `Keeper synthesis: ${String((prose as { text: string }).text)}` : null,
       `Brief freshness: ${freshness}`,
-    ].filter((p): p is string => p !== null)
+    ].filter((part): part is string => part !== null)
     return parts.length > 0 ? parts.join('\n') : null
   } catch {
+    // A missing or malformed projection is optional context, not a failure.
     return null
   }
 }
@@ -213,69 +229,137 @@ export function extractWhiteboardSummary(
     const lines = entries.map(e => `- ${e.pinned ? '📌 ' : ''}[${e.kind}] ${e.text}`)
     return lines.join('\n')
   } catch {
+    // A malformed shared document never blocks a consultation.
     return null
   }
 }
 
-export function buildInitialPackage(
-  brief: string | null,
-  args: { request: string; files?: string[] },
-  scorecard: OracleFiber['scorecard'],
-  whiteboardText?: string | null,
-): string {
-  const lines: string[] = []
-  lines.push('You are the Oracle — the senior architectural supervisor and deep reviewer.')
-  lines.push('This is a FRESH consultation session for the active user query. Review the request below against the current state.')
-  if (whiteboardText) {
-    lines.push('--- PINNED WHITEBOARD ---')
-    lines.push(whiteboardText)
-  }
-  if (brief !== null) {
-    lines.push('--- SESSION BRIEF ---')
-    lines.push(brief)
-  }
-  if (scorecard.verdicts.length > 0) {
-    lines.push('--- PRIOR REVIEWS IN RECENT SESSIONS (condensed scorecard) ---')
-    for (const v of scorecard.verdicts.slice(-3)) {
-      lines.push(`- ${v.approved ? 'approved' : 'concerns'}: ${v.concerns.join('; ') || 'no concerns noted'}`)
-    }
-  }
-  lines.push('--- REVIEW REQUEST ---')
-  lines.push(args.request)
-  if (Array.isArray(args.files) && args.files.length > 0) {
+/** One consultation's verbatim inputs. */
+export interface OracleConsultInput {
+  /** What to review or consult on. */
+  readonly request: string
+  /** Relevant file paths the Oracle should read itself. */
+  readonly files?: readonly string[]
+  /** Pinned whiteboard entries, when the shared document has any. */
+  readonly whiteboard?: string | null
+  /** Living Brief prose, when the keeper produced one. */
+  readonly brief?: string | null
+}
+
+/**
+ * Build the FIRST consultation package for one Oracle child.
+ * @param input - request, reading list, whiteboard, and brief.
+ * @returns the prompt text delivered to a newly spawned Oracle child.
+ */
+export function buildInitialPackage(input: OracleConsultInput): string {
+  const lines: string[] = [
+    'You are the Oracle — the senior architectural supervisor and deep reviewer.',
+    'This is a persistent consultation session for this operator session; later consultations arrive as deltas.',
+  ]
+  if (input.whiteboard) lines.push('--- PINNED WHITEBOARD ---', input.whiteboard)
+  if (input.brief !== null && input.brief !== undefined) lines.push('--- SESSION BRIEF ---', input.brief)
+  lines.push('--- REVIEW REQUEST ---', input.request)
+  if (input.files !== undefined && input.files.length > 0) {
     lines.push('--- READING LIST (read these files directly) ---')
-    for (const f of args.files) lines.push(`- ${f}`)
+    for (const file of input.files) lines.push(`- ${file}`)
   }
   return lines.join('\n')
 }
 
-function buildDelta(
-  brief: string | null,
-  args: { request: string; files?: string[] },
-  whiteboardText?: string | null,
-): string {
-  const lines: string[] = ['Follow-up review in the SAME query (delta turn). Your prior review and findings are in your conversation history above.']
-  if (whiteboardText) {
-    lines.push('--- PINNED WHITEBOARD ---', whiteboardText)
-  }
-  if (brief !== null) {
-    lines.push('--- CURRENT SESSION BRIEF ---', brief)
-  }
-  lines.push('--- DELTA REQUEST ---', args.request)
-  if (Array.isArray(args.files) && args.files.length > 0) {
+/** One continuing consultation's delta inputs. */
+export interface OracleDeltaInput extends OracleConsultInput {
+  /** Newest operator prompt, sent only when it changed since the last consult. */
+  readonly operatorQuery?: string | null
+}
+
+/**
+ * Build the DELTA prompt for an existing Oracle child.
+ * @param input - request, files, and the changed sections only.
+ * @returns the delta prompt text delivered to the persistent child.
+ */
+export function buildDelta(input: OracleDeltaInput): string {
+  const lines: string[] = []
+  if (input.operatorQuery) lines.push('--- NEW OPERATOR QUERY ---', input.operatorQuery)
+  if (input.whiteboard) lines.push('--- PINNED WHITEBOARD ---', input.whiteboard)
+  if (input.brief) lines.push('--- CURRENT SESSION BRIEF ---', input.brief)
+  lines.push('--- REVIEW REQUEST ---', input.request)
+  if (input.files !== undefined && input.files.length > 0) {
     lines.push('--- CHANGED/NEW FILES TO READ ---')
-    for (const f of args.files) lines.push(`- ${f}`)
+    for (const file of input.files) lines.push(`- ${file}`)
   }
   return lines.join('\n')
 }
 
-export interface PersonaModelConfig {
-  provider: string
-  model: string
-  reasoningEffort?: string
+/** Route identity of one spawn: provider, model, reasoning effort, and chain. */
+export interface OracleRoute {
+  readonly provider?: string
+  readonly model?: string
+  readonly reasoningEffort?: string
+  readonly chainId?: string
+}
+
+/** In-memory state of one parent's persistent Oracle child (C8). */
+export interface OracleChildState {
+  readonly childId: SessionId
+  /** Route identity the child was spawned on. */
+  readonly route: string
+  /** Parent `user/message` seq of the newest operator query delivered so far. */
+  lastHumanSeq: number
+  /** Hash of the whiteboard text delivered so far. */
+  wbHash: string | null
+  /** Hash of the session brief delivered so far. */
+  briefHash: string | null
+}
+
+/** Stable route identity used to detect a route change across consultations. */
+export function routeIdentity(route: OracleRoute): string {
+  return [route.provider ?? '', route.model ?? '', route.reasoningEffort ?? '', route.chainId ?? ''].join('/')
+}
+
+/** Deterministic short hash for change detection (FNV-1a 32-bit). */
+export function hashText(text: string | null): string | null {
+  if (text === null || text === '') return null
+  let hash = 0x811c9dc5
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(16)
+}
+
+/**
+ * Rediscover the newest continuable child labelled exactly `oracle` (C8).
+ * @param ctx - context carrying `subagents`.
+ * @param parentId - parent whose catalog is read.
+ * @returns the newest matching child, or `undefined` when none exists.
+ */
+export async function discoverOracleChild(ctx: Context, parentId: SessionId): Promise<SessionId | undefined> {
+  let entries: SubagentCatalogEntry[]
+  try {
+    entries = await ctx.subagents.listChildren(parentId)
+  } catch {
+    // Catalog unavailable (composition without session-query): no rediscovery.
+    return undefined
+  }
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index]!
+    if (entry.mode === 'continuable' && entry.label === ORACLE_LABEL) return entry.id
+  }
+  return undefined
 }
 
 /** Doc 38: oracle consultation timeout — resolved fresh per call (hot-swap). */
+export function resolveOracleTimeoutMs(ctx: Context): number {
+  try {
+    const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
+    const value = (doc?.parameters as { oracle?: { timeoutMs?: number } } | undefined)?.oracle?.timeoutMs
+    if (typeof value === 'number' && !Number.isNaN(value)) return Math.min(300_000, Math.max(30_000, value))
+  } catch {
+    // settings unavailable — default
+  }
+  return 120_000
+}
+
 /** Bounded wait for the demand-driven Living Brief before an oracle consultation, in ms. */
 const ORACLE_BRIEF_WAIT_MS = 4_000
 
@@ -288,7 +372,7 @@ const ORACLE_BRIEF_WAIT_MS = 4_000
  */
 async function ensureBriefWithin(parent: Agent, signal: AbortSignal): Promise<void> {
   const brief = getBriefService()
-  if (brief === undefined) return
+  if (brief === null || brief === undefined) return
   const pending = brief.ensureFreshBrief(parent.session, signal).catch(() => {
     // A failed brief is optional context; the deterministic package still goes.
     return null
@@ -303,15 +387,10 @@ async function ensureBriefWithin(parent: Agent, signal: AbortSignal): Promise<vo
   if (signal.aborted) throw signal.reason ?? new Error('aborted')
 }
 
-export function resolveOracleTimeoutMs(ctx: Context): number {
-  try {
-    const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
-    const v = (doc?.parameters as { oracle?: { timeoutMs?: number } } | undefined)?.oracle?.timeoutMs
-    if (typeof v === 'number' && !Number.isNaN(v)) return Math.min(300_000, Math.max(30_000, v))
-  } catch {
-    // settings unavailable — default
-  }
-  return 120_000
+export interface PersonaModelConfig {
+  provider: string
+  model: string
+  reasoningEffort?: string
 }
 
 export function resolvePersonaModel(ctx: Context, persona: string): PersonaModelConfig | undefined {
@@ -326,7 +405,9 @@ export function resolvePersonaModel(ctx: Context, persona: string): PersonaModel
         ...(entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}),
       }
     }
-  } catch {}
+  } catch {
+    // settings unavailable — no persona route
+  }
   return undefined
 }
 
@@ -378,6 +459,7 @@ function resolveChainSnapshot(ctx: Context, id: unknown): OracleChainSnapshot | 
       onCut: record.onCut === 'continue' ? 'continue' : 'failover',
     }
   } catch {
+    // A misbehaving chain service degrades to the persona/default route.
     return undefined
   }
 }
@@ -386,6 +468,7 @@ function resolveChainSnapshot(ctx: Context, id: unknown): OracleChainSnapshot | 
 export interface OracleAttemptModel {
   provider?: string
   model?: string
+  reasoningEffort?: string
 }
 
 /**
@@ -409,7 +492,11 @@ export function resolveOracleChainAttempts(
     const snapshot = resolveChainSnapshot(ctx, entry?.chain)
     if (snapshot !== undefined) {
       const active: OracleChainSnapshotLink = entry != null && entry.provider && entry.model
-        ? { provider: entry.provider, model: entry.model }
+        ? {
+            provider: entry.provider,
+            model: entry.model,
+            ...(entry.reasoningEffort ? { effort: entry.reasoningEffort } : {}),
+          }
         : { ...snapshot.links[0]! }
       const links = [
         active,
@@ -419,7 +506,11 @@ export function resolveOracleChainAttempts(
       return {
         chainId: snapshot.id,
         carryId: head.provider === active.provider && head.model === active.model,
-        attempts: links.map(link => ({ provider: link.provider, model: link.model })),
+        attempts: links.map(link => ({
+          provider: link.provider,
+          model: link.model,
+          ...(link.effort !== undefined ? { reasoningEffort: link.effort } : {}),
+        })),
       }
     }
   } catch {
@@ -428,33 +519,17 @@ export function resolveOracleChainAttempts(
   const personaModel = resolvePersonaModel(ctx, persona)
   return {
     carryId: false,
-    attempts: personaModel !== undefined ? [{ provider: personaModel.provider, model: personaModel.model }] : [{}],
+    attempts: personaModel !== undefined
+      ? [{
+          provider: personaModel.provider,
+          model: personaModel.model,
+          ...(personaModel.reasoningEffort !== undefined ? { reasoningEffort: personaModel.reasoningEffort } : {}),
+        }]
+      : [{}],
   }
 }
 
 /** Extract the VERDICT BLOCK JSON from the oracle's final message. */
-function applyPersonaModel(ctx: Context, childId: string, persona: string): void {
-  try {
-    const entry = resolvePersonaModel(ctx, persona)
-    if (entry && entry.provider && entry.model) {
-      const sessions = ctx.get('sessions') as { get?: (id: string) => Session } | undefined
-      const childSession = sessions?.get?.(childId)
-      if (childSession && typeof childSession.append === 'function') {
-        childSession.append('request/header', {
-          header: {
-            config: {
-              provider: entry.provider,
-              model: entry.model,
-              ...(entry.reasoningEffort ? { reasoningEffort: entry.reasoningEffort } : {}),
-            },
-          },
-          reason: 'custom',
-        })
-      }
-    }
-  } catch {}
-}
-
 function parseVerdict(text: string): Verdict {
   // 1) Strict JSON block first.
   const matches = [...text.matchAll(/\{(?:[^{}]|\{[^{}]*\})*\}/g)]
@@ -483,165 +558,80 @@ function parseVerdict(text: string): Verdict {
   return { approved, concerns, unverified: [], blockers }
 }
 
-/**
- * Raised when a blocking consultation exceeds its wait budget. The child is
- * NOT cancelled: the caller owns deciding whether to park it or detach the
- * verdict delivery (see {@link deliverDetachedOracleVerdict}).
- */
-export class OracleTimeoutError extends Error {
-  /**
-   * @param childId - the still-running oracle child the wait abandoned.
-   * @param timeoutMs - the exceeded wait budget.
-   */
-  constructor(readonly childId: SessionId, readonly timeoutMs: number) {
-    super(`oracle consultation timed out after ${timeoutMs}ms`)
-    this.name = 'OracleTimeoutError'
+/** Headline of one delivered verdict message. */
+function verdictHeadline(turn: ChildTurnResult): string {
+  if (turn.stopReason !== 'completed' && turn.stopReason !== 'max-tokens') {
+    const detail = turn.error === undefined ? '' : `: ${turn.error}`
+    return `📬 Oracle consultation ended (${turn.stopReason})${detail}.`
   }
+  const verdict = parseVerdict(turn.text)
+  return `📬 Oracle finished — ${verdict.approved ? 'APPROVED' : 'CONCERNS'} (${verdict.concerns.length} concern(s)).`
 }
 
-export async function waitForChildTurn(
+/**
+ * Deliver one finished consultation's verdict into the parent session, waking it.
+ *
+ * The parent is resolved through `ctx.agents`; a disposed parent drops the
+ * verdict. A parent that moved to a newer operator query receives the verdict
+ * quietly for its next turn; an idle parent is woken by a follow-up; a running
+ * parent is steered at its next step.
+ * @param ctx - context carrying `agents`.
+ * @param parentId - session id of the consulting parent.
+ * @param capturedHumanSeq - parent human-query seq when the consultation started.
+ * @param turn - the settled child turn.
+ * @returns whether a live parent accepted the message.
+ */
+export function deliverOracleVerdict(
   ctx: Context,
-  childId: SessionId,
-  signal: AbortSignal,
-  timeoutMs = 120_000,
-  pollMs = 100,
-): Promise<string> {
-  const started = Date.now()
-  const controller = new AbortController()
-  const onAbort = () => controller.abort()
-  signal.addEventListener('abort', onAbort, { once: true })
-  try {
-    for (;;) {
-      if (signal.aborted) throw new Error('oracle consultation aborted')
-      if (Date.now() - started > timeoutMs) throw new OracleTimeoutError(childId, timeoutMs)
-      // The child parks when its turn settles (cold-resume model, Spike A).
-      if (ctx.agents.get(childId) === undefined) {
-        const persistence = ctx.get('sessionPersistence') as SessionPersistence | undefined
-        if (persistence !== undefined) {
-          const handle = await persistence.open(childId, 'read')
-          let events: readonly SessionEvent[]
-          try {
-            events = (await handle.read(0, undefined)).events
-          } finally {
-            await handle.close()
-          }
-          // Slice to the CURRENT turn: only assistant messages after the last
-          // user message (delta followups must not re-read older verdicts).
-          const lastUser = [...events].reverse().find(e => e.type === 'user/message')
-          const since = lastUser === undefined ? 0 : lastUser.seq
-          const messages = events.filter(e => e.type === 'assistant/message' && e.seq > since)
-          if (messages.length > 0) {
-            const extracted = messages
-              .map(m => {
-                const data = m.data as { message?: { content?: unknown }; content?: unknown }
-                return textOfContent(data.message?.content ?? data.content)
-              })
-              .filter(t => t.length > 0)
-              .join('\n')
-              .trim()
-            if (extracted.length > 0) {
-              return extracted
-            }
-          }
-
-          // If no assistant message was produced, inspect turn/end for provider/model errors
-          const turnEnd = events.find(e => e.type === 'turn/end' && e.seq > since)
-          if (turnEnd !== undefined) {
-            const reason = (turnEnd.data as { reason?: { kind?: string; error?: { message?: string }; failure?: { message?: string }; reason?: { kind?: string } } })?.reason
-            if (reason?.kind === 'error') {
-              const errMsg = reason.error?.message ?? reason.failure?.message ?? 'Model execution failed'
-              throw new Error(`Turn failed: ${errMsg}`)
-            }
-            if (reason?.kind === 'aborted') {
-              const abortCause = reason.reason?.kind ?? 'cancelled'
-              throw new Error(`Turn was aborted (${abortCause})`)
-            }
-            if (reason?.kind === 'completed' && messages.length === 0) {
-              return '[NO_OUTPUT: oracle returned empty content]'
-            }
-          }
-        }
-      }
-      await new Promise(resolve => setTimeout(resolve, pollMs))
-    }
-  } finally {
-    signal.removeEventListener('abort', onAbort)
-  }
+  parentId: SessionId,
+  capturedHumanSeq: number,
+  turn: ChildTurnResult,
+): boolean {
+  const agent = ctx.get('agents')?.get(parentId)
+  if (agent === undefined) return false
+  const message = createUserMessage({
+    content: [{ type: 'text', text: `${verdictHeadline(turn)}\n\n${turn.text}` }],
+    source: { kind: 'enpoi-oracle' },
+  })
+  const currentHumanSeq = lastHumanUserMessageSeq(agent.session.snapshotEvents())
+  if (currentHumanSeq !== capturedHumanSeq) agent.send(message, 'next-turn', false)
+  else if (agent.status === 'idle') agent.followup(message)
+  else agent.steer(message)
+  return true
 }
 
-/**
- * Deliver a timed-out consultation's verdict when the still-running child
- * eventually finishes: waits without a deadline (bounded by the child's own
- * turn settling), parses the verdict, records it on the fiber, and injects the
- * result into the parent as a message. The child is never cancelled — a
- * timeout must not abandon live work silently.
- * @param options - parent, child, fiber, mutex key, and poll cadence.
- */
-export async function deliverDetachedOracleVerdict(options: {
-  ctx: Context
-  parent: Agent
-  childId: SessionId
-  fiber: OracleFiber
-  key: string
-  busy: Set<string>
-  pollMs?: number
-}): Promise<void> {
-  const { ctx, parent, childId, fiber, key, busy } = options
-  try {
-    const text = await waitForChildTurn(
-      ctx,
-      childId,
-      new AbortController().signal,
-      Number.POSITIVE_INFINITY,
-      options.pollMs ?? 1_000,
-    )
-    const verdict = parseVerdict(text)
-    fiber.consultations += 1
-    fiber.scorecard.verdicts.push({ approved: verdict.approved, concerns: verdict.concerns })
-    const agent = ctx.get('agents')?.get(parent.session.id)
-    if (agent !== undefined) {
-      agent.inject(createUserMessage({
-        content: [{
-          type: 'text',
-          text: `📬 Oracle (detached after timeout) finished — ${verdict.approved ? 'APPROVED' : 'CONCERNS'} (${verdict.concerns.length} concern(s)).\n\n${text}`,
-        }],
-        source: { kind: 'enpoi-oracle' },
-      }))
-    }
-  } catch {
-    // The child was disposed or its turn failed: there is no verdict to deliver.
-  } finally {
-    busy.delete(key)
-  }
-}
-
-export function apply(ctx: Context): void {
-  ctx.inject(['tools', 'subagents', 'sessionPersistence', 'sessions'], (injected) => {
-    registerOracleTools(injected, ctx)
+export function apply(ctx: Context, config: Config = {}): void {
+  const pollMs = Math.max(100, Math.trunc(typeof config.childPollMs === 'number' ? config.childPollMs : 1000))
+  ctx.inject(['tools', 'subagents', 'sessionPersistence', 'agents'], (injected) => {
+    registerOracleTools(injected, ctx, pollMs)
   })
 }
 
-function registerOracleTools(ctx: Context, root: Context): void {
+function registerOracleTools(ctx: Context, root: Context, pollMs: number): void {
   ctx = root
-  const fibers = new Map<string, OracleFiber>()
-  /** Condensed scorecards stashed at rollover (doc 35 2.4) — seed the next fiber. */
-  const rolloverScorecards = new Map<string, OracleFiber['scorecard']>()
-  const busy = new Set<string>()
+  /** Persistent child state per parent session (C8). */
+  const children = new Map<string, OracleChildState>()
+  /** One FIFO lane per parent session. */
+  const queue = new ParentFifoQueue()
+
+  ctx.on('session/disposed', (session: Session) => {
+    children.delete(session.id)
+  })
 
   ctx.tools.register({
     name: 'oracle_review',
     description: [
       'Consult the Oracle (senior reviewer for architecture, conceptual design, planning, trade-offs, code reviews, and debugging).',
-      'The Oracle reasons independently about concepts and code. LIFECYCLE: Starts fresh on each new user query, but stays persistent across follow-up calls within that query.',
-      'Call #1 of a query: provide self-contained context (what you are building/fixing, architecture, decisions) and any relevant file paths if applicable. On follow-ups: send concise deltas.',
-      'Blocking by default; background:true delivers verdict as a message.',
+      'One persistent Oracle per session remembers every earlier consultation; first call: self-contained context and relevant file paths; later calls: concise deltas.',
+      'Calls made while it is busy queue in order.',
+      'Blocking by default; background:true delivers the verdict as a message that wakes this session.',
     ].join(' '),
     parameters: {
       type: 'object',
       properties: {
         request: {
           type: 'string',
-          description: 'What to review or consult on. On Call #1 of a query, provide clear self-contained context (concepts, problem, approach, state). On follow-ups in the same query, provide a concise delta.',
+          description: 'What to review or consult on. First call: self-contained context (concepts, problem, approach, state). Later calls: a concise delta.',
         },
         files: {
           type: 'array',
@@ -651,6 +641,10 @@ function registerOracleTools(ctx: Context, root: Context): void {
         background: {
           type: 'boolean',
           description: 'Run in the background — returns immediately; the verdict arrives as a delivered message. Omit for blocking.',
+        },
+        fresh: {
+          type: 'boolean',
+          description: 'Start a brand-new Oracle child instead of continuing the persistent one. Use only when the earlier consultation history would mislead.',
         },
       },
       required: ['request'],
@@ -683,293 +677,18 @@ function registerOracleTools(ctx: Context, root: Context): void {
       },
     },
     isConcurrencySafe: () => true,
-    async execute(args, exec) {
+    async execute(args: {
+      request: string
+      files?: string[]
+      background?: boolean
+      fresh?: boolean
+    }, exec) {
       const parent: Agent | undefined = exec.agent
       if (parent === undefined) throw new Error('oracle_review requires a calling agent')
-
-      const key = parent.session.id
-      if (busy.has(key)) {
-        return {
-          approved: false,
-          concerns: [],
-          unverified: [],
-          blockers: ['CONCURRENT_CALL_REJECTED: another oracle consultation is already running for this session'],
-          summary: 'Rejected by the single-flight mutex (I7): another oracle consultation is already running for this session.',
-          rejected: true,
-        }
-      }
-      busy.add(key)
-      let bg: AbortController | null = null
-      let stopWatch: (() => void) | null = null
-      let handedOff = false
-      try {
-        const lastUserSeq = lastHumanUserMessageSeq(parent.session.snapshotEvents())
-        let fiber = fibers.get(key)
-
-        // Query-bound (I13): the oracle fiber is persistent within ONE user query / task.
-        // When the operator sends a new prompt (query boundary), or the child died, reset for a clean task.
-        // Scorecard rollover (doc 35 amendment 6): the old fiber's scorecard
-        // seeds the fresh one — 10-consultation rollover must not lose history.
-        let rolloverScorecard: OracleFiber['scorecard'] | null = null
-        if (fiber !== undefined && (fiber.lastParentUserSeq !== lastUserSeq || fiber.childId === null)) {
-          rolloverScorecard = fiber.scorecard
-          fibers.delete(key)
-          fiber = undefined
-        } else if (fiber === undefined && rolloverScorecards.has(key)) {
-          // A prior fiber rolled over at 10 consultations — seed with its
-          // condensed scorecard (doc 35 2.4). Consumed ONLY after a
-          // successful spawn (Oracle D2): a transient spawn error must not
-          // erase 10 consultations of verdicts.
-          rolloverScorecard = rolloverScorecards.get(key)!
-        }
-
-        const fresh = fiber === undefined
-
-        if (fresh) {
-          // Demand-driven cognition: materialize the prose brief for this
-          // query's first consultation (Oracle amendment 3). Bounded: a
-          // hanging keeper route degrades to the deterministic brief.
-          await ensureBriefWithin(parent, exec.signal)
-          fiber = {
-            childId: null,
-            consultations: 0,
-            lastParentUserSeq: lastUserSeq,
-            scorecard: rolloverScorecard ?? { files: [], verdicts: [] },
-            brief: readLivingBrief(ctx, parent.session),
-          }
-        }
-
-        // Frozen-at-call-#1 semantics (doc 35 amendment 6): delta calls use
-        // the brief captured at the query's first consultation, never a
-        // newer distillation.
-        const brief = fiber.brief
-
-        if (args.background === true) {
-          bg = new AbortController()
-          stopWatch = ctx.on('session/event', (s, e: SessionEvent) => {
-            if (s.id !== parent.session.id) return
-            if (e.type === 'turn/end' && e.data.reason.kind === 'aborted' && e.data.reason.reason?.kind === 'user') bg?.abort()
-          })
-        }
-
-        const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
-        const wbSummary = extractWhiteboardSummary(doc, parent.session?.id, parent.session?.header?.cwd)
-
-        const prompt: Array<{ type: 'text'; text: string }> = [{
-          type: 'text',
-          text: fresh
-            ? buildInitialPackage(brief, args, fiber.scorecard, wbSummary)
-            : buildDelta(brief, args, wbSummary),
-        }]
-
-        // Chain snapshot at consultation start (doc 60): the ordered routes are
-        // frozen here and never re-read between attempts. Without a chain this
-        // is exactly the legacy single persona/default route.
-        const { chainId, carryId, attempts: attemptModels } = resolveOracleChainAttempts(ctx, 'oracle')
-        const callSignal = (): AbortSignal => bg?.signal ?? exec.signal
-
-        /**
-         * Spawn one fresh oracle child on the given attempt route.
-         * @param attempt - provider/model route for this spawn.
-         * @param carriedChainId - `AgentOptions.chain` to carry (the fork's
-         *   step retry loop escalates internally from the named link).
-         */
-        const spawnOracleChild = async (attempt: OracleAttemptModel, carriedChainId?: string): Promise<SessionId> => {
-          const denied = ORACLE_TOOL_FILTER.deny
-          const started = await ctx.subagents.startContinuable({
-            provider: 'spawn',
-            label: `oracle review: ${args.request.slice(0, 60)}`,
-            quiet: true,
-            request: {
-              prompt,
-              parent,
-              persona: ORACLE_PERSONA,
-              quiet: true,
-              toolFilter: denied.length > 0 ? { deny: denied } : undefined,
-              ...(attempt.provider !== undefined ? {
-                agentOptions: {
-                  provider: attempt.provider,
-                  model: attempt.model,
-                  ...(carriedChainId !== undefined ? { chain: carriedChainId } : {}),
-                },
-              } : {}),
-            },
-            signal: callSignal(),
-          })
-          if (!started.childId || started.childId === 'null' || !started.childId.includes('-')) {
-            throw new Error(`oracle spawn returned an invalid child id: ${String(started.childId)}`)
-          }
-          return started.childId as SessionId
-        }
-
-        /**
-         * Wait for the child's turn; when it fails and the oracle persona is
-         * assigned a model chain, dispose the dead child, respawn the SAME full
-         * initial package on the NEXT link of the start-of-call snapshot, and
-         * wait again. Fail-open: without a chain (or for a delta turn) this is
-         * exactly one waitForChildTurn call.
-         */
-        const waitWithChainAdvance = async (firstChildId: SessionId, advance: boolean): Promise<string> => {
-          let childId = firstChildId
-          let lastError: unknown
-          for (let index = 0; index < attemptModels.length; index += 1) {
-            try {
-              return await waitForChildTurn(ctx, childId, callSignal(), resolveOracleTimeoutMs(ctx))
-            } catch (error) {
-              lastError = error
-              if (callSignal().aborted) throw error
-              // A timed-out child is still working: never advance the chain
-              // (which would delete it) and never abandon it — the caller
-              // detaches the verdict delivery instead.
-              if (error instanceof OracleTimeoutError) throw error
-              const current = attemptModels[index]!
-              const next = advance ? attemptModels[index + 1] : undefined
-              if (next === undefined) break
-              const message = error instanceof Error ? error.message : String(error)
-              process.stderr.write(`[model-chain] ${chainId ?? 'oracle'}: link ${index + 1} (${current.provider ?? 'default'}/${current.model ?? 'default'}) FAILED → link ${index + 2} (${next.provider ?? 'default'}/${next.model ?? 'default'}): ${message}\n`)
-              try { await ctx.get('sessions')?.delete(childId) } catch { /* best-effort disposal */ }
-              // The advanced link is one of the chain's own, so carry the group
-              // id too; the fork starts at the named link and escalates from it.
-              childId = await spawnOracleChild(next, chainId)
-              fiber.childId = childId
-              fibers.set(key, fiber)
-            }
-          }
-          throw lastError instanceof Error ? lastError : new Error(String(lastError))
-        }
-
-        if (fresh) {
-          try {
-            const childId = await spawnOracleChild(attemptModels[0]!, carryId ? chainId : undefined)
-            fiber.childId = childId
-            applyPersonaModel(ctx, childId, 'oracle')
-            fibers.set(key, fiber)
-            // Oracle D2: consume the rollover entry only after the spawn
-            // registered — a failed spawn retries from the same entry.
-            if (rolloverScorecard !== null && rolloverScorecards.has(key)) {
-              rolloverScorecards.delete(key)
-            }
-          } catch (err) {
-            fibers.delete(key)
-            throw err
-          }
-        } else {
-          await queueHostSubagentPrompt(
-            ctx.subagents,
-            parent,
-            fiber.childId!,
-            prompt,
-            { kind: 'user' },
-            bg?.signal ?? exec.signal,
-          )
-        }
-
-        if (bg !== null) {
-          handedOff = true
-          const childId = fiber.childId!
-          void (async () => {
-            try {
-              let t: string
-              try {
-                t = await waitWithChainAdvance(childId, fresh)
-              } catch (error) {
-                // A background wait that timed out keeps the still-running
-                // child instead of dropping the delivery: wait without a
-                // deadline for its verdict (no silent orphans).
-                if (!(error instanceof OracleTimeoutError)) throw error
-                t = await waitForChildTurn(ctx, error.childId, new AbortController().signal, Number.POSITIVE_INFINITY, 1_000)
-              }
-              const v = parseVerdict(t)
-              fiber.consultations += 1
-              fiber.scorecard.verdicts.push({ approved: v.approved, concerns: v.concerns })
-              if (Array.isArray(args.files)) fiber.scorecard.files.push(...args.files)
-              if (fiber.consultations >= 10) {
-                // Scorecard rollover (doc 35 2.4): dispose at 10 consultations —
-                // the condensed scorecard seeds the next fiber.
-                rolloverScorecards.set(key, fiber.scorecard)
-                fibers.delete(key)
-              }
-              const agent = ctx.get('agents')?.get(parent.session.id)
-              if (agent !== undefined) {
-                agent.inject(createUserMessage({
-                  content: [{
-                    type: 'text',
-                    text: `📬 Oracle (background) finished — ${v.approved ? 'APPROVED' : 'CONCERNS'} (${v.concerns.length} concern(s)).\n\n${t}`,
-                  }],
-                  source: { kind: 'enpoi-oracle' },
-                }))
-              }
-            } catch { /* aborted or failed: no delivery */ } finally {
-              stopWatch?.()
-              busy.delete(key)
-            }
-          })()
-          return {
-            approved: false,
-            concerns: [],
-            unverified: [],
-            blockers: [],
-            summary: `Background consultation started (${childId}) — the verdict will be delivered as a message when the oracle finishes.`,
-            background: true,
-          }
-        }
-
-        let verdictText = ''
-        try {
-          verdictText = await waitWithChainAdvance(fiber.childId!, fresh)
-        } catch (err: unknown) {
-          if (err instanceof OracleTimeoutError) {
-            // No silent orphan: keep the child alive, keep the fiber pointing
-            // at it, and deliver its verdict into the parent when it finishes.
-            // The single-flight mutex stays held until the detached wait ends.
-            handedOff = true
-            void deliverDetachedOracleVerdict({ ctx, parent, childId: err.childId, fiber, key, busy })
-            return {
-              approved: false,
-              concerns: [`Oracle consultation timed out after ${err.timeoutMs}ms; the oracle child is still running.`],
-              unverified: [],
-              blockers: [`ORACLE_TIMEOUT_DETACHED: oracle child ${err.childId} was NOT cancelled — its verdict will be delivered as a message when it finishes.`],
-              summary: `Oracle consultation timed out after ${err.timeoutMs}ms. The oracle child ${err.childId} was NOT cancelled and is still working; its verdict will be delivered as a message when it finishes.`,
-              rejected: true,
-            }
-          }
-          const errMsg = err instanceof Error ? err.message : String(err)
-          fibers.delete(key)
-          return {
-            approved: false,
-            concerns: [`Oracle consultation failed: ${errMsg}`],
-            unverified: [],
-            blockers: [`ORACLE_MODEL_ERROR: ${errMsg}`],
-            summary: `Oracle consultation failed: ${errMsg}`,
-            rejected: true,
-          }
-        }
-        const verdict = parseVerdict(verdictText)
-
-        fiber.consultations += 1
-        fiber.scorecard.verdicts.push({ approved: verdict.approved, concerns: verdict.concerns })
-        if (Array.isArray(args.files)) fiber.scorecard.files.push(...args.files)
-
-        // Scorecard rollover (doc 35 2.4): dispose at 10 consultations —
-        // the condensed scorecard seeds the next fiber.
-        if (fiber.consultations >= 10) {
-          rolloverScorecards.set(key, fiber.scorecard)
-          fibers.delete(key)
-        }
-
-        return {
-          approved: verdict.approved,
-          concerns: verdict.concerns,
-          unverified: verdict.unverified,
-          blockers: verdict.blockers,
-          summary: verdictText,
-        }
-      } finally {
-        if (!handedOff) {
-          stopWatch?.()
-          busy.delete(key)
-        }
-      }
+      const parentId = parent.session.id
+      // Queue time counts against the consultation budget (spec L5.6).
+      const deadline = Date.now() + resolveOracleTimeoutMs(ctx)
+      return queue.run(parentId, () => consult(parent, args, exec.signal, deadline, pollMs, children, ctx))
     },
   })
 
@@ -977,7 +696,7 @@ function registerOracleTools(ctx: Context, root: Context): void {
   // A free-form research primitive. Any agent that can see it may call it any
   // number of times (or never); it spawns one research child — codebase
   // explorer or web librarian, chosen by the target — waits for a cited fact
-  // sheet, returns it as the tool result, and disposes the child. The caller
+  // sheet, returns it as the tool result, and releases the child. The caller
   // keeps its own context pure: one distilled answer instead of raw files.
   ctx.tools.register({
     name: 'request_evidence',
@@ -1024,6 +743,7 @@ function registerOracleTools(ctx: Context, root: Context): void {
       const retrievedBy = isExternalEvidenceTarget(target) ? 'librarian' : 'explorer'
       const personaModel = resolvePersonaModel(ctx, retrievedBy)
       let childId: SessionId | null = null
+      let messageId: MessageId | null = null
       try {
         const started = await ctx.subagents.startContinuable({
           provider: 'spawn',
@@ -1041,27 +761,246 @@ function registerOracleTools(ctx: Context, root: Context): void {
           },
           signal: exec.signal,
         })
-        if (!started.childId || started.childId === 'null' || !String(started.childId).includes('-')) {
-          throw new Error(`evidence research child spawn returned an invalid id: ${String(started.childId)}`)
-        }
-        childId = started.childId as SessionId
-        const text = await waitForChildTurn(ctx, childId, exec.signal, 240_000)
-        const sheet = parseEvidenceSheet(text)
+        childId = started.childId
+        messageId = started.messageId
+        const turn = await waitForChildMessageTurn(ctx, childId, messageId, {
+          signal: exec.signal,
+          deadline: Number.POSITIVE_INFINITY,
+          pollMs,
+        })
+        const sheet = parseEvidenceSheet(turn.text)
         if (sheet === null) {
-          return { found: false, citation: 'n/a', facts: `the research child returned no parseable fact sheet; raw tail: ${text.slice(-300)}`, confidence: 'low' }
+          return { found: false, citation: 'n/a', facts: `the research child returned no parseable fact sheet; raw tail: ${turn.text.slice(-300)}`, confidence: 'low' }
         }
         const notFindable = /NOT FINDABLE/i.test(sheet.facts)
         return { found: !notFindable, citation: sheet.citation, facts: sheet.facts, confidence: sheet.confidence }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err)
-        return { found: false, citation: 'n/a', facts: `evidence retrieval failed: ${msg}`, confidence: 'low' }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        return { found: false, citation: 'n/a', facts: `evidence retrieval failed: ${message}`, confidence: 'low' }
       } finally {
         if (childId !== null) {
-          try { await ctx.get('sessions')?.delete(childId) } catch { /* best-effort disposal */ }
+          try {
+            await ctx.subagents.drainContinuableChildren(requester, [childId])
+          } catch {
+            // Release is best-effort; parent teardown owns anything left resident.
+          }
         }
       }
     },
   })
+}
+
+/** One consultation pass, already ordered behind the parent's FIFO lane. */
+async function consult(
+  parent: Agent,
+  args: { request: string; files?: string[]; background?: boolean; fresh?: boolean },
+  signal: AbortSignal,
+  deadline: number,
+  pollMs: number,
+  children: Map<string, OracleChildState>,
+  ctx: Context,
+): Promise<{
+  approved: boolean
+  concerns: string[]
+  unverified: string[]
+  blockers: string[]
+  summary: string
+  background?: boolean
+  rejected?: boolean
+}> {
+  const parentId = parent.session.id
+  const events = parent.session.snapshotEvents()
+  const lastHumanSeq = lastHumanUserMessageSeq(events)
+  const operatorQuery = latestOperatorQuery(events)
+
+  const { chainId, carryId, attempts } = resolveOracleChainAttempts(ctx, 'oracle')
+  const active = attempts[0] ?? {}
+  const route: OracleRoute = {
+    ...(active.provider !== undefined ? { provider: active.provider } : {}),
+    ...(active.model !== undefined ? { model: active.model } : {}),
+    ...(active.reasoningEffort !== undefined ? { reasoningEffort: ReasoningEffortId(active.reasoningEffort) } : {}),
+    ...(carryId && chainId !== undefined ? { chainId } : {}),
+  }
+  const identity = routeIdentity(route)
+
+  let state = children.get(parentId)
+  const routeChanged = state !== undefined && state.route !== identity
+  if (args.fresh === true) {
+    children.delete(parentId)
+    state = undefined
+  } else if (routeChanged) {
+    // A different resolved route owns a different child; the old one is left
+    // to its parent-scoped teardown rather than deleted out from under it.
+    children.delete(parentId)
+    state = undefined
+  } else if (state === undefined) {
+    const rediscovered = await discoverOracleChild(ctx, parentId)
+    if (rediscovered !== undefined) {
+      state = { childId: rediscovered, route: identity, lastHumanSeq: 0, wbHash: null, briefHash: null }
+    }
+  }
+
+  const doc = readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined)
+  const whiteboard = extractWhiteboardSummary(doc, parent.session?.id, parent.session?.header?.cwd)
+  const whiteboardHash = hashText(whiteboard)
+  const spawn = state === undefined
+  const brief = spawn
+    // Demand-driven cognition: materialize the prose brief for the first
+    // consultation (Oracle amendment 3). Bounded: a hanging keeper route
+    // degrades to the deterministic brief.
+    ? await ensureBriefWithin(parent, signal).then(() => readLivingBrief(ctx, parent.session))
+    : readLivingBrief(ctx, parent.session)
+  const briefHash = hashText(brief)
+  const files = Array.isArray(args.files) ? args.files : undefined
+
+  const newQuery = state !== undefined && lastHumanSeq !== state.lastHumanSeq
+  const whiteboardChanged = state !== undefined && whiteboardHash !== state.wbHash
+  const briefChanged = state !== undefined && newQuery && brief !== null && briefHash !== state.briefHash
+
+  let content: ContentBlock[]
+  if (spawn || state === undefined) {
+    content = [{
+      type: 'text',
+      text: buildInitialPackage({ request: args.request, ...(files !== undefined ? { files } : {}), whiteboard, brief }),
+    }]
+  } else {
+    content = [{
+      type: 'text',
+      text: buildDelta({
+        request: args.request,
+        ...(files !== undefined ? { files } : {}),
+        operatorQuery: newQuery ? operatorQuery : '',
+        whiteboard: whiteboardChanged ? whiteboard : null,
+        brief: briefChanged ? brief : null,
+      }),
+    }]
+  }
+
+  let childId: SessionId
+  let messageId: MessageId
+  if (spawn || state === undefined) {
+    const agentOptions = active.provider !== undefined
+      ? {
+          provider: active.provider,
+          ...(active.model !== undefined ? { model: active.model } : {}),
+          ...(active.reasoningEffort !== undefined ? { reasoningEffort: ReasoningEffortId(active.reasoningEffort) } : {}),
+          ...(carryId && chainId !== undefined ? { chain: chainId } : {}),
+        }
+      : undefined
+    const started = await ctx.subagents.startContinuable({
+      provider: 'spawn',
+      label: ORACLE_LABEL,
+      quiet: true,
+      request: {
+        prompt: content,
+        parent,
+        persona: ORACLE_PERSONA,
+        quiet: true,
+        toolFilter: { deny: ORACLE_TOOL_FILTER.deny },
+        ...(agentOptions !== undefined ? { agentOptions } : {}),
+      },
+      signal,
+    })
+    childId = started.childId
+    messageId = started.messageId
+    children.set(parentId, { childId, route: identity, lastHumanSeq, wbHash: whiteboardHash, briefHash })
+  } else {
+    const current = state
+    childId = current.childId
+    messageId = await queueHostSubagentPrompt(ctx.subagents, parent, childId, content, { kind: 'user' }, signal)
+    children.set(parentId, {
+      ...current,
+      lastHumanSeq,
+      wbHash: whiteboardChanged ? whiteboardHash : current.wbHash,
+      briefHash: briefChanged ? briefHash : current.briefHash,
+    })
+  }
+
+  if (args.background === true) {
+    void (async () => {
+      try {
+        const turn = await waitForChildMessageTurn(ctx, childId, messageId, {
+          signal: new AbortController().signal,
+          deadline: Number.POSITIVE_INFINITY,
+          pollMs,
+        })
+        deliverOracleVerdict(ctx, parentId, lastHumanSeq, turn)
+      } catch {
+        // The child was disposed or its turn never settled: nothing to deliver.
+      }
+    })()
+    return {
+      approved: false,
+      concerns: [],
+      unverified: [],
+      blockers: [],
+      summary: `Background consultation started (${childId}) — the verdict will be delivered as a message when the oracle finishes.`,
+      background: true,
+    }
+  }
+
+  try {
+    const turn = await waitForChildMessageTurn(ctx, childId, messageId, { signal, deadline, pollMs })
+    if (turn.stopReason === 'error' || turn.stopReason === 'aborted' || turn.stopReason === 'refusal') {
+      const detail = turn.error ?? `turn ended ${turn.stopReason}`
+      return {
+        approved: false,
+        concerns: [`Oracle consultation failed: ${detail}`],
+        unverified: [],
+        blockers: [`ORACLE_MODEL_ERROR: ${detail}`],
+        summary: `Oracle consultation failed: ${detail}`,
+        rejected: true,
+      }
+    }
+    const verdict = parseVerdict(turn.text)
+    return {
+      approved: verdict.approved,
+      concerns: verdict.concerns,
+      unverified: verdict.unverified,
+      blockers: verdict.blockers,
+      summary: turn.text,
+    }
+  } catch (error) {
+    if (error instanceof ChildTurnTimeoutError) {
+      // No silent orphan: the child keeps running and its verdict is delivered
+      // as a message that wakes the parent. The FIFO lane is released here.
+      void (async () => {
+        try {
+          const turn = await waitForChildMessageTurn(ctx, error.childId, error.messageId, {
+            signal: new AbortController().signal,
+            deadline: Number.POSITIVE_INFINITY,
+            pollMs,
+          })
+          deliverOracleVerdict(ctx, parentId, lastHumanSeq, turn)
+        } catch {
+          // Nothing left to deliver.
+        }
+      })()
+      return {
+        approved: false,
+        concerns: [],
+        unverified: [],
+        blockers: ['ORACLE_PENDING'],
+        summary: `ORACLE_PENDING: the Oracle is still working on ${error.childId}; the verdict will be delivered as a message.`,
+        rejected: true,
+      }
+    }
+    if (signal.aborted) {
+      // The caller cancelled: stop the child's live turn, release the lane,
+      // and deliver nothing.
+      ctx.subagents.interrupt(childId, { kind: 'ancestor', agent: parent })
+      throw error
+    }
+    const message = error instanceof Error ? error.message : String(error)
+    return {
+      approved: false,
+      concerns: [`Oracle consultation failed: ${message}`],
+      unverified: [],
+      blockers: [`ORACLE_MODEL_ERROR: ${message}`],
+      summary: `Oracle consultation failed: ${message}`,
+      rejected: true,
+    }
+  }
 }
 
 /** Anti-leak fence for evidence research children (never relay to the parent inbox). */
