@@ -6,10 +6,8 @@ import { applyToolGroupsProjection, toolGroupsProjection } from '../src/projecti
 import { apply, TOOL_GROUPS_TOOL } from '../src/index.js'
 
 const PEER = ['peer_status', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']
-const DEBUG = [
-  'diagnostics_report', 'session_debug', 'session_event_read', 'session_event_search',
-  'session_event_trace', 'session_search', 'session_trace',
-]
+const DEBUG = ['diagnostics_report', 'session_debug', 'session_event_trace', 'session_trace']
+const RECALL = ['session_event_read', 'session_event_search', 'session_search']
 const CORE = ['read', 'write', 'edit', 'bash', 'glob', 'grep', 'subagent']
 const CREATOR = ['cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager']
 /** A live-registry roster covering every shipped member plus two ungrouped tools. */
@@ -170,6 +168,12 @@ describe('tool-group catalog', () => {
     const byId = new Map(SHIPPED_TOOL_GROUPS.map(group => [group.id, group]))
     expect(byId.get('peer')?.members).toEqual(PEER)
     expect(byId.get('debug')?.members).toEqual(DEBUG)
+    // C5: recall is static and always on for every seat; the recall tools left
+    // the debug family so an operator disable of debug can never remove them.
+    expect(byId.get('recall')?.mode).toBe('static')
+    expect(byId.get('recall')?.members).toEqual(RECALL)
+    expect(byId.get('recall')?.seats).toBeUndefined()
+    expect(byId.get('recall')?.enabled).toBe(true)
     expect(byId.get('creator')?.members).toEqual(CREATOR)
     // No shipped group pre-attaches: every on-demand family starts detached.
     for (const id of ['peer', 'debug', 'creator']) {
@@ -178,6 +182,22 @@ describe('tool-group catalog', () => {
     expect(byId.get('creator')?.seats).toEqual(['creator'])
     // Core is the everyday surface; every shipped member is registered nowhere else.
     expect(byId.get('core')?.members.length).toBe(13)
+  })
+
+  it('never denies the recall family for any seat: earlier messages stay reachable', () => {
+    const catalog = catalogWith()
+    for (const seat of ['orchestrator', 'sysadmin', 'creator', 'broker', 'fixer', 'explorer', 'librarian', 'designer', 'oracle', undefined]) {
+      const group = catalog.byId.get('recall')!
+      expect(groupVisibleTo(group, seat), `recall visible to ${String(seat)}`).toBe(true)
+      const denied = denyNames(catalog, new Set())
+      for (const name of RECALL) expect(denied, `${name} denied for ${String(seat)}`).not.toContain(name)
+      // A seat may never pre-attach or detach a static family; it is simply on.
+      expect(preAttachFor(catalog, seat ?? 'default')).not.toContain('recall')
+    }
+    // Removing recall requires an explicit operator disable, never a seat or an
+    // attach state. (The operator is the only authority over the catalog.)
+    const disabled = catalogWith({ toolGroups: { groups: { recall: { enabled: false } } } })
+    expect(denyNames(disabled, new Set())).toEqual(expect.arrayContaining(RECALL))
   })
 
   it('denies exactly the on-demand members that are not attached and never a static member', () => {
@@ -288,7 +308,7 @@ describe('tool-group catalog', () => {
     expect(text).toContain('(5 tools, attached)')
     expect(text).toContain('- debug —')
     expect(text).toContain('session log, event trace, and diagnostics inspection')
-    expect(text).toContain('(7 tools, not attached)')
+    expect(text).toContain('(4 tools, not attached)')
     // The creator group is seat-restricted: orchestrator reads a seat-only
     // notice, never an attach state.
     expect(text).toContain('- creator — Creator-seat-only family (3 tools)')
@@ -307,7 +327,7 @@ describe('tool-group catalog', () => {
   it('lists every on-demand family in the fresh menu: visible ones with state, hidden ones as a notice', () => {
     const text = renderMenuText(catalogWith(), new Set(), [], 'orchestrator')
     expect(text).toContain('- peer — cross-device peer sessions: status, ask, answer, cancel (5 tools, not attached)')
-    expect(text).toContain('- debug — session log, event trace, and diagnostics inspection (7 tools, not attached)')
+    expect(text).toContain('- debug — session log, event trace, and diagnostics inspection (4 tools, not attached)')
     expect(text).toContain('- creator — Creator-seat-only family (3 tools)')
     // A disabled family is offered nowhere, notice included.
     const disabled = renderMenuText(

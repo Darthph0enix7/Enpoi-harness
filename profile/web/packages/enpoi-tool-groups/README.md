@@ -6,7 +6,9 @@ The plugin owns **presentation only**. The tool registry stays host-plane; each 
 is shaped by one `tools.restrict({ deny })` installed through a plugin-owned scope tagged with
 that agent, so the filter covers one session. The base surface keeps every static family; the
 on-demand families (`peer`, `debug`, `creator`) are listed in the prompt as a menu (id + purpose +
-attach state) and attach through the `tool_groups` meta-tool. No family pre-attaches: a fresh
+attach state) and attach through the `tool_groups` meta-tool. The `recall` family
+(`session_event_search`, `session_event_read`, `session_search`) is static and enabled for every
+seat, so exact earlier messages stay reachable after compaction without an attach step. No family pre-attaches: a fresh
 session starts with all three detached, and only an operator `seats.<seat>.preAttach` override
 starts a seat attached. The `creator` group belongs to the creator seat alone, so orchestrator and
 sysadmin never see its three harness-authoring tools; their menu names the family in a one-line
@@ -16,7 +18,7 @@ pre-execute backstop).
 - **Model effect**: the on-demand schemas leave the tool block until attached; the menu adds one
   line per on-demand group. Attach/detach is durable (`tool-groups/change`) and applied at the
   next turn boundary, so a request's tool block never changes mid-flight.
-- **Token effect**: the base block drops the 5 peer + 7 debug + 3 creator schemas; the menu costs
+- **Token effect**: the base block drops the 5 peer + 4 debug + 3 creator schemas; the menu costs
   ~120 tokens.
 - **KV-cache effect**: attach/detach costs exactly one prefix rebuild at the next turn; nothing
   else in the prefix changes. The creator seat's menu shows the creator family's attach state

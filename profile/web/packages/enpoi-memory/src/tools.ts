@@ -1,14 +1,45 @@
 /**
  * enpoi-memory — agent tools: memory_save / memory_search / memory_rescind / memory_confirm.
+ *
+ * Memory is tool-driven (standing rule #615): nothing is injected; the model
+ * calls `memory_search` when it needs earlier decisions. Search scopes
+ * compaction-derived rows to the caller's workspace (C3/C4).
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { DatabaseSync } from 'node:sqlite'
+import { resolveMemoryConfig, type MemoryConfig } from './config'
 import { CATEGORIES } from './db'
-import { makePipeline, type Pipeline } from './pipeline'
+import type { Pipeline } from './pipeline'
 import { getMemoryParams, searchMemory } from './retriever'
 
-export function registerMemoryTools(ctx: Context, db: DatabaseSync, pipeline: Pipeline): void {
+/** `YYYY-MM-DD` in UTC from one epoch-millisecond stamp. */
+function savedAt(claim: { committed_at: number | null; created_at: number }): string {
+  const stamp = claim.committed_at ?? claim.created_at
+  const date = new Date(stamp)
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10)
+}
+
+/** Loose JSON value shape accepted by a tool render callback. */
+type RenderValue = Record<string, unknown>
+
+/** One `memory_search` fact row (C4). */
+interface MemoryFactRow {
+  readonly id: string
+  readonly category: string
+  readonly origin: string
+  readonly savedAt: string
+  readonly state: string
+  readonly trust: string
+  readonly fact: string
+}
+
+export function registerMemoryTools(
+  ctx: Context,
+  db: DatabaseSync,
+  pipeline: Pipeline,
+  config: MemoryConfig = resolveMemoryConfig(undefined),
+): void {
   ctx.tools.register({
     name: 'memory_save',
     description: [
@@ -32,13 +63,23 @@ export function registerMemoryTools(ctx: Context, db: DatabaseSync, pipeline: Pi
         properties: { saved: { type: 'boolean' }, id: { type: 'string' }, state: { type: 'string' }, note: { type: 'string' } },
         required: ['saved'],
       },
-      render: (_a, v) => [{ type: 'text', text: v.saved ? `Memory saved: ${String(v.id)} (${String(v.state)})` : `Memory NOT saved — ${String(v.note ?? '')}` }],
+      render: (_a, raw) => {
+        const v = raw as { saved?: boolean; id?: string; state?: string; note?: string }
+        return [{ type: 'text', text: v.saved ? `Memory saved: ${String(v.id)} (${String(v.state)})` : `Memory NOT saved — ${String(v.note ?? '')}` }]
+      },
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args: Record<string, unknown>, exec?: ToolRunContext) {
+      // Provenance is audit-only for operator saves: it never scopes retrieval.
+      const session = exec?.agent?.session
+      const provenance = JSON.stringify({
+        source: 'memory_save',
+        sessionId: session?.id ?? '',
+        cwd: session?.header.cwd ?? '',
+      })
       const inserted = await pipeline.intake(
         [{ fact: String(args.fact ?? ''), category: String(args.category ?? 'PROJECT'), tags: String(args.tags ?? '') }],
-        { origin: 'orchestrator', trust: 'operator' },
+        { origin: 'orchestrator', trust: 'operator', provenance },
       )
       if (inserted.length === 0) return { saved: false, note: 'Duplicate or invalid fact (already known / empty / >400 chars)' }
       const c = inserted[0]!
@@ -61,21 +102,54 @@ export function registerMemoryTools(ctx: Context, db: DatabaseSync, pipeline: Pi
       schema: {
         type: 'object', additionalProperties: false,
         properties: {
-          facts: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, category: { type: 'string' }, state: { type: 'string' }, trust: { type: 'string' }, fact: { type: 'string' } }, required: ['id', 'fact'] } },
+          facts: {
+            type: 'array',
+            items: {
+              type: 'object', additionalProperties: false,
+              properties: {
+                id: { type: 'string' },
+                category: { type: 'string' },
+                origin: { type: 'string' },
+                savedAt: { type: 'string' },
+                state: { type: 'string' },
+                trust: { type: 'string' },
+                fact: { type: 'string' },
+              },
+              required: ['id', 'fact'],
+            },
+          },
           note: { type: 'string' },
         },
         required: ['facts'],
       },
-      render: (_a, v) => [{ type: 'text', text: (Array.isArray(v.facts) ? v.facts.map((f: { id: string; category: string; fact: string }) => `• ${f.id} ${f.category} — ${f.fact}`) : []).join('\n') || 'No matching memory.' }],
+      // C4: `• <id> <category> [<origin> <savedAt>] — <fact>`.
+      render: (_a, raw) => {
+        const v = raw as { facts?: MemoryFactRow[] }
+        return [{
+          type: 'text',
+          text: (Array.isArray(v.facts) ? v.facts.map(f => `• ${f.id} ${f.category} [${f.origin} ${f.savedAt}] — ${f.fact}`) : []).join('\n')
+            || 'No matching memory.',
+        }]
+      },
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args: Record<string, unknown>, exec?: ToolRunContext) {
       // Doc 38: retriever top-K resolved fresh per call (hot-swap).
       const params = getMemoryParams(ctx)
-      const hits = searchMemory(db, String(args.query ?? ''), Math.min(Number(args.limit ?? params.retrieverTopK) || params.retrieverTopK, params.retrieverTopK))
+      // L2: compaction-derived facts are workspace-scoped to the caller's cwd.
+      const scope = { cwd: exec?.agent?.session.header.cwd, scopeCompaction: config.scopeCompactionFactsToWorkspace }
+      const hits = searchMemory(db, String(args.query ?? ''), Math.min(Number(args.limit ?? params.retrieverTopK) || params.retrieverTopK, params.retrieverTopK), scope)
       if (hits.length === 0) return { facts: [], note: 'No matching memory.' }
       return {
-        facts: hits.map(h => ({ id: h.id, category: h.category, state: h.state, trust: h.source_trust, fact: h.fact })),
+        facts: hits.map(h => ({
+          id: h.id,
+          category: h.category,
+          origin: h.origin,
+          savedAt: savedAt(h),
+          state: h.state,
+          trust: h.source_trust,
+          fact: h.fact,
+        })),
         note: `${hits.length} fact(s)`,
       }
     },
@@ -98,10 +172,13 @@ export function registerMemoryTools(ctx: Context, db: DatabaseSync, pipeline: Pi
         properties: { rescinded: { type: 'boolean' }, note: { type: 'string' } },
         required: ['rescinded'],
       },
-      render: (_a, v) => [{ type: 'text', text: v.rescinded ? 'Memory fact rescinded (tombstoned).' : String(v.note ?? 'Not rescinded.') }],
+      render: (_a, raw) => {
+        const v = raw as { rescinded?: boolean; note?: string }
+        return [{ type: 'text', text: v.rescinded ? 'Memory fact rescinded (tombstoned).' : String(v.note ?? 'Not rescinded.') }]
+      },
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args: Record<string, unknown>) {
       const ok = await pipeline.rescind(String(args.id ?? ''), String(args.reason ?? ''))
       return ok ? { rescinded: true } : { rescinded: false, note: `No active fact with id ${String(args.id)}` }
     },
@@ -123,10 +200,13 @@ export function registerMemoryTools(ctx: Context, db: DatabaseSync, pipeline: Pi
         properties: { confirmed: { type: 'boolean' }, id: { type: 'string' }, state: { type: 'string' }, note: { type: 'string' } },
         required: ['confirmed'],
       },
-      render: (_a, v) => [{ type: 'text', text: v.confirmed ? `Memory confirmed: ${String(v.id)} → ${String(v.state)}` : String(v.note ?? 'Not confirmed.') }],
+      render: (_a, raw) => {
+        const v = raw as { confirmed?: boolean; id?: string; state?: string; note?: string }
+        return [{ type: 'text', text: v.confirmed ? `Memory confirmed: ${String(v.id)} → ${String(v.state)}` : String(v.note ?? 'Not confirmed.') }]
+      },
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args: Record<string, unknown>) {
       const id = String(args.id ?? '')
       const row = await pipeline.confirm(id)
       if (row !== null) return { confirmed: true, id: row.id, state: row.state }

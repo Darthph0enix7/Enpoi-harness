@@ -15,10 +15,8 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import { apply } from '../src/index.js'
 
 const PEER = ['peer_status', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']
-const DEBUG = [
-  'diagnostics_report', 'session_debug', 'session_event_read', 'session_event_search',
-  'session_event_trace', 'session_search', 'session_trace',
-]
+const DEBUG = ['diagnostics_report', 'session_debug', 'session_event_trace', 'session_trace']
+const RECALL = ['session_event_read', 'session_event_search', 'session_search']
 
 function fixtureTool(name: string) {
   return {
@@ -34,7 +32,7 @@ async function setup() {
   const ctx = new Context()
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
-  for (const name of [...PEER, ...DEBUG, 'read', 'bash', 'synthetic_ungrouped']) ctx.tools.register(fixtureTool(name) as never)
+  for (const name of [...PEER, ...DEBUG, ...RECALL, 'read', 'bash', 'synthetic_ungrouped']) ctx.tools.register(fixtureTool(name) as never)
   return ctx
 }
 
@@ -92,6 +90,8 @@ describe('real composition: scope filter + plugin', () => {
       const base = ctx.tools.schemas(agent).map(tool => tool.name)
       expect([...PEER, ...DEBUG].every(name => !base.includes(name))).toBe(true)
       expect(['read', 'bash'].every(name => base.includes(name))).toBe(true)
+      // C5: the recall family is static — never hidden, attached or not.
+      expect(RECALL.every(name => base.includes(name))).toBe(true)
       // The ungrouped tool is not a group member: it must stay present.
       expect(base).toContain('synthetic_ungrouped')
 
@@ -115,6 +115,7 @@ describe('real composition: scope filter + plugin', () => {
       expect(PEER.every(name => after.includes(name))).toBe(true)
       expect(DEBUG.every(name => !after.includes(name))).toBe(true)
       expect(after).toContain('synthetic_ungrouped')
+      expect(RECALL.every(name => after.includes(name))).toBe(true)
 
       const settled = await ctx.tools.execute({
         signal: new AbortController().signal,

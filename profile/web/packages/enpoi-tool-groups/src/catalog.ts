@@ -168,6 +168,20 @@ export const SHIPPED_TOOL_GROUPS: readonly ToolGroupDefinition[] = Object.freeze
     members: ['memory_confirm', 'memory_rescind', 'memory_save', 'memory_search'],
   },
   {
+    // Recall stays static and enabled for EVERY seat: the harness promoted
+    // session_event_search/read and session_search into an always-available
+    // family, so a truncated context is never a dead end. The compaction
+    // instruction and the persona both rely on these tools being callable
+    // without an attach step.
+    id: 'recall',
+    label: 'Recall',
+    purpose: 'search and read earlier messages of this and other sessions',
+    mode: 'static',
+    preAttach: [],
+    enabled: true,
+    members: ['session_event_read', 'session_event_search', 'session_search'],
+  },
+  {
     id: 'peer',
     label: 'Peer interconnect',
     purpose: 'cross-device peer sessions: status, ask, answer, cancel',
@@ -189,8 +203,7 @@ export const SHIPPED_TOOL_GROUPS: readonly ToolGroupDefinition[] = Object.freeze
     preAttach: [],
     enabled: true,
     members: [
-      'diagnostics_report', 'session_debug', 'session_event_read', 'session_event_search',
-      'session_event_trace', 'session_search', 'session_trace',
+      'diagnostics_report', 'session_debug', 'session_event_trace', 'session_trace',
     ],
   },
   {

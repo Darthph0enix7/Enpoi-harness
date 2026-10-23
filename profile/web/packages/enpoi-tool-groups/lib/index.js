@@ -37,6 +37,8 @@ var zh = {
   "group.whiteboard.purpose": "\u56FA\u5B9A\u3001\u8BFB\u53D6\u5E76\u9057\u5FD8\u6301\u4E45\u767D\u677F\u7B14\u8BB0",
   "group.memory.label": "\u8BB0\u5FC6",
   "group.memory.purpose": "\u4FDD\u5B58\u3001\u641C\u7D22\u3001\u786E\u8BA4\u5E76\u64A4\u56DE\u6301\u4E45\u9879\u76EE\u4E8B\u5B9E",
+  "group.recall.label": "\u56DE\u6EAF",
+  "group.recall.purpose": "\u641C\u7D22\u5E76\u8BFB\u53D6\u672C\u4F1A\u8BDD\u53CA\u5176\u4ED6\u4F1A\u8BDD\u7684\u65E9\u671F\u6D88\u606F",
   "group.peer.label": "\u5BF9\u7B49\u4E92\u8054",
   "group.peer.purpose": "\u8DE8\u8BBE\u5907\u5BF9\u7B49\u4F1A\u8BDD\uFF1A\u72B6\u6001\u3001\u63D0\u95EE\u3001\u56DE\u7B54\u3001\u53D6\u6D88",
   "group.debug.label": "\u8C03\u8BD5\u4E0E\u53EF\u89C2\u6D4B\u6027",
@@ -63,6 +65,8 @@ var en = {
   "group.whiteboard.purpose": "pin, read, and forget durable board notes",
   "group.memory.label": "Memory",
   "group.memory.purpose": "save, search, confirm, and rescind durable project facts",
+  "group.recall.label": "Recall",
+  "group.recall.purpose": "search and read earlier messages of this and other sessions",
   "group.peer.label": "Peer interconnect",
   "group.peer.purpose": "cross-device peer sessions: status, ask, answer, cancel",
   "group.debug.label": "Debug & observability",
@@ -174,6 +178,20 @@ var SHIPPED_TOOL_GROUPS = Object.freeze([
     members: ["memory_confirm", "memory_rescind", "memory_save", "memory_search"]
   },
   {
+    // Recall stays static and enabled for EVERY seat: the harness promoted
+    // session_event_search/read and session_search into an always-available
+    // family, so a truncated context is never a dead end. The compaction
+    // instruction and the persona both rely on these tools being callable
+    // without an attach step.
+    id: "recall",
+    label: "Recall",
+    purpose: "search and read earlier messages of this and other sessions",
+    mode: "static",
+    preAttach: [],
+    enabled: true,
+    members: ["session_event_read", "session_event_search", "session_search"]
+  },
+  {
     id: "peer",
     label: "Peer interconnect",
     purpose: "cross-device peer sessions: status, ask, answer, cancel",
@@ -197,10 +215,7 @@ var SHIPPED_TOOL_GROUPS = Object.freeze([
     members: [
       "diagnostics_report",
       "session_debug",
-      "session_event_read",
-      "session_event_search",
       "session_event_trace",
-      "session_search",
       "session_trace"
     ]
   },

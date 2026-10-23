@@ -218,6 +218,17 @@ describe('fresh-home boot composition', () => {
     for (const seat of ['orchestrator', 'sysadmin', 'creator', 'broker', 'fixer', 'explorer', 'librarian', 'designer', 'oracle']) {
       expect(preAttachFor(catalog, seat), `seat ${seat} pre-attach`).toEqual([])
     }
+    // C5: the recall family is static and enabled on a fresh install, so exact
+    // earlier messages stay reachable for every seat without an attach step.
+    expect(catalog.byId.get('recall')).toMatchObject({
+      mode: 'static',
+      enabled: true,
+      members: ['session_event_read', 'session_event_search', 'session_search'],
+    })
+    // `debug` keeps the diagnostics surface; the recall tools no longer live there.
+    expect(catalog.byId.get('debug')?.members).toEqual([
+      'diagnostics_report', 'session_debug', 'session_event_trace', 'session_trace',
+    ])
   })
 
   it('pins the child catalogs to the narrower server surfaces', () => {

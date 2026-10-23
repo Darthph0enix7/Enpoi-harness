@@ -12,13 +12,20 @@ import * as path from 'node:path'
 
 export type State = 'tentative' | 'committed' | 'orphaned_cancelled' | 'rescinded'
 export type Trust = 'operator' | 'verified_execution' | 'untrusted_external'
-export type Origin = 'keeper' | 'worker' | 'orchestrator' | 'legacy' | string
+export type Origin = 'keeper' | 'compaction' | 'worker' | 'orchestrator' | 'legacy' | string
 
 export const CATEGORIES = ['RULES', 'ARCHITECTURE', 'CONSTRAINTS', 'CONFIG_VALUES', 'NAMING', 'PROJECT'] as const
 export type Category = (typeof CATEGORIES)[number]
 
 /** Keeper-produced claims may only take these categories (A3.4). */
 export const KEEPER_ALLOWED: ReadonlySet<string> = new Set(['ARCHITECTURE', 'CONFIG_VALUES', 'PROJECT'])
+
+/**
+ * Origins written without a human in the loop: they get the keeper category
+ * limit (A3.4) so an automated pipeline can never mint RULES/CONSTRAINTS/
+ * NAMING claims.
+ */
+export const AUTOMATED_ORIGINS: ReadonlySet<string> = new Set(['keeper', 'compaction'])
 
 export function memoryDbPath(): string {
   return process.env.DSH_MEMORY_DB ?? path.join(os.homedir(), '.dsh', 'memory.db')

@@ -7,7 +7,7 @@
  */
 import type { DatabaseSync } from 'node:sqlite'
 import { createHash } from 'node:crypto'
-import { CATEGORIES, KEEPER_ALLOWED, type Category, type ClaimRow, type Origin, type State, type Trust } from './db'
+import { AUTOMATED_ORIGINS, CATEGORIES, KEEPER_ALLOWED, type ClaimRow, type Origin, type State, type Trust } from './db'
 
 export interface ClaimInput {
   fact: string
@@ -74,8 +74,10 @@ export function makePipeline(db: DatabaseSync) {
           let category = String(c.category ?? 'PROJECT').toUpperCase()
           if (!(CATEGORIES as readonly string[]).includes(category)) category = 'PROJECT'
 
-          // A3.4 category boundaries: keeper never writes RULES/CONSTRAINTS/NAMING.
-          if (opts.origin === 'keeper' && !KEEPER_ALLOWED.has(category)) category = 'PROJECT'
+          // A3.4 category boundaries: automated producers (keeper, compaction)
+          // never write RULES/CONSTRAINTS/NAMING — only operator/memory_save
+          // claims carry that authority.
+          if (AUTOMATED_ORIGINS.has(opts.origin) && !KEEPER_ALLOWED.has(category)) category = 'PROJECT'
 
           const hash = claimHash(fact, category)
           const existing = db.prepare('SELECT * FROM claims WHERE id = ?').get(`claim-${hash}`) as ClaimRow | undefined
@@ -184,15 +186,15 @@ export function makePipeline(db: DatabaseSync) {
 
   function list(filter?: { category?: string; state?: State }): ClaimRow[] {
     if (filter?.category !== undefined && filter?.state !== undefined) {
-      return db.prepare(`SELECT * FROM claims WHERE category = ? AND state = ? ORDER BY created_at DESC`).all(filter.category, filter.state) as ClaimRow[]
+      return db.prepare(`SELECT * FROM claims WHERE category = ? AND state = ? ORDER BY created_at DESC, rowid DESC`).all(filter.category, filter.state) as unknown as ClaimRow[]
     }
     if (filter?.category !== undefined) {
-      return db.prepare(`SELECT * FROM claims WHERE category = ? ORDER BY created_at DESC`).all(filter.category) as ClaimRow[]
+      return db.prepare(`SELECT * FROM claims WHERE category = ? ORDER BY created_at DESC, rowid DESC`).all(filter.category) as unknown as ClaimRow[]
     }
     if (filter?.state !== undefined) {
-      return db.prepare(`SELECT * FROM claims WHERE state = ? ORDER BY created_at DESC`).all(filter.state) as ClaimRow[]
+      return db.prepare(`SELECT * FROM claims WHERE state = ? ORDER BY created_at DESC, rowid DESC`).all(filter.state) as unknown as ClaimRow[]
     }
-    return db.prepare(`SELECT * FROM claims ORDER BY created_at DESC LIMIT 200`).all() as ClaimRow[]
+    return db.prepare(`SELECT * FROM claims ORDER BY created_at DESC, rowid DESC LIMIT 200`).all() as unknown as ClaimRow[]
   }
 
   return { intake, graduate, confirm, rescind, reconcileBoot, list, get, stateOf }
