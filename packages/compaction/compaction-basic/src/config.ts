@@ -461,7 +461,7 @@ function resolveContextUx(config: BasicCompactionConfig): ResolvedContextUxConfi
   return {
     recallFooter: config.recallFooter ?? '',
     recallFooterTools: [...(config.recallFooterTools ?? [])],
-    pinLeadingUserMessages: config.pinLeadingUserMessages ?? 0,
+    pinLeadingUserMessages: config.pinLeadingUserMessages ?? 1,
     pinLeadingMaxTokens: config.pinLeadingMaxTokens ?? DEFAULT_PIN_LEADING_MAX_TOKENS,
     pinScope: config.pinScope ?? 'child',
   }

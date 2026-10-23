@@ -1780,7 +1780,7 @@ Source: [`packages/skill/tool-skill/src/index.ts`](../packages/skill/tool-skill/
 
 ### `session_event_read`
 
-Read one full unabridged event and optional neighboring raw-event summaries from an authorized session.
+Read one full unabridged event and optional neighboring raw-event summaries from an authorized session. Use it after a search hit to read verbatim what a compaction checkpoint only summarised.
 
 ```json
 {
@@ -1813,7 +1813,7 @@ Source: [`packages/session-query/tool-session-query/src/index.ts`](../packages/s
 
 ### `session_event_search`
 
-Search prior events in one authorized session; the current session excludes the step performing this call.
+Search prior events in one authorized session; the current session excludes the step performing this call. Use it to recover exact earlier wording, code, or tool output after older turns were compacted into a checkpoint — the complete transcript stays searchable.
 
 ```json
 {

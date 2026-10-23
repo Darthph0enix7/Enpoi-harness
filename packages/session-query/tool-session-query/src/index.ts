@@ -74,7 +74,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'session_event_search',
-    description: 'Search prior events in one authorized session; the current session excludes the step performing this call.',
+    description: 'Search prior events in one authorized session; the current session excludes the step performing this call. Use it to recover exact earlier wording, code, or tool output after older turns were compacted into a checkpoint — the complete transcript stays searchable.',
     parameters: toolInput.eventSearchParameters,
     output: TEXT_OUTPUT,
     timeoutMs: resolved.searchTimeoutMs,
@@ -107,7 +107,7 @@ export function apply(ctx: Context, config: Config): void {
 
   ctx.tools.register(defineTool({
     name: 'session_event_read',
-    description: 'Read one full unabridged event and optional neighboring raw-event summaries from an authorized session.',
+    description: 'Read one full unabridged event and optional neighboring raw-event summaries from an authorized session. Use it after a search hit to read verbatim what a compaction checkpoint only summarised.',
     parameters: {
       ...toolInput.targetSessionParameter,
       seq: { type: 'integer', required: true, description: 'Target event sequence number.' },

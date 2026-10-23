@@ -337,7 +337,7 @@ describe('compact configuration and defaults', () => {
       maxOverflowRetries: 1,
       recallFooter: '',
       recallFooterTools: [],
-      pinLeadingUserMessages: 0,
+      pinLeadingUserMessages: 1,
       pinLeadingMaxTokens: 4_000,
       pinScope: 'child',
       modelPolicies: [],
