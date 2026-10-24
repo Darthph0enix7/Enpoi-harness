@@ -16,7 +16,11 @@
  * - Exact context windows (e.g. 1M for GLM-5.2, 1M for MiniMax-M3, 1.05M for Luna).
  * - Exact max output token limits.
  * - Exact modalities (text, image, audio, video, pdf).
- * - Exact reasoning options & effort ladders.
+ * - Exact reasoning options & effort ladders: a ladder the endpoint's own
+ *   capability block advertises (with its image/pdf input support) is read by
+ *   the shared llm-pi-ai listing parser and wins over catalog inference, so a
+ *   refresh keeps what Add wrote; a `source: 'manual'` entry keeps the ladder
+ *   its operator declared.
  * - Tool-calling and price metadata (models.dev `tool_call` / `cost`) consumed
  *   by the dynamic catalogue rules (dsh-enpoi-catalog-rules predicates).
  * - Live hot-swap into runtime memory without restarting the server.
@@ -53,6 +57,10 @@ import type { Model, Api } from '@earendil-works/pi-ai'
 // explicitly so a discovered record is complete, but the one authoritative
 // value stays in the adapter's config module.
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from '@deepseek-ai/dsh-llm-pi-ai/src/config.ts'
+// A listing's capability block (effort ladder, image/pdf input) is read by the
+// one parser llm-pi-ai's own discovery uses, so a refresh can never answer
+// differently from the Add that created the route.
+import { listingCapabilities } from '@deepseek-ai/dsh-llm-pi-ai/src/listing.ts'
 import {
   claimCapabilityHints,
   loadCapabilityHints,
@@ -172,12 +180,21 @@ interface LiveModel {
   name?: string
   contextWindow?: number
   maxTokens?: number
-  /** Modalities the listing itself disclosed; `undefined` means it said nothing. */
+  /**
+   * Modalities the listing itself disclosed — its modality fields or the
+   * capability block's image/pdf support; `undefined` means it said nothing.
+   */
   input?: Array<LiveModality>
   /** Whether the listing advertised tool calling; `undefined` means undisclosed. */
   tools?: boolean
   /** Whether the listing advertised reasoning; `undefined` means undisclosed. */
   reasoning?: boolean
+  /**
+   * Selectable reasoning levels (picker id → wire value) the listing's
+   * capability block advertised. Absent means the endpoint said nothing, so
+   * catalog inference answers as before.
+   */
+  reasoningEfforts?: Readonly<Record<string, string>>
   /** The listing's own price fields, verbatim. */
   pricing?: Record<string, string>
   /** Whether the listing's directory marked the model free. */
@@ -701,6 +718,39 @@ function listingModalities(entry: Record<string, unknown>): LiveModality[] | und
 }
 
 /**
+ * Union the modalities an entry's own fields disclosed with the ones its
+ * capability block disclosed. Both are the same disclosure from one endpoint,
+ * so neither overrides the other; the vocabulary is deduplicated in order.
+ * @param listed - tokens read from the entry's modality fields, when present.
+ * @param capabilities - tokens the shared listing parser derived, when present.
+ * @returns the merged tokens, or `undefined` when neither disclosure exists.
+ */
+function mergeModalities(
+  listed: readonly LiveModality[] | undefined,
+  capabilities: readonly LiveModality[] | undefined,
+): LiveModality[] | undefined {
+  if (listed === undefined && capabilities === undefined) return undefined
+  const modalities: LiveModality[] = []
+  for (const modality of [...listed ?? [], ...capabilities ?? []]) {
+    if (!modalities.includes(modality)) modalities.push(modality)
+  }
+  return modalities.length === 0 ? undefined : modalities
+}
+
+/**
+ * A ladder normalizes to "the entry advertised levels" or "it advertised
+ * none": an absent or empty dict says nothing, and every non-empty ladder is
+ * carried verbatim.
+ * @param ladder - the advertised levels, when any.
+ * @returns the non-empty ladder, or `undefined` when nothing was advertised.
+ */
+function liveEfforts(
+  ladder: Readonly<Record<string, string>> | undefined,
+): Readonly<Record<string, string>> | undefined {
+  return ladder === undefined || Object.keys(ladder).length === 0 ? undefined : ladder
+}
+
+/**
  * The `supported_parameters` vocabulary OpenRouter-style gateways publish.
  * Absent means undisclosed; present means the endpoint enumerated what it
  * takes, so an omission is a disclosure of absence for the two flags read
@@ -761,16 +811,25 @@ export function normalizeListingEntry(entry: unknown): LiveModel | undefined {
   )
   const supported = listingSupported(row)
   const isFree = typeof row.isFree === 'boolean' ? row.isFree : undefined
+  // The capability block — the advertised effort ladder and the image/pdf
+  // input support — is read by the shared listing parser, the same reader the
+  // Add flow and llm-pi-ai discovery use, so a refresh cannot drop a claim
+  // those paths wrote. Capacities keep this probe's own field order above:
+  // the sync reads more spellings than that parser does.
+  const capabilities = listingCapabilities(row)
+  const modalities = mergeModalities(listingModalities(row), capabilities.inputModalities)
+  const efforts = liveEfforts(capabilities.reasoningEfforts)
   return {
     id,
     ...displayName === undefined || displayName.length > 120 ? {} : { name: displayName },
     ...contextWindow === undefined ? {} : { contextWindow },
     ...maxTokens === undefined ? {} : { maxTokens },
-    ...listingModalities(row) === undefined ? {} : { input: listingModalities(row) },
+    ...modalities === undefined ? {} : { input: modalities },
     ...supported.tools === undefined ? {} : { tools: supported.tools },
     ...supported.reasoning === undefined ? {} : { reasoning: supported.reasoning },
     ...listingPricing(row) === undefined ? {} : { pricing: listingPricing(row) },
     ...isFree === undefined ? {} : { isFree },
+    ...efforts === undefined ? {} : { reasoningEfforts: { ...efforts } },
     ...isFree === false ? { gated: true, gateReason: SIGN_IN_REQUIRED } : {},
   }
 }
@@ -1423,16 +1482,23 @@ function analyzeModel(
     ? ['text', ...liveModalities(disclosed).filter(modality => modality !== 'text')]
     : ['text']
   // An explicit boolean the listing stated is the route's own answer; only a
-  // listing that stayed silent lets models.dev and the catalog speak.
+  // listing that stayed silent lets models.dev and the catalog speak. An
+  // advertised effort ladder is the most specific reasoning claim the endpoint
+  // can make, so it decides both the boolean and the levels ahead of every
+  // inference — and an empty ladder states nothing, leaving today's path.
   const listingReasoning = typeof model.reasoning === 'boolean' ? model.reasoning : undefined
+  const endpointEfforts = liveEfforts(model.reasoningEfforts)
+  const catalogMaySpeak = endpointEfforts === undefined && listingReasoning === undefined
   const enrichedReasoning = [mDev?.reasoning, cat?.reasoning]
     .filter((value): value is boolean => typeof value === 'boolean')
-  const reasoningOptions = listingReasoning === undefined
+  const reasoningOptions = catalogMaySpeak
     && Array.isArray(mDev?.reasoning_options) && mDev.reasoning_options.length > 0
-  const thinkingLevels = listingReasoning === undefined
+  const thinkingLevels = catalogMaySpeak
     && cat?.thinkingLevelMap !== undefined && Object.keys(cat.thinkingLevelMap).some(key => key !== 'off')
-  const reasoningDisclosed = listingReasoning !== undefined || enrichedReasoning.length > 0 || reasoningOptions || thinkingLevels
-  const isReasoning = listingReasoning ?? (enrichedReasoning.some(value => value === true) || reasoningOptions || thinkingLevels)
+  const reasoningDisclosed = endpointEfforts !== undefined || listingReasoning !== undefined || enrichedReasoning.length > 0 || reasoningOptions || thinkingLevels
+  const isReasoning = endpointEfforts !== undefined
+    ? true
+    : listingReasoning ?? (enrichedReasoning.some(value => value === true) || reasoningOptions || thinkingLevels)
 
   // The shared table's guess (and any owner override) never becomes a fact:
   // it is kept only under `capabilityHints`, and a claim for a capability
@@ -1442,6 +1508,7 @@ function analyzeModel(
   const hintedReasoning = !reasoningDisclosed && claim?.reasoning === true
   const nothingDescribed = mDev === undefined && cat === undefined
     && model.input === undefined && model.reasoning === undefined && model.tools === undefined
+    && endpointEfforts === undefined
   const unverified = nothingDescribed || hintedInput || hintedReasoning
   // A disclosed capability keeps its fact; the labeled hint field carries only
   // the claims a disclosure did not cover.
@@ -1460,7 +1527,12 @@ function analyzeModel(
   // catalog materializer maps absent levels to `null` (off included), and
   // "not thinking" is the parameter's absence on the wire anyway.
   let reasoningEfforts: Record<string, string | null> | undefined
-  if (isReasoning) {
+  if (endpointEfforts !== undefined) {
+    // The endpoint's own ladder travels verbatim: its keys are the levels the
+    // route's picker offers and its values the wire spellings. Inference
+    // neither overrides nor extends what the endpoint advertises.
+    reasoningEfforts = { ...endpointEfforts }
+  } else if (isReasoning) {
     const levels: Record<string, string | null> = {}
     const VALID_THINKING_KEYS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
 
@@ -1561,6 +1633,22 @@ function analyzeModel(
   }
 }
 
+/**
+ * The fields one configured entry keeps through a refresh because they are the
+ * operator's own claim: a `source: 'manual'` model's reasoning ladder. Every
+ * other field still refreshes from the listing. The settings record is stored
+ * JSON, so the value is narrowed here.
+ * @param entry - the configured model record.
+ * @returns the fields the refresh must not overwrite; `{}` for a non-manual entry.
+ */
+function preservedManualFields(entry: Record<string, unknown>): Record<string, unknown> {
+  if (entry.source !== 'manual') return {}
+  const ladder = entry.reasoningEfforts
+  return ladder !== null && typeof ladder === 'object' && !Array.isArray(ladder) && Object.keys(ladder).length > 0
+    ? { reasoningEfforts: { ...ladder as Record<string, unknown> } }
+    : {}
+}
+
 /** One route's merged model list plus the configured ids the listing omitted. */
 export interface ConfiguredMerge {
   /** Configured entries first (updated in place), then newly advertised entries. */
@@ -1574,10 +1662,12 @@ export interface ConfiguredMerge {
  * replacing them wholesale: an advertised id is refreshed from the listing,
  * an id the listing omits is kept exactly as configured and stamped
  * `source: 'configured'` so it survives a degraded pass (a hand-added
- * `source: 'manual'` entry keeps its own stamp), and a live id the
- * configuration does not name is appended. This is the degraded-pass merge:
- * the removal-aware membership planner ({@link planRouteModels}) is the path a
- * healthy pass takes.
+ * `source: 'manual'` entry keeps its own stamp and its own reasoning ladder),
+ * and a live id the configuration does not name is appended. A refreshed
+ * entry carries the listing's own effort ladder when the listing advertised
+ * one; a listing that advertises nothing leaves the inference result, exactly
+ * as before. This is the degraded-pass merge: the removal-aware membership
+ * planner ({@link planRouteModels}) is the path a healthy pass takes.
  * @param route - provider route key, for models.dev scoping.
  * @param configured - the route's current `models` array, when any.
  * @param live - normalized live listing entries.
@@ -1614,7 +1704,11 @@ export function mergeConfiguredModels(
     seen.add(id)
     const fresh = advertised.get(id)
     if (fresh !== undefined) {
-      models.push(entry.source === 'manual' ? { ...fresh, source: 'manual' } : fresh)
+      // A manual entry is the operator's own claim: the listing refreshes the
+      // rest of the record, and a ladder they declared stays theirs.
+      models.push(entry.source === 'manual'
+        ? { ...fresh, ...preservedManualFields(entry), source: 'manual' }
+        : fresh)
       continue
     }
     const keptSource = entry.source === 'manual' || entry.source === 'pinned-in-use' ? entry.source : 'configured'
@@ -2025,6 +2119,9 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
       if (fresh !== undefined) {
         models.push({
           ...fresh,
+          // The healthy pass refreshes the record too; a manual entry's own
+          // ladder is the operator's claim and survives it.
+          ...preservedManualFields(entry),
           ...entry.source === 'manual' ? { source: 'manual' } : {},
           ...isGrace ? { firstSeenAt: firstSeenAtOf(entry) ?? input.now } : {},
         })
