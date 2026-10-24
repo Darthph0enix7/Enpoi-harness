@@ -78,6 +78,15 @@ export function summarizationFailureCause(error: unknown): SummarizationFailure 
   }
 }
 
+/**
+ * Stable failure code for a framed summariser request that would carry no
+ * shadowed-span content: everything the budget leaves room for is the fixed
+ * instruction, the system head, and the leading replay. The call is never
+ * issued, because a checkpoint must not claim to condense content the
+ * summariser was not shown.
+ */
+export const SUMMARIZER_NO_REGION_CONTENT_CODE = 'SUMMARIZER_NO_REGION_CONTENT'
+
 /** Tags wrapping the structured summary inside the landed checkpoint node. */
 const SUMMARY_OPEN_TAG = '<compacted-summary>'
 const SUMMARY_CLOSE_TAG = '</compacted-summary>'
@@ -305,7 +314,8 @@ function replayPrice(ctx: Context, message: Message): number {
  * A single message larger than the whole budget cannot be split here; it stays
  * whole and relies on the output-cap guard and, on failure, the mechanical
  * omission fallback (the doc 66 L4 spill for one oversized message is future
- * work).
+ * work). `regionMessageCount` reports how much shadowed-span content the
+ * framed request actually carries, so a clip that keeps none is never sent.
  */
 function clipReplayToBudget(
   ctx: Context,
@@ -314,11 +324,12 @@ function clipReplayToBudget(
   leadingCount: number,
   fixedTokens: number,
   budgetTokens: number,
-): { messages: readonly Message[]; regionSeqs: readonly SessionSeq[] | undefined; windowClipped: boolean } {
-  let total = fixedTokens
-  for (const message of messages) total += replayPrice(ctx, message)
-  if (total <= budgetTokens) return { messages, regionSeqs, windowClipped: false }
-
+): {
+  messages: readonly Message[]
+  regionSeqs: readonly SessionSeq[] | undefined
+  windowClipped: boolean
+  regionMessageCount: number
+} {
   // The system head stays pinned: it is the conversation's identity and the
   // anchor the region's newer messages are read against. The leading run the
   // range keeps verbatim is pinned with it for the same prefix-cache reason;
@@ -326,6 +337,17 @@ function clipReplayToBudget(
   const head = messages[0]?.role === 'system' ? messages[0] : undefined
   const firstLeading = head === undefined ? 0 : 1
   const firstRegion = Math.min(messages.length, firstLeading + Math.max(0, leadingCount))
+  let total = fixedTokens
+  for (const message of messages) total += replayPrice(ctx, message)
+  if (total <= budgetTokens) {
+    return {
+      messages,
+      regionSeqs,
+      windowClipped: false,
+      regionMessageCount: messages.length - firstRegion,
+    }
+  }
+
   const leading = messages.slice(firstLeading, firstRegion)
   const kept: Message[] = []
   const keptSeqs: SessionSeq[] = []
@@ -346,6 +368,7 @@ function clipReplayToBudget(
     messages: [...(head === undefined ? [] : [head]), ...leading, ...kept],
     regionSeqs: regionSeqs === undefined ? undefined : keptSeqs,
     windowClipped: true,
+    regionMessageCount: kept.length,
   }
 }
 
@@ -389,8 +412,21 @@ export async function summarizeWithLlm(
   const fixedTokens = Math.ceil(COMPACTION_INSTRUCTION.length / 4) + 8
     + Math.ceil(JSON.stringify(input.tools ?? []).length / 4) + 4
   const budget = framing?.inputBudgetTokens
+  // The replayed messages are authoritative: `regionSeqs` is optional and only
+  // names the durable seqs for recovery, so the framed region is the tail after
+  // the system head and the leading run either way.
+  const headCount = input.messages[0]?.role === 'system' ? 1 : 0
+  const firstRegion = Math.min(input.messages.length, headCount + Math.max(0, input.leadingCount ?? 0))
+  const inputRegionCount = input.messages.length - firstRegion
+  if (inputRegionCount === 0) {
+    // Nothing to condense: the selected span replays no message at all. Issue
+    // no call rather than ask a model to summarize an empty region.
+    throw noRegionContentError(
+      'summariser input carries no region content: the selected span replays no message to condense',
+    )
+  }
   const replay = budget === undefined || budget <= 0
-    ? { messages: input.messages, regionSeqs: input.regionSeqs, windowClipped: false }
+    ? { messages: input.messages, regionSeqs: input.regionSeqs, windowClipped: false, regionMessageCount: inputRegionCount }
     : clipReplayToBudget(
       ctx,
       input.messages,
@@ -399,6 +435,17 @@ export async function summarizeWithLlm(
       fixedTokens,
       budget,
     )
+  if (replay.regionMessageCount === 0) {
+    // The budget leaves room only for the instruction, the system head, and the
+    // leading run. A model call here would produce a checkpoint claiming to
+    // condense a span it never saw; the caller's deterministic fallback frees
+    // real space instead.
+    throw noRegionContentError(
+      `summariser input budget (${budget ?? 0} tokens) left no region content: `
+      + 'the fixed instruction and the replayed leading messages alone exceed it, '
+      + 'so no shadowed-span message would be condensed',
+    )
+  }
 
   const dispatch = async (
     replayMessages: readonly Message[],
@@ -468,6 +515,18 @@ export async function summarizeWithLlm(
       ? { conservativeWindowClip: true }
       : {}),
   }
+}
+
+/**
+ * Build the framing failure that keeps an empty-region summarisation from
+ * reaching a provider. The message never mentions provider-size vocabulary, so
+ * the caller treats it as a framing decision and not as a size-class refusal it
+ * should retry with a smaller frame.
+ * @param message - why the framed request would carry no region content.
+ * @returns the stable-coded failure recorded on the mechanical checkpoint.
+ */
+function noRegionContentError(message: string): LlmError {
+  return new LlmError(message, SUMMARIZER_NO_REGION_CONTENT_CODE)
 }
 
 /**

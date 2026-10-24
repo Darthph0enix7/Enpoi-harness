@@ -351,7 +351,6 @@ describe('prefix-preserving summarizer replay', () => {
     }, {
       messages: [system, pinned, oldest, newest],
       leadingCount: 1,
-      regionSeqs: [],
     }, agent(session, ctx), SIGNAL, { inputBudgetTokens: 800 })
 
     const sent = adapter.lastOptions?.messages ?? []
@@ -467,7 +466,12 @@ describe('durable facts in the summarization instruction', () => {
       summarizationProvider: MODEL,
       summarizationModel: MODEL,
       maxTokens: 64,
-    }, { messages: [] }, agent(session, ctx), SIGNAL)
+    }, {
+      messages: [createUserMessage({
+        content: [{ type: 'text', text: 'history to condense' }],
+        source: { kind: 'user' },
+      })],
+    }, agent(session, ctx), SIGNAL)
 
     expect(adapter.text).toContain('## Durable Facts')
     expect(adapter.text).toContain(

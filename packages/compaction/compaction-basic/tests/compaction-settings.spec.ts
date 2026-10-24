@@ -347,12 +347,15 @@ describe('window-aware summariser framing', () => {
     void new LlmRuntime(meterless)
     const sparse = new RecordingAdapter(1_000)
     meterless.llm.registerAdapter([MODEL], sparse)
+    // The budget keeps at most the newest region message: a clip must leave at
+    // least one shadowed-span message or no call is made at all.
     await summarizeWithLlm(meterless, {
       summarizationProvider: MODEL,
       summarizationModel: MODEL,
       maxTokens: 100,
-    }, input, agent(session), SIGNAL, { inputBudgetTokens: 1 })
+    }, input, agent(session), SIGNAL, { inputBudgetTokens: 800 })
     expect(sparse.lastOptions?.messages.length).toBeLessThan(input.messages.length + 1)
+    expect(sparse.lastOptions?.messages.length).toBeGreaterThan(1)
   })
 })
 

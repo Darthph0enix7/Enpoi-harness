@@ -10,7 +10,7 @@ import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compac
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
 import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
-import { CONTEXT_WINDOW_EXCEEDED_CODE, HarnessError } from '@deepseek-ai/dsh-llm'
+import { CONTEXT_WINDOW_EXCEEDED_CODE, HarnessError, LlmError } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
@@ -32,7 +32,12 @@ import {
 } from './region.ts'
 import type { PinLeadingOptions, RecallFraming } from './region.ts'
 import { readCompactionSettings, resolveCompactionSeat } from './settings.ts'
-import { resolveSummarizationTarget, summarizationFailureCause, summarizeWithLlm } from './summarizer.ts'
+import {
+  resolveSummarizationTarget,
+  SUMMARIZER_NO_REGION_CONTENT_CODE,
+  summarizationFailureCause,
+  summarizeWithLlm,
+} from './summarizer.ts'
 import type { SummarizationInput, SummarizationFraming, SummaryConfig, SummaryResult } from './summarizer.ts'
 import type {
   BasicCompactionConfig,
@@ -57,6 +62,21 @@ export type {
  * post-hoc reader can tell "we stopped paying" from "the provider said no".
  */
 export const SUMMARIZER_CIRCUIT_OPEN_CODE = 'SUMMARIZER_CIRCUIT_OPEN'
+
+/** Re-exported framing failure code; see {@link SUMMARIZER_NO_REGION_CONTENT_CODE} in the summariser. */
+export { SUMMARIZER_NO_REGION_CONTENT_CODE }
+
+/**
+ * Whether one thrown summarisation failure is a framing decision rather than a
+ * route fault: no region content means the next identical compaction would fail
+ * the same way, so counting it toward escalation or the circuit would only mask
+ * the real reason on later checkpoints.
+ * @param error - value thrown by the summariser call.
+ * @returns true when the request carried no shadowed-span content.
+ */
+function isFramingFailure(error: unknown): boolean {
+  return error instanceof LlmError && error.code === SUMMARIZER_NO_REGION_CONTENT_CODE
+}
 
 /** Consecutive failures counted against one summariser route in one session. */
 interface SummarizerRouteState {
@@ -438,8 +458,11 @@ export class BasicCompactionEngine extends CompactionEngine {
       activeState.lastCode = ''
       return result
     } catch (error: unknown) {
-      // Cancellation is not a route fault and must not trip the breaker.
-      if (signal?.aborted !== true) {
+      // Cancellation is not a route fault, and an input that carried no region
+      // content is a framing decision that would repeat identically on every
+      // route: neither may count toward escalation or the breaker, or the
+      // recorded failure would stop explaining why the call was never made.
+      if (signal?.aborted !== true && !isFramingFailure(error)) {
         const cause = summarizationFailureCause(error)
         activeState.failures += 1
         activeState.lastCode = cause.code

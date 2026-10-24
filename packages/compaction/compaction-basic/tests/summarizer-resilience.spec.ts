@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import BasicCompactionEngine, { SUMMARIZER_CIRCUIT_OPEN_CODE } from '@deepseek-ai/dsh-compaction-basic'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
-import LlmRuntime, { createMessage, createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createMessage, createSystemMessage, createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
 import type {
   ContentBlock,
   GenerateOptions,
@@ -20,6 +20,7 @@ import SessionStore, { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-s
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { summarizeWithLlm, SUMMARIZER_NO_REGION_CONTENT_CODE } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import type { SummarizationInput, SummaryResult } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -159,6 +160,64 @@ function maintenanceAgent(session: Session): Agent {
   } as unknown as Agent
 }
 
+/** System head, one large leading brief, then closed two-message turns and one open turn. */
+function pinnedConversation(
+  turns = 20,
+  brief = 'brief '.repeat(200).trim(),
+  text = 'detail '.repeat(60).trim(),
+): Session {
+  const session = Session.create(SessionId(`pinned-${turns}-${text.length}`))
+  session.append('turn/start', { turn: 1 })
+  session.append('system/message', {
+    turn: 1,
+    step: 1,
+    message: createSystemMessage('system prompt'),
+  }, { surfaceOp: 'append' })
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: brief }],
+    source: { kind: 'user' },
+  }), { surfaceOp: 'append' })
+  session.append('step/start', { turn: 1, step: 1 })
+  session.append('request/header', {
+    header: { config: { provider: MODEL, model: MODEL } },
+    reason: 'initial',
+  })
+  session.append('assistant/message', {
+    stream: [],
+    turn: 1,
+    step: 1,
+    message: createMessage({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ack' }],
+      source: { kind: 'model', provider: MODEL, model: MODEL },
+    }),
+  }, { surfaceOp: 'append' })
+  session.append('step/end', { turn: 1, step: 1 })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  for (let turn = 2; turn <= turns; turn += 1) {
+    session.append('turn/start', { turn })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: `${text} user ${turn}` }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    session.append('step/start', { turn, step: 1 })
+    session.append('assistant/message', {
+      stream: [],
+      turn,
+      step: 1,
+      message: createMessage({
+        role: 'assistant',
+        content: [{ type: 'text', text: `${text} assistant ${turn}` }],
+        source: { kind: 'model', provider: MODEL, model: MODEL },
+      }),
+    }, { surfaceOp: 'append' })
+    session.append('step/end', { turn, step: 1 })
+    session.append('turn/end', { turn, reason: { kind: 'completed' } })
+  }
+  session.append('turn/start', { turn: turns + 1 })
+  return session
+}
+
 /** One replayed user message per entry, for direct summariser framing tests. */
 function replayInput(count: number, text = 'detail '.repeat(40).trim()): SummarizationInput {
   return {
@@ -215,7 +274,7 @@ describe('unknown summariser window', () => {
       auto: false,
       headroomTokens: 0,
       maxTokens: 8192,
-      summarizerUnknownWindowTokens: 300,
+      summarizerUnknownWindowTokens: 1_000,
     })
     const session = conversation(10, 'detail '.repeat(10).trim())
     const nodes = [...session.surface.nodes]
@@ -271,6 +330,127 @@ describe('size-class frame retries and route escalation', () => {
     expect(result.shadowedSeqs[0]).not.toBe(start)
     expect(session.surface.nodes).toContain(start)
     expect(latestSummary(session)?.data).toMatchObject({ provider: MODEL, model: MODEL })
+  })
+})
+
+describe('summariser frames that carry no region content', () => {
+  it('skips the model call, lands the mechanical omission, and records why', async () => {
+    const ctx = newContext(['session_event_search', 'session_event_read'])
+    withDocument(ctx, { personas: { compaction: { provider: SEAT_PROVIDER, model: SEAT_MODEL } } })
+    const seat = new ScriptedAdapter(undefined)
+    ctx.llm.registerAdapter([SEAT_PROVIDER], seat)
+    const compact = new BasicCompactionEngine(ctx, {
+      auto: false,
+      headroomTokens: 0,
+      maxTokens: 8192,
+      summarizerUnknownWindowTokens: 200,
+      mechanicalFallbackFreeShare: 0.5,
+    })
+    const session = pinnedConversation()
+    const nodes = [...session.surface.nodes]
+    const start = nodes[2]!
+    const end = nodes[nodes.length - 2]!
+    const beforeMeasurement = ctx.tokenMeter.measure(session)
+    const before = beforeMeasurement.totalTokens
+    const prices = new Map(beforeMeasurement.nodes.map(node => [node.seq, node.tokens]))
+    const startIdx = nodes.indexOf(start)
+    const endIdx = nodes.indexOf(end)
+    const spanTokens = pricedSpan(prices, nodes.slice(startIdx, endIdx + 1))
+
+    await compact.compactRegion(start, end, agent(session), SIGNAL)
+
+    // The fixed instruction plus the system head and the leading brief already
+    // exceed the budget, so the call is never issued.
+    expect(seat.requests).toHaveLength(0)
+    const summary = latestSummary(session)!
+    expect(summary.data).toMatchObject({
+      provider: '',
+      model: '',
+      summarizationFailure: { code: SUMMARIZER_NO_REGION_CONTENT_CODE },
+    })
+    expect(summary.data.summarizationFailure?.message).toContain('left no region content')
+
+    // The mechanical omission still frees the guaranteed share of the span.
+    const after = ctx.tokenMeter.measure(session).totalTokens
+    const freed = before - after
+    const dropped = pricedSpan(prices, summary.data.shadowedSeqs)
+    if (summary.data.shadowedRange.start !== start) {
+      expect(freed).toBeGreaterThanOrEqual(Math.ceil(spanTokens * 0.5))
+    } else {
+      expect(freed).toBeGreaterThan(0)
+    }
+    expect(dropped).toBeGreaterThan(0)
+  })
+
+  it('still summarizes when the clip keeps at least one region message', async () => {
+    const ctx = newContext(['session_event_search', 'session_event_read'])
+    withDocument(ctx, { personas: { compaction: { provider: SEAT_PROVIDER, model: SEAT_MODEL } } })
+    const seat = new ScriptedAdapter(undefined)
+    ctx.llm.registerAdapter([SEAT_PROVIDER], seat)
+    const compact = new BasicCompactionEngine(ctx, {
+      auto: false,
+      headroomTokens: 0,
+      maxTokens: 8192,
+      summarizerUnknownWindowTokens: 2_500,
+    })
+    const session = pinnedConversation()
+    const nodes = [...session.surface.nodes]
+    const start = nodes[2]!
+    const end = nodes[nodes.length - 1]!
+
+    const result = await compact.compactRegion(start, end, agent(session), SIGNAL)
+
+    expect(seat.requests).toHaveLength(1)
+    const replay = seat.requests[0]!.messages.slice(0, -1)
+    expect(replay.length).toBeGreaterThan(2)
+    expect(replay.length).toBeLessThan(result.shadowedSeqs.length + 2)
+    // The newest region message survives the clip and is what the model saw.
+    expect(replay.at(-1)).toEqual(seat.requests[0]!.messages.at(-2))
+    expect(JSON.stringify(replay.at(-1))).toContain('assistant 20')
+    const summary = latestSummary(session)!
+    expect(summary.data).toMatchObject({ provider: SEAT_PROVIDER, model: SEAT_MODEL })
+    expect(summary.data).not.toHaveProperty('summarizationFailure')
+    const replacement = session.snapshotEvents().findLast(event => event.type === 'user/message'
+      && event.data.source?.kind === 'compact-checkpoint')
+    expect(JSON.stringify(replacement)).toContain('could not be resolved')
+  })
+
+  it('never counts an empty-region frame toward the route circuit', async () => {
+    const ctx = newContext(['session_event_search', 'session_event_read'])
+    ctx.llm.registerAdapter([MODEL], new ScriptedAdapter(100_000))
+    const compact = new ExposedEngine(ctx, {
+      auto: true,
+      headroomTokens: 0,
+      maxTokens: 8192,
+      summarizerCircuitFailures: 1,
+    })
+    const owner = agent(conversation(1))
+    const empty: SummarizationInput = { messages: [createSystemMessage('head only')] }
+
+    await expect(compact.runSummarize(empty, owner))
+      .rejects.toMatchObject({ code: SUMMARIZER_NO_REGION_CONTENT_CODE })
+    // A framing decision is not a route fault: the breaker must not replace the
+    // recorded reason with SUMMARIZER_CIRCUIT_OPEN.
+    await expect(compact.runSummarize(empty, owner))
+      .rejects.toMatchObject({ code: SUMMARIZER_NO_REGION_CONTENT_CODE })
+    await expect(compact.runSummarize(empty, owner))
+      .rejects.not.toMatchObject({ code: 'SUMMARIZER_CIRCUIT_OPEN' })
+  })
+
+  it('reports an empty replay region before any provider call', async () => {
+    const ctx = newContext(['session_event_search', 'session_event_read'])
+    const adapter = new ScriptedAdapter(100_000)
+    ctx.llm.registerAdapter([MODEL], adapter)
+    const session = conversation(1)
+
+    await expect(summarizeWithLlm(ctx, {
+      summarizationProvider: MODEL,
+      summarizationModel: MODEL,
+      maxTokens: 100,
+    }, {
+      messages: [createSystemMessage('head only')],
+    }, agent(session), SIGNAL)).rejects.toMatchObject({ code: SUMMARIZER_NO_REGION_CONTENT_CODE })
+    expect(adapter.requests).toHaveLength(0)
   })
 })
 

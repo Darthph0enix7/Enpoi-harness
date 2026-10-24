@@ -18,6 +18,9 @@ import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as LlmRetry from '@deepseek-ai/dsh-llm-retry'
 import { Session, SessionId, type SessionEvent, type SessionSeq, type SurfaceEvent } from '@deepseek-ai/dsh-session'
 
+/** Summariser route with a window large enough to replay the span it condenses. */
+const SUMMARISER_PROVIDER = 'summariser'
+
 /**
  * CBR-001 regression through the real loop. A replacement checkpoint has a high
  * log seq at the surface head and carries no tool pair, so both adjacent cuts
@@ -115,7 +118,9 @@ class OverflowRecoveryAdapter extends LlmAdapter {
       provider,
       id: model,
       name: model,
-      context: { contextWindow: 128 },
+      // The conversation route overflows at 128 tokens; the compaction route is
+      // a separate target with room to actually replay the span it condenses.
+      context: { contextWindow: provider === SUMMARISER_PROVIDER ? 100_000 : 128 },
     })
   }
 
@@ -326,7 +331,7 @@ describe('CBR-001: a real-loop checkpoint is a valid boundary on both sides', ()
       // replacement is the compounding-loss case the guard exists for.
       for (const region of engine.regions) {
         const nodes = agent.session.surface.nodes.filter(seq => seq >= region.start && seq <= region.end)
-        const checkpointOnly = nodes.length > 0 && nodes.every(seq => {
+        const checkpointOnly = nodes.length > 0 && nodes.every((seq) => {
           // oxlint-disable-next-line typescript/no-deprecated -- test mirrors the guard's own read.
           const event = agent.session.eventAt(seq)
           if (event?.type !== 'user/message') return false
@@ -460,7 +465,7 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
       await mountInvariants(ctx)
       await ctx.plugin(AgentLoop, { agents: [] })
       await ctx.plugin(TokenMeter)
-      ctx.llm.registerAdapter(['mock'], adapter)
+      ctx.llm.registerAdapter(['mock', SUMMARISER_PROVIDER], adapter)
       ctx.on('agent/request', async (_payload, next) => ({
         ...await next(), provider: 'mock', model: 'mock',
       }))
@@ -471,6 +476,8 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
         maxTokens: 64,
         compactionRetries: 0,
         maxOverflowRetries: 1,
+        summarizationProvider: SUMMARISER_PROVIDER,
+        summarizationModel: 'mock',
       })
 
       try {
@@ -540,7 +547,7 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
     await ctx.plugin(LlmRetry)
     await ctx.plugin(AgentLoop, { agents: [] })
     await ctx.plugin(TokenMeter)
-    ctx.llm.registerAdapter(['mock'], adapter)
+    ctx.llm.registerAdapter(['mock', SUMMARISER_PROVIDER], adapter)
     await ctx.plugin(BasicCompactionEngine, {
       headroomTokens: 0,
       thresholdRatio: 1,
@@ -548,6 +555,8 @@ describe('context-overflow recovery across the real loop and compaction-basic', 
       maxTokens: 64,
       compactionRetries: 0,
       maxOverflowRetries: 1,
+      summarizationProvider: SUMMARISER_PROVIDER,
+      summarizationModel: 'mock',
     })
 
     try {
