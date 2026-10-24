@@ -22,6 +22,8 @@
  * @module dsh-enpoi-heavy-providers/manifests
  */
 
+import { offeredCompatFields } from '@deepseek-ai/dsh-llm-pi-ai/src/compat.ts'
+
 /** One shell step of an install or teardown run. */
 export interface HeavyStep {
   /** Human stage label shown in the progress UI. */
@@ -192,6 +194,15 @@ export interface HeavyProviderManifest {
   summary: string
   /** llm-pi-ai wire protocol the route declares. */
   protocol: string
+  /**
+   * pi-ai wire-compatibility switches the created route profile carries, as a
+   * record of compat field → boolean. The field names are llm-pi-ai's own
+   * offered vocabulary for this manifest's `protocol`
+   * (`llm-pi-ai/src/compat.ts`, the same disposition tables that validate a
+   * stored route): a withheld or undeclared name is a manifest problem, never
+   * a switch the route write silently drops. Omit for a route that needs none.
+   */
+  compat?: Readonly<Record<string, boolean>>
   /**
    * How an added route reaches its endpoint.
    * - `service` (default): a service instance this device can detect and
@@ -970,6 +981,13 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
     label: 'Claude Code (Meridian)',
     summary: 'Local proxy that serves the operator\'s Claude subscription through the official Agent SDK as an Anthropic Messages-compatible endpoint.',
     protocol: 'anthropic-messages',
+    // Live probes against a shipped Meridian: budget-style thinking
+    // (`{type: 'enabled', budget_tokens}`) is accepted and its budget ignored,
+    // while adaptive thinking plus an effort level answers with reasoning
+    // blocks. pi-ai emits the budget shape unless the route says otherwise, so
+    // the compat switch is part of the provider's declaration, not an operator
+    // preference.
+    compat: { forceAdaptiveThinking: true },
     // A service instance on this device: detection and the health probe use
     // the loopback endpoint, and an operator's own host belongs in the
     // private server overlay.
@@ -993,6 +1011,7 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
       'ExecStart must be `node <resolved>/dist/cli.js`, never the `meridian` bin: its `#!/usr/bin/env node` shebang does not resolve under systemd',
       'The unit PATH must contain the npm global bin (where `claude` lives), or the Agent SDK cannot spawn the CLI',
       'The model catalog ships inside each Meridian release: /v1/models answers from the build, not from a live CLI query, but an unknown model id still passes through to the SDK',
+      'Thinking: budget-style `thinking: {type:"enabled", budget_tokens}` is accepted but its budget is ignored; adaptive thinking plus an effort level (`output_config.effort`) is the working shape, so this route is created with the llm-pi-ai compat switch `forceAdaptiveThinking`',
       'MERIDIAN_ENFORCE_MAX_TOKENS=1 is set here, so a harness that relies on max_tokens gets a hard budget',
       'x-session-affinity is optional and only matters for append-only clients; a request without it runs a fresh SDK session with the history packed into the system prompt',
       'Billing draws from the operator\'s own Claude subscription usage windows (like `claude -p`) — Meridian drives the official CLI/SDK and never reads or replays OAuth tokens',
@@ -1140,6 +1159,17 @@ export function manifestProblems(manifests: readonly HeavyProviderManifest[] = H
     }
     if (manifest.unsupported === undefined && !LLM_PI_AI_PROTOCOLS.includes(manifest.protocol) && manifest.settingsNs === undefined) {
       problems.push(`${where}: protocol "${manifest.protocol}" is not served by llm-pi-ai and needs an explicit settingsNs`)
+    }
+    // The vocabulary is llm-pi-ai's own offered set for the declared protocol:
+    // a withheld field or a misspelling is refused here instead of reaching a
+    // route write that would store a switch nothing reads.
+    const offered = offeredCompatFields(manifest.protocol)
+    for (const [field, value] of Object.entries(manifest.compat ?? {})) {
+      if (!offered.includes(field)) {
+        problems.push(`${where}: compat "${field}" is not offered by protocol "${manifest.protocol}"`
+          + (offered.length === 0 ? ' (that protocol takes no compat)' : `; offered: ${offered.join(', ')}`))
+      }
+      if (typeof value !== 'boolean') problems.push(`${where}: compat "${field}" must be true or false`)
     }
     // A direct vendor route has no gatekeeper in front of it: without a pool
     // or a key reference it can only send the anonymous request the vendor

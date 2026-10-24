@@ -19,8 +19,9 @@
  * their native model-listing endpoints. The parser accepts the standard
  * `data` array and the enriched `models` map some compatible gateways expose.
  * A provider-neutral `capabilities` block, when present, contributes the
- * advertised reasoning efforts and input types; its absence leaves the row as
- * the listing read it. Every other protocol reports that it cannot be
+ * advertised reasoning efforts and input types through the shared listing
+ * parser (`listing.ts`, which the heavy-provider planner reads the same body
+ * with); its absence leaves the row as the listing read it. Every other protocol reports that it cannot be
  * interrogated so the surface falls back to hand-entry rather than guessing
  * its response fields.
  *
@@ -28,10 +29,11 @@
  */
 
 import { INVALID_CREDENTIAL_CODE, LlmError, normalizeApiKey } from '@deepseek-ai/dsh-llm'
-import type { LlmDiscoveredModel, LlmModelDiscoveryOperation, ModelModality } from '@deepseek-ai/dsh-llm'
+import type { LlmDiscoveredModel, LlmModelDiscoveryOperation } from '@deepseek-ai/dsh-llm'
 import { attributionHeaders } from '@deepseek-ai/dsh-llm'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { catalogModels } from './catalog.ts'
+import { listingCapabilities, listingText, type ListingEntry } from './listing.ts'
 
 /**
  * Protocols whose model listing this module can read. OpenAI protocols use
@@ -80,109 +82,6 @@ export interface ModelDiscoveryLimits {
   readonly timeoutMs?: number
   /** Largest model-listing reply accepted (default {@link DEFAULT_MAX_RESPONSE_BYTES}). */
   readonly maxResponseBytes?: number
-}
-
-/** Capacity fields nested by enriched model-directory replies. */
-interface ListingLimit {
-  context?: unknown
-  output?: unknown
-}
-
-/** Per-route capacities OpenRouter nests under each entry. */
-interface ListingTopProvider {
-  max_completion_tokens?: unknown
-}
-
-/** One entry of a supported `GET /models` reply. */
-interface ListingEntry {
-  id?: unknown
-  /** Common gateway extensions; absent from the official listings. */
-  name?: unknown
-  display_name?: unknown
-  displayName?: unknown
-  contextWindow?: unknown
-  context_window?: unknown
-  context_length?: unknown
-  max_input_tokens?: unknown
-  maxOutputTokens?: unknown
-  max_tokens?: unknown
-  max_output_tokens?: unknown
-  maxTokens?: unknown
-  limit?: ListingLimit | null
-  top_provider?: ListingTopProvider | null
-  /** Provider-neutral capability block some gateways (and Anthropic) nest per model. */
-  capabilities?: unknown
-}
-
-/** One `{ supported: boolean }` capability object in a listing's `capabilities` block. */
-interface ListingCapability {
-  supported?: unknown
-}
-
-/** A positive integer field of a listing entry, or `undefined` when absent or unusable. */
-function capacity(...candidates: readonly unknown[]): number | undefined {
-  for (const candidate of candidates) {
-    if (typeof candidate === 'number' && Number.isInteger(candidate) && candidate > 0) return candidate
-  }
-  return undefined
-}
-
-/** A non-empty string field of a listing entry, or `undefined`. */
-function label(...candidates: readonly unknown[]): string | undefined {
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.length > 0) return candidate
-  }
-  return undefined
-}
-
-/** Whether one capability object explicitly advertises support. */
-function supported(value: unknown): boolean {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    && (value as ListingCapability).supported === true
-}
-
-/** A plain JSON object, or `undefined` for anything else (arrays included). */
-function record(value: unknown): Readonly<Record<string, unknown>> | undefined {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as Readonly<Record<string, unknown>>
-    : undefined
-}
-
-/**
- * Turn a listing's `capabilities.effort` block into selectable reasoning
- * levels. Only entries that explicitly report `supported: true` are offered;
- * the picker id is the advertised key and the wire value keeps the same
- * spelling because no per-gateway mapping was disclosed. A malformed or
- * absent block yields no levels instead of failing the discovery pass.
- */
-function listedEfforts(raw: unknown): Readonly<Record<string, string>> | undefined {
-  const efforts = record(raw)
-  if (efforts === undefined) return undefined
-  const levels: Record<string, string> = {}
-  for (const [level, capability] of Object.entries(efforts)) {
-    if (level.length > 0 && supported(capability)) levels[level] = level
-  }
-  return Object.keys(levels).length > 0 ? levels : undefined
-}
-
-/**
- * Read what a listing's provider-neutral `capabilities` block discloses.
- * `effort` becomes {@link LlmDiscoveredModel.reasoningEfforts}; supported
- * `image_input` / `pdf_input` become input modalities, with `text` implied as
- * it is for every prompt-capable model. Everything absent or malformed is
- * left undisclosed rather than guessed at.
- */
-function listedCapabilities(raw: unknown): Pick<LlmDiscoveredModel, 'inputModalities' | 'reasoningEfforts'> {
-  const capabilities = record(raw)
-  if (capabilities === undefined) return {}
-  const reasoningEfforts = listedEfforts(capabilities.effort)
-  const modalities: ModelModality[] = ['text']
-  if (supported(capabilities.image_input)) modalities.push('image')
-  if (supported(capabilities.pdf_input)) modalities.push('pdf')
-  return {
-    ...reasoningEfforts === undefined ? {} : { reasoningEfforts },
-    ...modalities.length === 1 ? {} : { inputModalities: modalities },
-  }
 }
 
 /**
@@ -286,30 +185,13 @@ function readListing(body: unknown): LiveRow[] {
   const models: LiveRow[] = []
   for (const { key, raw } of listed) {
     const entry = raw as ListingEntry | null
-    const id = label(key, entry?.id)
+    const id = listingText(key, entry?.id)
     if (id === undefined) continue
-    const name = label(entry?.name, entry?.display_name, entry?.displayName) ?? id
-    const contextWindow = capacity(
-      entry?.contextWindow,
-      entry?.context_window,
-      entry?.context_length,
-      entry?.max_input_tokens,
-      entry?.limit?.context,
-    )
-    const maxTokens = capacity(
-      entry?.maxOutputTokens,
-      entry?.max_output_tokens,
-      entry?.maxTokens,
-      entry?.max_tokens,
-      entry?.limit?.output,
-      entry?.top_provider?.max_completion_tokens,
-    )
+    const name = listingText(entry?.name, entry?.display_name, entry?.displayName) ?? id
     models.push({
       id,
       name,
-      ...contextWindow === undefined ? {} : { contextWindow },
-      ...maxTokens === undefined ? {} : { maxTokens },
-      ...listedCapabilities(entry?.capabilities),
+      ...listingCapabilities(entry),
     })
   }
   return models

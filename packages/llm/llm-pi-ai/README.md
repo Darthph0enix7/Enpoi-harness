@@ -145,6 +145,8 @@ The adapter is built on immutable snapshots and per-operation resolution. Each o
 | [`src/login.ts`](src/login.ts) | Authorization flows for the installed providers that ship a login |
 | [`src/config.ts`](src/config.ts) | Profile schema, resolution, and serviceability checks |
 | [`src/catalog.ts`](src/catalog.ts) | Installed-catalog integration and drift gates |
+| [`src/compat.ts`](src/compat.ts) | The offered compat-field vocabulary per wire protocol, and its drift gates |
+| [`src/listing.ts`](src/listing.ts) | The model-listing parser shared by endpoint discovery and the heavy-provider planner |
 | [`src/models.ts`](src/models.ts) | Model collections, static providers, and reasoning levels over narrow pi-ai entry points |
 | [`src/provider.ts`](src/provider.ts) | The supported-protocol table and provider construction |
 | [`src/context.ts`](src/context.ts) | Harness-to-pi-ai context conversion, image handling, replay restore |

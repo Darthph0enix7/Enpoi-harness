@@ -6,7 +6,12 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": ["node"],
+    // esbuild owns emission; the shared llm-pi-ai helpers are imported by
+    // their source path (the package ships `./src/*`), as enpoi-provider-sync
+    // already does.
+    "noEmit": true,
+    "allowImportingTsExtensions": true
   },
   "include": ["src/**/*", "tests/**/*"]
 }

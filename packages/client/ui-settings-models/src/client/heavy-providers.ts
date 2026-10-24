@@ -171,6 +171,13 @@ export interface HeavyProviderManifest {
   /** llm-pi-ai wire protocol the route declares. */
   protocol: string
   /**
+   * pi-ai wire-compatibility switches the created route profile carries, as a
+   * record of compat field → boolean. The names are llm-pi-ai's offered
+   * vocabulary for this manifest's `protocol`; the host manifest table
+   * validates them and the route write stores them.
+   */
+  compat?: Readonly<Record<string, boolean>>
+  /**
    * How an added route reaches its endpoint.
    * - `service` (default): a service instance this device can detect and
    *   health-probe; the manifest's addresses are loopback.
@@ -851,6 +858,10 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
     label: 'Claude Code (Meridian)',
     summary: 'Local proxy that serves the operator\'s Claude subscription through the official Agent SDK as an Anthropic Messages-compatible endpoint.',
     protocol: 'anthropic-messages',
+    // Budget-style thinking is accepted with its budget ignored; adaptive
+    // thinking plus an effort level is the shape that answers with reasoning
+    // blocks, so the route declares the compat switch that emits it.
+    compat: { forceAdaptiveThinking: true },
     // A service instance on this device: detection and the health probe use
     // the loopback endpoint; an operator's own host belongs in the private
     // server overlay.
@@ -870,6 +881,7 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
       'ExecStart must be `node <resolved>/dist/cli.js`, never the `meridian` bin: its `#!/usr/bin/env node` shebang does not resolve under systemd',
       'The unit PATH must contain the npm global bin (where `claude` lives), or the Agent SDK cannot spawn the CLI',
       'The model catalog ships inside each Meridian release: /v1/models answers from the build, not from a live CLI query, but an unknown model id still passes through to the SDK',
+      'Thinking: budget-style `thinking: {type:"enabled", budget_tokens}` is accepted but its budget is ignored; adaptive thinking plus an effort level (`output_config.effort`) is the working shape, so this route is created with the llm-pi-ai compat switch `forceAdaptiveThinking`',
       'MERIDIAN_ENFORCE_MAX_TOKENS=1 is set here, so a harness that relies on max_tokens gets a hard budget',
       'x-session-affinity is optional and only matters for append-only clients; a request without it runs a fresh SDK session with the history packed into the system prompt',
       'Billing draws from the operator\'s own Claude subscription usage windows (like `claude -p`) — Meridian drives the official CLI/SDK and never reads or replays OAuth tokens',

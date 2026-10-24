@@ -12,6 +12,7 @@
 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { listingCapabilities, listingText, type ListingEntry } from '@deepseek-ai/dsh-llm-pi-ai/src/listing.ts'
 import { platformInstallVariant, platformUnsupported, resolveHeavyInstall } from './manifests.js'
 import type { HeavyFileRequirement, HeavyHealth, HeavyLocalRuntime, HeavyManifestPool, HeavyProviderManifest, HeavyStep } from './manifests.js'
 
@@ -49,6 +50,8 @@ export interface ModelDiscoveryEntry {
   contextWindow?: number
   maxTokens?: number
   inputModalities?: readonly string[]
+  /** Selectable reasoning levels (picker id → wire value) the route advertises. */
+  reasoningEfforts?: Readonly<Record<string, string>>
 }
 
 /**
@@ -101,12 +104,16 @@ export interface HeavyRouteProfile {
   keyless?: boolean
   /** Provider-native credential pool declared by a custom-protocol manifest. */
   pool?: HeavyManifestPool
+  /** llm-pi-ai wire-compatibility switches the manifest declares. */
+  compat?: Readonly<Record<string, boolean>>
   models: Array<{
     id: string
     name?: string
     contextWindow?: number
     maxTokens?: number
     input?: readonly string[]
+    /** Selectable reasoning levels, so the Effort control exists from the add. */
+    reasoningEfforts?: Readonly<Record<string, string>>
   }>
 }
 
@@ -716,6 +723,11 @@ export function overlayInjectionRow(dshHome: string): HeavyOverlayInjectionRow |
  * front their own credential handling (a gateway key, or no client auth at
  * all).
  *
+ * The manifest's `compat` switches are written at the route, and each model
+ * carries the input modalities and reasoning ladder its listing disclosed, so
+ * a route created here — by Add or by an install — offers the same effort and
+ * modality controls a later Models-page refresh would.
+ *
  * An empty discovery with no `fallbackModel` writes `models: []`. llm-pi-ai
  * resolves an absent and an empty `models` list identically — the installed
  * catalog, then the route's discovered-cache record (llm-pi-ai
@@ -740,6 +752,11 @@ export function routeProfile(
         ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
         ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
         ...model.input === undefined || model.input.length === 0 ? {} : { input: [...model.input] },
+        // An empty ladder states nothing and the route schema refuses it as a
+        // declared-but-empty capability, so it is omitted like an absent one.
+        ...model.reasoningEfforts === undefined || Object.keys(model.reasoningEfforts).length === 0
+          ? {}
+          : { reasoningEfforts: { ...model.reasoningEfforts } },
       }))
     : manifest.fallbackModel === undefined ? [] : [{ id: manifest.fallbackModel }]
   // A direct route never runs a local service, so its name must not carry the
@@ -751,6 +768,7 @@ export function routeProfile(
     baseURL: overrides.baseURL ?? modeBaseURL(manifest, mode),
     ...manifest.auth.apiKeyEnv === undefined ? {} : { apiKeyEnv: manifest.auth.apiKeyEnv },
     ...manifest.auth.kind === 'none' ? { keyless: true } : {},
+    ...manifest.compat === undefined ? {} : { compat: { ...manifest.compat } },
     ...manifest.pool === undefined
       ? {}
       : {
@@ -800,6 +818,8 @@ export interface DiscoveredModel {
   maxTokens?: number
   /** Accepted input modalities the source disclosed. */
   input?: readonly string[]
+  /** Selectable reasoning levels (picker id → wire value) the source advertised. */
+  reasoningEfforts?: Readonly<Record<string, string>>
 }
 
 /** Stable API version required by Anthropic's native model-listing endpoint. */
@@ -826,45 +846,6 @@ export function modelListingUrl(baseURL: string, api?: string): string {
 }
 
 /**
- * One listing entry field as a non-empty label. The proxy discloses the human
- * model name in `description`; a value long enough to be prose rather than a
- * name is refused so it never becomes a route row's label.
- */
-function listingLabel(...candidates: readonly unknown[]): string | undefined {
-  for (const candidate of candidates) {
-    if (typeof candidate === 'string' && candidate.length > 0 && candidate.length <= 200) return candidate
-  }
-  return undefined
-}
-
-/** One listing entry field as a positive integer capacity, or undefined. */
-function listingCapacity(...candidates: readonly unknown[]): number | undefined {
-  for (const candidate of candidates) {
-    if (typeof candidate === 'number' && Number.isInteger(candidate) && candidate > 0) return candidate
-  }
-  return undefined
-}
-
-/** The listing fields a compatible endpoint may disclose beyond the id. */
-interface ListingEntry {
-  id?: unknown
-  name?: unknown
-  displayName?: unknown
-  display_name?: unknown
-  description?: unknown
-  contextWindow?: unknown
-  context_window?: unknown
-  context_length?: unknown
-  max_input_tokens?: unknown
-  limit?: { context?: unknown; output?: unknown } | null
-  maxOutputTokens?: unknown
-  max_output_tokens?: unknown
-  maxTokens?: unknown
-  max_tokens?: unknown
-  top_provider?: { max_completion_tokens?: unknown } | null
-}
-
-/**
  * Read one model listing: the standard `data` array or an enriched `models`
  * map, whose property key is the endpoint-facing id. Entries without an id
  * are skipped; capacities are kept only when the endpoint discloses them.
@@ -887,30 +868,23 @@ function readModelListing(body: unknown): DiscoveredModel[] {
   const models: DiscoveredModel[] = []
   for (const { key, raw } of rows.slice(0, 2000)) {
     const entry = raw as ListingEntry | null
-    const id = listingLabel(key, entry?.id)
+    const id = listingText(key, entry?.id)
     if (id === undefined || seen.has(id)) continue
     seen.add(id)
-    const name = listingLabel(entry?.name, entry?.displayName, entry?.display_name, entry?.description)
-    const contextWindow = listingCapacity(
-      entry?.contextWindow,
-      entry?.context_window,
-      entry?.context_length,
-      entry?.max_input_tokens,
-      entry?.limit?.context,
-    )
-    const maxTokens = listingCapacity(
-      entry?.maxOutputTokens,
-      entry?.max_output_tokens,
-      entry?.maxTokens,
-      entry?.max_tokens,
-      entry?.limit?.output,
-      entry?.top_provider?.max_completion_tokens,
-    )
+    // The proxy discloses the human model name in `description`; the shared
+    // reader refuses prose-length values so one never becomes a route label.
+    const name = listingText(entry?.name, entry?.displayName, entry?.display_name, entry?.description)
+    // Capacities, modalities, and the advertised effort ladder come from the
+    // one parser llm-pi-ai's discovery uses, so an add-created route carries
+    // exactly what a later Models-page refresh would disclose.
+    const capabilities = listingCapabilities(entry)
     models.push({
       id,
       ...name === undefined || name === id ? {} : { name },
-      ...contextWindow === undefined ? {} : { contextWindow },
-      ...maxTokens === undefined ? {} : { maxTokens },
+      ...capabilities.contextWindow === undefined ? {} : { contextWindow: capabilities.contextWindow },
+      ...capabilities.maxTokens === undefined ? {} : { maxTokens: capabilities.maxTokens },
+      ...capabilities.inputModalities === undefined ? {} : { input: [...capabilities.inputModalities] },
+      ...capabilities.reasoningEfforts === undefined ? {} : { reasoningEfforts: { ...capabilities.reasoningEfforts } },
     })
   }
   return models
@@ -983,12 +957,16 @@ export async function discoverRouteModels(
     return found.flatMap((model): DiscoveredModel[] => {
       if (model.id === '') return []
       const input = (model.inputModalities ?? []).filter(modality => typeof modality === 'string' && modality !== '')
+      const reasoningEfforts = model.reasoningEfforts === undefined
+        ? undefined
+        : Object.keys(model.reasoningEfforts).length === 0 ? undefined : { ...model.reasoningEfforts }
       return [{
         id: model.id,
         ...model.name === undefined || model.name === model.id ? {} : { name: model.name },
         ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
         ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
         ...input.length === 0 ? {} : { input },
+        ...reasoningEfforts === undefined ? {} : { reasoningEfforts },
       }]
     })
   } catch {

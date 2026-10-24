@@ -614,6 +614,34 @@ it('meridian is a loopback keyless Anthropic Messages service route on port 3456
   expect(manifest.fallbackModel).toBeUndefined()
 })
 
+it('meridian declares the adaptive-thinking compat switch the live endpoint needs', () => {
+  const manifest = manifestById('meridian')!
+  expect(manifest.compat).toEqual({ forceAdaptiveThinking: true })
+  expect(manifestProblems()).toEqual([])
+  const quirks = manifest.quirks.join('\n')
+  expect(quirks).toContain('budget_tokens')
+  expect(quirks).toContain('adaptive thinking')
+  expect(quirks).toContain('forceAdaptiveThinking')
+})
+
+it('refuses a compat key the declared protocol does not offer', () => {
+  const meridian = manifestById('meridian')!
+  // A misspelling: refused with the offer the protocol actually has.
+  const misspelled = manifestProblems([{ ...meridian, compat: { notACompatField: true } }]).join('\n')
+  expect(misspelled).toContain('compat "notACompatField" is not offered by protocol "anthropic-messages"')
+  expect(misspelled).toContain('forceAdaptiveThinking')
+  // A field pi-ai's installed catalog decides for the vendors that need it is
+  // declared upstream but withheld from configuration.
+  expect(manifestProblems([{ ...meridian, compat: { allowedFallbackModels: true } }]).join('\n'))
+    .toContain('compat "allowedFallbackModels" is not offered')
+  // A route served by its own adapter takes no llm-pi-ai compat at all.
+  expect(manifestProblems([{ ...manifestById('commandcode')!, compat: { supportsStore: true } }]).join('\n'))
+    .toContain('(that protocol takes no compat)')
+  // A valueless switch is refused too, not silently coerced.
+  expect(manifestProblems([{ ...meridian, compat: { forceAdaptiveThinking: 'yes' as unknown as boolean } }]).join('\n'))
+    .toContain('compat "forceAdaptiveThinking" must be true or false')
+})
+
 it('meridian badges the subscription login as a browser flow and carries the documented quirks', () => {
   const manifest = manifestById('meridian')!
   expect(manifest.requiresBrowser.join('\n')).toContain('claude auth login --claudeai')

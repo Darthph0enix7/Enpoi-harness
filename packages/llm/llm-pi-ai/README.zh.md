@@ -145,6 +145,8 @@ Settings 写入会在合并组合层与用户层后严格校验每个新增或�
 | [`src/login.ts`](src/login.ts) | 面向提供登录的已安装提供方的授权流程 |
 | [`src/config.ts`](src/config.ts) | Profile schema、解析与可服务性校验 |
 | [`src/catalog.ts`](src/catalog.ts) | 已安装目录集成与漂移门禁 |
+| [`src/compat.ts`](src/compat.ts) | 各 wire protocol 可配置的 compat 字段词表及其漂移门禁 |
+| [`src/listing.ts`](src/listing.ts) | 端点发现与 heavy provider 规划器共用的模型列表解析器 |
 | [`src/models.ts`](src/models.ts) | 基于 pi-ai 窄入口的 model collection、静态 provider 与 reasoning level |
 | [`src/provider.ts`](src/provider.ts) | 受支持协议表与提供方构建 |
 | [`src/context.ts`](src/context.ts) | Harness 到 pi-ai 的上下文转换、图片处理、回放恢复 |
