@@ -238,6 +238,7 @@ function visibleJobSnapshot(job, configured) {
 }
 
 // src/manifests.ts
+import { offeredCompatFields } from "@deepseek-ai/dsh-llm-pi-ai/src/compat.ts";
 function platformInstallVariant(local, platform) {
   return platform === "linux" || platform === "darwin" || platform === "win32" ? local.install[platform] ?? local.install.default : local.install.default;
 }
@@ -862,15 +863,22 @@ var HEAVY_MANIFESTS = [
   {
     id: "meridian",
     label: "Claude Code (Meridian)",
-    summary: "Local proxy that serves the operator's Claude subscription through the official Agent SDK as an OpenAI-compatible endpoint.",
-    protocol: "openai-completions",
+    summary: "Local proxy that serves the operator's Claude subscription through the official Agent SDK as an Anthropic Messages-compatible endpoint.",
+    protocol: "anthropic-messages",
+    // Live probes against a shipped Meridian: budget-style thinking
+    // (`{type: 'enabled', budget_tokens}`) is accepted and its budget ignored,
+    // while adaptive thinking plus an effort level answers with reasoning
+    // blocks. pi-ai emits the budget shape unless the route says otherwise, so
+    // the compat switch is part of the provider's declaration, not an operator
+    // preference.
+    compat: { forceAdaptiveThinking: true },
     // A service instance on this device: detection and the health probe use
     // the loopback endpoint, and an operator's own host belongs in the
     // private server overlay.
     delivery: "service",
     // The proxy needs no client key: as shipped it is loopback-gated, and it
     // forwards no credential of its own (it drives the CLI login store).
-    // llm-pi-ai serves keyless openai-completions routes, so the route is
+    // llm-pi-ai serves keyless anthropic-messages routes, so the route is
     // written keyless and no stored or ambient key reaches the wire. An
     // operator who sets MERIDIAN_API_KEY retargets the route through the
     // server overlay with a unified key; the shipped table stays keyless.
@@ -887,19 +895,20 @@ var HEAVY_MANIFESTS = [
       "ExecStart must be `node <resolved>/dist/cli.js`, never the `meridian` bin: its `#!/usr/bin/env node` shebang does not resolve under systemd",
       "The unit PATH must contain the npm global bin (where `claude` lives), or the Agent SDK cannot spawn the CLI",
       "The model catalog ships inside each Meridian release: /v1/models answers from the build, not from a live CLI query, but an unknown model id still passes through to the SDK",
+      'Thinking: budget-style `thinking: {type:"enabled", budget_tokens}` is accepted but its budget is ignored; adaptive thinking plus an effort level (`output_config.effort`) is the working shape, so this route is created with the llm-pi-ai compat switch `forceAdaptiveThinking`',
       "MERIDIAN_ENFORCE_MAX_TOKENS=1 is set here, so a harness that relies on max_tokens gets a hard budget",
       "x-session-affinity is optional and only matters for append-only clients; a request without it runs a fresh SDK session with the history packed into the system prompt",
       "Billing draws from the operator's own Claude subscription usage windows (like `claude -p`) \u2014 Meridian drives the official CLI/SDK and never reads or replays OAuth tokens"
     ],
     reuse: {
       label: "Use a detected instance",
-      baseURL: `http://127.0.0.1:${MERIDIAN_PORT}/v1`,
+      baseURL: `http://127.0.0.1:${MERIDIAN_PORT}`,
       note: "Zero install: uses a Meridian proxy already running on this device and its Claude subscription login.",
       health: MERIDIAN_HEALTH
     },
     local: {
       label: "Install locally (npm + user service)",
-      baseURL: `http://127.0.0.1:${MERIDIAN_PORT}/v1`,
+      baseURL: `http://127.0.0.1:${MERIDIAN_PORT}`,
       deps: ["Node.js >= 22", "A reachable systemd user session (systemctl --user) on the default path"],
       diskHint: "Two global npm packages and one Node process; no GPU, no Docker",
       dashboardUrl: `http://127.0.0.1:${MERIDIAN_PORT}`,
@@ -1021,6 +1030,13 @@ function manifestProblems(manifests = HEAVY_MANIFESTS) {
     if (manifest.unsupported === void 0 && !LLM_PI_AI_PROTOCOLS.includes(manifest.protocol) && manifest.settingsNs === void 0) {
       problems.push(`${where}: protocol "${manifest.protocol}" is not served by llm-pi-ai and needs an explicit settingsNs`);
     }
+    const offered = offeredCompatFields(manifest.protocol);
+    for (const [field, value] of Object.entries(manifest.compat ?? {})) {
+      if (!offered.includes(field)) {
+        problems.push(`${where}: compat "${field}" is not offered by protocol "${manifest.protocol}"` + (offered.length === 0 ? " (that protocol takes no compat)" : `; offered: ${offered.join(", ")}`));
+      }
+      if (typeof value !== "boolean") problems.push(`${where}: compat "${field}" must be true or false`);
+    }
     if (manifest.delivery === "direct" && manifest.unsupported === void 0 && manifest.pool === void 0 && manifest.auth.kind === "none") {
       problems.push(`${where}: a direct route must declare a key pool or a non-keyless auth kind`);
     }
@@ -1059,6 +1075,7 @@ function manifestProblems(manifests = HEAVY_MANIFESTS) {
 // src/planner.ts
 import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { dirname, join as join2 } from "node:path";
+import { listingCapabilities, listingText } from "@deepseek-ai/dsh-llm-pi-ai/src/listing.ts";
 var LLM_NS = "llm-pi-ai";
 var ORCHESTRATION_NS = "enpoi-orchestration";
 function substitute(value, home, dshHome) {
@@ -1393,7 +1410,10 @@ function routeProfile(manifest, mode, models, overrides = {}) {
     ...model.name === void 0 ? {} : { name: model.name },
     ...model.contextWindow === void 0 ? {} : { contextWindow: model.contextWindow },
     ...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens },
-    ...model.input === void 0 || model.input.length === 0 ? {} : { input: [...model.input] }
+    ...model.input === void 0 || model.input.length === 0 ? {} : { input: [...model.input] },
+    // An empty ladder states nothing and the route schema refuses it as a
+    // declared-but-empty capability, so it is omitted like an absent one.
+    ...model.reasoningEfforts === void 0 || Object.keys(model.reasoningEfforts).length === 0 ? {} : { reasoningEfforts: { ...model.reasoningEfforts } }
   })) : manifest.fallbackModel === void 0 ? [] : [{ id: manifest.fallbackModel }];
   const suffix = manifest.delivery === "direct" ? " (direct)" : mode === "local" ? " (local)" : " (detected)";
   return {
@@ -1402,6 +1422,7 @@ function routeProfile(manifest, mode, models, overrides = {}) {
     baseURL: overrides.baseURL ?? modeBaseURL(manifest, mode),
     ...manifest.auth.apiKeyEnv === void 0 ? {} : { apiKeyEnv: manifest.auth.apiKeyEnv },
     ...manifest.auth.kind === "none" ? { keyless: true } : {},
+    ...manifest.compat === void 0 ? {} : { compat: { ...manifest.compat } },
     ...manifest.pool === void 0 ? {} : {
       pool: {
         ...manifest.pool.strategy === void 0 ? {} : { strategy: manifest.pool.strategy },
@@ -1436,18 +1457,6 @@ function modelListingUrl(baseURL, api) {
   const root = base.endsWith("/v1") ? base.slice(0, -3) : base;
   return `${root}/v1/models?limit=1000`;
 }
-function listingLabel(...candidates) {
-  for (const candidate of candidates) {
-    if (typeof candidate === "string" && candidate.length > 0 && candidate.length <= 200) return candidate;
-  }
-  return void 0;
-}
-function listingCapacity(...candidates) {
-  for (const candidate of candidates) {
-    if (typeof candidate === "number" && Number.isInteger(candidate) && candidate > 0) return candidate;
-  }
-  return void 0;
-}
 function readModelListing(body) {
   const listing = body;
   let rows;
@@ -1464,30 +1473,18 @@ function readModelListing(body) {
   const models = [];
   for (const { key, raw } of rows.slice(0, 2e3)) {
     const entry = raw;
-    const id = listingLabel(key, entry?.id);
+    const id = listingText(key, entry?.id);
     if (id === void 0 || seen.has(id)) continue;
     seen.add(id);
-    const name2 = listingLabel(entry?.name, entry?.displayName, entry?.display_name, entry?.description);
-    const contextWindow = listingCapacity(
-      entry?.contextWindow,
-      entry?.context_window,
-      entry?.context_length,
-      entry?.max_input_tokens,
-      entry?.limit?.context
-    );
-    const maxTokens = listingCapacity(
-      entry?.maxOutputTokens,
-      entry?.max_output_tokens,
-      entry?.maxTokens,
-      entry?.max_tokens,
-      entry?.limit?.output,
-      entry?.top_provider?.max_completion_tokens
-    );
+    const name2 = listingText(entry?.name, entry?.displayName, entry?.display_name, entry?.description);
+    const capabilities = listingCapabilities(entry);
     models.push({
       id,
       ...name2 === void 0 || name2 === id ? {} : { name: name2 },
-      ...contextWindow === void 0 ? {} : { contextWindow },
-      ...maxTokens === void 0 ? {} : { maxTokens }
+      ...capabilities.contextWindow === void 0 ? {} : { contextWindow: capabilities.contextWindow },
+      ...capabilities.maxTokens === void 0 ? {} : { maxTokens: capabilities.maxTokens },
+      ...capabilities.inputModalities === void 0 ? {} : { input: [...capabilities.inputModalities] },
+      ...capabilities.reasoningEfforts === void 0 ? {} : { reasoningEfforts: { ...capabilities.reasoningEfforts } }
     });
   }
   return models;
@@ -1522,12 +1519,14 @@ async function discoverRouteModels(deps, manifest, baseURL, apiKey) {
     return found.flatMap((model) => {
       if (model.id === "") return [];
       const input = (model.inputModalities ?? []).filter((modality) => typeof modality === "string" && modality !== "");
+      const reasoningEfforts = model.reasoningEfforts === void 0 ? void 0 : Object.keys(model.reasoningEfforts).length === 0 ? void 0 : { ...model.reasoningEfforts };
       return [{
         id: model.id,
         ...model.name === void 0 || model.name === model.id ? {} : { name: model.name },
         ...model.contextWindow === void 0 ? {} : { contextWindow: model.contextWindow },
         ...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens },
-        ...input.length === 0 ? {} : { input }
+        ...input.length === 0 ? {} : { input },
+        ...reasoningEfforts === void 0 ? {} : { reasoningEfforts }
       }];
     });
   } catch {
@@ -1884,7 +1883,7 @@ var zh = {
   "commandcode.default.0": "\u94FE\u63A5\u5E76\u6784\u5EFA DSH \u63D0\u4F9B\u65B9\u5305",
   "commandcode.linux.0": "\u94FE\u63A5\u5E76\u6784\u5EFA DSH \u63D0\u4F9B\u65B9\u5305",
   "commandcode.darwin.0": "\u94FE\u63A5\u5E76\u6784\u5EFA DSH \u63D0\u4F9B\u65B9\u5305",
-  "summary.meridian": "\u901A\u8FC7\u5B98\u65B9 Agent SDK \u628A\u8FD0\u8425\u8005\u7684 Claude \u8BA2\u9605\u4F5C\u4E3A OpenAI \u517C\u5BB9\u7AEF\u70B9\u63D0\u4F9B\u7684\u672C\u5730\u4EE3\u7406\u3002",
+  "summary.meridian": "\u901A\u8FC7\u5B98\u65B9 Agent SDK \u628A\u8FD0\u8425\u8005\u7684 Claude \u8BA2\u9605\u4F5C\u4E3A Anthropic Messages \u517C\u5BB9\u7AEF\u70B9\u63D0\u4F9B\u7684\u672C\u5730\u4EE3\u7406\u3002",
   "reuse.meridian.label": "\u4F7F\u7528\u68C0\u6D4B\u5230\u7684\u5B9E\u4F8B",
   "reuse.meridian.note": "\u96F6\u5B89\u88C5\uFF1A\u4F7F\u7528\u672C\u673A\u5DF2\u5728\u8FD0\u884C\u7684 Meridian \u4EE3\u7406\u53CA\u5176 Claude \u8BA2\u9605\u767B\u5F55\u3002",
   "local.meridian.label": "\u672C\u5730\u5B89\u88C5\uFF08npm + \u7528\u6237\u670D\u52A1\uFF09",
@@ -1979,7 +1978,7 @@ var en = {
   "commandcode.default.0": "Link and build the DSH provider package",
   "commandcode.linux.0": "Link and build the DSH provider package",
   "commandcode.darwin.0": "Link and build the DSH provider package",
-  "summary.meridian": "Local proxy that serves the operator's Claude subscription through the official Agent SDK as an OpenAI-compatible endpoint.",
+  "summary.meridian": "Local proxy that serves the operator's Claude subscription through the official Agent SDK as an Anthropic Messages-compatible endpoint.",
   "reuse.meridian.label": "Use a detected instance",
   "reuse.meridian.note": "Zero install: uses a Meridian proxy already running on this device and its Claude subscription login.",
   "local.meridian.label": "Install locally (npm + user service)",

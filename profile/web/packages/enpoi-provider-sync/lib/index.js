@@ -398,6 +398,7 @@ function getBuiltinModels(provider) {
 
 // src/index.ts
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from "@deepseek-ai/dsh-llm-pi-ai/src/config.ts";
+import { listingCapabilities } from "@deepseek-ai/dsh-llm-pi-ai/src/listing.ts";
 
 // src/capability-hints.ts
 import { readFileSync } from "node:fs";
@@ -821,6 +822,17 @@ function listingModalities(entry) {
   const inputs = liveModalities(raw);
   return inputs.length === 0 ? void 0 : inputs;
 }
+function mergeModalities(listed, capabilities) {
+  if (listed === void 0 && capabilities === void 0) return void 0;
+  const modalities = [];
+  for (const modality of [...listed ?? [], ...capabilities ?? []]) {
+    if (!modalities.includes(modality)) modalities.push(modality);
+  }
+  return modalities.length === 0 ? void 0 : modalities;
+}
+function liveEfforts(ladder) {
+  return ladder === void 0 || Object.keys(ladder).length === 0 ? void 0 : ladder;
+}
 function listingSupported(entry) {
   const raw = entry.supported_parameters;
   if (!Array.isArray(raw)) return {};
@@ -866,16 +878,20 @@ function normalizeListingEntry(entry) {
   );
   const supported = listingSupported(row);
   const isFree = typeof row.isFree === "boolean" ? row.isFree : void 0;
+  const capabilities = listingCapabilities(row);
+  const modalities = mergeModalities(listingModalities(row), capabilities.inputModalities);
+  const efforts = liveEfforts(capabilities.reasoningEfforts);
   return {
     id,
     ...displayName === void 0 || displayName.length > 120 ? {} : { name: displayName },
     ...contextWindow === void 0 ? {} : { contextWindow },
     ...maxTokens === void 0 ? {} : { maxTokens },
-    ...listingModalities(row) === void 0 ? {} : { input: listingModalities(row) },
+    ...modalities === void 0 ? {} : { input: modalities },
     ...supported.tools === void 0 ? {} : { tools: supported.tools },
     ...supported.reasoning === void 0 ? {} : { reasoning: supported.reasoning },
     ...listingPricing(row) === void 0 ? {} : { pricing: listingPricing(row) },
     ...isFree === void 0 ? {} : { isFree },
+    ...efforts === void 0 ? {} : { reasoningEfforts: { ...efforts } },
     ...isFree === false ? { gated: true, gateReason: SIGN_IN_REQUIRED } : {}
   };
 }
@@ -1190,15 +1206,17 @@ function analyzeModel(route, model, fallback, hints, routeProviderMap = DEFAULT_
   const modalityDisclosed = disclosed !== void 0;
   const inputModalities = modalityDisclosed ? ["text", ...liveModalities(disclosed).filter((modality) => modality !== "text")] : ["text"];
   const listingReasoning = typeof model.reasoning === "boolean" ? model.reasoning : void 0;
+  const endpointEfforts = liveEfforts(model.reasoningEfforts);
+  const catalogMaySpeak = endpointEfforts === void 0 && listingReasoning === void 0;
   const enrichedReasoning = [mDev?.reasoning, cat?.reasoning].filter((value2) => typeof value2 === "boolean");
-  const reasoningOptions = listingReasoning === void 0 && Array.isArray(mDev?.reasoning_options) && mDev.reasoning_options.length > 0;
-  const thinkingLevels = listingReasoning === void 0 && cat?.thinkingLevelMap !== void 0 && Object.keys(cat.thinkingLevelMap).some((key) => key !== "off");
-  const reasoningDisclosed = listingReasoning !== void 0 || enrichedReasoning.length > 0 || reasoningOptions || thinkingLevels;
-  const isReasoning = listingReasoning ?? (enrichedReasoning.some((value2) => value2 === true) || reasoningOptions || thinkingLevels);
+  const reasoningOptions = catalogMaySpeak && Array.isArray(mDev?.reasoning_options) && mDev.reasoning_options.length > 0;
+  const thinkingLevels = catalogMaySpeak && cat?.thinkingLevelMap !== void 0 && Object.keys(cat.thinkingLevelMap).some((key) => key !== "off");
+  const reasoningDisclosed = endpointEfforts !== void 0 || listingReasoning !== void 0 || enrichedReasoning.length > 0 || reasoningOptions || thinkingLevels;
+  const isReasoning = endpointEfforts !== void 0 ? true : listingReasoning ?? (enrichedReasoning.some((value2) => value2 === true) || reasoningOptions || thinkingLevels);
   const claim = claimCapabilityHints(route, model.id, hints.table, hints.override);
   const hintedInput = !modalityDisclosed && claim !== void 0 && claim.input.length > 0;
   const hintedReasoning = !reasoningDisclosed && claim?.reasoning === true;
-  const nothingDescribed = mDev === void 0 && cat === void 0 && model.input === void 0 && model.reasoning === void 0 && model.tools === void 0;
+  const nothingDescribed = mDev === void 0 && cat === void 0 && model.input === void 0 && model.reasoning === void 0 && model.tools === void 0 && endpointEfforts === void 0;
   const unverified = nothingDescribed || hintedInput || hintedReasoning;
   const capabilityHints = claim === void 0 ? void 0 : {
     ...claim.input.length === 0 || modalityDisclosed ? {} : { input: claim.input },
@@ -1206,7 +1224,9 @@ function analyzeModel(route, model, fallback, hints, routeProviderMap = DEFAULT_
     source: claim.source
   };
   let reasoningEfforts;
-  if (isReasoning) {
+  if (endpointEfforts !== void 0) {
+    reasoningEfforts = { ...endpointEfforts };
+  } else if (isReasoning) {
     const levels = {};
     const VALID_THINKING_KEYS = /* @__PURE__ */ new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
     if (Array.isArray(mDev?.reasoning_options)) {
@@ -1281,6 +1301,11 @@ function analyzeModel(route, model, fallback, hints, routeProviderMap = DEFAULT_
     }
   };
 }
+function preservedManualFields(entry) {
+  if (entry.source !== "manual") return {};
+  const ladder = entry.reasoningEfforts;
+  return ladder !== null && typeof ladder === "object" && !Array.isArray(ladder) && Object.keys(ladder).length > 0 ? { reasoningEfforts: { ...ladder } } : {};
+}
 function mergeConfiguredModels(route, configured, live2, capacities, hints = { table: loadCapabilityHints(), override: {} }, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP) {
   const advertised = /* @__PURE__ */ new Map();
   for (const model of live2) {
@@ -1300,7 +1325,7 @@ function mergeConfiguredModels(route, configured, live2, capacities, hints = { t
     seen.add(id);
     const fresh = advertised.get(id);
     if (fresh !== void 0) {
-      models.push(entry.source === "manual" ? { ...fresh, source: "manual" } : fresh);
+      models.push(entry.source === "manual" ? { ...fresh, ...preservedManualFields(entry), source: "manual" } : fresh);
       continue;
     }
     const keptSource = entry.source === "manual" || entry.source === "pinned-in-use" ? entry.source : "configured";
@@ -1514,6 +1539,9 @@ function planRouteModels(input) {
       if (fresh !== void 0) {
         models.push({
           ...fresh,
+          // The healthy pass refreshes the record too; a manual entry's own
+          // ladder is the operator's claim and survives it.
+          ...preservedManualFields(entry),
           ...entry.source === "manual" ? { source: "manual" } : {},
           ...isGrace ? { firstSeenAt: firstSeenAtOf(entry) ?? input.now } : {}
         });
