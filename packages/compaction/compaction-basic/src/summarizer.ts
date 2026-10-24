@@ -9,6 +9,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import {
   contentHasImage,
   BlockAssembler,
+  errorChain,
   IMAGE_OFFLOAD_REQUIRED_CODE,
   LlmError,
   projectImagesForTextModel,
@@ -27,6 +28,54 @@ export interface SummaryConfig {
   /** Model-group id the summariser route was resolved through, when a seat named a chain. */
   readonly summarizationChain?: string
   readonly maxTokens: number
+}
+
+/**
+ * Bounded, durable cause of the summarization failure that forced the
+ * mechanical fallback. Mirrors the `compaction/summary` payload field of the
+ * same name, so the recorded failure has one vocabulary.
+ */
+export interface SummarizationFailure {
+  /** Stable failure class: the error's own `code` when present, else its constructor name. */
+  readonly code: string
+  /** Rendered failure message with its cause chain, truncated to a durable audit length. */
+  readonly message: string
+}
+
+/** Durable audit bound for one recorded summarization-failure message. */
+const SUMMARIZATION_FAILURE_MESSAGE_MAX_CHARS = 500
+
+/**
+ * Classify one thrown summarization failure for the durable record. The own
+ * `code` data property wins when present — `LlmError`/`HarnessError` codes and
+ * the plain `MAX_TOKENS` classification — because it is the stable
+ * machine-routable class; otherwise the constructor name, or `UNKNOWN` for a
+ * non-Error throw. Reading the descriptor cannot invoke a hostile accessor, so
+ * recording the failure can never mask it.
+ * @param error - value thrown by the summarizer or the shrink guard.
+ * @returns the bounded code and message recorded on the summary event.
+ */
+export function summarizationFailureCause(error: unknown): SummarizationFailure {
+  let code: string | undefined
+  if (error instanceof Error) {
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(error, 'code')
+      if (descriptor !== undefined && 'value' in descriptor
+        && typeof descriptor.value === 'string' && descriptor.value.length > 0) {
+        code = descriptor.value
+      }
+    } catch (_hostileCodeAccessor) {
+      // The constructor name below still classifies the failure.
+    }
+  }
+  const name = error instanceof Error && error.name.length > 0 ? error.name : undefined
+  const message = errorChain(error)
+  return {
+    code: code ?? name ?? 'UNKNOWN',
+    message: message.length <= SUMMARIZATION_FAILURE_MESSAGE_MAX_CHARS
+      ? message
+      : `${message.slice(0, SUMMARIZATION_FAILURE_MESSAGE_MAX_CHARS - 1)}…`,
+  }
 }
 
 /** Tags wrapping the structured summary inside the landed checkpoint node. */
@@ -142,6 +191,13 @@ export interface SummarizationFraming {
    * are left out of this call and the durable checkpoint records the gap.
    */
   readonly inputBudgetTokens?: number
+  /**
+   * The budget is a conservative stand-in because the summariser's own context
+   * window (or its metadata) could not be resolved. A clipped replay is then
+   * reported as a conservative clip, so the checkpoint note states the real
+   * reason instead of implying a known window.
+   */
+  readonly unknownWindow?: boolean
 }
 
 /** Safe summary content plus the exact auxiliary call envelope recorded with it. */
@@ -157,6 +213,11 @@ export type SummaryResult = {
    * its newest messages. The durable checkpoint framing documents the gap.
    */
   windowClipped?: boolean
+  /**
+   * The cap was the conservative unknown-window budget rather than a resolved
+   * model window; the checkpoint note names that reason.
+   */
+  conservativeWindowClip?: boolean
 } & (
   | {
     /** Complete provider output before the text-only summary projection. */
@@ -403,6 +464,9 @@ export async function summarizeWithLlm(
     maxTokens: config.maxTokens,
     ...dispatched.usage === undefined ? {} : { usage: dispatched.usage },
     ...(replay.windowClipped ? { windowClipped: true } : {}),
+    ...(replay.windowClipped && framing?.unknownWindow === true
+      ? { conservativeWindowClip: true }
+      : {}),
   }
 }
 

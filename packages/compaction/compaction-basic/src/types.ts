@@ -52,6 +52,48 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
   pinLeadingMaxTokens?: number
   /** Where pinning applies: child sessions only (default) or every session. */
   pinScope?: 'child' | 'all'
+  /**
+   * Replay input budget used when the summariser's own context window cannot be
+   * resolved. Never sends the whole region on an unknown window; a positive
+   * integer, defaults to `16384`.
+   */
+  summarizerUnknownWindowTokens?: number
+  /**
+   * Extra summarization attempts with a smaller replay region after a
+   * request-size rejection (400/413/context-length/token-limit). Non-negative
+   * integer, defaults to `2` (halve, then halve again).
+   */
+  summarizerFrameRetries?: number
+  /** Fraction of the rejected region kept for the next attempt; in (0, 1), defaults to `0.5`. */
+  summarizerFrameShrinkRatio?: number
+  /**
+   * Consecutive summariser failures on one route before the session's own
+   * routed provider/model is used for the next summary. Positive integer,
+   * defaults to `2`.
+   */
+  summarizerEscalationFailures?: number
+  /**
+   * Consecutive summariser failures on one route that open its circuit: no
+   * further call is paid until the route, the session configuration, or an
+   * explicit `/compact` resets it. Positive integer, defaults to `4`.
+   */
+  summarizerCircuitFailures?: number
+  /**
+   * Share of the compacted region the deterministic mechanical fallback must
+   * free (`0 < share ≤ 1`, defaults to `0.5`), so consecutive attempts make
+   * monotonic progress. The whole selected region is the clamp.
+   */
+  mechanicalFallbackFreeShare?: number
+}
+
+/** Validated summariser resilience policy: framing, retry, escalation, and fallback bounds. */
+export interface ResolvedSummarizerResilience {
+  readonly summarizerUnknownWindowTokens: number
+  readonly summarizerFrameRetries: number
+  readonly summarizerFrameShrinkRatio: number
+  readonly summarizerEscalationFailures: number
+  readonly summarizerCircuitFailures: number
+  readonly mechanicalFallbackFreeShare: number
 }
 
 /** Where leading-message pinning applies. */
@@ -83,10 +125,11 @@ interface ResolvedPolicyFields {
 }
 
 /** Validated immutable config whose target-specific defaults remain unresolved. */
-export type ResolvedConfig = ResolvedPolicyFields & ResolvedRetention & ResolvedContextUxConfig & {
-  readonly modelPolicies: readonly Readonly<ModelCompactPolicyConfig>[]
-  readonly auto: boolean
-}
+export type ResolvedConfig = ResolvedPolicyFields & ResolvedRetention & ResolvedContextUxConfig
+  & ResolvedSummarizerResilience & {
+    readonly modelPolicies: readonly Readonly<ModelCompactPolicyConfig>[]
+    readonly auto: boolean
+  }
 
 /** Fully merged policy for one routed conversation target, before capacity scaling. */
 export type ResolvedTargetPolicy = ResolvedPolicyFields & ResolvedRetention & {

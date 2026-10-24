@@ -15,6 +15,7 @@ import type {
   ResolvedConfig,
   ResolvedContextUxConfig,
   ResolvedRetention,
+  ResolvedSummarizerResilience,
   ResolvedTargetPolicy,
 } from './types.ts'
 
@@ -26,6 +27,24 @@ const DEFAULT_RETAIN_RATIO = 0.16
 
 /** Default per-pinned-message price ceiling. */
 const DEFAULT_PIN_LEADING_MAX_TOKENS = 4_000
+
+/** Default replay budget used when the summariser window is unknown. */
+const DEFAULT_SUMMARIZER_UNKNOWN_WINDOW_TOKENS = 16_384
+
+/** Default extra attempts with a smaller frame after a size-class rejection. */
+const DEFAULT_SUMMARIZER_FRAME_RETRIES = 2
+
+/** Default fraction of a rejected frame kept for the next attempt. */
+const DEFAULT_SUMMARIZER_FRAME_SHRINK_RATIO = 0.5
+
+/** Default consecutive failures before the session route is tried. */
+const DEFAULT_SUMMARIZER_ESCALATION_FAILURES = 2
+
+/** Default consecutive failures that open one route's circuit. */
+const DEFAULT_SUMMARIZER_CIRCUIT_FAILURES = 4
+
+/** Default share of the compacted region the mechanical fallback must free. */
+const DEFAULT_MECHANICAL_FALLBACK_FREE_SHARE = 0.5
 
 /** Fields shared by top-level defaults and exact-target overrides. */
 const POLICY_CONFIG_KEYS = [
@@ -50,6 +69,12 @@ const BASIC_COMPACT_CONFIG_KEYS: ReadonlySet<string> = new Set([
   'pinLeadingUserMessages',
   'pinLeadingMaxTokens',
   'pinScope',
+  'summarizerUnknownWindowTokens',
+  'summarizerFrameRetries',
+  'summarizerFrameShrinkRatio',
+  'summarizerEscalationFailures',
+  'summarizerCircuitFailures',
+  'mechanicalFallbackFreeShare',
 ])
 
 /** Complete exact-target override key set. */
@@ -82,6 +107,7 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
     throw new Error('BasicCompactionConfig: auto must be a boolean')
   }
   validateContextUx(config)
+  validateSummarizerResilience(config)
 
   const headroomTokens = config.headroomTokens ?? 65_536
   const maxTokens = config.maxTokens ?? headroomTokens
@@ -116,6 +142,7 @@ export function resolveConfig(config: BasicCompactionConfig = {}): ResolvedConfi
     compactionRetries: config.compactionRetries ?? 1,
     maxOverflowRetries: config.maxOverflowRetries ?? 1,
     ...resolveContextUx(config),
+    ...resolveSummarizerResilience(config),
     modelPolicies,
     auto: config.auto ?? true,
   })
@@ -159,6 +186,12 @@ export function applySettingsOverrides(
     pinLeadingUserMessages: config.pinLeadingUserMessages,
     pinLeadingMaxTokens: config.pinLeadingMaxTokens,
     pinScope: config.pinScope,
+    summarizerUnknownWindowTokens: config.summarizerUnknownWindowTokens,
+    summarizerFrameRetries: config.summarizerFrameRetries,
+    summarizerFrameShrinkRatio: config.summarizerFrameShrinkRatio,
+    summarizerEscalationFailures: config.summarizerEscalationFailures,
+    summarizerCircuitFailures: config.summarizerCircuitFailures,
+    mechanicalFallbackFreeShare: config.mechanicalFallbackFreeShare,
     modelPolicies: config.modelPolicies,
     auto: config.auto,
   }
@@ -453,6 +486,67 @@ function validateContextUx(config: BasicCompactionConfig): void {
   }
   if (config.pinScope !== undefined && config.pinScope !== 'child' && config.pinScope !== 'all') {
     throw new Error('BasicCompactionConfig.pinScope must be "child" or "all"')
+  }
+}
+
+/** Validate the summariser resilience bounds before a default can hide a stale value. */
+function validateSummarizerResilience(config: BasicCompactionConfig): void {
+  if (config.summarizerUnknownWindowTokens !== undefined) {
+    assertPositiveInteger(
+      'BasicCompactionConfig.summarizerUnknownWindowTokens',
+      config.summarizerUnknownWindowTokens,
+    )
+  }
+  if (config.summarizerFrameRetries !== undefined) {
+    assertNonNegativeInteger(
+      'BasicCompactionConfig.summarizerFrameRetries',
+      config.summarizerFrameRetries,
+    )
+  }
+  if (config.summarizerFrameShrinkRatio !== undefined) {
+    assertOpenRatio('BasicCompactionConfig.summarizerFrameShrinkRatio', config.summarizerFrameShrinkRatio)
+  }
+  if (config.summarizerEscalationFailures !== undefined) {
+    assertPositiveInteger(
+      'BasicCompactionConfig.summarizerEscalationFailures',
+      config.summarizerEscalationFailures,
+    )
+  }
+  if (config.summarizerCircuitFailures !== undefined) {
+    assertPositiveInteger(
+      'BasicCompactionConfig.summarizerCircuitFailures',
+      config.summarizerCircuitFailures,
+    )
+  }
+  if (config.mechanicalFallbackFreeShare !== undefined) {
+    assertRatio(
+      'BasicCompactionConfig.mechanicalFallbackFreeShare',
+      config.mechanicalFallbackFreeShare,
+    )
+  }
+}
+
+/** A finite number strictly between 0 and 1, so a shrink attempt always shrinks. */
+function assertOpenRatio(name: string, value: unknown): asserts value is number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0 || value >= 1) {
+    throw new Error(`${name} (${String(value)}) must be a number in (0, 1)`)
+  }
+}
+
+/** Detach the validated summariser resilience fields with their shipped defaults. */
+function resolveSummarizerResilience(config: BasicCompactionConfig): ResolvedSummarizerResilience {
+  return {
+    summarizerUnknownWindowTokens:
+      config.summarizerUnknownWindowTokens ?? DEFAULT_SUMMARIZER_UNKNOWN_WINDOW_TOKENS,
+    summarizerFrameRetries: config.summarizerFrameRetries ?? DEFAULT_SUMMARIZER_FRAME_RETRIES,
+    summarizerFrameShrinkRatio:
+      config.summarizerFrameShrinkRatio ?? DEFAULT_SUMMARIZER_FRAME_SHRINK_RATIO,
+    summarizerEscalationFailures:
+      config.summarizerEscalationFailures ?? DEFAULT_SUMMARIZER_ESCALATION_FAILURES,
+    summarizerCircuitFailures:
+      config.summarizerCircuitFailures ?? DEFAULT_SUMMARIZER_CIRCUIT_FAILURES,
+    mechanicalFallbackFreeShare:
+      config.mechanicalFallbackFreeShare ?? DEFAULT_MECHANICAL_FALLBACK_FREE_SHARE,
   }
 }
 

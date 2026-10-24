@@ -340,6 +340,12 @@ describe('compact configuration and defaults', () => {
       pinLeadingUserMessages: 1,
       pinLeadingMaxTokens: 4_000,
       pinScope: 'child',
+      summarizerUnknownWindowTokens: 16_384,
+      summarizerFrameRetries: 2,
+      summarizerFrameShrinkRatio: 0.5,
+      summarizerEscalationFailures: 2,
+      summarizerCircuitFailures: 4,
+      mechanicalFallbackFreeShare: 0.5,
       modelPolicies: [],
       auto: true,
     })

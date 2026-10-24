@@ -96,6 +96,65 @@ export function isContextWindowExceededError(detail: string): boolean {
 }
 
 /**
+ * Client-payload vocabulary: the request itself is unserviceable because of its
+ * size. This is the exact set the pi-ai pool classifies as `INVALID_REQUEST`
+ * (`packages/llm/llm-pi-ai/src/pool.ts`) plus the payload-size wording its
+ * stream mapper adds; it lives here so every consumer of a summarisation or
+ * retry decision shares one vocabulary instead of private regex copies.
+ */
+// One line keeps the auditable pattern readable; the payload clauses mirror the
+// pi-ai stream mapper's oversized-body wording.
+// eslint-disable-next-line @stylistic/max-len -- the vocabulary literal must stay one line.
+const REQUEST_SIZE_RE = /\b400\b|\b413\b|invalid argument|context (?:window|length)|maximum context|token limit exceeded|payload too large|request body too large|failed to buffer the request body/i
+
+/** Failure codes whose class is a rejected request size/payload rather than a route fault. */
+const REQUEST_SIZE_CODES: ReadonlySet<string> = new Set([
+  CONTEXT_WINDOW_EXCEEDED_CODE,
+  // The pi-ai pool's class for 400/413-shaped refusals, carried as the LlmError
+  // code when that adapter exhausts its own failover.
+  'INVALID_REQUEST',
+])
+
+/**
+ * Recognize provider wording that identifies a request rejected for its size or
+ * payload: HTTP 400/413, context length, token limit, or an oversized body.
+ * A caller retrying with a smaller request (summarisation framing, region
+ * shrink) routes on this plus {@link isRequestSizeFailure}.
+ * @param detail - provider error code/type/message text joined into one string.
+ * @returns true when the detail identifies an unserviceable request size.
+ */
+export function isRequestSizeExceededError(detail: string): boolean {
+  return REQUEST_SIZE_RE.test(detail) || isContextWindowExceededError(detail)
+}
+
+/**
+ * Recognize a thrown failure whose class is a rejected request size, reading
+ * both the rendered cause chain and each link's own `code`. Adapters that
+ * already classified a 400-for-size refusal (such as the pi-ai pool's
+ * `INVALID_REQUEST`) keep the class even when the provider body is empty.
+ * @param value - the caught value (`unknown` in catch clauses).
+ * @returns true when any link of the failure identifies a request-size class.
+ */
+export function isRequestSizeFailure(value: unknown): boolean {
+  if (isRequestSizeExceededError(errorChain(value))) return true
+  const seen = new Set<unknown>()
+  let current: unknown = value
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current)
+    try {
+      const descriptor = Object.getOwnPropertyDescriptor(current, 'code')
+      if (descriptor !== undefined && 'value' in descriptor
+        && typeof descriptor.value === 'string'
+        && REQUEST_SIZE_CODES.has(descriptor.value)) return true
+    } catch (_hostileCodeAccessor) {
+      // The rendered chain above still classifies the failure.
+    }
+    current = current.cause
+  }
+  return false
+}
+
+/**
  * Recognize provider wording that identifies an exhausted account quota rather
  * than a transient request-rate limit.
  * @param detail - provider error code/type/message text joined into one string.

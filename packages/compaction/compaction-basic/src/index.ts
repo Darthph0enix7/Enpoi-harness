@@ -10,7 +10,7 @@ import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compac
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
 import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
-import { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import { CONTEXT_WINDOW_EXCEEDED_CODE, HarnessError } from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
@@ -32,7 +32,7 @@ import {
 } from './region.ts'
 import type { PinLeadingOptions, RecallFraming } from './region.ts'
 import { readCompactionSettings, resolveCompactionSeat } from './settings.ts'
-import { resolveSummarizationTarget, summarizeWithLlm } from './summarizer.ts'
+import { resolveSummarizationTarget, summarizationFailureCause, summarizeWithLlm } from './summarizer.ts'
 import type { SummarizationInput, SummarizationFraming, SummaryConfig, SummaryResult } from './summarizer.ts'
 import type {
   BasicCompactionConfig,
@@ -47,8 +47,41 @@ export type {
   ResolvedCompactSpec,
   ResolvedConfig,
   ResolvedRetention,
+  ResolvedSummarizerResilience,
   ResolvedTargetPolicy,
 } from './types.ts'
+
+/**
+ * Failure code recorded on the mechanical checkpoint when a summariser route's
+ * circuit is open. It names the state rather than a provider refusal, so a
+ * post-hoc reader can tell "we stopped paying" from "the provider said no".
+ */
+export const SUMMARIZER_CIRCUIT_OPEN_CODE = 'SUMMARIZER_CIRCUIT_OPEN'
+
+/** Consecutive failures counted against one summariser route in one session. */
+interface SummarizerRouteState {
+  /** Paid attempts that failed since the last success or reset. */
+  failures: number
+  /** Whether the route is circuit-open and must not be called. */
+  open: boolean
+  /** The most recent recorded failure class, for the durable circuit notice. */
+  lastCode: string
+}
+
+/** Stable map key for one resolved summariser route. */
+function routeKey(route: { readonly provider: string; readonly model: string }): string {
+  return `${route.provider}/${route.model}`
+}
+
+/** The synthetic failure that keeps a circuit-open route from being paid again. */
+function circuitOpenError(key: string, state: SummarizerRouteState): HarnessError {
+  return new HarnessError(
+    `summariser route ${key} is circuit-open after ${state.failures} consecutive `
+    + `failures (${state.lastCode}); no summary call is paid on it until the route, `
+    + 'the session configuration, or /compact resets it',
+    SUMMARIZER_CIRCUIT_OPEN_CODE,
+  )
+}
 
 /** Resolve the exact provider/model durably routed for the latest request. */
 function routedTarget(
@@ -147,6 +180,12 @@ const summarizationModelSchema = z.string()
 const maxTokensSchema = z.number().step(1).min(1)
 const compactionRetriesSchema = z.number().step(1).min(0)
 const maxOverflowRetriesSchema = z.number().step(1).min(0)
+const summarizerUnknownWindowTokensSchema = z.number().step(1).min(1)
+const summarizerFrameRetriesSchema = z.number().step(1).min(0)
+const summarizerFrameShrinkRatioSchema = z.number()
+const summarizerEscalationFailuresSchema = z.number().step(1).min(1)
+const summarizerCircuitFailuresSchema = z.number().step(1).min(1)
+const mechanicalFallbackFreeShareSchema = z.number()
 
 const modelPolicy: z<ModelCompactPolicyConfig> = z.object({
   provider: z.string().required(),
@@ -190,6 +229,12 @@ export class BasicCompactionEngine extends CompactionEngine {
     pinLeadingUserMessages: z.number().step(1).min(0),
     pinLeadingMaxTokens: z.number().step(1).min(1),
     pinScope: z.union(['child', 'all'] as const),
+    summarizerUnknownWindowTokens: summarizerUnknownWindowTokensSchema,
+    summarizerFrameRetries: summarizerFrameRetriesSchema,
+    summarizerFrameShrinkRatio: summarizerFrameShrinkRatioSchema,
+    summarizerEscalationFailures: summarizerEscalationFailuresSchema,
+    summarizerCircuitFailures: summarizerCircuitFailuresSchema,
+    mechanicalFallbackFreeShare: mechanicalFallbackFreeShareSchema,
   })
 
   /** Resolved and validated compaction configuration. */
@@ -199,6 +244,8 @@ export class BasicCompactionEngine extends CompactionEngine {
   private readonly warnedPressureReliefTargets = new Set<string>()
   private readonly overflowRetries = new WeakMap<Agent, number>()
   private readonly overflowAgents = new WeakMap<Session, Agent>()
+  /** Consecutive summariser failures per session route, and whether its circuit is open. */
+  private readonly summarizerRoutes = new WeakMap<Session, Map<string, SummarizerRouteState>>()
 
   constructor(ctx: Context, config: BasicCompactionConfig = {}) {
     super(ctx)
@@ -248,6 +295,13 @@ export class BasicCompactionEngine extends CompactionEngine {
     // A successful response starts a fresh overflow-recovery sequence even
     // when tool calls continue the same turn into another request.
     ctx.on('session/event', (session, event) => {
+      // A resumed session or a revision of the routed configuration re-probes
+      // every summariser route once more instead of inheriting a stale breaker.
+      if (event.type === 'request/header'
+        && (event.data.reason === 'resume' || event.data.reason === 'change')) {
+        this.summarizerRoutes.delete(session)
+        return
+      }
       if (event.type !== 'assistant/message') return
       const agent = this.overflowAgents.get(session)
       if (agent !== undefined) this.overflowRetries.delete(agent)
@@ -308,8 +362,12 @@ export class BasicCompactionEngine extends CompactionEngine {
    * route (a different model loses the prefix cache and pays the region's full
    * input price); when the summariser's own context window is smaller than the
    * region, the replay is capped to fit and the durable checkpoint records the
-   * un-summarized seqs for recall. Override this sole hook for a template or
-   * remote summarizer.
+   * un-summarized seqs for recall. An unresolvable window is framed by the
+   * conservative `summarizerUnknownWindowTokens` budget instead of the whole
+   * region. Consecutive failures on one route escalate to the session's own
+   * routed provider/model, then open that route's circuit until the route, the
+   * session configuration, or `/compact` resets it. Override this sole hook for
+   * a template or remote summarizer.
    * @param input - replayed conversation prefix (system, tools, and leading messages) to condense.
    * @param agent - supplies routed-model history, fallback model, and session id.
    * @param signal - optional cancellation forwarded to the adapter.
@@ -326,7 +384,7 @@ export class BasicCompactionEngine extends CompactionEngine {
       ? settings
       : resolveTargetPolicy(settings, target)
     const seat = resolveCompactionSeat(this.ctx)
-    const summaryConfig: SummaryConfig = seat === undefined
+    const preferred: SummaryConfig = seat === undefined
       ? config
       : {
         ...config,
@@ -334,32 +392,124 @@ export class BasicCompactionEngine extends CompactionEngine {
         summarizationModel: seat.model,
         ...seat.chain === undefined ? {} : { summarizationChain: seat.chain },
       }
-    const framing = await this.summarizerFraming(summaryConfig, agent, signal)
-    return summarizeWithLlm(this.ctx, summaryConfig, input, agent, signal, framing)
+    const preferredRoute = resolveSummarizationTarget(preferred, agent)
+    if (preferredRoute === undefined) {
+      // No route at all is a configuration failure, not a route fault: never
+      // count it toward a circuit or hide its actionable message.
+      return summarizeWithLlm(this.ctx, preferred, input, agent, signal)
+    }
+    const fallback: SummaryConfig | undefined = target === undefined
+      ? undefined
+      : {
+        summarizationProvider: target.provider,
+        summarizationModel: target.model,
+        maxTokens: config.maxTokens,
+      }
+    const preferredKey = routeKey(preferredRoute)
+    const fallbackKey = target === undefined ? undefined : routeKey(target)
+    // The observed routes bound the state table: a changed route has no entry,
+    // so it starts with a clean counter (the "try once more" after a change).
+    this.pruneSummarizerRoutes(agent.session, [
+      preferredKey,
+      ...fallbackKey === undefined || fallbackKey === preferredKey ? [] : [fallbackKey],
+    ])
+    const preferredState = this.summarizerRouteState(agent.session, preferredKey)
+    const escalateTo = fallbackKey !== undefined
+      && fallbackKey !== preferredKey
+      && (preferredState.open || preferredState.failures >= settings.summarizerEscalationFailures)
+      ? fallbackKey
+      : undefined
+    if (preferredState.open && escalateTo === undefined) throw circuitOpenError(preferredKey, preferredState)
+    const active = escalateTo === undefined ? preferred : fallback
+    const activeKey = escalateTo ?? preferredKey
+    if (active === undefined) throw circuitOpenError(preferredKey, preferredState)
+    const activeState = this.summarizerRouteState(agent.session, activeKey)
+    if (activeState.open) throw circuitOpenError(activeKey, activeState)
+    try {
+      const framing = await this.summarizerFraming(
+        active,
+        agent,
+        settings.summarizerUnknownWindowTokens,
+        signal,
+      )
+      const result = await summarizeWithLlm(this.ctx, active, input, agent, signal, framing)
+      activeState.failures = 0
+      activeState.open = false
+      activeState.lastCode = ''
+      return result
+    } catch (error: unknown) {
+      // Cancellation is not a route fault and must not trip the breaker.
+      if (signal?.aborted !== true) {
+        const cause = summarizationFailureCause(error)
+        activeState.failures += 1
+        activeState.lastCode = cause.code
+        if (activeState.failures >= settings.summarizerCircuitFailures) {
+          activeState.open = true
+          this.ctx.logger.warn(
+            `compaction: summariser route ${activeKey} open after `
+            + `${activeState.failures} consecutive failures (${cause.code}); `
+            + 'no further summary call is paid on it until the route, the session '
+            + 'configuration, or /compact resets it',
+          )
+        }
+      }
+      throw error
+    }
   }
 
   /** Resolve the summariser's usable input budget from its own context window. */
   private async summarizerFraming(
     config: SummaryConfig,
     agent: Agent,
+    unknownWindowTokens: number,
     signal?: AbortSignal,
-  ): Promise<SummarizationFraming | undefined> {
+  ): Promise<SummarizationFraming> {
+    // An unresolved window never sends the whole region: the conservative cap
+    // is marked so the checkpoint explains the real reason for the clip.
+    const conservative: SummarizationFraming = {
+      inputBudgetTokens: unknownWindowTokens,
+      unknownWindow: true,
+    }
     const target = resolveSummarizationTarget(config, agent)
-    if (target === undefined) return undefined
+    if (target === undefined) return conservative
     try {
       const info = await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal)
       const contextWindow = info.context?.contextWindow
-      if (contextWindow === undefined) return undefined
+      if (contextWindow === undefined) return conservative
       // The summariser's own completion is capped by the resolved generation
       // cap; never reserve more than half the window so the replay keeps room.
       const outputReserve = Math.min(config.maxTokens, Math.floor(contextWindow / 2))
       const inputBudgetTokens = contextWindow - outputReserve
-      return inputBudgetTokens > 0 ? { inputBudgetTokens } : undefined
+      return inputBudgetTokens > 0 ? { inputBudgetTokens } : conservative
     } catch {
-      // No window metadata or a metadata fault: replay the raw region exactly
-      // as before; the output-cap guard and the mechanical fallback still apply.
-      return undefined
+      // No window metadata or a metadata fault: the conservative cap keeps the
+      // request bounded; the size-class retry ladder still applies on refusal.
+      return conservative
     }
+  }
+
+  /** Drop state for routes no longer observed, so a route change resets its circuit. */
+  private pruneSummarizerRoutes(session: Session, keep: readonly string[]): void {
+    const routes = this.summarizerRoutes.get(session)
+    if (routes === undefined) return
+    for (const key of routes.keys()) {
+      if (!keep.includes(key)) routes.delete(key)
+    }
+  }
+
+  /** Consecutive-failure state for one summariser route in one session. */
+  private summarizerRouteState(session: Session, key: string): SummarizerRouteState {
+    let routes = this.summarizerRoutes.get(session)
+    if (routes === undefined) {
+      routes = new Map()
+      this.summarizerRoutes.set(session, routes)
+    }
+    let state = routes.get(key)
+    if (state === undefined) {
+      state = { failures: 0, open: false, lastCode: '' }
+      routes.set(key, state)
+    }
+    return state
   }
 
   /** Plugin config overlaid with the live `parameters.compaction` settings values. */
@@ -576,6 +726,8 @@ export class BasicCompactionEngine extends CompactionEngine {
     sourceCommandId?: CommandId,
   ): Promise<CompactionResult | null> {
     signal.throwIfAborted()
+    // An explicit /compact is the operator's request to try the route again.
+    this.summarizerRoutes.delete(agent.session)
     try {
       return agent.runMaintenance(async (agentSignal) => {
         const operationSignal = AbortSignal.any([agentSignal, signal])
@@ -639,6 +791,11 @@ export class BasicCompactionEngine extends CompactionEngine {
       }, () => false),
       warn: (line) => { this.ctx.logger.warn(line) },
       framing: agent => this.recallFraming(agent),
+      summarizerPolicy: {
+        frameRetries: this.config.summarizerFrameRetries,
+        frameShrinkRatio: this.config.summarizerFrameShrinkRatio,
+        mechanicalFreeShare: this.config.mechanicalFallbackFreeShare,
+      },
     }
   }
 }

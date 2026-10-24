@@ -16,13 +16,19 @@ import {
 } from '@deepseek-ai/dsh-compaction'
 import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
-import { createUserMessage, errorChain } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, errorChain, isRequestSizeFailure } from '@deepseek-ai/dsh-llm'
 import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import { SessionSeq, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { frameMechanicalOmission, frameSummary, MECHANICAL_SUMMARY_TEXT, SummarizationReplayError } from './summarizer.ts'
-import type { SummarizationInput, SummaryResult } from './summarizer.ts'
+import {
+  frameMechanicalOmission,
+  frameSummary,
+  MECHANICAL_SUMMARY_TEXT,
+  SummarizationReplayError,
+  summarizationFailureCause,
+} from './summarizer.ts'
+import type { SummarizationFailure, SummarizationInput, SummaryResult } from './summarizer.ts'
 interface RegionDependencies {
   readonly meter: TokenMeter
   summarize(input: SummarizationInput, agent: Agent, signal?: AbortSignal): Promise<SummaryResult>
@@ -31,6 +37,22 @@ interface RegionDependencies {
   warn(line: string): void
   /** Recall wording and footer resolved against the compacting agent's visible tools. */
   framing(agent: Agent): RecallFraming
+  /** Summariser resilience bounds resolved from plugin configuration. */
+  readonly summarizerPolicy: SummarizerRegionPolicy
+}
+
+/**
+ * Bounds the compaction transaction applies when the summarizer rejects its
+ * request or cannot run. Every value is a validated `BasicCompactionConfig`
+ * field on the owning plugin.
+ */
+export interface SummarizerRegionPolicy {
+  /** Extra attempts with a smaller replay region after a size-class rejection. */
+  readonly frameRetries: number
+  /** Fraction of the rejected region kept for the retry, in (0, 1). */
+  readonly frameShrinkRatio: number
+  /** Share of the selected region the mechanical omission must free, in (0, 1]. */
+  readonly mechanicalFreeShare: number
 }
 
 /** Deterministic recall wording for the compacting agent's tool scope. */
@@ -65,6 +87,8 @@ interface PreparedCompaction extends SurfaceSelection {
   readonly shadowedTokenCount: number
   /** Route-priced total of the selected span; the shrink comparison's unit. */
   readonly shadowedRouteTokenCount: number
+  /** Surface seqs replayed as leading context before the region, in order. */
+  readonly replayLeadingSeqs: readonly SessionSeq[]
   readonly input: SummarizationInput
 }
 
@@ -72,14 +96,6 @@ type SummarizedCompaction = PreparedCompaction & SummaryResult & {
   readonly checkpointMessage: UserMessage
   /** Bounded cause recorded when a summarization failure forced the mechanical stub. */
   readonly summarizationFailure?: SummarizationFailure
-}
-
-/** Bounded, durable cause of the summarization failure that forced the mechanical fallback. */
-interface SummarizationFailure {
-  /** Stable failure class: the error's own `code` when present, else its constructor name. */
-  readonly code: string
-  /** Rendered failure message with its cause chain, truncated to a durable audit length. */
-  readonly message: string
 }
 
 interface CompactionTransactionOptions {
@@ -132,42 +148,6 @@ class SummaryNotSmallerError extends Error {
     // Match the HarnessError convention so the class survives as the recorded
     // failure code when the shrink guard selects the mechanical fallback.
     this.name = 'SummaryNotSmallerError'
-  }
-}
-
-/** Durable audit bound for one recorded summarization-failure message. */
-const SUMMARIZATION_FAILURE_MESSAGE_MAX_CHARS = 500
-
-/**
- * Classify one thrown summarization failure for the durable record. The own
- * `code` data property wins when present — `LlmError`/`HarnessError` codes and
- * the plain `MAX_TOKENS` classification — because it is the stable
- * machine-routable class; otherwise the constructor name, or `UNKNOWN` for a
- * non-Error throw. Reading the descriptor cannot invoke a hostile accessor, so
- * recording the failure can never mask it.
- * @param error - value thrown by the summarizer or the shrink guard.
- * @returns the bounded code and message recorded on the summary event.
- */
-function summarizationFailureCause(error: unknown): SummarizationFailure {
-  let code: string | undefined
-  if (error instanceof Error) {
-    try {
-      const descriptor = Object.getOwnPropertyDescriptor(error, 'code')
-      if (descriptor !== undefined && 'value' in descriptor
-        && typeof descriptor.value === 'string' && descriptor.value.length > 0) {
-        code = descriptor.value
-      }
-    } catch (_hostileCodeAccessor) {
-      // The constructor name below still classifies the failure.
-    }
-  }
-  const name = error instanceof Error && error.name.length > 0 ? error.name : undefined
-  const message = errorChain(error)
-  return {
-    code: code ?? name ?? 'UNKNOWN',
-    message: message.length <= SUMMARIZATION_FAILURE_MESSAGE_MAX_CHARS
-      ? message
-      : `${message.slice(0, SUMMARIZATION_FAILURE_MESSAGE_MAX_CHARS - 1)}…`,
   }
 }
 
@@ -466,11 +446,22 @@ function validateSurfaceRegion(session: Session, start: SessionSeq, end: Session
   return { start, end, startIdx, endIdx, shadowedSeqs: nodes.slice(startIdx, endIdx + 1) }
 }
 
-/** Snapshot pricing and replay input for a validated surface range. */
+/**
+ * Snapshot pricing and replay input for a validated surface range.
+ * @param dependencies - meter and summariser policy.
+ * @param session - session supplying surface positions and derivation.
+ * @param selection - the validated span the replacement will shadow.
+ * @param replayLeadingSeqs - surface seqs to replay before the region.
+ *   Defaults to the nodes between the system head and the selection start; a
+ *   shrunk retry passes the frame's original leading seqs so the nodes it
+ *   dropped from the oldest end are not replayed as leading context (which
+ *   would keep the request exactly as large as the refused one).
+ */
 function prepareCompaction(
   dependencies: RegionDependencies,
   session: Session,
   selection: SurfaceSelection,
+  replayLeadingSeqs?: readonly SessionSeq[],
 ): PreparedCompaction {
   const measurement = dependencies.meter.measure(session)
   const selectedNodes = measurement.nodes.slice(selection.startIdx, selection.endIdx + 1)
@@ -481,6 +472,7 @@ function prepareCompaction(
   const surfaceNodes = session.surface.nodes
   // oxlint-disable-next-line typescript/no-non-null-assertion
   const headIdx = systemHead(session, surfaceNodes[0]!) === undefined ? 0 : 1
+  const leadingSeqs = replayLeadingSeqs ?? surfaceNodes.slice(headIdx, selection.startIdx)
   return {
     ...selection,
     measurement,
@@ -491,11 +483,8 @@ function prepareCompaction(
     // route-priced `tokens` instead.
     shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.heuristicTokens, 0),
     shadowedRouteTokenCount: selectedNodes.reduce((total, node) => total + node.tokens, 0),
-    input: buildSummarizationInput(
-      session,
-      surfaceNodes.slice(headIdx, selection.startIdx),
-      selection.shadowedSeqs,
-    ),
+    replayLeadingSeqs: leadingSeqs,
+    input: buildSummarizationInput(session, leadingSeqs, selection.shadowedSeqs),
   }
 }
 
@@ -517,6 +506,7 @@ async function summarizeCompaction(
   allowMechanicalFallback: boolean,
   signal?: AbortSignal,
 ): Promise<SummarizedCompaction> {
+  let frameRetriesLeft = dependencies.summarizerPolicy.frameRetries
   for (;;) {
     signal?.throwIfAborted()
     try {
@@ -539,6 +529,32 @@ async function summarizeCompaction(
         ? error.replayedSourceSeqs
         : prepared.shadowedSeqs
       if (!dependencies.recover(error, agent, replayedSeqs, signal)) {
+        // A request-size rejection is the summariser telling us the frame is
+        // too large for what it can actually accept. Retry the SAME compaction
+        // with a smaller but never empty region and keep the retained tail, so
+        // the reduction still shadows the oldest part of the span. Image
+        // recovery owns its own ladder and is never shrunk here.
+        if (frameRetriesLeft > 0
+          && !(error instanceof SummarizationReplayError)
+          && isRequestSizeFailure(error)) {
+          const smaller = shrinkReplayRegion(
+            dependencies,
+            agent.session,
+            prepared,
+            dependencies.summarizerPolicy.frameShrinkRatio,
+          )
+          if (smaller !== null) {
+            frameRetriesLeft -= 1
+            const cause = summarizationFailureCause(error)
+            dependencies.warn(
+              `compaction ${compactionId}: summariser rejected the frame `
+              + `(${cause.code}: ${cause.message}); retrying with `
+              + `${smaller.shadowedSeqs.length} of ${prepared.shadowedSeqs.length} shadowed nodes`,
+            )
+            prepared = smaller
+            continue
+          }
+        }
         if (allowMechanicalFallback) {
           const failure = summarizationFailureCause(error)
           const mechanical = mechanicalCompaction(
@@ -576,10 +592,13 @@ function frameSummarizedCompaction(
   sourceCommandId: CommandId | undefined,
 ): SummarizedCompaction {
   const framing = dependencies.framing(agent)
+  const clippedCause = summaryResult.conservativeWindowClip === true
+    ? "the summariser's context window could not be resolved, so the replay was capped to a conservative budget"
+    : "the summariser's context window was smaller than this span"
   const coverageNote = summaryResult.windowClipped === true
     ? framing.searchRead
-      ? `the summariser's context window was smaller than this span, so only its newest messages were condensed; seqs ${prepared.start}–${prepared.end} remain retrievable with session_event_search / session_event_read`
-      : `the summariser's context window was smaller than this span, so only its newest messages were condensed; seqs ${prepared.start}–${prepared.end}. The complete transcript is preserved in the session log.`
+      ? `${clippedCause}, so only its newest messages were condensed; seqs ${prepared.start}–${prepared.end} remain retrievable with session_event_search / session_event_read`
+      : `${clippedCause}, so only its newest messages were condensed; seqs ${prepared.start}–${prepared.end}. The complete transcript is preserved in the session log.`
     : undefined
   const checkpointMessage = createUserMessage({
     content: frameSummary(summaryResult.summary, coverageNote, framing.footer),
@@ -599,6 +618,60 @@ function frameSummarizedCompaction(
     ...summaryResult,
     checkpointMessage,
   }
+}
+
+/**
+ * Re-derive the same compaction from its newest messages only: keep the
+ * retained tail and the newest suffix of the selected span, dropping the oldest
+ * part that made the request too large. The selection never becomes empty and
+ * always advances past the previous start, so a retry cannot repeat the exact
+ * frame that was just rejected and cannot loop with no effect. The replay's
+ * shared system head and pinned leading messages stay byte-identical, so the
+ * provider can still serve the cached prefix up to where the frames diverge.
+ * @param dependencies - meter and summariser policy.
+ * @param session - session whose surface supplies current positions and prices.
+ * @param prepared - the frame that was rejected for its size.
+ * @param shrinkRatio - fraction of the rejected region's tokens to keep, in (0, 1).
+ * @returns the smaller prepared compaction, or `null` when no strictly smaller
+ *   balanced region exists (the caller then selects its fallback).
+ */
+function shrinkReplayRegion(
+  dependencies: RegionDependencies,
+  session: Session,
+  prepared: PreparedCompaction,
+  shrinkRatio: number,
+): PreparedCompaction | null {
+  const nodes = session.surface.nodes
+  const startIdx = nodes.indexOf(prepared.start)
+  const endIdx = nodes.indexOf(prepared.end)
+  if (startIdx === -1 || endIdx <= startIdx) return null
+  const prices = new Map(
+    dependencies.meter.measure(session).nodes.map(node => [node.seq, node.tokens]),
+  )
+  const targetTokens = Math.max(1, Math.ceil(prepared.shadowedRouteTokenCount * shrinkRatio))
+  let spent = 0
+  let keepFromIdx = endIdx
+  for (let index = endIdx; index >= startIdx; index -= 1) {
+    // oxlint-disable-next-line typescript/no-non-null-assertion -- index is a valid surface position.
+    spent += prices.get(nodes[index]!) ?? 0
+    keepFromIdx = index
+    if (spent >= targetTokens) break
+  }
+  // Strictly smaller than the rejected frame: at least one older node is gone.
+  if (keepFromIdx <= startIdx) keepFromIdx = startIdx + 1
+  // The start must be a balanced boundary; `end` was already validated.
+  // oxlint-disable-next-line typescript/no-non-null-assertion -- index is a valid surface position.
+  while (keepFromIdx < endIdx && !toolPairingBalancedBefore(session, nodes[keepFromIdx]!)) {
+    keepFromIdx += 1
+  }
+  // oxlint-disable-next-line typescript/no-non-null-assertion -- index is a valid surface position.
+  if (keepFromIdx > endIdx || !toolPairingBalancedBefore(session, nodes[keepFromIdx]!)) return null
+  // oxlint-disable-next-line typescript/no-non-null-assertion -- index is a valid surface position.
+  const selection = validateSurfaceRegion(session, nodes[keepFromIdx]!, prepared.end)
+  // Replay only the smaller region: the nodes dropped from the oldest end are
+  // not leading context, or the request would stay exactly as large as the one
+  // the provider just refused.
+  return prepareCompaction(dependencies, session, selection, prepared.replayLeadingSeqs)
 }
 
 /**
@@ -634,15 +707,39 @@ function mechanicalCompaction(
   })
   const stubTokenCount = dependencies.meter.estimateMessage(probe)
 
+  // Free at least the configured share of the selected span, not merely enough
+  // to beat the stub's own price: a stub that frees 0.5k of a 590k region is a
+  // "success" that cannot relieve pressure and invites another identical pass.
+  // The stub price is still the hard floor (a replacement must shrink its
+  // source) and the whole selected span is the clamp — the retained tail lies
+  // outside it.
+  const targetTokens = Math.max(
+    stubTokenCount + 1,
+    Math.ceil(prepared.shadowedRouteTokenCount * dependencies.summarizerPolicy.mechanicalFreeShare)
+      + stubTokenCount,
+  )
   let droppedTokens = 0
   let cut: SessionSeq | undefined
   for (const [index, node] of prepared.selectedNodes.entries()) {
     droppedTokens += node.tokens
     // oxlint-disable-next-line typescript/no-non-null-assertion -- selectedNodes and shadowedSeqs are parallel.
     const seq = prepared.shadowedSeqs[index]!
-    if (droppedTokens > stubTokenCount && toolPairingBalancedAfter(session, seq)) {
+    if (droppedTokens >= targetTokens && toolPairingBalancedAfter(session, seq)) {
       cut = seq
       break
+    }
+  }
+  if (cut === undefined) {
+    // Clamp to the whole selected span: the newest balanced boundary at or
+    // before its end. Nothing beyond the span is ever removed, so the retained
+    // tail keeps its verbatim budget.
+    for (let index = prepared.shadowedSeqs.length - 1; index >= 0; index -= 1) {
+      // oxlint-disable-next-line typescript/no-non-null-assertion -- index is a valid position.
+      const seq = prepared.shadowedSeqs[index]!
+      if (toolPairingBalancedAfter(session, seq)) {
+        cut = seq
+        break
+      }
     }
   }
   if (cut === undefined) return null
