@@ -1,8 +1,21 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-23T19:35:35.567Z",
+  "generatedAt": "2026-10-24T18:18:29.308Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.107",
+      "commit": "4b2b165",
+      "releasedAt": "2026-10-24T18:02:29.000Z",
+      "notes": [
+        "chore(profile): rebuild the heavy-providers and provider-sync bundles",
+        "fix(provider-sync): a refresh must not drop the effort ladder an endpoint advertises",
+        "feat(providers): let a heavy route declare compat, and share one listing parser",
+        "fix(compaction): never condense a span the summariser cannot see",
+        "feat(compaction): coordinate the summariser with what it can actually take",
+        "fix(providers): Meridian speaks Anthropic Messages, and discovery reads advertised capabilities"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.106",
       "commit": "c4fda65",
@@ -365,14 +378,6 @@
       "releasedAt": "2026-10-11T23:01:48.000Z",
       "notes": [
         "perf(update): stop refreshing the superseded tree's scan index"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.65",
-      "commit": "7c0dbf2",
-      "releasedAt": "2026-10-11T22:37:28.000Z",
-      "notes": [
-        "fix(update): bounded v2 journal - real-tree applies in minutes, not hours"
       ]
     }
   ]
