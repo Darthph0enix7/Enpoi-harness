@@ -80,13 +80,13 @@ Provider ID 是永久的，因为请求、已保存会话、模型默认值和�
 
 ### Claude Code (Meridian)
 
-**Claude Code (Meridian)** 是一个本地代理，通过 Anthropic 官方的 Agent SDK 把你的 Claude Pro/Max 订阅作为 OpenAI 兼容端点 `http://127.0.0.1:3456/v1` 提供，健康检查为 `GET /health`，控制台位于 `http://127.0.0.1:3456`。它驱动已安装的 `claude` CLI，因此计费走订阅的用量窗口，不读取也不重放任何 OAuth 令牌。添加时不会写入任何凭据：按安装状态，该代理只对本机开放。
+**Claude Code (Meridian)** 是一个本地代理，通过 Anthropic 官方的 Agent SDK 把你的 Claude Pro/Max 订阅作为 Anthropic Messages 兼容端点 `http://127.0.0.1:3456` 提供（请求发往 `/v1/messages`），健康检查为 `GET /health`，控制台位于 `http://127.0.0.1:3456`。它驱动已安装的 `claude` CLI，因此计费走订阅的用量窗口，不读取也不重放任何 OAuth 令牌。添加时不会写入任何凭据：按安装状态，该代理只对本机开放。
 
 安装会先检查两个前提，然后才写入任何内容：Node.js 22 或更高版本及 npm，以及已安装并登录订阅的 `@anthropic-ai/claude-code` CLI（`env -u ANTHROPIC_API_KEY claude auth login --claudeai`）。该登录是浏览器流程，API 密钥会话不算数：当 `auth status` 报告的不是 `claude.ai` 时，安装会停止并给出登录命令。登录时请保持 `ANTHROPIC_API_KEY` 未设置。Linux 上安装会写入 `~/.config/systemd/user/meridian.service` 并启用它；macOS 上写入 `~/Library/LaunchAgents/dev.meridian.proxy.plist` 并引导该代理。两者都运行 `node <解析后的>/dist/cli.js` 而不是 `meridian` bin——后者的 shebang 在服务化 PATH 下无法解析——并设置 `MERIDIAN_HOST=127.0.0.1`、`MERIDIAN_PORT=3456`、`MERIDIAN_PASSTHROUGH=1` 和 `MERIDIAN_ENFORCE_MAX_TOKENS=1`，同时把 npm 全局 bin 放进 `PATH`，以便 SDK 能启动 `claude`。Windows 没有受支持的本地安装；拒绝原因会列出需要手动执行的命令。
 
 模型目录随每个 Meridian 版本一同发布，因此 `/v1/models` 由构建产物作答，而不是实时查询 CLI；比该版本更新的模型 ID 仍会透传给 SDK。`MERIDIAN_ENFORCE_MAX_TOKENS=1` 让路由的 `max_tokens` 成为硬性预算。`x-session-affinity` 是可选的，只对仅追加历史的客户端有意义：不发送时，每次请求都会在一个新的 SDK 会话上运行，并把历史打包进系统提示。升级方式是 `npm install -g @rynfar/meridian@latest` 后重启服务；重新运行内置安装会同时完成这两步。
 
-**从另一台设备访问。** 按安装状态，代理绑定 `127.0.0.1`。要服务 Tailscale 或局域网，请在单元（或 plist）中修改 `MERIDIAN_HOST` 并重新加载服务，然后在另一台机器上添加该提供商，并在**自定义实例 URL（可选）**中填入本机地址。当除你之外还有别的对象能访问该端口时，请设置 `MERIDIAN_API_KEY`；客户端随后会以 Bearer 令牌发送它。切勿在公网主机上绑定 `0.0.0.0`。
+**从另一台设备访问。** 按安装状态，代理绑定 `127.0.0.1`。要服务 Tailscale 或局域网，请在单元（或 plist）中修改 `MERIDIAN_HOST` 并重新加载服务，然后在另一台机器上添加该提供商，并在**自定义实例 URL（可选）**中填入本机地址。当除你之外还有别的对象能访问该端口时，请设置 `MERIDIAN_API_KEY`；客户端随后会通过 `x-api-key` 请求头发送它。切勿在公网主机上绑定 `0.0.0.0`。
 
 **移除。** 勾选本地卸载后，清理会停止并禁用 `meridian.service`（或 bootout launchd 代理）、删除单元或 plist，并删除 macOS 日志。它从不卸载 npm 全局包：`@rynfar/meridian` 与 `@anthropic-ai/claude-code` 都会保留，因为该 CLI 是共用工具，而 Meridian 可能是唯一副本——当没有其他工具使用它们时，请自行用 `npm uninstall -g` 移除。`~/.config/meridian`（配置档、设置、定价）和 `~/.cache/meridian`（会话）会留在原处，`~/.claude` 中的 CLI 登录存储也绝不会被触碰。不勾选时，移除只清理 DSH 侧状态。
 

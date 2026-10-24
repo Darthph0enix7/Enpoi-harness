@@ -18,14 +18,17 @@
  * OpenAI-compatible and Anthropic Messages protocols are interrogated through
  * their native model-listing endpoints. The parser accepts the standard
  * `data` array and the enriched `models` map some compatible gateways expose.
- * Every other protocol reports that it cannot be interrogated so the surface
- * falls back to hand-entry rather than guessing its response fields.
+ * A provider-neutral `capabilities` block, when present, contributes the
+ * advertised reasoning efforts and input types; its absence leaves the row as
+ * the listing read it. Every other protocol reports that it cannot be
+ * interrogated so the surface falls back to hand-entry rather than guessing
+ * its response fields.
  *
  * @module dsh-llm-pi-ai/discovery
  */
 
 import { INVALID_CREDENTIAL_CODE, LlmError, normalizeApiKey } from '@deepseek-ai/dsh-llm'
-import type { LlmDiscoveredModel, LlmModelDiscoveryOperation } from '@deepseek-ai/dsh-llm'
+import type { LlmDiscoveredModel, LlmModelDiscoveryOperation, ModelModality } from '@deepseek-ai/dsh-llm'
 import { attributionHeaders } from '@deepseek-ai/dsh-llm'
 import type { Api, Model } from '@earendil-works/pi-ai'
 import { catalogModels } from './catalog.ts'
@@ -107,6 +110,13 @@ interface ListingEntry {
   maxTokens?: unknown
   limit?: ListingLimit | null
   top_provider?: ListingTopProvider | null
+  /** Provider-neutral capability block some gateways (and Anthropic) nest per model. */
+  capabilities?: unknown
+}
+
+/** One `{ supported: boolean }` capability object in a listing's `capabilities` block. */
+interface ListingCapability {
+  supported?: unknown
 }
 
 /** A positive integer field of a listing entry, or `undefined` when absent or unusable. */
@@ -123,6 +133,56 @@ function label(...candidates: readonly unknown[]): string | undefined {
     if (typeof candidate === 'string' && candidate.length > 0) return candidate
   }
   return undefined
+}
+
+/** Whether one capability object explicitly advertises support. */
+function supported(value: unknown): boolean {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && (value as ListingCapability).supported === true
+}
+
+/** A plain JSON object, or `undefined` for anything else (arrays included). */
+function record(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Readonly<Record<string, unknown>>
+    : undefined
+}
+
+/**
+ * Turn a listing's `capabilities.effort` block into selectable reasoning
+ * levels. Only entries that explicitly report `supported: true` are offered;
+ * the picker id is the advertised key and the wire value keeps the same
+ * spelling because no per-gateway mapping was disclosed. A malformed or
+ * absent block yields no levels instead of failing the discovery pass.
+ */
+function listedEfforts(raw: unknown): Readonly<Record<string, string>> | undefined {
+  const efforts = record(raw)
+  if (efforts === undefined) return undefined
+  const levels: Record<string, string> = {}
+  for (const [level, capability] of Object.entries(efforts)) {
+    if (level.length > 0 && supported(capability)) levels[level] = level
+  }
+  return Object.keys(levels).length > 0 ? levels : undefined
+}
+
+/**
+ * Read what a listing's provider-neutral `capabilities` block discloses.
+ * `effort` becomes {@link LlmDiscoveredModel.reasoningEfforts}; supported
+ * `image_input` / `pdf_input` become input modalities, with `text` implied as
+ * it is for every prompt-capable model. Everything absent or malformed is
+ * left undisclosed rather than guessed at.
+ */
+function listedCapabilities(raw: unknown): Pick<LlmDiscoveredModel, 'inputModalities' | 'reasoningEfforts'> {
+  const capabilities = record(raw)
+  if (capabilities === undefined) return {}
+  const reasoningEfforts = listedEfforts(capabilities.effort)
+  const modalities: ModelModality[] = ['text']
+  if (supported(capabilities.image_input)) modalities.push('image')
+  if (supported(capabilities.pdf_input)) modalities.push('pdf')
+  return {
+    ...reasoningEfforts === undefined ? {} : { reasoningEfforts },
+    ...modalities.length === 1 ? {} : { inputModalities: modalities },
+  }
 }
 
 /**
@@ -249,6 +309,7 @@ function readListing(body: unknown): LiveRow[] {
       name,
       ...contextWindow === undefined ? {} : { contextWindow },
       ...maxTokens === undefined ? {} : { maxTokens },
+      ...listedCapabilities(entry?.capabilities),
     })
   }
   return models
@@ -294,10 +355,10 @@ function catalogAnswer(installed: ReadonlyMap<string, Model<Api>>): LlmDiscovere
 
 /**
  * Enrich one live row with what the installed catalog knows for its id. A
- * capacity the listing disclosed wins — the endpoint is the fresher authority
- * for a route whose list moves — while a name that merely echoes the id, plus
- * the undisclosed capacities and input types, come from the catalog. A row the
- * catalog does not describe is returned untouched.
+ * capacity or input type the listing disclosed wins — the endpoint is the
+ * fresher authority for a route whose list moves — while a name that merely
+ * echoes the id, plus the undisclosed capacities and input types, come from
+ * the catalog. A row the catalog does not describe is returned untouched.
  */
 function enrich(model: LiveRow, installed: ReadonlyMap<string, Model<Api>>): LlmDiscoveredModel {
   const base = installed.get(model.id)
@@ -307,7 +368,7 @@ function enrich(model: LiveRow, installed: ReadonlyMap<string, Model<Api>>): Llm
     name: model.name === model.id ? base.name : model.name,
     contextWindow: model.contextWindow ?? base.contextWindow,
     maxTokens: model.maxTokens ?? base.maxTokens,
-    inputModalities: [...base.input],
+    inputModalities: model.inputModalities ?? [...base.input],
   }
 }
 

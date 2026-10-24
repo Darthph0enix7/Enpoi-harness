@@ -589,10 +589,10 @@ it('the antigravity teardown removes the proxy state directory and only the pack
   }
 })
 
-it('meridian is a loopback keyless OpenAI-compatible service route on port 3456', () => {
+it('meridian is a loopback keyless Anthropic Messages service route on port 3456', () => {
   const manifest = manifestById('meridian')!
   expect(manifest.label).toBe('Claude Code (Meridian)')
-  expect(manifest.protocol).toBe('openai-completions')
+  expect(manifest.protocol).toBe('anthropic-messages')
   expect(manifest.delivery).toBe('service')
   // llm-pi-ai serves this route: no custom namespace, and an llm-pi-ai route
   // must never declare a credential pool.
@@ -603,9 +603,9 @@ it('meridian is a loopback keyless OpenAI-compatible service route on port 3456'
   // login, so the route is written keyless.
   expect(manifest.auth).toEqual({ kind: 'none', keyless: true })
   expect(manifest.defaultPort).toBe(3456)
-  expect(manifest.reuse.baseURL).toBe('http://127.0.0.1:3456/v1')
+  expect(manifest.reuse.baseURL).toBe('http://127.0.0.1:3456')
   expect(manifest.reuse.health.url).toBe('http://127.0.0.1:3456/health')
-  expect(manifest.local.baseURL).toBe('http://127.0.0.1:3456/v1')
+  expect(manifest.local.baseURL).toBe('http://127.0.0.1:3456')
   expect(manifest.local.health).toEqual(manifest.reuse.health)
   expect(manifest.local.dashboardUrl).toBe('http://127.0.0.1:3456')
   expect(manifest.local.runtime).toBe('node')

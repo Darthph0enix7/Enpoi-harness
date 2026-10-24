@@ -968,15 +968,15 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
   {
     id: 'meridian',
     label: 'Claude Code (Meridian)',
-    summary: 'Local proxy that serves the operator\'s Claude subscription through the official Agent SDK as an OpenAI-compatible endpoint.',
-    protocol: 'openai-completions',
+    summary: 'Local proxy that serves the operator\'s Claude subscription through the official Agent SDK as an Anthropic Messages-compatible endpoint.',
+    protocol: 'anthropic-messages',
     // A service instance on this device: detection and the health probe use
     // the loopback endpoint, and an operator's own host belongs in the
     // private server overlay.
     delivery: 'service',
     // The proxy needs no client key: as shipped it is loopback-gated, and it
     // forwards no credential of its own (it drives the CLI login store).
-    // llm-pi-ai serves keyless openai-completions routes, so the route is
+    // llm-pi-ai serves keyless anthropic-messages routes, so the route is
     // written keyless and no stored or ambient key reaches the wire. An
     // operator who sets MERIDIAN_API_KEY retargets the route through the
     // server overlay with a unified key; the shipped table stays keyless.
@@ -999,13 +999,13 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
     ],
     reuse: {
       label: 'Use a detected instance',
-      baseURL: `http://127.0.0.1:${MERIDIAN_PORT}/v1`,
+      baseURL: `http://127.0.0.1:${MERIDIAN_PORT}`,
       note: 'Zero install: uses a Meridian proxy already running on this device and its Claude subscription login.',
       health: MERIDIAN_HEALTH,
     },
     local: {
       label: 'Install locally (npm + user service)',
-      baseURL: `http://127.0.0.1:${MERIDIAN_PORT}/v1`,
+      baseURL: `http://127.0.0.1:${MERIDIAN_PORT}`,
       deps: ['Node.js >= 22', 'A reachable systemd user session (systemctl --user) on the default path'],
       diskHint: 'Two global npm packages and one Node process; no GPU, no Docker',
       dashboardUrl: `http://127.0.0.1:${MERIDIAN_PORT}`,

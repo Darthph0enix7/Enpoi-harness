@@ -479,8 +479,8 @@
   {
     "id": "meridian",
     "label": "Claude Code (Meridian)",
-    "summary": "Local proxy that serves the operator's Claude subscription through the official Agent SDK as an OpenAI-compatible endpoint.",
-    "protocol": "openai-completions",
+    "summary": "Local proxy that serves the operator's Claude subscription through the official Agent SDK as an Anthropic Messages-compatible endpoint.",
+    "protocol": "anthropic-messages",
     "delivery": "service",
     "auth": {
       "kind": "none",
@@ -504,7 +504,7 @@
     ],
     "reuse": {
       "label": "Use a detected instance",
-      "baseURL": "http://127.0.0.1:3456/v1",
+      "baseURL": "http://127.0.0.1:3456",
       "note": "Zero install: uses a Meridian proxy already running on this device and its Claude subscription login.",
       "health": {
         "url": "http://127.0.0.1:3456/health",
@@ -513,7 +513,7 @@
     },
     "local": {
       "label": "Install locally (npm + user service)",
-      "baseURL": "http://127.0.0.1:3456/v1",
+      "baseURL": "http://127.0.0.1:3456",
       "deps": [
         "Node.js >= 22",
         "A reachable systemd user session (systemctl --user) on the default path"

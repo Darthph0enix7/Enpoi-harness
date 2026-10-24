@@ -263,16 +263,16 @@ it('dashboard URLs cover both modes and deduplicate to the loopback dashboard', 
   expect(providerDashboardUrls('openai')).toEqual([])
 })
 
-it('meridian is listed as a keyless loopback OpenAI-compatible service before any install', () => {
+it('meridian is listed as a keyless loopback Anthropic Messages service before any install', () => {
   const manifest = fallbackHeavyManifest('meridian')!
   expect(manifest.label).toBe('Claude Code (Meridian)')
-  expect(manifest.protocol).toBe('openai-completions')
+  expect(manifest.protocol).toBe('anthropic-messages')
   expect(manifest.delivery).toBe('service')
   expect(manifest.auth).toEqual({ kind: 'none', keyless: true })
   expect(manifest.defaultPort).toBe(3456)
-  expect(manifest.reuse.baseURL).toBe('http://127.0.0.1:3456/v1')
+  expect(manifest.reuse.baseURL).toBe('http://127.0.0.1:3456')
   expect(manifest.reuse.health.url).toBe('http://127.0.0.1:3456/health')
-  expect(manifest.local.baseURL).toBe('http://127.0.0.1:3456/v1')
+  expect(manifest.local.baseURL).toBe('http://127.0.0.1:3456')
   expect(manifest.local.health.url).toBe('http://127.0.0.1:3456/health')
   expect(manifest.dashboardUrl).toBe('http://127.0.0.1:3456')
   expect(manifest.requiresBrowser.join('\n')).toContain('claude auth login --claudeai')

@@ -303,6 +303,107 @@ describe('draft-provider model discovery', () => {
     expect(server.headers.map(headers => headers['user-agent'])).toEqual([userAgent(), userAgent(), userAgent()])
   })
 
+  it('maps an advertised effort ladder and input capabilities onto a discovered model', async () => {
+    const server = await listingServer({
+      body: JSON.stringify({
+        data: [
+          {
+            id: 'claude-sonnet-5-5',
+            context_window: 1_000_000,
+            capabilities: {
+              image_input: { supported: true },
+              pdf_input: { supported: true },
+              effort: {
+                low: { supported: true },
+                medium: { supported: true },
+                high: { supported: true },
+                xhigh: { supported: true },
+                max: { supported: true },
+                // Advertised as unavailable: the ladder must not offer it.
+                minimal: { supported: false },
+                // The block's own marker is not a level.
+                supported: true,
+              },
+            },
+          },
+        ],
+      }),
+    })
+    const ctx = await harness()
+
+    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url, api: 'anthropic-messages' })).toEqual([
+      {
+        id: 'claude-sonnet-5-5',
+        name: 'claude-sonnet-5-5',
+        contextWindow: 1_000_000,
+        inputModalities: ['text', 'image', 'pdf'],
+        reasoningEfforts: {
+          low: 'low',
+          medium: 'medium',
+          high: 'high',
+          xhigh: 'xhigh',
+          max: 'max',
+        },
+      },
+    ])
+    expect(server.paths).toEqual(['/v1/models?limit=1000'])
+  })
+
+  it('leaves a listing with no capabilities exactly as read', async () => {
+    const server = await listingServer({
+      body: JSON.stringify({
+        data: [
+          { id: 'plain-large', context_window: 65_536, max_output_tokens: 4096 },
+          { id: 'plain-small' },
+        ],
+      }),
+    })
+    const ctx = await harness()
+
+    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })).toEqual([
+      { id: 'plain-large', name: 'plain-large', contextWindow: 65_536, maxTokens: 4096 },
+      { id: 'plain-small', name: 'plain-small' },
+    ])
+  })
+
+  it('still discovers a model whose capabilities block is malformed', async () => {
+    const server = await listingServer({
+      body: JSON.stringify({
+        data: [
+          { id: 'not-an-object', capabilities: 'nope' },
+          { id: 'an-array', capabilities: [{ effort: { low: { supported: true } } }] },
+          {
+            id: 'bad-fields',
+            context_window: 32_768,
+            capabilities: {
+              effort: ['low', 'high'],
+              image_input: null,
+              pdf_input: { supported: 'yes' },
+            },
+          },
+          {
+            id: 'bad-levels',
+            capabilities: {
+              effort: {
+                low: { supported: 'true' },
+                high: {},
+                max: null,
+              },
+            },
+          },
+        ],
+      }),
+    })
+    const ctx = await harness()
+
+    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })).toEqual([
+      { id: 'not-an-object', name: 'not-an-object' },
+      { id: 'an-array', name: 'an-array' },
+      { id: 'bad-fields', name: 'bad-fields', contextWindow: 32_768 },
+      { id: 'bad-levels', name: 'bad-levels' },
+    ])
+  })
+
   it('prefers the standard data array when both supported formats are present', async () => {
     const server = await listingServer({
       body: JSON.stringify({
@@ -543,7 +644,7 @@ describe('draft-provider model discovery', () => {
       const probe = ctx.llm.discoverModels('llm-pi-ai', { baseURL: 'https://blackhole.example/v1' })
       const rejection = expect(probe).rejects.toMatchObject({
         code: 'DISCOVERY_FAILED',
-        message: expect.stringContaining('did not answer within 15 seconds'),
+        message: expect.stringContaining('did not answer within 15 seconds') as string,
       })
       await vi.advanceTimersByTimeAsync(15_000)
       await rejection
@@ -660,8 +761,14 @@ const RECORDED_LISTINGS = [
     file: 'anthropic-reference-example.json',
     api: 'anthropic-messages',
     // The reference example fills both capacities with 0, which is not a
-    // usable capacity, so the row carries the name alone.
-    models: [{ id: 'claude-opus-5', name: 'Claude Opus 5' }],
+    // usable capacity; its capabilities block still discloses the effort
+    // ladder and the accepted input types.
+    models: [{
+      id: 'claude-opus-5',
+      name: 'Claude Opus 5',
+      inputModalities: ['text', 'image', 'pdf'],
+      reasoningEfforts: { high: 'high', low: 'low', max: 'max', medium: 'medium', xhigh: 'xhigh' },
+    }],
   },
 ]
 

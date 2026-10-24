@@ -345,6 +345,11 @@ export interface LlmDiscoveredModel {
   maxTokens?: number
   /** Accepted input types when disclosed by the catalog or endpoint; absent means unknown. */
   inputModalities?: readonly ModelModality[]
+  /**
+   * Selectable reasoning levels (picker id → wire value) when the endpoint
+   * advertises them; absent means undisclosed, never "does not reason".
+   */
+  reasoningEfforts?: Readonly<Record<string, string>>
 }
 
 /** Status view for one credential identity inside a provider pool. */
