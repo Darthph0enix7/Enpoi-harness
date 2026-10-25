@@ -22,7 +22,12 @@ import { describe, expect, it } from 'vitest'
  *    keeper/compaction personas are route state written by the first-run seed
  *    (packages/host/first-run).
  * 4. Exactly the three agent presets ship, with the upstream preset rows
- *    disabled, and nothing ever links the gated opencode free tier.
+ *    disabled, and no route reaches the gated opencode free tier
+ *    (`opencode/*-free`). The live content-based invariant (enabled chains,
+ *    `chain:` references, the default seat) belongs to the boot guard,
+ *    `scripts/disable-free-tier.mjs`, and is pinned by the sibling
+ *    `disable-free-tier.spec.ts`; this spec only guards the template, which
+ *    ships neither chains nor a seat.
  */
 
 const PATCH = readFileSync(new URL('../../../cordis.patch.yml', import.meta.url), 'utf8')
@@ -192,7 +197,15 @@ describe('web profile patch template guard', () => {
   })
 
   it('never routes into the gated opencode free tier', () => {
-    expect(PATCH).not.toMatch(/^\s*-? ?provider: opencode\s*$/m)
-    expect(PATCH).not.toMatch(/model: \S*-free\s*$/m)
+    // The invariant is content, not a chain name: `opencode/*-free` is gated
+    // server-side (403 FreeTierError). The tracked template carries no chains
+    // and no seat — those are operator state — so this guard rejects any such
+    // route the template might grow; the boot guard enforces the same content
+    // rule on the live document.
+    expect(PATCH).not.toMatch(/^\s*chains:/m)
+    expect(PATCH).not.toMatch(/^\s*chain:\s*\S/m)
+    for (const link of PATCH.matchAll(/^[ \t]*- provider: (\S+)\n[ \t]*model: (\S+)/gm)) {
+      expect(`${link[1]}/${link[2]}`, 'template link must not be gated free').not.toMatch(/^opencode\/.*-free$/)
+    }
   })
 })

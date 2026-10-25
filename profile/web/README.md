@@ -55,16 +55,24 @@ through the config editor. The old `settings-file` service and the
   a composition row in **`cordis.patch.yml`** (the config-editor document). The
   one-shot `settings.yaml` import lands the same row here; the row is what keeps
   the default model-group chain alive.
-- **OpenCode free tier is retired by profile policy.** `opencode/*-free` links
-  answer `403 FreeTierError` to any non-OpenCode client ("You cannot use the
-  free tier in other harnesses", anomalyco/opencode#49621), so the `free` chain
-  stays present but `disabled: true`, no enabled chain may link one, and the
-  default seat names a paid `opencode-go` route. Because any settings write
-  re-persists the live row into `cordis.patch.yml` (the Model Groups enable
-  toggle writes `chains.<id>.disabled`; every model picker writes the seat's
-  `chain`), re-run **`node scripts/disable-free-tier.mjs`** after settings
-  edits; `packages/enpoi-capabilities/tests/profile-patch.spec.ts` fails the
-  profile test run if the invariant drifts.
+- **OpenCode's gated free tier stays out of enabled routes.** `opencode/*-free`
+  links answer `403 FreeTierError` to any non-OpenCode client ("You cannot use
+  the free tier in other harnesses", anomalyco/opencode#49621). The guard is
+  content-based, not name-based: no enabled chain may link one, every `chain:`
+  reference must name an enabled declared chain or a shipped built-in group
+  (`free`), and `agent-default-model` must name a resolvable `provider`+`model`
+  pair or chain (it may carry both). The shipped `free` group is a selector
+  group (`zeroPrice`, `tools`, `gated: false`, …, `adopt: true`), so it needs no
+  settings row and links no gated model; attach it with `chain: free` on a seat
+  or persona once any legacy `chains.free` settings row is deleted (a row with
+  the same id shadows the built-in, including a disabled one). Because any
+  settings write re-persists the live row into
+  `cordis.patch.yml` (the Model Groups enable toggle writes
+  `chains.<id>.disabled`; every model picker writes the seat's `chain`), re-run
+  **`node scripts/disable-free-tier.mjs`** after settings edits;
+  `packages/enpoi-capabilities/tests/disable-free-tier.spec.ts` pins the guard
+  and fails when its `BUILTIN_CHAIN_IDS` drifts from
+  `dsh-enpoi-model-chains`'s shipped `builtinChains`.
 
 Operator checklist at the switch: the first 0.1.7 boot renames
 `~/.dsh/settings.yaml` to `settings.yaml.imported` and imports each section into
