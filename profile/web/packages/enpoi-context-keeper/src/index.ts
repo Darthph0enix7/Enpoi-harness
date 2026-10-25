@@ -112,9 +112,19 @@ function keeperEnabled(ctx: Context): boolean {
   }
 }
 
+/**
+ * Route the keeper runs on when nothing overrides it. Measured against the
+ * live Kilo gateway on 2026-10-25: `poolside/laguna-s-2.1:free` answered with
+ * real content, while the retired `kilo-auto/free` answered 200 with EMPTY
+ * content and `kilo-auto/balanced` answered 400 "You need to sign in to use
+ * this model". The first-run seed writes the same pair; the `free` group is
+ * attached through `personas.keeper.chain` when the persona is assigned.
+ */
+export const DEFAULT_KEEPER_ROUTE = { provider: 'kilo', model: 'poolside/laguna-s-2.1:free' } as const
+
 /** Keeper primary/fallback route plus its per-wake budgets (doc 38; live-editable).
- * The primary defaults to the keyless kilo seed (`kilo/kilo-auto/free`) a fresh
- * install can reach; a configured machine overrides it through the plugin row or
+ * The primary defaults to the keyless kilo seed a fresh install can reach; a
+ * configured machine overrides it through the plugin row or
  * `enpoi-orchestration.personas.keeper`. There is no default fallback: a second
  * link exists only when the operator sets `fallbackProvider` and `fallbackModel`
  * or assigns a chain via `personas.keeper.chain`. */
@@ -143,8 +153,8 @@ export interface Config {
 }
 
 export const Config = Schema.object({
-  provider: live(Schema.string().default('kilo')),
-  model: live(Schema.string().default('kilo-auto/free')),
+  provider: live(Schema.string().default(DEFAULT_KEEPER_ROUTE.provider)),
+  model: live(Schema.string().default(DEFAULT_KEEPER_ROUTE.model)),
   fallbackProvider: live(Schema.string()),
   fallbackModel: live(Schema.string()),
   leaseMs: live(Schema.number().default(45_000)),
@@ -413,8 +423,8 @@ export function resolveKeeperRoute(ctx: Context, config: Config): ResolvedRoute 
     // settings unavailable — fall through to config defaults
   }
   return {
-    provider: config.provider ?? 'kilo',
-    model: config.model ?? 'kilo-auto/free',
+    provider: config.provider ?? DEFAULT_KEEPER_ROUTE.provider,
+    model: config.model ?? DEFAULT_KEEPER_ROUTE.model,
     ...fallback,
   }
 }

@@ -609,6 +609,31 @@ var Config = Schema.object({
   catalogFreshMs: live(Schema.number().default(CATALOG_FRESH_MS))
 });
 var SIGN_IN_REQUIRED = "sign-in required";
+var DEFAULT_FREE_TIER_GATE_REASON = "free tier is gated to the provider's own clients";
+function freeTierGateOf(profile) {
+  if (profile?.freeTierGated !== true) return void 0;
+  const configured = profile.freeTierGateReason;
+  return { reason: typeof configured === "string" && configured !== "" ? configured : DEFAULT_FREE_TIER_GATE_REASON };
+}
+function isKnownZeroPrice(entry) {
+  const cost = entry.cost;
+  if (cost === null || typeof cost !== "object" || Array.isArray(cost)) return false;
+  const prices = cost;
+  const values = [prices.input, prices.output].filter((value2) => typeof value2 === "number" && Number.isFinite(value2));
+  return values.length > 0 && values.every((value2) => value2 === 0);
+}
+function applyFreeTierGate(models, gate) {
+  if (gate === void 0) return [...models];
+  return models.map((model) => {
+    if (!isKnownZeroPrice(model)) return model;
+    const listed = model.gateReason;
+    return {
+      ...model,
+      gated: true,
+      gateReason: typeof listed === "string" && listed !== "" ? listed : gate.reason
+    };
+  });
+}
 var LLM_NS = "llm-pi-ai";
 var AGENT_DEFAULT_MODEL_NS = "agent-default-model";
 async function enforceSessionHeaders(settings, wanted, log) {
@@ -1598,7 +1623,7 @@ function planRouteModels(input) {
       models.push(grace.has(id) ? { ...fresh, firstSeenAt: input.now } : fresh);
     }
   }
-  return { models: applyCatalogOverlay(models, input.overlay), report };
+  return { models: applyFreeTierGate(applyCatalogOverlay(models, input.overlay), input.freeTierGate), report };
 }
 function stringifyComparable(models) {
   return JSON.stringify(
@@ -1705,6 +1730,7 @@ function apply(ctx, config) {
       capacities,
       hints: recipe.hints,
       routeProviderMap,
+      ...recipe.freeTierGate === void 0 ? {} : { freeTierGate: recipe.freeTierGate },
       source: recipe.source,
       endpointGraceMs: value(config.endpointGraceMs) ?? ENDPOINT_ONLY_GRACE_MS,
       force: recipe.force
@@ -1742,6 +1768,7 @@ function apply(ctx, config) {
       fetchError = error instanceof Error ? error.message : String(error);
       logger.warn(describeSyncFailure(route, error, ns));
     }
+    const gate = freeTierGateOf(profile);
     const recipe = {
       live: live2,
       catalogRoute,
@@ -1749,6 +1776,7 @@ function apply(ctx, config) {
       catalogOnlineOk: options.catalogOnlineOk,
       overlay,
       hints: options.hints,
+      ...gate === void 0 ? {} : { freeTierGate: gate },
       source: ns === COMMANDCODE_NS ? "catalog" : "live",
       force: options.force
     };
@@ -2100,11 +2128,13 @@ function apply(ctx, config) {
 export {
   CATALOG_FRESH_MS,
   Config,
+  DEFAULT_FREE_TIER_GATE_REASON,
   DEFAULT_MODELS_DEV_URL,
   DEFAULT_ROUTE_PROVIDER_MAP,
   ENDPOINT_ONLY_GRACE_MS,
   apply,
   applyCatalogOverlay,
+  applyFreeTierGate,
   capabilityHintsOverridePath,
   catalogCacheAgeMs,
   catalogOverlaysPath,
@@ -2113,6 +2143,7 @@ export {
   discoveredCachePath,
   enforceSessionHeaders,
   fetchModels,
+  freeTierGateOf,
   inject,
   isCatalogRoute,
   loadCapabilityHintsOverride,

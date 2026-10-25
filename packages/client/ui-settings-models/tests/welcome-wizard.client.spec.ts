@@ -69,10 +69,10 @@ describe('welcome wizard state machine', () => {
     const writes = intelligenceWrites({ compaction: true, keeper: true, whiteboard: true })
     expect(writes.map(write => write.ns)).toEqual(['enpoi-orchestration', 'enpoi-orchestration', 'enpoi-orchestration', 'enpoi-orchestration'])
     expect(writes[2]?.ops).toEqual([{
-      op: 'set', path: ['personas', 'compaction'], value: { provider: 'kilo', model: 'kilo-auto/free' },
+      op: 'set', path: ['personas', 'compaction'], value: { provider: 'kilo', model: 'poolside/laguna-s-2.1:free', chain: 'free' },
     }])
     expect(writes[3]?.ops).toEqual([{
-      op: 'set', path: ['personas', 'keeper'], value: { provider: 'kilo', model: 'kilo-auto/free' },
+      op: 'set', path: ['personas', 'keeper'], value: { provider: 'kilo', model: 'poolside/laguna-s-2.1:free', chain: 'free' },
     }])
   })
 

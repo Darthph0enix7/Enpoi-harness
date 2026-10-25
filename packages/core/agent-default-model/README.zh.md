@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 配置默认值
 
-组合要求提供 provider 和模型。即使没有挂载配置编辑器，消费者也可读取即时引用。空的 `provider` 或 `model` 表示未设置的选择：在随附的 `baseline: kilo` 策略下，它会解析为免密钥的 Kilo 网关免费层（`kilo` / `kilo-auto/free`），也就是首次运行种子写入的路由，因此未做任何配置的部署也能启动。正因如此，即使 profile 中没有提供方配置，全新安装仍依赖 Kilo 网关免费层。`baseline: off` 让空字段保持为空，因此刻意不使用 Kilo 回退的部署（例如每个会话始终自带路由的部署）需自行负责缺失的路由。该模式是可在 Settings 中编辑的即时字段，保存选择时会一并保留。
+组合要求提供 provider 和模型。即使没有挂载配置编辑器，消费者也可读取即时引用。空的 `provider` 或 `model` 表示未设置的选择：在随附的 `baseline: kilo` 策略下，它会解析为免密钥的 Kilo 网关免费层（`kilo` / `poolside/laguna-s-2.1:free`，以 `free` 模型组作为后备），也就是首次运行种子写入的同一组合，因此未做任何配置的部署也能启动。正因如此，即使 profile 中没有提供方配置，全新安装仍依赖 Kilo 网关免费层。`baseline: off` 让空字段保持为空，因此刻意不使用 Kilo 回退的部署（例如每个会话始终自带路由的部署）需自行负责缺失的路由。该模式是可在 Settings 中编辑的即时字段，保存选择时会一并保留。
 
 ```yaml
 - name: '@deepseek-ai/dsh-agent-default-model'

@@ -160,13 +160,13 @@ describe('AgentModelsBody — dynamic fleet', () => {
     // explicit inherit placeholder (5 registry seats + compaction).
     expect(screen.getAllByRole('button', { name: 'Inherit' }).length).toBe(6)
     // The keeper names its built-in route instead of claiming inherit.
-    expect(screen.getByRole('button', { name: 'built-in default: kilo/kilo-auto/free' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'built-in default: kilo/poolside/laguna-s-2.1:free' })).toBeTruthy()
   })
 
   it('labels the keeper built-in default exactly', () => {
     mount(mergeRoleRegistry(undefined), { keeper: null }, directoryFace())
 
-    expect(screen.getByRole('button', { name: 'built-in default: kilo/kilo-auto/free' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'built-in default: kilo/poolside/laguna-s-2.1:free' })).toBeTruthy()
     // Every other unassigned seat keeps the inherit label.
     expect(screen.getAllByRole('button', { name: 'Inherit' }).length).toBe(6)
   })

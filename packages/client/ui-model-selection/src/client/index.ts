@@ -208,7 +208,7 @@ export function apply(ctx: ClientContext): void {
       locale: NS,
       inject: (sessionId): ModelSelectInjected => {
         // Session-less (first-run shell): the seat shows the shared catalog's
-        // deployment default (`kilo-auto/free`); the surrounding inert composer
+        // deployment default (`poolside/laguna-s-2.1:free`); the surrounding inert composer
         // keeps it locked, so there is no session to submit a selection to.
         if (sessionId === undefined) {
           return {

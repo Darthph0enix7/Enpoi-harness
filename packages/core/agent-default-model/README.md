@@ -29,7 +29,7 @@ Mount this package wherever agents are created without an explicit model route. 
 
 ### Configure the default
 
-The composition requires a provider and model. Consumers read the live references even when no configuration editor is mounted. A blank `provider` or `model` is an unset selection: under the shipped `baseline: kilo` policy it resolves to the keyless Kilo Gateway free tier (`kilo` / `kilo-auto/free`), the route the first-run seed also writes, so a deployment that configures nothing still starts. That is why a fresh install depends on the Kilo Gateway free tier even with no provider configuration in the profile. `baseline: off` keeps blank fields blank, so a deployment that deliberately runs no Kilo fallback (for example one whose sessions always carry their own route) owns the missing route instead. The mode is a live field editable from Settings, and saving a selection preserves it.
+The composition requires a provider and model. Consumers read the live references even when no configuration editor is mounted. A blank `provider` or `model` is an unset selection: under the shipped `baseline: kilo` policy it resolves to the keyless Kilo Gateway free tier (`kilo` / `poolside/laguna-s-2.1:free`, with the `free` model group as its fallback), the pair the first-run seed also writes, so a deployment that configures nothing still starts. That is why a fresh install depends on the Kilo Gateway free tier even with no provider configuration in the profile. `baseline: off` keeps blank fields blank, so a deployment that deliberately runs no Kilo fallback (for example one whose sessions always carry their own route) owns the missing route instead. The mode is a live field editable from Settings, and saving a selection preserves it.
 
 ```yaml
 - name: '@deepseek-ai/dsh-agent-default-model'
@@ -43,7 +43,7 @@ The composition requires a provider and model. Consumers read the live reference
 |---|---|---|
 | `provider` | required | Registered provider route for fresh agents |
 | `model` | required | Provider-owned model id for fresh agents |
-| `baseline` | `kilo` | Fallback for a blank provider or model: `kilo` resolves each blank to the keyless Kilo free tier; `off` keeps blanks blank |
+| `baseline` | `kilo` | Fallback for a blank provider or model: `kilo` resolves each blank to the keyless Kilo free tier, adding the `free` group when the model falls back; `off` keeps blanks blank |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-agent-default-model) lists every accepted field. `reasoningEffort` is optional; saving a selection without it removes that field from the profile’s complete config override.
 

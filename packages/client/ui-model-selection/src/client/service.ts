@@ -116,7 +116,7 @@ export class ModelDirectoryResolver extends Service {
 
   /**
    * Republish the session-less seat state from the shared catalog: the Host's
-   * deployment default (`kilo-auto/free` in the shipped profile) is the
+   * deployment default (`poolside/laguna-s-2.1:free` in the shipped profile) is the
    * selection the picker shows, with its effort caption, while no session
    * exists.
    */

@@ -195,7 +195,7 @@ describe('WelcomeWizard', () => {
     const namespaces = h.operations.mock.calls.map(call => call[0])
     expect(namespaces).toEqual(['enpoi-orchestration', 'enpoi-orchestration', 'enpoi-orchestration'])
     expect(h.operations).toHaveBeenCalledWith('enpoi-orchestration', [
-      { op: 'set', path: ['personas', 'compaction'], value: { provider: 'kilo', model: 'kilo-auto/free' } },
+      { op: 'set', path: ['personas', 'compaction'], value: { provider: 'kilo', model: 'poolside/laguna-s-2.1:free', chain: 'free' } },
     ], undefined)
   })
 

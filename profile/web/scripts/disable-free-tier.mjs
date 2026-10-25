@@ -66,9 +66,11 @@ const BUILTIN_CHAIN_IDS = ['free']
  * `agent-default-model` row: the keyless Kilo baseline the plugin resolves a
  * blank selection to (`BASELINE_PROVIDER`/`BASELINE_MODEL` in
  * packages/core/agent-default-model), never the retired paid `opencode-go`
- * pin. The repair pins no chain.
+ * pin. `poolside/laguna-s-2.1:free` is the measured working free id; the
+ * retired `kilo-auto/free` answered 200 with empty content. The repair pins
+ * no chain.
  */
-const BASELINE = { provider: 'kilo', model: 'kilo-auto/free' }
+const BASELINE = { provider: 'kilo', model: 'poolside/laguna-s-2.1:free' }
 
 // A fresh profile has no patch yet (initProfile writes the template later).
 if (!existsSync(PATCH)) {

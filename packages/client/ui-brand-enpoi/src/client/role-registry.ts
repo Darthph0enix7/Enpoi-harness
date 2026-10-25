@@ -60,12 +60,14 @@ export const ROLE_GROUP_ORDER: readonly RoleGroup[] = ['supervision', 'specialis
 
 /**
  * The keeper's plugin Config route — shown as the "Default" sublabel. The
- * keyless kilo seed (`kilo/kilo-auto/free`, written by first-run) is the route
- * a fresh install can actually reach; the keeper has no parent turn to inherit
- * from, so its own route is always used. Must match
+ * keyless kilo seed (`kilo/poolside/laguna-s-2.1:free`, written by first-run)
+ * is the route a fresh install can actually reach; the keeper has no parent
+ * turn to inherit from, so its own route is always used. Measured against the
+ * live gateway on 2026-10-25: this id answered with real content, while the
+ * retired `kilo-auto/free` answered 200 with EMPTY content. Must match
  * `$PROFILE/packages/enpoi-context-keeper/src/index.ts` Config defaults.
  */
-export const KEEPER_DEFAULT_ROUTE = 'kilo/kilo-auto/free'
+export const KEEPER_DEFAULT_ROUTE = 'kilo/poolside/laguna-s-2.1:free'
 
 /** One fleet seat resolved for rendering. */
 export interface FleetSeat {

@@ -534,8 +534,11 @@ it('assembles the shipped Web transport, catalog, guidance, and defaults', async
   // The fresh scaffold boots an empty home, so the shipped first-run seed runs
   // and points the default seat at the fork's keyless Kilo route (the same
   // default a real fresh install gets); the shipped deepseek-official route
-  // stays installed and selectable, it is just no longer the default.
-  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'kilo', model: 'kilo-auto/free' })
+  // stays installed and selectable, it is just no longer the default. This
+  // scaffold mounts no model-chain registry, so the seeded `free` group is
+  // pruned from the stored row; the shipped web profile mounts
+  // `enpoi-model-chains` and keeps it.
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'kilo', model: 'poolside/laguna-s-2.1:free' })
   const index = await fetch(`http://127.0.0.1:${String(ctx.webServer.port)}`, {
     headers: { 'accept-encoding': 'gzip' },
   })

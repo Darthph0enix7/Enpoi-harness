@@ -20,7 +20,7 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-以基础组合挂载该插件；它注册 `ctx.feedbackCollect`（feedback-collect）、`ctx.feedbackSubmit`（feedback-submit，配置：`enabled` 默认 true、`endpoint` 默认 `https://enpoi-feedback.kalinsaz123321.workers.dev/feedback`、`timeoutMs` 15000、`retryDelayMs` 500）或 `ctx.feedbackTriage`（feedback-triage，配置：`provider` 默认 kilo、`model` 默认 kilo-auto/free、`preset`/`permissionPreset` 默认 system-analysis、`timeoutMinutes` 默认 5）。不挂载插件时，记录路径仍会在本地记录并返回 null 结果。
+以基础组合挂载该插件；它注册 `ctx.feedbackCollect`（feedback-collect）、`ctx.feedbackSubmit`（feedback-submit，配置：`enabled` 默认 true、`endpoint` 默认 `https://enpoi-feedback.kalinsaz123321.workers.dev/feedback`、`timeoutMs` 15000、`retryDelayMs` 500）或 `ctx.feedbackTriage`（feedback-triage，配置：`provider` 默认 kilo、`model` 默认 poolside/laguna-s-2.1:free、`preset`/`permissionPreset` 默认 system-analysis、`timeoutMinutes` 默认 5）。不挂载插件时，记录路径仍会在本地记录并返回 null 结果。
 
 <a id="known-limitations-and-deferred-work"></a>
 ## 已知限制与未竟事项

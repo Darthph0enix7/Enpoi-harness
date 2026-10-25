@@ -22,13 +22,15 @@ it('resolves the keyless Kilo baseline when no provider or model is selected', a
   const blank = new Context()
   onTestFinished(() => blank.fiber.dispose())
   await blank.plugin(DefaultModel, { provider: '', model: '' })
-  expect(blank.agentDefaultModel.currentSelection()).toEqual({ provider: 'kilo', model: 'kilo-auto/free' })
+  // A wholly unset selection is the seeded pair plus its fallback group.
+  expect(blank.agentDefaultModel.currentSelection()).toEqual({ provider: 'kilo', model: 'poolside/laguna-s-2.1:free', chain: 'free' })
 
-  // A blank field resolves alone: a configured provider keeps its model baseline.
+  // A blank field resolves alone: a configured provider keeps its model
+  // baseline, and only the model fallback carries the free group.
   const half = new Context()
   onTestFinished(() => half.fiber.dispose())
   await half.plugin(DefaultModel, { provider: 'acme', model: '' })
-  expect(half.agentDefaultModel.currentSelection()).toEqual({ provider: 'acme', model: 'kilo-auto/free' })
+  expect(half.agentDefaultModel.currentSelection()).toEqual({ provider: 'acme', model: 'poolside/laguna-s-2.1:free', chain: 'free' })
 })
 
 it('leaves blank fields blank when the deployment disables the baseline', async () => {
@@ -39,7 +41,7 @@ it('leaves blank fields blank when the deployment disables the baseline', async 
   // The policy is a live field: re-enabling it restores the Kilo fallback on
   // the running fiber, and each blank field resolves alone.
   await live.update({ baseline: 'kilo' })
-  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'kilo', model: 'kilo-auto/free' })
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'kilo', model: 'poolside/laguna-s-2.1:free', chain: 'free' })
   await live.update({ provider: 'acme', model: '', baseline: 'off' })
   expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'acme', model: '' })
 })
@@ -153,7 +155,11 @@ it('falls back to the baseline pair when the picked route is gone before the wri
   const pending = ctx.agentDefaultModel.saveSelection({ provider: 'ghost', model: 'm' })
   providers = [{ id: 'kilo', name: 'Kilo' }]
   await pending
-  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'kilo', model: 'kilo-auto/free' })
+  // The baseline pair is written; its `free` group is pruned by the config
+  // editor because this fixture registers no model-chain registry, so the
+  // stored row cannot reference it. A deployment with `enpoi-model-chains`
+  // mounted resolves `free` and keeps the group.
+  expect(ctx.agentDefaultModel.currentSelection()).toEqual({ provider: 'kilo', model: 'poolside/laguna-s-2.1:free' })
 })
 
 it('drops a selection that echoes a group the runtime cannot route', async () => {

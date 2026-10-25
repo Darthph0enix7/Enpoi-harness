@@ -57,6 +57,31 @@ describe('reasoning schema boundary', () => {
   })
 })
 
+describe('route-level free-tier gate profile fields', () => {
+  it('accepts the durable gate declaration and carries it into the resolved profile', () => {
+    const validated = routeWith({ freeTierGated: true, freeTierGateReason: 'free tier is limited to Acme clients' })() as {
+      providers: Record<string, { freeTierGated?: unknown; freeTierGateReason?: unknown }>
+    }
+    expect(validated.providers['acme-gateway']).toMatchObject({
+      freeTierGated: true,
+      freeTierGateReason: 'free tier is limited to Acme clients',
+    })
+    const resolved = resolveProfiles(validated.providers as Options['providers'])
+    expect(resolved.get('acme-gateway')).toMatchObject({
+      freeTierGated: true,
+      freeTierGateReason: 'free tier is limited to Acme clients',
+    })
+    // The reason is optional; the flag alone is the gate.
+    expect(routeWith({ freeTierGated: true })()).toMatchObject({
+      providers: { 'acme-gateway': { freeTierGated: true } },
+    })
+  })
+
+  it('rejects a non-boolean gate flag at the write boundary', () => {
+    expect(routeWith({ freeTierGated: 'yes' })).toThrow()
+  })
+})
+
 describe('modality schema boundary', () => {
   it('accepts the harness modality vocabulary at either level', () => {
     // models.dev publishes audio/video/pdf input; the stored entry keeps them

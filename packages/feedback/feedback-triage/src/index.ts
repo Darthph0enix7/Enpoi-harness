@@ -305,10 +305,19 @@ export interface Config {
   timeoutMinutes?: number
 }
 
+/**
+ * Route the triage session runs on when nothing overrides it. Measured against
+ * the live Kilo gateway on 2026-10-25: `poolside/laguna-s-2.1:free` answered
+ * with real content, while the retired `kilo-auto/free` answered 200 with
+ * EMPTY content. The first-run seed and the system analysis write the same
+ * pair.
+ */
+export const DEFAULT_TRIAGE_ROUTE = { provider: 'kilo', model: 'poolside/laguna-s-2.1:free' } as const
+
 /** Config schema with the first-run system-analysis defaults. */
 export const Config = Schema.object({
-  provider: Schema.string().default('kilo'),
-  model: Schema.string().default('kilo-auto/free'),
+  provider: Schema.string().default(DEFAULT_TRIAGE_ROUTE.provider),
+  model: Schema.string().default(DEFAULT_TRIAGE_ROUTE.model),
   preset: Schema.string().default('sysadmin'),
   permissionPreset: Schema.string().default('system-analysis'),
   timeoutMinutes: Schema.number().min(1).max(60).default(5),
@@ -327,8 +336,8 @@ export class FeedbackTriageSession extends Service implements FeedbackTriageServ
     this.runner = (input, signal) => runFeedbackTriage({
       ctx: this.ctx,
       workspace: triageWorkspacePath(),
-      provider: config.provider ?? 'kilo',
-      model: config.model ?? 'kilo-auto/free',
+      provider: config.provider ?? DEFAULT_TRIAGE_ROUTE.provider,
+      model: config.model ?? DEFAULT_TRIAGE_ROUTE.model,
       preset: config.preset ?? 'sysadmin',
       permissionPreset: config.permissionPreset ?? 'system-analysis',
       timeoutMinutes: config.timeoutMinutes ?? 5,

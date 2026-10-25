@@ -87,9 +87,10 @@ function keeperEnabled(ctx) {
     return true;
   }
 }
+var DEFAULT_KEEPER_ROUTE = { provider: "kilo", model: "poolside/laguna-s-2.1:free" };
 var Config = Schema.object({
-  provider: live(Schema.string().default("kilo")),
-  model: live(Schema.string().default("kilo-auto/free")),
+  provider: live(Schema.string().default(DEFAULT_KEEPER_ROUTE.provider)),
+  model: live(Schema.string().default(DEFAULT_KEEPER_ROUTE.model)),
   fallbackProvider: live(Schema.string()),
   fallbackModel: live(Schema.string()),
   leaseMs: live(Schema.number().default(45e3)),
@@ -259,8 +260,8 @@ function resolveKeeperRoute(ctx, config) {
   } catch {
   }
   return {
-    provider: config.provider ?? "kilo",
-    model: config.model ?? "kilo-auto/free",
+    provider: config.provider ?? DEFAULT_KEEPER_ROUTE.provider,
+    model: config.model ?? DEFAULT_KEEPER_ROUTE.model,
     ...fallback
   };
 }
@@ -1612,6 +1613,7 @@ export {
   CHECKPOINT_SOURCE,
   CheckpointService,
   Config,
+  DEFAULT_KEEPER_ROUTE,
   KEEPER_CACHE_CAP,
   KEEPER_MAX_OUTPUT_TOKENS,
   KEEPER_MESSAGE_KIND,

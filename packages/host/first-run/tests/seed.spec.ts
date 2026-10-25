@@ -39,7 +39,7 @@ describe('first-run Kilo seed', () => {
           baseURL: KILO_BASE_URL,
           apiKeyEnv: KILO_KEY_REF,
           keyless: true,
-          models: [{ id: KILO_MODEL_ID, name: KILO_MODEL_NAME }],
+          models: [{ id: KILO_MODEL_ID, name: KILO_MODEL_NAME, cost: { input: 0, output: 0 } }],
         },
       },
     })
@@ -109,10 +109,47 @@ describe('first-run Kilo seed', () => {
     expect(writes.map(write => write.ns)).toEqual(['llm-pi-ai', 'agent-default-model', 'first-run'])
   })
 
-  it('never overwrites an install that already carries provider routes', async () => {
+  it('leaves an install that already carries other provider routes alone', async () => {
     const { settings, writes } = fakeSettings({ user: { providers: { anthropic: {} } } })
     await expect(seedFirstRun(settings, OPTIONS)).resolves.toBe('present')
     expect(writes).toEqual([{ ns: 'first-run', patch: { seedVersion: FIRST_RUN_SEED_VERSION } }])
+  })
+
+  it('repairs the seat and personas a crashed earlier seed left unwritten', async () => {
+    // The route landed, then the process stopped before the default seat.
+    const { settings, writes } = fakeSettings({ user: { providers: { kilo: { models: [{ id: KILO_MODEL_ID }] } } } })
+    await expect(seedFirstRun(settings, OPTIONS)).resolves.toBe('seeded')
+    expect(writes.map(write => write.ns)).toEqual(['agent-default-model', 'enpoi-orchestration', 'first-run'])
+    expect(writes[0]?.patch).toEqual({ provider: 'kilo', model: KILO_MODEL_ID, chain: KILO_FREE_CHAIN_ID })
+    expect(writes[1]?.patch).toEqual({ personas: kiloPersonaSeeds(KILO_ROUTE_ID, KILO_MODEL_ID) })
+    expect(writes[2]?.patch).toEqual({ seedVersion: FIRST_RUN_SEED_VERSION })
+  })
+
+  it('writes only the missing persona and keeps an operator assignment', async () => {
+    const keeper = { provider: 'acme', model: 'own-model' }
+    // The fake serves one projection for every namespace, so the persona state
+    // rides the same object the seed reads.
+    const { settings, writes } = fakeSettings({
+      user: { providers: { kilo: {} }, personas: { keeper } },
+    })
+    await expect(seedFirstRun(settings, OPTIONS)).resolves.toBe('seeded')
+    expect(writes.map(write => write.ns)).toEqual(['agent-default-model', 'enpoi-orchestration', 'first-run'])
+    expect(writes[1]?.patch).toEqual({
+      personas: { compaction: kiloPersonaSeeds(KILO_ROUTE_ID, KILO_MODEL_ID)['compaction'] },
+    })
+  })
+
+  it('keeps an operator default seat while finishing the persona write', async () => {
+    const { settings, writes } = fakeSettings({
+      user: {
+        providers: { kilo: {} },
+        provider: 'acme',
+        model: 'own-model',
+      },
+    })
+    await expect(seedFirstRun(settings, OPTIONS)).resolves.toBe('seeded')
+    expect(writes.map(write => write.ns)).toEqual(['enpoi-orchestration', 'first-run'])
+    expect(writes[0]?.patch).toEqual({ personas: kiloPersonaSeeds(KILO_ROUTE_ID, KILO_MODEL_ID) })
   })
 
   it('reports an unmounted settings service or namespace without writing', async () => {
@@ -206,6 +243,25 @@ describe('first-run seed marker', () => {
     expect(later.document['agent-default-model']).toBeUndefined()
     await harness.ctx.fiber.dispose()
     await later.ctx.fiber.dispose()
+  })
+
+  it('fills the missing seat and personas on the boot after a partial seed', async () => {
+    // The earlier boot wrote only the route and died before the seat write;
+    // the marker is unset, so this boot finishes the remaining pieces.
+    const harness = applyHarness({ 'llm-pi-ai': { providers: { kilo: { models: [] } } } })
+    apply(harness.ctx, harness.config)
+    await vi.waitFor(() => { expect(harness.writes).toHaveLength(3) })
+    expect(harness.writes.map(write => write.ns)).toEqual(['agent-default-model', 'enpoi-orchestration', 'first-run'])
+    expect(harness.document['agent-default-model']).toEqual({
+      provider: KILO_ROUTE_ID,
+      model: KILO_MODEL_ID,
+      chain: KILO_FREE_CHAIN_ID,
+    })
+    expect((harness.document['enpoi-orchestration'] as Record<string, unknown>).personas).toEqual(
+      kiloPersonaSeeds(KILO_ROUTE_ID, KILO_MODEL_ID),
+    )
+    expect(harness.document['first-run']).toEqual({ seedVersion: FIRST_RUN_SEED_VERSION })
+    await harness.ctx.fiber.dispose()
   })
 
   it('defaults the seed to the measured working free model and the shipped free group', () => {

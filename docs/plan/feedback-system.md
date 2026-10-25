@@ -22,7 +22,7 @@
   `packages/host/first-run/src/investigation.ts`
   (`agents.create` with a branded `system-analysis-*` id, preset mount,
   `permissions.set(..., 'system-analysis')` = `workspace-write + never ask`,
-  model **`kilo / kilo-auto/free`** (keyless free tier), `whenIdle` →
+  model **`kilo / poolside/laguna-s-2.1:free`** (keyless free tier), `whenIdle` →
   `dispose()`; work dir `$DSH_HOME/system-analysis-work` removed).
 - **Session data accessors** — `ctx.sessionQuery.*` (search/read/trace,
   cwd-fenced), `session-log-export` (`readSessionLogText`, ZIP stream),
@@ -43,7 +43,7 @@
    redact  : telemetry redaction waterfall + path/identity anonymizer (home→~)
         │
         ▼
-[feedback/triage]   ephemeral session (kilo/kilo-auto/free, preset
+[feedback/triage]   ephemeral session (kilo/poolside/laguna-s-2.1:free, preset
    'system-analysis', title 'Feedback triage', no archive, disposed after idle,
    work dir removed) → JSON {category, severity, summary, details}   (fail-soft)
         │

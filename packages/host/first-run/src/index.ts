@@ -12,6 +12,12 @@
  * removing it unsets the path, and the marker below stops any later boot from
  * re-adding it. The route names the public Kilo gateway endpoint, never a
  * machine-local server.
+ *
+ * The seed is idempotent per piece, not all-or-nothing: the route, the default
+ * seat, and each persona are checked and written independently, and the marker
+ * lands last. A boot that crashed after the route write therefore still writes
+ * the missing seat and personas next time. An existing route or a persona the
+ * operator assigned is never overwritten.
  * @module @deepseek-ai/dsh-host-first-run
  */
 
@@ -120,6 +126,11 @@ export function kiloRouteValue(model: string = KILO_MODEL_ID, route: KiloRouteOv
     models: [{
       id: model,
       name: model === KILO_MODEL_ID ? KILO_MODEL_NAME : model,
+      // The shipped `free` group selects zero-priced models. The seed is the
+      // first writer of this route, so it states the shipped free model's
+      // price explicitly: the group contains it before the first discovery
+      // pass. An operator's paid override keeps no price claim.
+      ...model === KILO_MODEL_ID ? { cost: { input: 0, output: 0 } } : {},
     }],
   }
 }
@@ -157,12 +168,10 @@ export interface SeedSettings {
 
 /** What one seed attempt decided. */
 export type SeedOutcome =
-  /** The route, default model, personas, and marker were written. */
+  /** At least one missing piece (route, seat, or persona) and the marker were written. */
   | 'seeded'
-  /** Provider routes already exist (a configured install); only the marker moved. */
+  /** Every seeded piece was already present (a configured install); only the marker moved. */
   | 'present'
-  /** A marker was already stored; nothing was read or written. */
-  | 'already'
   /** The settings namespaces are not mounted in this composition. */
   | 'unavailable'
 
@@ -175,15 +184,40 @@ export interface SeedOptions extends KiloRouteOverrides {
   version: string
 }
 
+/** The plain-object member a settings projection carries, or undefined. */
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+/** Whether a string field carries a value. */
+function filled(value: unknown): value is string {
+  return typeof value === 'string' && value !== ''
+}
+
 /** Whether one settings projection carries any configured provider route. */
 function hasProviderRoutes(user: unknown): boolean {
-  if (typeof user !== 'object' || user === null) return false
-  const providers = (user as { providers?: unknown }).providers
-  return typeof providers === 'object' && providers !== null && Object.keys(providers).length > 0
+  const providers = recordOf(recordOf(user)?.providers)
+  return providers !== undefined && Object.keys(providers).length > 0
+}
+
+/** Whether the provider route named by the seed is already stored. */
+function hasRoute(user: unknown, provider: string): boolean {
+  const providers = recordOf(recordOf(user)?.providers)
+  return providers !== undefined && Object.hasOwn(providers, provider)
+}
+
+/** Whether one stored persona assignment names a provider and a model. */
+function hasPersonaAssignment(value: unknown): boolean {
+  const entry = recordOf(value)
+  return entry !== undefined && filled(entry.provider) && filled(entry.model)
 }
 
 /**
- * Seed the first-run defaults, at most once per settings document.
+ * Seed the missing first-run defaults, then store the marker. A document that
+ * carries other provider routes and not the seeded one is a configured
+ * install: it gets the marker only, never the Kilo route back.
  * @param settings - the live settings service, or undefined when it is not mounted.
  * @param options - resolved route fields, model, chain, and marker version.
  * @returns what this attempt decided.
@@ -196,31 +230,56 @@ export async function seedFirstRun(
   if (settings === undefined) return 'unavailable'
   const providerSection = settings.describeNamespace('llm-pi-ai')
   if (providerSection === undefined) return 'unavailable'
-  if (!hasProviderRoutes(providerSection.user)) {
+  let wrote = false
+  // Each piece is checked on its own so a boot that stopped after an earlier
+  // write still fills what is missing. The route write never touches a route
+  // key that is already stored.
+  const routesPresent = hasProviderRoutes(providerSection.user)
+  const routePresent = hasRoute(providerSection.user, options.provider)
+  if (!routesPresent) {
     await settings.update('llm-pi-ai', { providers: { [options.provider]: kiloRouteValue(options.model, options) } })
-    // Provider/model is the first attempt; the chain is the shipped free group
-    // appended behind it. The runtime starts at the named link and escalates
-    // through the group's selector matches on a retryable failure.
-    await settings.update('agent-default-model', {
-      provider: options.provider,
-      model: options.model,
-      // A blank configured group means "no fallback": omit the key instead of
-      // storing an empty group id.
-      ...options.chain === '' ? {} : { chain: options.chain },
-    })
-    // The personas name the route just seeded, so they land in the same
-    // once-only write. A profile without the fleet namespace (a non-Enpoi
-    // composition) skips them instead of failing the whole seed.
-    if (settings.describeNamespace(ORCHESTRATION_NAMESPACE) !== undefined) {
-      await settings.update(ORCHESTRATION_NAMESPACE, {
-        personas: kiloPersonaSeeds(options.provider, options.model, options.chain),
-      })
-    }
-    await settings.update('first-run', { seedVersion: options.version })
-    return 'seeded'
+    wrote = true
   }
+  // A configured install (other routes, not this one) keeps its own routing;
+  // the seat and personas are only repaired when the seed owns the route.
+  if (!routesPresent || routePresent) {
+    const seat = recordOf(settings.describeNamespace('agent-default-model')?.user)
+    const seatPatch: Record<string, string> = {}
+    if (!filled(seat?.provider)) seatPatch.provider = options.provider
+    if (!filled(seat?.model)) {
+      seatPatch.model = options.model
+      // Provider/model is the first attempt; the chain is the shipped free
+      // group appended behind it. The runtime starts at the named link and
+      // escalates through the group's selector matches on a retryable failure.
+      // A blank configured group means "no fallback": omit the key instead of
+      // storing an empty group id, and keep a group the operator stored.
+      const storedChain = seat !== undefined && filled(seat.chain) ? seat.chain : options.chain
+      if (storedChain !== '') seatPatch.chain = storedChain
+    }
+    if (Object.keys(seatPatch).length > 0) {
+      await settings.update('agent-default-model', seatPatch)
+      wrote = true
+    }
+    // The personas name the seeded route. A profile without the fleet
+    // namespace (a non-Enpoi composition) skips them instead of failing the
+    // seed, and an assignment the operator already made is left alone.
+    const fleetSection = settings.describeNamespace(ORCHESTRATION_NAMESPACE)
+    if (fleetSection !== undefined) {
+      const storedPersonas = recordOf(recordOf(fleetSection.user)?.personas)
+      const missing = Object.fromEntries(
+        Object.entries(kiloPersonaSeeds(options.provider, options.model, options.chain))
+          .filter(([id]) => !hasPersonaAssignment(storedPersonas?.[id])),
+      )
+      if (Object.keys(missing).length > 0) {
+        await settings.update(ORCHESTRATION_NAMESPACE, { personas: missing })
+        wrote = true
+      }
+    }
+  }
+  // The marker lands last: a failed earlier write leaves it unset, so the next
+  // boot retries the missing pieces instead of treating the document as seeded.
   await settings.update('first-run', { seedVersion: options.version })
-  return 'present'
+  return wrote ? 'seeded' : 'present'
 }
 
 /** Stable Cordis plugin name. */

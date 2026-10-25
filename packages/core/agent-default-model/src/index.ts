@@ -50,27 +50,43 @@ export interface Config {
  * the keyless Kilo Gateway, which the first-run seed also writes.
  */
 export const BASELINE_PROVIDER = 'kilo'
-/** Model the baseline selection resolves to: the gateway's free auto tier. */
-export const BASELINE_MODEL = 'kilo-auto/free'
+/**
+ * Model the baseline selection resolves to. Measured against the live gateway
+ * on 2026-10-25: this id answered with real content (262k context, tools, and
+ * reasoning advertised), while the retired `kilo-auto/free` answered 200 with
+ * EMPTY content and `kilo-auto/balanced` answered 400 "You need to sign in to
+ * use this model". The first-run seed writes the same id.
+ */
+export const BASELINE_MODEL = 'poolside/laguna-s-2.1:free'
+/**
+ * Model group the baseline pairs with: the shipped `free` selector group, so a
+ * dead first attempt escalates through the zero-priced catalogue instead of
+ * leaving the Session with nothing. Omitted when the configured model is set.
+ */
+export const BASELINE_CHAIN = 'free'
 
 /**
  * Resolve a possibly unset provider/model pair against the configured baseline.
  * A blank field is an unset selection, never a route or model id. Under the
  * default `kilo` baseline a deployment that selects nothing still starts every
  * Session on a provider; under `off` the blanks stay blank and the consumer
- * owns the missing route.
+ * owns the missing route. When the model falls back to {@link BASELINE_MODEL},
+ * the resolved selection also carries {@link BASELINE_CHAIN}, the same fallback
+ * rung the seed writes; a configured model keeps its own routing and gets no
+ * implicit group.
  * @param configured - provider and model as configured; blank means unset.
  * @param baseline - baseline policy; omitted means the shipped `kilo` default.
- * @returns the configured pair, or the Kilo free-auto baseline per blank field.
+ * @returns the configured pair, or the Kilo baseline pair plus its free group.
  */
 export function resolveBaseline(
   configured: { provider: string; model: string },
   baseline: BaselineMode = 'kilo',
-): { provider: string; model: string } {
+): { provider: string; model: string; chain?: string } {
   if (baseline === 'off') return { provider: configured.provider, model: configured.model }
   return {
     provider: configured.provider === '' ? BASELINE_PROVIDER : configured.provider,
     model: configured.model === '' ? BASELINE_MODEL : configured.model,
+    ...configured.model === '' ? { chain: BASELINE_CHAIN } : {},
   }
 }
 

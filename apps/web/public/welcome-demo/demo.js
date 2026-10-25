@@ -285,7 +285,7 @@
 
   // Demo-only simulation facts for Kilo: the shipped preset list marks it
   // keyless through KEYLESS_PRESET_IDS; discovery count and model are samples.
-  const PROVIDER_EXTRAS = { kilo: { keyless: true, models: 5, model: 'kilo-auto/free' } }
+  const PROVIDER_EXTRAS = { kilo: { keyless: true, models: 5, model: 'poolside/laguna-s-2.1:free' } }
 
   const PROVIDERS = Object.fromEntries(
     CATALOGUE.map((p) => [p.id, { ...p, ...(PROVIDER_EXTRAS[p.id] || {}) }]),

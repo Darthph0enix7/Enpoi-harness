@@ -55,7 +55,7 @@ Expand **Customized settings → Model options** to edit each model. Both provid
 
 **Preset overrides.** The add card's catalog is generated data; an operator changes it without editing that data by writing `enpoi-orchestration.uiPreferences.providerCatalog.<id>` — `hidden`, `keyless`, and `popular` booleans. A hidden preset leaves the picker and the unconfigured provider listing, while a route the operator already configured (or one currently registered) keeps its row and stays editable; `keyless`/`popular` replace the shipped verdict for that provider.
 
-**Fresh-install intent.** A fresh installation should ship Kilo Gateway as the default route — keyless, `kilo-auto/free` — with upstream's built-in `deepseek-official` route either absent or removable through the shipped-route removal above. The default-route assignment is a profile-composition decision and is not implemented by this package.
+**Fresh-install intent.** A fresh installation should ship Kilo Gateway as the default route — keyless, `poolside/laguna-s-2.1:free` — with upstream's built-in `deepseek-official` route either absent or removable through the shipped-route removal above. The default-route assignment is a profile-composition decision and is not implemented by this package.
 
 ### First-run dialogs
 

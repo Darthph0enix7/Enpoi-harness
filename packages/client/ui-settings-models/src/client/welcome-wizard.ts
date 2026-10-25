@@ -34,9 +34,15 @@ export const WIZARD_SETTINGS_NAMESPACE = WELCOME_NOTICE_SETTINGS_NAMESPACE
 /** Field storing the version of the setup flow this installation completed. */
 export const WIZARD_COMPLETED_FIELD = 'onboardingCompleted'
 
-/** Route id and free model the background helpers use for their seats. */
+/**
+ * Route id, free model, and fallback group the background helpers use for
+ * their seats. `poolside/laguna-s-2.1:free` is the measured working free id
+ * (2026-10-25: real content, unlike the retired `kilo-auto/free`, which
+ * answered 200 with empty content); the first-run seed writes the same pair.
+ */
 export const WIZARD_FREE_PROVIDER = 'kilo'
-export const WIZARD_FREE_MODEL = 'kilo-auto/free'
+export const WIZARD_FREE_MODEL = 'poolside/laguna-s-2.1:free'
+export const WIZARD_FREE_CHAIN = 'free'
 
 /** The eight steps, in order. */
 export const WIZARD_STEPS = ['welcome', 'security', 'provider', 'web', 'intelligence', 'tour', 'agents', 'done'] as const
@@ -106,7 +112,7 @@ export function intelligenceWrites(choice: IntelligenceChoice): WizardWrite[] {
   if (choice.compaction) {
     writes.push({
       ns,
-      ops: [{ op: 'set', path: ['personas', 'compaction'], value: { provider: WIZARD_FREE_PROVIDER, model: WIZARD_FREE_MODEL } }],
+      ops: [{ op: 'set', path: ['personas', 'compaction'], value: { provider: WIZARD_FREE_PROVIDER, model: WIZARD_FREE_MODEL, chain: WIZARD_FREE_CHAIN } }],
     })
   } else {
     writes.push({ ns, ops: [{ op: 'unset', path: ['personas', 'compaction'] }] })
@@ -114,7 +120,7 @@ export function intelligenceWrites(choice: IntelligenceChoice): WizardWrite[] {
   if (choice.keeper) {
     writes.push({
       ns,
-      ops: [{ op: 'set', path: ['personas', 'keeper'], value: { provider: WIZARD_FREE_PROVIDER, model: WIZARD_FREE_MODEL } }],
+      ops: [{ op: 'set', path: ['personas', 'keeper'], value: { provider: WIZARD_FREE_PROVIDER, model: WIZARD_FREE_MODEL, chain: WIZARD_FREE_CHAIN } }],
     })
   }
   return writes

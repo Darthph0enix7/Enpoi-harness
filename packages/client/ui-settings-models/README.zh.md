@@ -55,7 +55,7 @@ API 密钥输入框初始为空，并通过 `autocomplete="new-password"` 请求
 
 **预设覆盖。** 新增卡片的目录是生成数据；运营者无需改动该数据，只需写入 `enpoi-orchestration.uiPreferences.providerCatalog.<id>`——`hidden`、`keyless` 与 `popular` 三个布尔字段——即可修改它。被隐藏的预设会离开选择器与未配置提供商列表，而运营者已配置（或当前已注册）的路由仍保留自己的行并可继续编辑；`keyless`/`popular` 会替换该提供商的随附判定。
 
-**全新安装意图。** 全新安装应以 Kilo Gateway 作为默认路由——keyless、`kilo-auto/free`——并让上游内置的 `deepseek-official` 路由缺失或可通过上述 shipped 路由删除移除。默认路由的指派属于 profile 组合决策，本包不实现。
+**全新安装意图。** 全新安装应以 Kilo Gateway 作为默认路由——keyless、`poolside/laguna-s-2.1:free`——并让上游内置的 `deepseek-official` 路由缺失或可通过上述 shipped 路由删除移除。默认路由的指派属于 profile 组合决策，本包不实现。
 
 ### 首次运行弹窗
 

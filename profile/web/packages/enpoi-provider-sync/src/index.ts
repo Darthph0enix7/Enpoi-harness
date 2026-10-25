@@ -213,6 +213,67 @@ interface LiveModel {
 /** The gate reason the listing's own `isFree: false` verdict earns. */
 const SIGN_IN_REQUIRED = 'sign-in required'
 
+/**
+ * Picker-facing reason stamped on a route whose profile sets
+ * `freeTierGated` without naming its own. It describes the policy, not a
+ * provider: no provider name reaches code through this path.
+ */
+export const DEFAULT_FREE_TIER_GATE_REASON = "free tier is gated to the provider's own clients"
+
+/** One route's durable free-tier gate, resolved from its provider profile. */
+export interface FreeTierGate {
+  /** Picker-facing reason stamped on every zero-priced model. */
+  reason: string
+}
+
+/**
+ * Resolve the gate a route's profile declares, or `undefined` when it declares
+ * none.
+ * @param profile - the route's configured profile, when one exists.
+ * @returns the gate with its effective reason, or undefined.
+ */
+export function freeTierGateOf(profile: ProviderProfile | undefined): FreeTierGate | undefined {
+  if (profile?.freeTierGated !== true) return undefined
+  const configured = profile.freeTierGateReason
+  return { reason: typeof configured === 'string' && configured !== '' ? configured : DEFAULT_FREE_TIER_GATE_REASON }
+}
+
+/** Whether one record's disclosed price is known and entirely zero. */
+function isKnownZeroPrice(entry: Record<string, unknown>): boolean {
+  const cost = entry.cost
+  if (cost === null || typeof cost !== 'object' || Array.isArray(cost)) return false
+  const prices = cost as Record<string, unknown>
+  const values = [prices.input, prices.output]
+    .filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+  return values.length > 0 && values.every(value => value === 0)
+}
+
+/**
+ * Stamp the route's durable gate onto every zero-priced settings record. A
+ * record with no disclosed price stays untouched (absent is "unknown", never
+ * a free claim), and a paid record keeps whatever gate the listing gave it.
+ * With no gate configured the list is returned unchanged, so a route that
+ * does not declare one writes byte-identical records.
+ * @param models - the route's planned settings records.
+ * @param gate - the gate its profile declares, when any.
+ * @returns the records to persist.
+ */
+export function applyFreeTierGate<T extends Record<string, unknown>>(
+  models: readonly T[],
+  gate: FreeTierGate | undefined,
+): T[] {
+  if (gate === undefined) return [...models]
+  return models.map((model) => {
+    if (!isKnownZeroPrice(model)) return model
+    const listed = model.gateReason
+    return {
+      ...model,
+      gated: true,
+      gateReason: typeof listed === 'string' && listed !== '' ? listed : gate.reason,
+    }
+  })
+}
+
 /** The llm-pi-ai namespace (branded through the settings seam). */
 const LLM_NS = 'llm-pi-ai'
 
@@ -238,6 +299,15 @@ interface ProviderProfile {
   apiKeyEnv?: string
   /** Anonymous route: its listing is fetched without any credential, like its requests. */
   keyless?: boolean
+  /**
+   * Route-level declaration that its zero-priced models are gated to the
+   * provider's own clients. The listing (and therefore every per-model
+   * `gated` marking) is rewritten each pass, so this profile field is what
+   * survives; the sync stamps every zero-priced record it writes.
+   */
+  freeTierGated?: boolean
+  /** Picker-facing reason stamped beside the gate; the sync default fills an omitted one. */
+  freeTierGateReason?: string
   models?: Array<Record<string, unknown>>
   pool?: {
     strategy?: string
@@ -2014,6 +2084,8 @@ export interface PlanRouteInput {
   hints?: CapabilityHintContext | undefined
   /** The effective route → models.dev provider keys. */
   routeProviderMap?: RouteProviderMap | undefined
+  /** The durable free-tier gate the route's profile declares, when any. */
+  freeTierGate?: FreeTierGate | undefined
   /** Which listing answered the endpoint authority question. */
   source?: 'live' | 'catalog' | undefined
   /** Force removal execution even if removals drop >50% (e.g. manual refresh or authoritative endpoint). */
@@ -2202,7 +2274,7 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
       models.push(grace.has(id) ? { ...fresh, firstSeenAt: input.now } : fresh)
     }
   }
-  return { models: applyCatalogOverlay(models, input.overlay), report }
+  return { models: applyFreeTierGate(applyCatalogOverlay(models, input.overlay), input.freeTierGate), report }
 }
 
 /** The value `providerSync.refreshRoute` returns to the client. */
@@ -2435,6 +2507,8 @@ export function apply(ctx: Context, config: Config): void {
       overlay: RouteCatalogOverlay | undefined
       hints: CapabilityHintContext
       source: 'live' | 'catalog'
+      /** The durable free-tier gate the route profile declares, when any. */
+      freeTierGate?: FreeTierGate | undefined
       force?: boolean | undefined
     }
 
@@ -2483,6 +2557,7 @@ export function apply(ctx: Context, config: Config): void {
         capacities,
         hints: recipe.hints,
         routeProviderMap,
+        ...recipe.freeTierGate === undefined ? {} : { freeTierGate: recipe.freeTierGate },
         source: recipe.source,
         endpointGraceMs: value(config.endpointGraceMs) ?? ENDPOINT_ONLY_GRACE_MS,
         force: recipe.force,
@@ -2555,6 +2630,7 @@ export function apply(ctx: Context, config: Config): void {
         fetchError = error instanceof Error ? error.message : String(error)
         logger.warn(describeSyncFailure(route, error, ns))
       }
+      const gate = freeTierGateOf(profile)
       const recipe: PlanRecipe = {
         live,
         catalogRoute,
@@ -2562,6 +2638,7 @@ export function apply(ctx: Context, config: Config): void {
         catalogOnlineOk: options.catalogOnlineOk,
         overlay,
         hints: options.hints,
+        ...gate === undefined ? {} : { freeTierGate: gate },
         source: ns === COMMANDCODE_NS ? 'catalog' : 'live',
         force: options.force,
       }

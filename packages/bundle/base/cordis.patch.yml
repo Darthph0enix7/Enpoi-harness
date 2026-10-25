@@ -81,11 +81,15 @@
     # Settings may supply a saved selection; consumers read it at creation time.
     # The shipped baseline is the keyless Kilo Gateway free tier, so a Session
     # with nothing selected still starts on a provider that answers without a key.
+    # `poolside/laguna-s-2.1:free` is the measured working free id; the retired
+    # `kilo-auto/free` answered 200 with empty content. The `free` group is the
+    # fallback rung the first-run seed also writes.
     - id: agent-default-model
       name: '@deepseek-ai/dsh-agent-default-model'
       config:
         provider: kilo
-        model: kilo-auto/free
+        model: poolside/laguna-s-2.1:free
+        chain: free
 
     # First-run defaults. On a fresh settings document with no provider
     # routes, this writes the keyless Kilo Gateway route and points the

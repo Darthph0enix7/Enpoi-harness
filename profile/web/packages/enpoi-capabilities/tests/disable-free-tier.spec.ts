@@ -219,7 +219,7 @@ describe('disable-free-tier boot guard', () => {
     expect(first.stdout).toContain('applied 1 fix')
     const repaired = readFileSync(path, 'utf8')
     expect(repaired).toContain('- id: agent-default-model')
-    expect(repaired).toContain('    provider: kilo\n    model: kilo-auto/free\n')
+    expect(repaired).toContain('    provider: kilo\n    model: poolside/laguna-s-2.1:free\n')
     const second = run(path)
     expect(second.status).toBe(0)
     expect(second.stdout).toContain('already clean')

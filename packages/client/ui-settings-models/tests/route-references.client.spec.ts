@@ -133,7 +133,7 @@ describe('cleanupRemovedRoute', () => {
     expect(agentNs).toBe(AGENT_DEFAULT_MODEL_NS)
     expect(agentOps).toEqual([
       { op: 'set', path: ['provider'], value: 'kilo' },
-      { op: 'set', path: ['model'], value: 'kilo-auto/free' },
+      { op: 'set', path: ['model'], value: 'poolside/laguna-s-2.1:free' },
     ])
     const [subagentNs, subagentOps] = [mutate.mock.calls[2]![0], mutate.mock.calls[2]![1]] as const
     expect(subagentNs).toBe(SUBAGENT_MODEL_SELECTION_NS)
@@ -302,7 +302,7 @@ describe('route reference builders', () => {
     expect(buildAgentDefaultModelOps(null, 'gone', new Set())).toEqual([])
     expect(buildAgentDefaultModelOps({ provider: 'gone' }, 'gone', new Set())).toEqual([
       { op: 'set', path: ['provider'], value: 'kilo' },
-      { op: 'set', path: ['model'], value: 'kilo-auto/free' },
+      { op: 'set', path: ['model'], value: 'poolside/laguna-s-2.1:free' },
     ])
     expect(buildAgentDefaultModelOps({ provider: 'kept', chain: 'kept' }, 'gone', new Set())).toEqual([])
     expect(buildSubagentSelectionOps(null, 'gone')).toEqual([])

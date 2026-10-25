@@ -115,6 +115,20 @@ export interface PiAiProviderProfile {
    */
   keyless?: boolean
   /**
+   * Whether this route gates its zero-priced models to the provider's own
+   * clients. The provider's model listing is rewritten by discovery, so a
+   * per-model `gated` marking cannot survive a refresh; this route-level flag
+   * is the durable declaration, and the provider sync stamps `gated: true`
+   * plus {@link freeTierGateReason} on every zero-priced model it writes.
+   * Paid models and models with no disclosed price are untouched.
+   */
+  freeTierGated?: boolean
+  /**
+   * Picker-facing reason stamped beside the gate when {@link freeTierGated} is
+   * set; the sync's own neutral default applies when it is omitted.
+   */
+  freeTierGateReason?: string
+  /**
    * Multi-credential pool for this route. When present, requests rotate
    * across the listed identities (priority-sticky) with per-identity ×
    * per-model cooldowns; a single `apiKeyEnv` remains valid as an implicit
@@ -404,6 +418,8 @@ const poolConfig = z.object({
 const profile = z.object({
   apiKeyEnv: z.string().role('credential-ref'),
   keyless: z.boolean(),
+  freeTierGated: z.boolean(),
+  freeTierGateReason: z.string(),
   pool: poolConfig,
   displayName: z.string(),
   api: z.union(supportedProtocols()),
@@ -634,7 +650,7 @@ export function resolveProfiles(
       displayName,
       keyless: keyless === true,
       ...apiKeyEnv === undefined ? {} : { apiKeyEnv: credentialRef(apiKeyEnv) },
-      ...hasPool && pool !== undefined ? { pool: { ...pool, identities: pool.identities.map(identity => ({ ...identity })) } } : {},
+      ...hasPool ? { pool: { ...pool, identities: pool.identities.map(identity => ({ ...identity })) } } : {},
       streamIdleTimeoutMs,
       maxRequestImageBytes,
       requestImagePixelBudget,
