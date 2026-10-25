@@ -247,8 +247,10 @@ export const IMAGE_OFFLOAD_REQUIRED_CODE = 'IMAGE_OFFLOAD_REQUIRED'
  * "You cannot use the free tier in other harnesses (this is only a limitation
  * for the free tier nothing else)" (rekram1-node, anomalyco/opencode#49621,
  * 2026-09-18). The paid OpenCode Go route is the sanctioned client path. A
- * failure carrying this code is terminal: it must not cycle the pool's keys,
- * cool an identity down, quarantine the route, or escalate a model group.
+ * failure carrying this code must not cycle the pool's keys, cool an identity
+ * down, or quarantine the route. A model group may skip the rest of that
+ * provider's links, because a different provider is the only route that can
+ * serve the request.
  */
 export const FREE_TIER_GATED_CODE = 'FREE_TIER_GATED'
 

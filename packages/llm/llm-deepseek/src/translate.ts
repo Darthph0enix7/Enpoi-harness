@@ -146,7 +146,16 @@ export async function* translate(events: AsyncIterable<Record<string, unknown>>,
       if (event.usage !== undefined) updateUsage(usage, event.usage)
     } else {
       if (reason === undefined || [...blocks.values()].some(block => !block.closed)) return malformed('message_stop without settled blocks and stop reason')
-      if (blocks.size === 0 && reason.kind === 'stop') throw new LlmError('DeepSeek Messages returned no content', 'EMPTY_RESPONSE')
+      // A completed response must carry something a consumer can retain:
+      // non-empty text or a tool call. Reasoning and usage do not count, so an
+      // empty text block or a thinking-only reply is EMPTY_RESPONSE. Tool-call
+      // and text-only steps remain successful. A length-capped step keeps its
+      // truncation result, which the loop already handles.
+      const hasAnswer = [...blocks.values()].some(({ content }) =>
+        content.type === 'tool-call' || (content.type === 'text' && content.text.length > 0))
+      if (reason.kind === 'stop' && !hasAnswer) {
+        throw new LlmError('DeepSeek Messages returned no content', 'EMPTY_RESPONSE')
+      }
       // Truncated tool JSON is retained in the stream, then pruned by the shared assembler.
       if (reason.kind !== 'max-tokens') {
         for (const { content } of blocks.values()) {

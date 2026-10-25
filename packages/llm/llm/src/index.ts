@@ -40,7 +40,10 @@ import { callConfigEquals, isAgentLoopRequest, markAgentLoopRequest } from './ca
 import type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
 import {
   ACCOUNT_QUOTA_EXCEEDED_CODE,
+  CONTEXT_WINDOW_EXCEEDED_CODE,
+  EMPTY_RESPONSE_CODE,
   ENTITLEMENT_GATED_CODE,
+  FREE_TIER_GATED_CODE,
   HarnessError,
   INVALID_CREDENTIAL_CODE,
   STREAM_CLOSED_CODE,
@@ -202,8 +205,8 @@ export function assertUsableApiKey(raw: string, pkg: string, ref: string): strin
 /**
  * Wall-clock budget for one chain link's pre-commit phase: the time its
  * identity pool may spend rotating keys before the chain escalates. The budget
- * stops applying at the first non-usage chunk, so a committed generation runs
- * to its own end. Mirrors llm-pi-ai's `poolDeadlineMs` default.
+ * stops applying at the first non-usage chunk, so a live generation runs to
+ * its own end. Mirrors llm-pi-ai's `poolDeadlineMs` default.
  */
 const CHAIN_LINK_BUDGET_MS = 15_000
 
@@ -215,17 +218,17 @@ const CHAIN_BUDGET_MS = 60_000
  * the resolved retry policy's defaults; the route failures are ones only a
  * different provider can survive (exhausted key pool, model outage, auth,
  * quota, a route with no adapter, a route whose model is not configured).
- * FATAL codes (bad request, schema, context overflow, image offload) are
- * absent on purpose: they never rotate. A provider stream that ended without
- * a terminal event is the same provider-side truncation as a cut, so it
- * rotates even when the link's own policy does not list it.
- * `FREE_TIER_GATED` is absent for the same reason: OpenCode's free-tier client
- * gate is a server-side policy rejection ("You cannot use the free tier in
- * other harnesses", anomalyco/opencode#49621), so cycling the group's other
- * gated links only repeats the same 403 while hiding the explanation.
+ * FATAL codes (bad request, schema, image offload) are absent on purpose:
+ * they never rotate. A provider stream that ended without a terminal event is
+ * the same provider-side truncation as a cut, so it rotates even when the
+ * link's own policy does not list it. A context overflow is present because a
+ * larger member of the same group may still carry the request.
+ * `FREE_TIER_GATED` is present even though it condemns only its provider: a
+ * different provider can serve the request, and the provider-skip loop below
+ * never repeats the same gated route.
  */
 const CHAIN_ESCALATION_CODES: ReadonlySet<string> = new Set([
-  'EMPTY_RESPONSE',
+  EMPTY_RESPONSE_CODE,
   STREAM_CLOSED_CODE,
   'RATE_LIMIT',
   'SERVER',
@@ -241,7 +244,20 @@ const CHAIN_ESCALATION_CODES: ReadonlySet<string> = new Set([
   // An identity/account entitlement gate is not a dead route: another chain
   // link (provider or account) may carry a plan that grants the model.
   ENTITLEMENT_GATED_CODE,
+  FREE_TIER_GATED_CODE,
   'MISSING_CREDENTIAL',
+  CONTEXT_WINDOW_EXCEEDED_CODE,
+])
+
+/**
+ * Failures that condemn every remaining link of the link's provider for this
+ * request. Only a different provider can serve it: an auth/sign-in gate (D5)
+ * and the free-tier client policy (D6) repeat identically on every model of
+ * the same route.
+ */
+const CHAIN_PROVIDER_SKIP_CODES: ReadonlySet<string> = new Set([
+  'AUTH',
+  FREE_TIER_GATED_CODE,
 ])
 
 /** Terminal failure code for a chain whose links all failed. */
@@ -435,6 +451,47 @@ function chainFailureChunk(
         code: MODEL_CHAIN_EXHAUSTED_CODE,
       }, linkRoute(last.link)),
     },
+  }
+}
+
+/** One ordered attempt candidate and its 1-based position in the request's link order. */
+interface ChainAttempt {
+  readonly link: ModelChainLink
+  readonly position: number
+}
+
+/**
+ * Fixed-density request-size estimate used only to prefilter group members
+ * against a known context window. Mirrors the token meter's public heuristic
+ * (four characters per token) without importing the meter, which depends on
+ * this package. Unknown-shaped content is priced by its JSON length, so the
+ * estimate errs high rather than low.
+ */
+function estimateRequestTokens(options: GenerateOptions): number {
+  let characters = options.system?.length ?? 0
+  for (const message of options.messages) {
+    for (const block of message.content) {
+      characters += block.type === 'text' ? block.text.length : JSON.stringify(block).length
+    }
+    characters += 16
+  }
+  if (options.tools !== undefined) characters += JSON.stringify(options.tools).length
+  return Math.ceil(characters / 4)
+}
+
+/**
+ * Whether one non-usage chunk carries an answer a consumer can retain: text
+ * (a non-empty delta or closed block) or a tool call. Reasoning alone is not
+ * an answer, so an EMPTY_RESPONSE remains distinguishable from a real turn.
+ */
+function isAnswerContent(chunk: StreamChunk): boolean {
+  switch (chunk.type) {
+    case 'text-delta': return chunk.text.length > 0
+    case 'tool-call-delta': return true
+    case 'block-end':
+      return chunk.block.type === 'tool-call'
+        || (chunk.block.type === 'text' && chunk.block.text.length > 0)
+    default: return false
   }
 }
 
@@ -1452,6 +1509,7 @@ export class LlmRuntime extends TypertRemoteService {
     }
 
     let completed = false
+    let answered = false
     try {
       while (true) {
         let item: { done: true } | { done: false; value: StreamChunk }
@@ -1469,9 +1527,35 @@ export class LlmRuntime extends TypertRemoteService {
           completed = true
           return
         }
+        const value = item.value
+        if (value.type === 'finish'
+          && value.reason.kind !== 'error'
+          && value.reason.kind !== 'aborted'
+          && value.reason.kind !== 'max-tokens'
+          && !answered) {
+          // A provider can answer `stop` with only an empty text block or
+          // reasoning. That is not a successful turn: surface EMPTY_RESPONSE so
+          // a chain can move on and a single-model request reports the honest
+          // failure instead of silently ending with nothing. A `max-tokens`
+          // truncation keeps its own result, which the loop already handles.
+          yield {
+            type: 'finish',
+            reason: {
+              kind: 'error',
+              failure: {
+                message: `model "${options.model}" returned a completed response with no content`,
+                code: EMPTY_RESPONSE_CODE,
+                provider: options.provider,
+                model: options.model,
+              },
+            },
+          }
+          return
+        }
+        if (isAnswerContent(value)) answered = true
         // End the adapter-owned try before yielding: consumer/middleware
         // failures resumed into this generator must remain thrown.
-        yield item.value
+        yield value
       }
     } finally {
       if (!completed) {
@@ -1568,24 +1652,29 @@ export class LlmRuntime extends TypertRemoteService {
   }
 
   /**
-   * Try the group's links in order. The first link is the one the request
-   * already names (a consumer's retry advances that selection); links before it
-   * are not re-run. Budgets are pre-commit only: once a link commits, its
-   * generation runs to its own end and only a terminal chunk is yielded.
+   * Try the request's own route first, then the group's links in order. The
+   * request route is an implicit first member when the group does not list it;
+   * when it is listed, links before it are not re-run (a consumer's retry
+   * advances that selection). Members whose known context window is smaller
+   * than the estimated request are skipped unless every candidate is too
+   * small. Budgets are pre-commit only: once a link commits, its generation
+   * runs to its own end and only a terminal chunk is yielded.
    */
   private async * chainStream(
     options: GenerateOptions,
     prepared: PreparedDispatch | undefined,
     chain: ResolvedModelChain,
   ): AsyncGenerator<StreamChunk> {
-    const links = chain.links
-    const named = links.findIndex(link => link.provider === options.provider && link.model === options.model)
-    const start = named < 0 ? 0 : named
+    const order = await this.chainAttemptOrder(options, chain)
     const budgetEnd = Date.now() + CHAIN_BUDGET_MS
     const attempted: { link: ModelChainLink; failure: LlmFailure }[] = []
-    for (let index = start; index < links.length; index += 1) {
-      const link = links[index]
-      if (link === undefined) continue
+    // A provider condemned by AUTH or the free-tier gate stays condemned for
+    // the rest of this request, even if a later different provider also fails.
+    const skippedProviders = new Set<string>()
+    for (let step = 0; step < order.length; step += 1) {
+      const candidate = order[step]
+      if (candidate === undefined) continue
+      const link = candidate.link
       const remaining = budgetEnd - Date.now()
       if (remaining <= 0) break
       // Manual iteration instead of an assignment from `yield*`: the packed
@@ -1597,13 +1686,17 @@ export class LlmRuntime extends TypertRemoteService {
         yield linkStep.value
         linkStep = await linkStream.next()
       }
-      const outcome = linkStep.done === true ? linkStep.value : undefined
+      const outcome = linkStep.value as ChainLinkOutcome | undefined
       if (outcome === undefined) return
       if (outcome.kind === 'answered') return
       const failure = withRoute(outcome.failure, linkRoute(link))
       attempted.push({ link, failure })
-      const next = links[index + 1]
-      if (!outcome.retryable || next === undefined || budgetEnd - Date.now() <= 0) {
+      if (CHAIN_PROVIDER_SKIP_CODES.has(failure.code)) skippedProviders.add(link.provider)
+      const nextStep = this.nextChainStep(order, step, skippedProviders)
+      const nextCandidate = nextStep === undefined ? undefined : order[nextStep]
+      const next = nextCandidate?.link
+      if (!outcome.retryable || nextStep === undefined || next === undefined
+        || nextCandidate === undefined || budgetEnd - Date.now() <= 0) {
         yield chainFailureChunk(chain.id, attempted)
         return
       }
@@ -1611,10 +1704,77 @@ export class LlmRuntime extends TypertRemoteService {
       // that failed even though only the answering link's chunks reach the
       // consumer. The record IS the escalation audit; the stderr line stays
       // for operators tailing a log.
-      this.appendAttemptFailure(options, chain.id, index + 1, link, failure, next)
-      writeChainEscalation(chain.id, index + 1, link, index + 2, next, failure)
+      this.appendAttemptFailure(options, chain.id, candidate.position, link, failure, next)
+      writeChainEscalation(chain.id, candidate.position, link, nextCandidate.position, next, failure)
+      step = nextStep - 1
     }
     yield chainFailureChunk(chain.id, attempted)
+  }
+
+  /**
+   * Build this request's 1-based attempt order. The request's own route is an
+   * implicit first member when the group does not name it, deduped when it
+   * does; the resolved group snapshot itself is never mutated. Members with a
+   * known context window below the estimated request size are removed, but an
+   * order where every member is too small is kept whole so the prefilter can
+   * never be the sole reason a request gives up.
+   */
+  private async chainAttemptOrder(
+    options: GenerateOptions,
+    chain: ResolvedModelChain,
+  ): Promise<readonly ChainAttempt[]> {
+    const named = chain.links.findIndex(link =>
+      link.provider === options.provider && link.model === options.model)
+    const candidates: ChainAttempt[] = named < 0
+      ? [
+        { link: { provider: options.provider, model: options.model }, position: 1 },
+        ...chain.links.map((link, offset) => ({ link, position: offset + 2 })),
+      ]
+      : chain.links
+        .slice(named)
+        .map((link, offset) => ({ link, position: named + offset + 1 }))
+    const estimated = estimateRequestTokens(options)
+    const eligible: ChainAttempt[] = []
+    for (const candidate of candidates) {
+      if (await this.chainLinkFits(candidate.link, estimated, options.signal)) eligible.push(candidate)
+    }
+    return eligible.length === 0 ? candidates : eligible
+  }
+
+  /**
+   * Whether one member can carry the estimated request. An unknown window, or
+   * a metadata lookup that fails, keeps the member: the prefilter is advisory
+   * and never replaces the provider's own answer.
+   */
+  private async chainLinkFits(
+    link: ModelChainLink,
+    estimatedTokens: number,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    try {
+      const contextWindow = (await this.resolveModelInfo(link.provider, link.model, signal)).context?.contextWindow
+      return contextWindow === undefined || contextWindow >= estimatedTokens
+    } catch (_unavailableModelContext) {
+      return true
+    }
+  }
+
+  /**
+   * Next attempt position after one failure, skipping every member of a
+   * provider condemned earlier in this request.
+   */
+  private nextChainStep(
+    order: readonly ChainAttempt[],
+    step: number,
+    skippedProviders: ReadonlySet<string>,
+  ): number | undefined {
+    let index = step + 1
+    while (index < order.length) {
+      const candidate = order[index]
+      if (candidate === undefined || !skippedProviders.has(candidate.link.provider)) break
+      index += 1
+    }
+    return index < order.length ? index : undefined
   }
 
   /**
@@ -1662,8 +1822,11 @@ export class LlmRuntime extends TypertRemoteService {
           return { kind: 'answered' }
         }
         if (chunk.type !== 'usage') {
-          committed = true
-          // A committed generation owns its own clock; only the pool phase is budgeted.
+          // Only an actual answer commits a link: reasoning-only or empty text
+          // output must remain eligible for the next member. The timer still
+          // stops at the first activity, because a live generation owns its own
+          // clock even when it later turns out to be empty.
+          if (isAnswerContent(chunk)) committed = true
           clearTimeout(timer)
         }
         yield chunk
@@ -1838,9 +2001,9 @@ async function captureWireRequest(options: GenerateOptions): Promise<void> {
 async function writeWireCapture(options: GenerateOptions, wireLogPath: string | undefined): Promise<void> {
   try {
     const { homedir } = await import('node:os')
-    const { mkdir, writeFile } = await import('node:fs/promises')
-    const { dirname, join } = await import('node:path')
-    const root = wireLogPath === undefined ? homedir() + '/.dsh/logs' : dirname(wireLogPath)
+    const fs = await import('node:fs/promises')
+    const path = await import('node:path')
+    const root = wireLogPath === undefined ? homedir() + '/.dsh/logs' : path.dirname(wireLogPath)
     const payload = {
       time: Date.now(),
       provider: options.provider,
@@ -1853,14 +2016,14 @@ async function writeWireCapture(options: GenerateOptions, wireLogPath: string | 
       messages: options.messages,
       tools: options.tools ?? [],
     }
-    await mkdir(root, { recursive: true })
+    await fs.mkdir(root, { recursive: true })
     // Full audit trail: every call, timestamped. wire-last.json additionally
     // holds only the MAIN agent call (no `purpose` — auxiliary calls like
     // session-title/context-keeper are excluded), so it is always inspectable.
     const serialized = JSON.stringify(payload)
-    await writeFile(join(root, `wire-${Date.now()}.json`), serialized).then(undefined, () => undefined)
+    await fs.writeFile(path.join(root, `wire-${Date.now()}.json`), serialized).then(undefined, () => undefined)
     if (options.purpose === undefined) {
-      await writeFile(wireLogPath ?? join(root, 'wire-last.json'), serialized).then(undefined, () => undefined)
+      await fs.writeFile(wireLogPath ?? path.join(root, 'wire-last.json'), serialized).then(undefined, () => undefined)
       // Per-Session view beside the global files: one bounded, atomically
       // replaced capture holding the most recent MAIN request of that Session.
       await writeSessionWireCapture(root, options)

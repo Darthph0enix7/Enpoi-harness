@@ -88,6 +88,8 @@ describe('Messages stream', () => {
   it('refuses unsupported response content, empty responses and premature EOF', async () => {
     await expect(chunks(translate(events([start, { type: 'content_block_start', index: 0, content_block: { type: 'redacted_thinking', data: 'x' } }]), MODEL))).rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
     await expect(chunks(translate(events([start, ...end()]), MODEL))).rejects.toMatchObject({ code: 'EMPTY_RESPONSE' })
+    await expect(chunks(translate(events([start, { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }, { type: 'content_block_stop', index: 0 }, ...end()]), MODEL))).rejects.toMatchObject({ code: 'EMPTY_RESPONSE' })
+    await expect(chunks(translate(events([start, { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } }, { type: 'content_block_stop', index: 0 }, ...end()]), MODEL))).rejects.toMatchObject({ code: 'EMPTY_RESPONSE' })
     await expect(chunks(translate(events(textEvents.slice(0, -1)), MODEL))).rejects.toMatchObject({ code: 'STREAM_CLOSED' })
   })
 })

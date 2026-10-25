@@ -47,9 +47,19 @@ export function mapUsage(usage: PiUsage): TokenUsage {
 function classifyPiAiError(message: string): string {
   // OpenCode's `-free` models answer 403 FreeTierError to non-OpenCode
   // clients; the team states the rule directly ("You cannot use the free tier
-  // in other harnesses", anomalyco/opencode#49621). Policy, not auth: the code
-  // stays terminal so the chain neither retries nor rotates keys over it.
+  // in other harnesses", anomalyco/opencode#49621). Policy, not auth: the
+  // provider's other models repeat it, so a model group skips the provider
+  // while the pool still never rotates keys over it.
   if (isFreeTierGatedError(message)) return FREE_TIER_GATED_CODE
+  // A paid-model / sign-in wall is route-level, not payload-level: Kilo answers
+  // `400 {"code":"PAID_MODEL_AUTH_REQUIRED", ...}` (and sibling gateways spell
+  // the same idea `AUTH_REQUIRED`/`SIGN_IN_REQUIRED`/`SUBSCRIPTION_REQUIRED`).
+  // The machine code decides before prose entitlement: without this check the
+  // bare `400` below classifies it INVALID_REQUEST, which is fatal and never
+  // fails over to a provider that can serve the request.
+  if (/\b(?:PAID_MODEL_AUTH_REQUIRED|AUTH_REQUIRED|SIGN_?IN_REQUIRED|LOGIN_REQUIRED|SUBSCRIPTION_REQUIRED)\b/i.test(message)) {
+    return 'AUTH'
+  }
   // A per-account entitlement gate (OpenCode Go: "An active OpenCode Go
   // subscription is required to use Go models.") is identity-specific: live
   // pool state showed sibling identities serving the same model while one
@@ -57,6 +67,12 @@ function classifyPiAiError(message: string): string {
   // gated identity for a long period; this single-credential layer reports the
   // terminal code so the caller can fail over to another route or provider.
   if (isEntitlementGatedError(message)) return ENTITLEMENT_GATED_CODE
+  // Prose sign-in wording without a machine code gets the same route-level
+  // class; a bare `400` must not turn it into a fatal payload rejection.
+  if (/\b(?:need|must|have)\s+to\s+sign[\s-]?in\b/i.test(message)
+    || /\bsign[\s-]?in\s+(?:is\s+)?required\b/i.test(message)) {
+    return 'AUTH'
+  }
   if (/\b(?:401|403)\b/.test(message)) return 'AUTH'
   if (isQuotaExceededError(message)) return QUOTA_EXCEEDED_CODE
   if (/\b429\b|rate.?limit/i.test(message)) return 'RATE_LIMIT'
@@ -139,9 +155,9 @@ export function providerErrorDetail(text: string): string | undefined {
  * @param contextWindow - resolved catalog capacity for usage-based overflow detection.
  * @returns the mapped harness reason. Recognized error text, `stop` usage above
  *   `contextWindow`, and zero-output `length` usage that fills the window map
- *   to `CONTEXT_WINDOW_EXCEEDED`; a `stop` with no content blocks maps to an
- *   `EMPTY_RESPONSE` error, while terminal `pending` and `deferred` states map
- *   to non-retryable `PI_AI_ERROR` failures.
+ *   to `CONTEXT_WINDOW_EXCEEDED`; a completed `stop` with no non-empty text
+ *   block and no tool call maps to an `EMPTY_RESPONSE` error, while terminal
+ *   `pending` and `deferred` states map to non-retryable `PI_AI_ERROR` failures.
  */
 export function mapStopReason(message: AssistantMessage, contextWindow?: number): FinishReason {
   const piAiOverflow = isContextOverflow(message, contextWindow)
@@ -158,19 +174,24 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
     }
   }
 
+  // A completed response is successful only when it carries something a
+  // consumer can retain: non-empty text or a tool call. Reasoning and usage
+  // do not count, so a gateway that answers 200 with an empty text block (the
+  // Kilo free route) or reasoning only is an EMPTY_RESPONSE, not a silent
+  // successful turn. Tool-call-only and text-only steps stay successful.
+  const hasAnswer = message.content.some(block =>
+    block.type === 'toolCall' || (block.type === 'text' && block.text.length > 0))
+  const emptyResponse = (): FinishReason => ({
+    kind: 'error',
+    failure: {
+      message: `model "${message.model}" returned a completed response with no content`,
+      code: EMPTY_RESPONSE_CODE,
+    },
+  })
+
   switch (message.stopReason) {
     case 'stop':
-      // A terminal stop that produced no content blocks is a degenerate
-      // provider completion, not a successful (empty) assistant message.
-      if (message.content.length === 0) {
-        return {
-          kind: 'error',
-          failure: {
-            message: `model "${message.model}" returned a completed response with no content`,
-            code: EMPTY_RESPONSE_CODE,
-          },
-        }
-      }
+      if (!hasAnswer) return emptyResponse()
       return { kind: 'stop' }
     case 'length': return { kind: 'max-tokens' }
     case 'toolUse': return { kind: 'tool-calls' }

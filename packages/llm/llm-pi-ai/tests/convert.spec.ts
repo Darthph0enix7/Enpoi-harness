@@ -859,6 +859,19 @@ describe('mapStopReason / mapUsage', () => {
     })
   })
 
+  it('classifies an empty text block on a completed stop as EMPTY_RESPONSE', () => {
+    expect(mapStopReason(assistant({
+      stopReason: 'stop',
+      content: [{ type: 'text', text: '' }],
+    }))).toEqual({
+      kind: 'error',
+      failure: {
+        message: 'model "deepseek-v4-flash" returned a completed response with no content',
+        code: EMPTY_RESPONSE_CODE,
+      },
+    })
+  })
+
   it('classifies a gateway-reported empty completion as retryable EMPTY_RESPONSE', () => {
     // Kilo's gateway relays a degenerate upstream completion with this exact
     // wording; the turn must retry it, not die as a catch-all PI_AI_ERROR.
@@ -880,9 +893,26 @@ describe('mapStopReason / mapUsage', () => {
       .toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
   })
 
-  it('keeps a thinking-only stop successful (any block counts as content)', () => {
+  it('classifies a reasoning-only stop as EMPTY_RESPONSE', () => {
     expect(mapStopReason(assistant({ stopReason: 'stop', content: [{ type: 'thinking', thinking: 'mull' }] })))
-      .toEqual({ kind: 'stop' })
+      .toEqual({
+        kind: 'error',
+        failure: {
+          message: 'model "deepseek-v4-flash" returned a completed response with no content',
+          code: EMPTY_RESPONSE_CODE,
+        },
+      })
+  })
+
+  it('keeps tool-call-only and text-only completed steps successful', () => {
+    expect(mapStopReason(assistant({
+      stopReason: 'stop',
+      content: [{ type: 'toolCall', id: 'call-1', name: 'read', arguments: {} }],
+    }))).toEqual({ kind: 'stop' })
+    expect(mapStopReason(assistant({
+      stopReason: 'stop',
+      content: [{ type: 'text', text: 'answer' }],
+    }))).toEqual({ kind: 'stop' })
   })
 
   it('defaults the error message when pi-ai omits it', () => {
@@ -908,6 +938,27 @@ describe('mapStopReason / mapUsage', () => {
     // No readable envelope: the raw diagnostic is kept rather than dropped.
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 401: bad key' })))
       .toEqual({ kind: 'error', failure: { code: 'AUTH', message: 'HTTP 401: bad key' } })
+  })
+
+  it('classifies a 400 sign-in wall as AUTH rather than INVALID_REQUEST', () => {
+    // Kilo answers the paid-model wall with 400, not 401/403. It is a
+    // route-level sign-in rejection, so a group must be able to fail over.
+    const detail = '400: {"error":{"code":"PAID_MODEL_AUTH_REQUIRED","message":"You need to sign in to use this model."}}'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: detail }))).toEqual({
+      kind: 'error',
+      failure: {
+        code: 'AUTH',
+        message: 'PAID_MODEL_AUTH_REQUIRED: You need to sign in to use this model.',
+      },
+    })
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '400: {"code":"AUTH_REQUIRED","message":"sign in required"}',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'AUTH' } })
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '400: {"code":"SUBSCRIPTION_REQUIRED","message":"An active subscription is required"}',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'AUTH' } })
   })
 
   it('maps routable HTTP-ish error messages to stable codes', () => {

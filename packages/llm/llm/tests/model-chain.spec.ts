@@ -4,7 +4,9 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, {
+  CONTEXT_WINDOW_EXCEEDED_CODE,
   createUserMessage,
+  EMPTY_RESPONSE_CODE,
   ENTITLEMENT_GATED_CODE,
   FREE_TIER_GATED_CODE,
   FREE_TIER_GATED_EXPLANATION,
@@ -27,6 +29,21 @@ const SCRIPT: StreamChunk[] = [
   { type: 'block-start', index: 0, blockType: 'text' },
   { type: 'text-delta', index: 0, text: 'answered by the fallback link' },
   { type: 'block-end', index: 0, block: { type: 'text', text: 'answered by the fallback link' } },
+  { type: 'finish', reason: { kind: 'stop' } },
+]
+
+/** A completed `stop` whose only text block is empty. */
+const EMPTY_TEXT_SCRIPT: StreamChunk[] = [
+  { type: 'block-start', index: 0, blockType: 'text' },
+  { type: 'block-end', index: 0, block: { type: 'text', text: '' } },
+  { type: 'finish', reason: { kind: 'stop' } },
+]
+
+/** A completed `stop` that carries reasoning but no answer text or tool call. */
+const REASONING_ONLY_SCRIPT: StreamChunk[] = [
+  { type: 'block-start', index: 0, blockType: 'reasoning' },
+  { type: 'reasoning-delta', index: 0, text: 'thinking only' },
+  { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'thinking only' } },
   { type: 'finish', reason: { kind: 'stop' } },
 ]
 
@@ -102,6 +119,23 @@ class DefaultOnlyAdapter extends ScriptedAdapter {
         efforts: [{ id: ReasoningEffortId('standard'), name: 'Standard' }],
         defaultEffort: ReasoningEffortId('standard'),
       },
+    })
+  }
+}
+
+/** {@link ScriptedAdapter} whose models expose a catalogue context window. */
+class ContextScriptedAdapter extends ScriptedAdapter {
+  constructor(script: StreamChunk[], private readonly windows: Readonly<Record<string, number>>) {
+    super(script)
+  }
+
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    const contextWindow = this.windows[model]
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      ...contextWindow === undefined ? {} : { context: { contextWindow } },
     })
   }
 }
@@ -764,46 +798,284 @@ describe('model-group failover', () => {
     expect(records).toHaveLength(0)
   })
 
-  it('treats the OpenCode free-tier gate as terminal and explained, never cycling the next link', async () => {
+  it('tries the request route first when the group does not name it, then members in order', async () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
-    const records: CapturedRecord[] = []
-    provideSessions(ctx, records)
+    const primary = new FailingAdapter(new LlmError('primary is down', 'RATE_LIMIT'))
+    const firstMember = new FailingAdapter(new LlmError('first member is down', 'RATE_LIMIT'))
+    const secondMember = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['primary'], primary)
+    ctx.llm.registerAdapter(['chain-a'], firstMember)
+    ctx.llm.registerAdapter(['chain-b'], secondMember)
+    provideChains(ctx, id => id === 'free' ? group('free', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    const stderr = captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'primary',
+      model: 'm-primary',
+      chain: 'free',
+      messages: [],
+    }))
+
+    // The request's own route is an implicit first member even though the
+    // group does not list it; only then do the declared members run in order.
+    expect(primary.calls.map(call => `${call.provider}/${call.model}`)).toEqual(['primary/m-primary'])
+    expect(firstMember.calls.map(call => `${call.provider}/${call.model}`)).toEqual(['chain-a/m-a'])
+    expect(secondMember.calls.map(call => `${call.provider}/${call.model}`)).toEqual(['chain-b/m-b'])
+    expect(chunks).toEqual(answeredBy('chain-b', 'm-b'))
+    expect(stderr.text()).toContain(
+      '[model-chain] free: link 1 primary/m-primary → RETRYABLE (RATE_LIMIT) → link 2 chain-a/m-a',
+    )
+    expect(stderr.text()).toContain(
+      '[model-chain] free: link 2 chain-a/m-a → RETRYABLE (RATE_LIMIT) → link 3 chain-b/m-b',
+    )
+  })
+
+  it('does not duplicate a request route already listed in the group', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const failing = new FailingAdapter(new LlmError('named link is down', 'RATE_LIMIT'))
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], failing)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'named' ? group('named', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'named',
+      messages: [],
+    }))
+
+    expect(failing.calls).toHaveLength(1)
+    expect(answering.calls).toHaveLength(1)
+    expect(chunks).toEqual(answeredBy('chain-b', 'm-b'))
+  })
+
+  it.each([
+    ['an empty text block', EMPTY_TEXT_SCRIPT],
+    ['reasoning-only content', REASONING_ONLY_SCRIPT],
+  ] as const)('escalates %s on a completed stop as EMPTY_RESPONSE', async (_label, emptyScript) => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const empty = new ScriptedAdapter(emptyScript)
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], empty)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'empty-stop' ? group('empty-stop', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    const stderr = captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'empty-stop',
+      messages: [],
+    }))
+
+    // Pre-commit chunks from the empty link may already have reached the
+    // consumer; the answering link still supplies the complete terminal answer.
+    const expected = answeredBy('chain-b', 'm-b')
+    expect(chunks.slice(-expected.length)).toEqual(expected)
+    expect(answering.calls).toHaveLength(1)
+    expect(stderr.text()).toContain(
+      '[model-chain] empty-stop: link 1 chain-a/m-a → RETRYABLE (EMPTY_RESPONSE) → link 2 chain-b/m-b',
+    )
+  })
+
+  it('classifies a sign-in wall as AUTH and skips the rest of that provider', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const signedOut = new FailingAdapter(new LlmError(
+      '400: {"error":{"code":"PAID_MODEL_AUTH_REQUIRED","message":"You need to sign in to use this model."}}',
+      'AUTH',
+    ))
+    const otherProvider = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], signedOut)
+    ctx.llm.registerAdapter(['chain-b'], otherProvider)
+    provideChains(ctx, id => id === 'signin' ? group(
+      'signin',
+      ['chain-a', 'm-a'],
+      ['chain-a', 'm-a-2'],
+      ['chain-b', 'm-b'],
+    ) : undefined)
+    const stderr = captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'signin',
+      messages: [],
+    }))
+
+    expect(chunks).toEqual(answeredBy('chain-b', 'm-b'))
+    // AUTH is provider-level: chain-a's second model was not tried.
+    expect(signedOut.calls).toHaveLength(1)
+    expect(otherProvider.calls).toHaveLength(1)
+    expect(stderr.text()).toContain(
+      '[model-chain] signin: link 1 chain-a/m-a → RETRYABLE (AUTH) → link 3 chain-b/m-b',
+    )
+  })
+
+  it('keeps a condemned provider skipped after another provider fails', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const signedOut = new FailingAdapter(new LlmError('sign in required', 'AUTH'))
+    const rateLimited = new FailingAdapter(new LlmError('rate limited', 'RATE_LIMIT'))
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], signedOut)
+    ctx.llm.registerAdapter(['chain-b'], rateLimited)
+    ctx.llm.registerAdapter(['chain-c'], answering)
+    // chain-a returns after chain-b in the group; its AUTH gate still stands.
+    provideChains(ctx, id => id === 'late-auth' ? group(
+      'late-auth',
+      ['chain-a', 'm-a'],
+      ['chain-b', 'm-b'],
+      ['chain-a', 'm-a-2'],
+      ['chain-c', 'm-c'],
+    ) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'late-auth',
+      messages: [],
+    }))
+
+    expect(chunks).toEqual(answeredBy('chain-c', 'm-c'))
+    expect(signedOut.calls).toHaveLength(1)
+    expect(rateLimited.calls).toHaveLength(1)
+    expect(answering.calls).toHaveLength(1)
+  })
+
+  it('skips the rest of a free-tier-gated provider and serves the next provider', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
     const gated = '403 {"type":"FreeTierError","message":"OpenCode\'s free tier can only be used from within OpenCode"}'
     const failing = new FailingAdapter(new LlmError(
       `${gated} — ${FREE_TIER_GATED_EXPLANATION}`,
       FREE_TIER_GATED_CODE,
     ))
+    const sibling = new ScriptedAdapter(SCRIPT)
     const answering = new ScriptedAdapter(SCRIPT)
     ctx.llm.registerAdapter(['chain-a'], failing)
     ctx.llm.registerAdapter(['chain-b'], answering)
-    provideChains(ctx, id => id === 'gated' ? group('gated', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    ctx.llm.registerAdapter(['chain-a-2'], sibling)
+    provideChains(ctx, id => id === 'gated' ? group(
+      'gated',
+      ['chain-a', 'm-a'],
+      ['chain-a', 'm-a-2'],
+      ['chain-b', 'm-b'],
+    ) : undefined)
     const stderr = captureStderr()
 
-    const chunks = await collect(ctx.llm.stream(request({
+    const chunks = await collect(ctx.llm.stream({
       provider: 'chain-a',
       model: 'm-a',
       chain: 'gated',
       messages: [],
-    })))
+    }))
 
-    // Policy, not a dead route: the next link is not tried, the link is not
-    // recorded as an attempt left behind, and the explanation reaches the user.
-    expect(answering.calls).toHaveLength(0)
-    expect(records).toHaveLength(0)
-    expect(stderr.text()).not.toContain('RETRYABLE')
-    expect(chunks.at(-1)).toEqual({
-      type: 'finish',
-      reason: {
-        kind: 'error',
-        failure: {
-          message: `${gated} — ${FREE_TIER_GATED_EXPLANATION}`,
-          code: FREE_TIER_GATED_CODE,
-          provider: 'chain-a',
-          model: 'm-a',
-        },
-      },
-    })
+    // The gate belongs to the provider, so its sibling model is skipped and a
+    // different provider is allowed to serve the request.
+    expect(chunks).toEqual(answeredBy('chain-b', 'm-b'))
+    expect(sibling.calls).toHaveLength(0)
+    expect(answering.calls).toHaveLength(1)
+    expect(stderr.text()).toContain(
+      '[model-chain] gated: link 1 chain-a/m-a → RETRYABLE (FREE_TIER_GATED) → link 3 chain-b/m-b',
+    )
+  })
+
+  it('escalates a context window overflow to the next (larger) member', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const tooSmall = new FailingAdapter(new LlmError('input exceeds the model context window', CONTEXT_WINDOW_EXCEEDED_CODE))
+    const larger = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], tooSmall)
+    ctx.llm.registerAdapter(['chain-b'], larger)
+    provideChains(ctx, id => id === 'overflow' ? group('overflow', ['chain-a', 'm-small'], ['chain-b', 'm-large']) : undefined)
+    const stderr = captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-small',
+      chain: 'overflow',
+      messages: [],
+    }))
+
+    expect(chunks).toEqual(answeredBy('chain-b', 'm-large'))
+    expect(larger.calls).toHaveLength(1)
+    expect(stderr.text()).toContain(
+      '[model-chain] overflow: link 1 chain-a/m-small → RETRYABLE (CONTEXT_WINDOW_EXCEEDED) → link 2 chain-b/m-large',
+    )
+  })
+
+  it('surfaces the same failures as honest errors on a single-model request', async () => {
+    const cases: Array<[LlmAdapter, string]> = [
+      [new ScriptedAdapter(EMPTY_TEXT_SCRIPT), EMPTY_RESPONSE_CODE],
+      [new FailingAdapter(new LlmError('sign in required', 'AUTH')), 'AUTH'],
+      [new FailingAdapter(new LlmError('free tier gated', FREE_TIER_GATED_CODE)), FREE_TIER_GATED_CODE],
+      [new FailingAdapter(new LlmError('context too small', CONTEXT_WINDOW_EXCEEDED_CODE)), CONTEXT_WINDOW_EXCEEDED_CODE],
+    ]
+    captureStderr()
+    for (const [adapter, code] of cases) {
+      const ctx = new Context()
+      await ctx.plugin(LlmRuntime)
+      ctx.llm.registerAdapter(['solo'], adapter)
+      const chunks = await collect(ctx.llm.stream({ provider: 'solo', model: 'm', messages: [] }))
+      const finish = chunks.at(-1)
+      if (finish?.type !== 'finish' || finish.reason.kind !== 'error') throw new Error('expected an error finish')
+      expect(finish.reason.failure.code).toBe(code)
+      expect(finish.reason.failure.provider).toBe('solo')
+      expect(finish.reason.failure.model).toBe('m')
+    }
+  })
+
+  it('skips a member whose known context window is smaller than the estimated request', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const tooSmall = new ContextScriptedAdapter(SCRIPT, { 'm-small': 1 })
+    const large = new ContextScriptedAdapter(SCRIPT, { 'm-large': 100_000 })
+    ctx.llm.registerAdapter(['chain-a'], tooSmall)
+    ctx.llm.registerAdapter(['chain-b'], large)
+    provideChains(ctx, id => id === 'prefilter' ? group('prefilter', ['chain-a', 'm-small'], ['chain-b', 'm-large']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-small',
+      chain: 'prefilter',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(1_000) }] }],
+    }))
+
+    expect(tooSmall.calls).toHaveLength(0)
+    expect(large.calls).toHaveLength(1)
+    expect(chunks).toEqual(answeredBy('chain-b', 'm-large'))
+  })
+
+  it('tries every member in order when the prefilter finds them all too small', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const first = new ContextScriptedAdapter(SCRIPT, { 'm-a': 1 })
+    const second = new ContextScriptedAdapter(SCRIPT, { 'm-b': 1 })
+    ctx.llm.registerAdapter(['chain-a'], first)
+    ctx.llm.registerAdapter(['chain-b'], second)
+    provideChains(ctx, id => id === 'all-small' ? group('all-small', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'all-small',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(1_000) }] }],
+    }))
+
+    // The prefilter is advisory: with no member large enough, the first member
+    // still runs in order rather than the request giving up.
+    expect(first.calls).toHaveLength(1)
+    expect(second.calls).toHaveLength(0)
+    expect(chunks).toStrictEqual(SCRIPT)
   })
 
   it('escalates an identity entitlement gate to the next chain link', async () => {
