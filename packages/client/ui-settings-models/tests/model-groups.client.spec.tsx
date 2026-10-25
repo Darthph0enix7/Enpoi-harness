@@ -686,6 +686,18 @@ describe('Model groups row', () => {
     expect(mutate).not.toHaveBeenCalled()
   })
 
+  it('hints that the shipped free group replaced a retired row', async () => {
+    await seed({ free: { ...BUILTIN_FREE, migratedFrom: 'legacy-free' } })
+    const mutate = vi.fn(async () => ({ ok: true, value: {} }))
+    renderRow({ api: wire(mutate) })
+    fireEvent.click(screen.getByRole('button', { name: /Model groups/ }))
+    expect(screen.getByText(new RegExp(en.groupsMigrated))).toBeTruthy()
+    // It is still a built-in: Customize is the only write it offers.
+    expect(screen.getByRole('button', { name: en.groupsCustomize })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: en.groupsEdit })).toBeNull()
+    expect(mutate).not.toHaveBeenCalled()
+  })
+
   it('customizes a built-in by copying its whole spec, selectors included', async () => {
     await seed({ free: BUILTIN_FREE })
     const mutate = vi.fn(async () => ({ ok: true, value: {} }))

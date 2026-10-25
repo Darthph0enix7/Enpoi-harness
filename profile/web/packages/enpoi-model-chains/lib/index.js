@@ -43,6 +43,29 @@ var Config = Schema.object({
 function builtinChainsOf(config) {
   return config?.builtinChains ?? SHIPPED_BUILTIN_CHAINS;
 }
+var LEGACY_FREE_GROUP_ID = "free";
+var LEGACY_FREE_MIGRATION = "legacy-free";
+var RETIRED_OPENCODE_FREE_MODELS = Object.freeze([
+  "ling-3.0-flash-fin-free"
+]);
+var RETIRED_OPENCODE_PROVIDER = "opencode";
+var RETIRED_ROW_FIELDS = /* @__PURE__ */ new Set(["label", "links", "attempts", "onCut", "disabled"]);
+var RETIRED_LINK_FIELDS = /* @__PURE__ */ new Set(["provider", "model"]);
+function isRetiredFreeModel(model) {
+  return RETIRED_OPENCODE_FREE_MODELS.includes(model) || model.endsWith("-free");
+}
+function isRetiredFreeRow(raw) {
+  if (!isRecord(raw)) return false;
+  if (Object.keys(raw).some((field) => !RETIRED_ROW_FIELDS.has(field))) return false;
+  if (raw.disabled !== true) return false;
+  const links = raw.links;
+  if (!Array.isArray(links) || links.length === 0) return false;
+  return links.every((link) => isRecord(link) && Object.keys(link).every((field) => RETIRED_LINK_FIELDS.has(field)) && link.provider === RETIRED_OPENCODE_PROVIDER && typeof link.model === "string" && isRetiredFreeModel(link.model));
+}
+function legacyFreeWarning(linkCount) {
+  return `[enpoi-model-chains] chain "${LEGACY_FREE_GROUP_ID}": ignored the retired static free row (${String(linkCount)} ${RETIRED_OPENCODE_PROVIDER}/*-free link(s), disabled) and applied the shipped free group \u2014 "Customize" writes a real row; editing the legacy row stops the migration
+`;
+}
 var inject = ["settings"];
 var ORCH_NS = "enpoi-orchestration";
 function isRecord(value) {
@@ -221,8 +244,10 @@ var ModelChainsResolver = class {
     if (this.resolved !== void 0) return this.resolved;
     const groups = {};
     const project = (id, raw, source) => {
+      const migration = source === "settings" ? this.migrationOf(id) : void 0;
+      const effective = migration === void 0 ? raw : this.builtin[id];
       const parseWarnings = [];
-      const parsed = parseChainRaw(id, raw, (line) => parseWarnings.push(line));
+      const parsed = parseChainRaw(id, effective, (line) => parseWarnings.push(line));
       if (parsed === void 0) return;
       const { chain, disabled } = parsed;
       const expanded = this.expandChain(chain, false, false);
@@ -234,12 +259,17 @@ var ModelChainsResolver = class {
         selectorMatches: Object.freeze(expanded.selectorMatches),
         members: Object.freeze(expanded.links),
         candidates: Object.freeze(expanded.candidates),
-        warnings: Object.freeze([...parseWarnings, ...expanded.warnings]),
+        warnings: Object.freeze([
+          ...migration !== void 0 ? [legacyFreeWarning(migration.linkCount)] : [],
+          ...parseWarnings,
+          ...expanded.warnings
+        ]),
         ...chain.attempts !== void 0 ? { attempts: chain.attempts } : {},
         ...chain.onCut !== void 0 ? { onCut: chain.onCut } : {},
         disabled,
-        source,
-        ...source === "settings" && Object.hasOwn(this.builtin, id) ? { overridesBuiltin: true } : {}
+        source: migration === void 0 ? source : "builtin",
+        ...migration === void 0 && source === "settings" && Object.hasOwn(this.builtin, id) ? { overridesBuiltin: true } : {},
+        ...migration !== void 0 ? { migratedFrom: LEGACY_FREE_MIGRATION } : {}
       });
     };
     for (const [id, raw] of Object.entries(this.raw)) project(id, raw, "settings");
@@ -249,6 +279,21 @@ var ModelChainsResolver = class {
     }
     this.resolved = Object.freeze(groups);
     return this.resolved;
+  }
+  /**
+   * Whether the document's row for `id` is the untouched retired free
+   * definition a built-in now answers for. Requires both the row and the
+   * built-in, so a composition without a `free` built-in keeps the row.
+   * @param id - group id being resolved.
+   * @returns the retired row's link count when it must be ignored, else undefined.
+   */
+  migrationOf(id) {
+    if (id !== LEGACY_FREE_GROUP_ID) return void 0;
+    if (!Object.hasOwn(this.raw, id) || !Object.hasOwn(this.builtin, id)) return void 0;
+    const row = this.raw[id];
+    if (!isRetiredFreeRow(row)) return void 0;
+    const links = isRecord(row) && Array.isArray(row.links) ? row.links : [];
+    return { linkCount: links.length };
   }
   /** The warning sink: injected in tests, stderr in production. */
   warn(line) {
@@ -260,11 +305,14 @@ var ModelChainsResolver = class {
   /**
    * Parse (and cache) one chain, with per-id warning dedupe. A settings row
    * with the id wins outright — including one that is malformed or disabled,
-   * so a row never silently falls back to the built-in it replaced.
+   * so a row never silently falls back to the built-in it replaced. The one
+   * exception is the untouched retired free row, which is ignored so the
+   * built-in answers; any operator edit stops that on the next refresh.
    */
   chainOf(key) {
     if (this.cache.has(key)) return this.cache.get(key);
-    const raw = Object.hasOwn(this.raw, key) ? this.raw[key] : Object.hasOwn(this.builtin, key) ? this.builtin[key] : void 0;
+    const hasRow = Object.hasOwn(this.raw, key);
+    const raw = hasRow && this.migrationOf(key) !== void 0 ? this.builtin[key] : hasRow ? this.raw[key] : Object.hasOwn(this.builtin, key) ? this.builtin[key] : void 0;
     let reported = false;
     const chain = parseChainEntry(key, raw, (line) => {
       if (reported || this.warned.has(key)) return;
@@ -514,14 +562,19 @@ function apply(ctx, config = {}) {
 }
 export {
   Config,
+  LEGACY_FREE_GROUP_ID,
+  LEGACY_FREE_MIGRATION,
   ModelChainsResolver,
   RESOLVED_GROUPS_ARTIFACT,
+  RETIRED_OPENCODE_FREE_MODELS,
   ROUTE_HEALTH_ARTIFACT,
   SHIPPED_BUILTIN_CHAINS,
   SHIPPED_FREE_CHAIN,
   apply,
   builtinChainsOf,
   inject,
+  isRetiredFreeModel,
+  isRetiredFreeRow,
   name,
   parseChainEntry,
   parseChainSelector,

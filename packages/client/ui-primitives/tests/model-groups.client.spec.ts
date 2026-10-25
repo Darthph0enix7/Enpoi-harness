@@ -75,6 +75,26 @@ describe('parseModelGroups', () => {
     expect(parseModelGroup('stable', { source: 'weird' })?.source).toBe('settings')
   })
 
+  it('round-trips the migratedFrom marker of a built-in that replaced a retired row', () => {
+    const group = parseModelGroup('free', {
+      label: 'Free',
+      links: [],
+      members: [{ provider: 'groq', model: 'free-tool' }],
+      source: 'builtin',
+      migratedFrom: 'legacy-free',
+    })
+    expect(group).toMatchObject({ source: 'builtin', migratedFrom: 'legacy-free' })
+    // A parse of the parsed group keeps the marker (artifact round-trip).
+    expect(parseModelGroups({ free: group })[0]).toMatchObject({ migratedFrom: 'legacy-free' })
+    expect(parseModelGroupList([group])[0]).toMatchObject({ migratedFrom: 'legacy-free' })
+    expect(parseResolvedModelGroup(group)).toMatchObject({ migratedFrom: 'legacy-free' })
+    // Absent, blank, and non-string markers stay absent.
+    expect(parseModelGroup('free', { source: 'builtin' })?.migratedFrom).toBeUndefined()
+    expect(parseModelGroup('free', { migratedFrom: '   ' })?.migratedFrom).toBeUndefined()
+    expect(parseModelGroup('free', { migratedFrom: 7 })?.migratedFrom).toBeUndefined()
+    expect(parseModelGroup('free', { migratedFrom: '  legacy-free ' })?.migratedFrom).toBe('legacy-free')
+  })
+
   it('drops entries with an empty id or a non-object value', () => {
     expect(parseModelGroups({
       '': { label: 'empty id' },

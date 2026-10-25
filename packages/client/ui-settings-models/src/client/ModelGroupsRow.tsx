@@ -404,6 +404,11 @@ export function ModelGroupsRow({
                   {group.source === 'builtin' && (
                     <span className={css.groupDisabled}>· {t('groupsBuiltin')}</span>
                   )}
+                  {group.migratedFrom !== undefined && (
+                    <span className={css.groupDisabled} title={t('groupsMigratedHint')}>
+                      · {t('groupsMigrated')}
+                    </span>
+                  )}
                   {group.disabled && <span className={css.groupDisabled}>· {t('groupsDisabled')}</span>}
                 </div>
                 {group.members.length === 0 && group.selectors.length === 0 && (

@@ -52,7 +52,16 @@
  * the runtime resolves it, and the published projection marks it
  * `source: 'builtin'`. A settings row with the same id REPLACES the built-in
  * entirely (including a `disabled: true` opt-out); deleting the row restores
- * the shipped definition. Nothing is migrated automatically.
+ * the shipped definition.
+ *
+ * The one exception is a CONTENT FINGERPRINT: an untouched copy of the retired
+ * static `chains.free` row (six `opencode/*-free` links, `disabled: true`, no
+ * selector, no field the retired row never carried) is ignored for resolution
+ * and the shipped group answers instead, marked
+ * `{ source: 'builtin', migratedFrom: 'legacy-free' }`. Nothing is written:
+ * the settings document keeps the row, so the migration is idempotent and
+ * reversible — any operator edit (even `disabled: false`) stops it on the very
+ * next resolve, and "Customize" writes a real row that wins outright.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -179,6 +188,76 @@ export function builtinChainsOf(config: Config | undefined): Record<string, unkn
   return config?.builtinChains ?? SHIPPED_BUILTIN_CHAINS
 }
 
+/** Group id the retired static free row shadowed. */
+export const LEGACY_FREE_GROUP_ID = 'free'
+
+/** `migratedFrom` marker for a built-in that replaced the retired static row. */
+export const LEGACY_FREE_MIGRATION = 'legacy-free'
+
+/**
+ * Model ids known to belong to the retired static `chains.free` row. The row
+ * shipped six `opencode/*-free` links; {@link isRetiredFreeModel} also admits
+ * any other id of that shape, so a shard that wrote a slightly different
+ * `*-free` id still fingerprints as unchanged — the point is that the row
+ * carries no non-opencode link.
+ */
+export const RETIRED_OPENCODE_FREE_MODELS: readonly string[] = Object.freeze([
+  'ling-3.0-flash-fin-free',
+])
+
+/** Provider every link of the retired row used. */
+const RETIRED_OPENCODE_PROVIDER = 'opencode'
+
+/** Row fields the retired row carried; anything else is an operator edit. */
+const RETIRED_ROW_FIELDS: ReadonlySet<string> = new Set(['label', 'links', 'attempts', 'onCut', 'disabled'])
+
+/** Link fields the retired row carried; anything else is an operator edit. */
+const RETIRED_LINK_FIELDS: ReadonlySet<string> = new Set(['provider', 'model'])
+
+/**
+ * Whether one model id belongs to the retired free row: a known retired id, or
+ * any other `opencode/*-free` id.
+ * @param model - the model id from a link.
+ * @returns true when the id has the retired shape.
+ */
+export function isRetiredFreeModel(model: string): boolean {
+  return RETIRED_OPENCODE_FREE_MODELS.includes(model) || model.endsWith('-free')
+}
+
+/**
+ * The EXACT retired `chains.free` definition, as a content fingerprint. The
+ * migration must never touch a row the operator changed, so every deviation
+ * fails the match: an extra row or link field (a selector included), a link
+ * that is not `opencode`, a model that is not `*-free`, an empty or missing
+ * link list, or a `disabled` that is absent or false.
+ * @param raw - the raw `chains.free` settings value.
+ * @returns true only for the untouched retired row.
+ */
+export function isRetiredFreeRow(raw: unknown): boolean {
+  if (!isRecord(raw)) return false
+  if (Object.keys(raw).some(field => !RETIRED_ROW_FIELDS.has(field))) return false
+  if (raw.disabled !== true) return false
+  const links = raw.links
+  if (!Array.isArray(links) || links.length === 0) return false
+  return links.every(link => isRecord(link)
+    && Object.keys(link).every(field => RETIRED_LINK_FIELDS.has(field))
+    && link.provider === RETIRED_OPENCODE_PROVIDER
+    && typeof link.model === 'string'
+    && isRetiredFreeModel(link.model))
+}
+
+/**
+ * The single warning line a migrated group carries: what was replaced, and how
+ * to keep a custom row instead.
+ * @param linkCount - how many retired links the shadowed row carried.
+ * @returns one line, newline-terminated, in the plugin's stderr vocabulary.
+ */
+function legacyFreeWarning(linkCount: number): string {
+  return `[enpoi-model-chains] chain "${LEGACY_FREE_GROUP_ID}": ignored the retired static free row `
+    + `(${String(linkCount)} ${RETIRED_OPENCODE_PROVIDER}/*-free link(s), disabled) and applied the shipped free group — `
+    + `"Customize" writes a real row; editing the legacy row stops the migration\n`
+}
+
 /** The settings service must be up before the namespace can be read. */
 export const inject = ['settings']
 
@@ -284,6 +363,13 @@ export interface ResolvedModelGroup {
    * replaces that built-in, and removing it restores the shipped definition.
    */
   overridesBuiltin?: boolean
+  /**
+   * Present on a built-in group that answered in place of a settings row which
+   * still matches a RETIRED definition (never on `source: 'settings'`). The
+   * marker names what was replaced so clients can hint at it; the row itself
+   * is left untouched, so an operator edit stops the migration immediately.
+   */
+  migratedFrom?: string
 }
 
 /** The resolved state of every group, keyed by group id. */
@@ -577,8 +663,12 @@ export class ModelChainsResolver implements ModelChainsService {
     if (this.resolved !== undefined) return this.resolved
     const groups: Record<string, ResolvedModelGroup> = {}
     const project = (id: string, raw: unknown, source: ResolvedModelGroup['source']): void => {
+      // An untouched retired row is projected as the built-in that replaced
+      // it; the settings document is read, never rewritten.
+      const migration = source === 'settings' ? this.migrationOf(id) : undefined
+      const effective = migration === undefined ? raw : this.builtin[id]
       const parseWarnings: string[] = []
-      const parsed = parseChainRaw(id, raw, line => parseWarnings.push(line))
+      const parsed = parseChainRaw(id, effective, line => parseWarnings.push(line))
       if (parsed === undefined) return
       const { chain, disabled } = parsed
       const expanded = this.expandChain(chain, false, false)
@@ -590,12 +680,19 @@ export class ModelChainsResolver implements ModelChainsService {
         selectorMatches: Object.freeze(expanded.selectorMatches),
         members: Object.freeze(expanded.links),
         candidates: Object.freeze(expanded.candidates),
-        warnings: Object.freeze([...parseWarnings, ...expanded.warnings]),
+        warnings: Object.freeze([
+          ...(migration !== undefined ? [legacyFreeWarning(migration.linkCount)] : []),
+          ...parseWarnings,
+          ...expanded.warnings,
+        ]),
         ...(chain.attempts !== undefined ? { attempts: chain.attempts } : {}),
         ...(chain.onCut !== undefined ? { onCut: chain.onCut } : {}),
         disabled,
-        source,
-        ...source === 'settings' && Object.hasOwn(this.builtin, id) ? { overridesBuiltin: true } : {},
+        source: migration === undefined ? source : 'builtin',
+        ...migration === undefined && source === 'settings' && Object.hasOwn(this.builtin, id)
+          ? { overridesBuiltin: true }
+          : {},
+        ...(migration !== undefined ? { migratedFrom: LEGACY_FREE_MIGRATION } : {}),
       })
     }
     for (const [id, raw] of Object.entries(this.raw)) project(id, raw, 'settings')
@@ -609,6 +706,22 @@ export class ModelChainsResolver implements ModelChainsService {
     return this.resolved
   }
 
+  /**
+   * Whether the document's row for `id` is the untouched retired free
+   * definition a built-in now answers for. Requires both the row and the
+   * built-in, so a composition without a `free` built-in keeps the row.
+   * @param id - group id being resolved.
+   * @returns the retired row's link count when it must be ignored, else undefined.
+   */
+  private migrationOf(id: string): { linkCount: number } | undefined {
+    if (id !== LEGACY_FREE_GROUP_ID) return undefined
+    if (!Object.hasOwn(this.raw, id) || !Object.hasOwn(this.builtin, id)) return undefined
+    const row = this.raw[id]
+    if (!isRetiredFreeRow(row)) return undefined
+    const links = isRecord(row) && Array.isArray(row.links) ? row.links : []
+    return { linkCount: links.length }
+  }
+
   /** The warning sink: injected in tests, stderr in production. */
   private warn(line: string): void {
     ;(this.options.warn ?? ((text: string) => { process.stderr.write(text) }))(line)
@@ -617,13 +730,18 @@ export class ModelChainsResolver implements ModelChainsService {
   /**
    * Parse (and cache) one chain, with per-id warning dedupe. A settings row
    * with the id wins outright — including one that is malformed or disabled,
-   * so a row never silently falls back to the built-in it replaced.
+   * so a row never silently falls back to the built-in it replaced. The one
+   * exception is the untouched retired free row, which is ignored so the
+   * built-in answers; any operator edit stops that on the next refresh.
    */
   private chainOf(key: string): ModelChain | undefined {
     if (this.cache.has(key)) return this.cache.get(key)
-    const raw = Object.hasOwn(this.raw, key)
-      ? this.raw[key]
-      : Object.hasOwn(this.builtin, key) ? this.builtin[key] : undefined
+    const hasRow = Object.hasOwn(this.raw, key)
+    const raw = hasRow && this.migrationOf(key) !== undefined
+      ? this.builtin[key]
+      : hasRow
+        ? this.raw[key]
+        : Object.hasOwn(this.builtin, key) ? this.builtin[key] : undefined
     let reported = false
     const chain = parseChainEntry(key, raw, (line) => {
       if (reported || this.warned.has(key)) return

@@ -76,6 +76,13 @@ export interface ModelGroup {
    * definition.
    */
   readonly overridesBuiltin?: boolean
+  /**
+   * Present on a built-in group that answered in place of a settings row which
+   * still matches a retired definition (`'legacy-free'` for the retired static
+   * free row). The host never rewrites the row, so an operator edit stops the
+   * migration; the marker lets a surface note that the shipped group applies.
+   */
+  readonly migratedFrom?: string
 }
 
 /** Parse one stored link; a link without a route/model is dropped. */
@@ -165,6 +172,9 @@ function groupOf(id: string, raw: Record<string, unknown>): ModelGroup {
     disabled: raw.disabled === true,
     source: raw.source === 'builtin' ? 'builtin' : 'settings',
     ...raw.overridesBuiltin === true ? { overridesBuiltin: true } : {},
+    ...typeof raw.migratedFrom === 'string' && raw.migratedFrom.trim() !== ''
+      ? { migratedFrom: raw.migratedFrom.trim() }
+      : {},
   }
 }
 
