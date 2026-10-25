@@ -62,23 +62,26 @@ __export(remote_exports, {
   mountProviderSyncRemote: () => mountProviderSyncRemote
 });
 import { Remote, RemoteError, TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
-function mountProviderSyncRemote(ctx, refresh) {
-  new ProviderSyncService(ctx, refresh);
+function mountProviderSyncRemote(ctx, refresh, refreshAll) {
+  new ProviderSyncService(ctx, refresh, refreshAll);
 }
-var _refreshRoute_dec, _a, _init, ProviderSyncService;
+var _refreshRoutes_dec, _refreshRoute_dec, _a, _init, ProviderSyncService;
 var init_remote = __esm({
   "src/remote.ts"() {
     "use strict";
-    ProviderSyncService = class extends (_a = TypertRemoteService, _refreshRoute_dec = [Remote], _a) {
+    ProviderSyncService = class extends (_a = TypertRemoteService, _refreshRoute_dec = [Remote], _refreshRoutes_dec = [Remote], _a) {
       /**
        * @param ctx - owning context (service registration is automatic).
        * @param refresh - the shared route-refresh pipeline.
+       * @param refreshAll - the full-pass pipeline, when the plugin mounts one.
        */
-      constructor(ctx, refresh) {
+      constructor(ctx, refresh, refreshAll) {
         super(ctx, "providerSync");
         __runInitializers(_init, 5, this);
         __publicField(this, "refresh");
+        __publicField(this, "refreshAll");
         this.refresh = refresh;
+        this.refreshAll = refreshAll;
       }
       async refreshRoute(route) {
         if (typeof route !== "string" || route.trim() === "") {
@@ -91,9 +94,28 @@ var init_remote = __esm({
           throw new RemoteError("gateway/bad-request", `providerSync.refreshRoute: ${message}`, {});
         }
       }
+      async refreshRoutes(routes) {
+        if (routes !== void 0 && (!Array.isArray(routes) || routes.some((route) => typeof route !== "string" || route.trim() === ""))) {
+          throw new RemoteError(
+            "gateway/bad-request",
+            "providerSync.refreshRoutes: routes must be an array of non-empty strings",
+            {}
+          );
+        }
+        if (this.refreshAll === void 0) {
+          throw new RemoteError("gateway/unavailable", "providerSync.refreshRoutes: the host did not mount a full-pass pipeline", {});
+        }
+        try {
+          return await this.refreshAll(routes);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new RemoteError("gateway/bad-request", `providerSync.refreshRoutes: ${message}`, {});
+        }
+      }
     };
     _init = __decoratorStart(_a);
     __decorateElement(_init, 1, "refreshRoute", _refreshRoute_dec, ProviderSyncService);
+    __decorateElement(_init, 1, "refreshRoutes", _refreshRoutes_dec, ProviderSyncService);
     __decoratorMetadata(_init, ProviderSyncService);
     /** Nothing is injected into the service fiber; the plugin passes its pipeline. */
     __publicField(ProviderSyncService, "inject", []);
@@ -947,6 +969,7 @@ function loadCommandCodeCatalog(path = commandCodeCatalogPath()) {
       ...entry.tool_call === true ? ["tools"] : [],
       ...entry.reasoning === true ? ["reasoning"] : []
     ];
+    const advertisedLevels = entry.reasoning === true && Array.isArray(entry.reasoningEfforts) ? entry.reasoningEfforts.filter((level) => typeof level === "string" && level.length > 0) : [];
     const model = normalizeListingEntry({
       id,
       name: entry.name,
@@ -954,6 +977,9 @@ function loadCommandCodeCatalog(path = commandCodeCatalogPath()) {
       max_output_tokens: limit?.output,
       ...Array.isArray(modalities?.input) ? { input_modalities: modalities.input } : {},
       ...supported.length === 0 ? {} : { supported_parameters: supported },
+      ...advertisedLevels.length === 0 ? {} : {
+        capabilities: { effort: Object.fromEntries(advertisedLevels.map((level) => [level, { supported: true }])) }
+      },
       ...entry.cost === null || typeof entry.cost !== "object" || Array.isArray(entry.cost) ? {} : { pricing: entry.cost }
     });
     if (model === void 0) continue;
@@ -1092,7 +1118,7 @@ function discoveredContent(model) {
   const { discoveredAt: _stamp, source: _source, ...rest } = model;
   return JSON.stringify(rest);
 }
-function mergeDiscoveredRoute(previous, baseURL, models, now) {
+function mergeDiscoveredRoute(previous, baseURL, models, now, retain = []) {
   const priorById = new Map((previous?.models ?? []).map((model) => [model.id, model]));
   const merged = models.map((model) => {
     const prior = priorById.get(model.id);
@@ -1102,6 +1128,17 @@ function mergeDiscoveredRoute(previous, baseURL, models, now) {
       discoveredAt: prior !== void 0 && discoveredContent(prior) === discoveredContent(model) ? prior.discoveredAt : now
     };
   });
+  const advertised = new Set(merged.map((model) => model.id));
+  if (retain.length > 0) {
+    const seen = new Set(advertised);
+    for (const id of retain) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const prior = priorById.get(id);
+      if (prior === void 0) continue;
+      merged.push({ ...prior, deprecated: true });
+    }
+  }
   const unchanged = previous !== void 0 && previous.baseURL === baseURL && JSON.stringify(previous.models) === JSON.stringify(merged);
   return {
     baseURL,
@@ -1267,6 +1304,8 @@ function analyzeModel(route, model, fallback, hints, routeProviderMap = DEFAULT_
   const costTiers = modelsDevCostTiers(mDev?.cost);
   const gated = model.gated === true || model.isFree === false;
   const gate = gated ? { gated: true, gateReason: model.gateReason ?? SIGN_IN_REQUIRED } : {};
+  const discoveredEfforts = reasoningEfforts === void 0 ? void 0 : Object.fromEntries(Object.entries(reasoningEfforts).filter(([, wire]) => typeof wire === "string" && wire.length > 0));
+  const discoveredEffortsValue = discoveredEfforts !== void 0 && Object.keys(discoveredEfforts).length > 0 ? discoveredEfforts : void 0;
   return {
     settings: {
       id: model.id,
@@ -1292,6 +1331,7 @@ function analyzeModel(route, model, fallback, hints, routeProviderMap = DEFAULT_
       ...modalityDisclosed ? { input: inputModalities } : {},
       ...tools === void 0 ? {} : { tools },
       ...model.reasoning === void 0 ? {} : { reasoning: model.reasoning },
+      ...discoveredEffortsValue === void 0 ? {} : { reasoningEfforts: discoveredEffortsValue },
       ...model.pricing === void 0 ? {} : { pricing: model.pricing },
       ...model.isFree === void 0 ? {} : { isFree: model.isFree },
       ...releaseDate === void 0 ? {} : { releaseDate },
@@ -1568,7 +1608,11 @@ function stringifyComparable(models) {
       contextWindow: m.contextWindow,
       maxTokens: m.maxTokens,
       input: m.input ?? null,
-      reasoning: m.reasoningEfforts ? Object.keys(m.reasoningEfforts).sort() : null,
+      reasoning: m.reasoning ?? null,
+      // The ladder's wire spellings are part of the record: a provider that
+      // renames a level's wire value (or changes which levels exist) must be
+      // written, not treated as an unchanged key set.
+      reasoningEfforts: m.reasoningEfforts !== null && typeof m.reasoningEfforts === "object" && !Array.isArray(m.reasoningEfforts) ? Object.entries(m.reasoningEfforts).sort(([left], [right]) => left.localeCompare(right)) : null,
       tools: m.tools ?? null,
       cost: m.cost ?? null,
       releaseDate: m.releaseDate ?? null,
@@ -1691,9 +1735,11 @@ function apply(ctx, config) {
     const overlay = options.overlays.routes?.[route];
     const key = await resolveListingKey(profile);
     let live2;
+    let fetchError;
     try {
       live2 = ns === COMMANDCODE_NS ? loadCommandCodeCatalog() : await fetchModels(baseURL, key, profile?.api);
     } catch (error) {
+      fetchError = error instanceof Error ? error.message : String(error);
       logger.warn(describeSyncFailure(route, error, ns));
     }
     const recipe = {
@@ -1746,6 +1792,8 @@ function apply(ctx, config) {
       cleanup,
       unadvertised,
       ...live2 === void 0 ? {} : { advertisedCount: live2.length },
+      ...fetchError === void 0 ? {} : { fetchError },
+      references,
       plan: recipe
     };
   }
@@ -1822,18 +1870,20 @@ function apply(ctx, config) {
     }
   }
   async function writeDiscoveredCache(outcome, hints) {
-    if (outcome.live === void 0) return;
+    if (outcome.live === void 0) return false;
     if (outcome.live.length === 0) {
       logger.warn(`route ${outcome.route}: endpoint advertised no models \u2014 discovered cache kept`);
-      return;
+      return false;
     }
     try {
       const previous = readDiscoveredFile(discoveredCachePath()).routes[outcome.route];
+      const pinned = (value(config.pinnedModels) ?? {})[outcome.route] ?? [];
       const record = mergeDiscoveredRoute(
         previous,
         outcome.baseURL,
         mergeDiscoveredModels(outcome.route, outcome.live, capacities, hints, routeProviderMap),
-        Date.now()
+        Date.now(),
+        [...outcome.references.map((reference) => reference.id), ...pinned]
       );
       if (previous !== void 0 && JSON.stringify(previous) === JSON.stringify(record)) {
         logger.debug(`route ${outcome.route}: ${String(outcome.live.length)} discovered models, no change`);
@@ -1843,10 +1893,13 @@ function apply(ctx, config) {
           logger.info(`route ${outcome.route}: discovered ${String(outcome.live.length)} models from ${outcome.baseURL} (source: discovered)`);
         } catch (error) {
           logger.warn(`route ${outcome.route}: discovered models could not be cached \u2014 ${error instanceof Error ? error.message : String(error)}`);
+          return false;
         }
       }
+      return true;
     } catch (error) {
-      logger.warn(describeSyncFailure(outcome.route, error));
+      logger.warn(describeSyncFailure(outcome.route));
+      return false;
     }
   }
   let inFlight;
@@ -1943,12 +1996,76 @@ function apply(ctx, config) {
       fetchedAt: Date.now()
     };
   }
+  async function refreshRoutesForClient(requested) {
+    const settings = ctx.get("settings");
+    if (settings === void 0) throw new Error("settings seam absent \u2014 cannot refresh routes");
+    const onlineOk = await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl);
+    const overlays = loadOverlays();
+    const hints = loadHints();
+    const llmProviders = sectionOf(settings, LLM_NS)?.providers;
+    const commandCode = sectionOf(settings, COMMANDCODE_NS)?.providers;
+    const routes = requested === void 0 ? [.../* @__PURE__ */ new Set([
+      ...Object.keys(llmProviders ?? {}),
+      ...Object.keys(commandCode ?? {}),
+      ...Object.keys(endpoints)
+    ])] : [...new Set(requested)];
+    const statuses = [];
+    for (const route of routes) {
+      const profile = llmProviders?.[route] ?? commandCode?.[route];
+      const catalogRoute = isCatalogRoute(route);
+      const baseURL = endpoints[route] ?? profile?.baseURL;
+      const outcome = await computeRouteRefresh(route, { catalogOnlineOk: onlineOk, overlays, hints, settings, force: true });
+      if (outcome === void 0) {
+        const staticCatalog = profile === void 0 && catalogRoute && baseURL !== void 0;
+        statuses.push({
+          route,
+          status: staticCatalog ? "static-catalog" : "no-listing",
+          source: "none",
+          authority: "none",
+          modelCount: (profile?.models ?? []).length,
+          removed: [],
+          deprecated: [],
+          degraded: false,
+          cached: false,
+          message: staticCatalog ? "served by the installed pi-ai catalog; add this provider to refresh its endpoint listing" : "no baseURL and no known endpoint \u2014 this route has no endpoint to list",
+          fetchedAt: Date.now()
+        });
+        continue;
+      }
+      let final = outcome;
+      if (outcome.hasProfile && (outcome.live !== void 0 || outcome.overlay !== void 0 && outcome.configured.length > 0)) {
+        try {
+          final = await persistRouteModels(settings, outcome);
+          await cleanupPrunedReferences(settings, route, final.cleanup);
+        } catch (error) {
+          logger.warn(describeSyncFailure(route, error, outcome.ns));
+        }
+      }
+      const cached = outcome.ns === LLM_NS && !catalogRoute ? await writeDiscoveredCache(outcome, hints) : false;
+      statuses.push({
+        route,
+        status: outcome.live === void 0 ? "unreachable" : "ok",
+        source: outcome.report.source,
+        authority: outcome.report.authority,
+        ...outcome.advertisedCount === void 0 ? {} : { advertised: outcome.advertisedCount },
+        modelCount: final.models.length,
+        removed: final.report.removed,
+        deprecated: final.report.deprecated,
+        degraded: final.report.degraded,
+        ...final.report.degradedReason === void 0 ? {} : { degradedReason: final.report.degradedReason },
+        cached,
+        ...outcome.fetchError === void 0 ? {} : { message: outcome.fetchError },
+        fetchedAt: Date.now()
+      });
+    }
+    return { refreshedAt: Date.now(), routes: statuses };
+  }
   ctx.effect(() => {
     let disposed = false;
     void Promise.resolve().then(() => (init_remote(), remote_exports)).then(({ mountProviderSyncRemote: mountProviderSyncRemote2 }) => {
       if (disposed) return;
       try {
-        mountProviderSyncRemote2(ctx, refreshRouteForClient);
+        mountProviderSyncRemote2(ctx, refreshRouteForClient, refreshRoutesForClient);
       } catch (error) {
         process.stderr.write(`[enpoi-provider-sync] providerSync remote mount failed: ${String(error)}
 `);
