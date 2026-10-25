@@ -55,6 +55,26 @@ describe('parseModelGroups', () => {
     }])
   })
 
+  it('carries the projection source and the built-in shadow marker', () => {
+    const builtin = parseModelGroup('free', {
+      label: 'Free',
+      selectors: [{ when: { zeroPrice: true }, adopt: true }],
+      members: [{ provider: 'groq', model: 'free-tool' }],
+      source: 'builtin',
+    })
+    expect(builtin).toMatchObject({ source: 'builtin', label: 'Free' })
+    expect(builtin?.overridesBuiltin).toBeUndefined()
+    const shadow = parseModelGroup('free', {
+      label: 'Mine',
+      links: [{ provider: 'p', model: 'm' }],
+      source: 'settings',
+      overridesBuiltin: true,
+    })
+    expect(shadow).toMatchObject({ source: 'settings', overridesBuiltin: true })
+    // An absent/unknown source stays an operator-owned settings group.
+    expect(parseModelGroup('stable', { source: 'weird' })?.source).toBe('settings')
+  })
+
   it('drops entries with an empty id or a non-object value', () => {
     expect(parseModelGroups({
       '': { label: 'empty id' },

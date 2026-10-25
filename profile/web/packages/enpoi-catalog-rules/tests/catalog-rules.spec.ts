@@ -299,3 +299,38 @@ describe('enpoi-catalog-rules edit diff', () => {
     expect(diff.warnings.some(line => line.includes('matched no catalogue entries'))).toBe(true)
   })
 })
+
+describe('enpoi-catalog-rules visible clause', () => {
+  const free = entry({ provider: 'groq', id: 'free-tools', cost: { input: 0, output: 0 } })
+
+  it('matches a visible model and leaves the other clauses unchanged', () => {
+    const visible = () => true
+    expect(evaluatePredicate(free, { zeroPrice: true, visible: true }, 'unknown', visible)).toEqual({ matched: true })
+    // Without the clause the same entry matches the same predicate: `visible`
+    // only filters, it never changes what a visible model satisfies.
+    expect(evaluatePredicate(free, { zeroPrice: true }, 'unknown', visible)).toEqual({ matched: true })
+    expect(evaluatePredicate(free, { visible: false }, 'unknown', visible)).toEqual({ matched: false, failed: 'hidden' })
+  })
+
+  it('excludes a hidden model', () => {
+    expect(evaluatePredicate(free, { zeroPrice: true, visible: true }, 'unknown', () => false))
+      .toEqual({ matched: false, failed: 'visible' })
+  })
+
+  it('fails the clause when visibility is unknown', () => {
+    // A hidden/unknown model must not silently join a group: no lookup, and a
+    // lookup that answers undefined, both fail in either direction.
+    expect(evaluatePredicate(free, { visible: true }, 'unknown'))
+      .toEqual({ matched: false, failed: 'visible' })
+    expect(evaluatePredicate(free, { visible: false }, 'unknown', () => undefined))
+      .toEqual({ matched: false, failed: 'hidden' })
+  })
+
+  it('parses and describes the clause', () => {
+    expect(describePredicate({ visible: true })).toBe('visible')
+    expect(describePredicate({ visible: false, tools: true })).toBe('tool-calling + hidden')
+    const selector = parseRulesDocument({ visibility: { hide: [{ when: { visible: true } }] } })
+    expect(selector.hide).toHaveLength(1)
+    expect(selector.hide[0]!.when).toEqual({ visible: true })
+  })
+})

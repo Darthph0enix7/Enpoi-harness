@@ -63,6 +63,31 @@ const STABLE = {
   source: 'settings',
 }
 
+/** The shipped built-in: selectors only, read-only until customized. */
+const BUILTIN_FREE = {
+  id: 'free',
+  label: 'Free',
+  links: [],
+  selectors: [{
+    when: { zeroPrice: true, tools: true, gated: false, visible: true, minContextWindow: 65536 },
+    adopt: true,
+  }],
+  selectorMatches: [{
+    index: 0,
+    when: { zeroPrice: true, tools: true, gated: false, visible: true, minContextWindow: 65536 },
+    adopt: true,
+    links: [{ provider: 'groq', model: 'free-tool' }],
+    warnings: [],
+  }],
+  members: [{ provider: 'groq', model: 'free-tool' }],
+  candidates: [],
+  warnings: [],
+  attempts: 2,
+  onCut: 'failover',
+  disabled: false,
+  source: 'builtin',
+}
+
 /** A selector-only group: no explicit link, members resolved live. */
 const FREE = {
   id: 'free',
@@ -646,6 +671,61 @@ describe('Model groups row', () => {
     expect(JSON.stringify(written.selectors)).toBe(JSON.stringify(stored.chains.free.selectors))
     expect(written.label).toBe('Free tools')
     expect(written.attempts).toBe(3)
+  })
+
+  it('renders a built-in read-only with Customize and no edit or disable', async () => {
+    await seed({ free: BUILTIN_FREE })
+    const mutate = vi.fn(async () => ({ ok: true, value: {} }))
+    renderRow({ api: wire(mutate) })
+    fireEvent.click(screen.getByRole('button', { name: /Model groups/ }))
+    expect(screen.getByText('Free')).toBeTruthy()
+    expect(screen.getByText(new RegExp(en.groupsBuiltin))).toBeTruthy()
+    expect(screen.getByRole('button', { name: en.groupsCustomize })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Disable' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull()
+    expect(mutate).not.toHaveBeenCalled()
+  })
+
+  it('customizes a built-in by copying its whole spec, selectors included', async () => {
+    await seed({ free: BUILTIN_FREE })
+    const mutate = vi.fn(async () => ({ ok: true, value: {} }))
+    const onSaved = vi.fn()
+    renderRow({ api: wire(mutate), onSaved })
+    fireEvent.click(screen.getByRole('button', { name: /Model groups/ }))
+    fireEvent.click(screen.getByRole('button', { name: en.groupsCustomize }))
+
+    await waitFor(() => {
+      expect(mutate).toHaveBeenCalledWith('enpoi-orchestration', [{
+        op: 'set',
+        path: ['chains', 'free'],
+        value: {
+          label: 'Free',
+          links: [],
+          selectors: BUILTIN_FREE.selectors,
+          attempts: 2,
+          onCut: 'failover',
+          disabled: false,
+        },
+      }], 3)
+    })
+    expect(onSaved).toHaveBeenCalled()
+    // The copied row is now an ordinary settings group the editor can edit.
+    expect(screen.getByRole('button', { name: 'Edit' })).toBeTruthy()
+  })
+
+  it('resets a settings row that shadows a built-in back to the shipped group', async () => {
+    await seed({ free: { ...BUILTIN_FREE, source: 'settings', overridesBuiltin: true } })
+    const mutate = vi.fn(async () => ({ ok: true, value: {} }))
+    renderRow({ api: wire(mutate) })
+    fireEvent.click(screen.getByRole('button', { name: /Model groups/ }))
+    fireEvent.click(screen.getByRole('button', { name: en.groupsReset }))
+
+    await waitFor(() => {
+      expect(mutate).toHaveBeenCalledWith('enpoi-orchestration', [{
+        op: 'unset',
+        path: ['chains', 'free'],
+      }], 3)
+    })
   })
 
   it('preserves header-only layout when collapsed and attaches scroll class to body when expanded', async () => {

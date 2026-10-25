@@ -17,6 +17,9 @@ import {
   type CatalogEntry, type CatalogPredicate, type PrivacyOverrides,
 } from './rules.ts'
 
+/** The picker's visibility answer for one entry; `undefined` when it has none. */
+export type VisibilityLookup = (entry: CatalogEntry) => boolean | undefined
+
 /** One ordered selector inside a group/chain definition. */
 export interface GroupSelector {
   /** Predicate clauses over catalogue entries (ANDed). */
@@ -118,17 +121,19 @@ export function selectorMatchKey(match: SelectorMatch): string {
  * @param selector - parsed selector.
  * @param entries - live catalogue snapshot.
  * @param privacy - document privacy overrides (merged with the curated seed).
+ * @param visible - the picker's per-entry visibility decision, for a `visible` clause.
  * @returns best-first matches, the raw match count, and warnings.
  */
 export function expandSelector(
   selector: GroupSelector,
   entries: readonly CatalogEntry[],
   privacy?: PrivacyOverrides,
+  visible?: VisibilityLookup,
 ): SelectorExpansion {
   const matched: CatalogEntry[] = []
   for (const entry of entries) {
     const verdict = resolvePrivacy(entry.provider, entry.id, privacy)
-    if (evaluatePredicate(entry, selector.when, verdict).matched) matched.push(entry)
+    if (evaluatePredicate(entry, selector.when, verdict, visible).matched) matched.push(entry)
   }
   const unique = new Map<string, CatalogEntry>()
   for (const entry of matched) {

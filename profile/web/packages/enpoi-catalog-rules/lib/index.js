@@ -96,7 +96,7 @@ function hasVideo(entry) {
 function hasPdf(entry) {
   return Array.isArray(entry.input) && entry.input.includes("pdf");
 }
-function evaluatePredicate(entry, predicate, privacy) {
+function evaluatePredicate(entry, predicate, privacy, visible) {
   let clauses = 0;
   const fail = (failed) => ({ matched: false, failed });
   if (predicate.zeroPrice !== void 0) {
@@ -163,6 +163,13 @@ function evaluatePredicate(entry, predicate, privacy) {
     clauses += 1;
     if (predicate.gated !== (entry.gated === true)) return fail(predicate.gated ? "gated" : "not gated");
   }
+  if (predicate.visible !== void 0) {
+    clauses += 1;
+    const decision = visible?.(entry);
+    if (decision === void 0 || predicate.visible !== decision) {
+      return fail(predicate.visible ? "visible" : "hidden");
+    }
+  }
   return clauses === 0 ? fail("empty predicate") : { matched: true };
 }
 function describePredicate(predicate) {
@@ -185,6 +192,8 @@ function describePredicate(predicate) {
   else if (predicate.noTraining === false) parts.push("trains-on-content");
   if (predicate.gated === true) parts.push("gated");
   else if (predicate.gated === false) parts.push("not gated");
+  if (predicate.visible === true) parts.push("visible");
+  else if (predicate.visible === false) parts.push("hidden");
   return parts.length > 0 ? parts.join(" + ") : "empty predicate";
 }
 function parseCatalogPredicate(raw, context, warnings) {
@@ -193,7 +202,7 @@ function parseCatalogPredicate(raw, context, warnings) {
     return {};
   }
   const predicate = {};
-  const booleanKeys = ["zeroPrice", "tools", "vision", "audio", "video", "pdf", "reasoning", "noTraining", "gated"];
+  const booleanKeys = ["zeroPrice", "tools", "vision", "audio", "video", "pdf", "reasoning", "noTraining", "gated", "visible"];
   for (const key of booleanKeys) {
     const value = raw[key];
     if (value === void 0) continue;
@@ -501,11 +510,11 @@ function compareMatches(left, right) {
   if (left.entry.provider !== right.entry.provider) return left.entry.provider.localeCompare(right.entry.provider);
   return left.entry.id.localeCompare(right.entry.id);
 }
-function expandSelector(selector, entries, privacy) {
+function expandSelector(selector, entries, privacy, visible) {
   const matched = [];
   for (const entry of entries) {
     const verdict = resolvePrivacy(entry.provider, entry.id, privacy);
-    if (evaluatePredicate(entry, selector.when, verdict).matched) matched.push(entry);
+    if (evaluatePredicate(entry, selector.when, verdict, visible).matched) matched.push(entry);
   }
   const unique = /* @__PURE__ */ new Map();
   for (const entry of matched) {
@@ -634,8 +643,17 @@ var CatalogRulesEngine = class {
   decide(provider, modelId) {
     return this.decisions.get(`${provider}/${modelId}`);
   }
+  /**
+   * The picker's visibility decision for one entry, as a selector sees it.
+   * An entry the current decision map does not carry answers `undefined`, so a
+   * `visible` clause fails instead of guessing.
+   */
+  isVisible = (entry) => {
+    const decision = this.decisions.get(`${entry.provider}/${entry.id}`);
+    return decision === void 0 ? void 0 : decision.state === "visible";
+  };
   expandSelector(selector) {
-    return expandSelector(selector, this.entries, this.rules.privacy);
+    return expandSelector(selector, this.entries, this.rules.privacy, this.isVisible);
   }
   expandRawSelector(raw) {
     const warnings = [];
@@ -643,7 +661,7 @@ var CatalogRulesEngine = class {
     if (selector === void 0) {
       return { links: [], matched: 0, warnings: Object.freeze(warnings.length > 0 ? warnings : ["selector ignored"]) };
     }
-    const expansion = expandSelector(selector, this.entries, this.rules.privacy);
+    const expansion = expandSelector(selector, this.entries, this.rules.privacy, this.isVisible);
     return { ...expansion, warnings: Object.freeze([...warnings, ...expansion.warnings]) };
   }
   previewRulesChange(nextRaw) {

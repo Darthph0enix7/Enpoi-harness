@@ -34,9 +34,13 @@ enpoi-orchestration:
 
 Predicates (all present clauses ANDed): `zeroPrice`, `maxPrice`, `tools`,
 `vision`, `audio`, `video`, `pdf`, `reasoning`, `minContextWindow`, `provider`,
-`providerGlob`, `idGlob`, `nameGlob`, `noTraining`, `gated`. Unknown
+`providerGlob`, `idGlob`, `nameGlob`, `noTraining`, `gated`, `visible`. Unknown
 price/context/name fails the clause rather than guessing; **unknown privacy
-fails `noTraining` in both directions** — never treated as safe. The curated
+fails `noTraining` in both directions** — never treated as safe. `visible`
+reads the same per-model decision the picker uses (manual `hiddenModels`
+pins included), so a hidden or unknown-visibility model never silently joins
+a group; a hide rule cannot use the clause because its own result would feed
+the decision. The curated
 privacy seed lives in `src/rules.ts` and the profile settings document: a
 document value wins over the seed, `null` deletes one seeded entry (the lookup
 then falls through to the next level, `unknown` last), and `useSeed: false`

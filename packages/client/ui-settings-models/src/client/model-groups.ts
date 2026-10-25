@@ -22,6 +22,7 @@
  * this package's consumers.
  */
 import type { SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { ModelGroup, ModelGroupLink } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { ModelsWire } from './store.ts'
 import { withWriteTimeout } from './write-timeout.ts'
@@ -71,21 +72,32 @@ export function sameModelGroups(left: readonly ModelGroup[], right: readonly Mod
 /** The stored JSON value of one link. */
 export type GroupSpecLink = { provider: string; model: string; effort?: string }
 
+/** The stored JSON value of one selector (`chains.<id>.selectors[]`). */
+export type GroupSpecSelector = { when: Record<string, unknown>; adopt: boolean; label?: string }
+
 /**
- * The stored JSON value of a NEW group spec (`chains.<id>`). Selectors are
- * never written from the UI: creation starts with explicit links, and every
- * later edit patches a leaf so stored selectors cannot be dropped.
+ * The stored JSON value of a whole group spec (`chains.<id>`). An ordinary
+ * edit never writes `selectors` — it patches leaves, so stored selectors
+ * survive. Only creation and "Customize" (copying a built-in into settings)
+ * write the whole object, and there `selectors` is included when the source
+ * group has any.
  */
 export type GroupSpec = {
   label: string
   links: GroupSpecLink[]
+  selectors?: GroupSpecSelector[]
   attempts: number
   onCut: 'failover' | 'continue'
   disabled: boolean
 }
 
-/** The stored spec value of one new group (the whole object, as `chains.<id>` holds it). */
+/** The stored spec value of one group (the whole object, as `chains.<id>` holds it). */
 export function groupSpec(group: ModelGroup): GroupSpec {
+  const selectors = group.selectors.map(selector => ({
+    when: selector.when,
+    adopt: selector.adopt,
+    ...selector.label === undefined ? {} : { label: selector.label },
+  }))
   return {
     label: group.label,
     links: group.links.map(link => ({
@@ -93,15 +105,36 @@ export function groupSpec(group: ModelGroup): GroupSpec {
       model: link.model,
       ...link.effort === undefined ? {} : { effort: link.effort },
     })),
+    ...selectors.length === 0 ? {} : { selectors },
     attempts: group.attempts,
     onCut: group.onCut,
     disabled: group.disabled,
   }
 }
 
-/** Write one whole group spec at `chains.<id>` (creation only). */
+/** Write one whole group spec at `chains.<id>` (creation, and built-in customization). */
 export function groupWriteOps(group: ModelGroup): SettingsPathOpView[] {
-  return [{ op: 'set', path: ['chains', group.id], value: groupSpec(group) }]
+  return [{ op: 'set', path: ['chains', group.id], value: groupSpec(group) as JsonValue }]
+}
+
+/**
+ * Copy a built-in group into settings. The written row REPLACES the built-in
+ * entirely, so it carries the built-in's label, links, selectors, attempts,
+ * onCut, and retire switch — the editor then edits an ordinary settings group.
+ * @param group - the built-in group as the projection reported it.
+ * @returns the whole-spec write operation.
+ */
+export function customizeGroupOps(group: ModelGroup): SettingsPathOpView[] {
+  return groupWriteOps(group)
+}
+
+/**
+ * Remove a settings row that shadows a built-in, restoring the shipped group.
+ * @param id - the group id.
+ * @returns the removal operation.
+ */
+export function resetGroupOps(id: string): SettingsPathOpView[] {
+  return [{ op: 'unset', path: ['chains', id] }]
 }
 
 /**

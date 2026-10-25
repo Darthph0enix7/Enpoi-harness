@@ -1,6 +1,48 @@
 // src/index.ts
+import Schema from "@deepseek-ai/schemastery";
 import { readOrchestrationDocument } from "dsh-enpoi-contracts";
 var name = "enpoi-model-chains";
+var BuiltinChainSelectorSchema = Schema.object({
+  when: Schema.dict(Schema.any()).required(),
+  adopt: Schema.boolean().default(false),
+  label: Schema.string()
+});
+var BuiltinChainLinkSchema = Schema.object({
+  provider: Schema.string().required(),
+  model: Schema.string().required(),
+  effort: Schema.string()
+});
+var BuiltinChainSchema = Schema.object({
+  label: Schema.string(),
+  links: Schema.array(BuiltinChainLinkSchema).default([]),
+  selectors: Schema.array(BuiltinChainSelectorSchema).default([]),
+  attempts: Schema.natural().min(1),
+  onCut: Schema.union(["failover", "continue"]),
+  disabled: Schema.boolean().default(false)
+});
+var SHIPPED_FREE_CHAIN = Object.freeze({
+  label: "Free",
+  selectors: Object.freeze([Object.freeze({
+    when: Object.freeze({
+      zeroPrice: true,
+      tools: true,
+      gated: false,
+      visible: true,
+      minContextWindow: 65536
+    }),
+    adopt: true
+  })]),
+  disabled: false
+});
+var SHIPPED_BUILTIN_CHAINS = Object.freeze({
+  free: SHIPPED_FREE_CHAIN
+});
+var Config = Schema.object({
+  builtinChains: Schema.dict(BuiltinChainSchema).default(structuredClone(SHIPPED_BUILTIN_CHAINS))
+});
+function builtinChainsOf(config) {
+  return config?.builtinChains ?? SHIPPED_BUILTIN_CHAINS;
+}
 var inject = ["settings"];
 var ORCH_NS = "enpoi-orchestration";
 function isRecord(value) {
@@ -134,15 +176,14 @@ function linkKey(link) {
 var ModelChainsResolver = class {
   /**
    * @param readRaw - reader for the raw `chains` map (ctx-bound in production).
-   * @param options - optional selector expander and warning sink.
+   * @param options - optional selector expander, warning sink, and built-in inventory.
    */
   constructor(readRaw, options = {}) {
     this.readRaw = readRaw;
     this.options = options;
     this.raw = this.readRaw();
+    this.builtin = options.builtinChains ?? {};
   }
-  readRaw;
-  options;
   raw;
   cache = /* @__PURE__ */ new Map();
   warned = /* @__PURE__ */ new Set();
@@ -150,6 +191,8 @@ var ModelChainsResolver = class {
   announced = /* @__PURE__ */ new Set();
   lastResolved = /* @__PURE__ */ new Map();
   baselines = /* @__PURE__ */ new Map();
+  /** Built-in groups: a settings row with the same id replaces one entirely. */
+  builtin;
   /** Memoized resolved-group projection; cleared whenever an input moves. */
   resolved;
   /** Re-read the settings document; the next resolve builds fresh snapshots. */
@@ -177,10 +220,10 @@ var ModelChainsResolver = class {
   resolvedGroups() {
     if (this.resolved !== void 0) return this.resolved;
     const groups = {};
-    for (const [id, raw] of Object.entries(this.raw)) {
+    const project = (id, raw, source) => {
       const parseWarnings = [];
       const parsed = parseChainRaw(id, raw, (line) => parseWarnings.push(line));
-      if (parsed === void 0) continue;
+      if (parsed === void 0) return;
       const { chain, disabled } = parsed;
       const expanded = this.expandChain(chain, false, false);
       groups[id] = Object.freeze({
@@ -195,8 +238,14 @@ var ModelChainsResolver = class {
         ...chain.attempts !== void 0 ? { attempts: chain.attempts } : {},
         ...chain.onCut !== void 0 ? { onCut: chain.onCut } : {},
         disabled,
-        source: "settings"
+        source,
+        ...source === "settings" && Object.hasOwn(this.builtin, id) ? { overridesBuiltin: true } : {}
       });
+    };
+    for (const [id, raw] of Object.entries(this.raw)) project(id, raw, "settings");
+    for (const [id, raw] of Object.entries(this.builtin)) {
+      if (Object.hasOwn(this.raw, id)) continue;
+      project(id, raw, "builtin");
     }
     this.resolved = Object.freeze(groups);
     return this.resolved;
@@ -208,11 +257,16 @@ var ModelChainsResolver = class {
       process.stderr.write(text);
     }))(line);
   }
-  /** Parse (and cache) one chain, with per-id warning dedupe. */
+  /**
+   * Parse (and cache) one chain, with per-id warning dedupe. A settings row
+   * with the id wins outright — including one that is malformed or disabled,
+   * so a row never silently falls back to the built-in it replaced.
+   */
   chainOf(key) {
     if (this.cache.has(key)) return this.cache.get(key);
+    const raw = Object.hasOwn(this.raw, key) ? this.raw[key] : Object.hasOwn(this.builtin, key) ? this.builtin[key] : void 0;
     let reported = false;
-    const chain = parseChainEntry(key, this.raw[key], (line) => {
+    const chain = parseChainEntry(key, raw, (line) => {
       if (reported || this.warned.has(key)) return;
       reported = true;
       this.warned.add(key);
@@ -400,7 +454,8 @@ var ModelChainsResolver = class {
 };
 var RESOLVED_GROUPS_ARTIFACT = "modelChains.resolved";
 var CATALOG_NS = "llm-pi-ai";
-function apply(ctx) {
+var ROUTE_HEALTH_ARTIFACT = "llm/route-health";
+function apply(ctx, config = {}) {
   const expander = (selector, chainId, selectorIndex) => {
     const rules = ctx.get("catalogRules");
     if (rules?.expandRawSelector !== void 0) return rules.expandRawSelector(selector);
@@ -411,10 +466,25 @@ function apply(ctx) {
 `]
     };
   };
-  const resolver = new ModelChainsResolver(() => readRawChains(ctx), { expandSelector: expander });
+  const resolver = new ModelChainsResolver(() => readRawChains(ctx), {
+    expandSelector: expander,
+    builtinChains: builtinChainsOf(config)
+  });
   const publishResolvedGroups = () => {
     const writer = ctx.get("settings");
     writer?.publishArtifact?.(RESOLVED_GROUPS_ARTIFACT, resolver.resolvedGroups());
+  };
+  const publishRouteHealth = () => {
+    const llm = ctx.get("llm");
+    if (typeof llm?.routeHealth !== "function") return;
+    let view;
+    try {
+      view = llm.routeHealth();
+    } catch {
+      return;
+    }
+    const writer = ctx.get("settings");
+    writer?.publishArtifact?.(ROUTE_HEALTH_ARTIFACT, view);
   };
   ctx.provide("modelChains", {
     resolve: (id) => {
@@ -437,13 +507,20 @@ function apply(ctx) {
   });
   ctx.on("settings/document-updated", onNamespaceChange);
   ctx.on("settings/updated", onNamespaceChange);
+  ctx.on("llm/route-health-updated", publishRouteHealth);
   publishResolvedGroups();
+  publishRouteHealth();
   process.stderr.write("[enpoi-model-chains] mounted\n");
 }
 export {
+  Config,
   ModelChainsResolver,
   RESOLVED_GROUPS_ARTIFACT,
+  ROUTE_HEALTH_ARTIFACT,
+  SHIPPED_BUILTIN_CHAINS,
+  SHIPPED_FREE_CHAIN,
   apply,
+  builtinChainsOf,
   inject,
   name,
   parseChainEntry,

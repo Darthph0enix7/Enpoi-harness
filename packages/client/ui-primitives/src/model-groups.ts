@@ -65,8 +65,17 @@ export interface ModelGroup {
   readonly attempts: number
   readonly onCut: 'failover' | 'continue'
   readonly disabled: boolean
-  /** Where the group came from; built-in groups land in a later lane. */
-  readonly source: 'settings'
+  /**
+   * Where the group came from: a settings row the operator owns, or the
+   * composition's built-in inventory (read-only; customize it to edit).
+   */
+  readonly source: 'settings' | 'builtin'
+  /**
+   * Present on a settings group whose id also names a built-in: the row
+   * replaces that built-in, and removing the row restores the shipped
+   * definition.
+   */
+  readonly overridesBuiltin?: boolean
 }
 
 /** Parse one stored link; a link without a route/model is dropped. */
@@ -154,7 +163,8 @@ function groupOf(id: string, raw: Record<string, unknown>): ModelGroup {
     attempts,
     onCut: raw.onCut === 'continue' ? 'continue' : 'failover',
     disabled: raw.disabled === true,
-    source: 'settings',
+    source: raw.source === 'builtin' ? 'builtin' : 'settings',
+    ...raw.overridesBuiltin === true ? { overridesBuiltin: true } : {},
   }
 }
 

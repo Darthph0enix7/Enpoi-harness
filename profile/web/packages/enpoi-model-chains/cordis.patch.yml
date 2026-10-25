@@ -1,4 +1,6 @@
-# dsh-enpoi-model-chains — settings-defined model failover chains (modelChains service).
+# dsh-enpoi-model-chains — settings-defined model failover chains (modelChains
+# service). The `builtinChains` config field ships the `free` group; a profile
+# replaces the inventory here (or by overriding this entry's `config:`).
 - insert:
     - id: enpoi-model-chains
       name: 'dsh-enpoi-model-chains'

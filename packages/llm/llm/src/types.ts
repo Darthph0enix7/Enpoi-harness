@@ -21,6 +21,15 @@ declare module '@deepseek-ai/cordis' {
      * @mode emit
      */
     'llm/adapters-updated'(): void
+    /**
+     * The in-memory route-health view moved: a `provider/model` cooled down, a
+     * consecutive run grew, or a successful attempt cleared the route. The
+     * view is process-local and never persisted, so this notification exists
+     * only for status projections; consumers re-read `ctx.llm.routeHealth()`.
+     * A listener failure is contained and cannot change a request's outcome.
+     * @mode emit
+     */
+    'llm/route-health-updated'(): void
   }
 }
 

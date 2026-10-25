@@ -23,8 +23,8 @@ import {
   type ModelSelectOverride,
 } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import {
-  groupEditOps, groupWriteOps, isValidGroupId, linkLabel, linkProviderPreview,
-  sameModelGroups, writeGroupOps,
+  customizeGroupOps, groupEditOps, groupWriteOps, isValidGroupId, linkLabel, linkProviderPreview,
+  resetGroupOps, sameModelGroups, writeGroupOps,
   type GroupWriteFailure, type ModelGroup, type ModelGroupLink,
 } from './model-groups.ts'
 import type { ModelPickerFace } from './picker-face.ts'
@@ -223,7 +223,26 @@ export function ModelGroupsRow({
     setConfirmRemove(null)
     const previous = groups
     setOptimistic(previous.filter(item => item.id !== group.id))
-    await persist([{ op: 'unset', path: ['chains', group.id] }], previous)
+    await persist(resetGroupOps(group.id), previous)
+  }
+
+  // A built-in is read-only: "Customize" copies it into settings as one whole
+  // spec, after which the row is an ordinary operator-owned group.
+  const customizeGroup = async (group: ModelGroup): Promise<void> => {
+    const next: ModelGroup = { ...group, source: 'settings', overridesBuiltin: true }
+    const previous = groups
+    applyGroup(next)
+    await persist(customizeGroupOps(next), previous)
+  }
+
+  // "Reset to shipped" removes the row that shadows a built-in; the built-in
+  // reappears on the next projection, so the optimistic overlay is dropped.
+  const resetGroup = async (group: ModelGroup): Promise<void> => {
+    setStatus(null)
+    const previous = groups
+    if (!await persist(resetGroupOps(group.id), previous)) return
+    setOptimistic(null)
+    await refreshModelGroups()
   }
 
   const saveDraft = async (): Promise<void> => {
@@ -382,6 +401,9 @@ export function ModelGroupsRow({
                         : t('groupsWarnings', { count: group.warnings.length })}
                     </span>
                   )}
+                  {group.source === 'builtin' && (
+                    <span className={css.groupDisabled}>· {t('groupsBuiltin')}</span>
+                  )}
                   {group.disabled && <span className={css.groupDisabled}>· {t('groupsDisabled')}</span>}
                 </div>
                 {group.members.length === 0 && group.selectors.length === 0 && (
@@ -389,47 +411,71 @@ export function ModelGroupsRow({
                 )}
               </div>
               <div className={css.groupActions}>
-                <button
-                  type="button"
-                  className={css.rowBtn}
-                  disabled={busy || readOnly}
-                  onClick={() => { void toggleEnabled(group) }}
-                >
-                  {group.disabled ? t('groupsEnable') : t('groupsDisable')}
-                </button>
-                <button
-                  type="button"
-                  className={css.rowBtn}
-                  disabled={busy || readOnly}
-                  onClick={() => { openEditor(group) }}
-                >
-                  {t('groupsEdit')}
-                </button>
-                {confirmRemove === group.id ? (
-                  <>
-                    <span className={css.confirmText}>{t('groupsDeleteConfirm')}</span>
-                    <button
-                      type="button"
-                      className={css.confirmBtn}
-                      disabled={busy}
-                      onClick={() => { void removeGroup(group) }}
-                    >
-                      {t('groupsDelete')}
-                    </button>
-                    <button type="button" className={css.rowBtn} onClick={() => { setConfirmRemove(null) }}>
-                      {t('groupsCancel')}
-                    </button>
-                  </>
-                ) : (
+                {group.source === 'builtin' ? (
+                  // A built-in has no stored row to edit, disable, or delete:
+                  // copying it into settings is the one write it offers.
                   <button
                     type="button"
-                    className={css.removeBtn}
-                    aria-label={`${t('groupsDelete')} ${group.label}`}
+                    className={css.rowBtn}
                     disabled={busy || readOnly}
-                    onClick={() => { setStatus(null); setConfirmRemove(group.id) }}
+                    onClick={() => { void customizeGroup(group) }}
                   >
-                    ×
+                    {t('groupsCustomize')}
                   </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className={css.rowBtn}
+                      disabled={busy || readOnly}
+                      onClick={() => { void toggleEnabled(group) }}
+                    >
+                      {group.disabled ? t('groupsEnable') : t('groupsDisable')}
+                    </button>
+                    <button
+                      type="button"
+                      className={css.rowBtn}
+                      disabled={busy || readOnly}
+                      onClick={() => { openEditor(group) }}
+                    >
+                      {t('groupsEdit')}
+                    </button>
+                    {group.overridesBuiltin === true ? (
+                      <button
+                        type="button"
+                        className={css.rowBtn}
+                        disabled={busy || readOnly}
+                        onClick={() => { void resetGroup(group) }}
+                      >
+                        {t('groupsReset')}
+                      </button>
+                    ) : confirmRemove === group.id ? (
+                      <>
+                        <span className={css.confirmText}>{t('groupsDeleteConfirm')}</span>
+                        <button
+                          type="button"
+                          className={css.confirmBtn}
+                          disabled={busy}
+                          onClick={() => { void removeGroup(group) }}
+                        >
+                          {t('groupsDelete')}
+                        </button>
+                        <button type="button" className={css.rowBtn} onClick={() => { setConfirmRemove(null) }}>
+                          {t('groupsCancel')}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className={css.removeBtn}
+                        aria-label={`${t('groupsDelete')} ${group.label}`}
+                        disabled={busy || readOnly}
+                        onClick={() => { setStatus(null); setConfirmRemove(group.id) }}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </>
                 )}
               </div>
             </div>

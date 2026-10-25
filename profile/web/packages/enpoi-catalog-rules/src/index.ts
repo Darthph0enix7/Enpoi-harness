@@ -26,7 +26,10 @@ import {
   buildResolvedVisibility, diffRules, evaluateVisibility, isGated, isRecord, parseRulesDocument, resolvePrivacy, withHiddenPins, withShownPins,
   type CatalogEntry, type ParsedRules, type RulesDiff, type VisibilityDecision, type VisibilityReport,
 } from './rules.ts'
-import { expandSelector, parseGroupSelector, type GroupSelector, type SelectorExpansion } from './selectors.ts'
+import {
+  expandSelector, parseGroupSelector,
+  type GroupSelector, type SelectorExpansion, type VisibilityLookup,
+} from './selectors.ts'
 import { readCatalogue } from './catalogue.ts'
 
 export const name = 'enpoi-catalog-rules'
@@ -137,8 +140,18 @@ export class CatalogRulesEngine implements CatalogRulesService {
     return this.decisions.get(`${provider}/${modelId}`)
   }
 
+  /**
+   * The picker's visibility decision for one entry, as a selector sees it.
+   * An entry the current decision map does not carry answers `undefined`, so a
+   * `visible` clause fails instead of guessing.
+   */
+  private readonly isVisible: VisibilityLookup = (entry) => {
+    const decision = this.decisions.get(`${entry.provider}/${entry.id}`)
+    return decision === undefined ? undefined : decision.state === 'visible'
+  }
+
   expandSelector(selector: GroupSelector): SelectorExpansion {
-    return expandSelector(selector, this.entries, this.rules.privacy)
+    return expandSelector(selector, this.entries, this.rules.privacy, this.isVisible)
   }
 
   expandRawSelector(raw: unknown): SelectorExpansion {
@@ -147,7 +160,7 @@ export class CatalogRulesEngine implements CatalogRulesService {
     if (selector === undefined) {
       return { links: [], matched: 0, warnings: Object.freeze(warnings.length > 0 ? warnings : ['selector ignored']) }
     }
-    const expansion = expandSelector(selector, this.entries, this.rules.privacy)
+    const expansion = expandSelector(selector, this.entries, this.rules.privacy, this.isVisible)
     return { ...expansion, warnings: Object.freeze([...warnings, ...expansion.warnings]) }
   }
 

@@ -7,6 +7,7 @@
  */
 
 import { Context } from '@deepseek-ai/cordis'
+import Schema from '@deepseek-ai/schemastery'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type {
@@ -51,6 +52,7 @@ import {
 import { STREAM_CUT_CODE } from './assembler.ts'
 import { normalizeLlmFailure } from './adapter-failure.ts'
 import { normalizeApiKey } from './api-key.ts'
+import { RouteHealthLedger, resolveRouteHealthPolicy, type RouteHealthEntry } from './route-health.ts'
 import { writeSessionWireCapture } from './wire-sessions.ts'
 import {
   contentHasFile,
@@ -72,6 +74,7 @@ export * from './content.ts'
 export * from './assistant-stream.ts'
 export * from './message.ts'
 export * from './retry-policy.ts'
+export * from './route-health.ts'
 export * from './wire-sessions.ts'
 export { BlockAssembler, STREAM_CUT_CODE } from './assembler.ts'
 export { callConfigEquals, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
@@ -201,6 +204,33 @@ export function assertUsableApiKey(raw: string, pkg: string, ref: string): strin
     INVALID_CREDENTIAL_CODE,
   )
 }
+
+/**
+ * Plugin config: how long a route stays demoted after one failure class.
+ *
+ * These are deployment choices, not protocol values, so a composition states
+ * them through `cordis.yml` and the shipped defaults below. Cooldowns live in
+ * process memory only: no settings document and no session log carries them,
+ * and a restart clears every one.
+ */
+export interface Config {
+  /** Cooldown after a completed response that carried no answer (`EMPTY_RESPONSE`), default ~10 min. */
+  emptyResponseCooldownMs: number
+  /** Cooldown after an auth/sign-in gate (`AUTH`), default ~6 h. */
+  authCooldownMs: number
+  /** Fallback cooldown after a rate limit with no provider reset hint, default ~60 s. */
+  rateLimitCooldownMs: number
+  /** Cooldown after a server failure or timeout (`SERVER`/`TIMEOUT`), default ~3 min. */
+  serverCooldownMs: number
+}
+
+/** Runtime schema for {@link Config}. */
+export const Config: Schema<Config> = Schema.object({
+  emptyResponseCooldownMs: Schema.natural().default(10 * 60_000),
+  authCooldownMs: Schema.natural().default(6 * 60 * 60_000),
+  rateLimitCooldownMs: Schema.natural().default(60_000),
+  serverCooldownMs: Schema.natural().default(3 * 60_000),
+})
 
 /**
  * Wall-clock budget for one chain link's pre-commit phase: the time its
@@ -677,6 +707,8 @@ export interface DirectoryRegistrationHandle {
  * API, interceptable via the `llm/stream` waterfall.
  */
 export class LlmRuntime extends TypertRemoteService {
+  static Config: Schema<Config> = Config
+
   private adapters = new Map<string, AdapterRegistration>()
   private directory = new Map<string, LlmConfigurableProvider>()
   private discoveries = new Map<
@@ -684,9 +716,39 @@ export class LlmRuntime extends TypertRemoteService {
     (request: LlmModelDiscoveryRequest, signal?: AbortSignal) => Promise<readonly LlmDiscoveredModel[]>
   >()
   private poolOperations = new Map<string, LlmPoolOperations>()
+  /** Process-local demotion state; never persisted, never a settings write. */
+  private readonly health: RouteHealthLedger
+  /** Serialized health view last announced, so an unchanged ledger emits nothing. */
+  private routeHealthAnnounced: string | undefined
 
-  constructor(ctx: Context) {
+  constructor(ctx: Context, config: Partial<Config> = {}) {
     super(ctx, 'llm')
+    this.health = new RouteHealthLedger(resolveRouteHealthPolicy(config))
+  }
+
+  /**
+   * The in-memory route-health view: every `provider/model` whose latest
+   * failures still hold a cooldown, sorted by route. It is the status surface
+   * a host artifact projects (the model-chains plugin publishes it as
+   * `llm/route-health`); reading it performs no settings write.
+   * @returns the frozen cooling entries, empty when every route is healthy.
+   */
+  routeHealth(): readonly RouteHealthEntry[] {
+    return this.health.snapshot()
+  }
+
+  /** Announce a ledger change to status observers, once per distinct view. */
+  private publishRouteHealth(): void {
+    const serialized = JSON.stringify(this.health.snapshot())
+    if (serialized === this.routeHealthAnnounced) return
+    this.routeHealthAnnounced = serialized
+    try {
+      this.ctx.emit('llm/route-health-updated')
+    } catch (error: unknown) {
+      // A status listener must never change a request's outcome.
+      this.ctx.logger.warn('llm: an llm/route-health-updated listener failed')
+      this.ctx.logger.warn(error)
+    }
   }
 
   /** Notify topology observers without letting one broken listener veto the commit. */
@@ -1558,11 +1620,30 @@ export class LlmRuntime extends TypertRemoteService {
         yield value
       }
     } finally {
+      // Only an actual answer proves the route usable: a completed-but-empty
+      // response returns above as EMPTY_RESPONSE and must keep its cooldown.
+      if (answered && options.signal?.aborted !== true) this.noteRouteSuccess(linkRoute(options))
       if (!completed) {
         const close = iterator.return?.bind(iterator)
         if (close) await close()
       }
     }
+  }
+
+  /**
+   * Feed one failed attempt into the process-local route-health ledger — the
+   * same point that appends the durable attempt record when a session log
+   * exists, so a sessionless request still demotes a dead route.
+   */
+  private noteRouteFailure(link: ModelChainLink, failure: LlmFailure): void {
+    if (this.health.recordFailure(link.provider, link.model, failure.code, failure.providerRetryAfterMs)) {
+      this.publishRouteHealth()
+    }
+  }
+
+  /** Feed one answered attempt: a success clears the route's run and cooldown. */
+  private noteRouteSuccess(route: ModelRoute): void {
+    if (this.health.recordSuccess(route.provider, route.model)) this.publishRouteHealth()
   }
 
   /**
@@ -1691,6 +1772,7 @@ export class LlmRuntime extends TypertRemoteService {
       if (outcome.kind === 'answered') return
       const failure = withRoute(outcome.failure, linkRoute(link))
       attempted.push({ link, failure })
+      this.noteRouteFailure(link, failure)
       if (CHAIN_PROVIDER_SKIP_CODES.has(failure.code)) skippedProviders.add(link.provider)
       const nextStep = this.nextChainStep(order, step, skippedProviders)
       const nextCandidate = nextStep === undefined ? undefined : order[nextStep]
@@ -1717,7 +1799,9 @@ export class LlmRuntime extends TypertRemoteService {
    * does; the resolved group snapshot itself is never mutated. Members with a
    * known context window below the estimated request size are removed, but an
    * order where every member is too small is kept whole so the prefilter can
-   * never be the sole reason a request gives up.
+   * never be the sole reason a request gives up. The route-health ledger then
+   * moves cooling members last without adding or dropping any: a group whose
+   * every member is cooling keeps its declared order and is attempted anyway.
    */
   private async chainAttemptOrder(
     options: GenerateOptions,
@@ -1738,7 +1822,7 @@ export class LlmRuntime extends TypertRemoteService {
     for (const candidate of candidates) {
       if (await this.chainLinkFits(candidate.link, estimated, options.signal)) eligible.push(candidate)
     }
-    return eligible.length === 0 ? candidates : eligible
+    return this.health.order(eligible.length === 0 ? candidates : eligible, attempt => attempt.link)
   }
 
   /**

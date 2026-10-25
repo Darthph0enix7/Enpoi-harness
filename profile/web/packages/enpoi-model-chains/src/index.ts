@@ -45,12 +45,139 @@
  * its inherited/default model. Malformed links (empty provider/model) are
  * dropped, never fatal, with one stderr warning per chain id — this harness's
  * logger drops info/warn, so stderr is the observable channel.
+ *
+ * Built-in groups (`builtinChains` in this plugin's Config) ship with the
+ * composition, so a fresh profile has a working `free` group without any
+ * settings write. A built-in is a group like any other: the picker lists it,
+ * the runtime resolves it, and the published projection marks it
+ * `source: 'builtin'`. A settings row with the same id REPLACES the built-in
+ * entirely (including a `disabled: true` opt-out); deleting the row restores
+ * the shipped definition. Nothing is migrated automatically.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import Schema from '@deepseek-ai/schemastery'
 import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 
 export const name = 'enpoi-model-chains'
+
+/** One link as a built-in group declares it. */
+export interface BuiltinChainLink {
+  /** Provider route id. */
+  provider: string
+  /** Model id interpreted by that provider. */
+  model: string
+  /** Adapter-owned reasoning effort, when declared. */
+  effort?: string
+}
+
+/** One selector as a built-in group declares it. */
+export interface BuiltinChainSelector {
+  /** Predicate clauses over catalogue entries (ANDed). */
+  when: Record<string, unknown>
+  /** Continuous auto-adoption of new matches: opt-in (true), default false. */
+  adopt?: boolean
+  /** Operator-facing label. */
+  label?: string
+}
+
+/** One built-in group definition; the settings-row vocabulary minus the id. */
+export interface BuiltinChain {
+  /** Operator-facing label. */
+  label?: string
+  /** Ordered explicit links. */
+  links?: BuiltinChainLink[]
+  /** Live selectors evaluated against the catalogue. */
+  selectors?: BuiltinChainSelector[]
+  /** Per-link attempt budget. */
+  attempts?: number
+  /** Cut policy. */
+  onCut?: 'failover' | 'continue'
+  /** Retire switch; a disabled built-in stays listed but never resolves. */
+  disabled?: boolean
+}
+
+/**
+ * Plugin config. `builtinChains` is the shipped group inventory: a profile
+ * lists one group here instead of writing the settings document, so the group
+ * exists on first boot and follows the catalogue hourly through its selector.
+ * A cordis.yml `config:` block may replace the whole map.
+ */
+export interface Config {
+  /** Built-in groups, keyed by group id. */
+  builtinChains?: Record<string, BuiltinChain>
+}
+
+/** Schema of one built-in selector. */
+const BuiltinChainSelectorSchema = Schema.object({
+  when: Schema.dict(Schema.any()).required(),
+  adopt: Schema.boolean().default(false),
+  label: Schema.string(),
+})
+
+/** Schema of one built-in link. */
+const BuiltinChainLinkSchema = Schema.object({
+  provider: Schema.string().required(),
+  model: Schema.string().required(),
+  effort: Schema.string(),
+})
+
+/** Schema of one built-in group. */
+const BuiltinChainSchema = Schema.object({
+  label: Schema.string(),
+  links: Schema.array(BuiltinChainLinkSchema).default([]),
+  selectors: Schema.array(BuiltinChainSelectorSchema).default([]),
+  attempts: Schema.natural().min(1),
+  onCut: Schema.union(['failover', 'continue'] as const),
+  disabled: Schema.boolean().default(false),
+})
+
+/**
+ * The shipped `free` group. Price is the meaning: `zeroPrice` keeps
+ * free-of-charge routes in and paid ones out, and a model whose price the
+ * catalogue does not know is EXCLUDED — an unknown price cannot be proven
+ * zero, and a paid route in a free group is worse than a missing one. The
+ * selector re-evaluates against the hourly models.dev catalogue, so new free
+ * tool-capable routes join without an operator edit (`adopt: true`), while
+ * `visible` keeps hidden manual pins and unknown visibility out.
+ */
+export const SHIPPED_FREE_CHAIN: BuiltinChain = Object.freeze({
+  label: 'Free',
+  selectors: Object.freeze([Object.freeze({
+    when: Object.freeze({
+      zeroPrice: true,
+      tools: true,
+      gated: false,
+      visible: true,
+      minContextWindow: 65_536,
+    }),
+    adopt: true,
+  })]),
+  disabled: false,
+})
+
+/** The shipped built-in inventory when the composition declares none. */
+export const SHIPPED_BUILTIN_CHAINS: Record<string, BuiltinChain> = Object.freeze({
+  free: SHIPPED_FREE_CHAIN,
+})
+
+/**
+ * Runtime schema for {@link Config}. The default is a detached copy: the
+ * schema normalizes the object it is given in place, while the exported
+ * shipped inventory stays frozen for readers.
+ */
+export const Config: Schema<Config> = Schema.object({
+  builtinChains: Schema.dict(BuiltinChainSchema).default(structuredClone(SHIPPED_BUILTIN_CHAINS)),
+})
+
+/**
+ * The built-in inventory this composition ships.
+ * @param config - plugin config, absent when the plugin is applied directly.
+ * @returns the declared map, or the shipped one.
+ */
+export function builtinChainsOf(config: Config | undefined): Record<string, unknown> {
+  return config?.builtinChains ?? SHIPPED_BUILTIN_CHAINS
+}
 
 /** The settings service must be up before the namespace can be read. */
 export const inject = ['settings']
@@ -150,8 +277,13 @@ export interface ResolvedModelGroup {
   onCut?: 'failover' | 'continue'
   /** Retire switch; a disabled group stays visible (as disabled) but never resolves. */
   disabled: boolean
-  /** Where the group came from; built-in groups land in a later lane. */
-  source: 'settings'
+  /** Where the group came from: a settings row, or the composition's built-in inventory. */
+  source: 'settings' | 'builtin'
+  /**
+   * Present on a settings group whose id also names a built-in: the row
+   * replaces that built-in, and removing it restores the shipped definition.
+   */
+  overridesBuiltin?: boolean
 }
 
 /** The resolved state of every group, keyed by group id. */
@@ -198,6 +330,11 @@ export interface ModelChainsResolverOptions {
   expandSelector?: SelectorExpander
   /** Warning sink; defaults to stderr. */
   warn?: (line: string) => void
+  /**
+   * Built-in group inventory. A settings row with the same id replaces the
+   * built-in entirely; an id only here resolves without any settings write.
+   */
+  builtinChains?: Record<string, unknown>
 }
 
 /** Whether one value is a non-array object. */
@@ -393,18 +530,21 @@ export class ModelChainsResolver implements ModelChainsService {
   private readonly announced = new Set<string>()
   private readonly lastResolved = new Map<string, readonly ModelChainLink[]>()
   private readonly baselines = new Map<string, Set<string>>()
+  /** Built-in groups: a settings row with the same id replaces one entirely. */
+  private readonly builtin: Record<string, unknown>
   /** Memoized resolved-group projection; cleared whenever an input moves. */
   private resolved: ResolvedModelGroups | undefined
 
   /**
    * @param readRaw - reader for the raw `chains` map (ctx-bound in production).
-   * @param options - optional selector expander and warning sink.
+   * @param options - optional selector expander, warning sink, and built-in inventory.
    */
   constructor(
     private readonly readRaw: () => Record<string, unknown>,
     private readonly options: ModelChainsResolverOptions = {},
   ) {
     this.raw = this.readRaw()
+    this.builtin = options.builtinChains ?? {}
   }
 
   /** Re-read the settings document; the next resolve builds fresh snapshots. */
@@ -436,10 +576,10 @@ export class ModelChainsResolver implements ModelChainsService {
   resolvedGroups(): ResolvedModelGroups {
     if (this.resolved !== undefined) return this.resolved
     const groups: Record<string, ResolvedModelGroup> = {}
-    for (const [id, raw] of Object.entries(this.raw)) {
+    const project = (id: string, raw: unknown, source: ResolvedModelGroup['source']): void => {
       const parseWarnings: string[] = []
       const parsed = parseChainRaw(id, raw, line => parseWarnings.push(line))
-      if (parsed === undefined) continue
+      if (parsed === undefined) return
       const { chain, disabled } = parsed
       const expanded = this.expandChain(chain, false, false)
       groups[id] = Object.freeze({
@@ -454,8 +594,16 @@ export class ModelChainsResolver implements ModelChainsService {
         ...(chain.attempts !== undefined ? { attempts: chain.attempts } : {}),
         ...(chain.onCut !== undefined ? { onCut: chain.onCut } : {}),
         disabled,
-        source: 'settings',
+        source,
+        ...source === 'settings' && Object.hasOwn(this.builtin, id) ? { overridesBuiltin: true } : {},
       })
+    }
+    for (const [id, raw] of Object.entries(this.raw)) project(id, raw, 'settings')
+    // A settings row replaces its built-in entirely, disabled included: the
+    // built-in is projected only for ids the document does not mention.
+    for (const [id, raw] of Object.entries(this.builtin)) {
+      if (Object.hasOwn(this.raw, id)) continue
+      project(id, raw, 'builtin')
     }
     this.resolved = Object.freeze(groups)
     return this.resolved
@@ -466,11 +614,18 @@ export class ModelChainsResolver implements ModelChainsService {
     ;(this.options.warn ?? ((text: string) => { process.stderr.write(text) }))(line)
   }
 
-  /** Parse (and cache) one chain, with per-id warning dedupe. */
+  /**
+   * Parse (and cache) one chain, with per-id warning dedupe. A settings row
+   * with the id wins outright — including one that is malformed or disabled,
+   * so a row never silently falls back to the built-in it replaced.
+   */
   private chainOf(key: string): ModelChain | undefined {
     if (this.cache.has(key)) return this.cache.get(key)
+    const raw = Object.hasOwn(this.raw, key)
+      ? this.raw[key]
+      : Object.hasOwn(this.builtin, key) ? this.builtin[key] : undefined
     let reported = false
-    const chain = parseChainEntry(key, this.raw[key], (line) => {
+    const chain = parseChainEntry(key, raw, (line) => {
       if (reported || this.warned.has(key)) return
       reported = true
       this.warned.add(key)
@@ -674,10 +829,24 @@ export const RESOLVED_GROUPS_ARTIFACT = 'modelChains.resolved'
 const CATALOG_NS = 'llm-pi-ai'
 
 /**
+ * Artifact the LLM runtime's in-memory route-health view is published under.
+ * The ledger itself never enters the settings document or a session event, so
+ * this derived value is the status surface the Models page reads.
+ */
+export const ROUTE_HEALTH_ARTIFACT = 'llm/route-health'
+
+/** Structural face of the LLM runtime's health view (no package dependency). */
+interface RouteHealthSource {
+  /** The current cooling routes, when the runtime exposes them. */
+  routeHealth?: () => readonly unknown[]
+}
+
+/**
  * Mount the `modelChains` service and keep it in step with the namespace.
  * @param ctx - profile plugin Context.
+ * @param config - plugin config; `builtinChains` is the shipped group inventory.
  */
-export function apply(ctx: Context): void {
+export function apply(ctx: Context, config: Config = {}): void {
   const expander: SelectorExpander = (selector, chainId, selectorIndex) => {
     const rules = ctx.get('catalogRules') as CatalogRulesSeam | undefined
     if (rules?.expandRawSelector !== undefined) return rules.expandRawSelector(selector)
@@ -687,7 +856,10 @@ export function apply(ctx: Context): void {
       warnings: [`[enpoi-model-chains] chain "${chainId}" selector #${String(selectorIndex + 1)}: catalogRules service absent — selector ignored\n`],
     }
   }
-  const resolver = new ModelChainsResolver(() => readRawChains(ctx), { expandSelector: expander })
+  const resolver = new ModelChainsResolver(() => readRawChains(ctx), {
+    expandSelector: expander,
+    builtinChains: builtinChainsOf(config),
+  })
   /**
    * Publish the resolved-group projection the clients render from. The value
    * is derived (the settings row stays authoritative) and `publishArtifact`
@@ -697,6 +869,24 @@ export function apply(ctx: Context): void {
   const publishResolvedGroups = (): void => {
     const writer = ctx.get('settings') as SettingsArtifacts | undefined
     writer?.publishArtifact?.(RESOLVED_GROUPS_ARTIFACT, resolver.resolvedGroups())
+  }
+  /**
+   * Project the LLM runtime's in-memory cooldown view. The runtime owns the
+   * ledger (it is not settings data and never a session event); this plugin
+   * only republishes the read through the artifact channel a client can read,
+   * and publishes nothing when no runtime is mounted.
+   */
+  const publishRouteHealth = (): void => {
+    const llm = ctx.get('llm') as RouteHealthSource | undefined
+    if (typeof llm?.routeHealth !== 'function') return
+    let view: readonly unknown[]
+    try {
+      view = llm.routeHealth()
+    } catch {
+      return
+    }
+    const writer = ctx.get('settings') as SettingsArtifacts | undefined
+    writer?.publishArtifact?.(ROUTE_HEALTH_ARTIFACT, view)
   }
   // Plain-object facade: the contract's methods are this-bound to nothing, so
   // a caller that destructures them (`const { resolve } = service`) still works.
@@ -725,6 +915,8 @@ export function apply(ctx: Context): void {
   }) as (...args: unknown[]) => unknown
   ctx.on('settings/document-updated', onNamespaceChange)
   ctx.on('settings/updated', onNamespaceChange)
+  ctx.on('llm/route-health-updated', publishRouteHealth)
   publishResolvedGroups()
+  publishRouteHealth()
   process.stderr.write('[enpoi-model-chains] mounted\n')
 }

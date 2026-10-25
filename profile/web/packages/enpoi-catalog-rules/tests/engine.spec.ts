@@ -46,6 +46,24 @@ describe('enpoi-catalog-rules engine', () => {
     expect(malformed.warnings).toHaveLength(1)
   })
 
+  it('filters a selector by the picker visibility decision a hidden pin made', () => {
+    const engine = new CatalogRulesEngine(
+      () => undefined,
+      () => [
+        entry('groq', 'hidden-free', { cost: { input: 0, output: 0 } }),
+        entry('groq', 'shown-free', { cost: { input: 0, output: 0 } }),
+      ],
+      () => ({ groq: ['hidden-free'] }),
+      () => ({ groq: ['pinned-visible'] }),
+    )
+    // The picker hides `hidden-free` manually, so a `visible: true` selector
+    // must not adopt it; the pinned-free model stays eligible.
+    const expansion = engine.expandSelector({ when: { zeroPrice: true, visible: true } })
+    expect(expansion.links.map(link => link.model)).toEqual(['shown-free'])
+    // Without the clause the selector still sees both entries.
+    expect(engine.expandSelector({ when: { zeroPrice: true } }).links).toHaveLength(2)
+  })
+
   it('merges picker hiddenModels pins into the manual tier', () => {
     const engine = new CatalogRulesEngine(
       () => undefined,

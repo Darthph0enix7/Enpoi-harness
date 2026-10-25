@@ -199,6 +199,12 @@ export interface CatalogPredicate {
   noTraining?: boolean
   /** Gated marker. */
   gated?: boolean
+  /**
+   * Picker visibility: `true` = the picker shows it, `false` = hidden (a manual
+   * `hiddenModels` pin, a hide rule, or gating). Unknown visibility — an entry
+   * the picker has no decision for — fails both directions.
+   */
+  visible?: boolean
 }
 
 /** One predicate evaluation: whether it matched, and the first failed clause. */
@@ -267,9 +273,17 @@ function hasPdf(entry: CatalogEntry): boolean {
  * @param entry - catalogue entry.
  * @param predicate - predicate clauses (ANDed).
  * @param privacy - pre-resolved privacy verdict for the entry.
+ * @param visible - the picker's visibility decision for the entry; absent in a
+ *   hide-rule evaluation (a hide rule cannot depend on its own result), where
+ *   the `visible` clause therefore fails.
  * @returns the evaluation.
  */
-export function evaluatePredicate(entry: CatalogEntry, predicate: CatalogPredicate, privacy: PrivacyVerdict): PredicateEvaluation {
+export function evaluatePredicate(
+  entry: CatalogEntry,
+  predicate: CatalogPredicate,
+  privacy: PrivacyVerdict,
+  visible?: (entry: CatalogEntry) => boolean | undefined,
+): PredicateEvaluation {
   let clauses = 0
   const fail = (failed: string): PredicateEvaluation => ({ matched: false, failed })
 
@@ -337,6 +351,15 @@ export function evaluatePredicate(entry: CatalogEntry, predicate: CatalogPredica
     clauses += 1
     if (predicate.gated !== (entry.gated === true)) return fail(predicate.gated ? 'gated' : 'not gated')
   }
+  if (predicate.visible !== undefined) {
+    clauses += 1
+    // Unknown visibility fails both directions: a group must never adopt an
+    // entry the picker cannot show (or hide one it cannot vouch for).
+    const decision = visible?.(entry)
+    if (decision === undefined || predicate.visible !== decision) {
+      return fail(predicate.visible ? 'visible' : 'hidden')
+    }
+  }
 
   return clauses === 0 ? fail('empty predicate') : { matched: true }
 }
@@ -367,6 +390,8 @@ export function describePredicate(predicate: CatalogPredicate): string {
   else if (predicate.noTraining === false) parts.push('trains-on-content')
   if (predicate.gated === true) parts.push('gated')
   else if (predicate.gated === false) parts.push('not gated')
+  if (predicate.visible === true) parts.push('visible')
+  else if (predicate.visible === false) parts.push('hidden')
   return parts.length > 0 ? parts.join(' + ') : 'empty predicate'
 }
 
@@ -428,7 +453,7 @@ export function parseCatalogPredicate(raw: unknown, context: string, warnings: s
     return {}
   }
   const predicate: CatalogPredicate = {}
-  const booleanKeys = ['zeroPrice', 'tools', 'vision', 'audio', 'video', 'pdf', 'reasoning', 'noTraining', 'gated'] as const
+  const booleanKeys = ['zeroPrice', 'tools', 'vision', 'audio', 'video', 'pdf', 'reasoning', 'noTraining', 'gated', 'visible'] as const
   for (const key of booleanKeys) {
     const value = raw[key]
     if (value === undefined) continue
