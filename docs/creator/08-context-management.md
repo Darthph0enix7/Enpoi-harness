@@ -31,7 +31,7 @@ Model-visible surface order (top to bottom): system prompt + tool list (frozen) 
 
 ## 3. Compaction
 
-- **Seat:** `personas.compaction` is the designated summariser seat (Settings → Agent Models, group BACKGROUND & SUPERVISION). Unassigned it INHERITS the session model — nothing changes by default. A `chain` resolves to its first enabled link; a stale/disabled chain inherits instead of failing (`packages/compaction/compaction-basic/src/settings.ts:128-161`).
+- **Seat:** `personas.compaction` is the designated summariser seat (Settings → Agent Models, group BACKGROUND & SUPERVISION). Unassigned it INHERITS the session model — nothing changes by default. A `chain` resolves through the live `modelChains` service to its first usable member and the summariser request carries the group id, so the rest of the group fails over per request; a missing service, a stale/disabled chain, or one that resolves to zero members inherits with a warning instead of failing (`packages/compaction/compaction-basic/src/settings.ts:143-235`).
 - **Economics:** a different summariser model loses the prompt-prefix cache and pays full input price for the whole region, so only free/local routes are reliably cheaper (`role-registry.ts:161-167`, `AgentModelsBody.tsx:217`). The readout follows the seat assignment, else the catalog default (`compaction-policy.ts:75-131`).
 - **Settings** (`parameters.compaction`, read fresh per decision, fail-open per field — `settings.ts:97-126`; UI mirrors at `packages/client/ui-brand-enpoi/src/client/params-store.ts:77-90`):
   - `thresholdRatio` 0.6 — pressure fraction; `retainRatio` 0.16 — verbatim tail as a fraction of (window − output reserve)

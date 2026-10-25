@@ -31,7 +31,10 @@ export interface CompactionSettingsValues {
 export interface CompactionSeatRoute {
   readonly provider: string
   readonly model: string
-  /** Model-group id the route was resolved through, when the seat named a chain. */
+  /**
+   * Model-group id the seat named. The summariser request carries it, so the
+   * LLM runtime can fail over across the group's remaining members.
+   */
   readonly chain?: string
 }
 
@@ -48,8 +51,20 @@ export interface CompactionSettingsHandle {
 export interface OrchestrationDocument {
   parameters?: { compaction?: unknown }
   personas?: Record<string, unknown>
-  chains?: Record<string, unknown>
 }
+
+/** Structural view of one resolved model group; the seat needs only its links. */
+interface CompactionModelGroup {
+  readonly links?: unknown
+}
+
+/** Structural view of the optional `modelChains` service the seat resolves through. */
+interface CompactionModelChainsHandle {
+  resolve?: (id: string) => CompactionModelGroup | undefined
+}
+
+/** Reasons a named seat group could not supply a route, deduped per context. */
+const warnedSeatGroups = new WeakMap<Context, Set<string>>()
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -126,13 +141,79 @@ export function readCompactionSettings(ctx: Context): CompactionSettingsValues {
 }
 
 /**
- * Resolve the `personas.compaction` seat to one concrete summariser route. A
- * seat naming a chain resolves through the live chains document to its first
- * enabled link, like the delegation persona resolver; a stale or disabled
- * chain yields `undefined` so the engine inherits the conversation route
- * instead of failing. The chain id is carried for diagnostics; the one-shot
- * summarization call itself does not fail over.
- * @param ctx - context that may provide the Settings service.
+ * Emit one diagnostic when a named seat group cannot supply a route, keyed per
+ * context and group id so a per-summary trigger never repeats it. stderr and
+ * the logger are the observable channel, matching the engine's own warnings.
+ * @param ctx - context that may provide the logger.
+ * @param chainId - group id the seat named.
+ * @param reason - why the group supplied no route.
+ */
+function warnSeatGroupUnusable(ctx: Context, chainId: string, reason: string): void {
+  let warned = warnedSeatGroups.get(ctx)
+  if (warned === undefined) {
+    warned = new Set()
+    warnedSeatGroups.set(ctx, warned)
+  }
+  if (warned.has(chainId)) return
+  warned.add(chainId)
+  const line = `compaction-basic: summariser seat group "${chainId}" ${reason}; inheriting the conversation route`
+  try {
+    ctx.logger.warn(line)
+  } catch (_loggerUnavailable) {
+    // stderr below still carries the diagnostic when no logger is mounted.
+  }
+  process.stderr.write(`[compaction-basic] ${line}\n`)
+}
+
+/**
+ * Resolve one named seat group to its first usable member through the optional
+ * `modelChains` service. The runtime resolves the group itself each request, so
+ * this only supplies the route (`provider`/`model`) `GenerateOptions` requires;
+ * carrying the group id is what enables per-request failover.
+ * @param ctx - context that may provide the `modelChains` service.
+ * @param chainId - group id the seat named.
+ * @returns the first usable link, or `undefined` when the group supplies none.
+ */
+function resolveSeatGroup(ctx: Context, chainId: string): { provider: string; model: string } | undefined {
+  const service = ctx.get('modelChains') as CompactionModelChainsHandle | undefined
+  if (service === undefined || typeof service.resolve !== 'function') {
+    warnSeatGroupUnusable(ctx, chainId, 'cannot resolve: no model-chains service is mounted')
+    return undefined
+  }
+  let group: CompactionModelGroup | undefined
+  try {
+    group = service.resolve(chainId)
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error)
+    warnSeatGroupUnusable(ctx, chainId, `cannot resolve: ${detail}`)
+    return undefined
+  }
+  if (group === undefined) {
+    warnSeatGroupUnusable(ctx, chainId, 'is not declared or is disabled')
+    return undefined
+  }
+  const links = Array.isArray(group.links) ? group.links : []
+  for (const candidate of links) {
+    if (!isRecord(candidate)) continue
+    const provider = nonEmptyString(candidate.provider)
+    const model = nonEmptyString(candidate.model)
+    if (provider !== undefined && model !== undefined) return { provider, model }
+  }
+  warnSeatGroupUnusable(ctx, chainId, 'resolves to zero usable members')
+  return undefined
+}
+
+/**
+ * Resolve the `personas.compaction` seat to one summariser route. An explicit
+ * provider/model pair is the seat's own route and, when a chain is also named,
+ * the group's implicit first member; the chain id is always carried so the LLM
+ * runtime fails over per request instead of collapsing to one link. A
+ * selector-only seat (a chain without an explicit pair) resolves its first
+ * usable member through the optional `modelChains` service. A missing service,
+ * an unknown or disabled group, and a group with no usable member leave the
+ * seat unset so the engine inherits the conversation route, with one warning
+ * naming the reason.
+ * @param ctx - context that may provide the Settings and `modelChains` services.
  * @returns the seat route, or `undefined` when the seat inherits the session model.
  */
 export function resolveCompactionSeat(ctx: Context): CompactionSeatRoute | undefined {
@@ -143,19 +224,12 @@ export function resolveCompactionSeat(ctx: Context): CompactionSeatRoute | undef
   if (!isRecord(entry)) return undefined
 
   const chain = nonEmptyString(entry.chain)
-  if (chain !== undefined) {
-    const group = document?.chains?.[chain]
-    if (!isRecord(group) || group.disabled === true) return undefined
-    const link = Array.isArray(group.links) ? group.links[0] : undefined
-    if (!isRecord(link)) return undefined
-    const provider = nonEmptyString(link.provider)
-    const model = nonEmptyString(link.model)
-    return provider === undefined || model === undefined
-      ? undefined
-      : { provider, model, chain }
-  }
-
   const provider = nonEmptyString(entry.provider)
   const model = nonEmptyString(entry.model)
-  return provider === undefined || model === undefined ? undefined : { provider, model }
+  if (provider !== undefined && model !== undefined) {
+    return chain === undefined ? { provider, model } : { provider, model, chain }
+  }
+  if (chain === undefined) return undefined
+  const link = resolveSeatGroup(ctx, chain)
+  return link === undefined ? undefined : { ...link, chain }
 }

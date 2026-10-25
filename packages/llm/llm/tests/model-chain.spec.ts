@@ -256,6 +256,38 @@ describe('model-group failover', () => {
     )
   })
 
+  it('ignores legacy attempts/onCut keys on a resolved group', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const failing = new FailingAdapter(new LlmError('link a is down', 'RATE_LIMIT'))
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], failing)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    // The documented snapshot still carries these keys for fork consumers, but
+    // the core loop reads neither: one attempt per link, then the next link.
+    const withLegacyPolicies = {
+      id: 'legacy',
+      links: [{ provider: 'chain-a', model: 'm-a' }, { provider: 'chain-b', model: 'm-b' }],
+      attempts: 2,
+      onCut: 'continue' as const,
+    }
+    provideChains(ctx, id => id === 'legacy' ? withLegacyPolicies : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'legacy',
+      messages: [],
+    }))
+
+    expect(chunks).toEqual(answeredBy('chain-b', 'm-b'))
+    // `attempts: 2` does not add a per-link retry; `onCut: continue` does not
+    // change the pre-commit escalation that kills this link.
+    expect(failing.calls).toHaveLength(1)
+    expect(answering.calls).toHaveLength(1)
+  })
+
   it('rotates a link whose model is not configured on its provider', async () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)

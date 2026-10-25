@@ -18,6 +18,7 @@ import LlmRuntime, {
   createMessage,
   createUserMessage,
   LlmAdapter,
+  LlmError,
 } from '@deepseek-ai/dsh-llm'
 import type {
   ContentBlock,
@@ -62,6 +63,20 @@ function createContext(): Context {
   return ctx
 }
 
+/** One group snapshot as the optional `modelChains` service answers it. */
+interface StubGroup {
+  readonly id: string
+  readonly links: ReadonlyArray<{ provider: string; model: string }>
+  /** Legacy document keys the settings schema still accepts; the core loop ignores them. */
+  readonly attempts?: number
+  readonly onCut?: 'failover' | 'continue'
+}
+
+/** Provide the optional `modelChains` service with one stub resolver. */
+function provideModelChains(ctx: Context, groups: Record<string, StubGroup>): void {
+  ctx.reflect.provide('modelChains', { resolve: (id: string) => groups[id] })
+}
+
 /** Structural tools service: only the named tools resolve, as one scope would see them. */
 function provideTools(ctx: Context, names: readonly string[]): void {
   const visible = new Set(names)
@@ -100,14 +115,26 @@ class RecordingAdapter extends LlmAdapter {
   }
 }
 
+/** Adapter that rejects every attempt with one classified failure. */
+class FailingAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  constructor(private readonly error: LlmError) {
+    super()
+  }
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    throw this.error
+  }
+}
+
 /** Engine whose summarizer always fails, to force the mechanical fallback. */
 class FailingSummaryEngine extends BasicCompactionEngine {
   protected override async summarize(): Promise<never> {
     throw new Error('summarizer offline')
   }
-}
-
-/** Closed two-message turns followed by one open turn. */
+}/** Closed two-message turns followed by one open turn. */
 function conversation(turns = 4, text = 'fixture '.repeat(40).trim()): Session {
   const session = Session.create(SessionId(`settings-${turns}-${text.length}`))
   for (let turn = 1; turn <= turns; turn += 1) {
@@ -209,25 +236,24 @@ describe('compaction settings reads', () => {
     expect(resolveCompactionSeat(ctx)).toBeUndefined()
   })
 
-  it('resolves the compaction seat directly, through a chain, and fails open', () => {
+  it('resolves an explicit seat route and inherits without a model-chains service', () => {
     const ctx = createContext()
     expect(resolveCompactionSeat(ctx)).toBeUndefined()
 
     withDocument(ctx, { personas: { compaction: { provider: 'p', model: 'm' } } })
     expect(resolveCompactionSeat(ctx)).toEqual({ provider: 'p', model: 'm' })
 
+    // A group needs the service: the document's raw chains are not read here.
     withDocument(ctx, {
       personas: { compaction: { chain: 'fast' } },
       chains: { fast: { links: [{ provider: 'p', model: 'm' }, { provider: 'q', model: 'n' }] } },
     })
+    expect(resolveCompactionSeat(ctx)).toBeUndefined()
+
+    // An explicit pair stays the seat's own route; the group id is still carried.
+    withDocument(ctx, { personas: { compaction: { chain: 'fast', provider: 'p', model: 'm' } } })
     expect(resolveCompactionSeat(ctx)).toEqual({ provider: 'p', model: 'm', chain: 'fast' })
 
-    withDocument(ctx, { personas: { compaction: { chain: 'fast' } }, chains: { fast: { disabled: true } } })
-    expect(resolveCompactionSeat(ctx)).toBeUndefined()
-    withDocument(ctx, { personas: { compaction: { chain: 'missing' } } })
-    expect(resolveCompactionSeat(ctx)).toBeUndefined()
-    withDocument(ctx, { personas: { compaction: { chain: 'fast' } }, chains: { fast: { links: [{ model: 'm' }] } } })
-    expect(resolveCompactionSeat(ctx)).toBeUndefined()
     withDocument(ctx, { personas: { compaction: { provider: 'p' } } })
     expect(resolveCompactionSeat(ctx)).toBeUndefined()
     withDocument(ctx, { personas: { compaction: 'keeper' } })
@@ -289,6 +315,146 @@ describe('settings-driven engine policy', () => {
     // The seat route, not the conversation route, wrote the checkpoint.
     expect(seatAdapter.lastOptions?.provider).toBe(SEAT_PROVIDER)
     expect(seatAdapter.lastOptions?.model).toBe(SEAT)
+    expect(conversationAdapter.lastOptions).toBeUndefined()
+  })
+})
+
+describe('summariser seat model groups', () => {
+  /** Engine whose only summariser trigger is the explicit `pressure` reason. */
+  function compactable(ctx: Context): BasicCompactionEngine {
+    return new BasicCompactionEngine(ctx, {
+      auto: false,
+      headroomTokens: 0,
+      maxTokens: 1000,
+      thresholdRatio: 1,
+      retainTokens: 900,
+    })
+  }
+
+  it('carries an explicit seat pair as the group first member and fails over through the group', async () => {
+    const ctx = createContext()
+    const conversationAdapter = new RecordingAdapter(100_000)
+    const failingSeat = new FailingAdapter(new LlmError('seat is rate limited', 'RATE_LIMIT'))
+    const backupAdapter = new RecordingAdapter(100_000)
+    ctx.llm.registerAdapter([MODEL], conversationAdapter)
+    ctx.llm.registerAdapter([SEAT_PROVIDER], failingSeat)
+    ctx.llm.registerAdapter(['backup'], backupAdapter)
+    provideModelChains(ctx, {
+      fast: {
+        id: 'fast',
+        links: [{ provider: SEAT_PROVIDER, model: SEAT }, { provider: 'backup', model: 'backup-model' }],
+      },
+    })
+    withDocument(ctx, {
+      parameters: { compaction: { thresholdRatio: 0.005, retainTokens: 1 } },
+      personas: { compaction: { chain: 'fast', provider: SEAT_PROVIDER, model: SEAT } },
+    })
+    expect(resolveCompactionSeat(ctx)).toEqual({ provider: SEAT_PROVIDER, model: SEAT, chain: 'fast' })
+
+    const result = await compactable(ctx).compactIfNeeded(
+      agent(conversation(6, 'group fixture '.repeat(60).trim())),
+      'pressure',
+      SIGNAL,
+    )
+    expect(result).not.toBeNull()
+    // The explicit pair is the first attempt, and the carried group id lets the
+    // request fail over to the next member instead of dying on one link.
+    expect(failingSeat.calls).toHaveLength(1)
+    expect(failingSeat.calls[0]).toMatchObject({ provider: SEAT_PROVIDER, model: SEAT, chain: 'fast' })
+    expect(backupAdapter.lastOptions).toMatchObject({ provider: 'backup', model: 'backup-model', chain: 'fast' })
+    expect(conversationAdapter.lastOptions).toBeUndefined()
+  })
+
+  it('resolves a selector-only group through the model-chains service instead of the conversation route', async () => {
+    const ctx = createContext()
+    const conversationAdapter = new RecordingAdapter(100_000)
+    const seatAdapter = new RecordingAdapter(100_000)
+    ctx.llm.registerAdapter([MODEL], conversationAdapter)
+    ctx.llm.registerAdapter([SEAT_PROVIDER], seatAdapter)
+    // A selector-only group carries no explicit links in the document; only the
+    // service's expansion knows its members.
+    provideModelChains(ctx, {
+      auto: { id: 'auto', links: [{ provider: SEAT_PROVIDER, model: SEAT }] },
+    })
+    withDocument(ctx, {
+      parameters: { compaction: { thresholdRatio: 0.005, retainTokens: 1 } },
+      personas: { compaction: { chain: 'auto' } },
+      chains: { auto: { selectors: [{ when: { zeroPrice: true }, adopt: true }] } },
+    })
+    expect(resolveCompactionSeat(ctx)).toEqual({ provider: SEAT_PROVIDER, model: SEAT, chain: 'auto' })
+
+    const result = await compactable(ctx).compactIfNeeded(
+      agent(conversation(6, 'selector fixture '.repeat(60).trim())),
+      'pressure',
+      SIGNAL,
+    )
+    expect(result).not.toBeNull()
+    expect(seatAdapter.lastOptions).toMatchObject({ provider: SEAT_PROVIDER, model: SEAT, chain: 'auto' })
+    expect(conversationAdapter.lastOptions).toBeUndefined()
+  })
+
+  it('inherits the conversation route with a stated reason when the group has no members', async () => {
+    const ctx = createContext()
+    const conversationAdapter = new RecordingAdapter(100_000)
+    const seatAdapter = new RecordingAdapter(100_000)
+    ctx.llm.registerAdapter([MODEL], conversationAdapter)
+    ctx.llm.registerAdapter([SEAT_PROVIDER], seatAdapter)
+    const warnings: string[] = []
+    ctx.logger.warn = ((message: string) => void warnings.push(message)) as typeof ctx.logger.warn
+    provideModelChains(ctx, { empty: { id: 'empty', links: [] } })
+    withDocument(ctx, {
+      parameters: { compaction: { thresholdRatio: 0.005, retainTokens: 1 } },
+      personas: { compaction: { chain: 'empty' } },
+    })
+    expect(resolveCompactionSeat(ctx)).toBeUndefined()
+    expect(warnings).toEqual([expect.stringContaining('resolves to zero usable members')])
+
+    const result = await compactable(ctx).compactIfNeeded(
+      agent(conversation(6, 'empty fixture '.repeat(60).trim())),
+      'pressure',
+      SIGNAL,
+    )
+    expect(result).not.toBeNull()
+    expect(conversationAdapter.lastOptions).toMatchObject({ provider: MODEL, model: MODEL })
+    expect(conversationAdapter.lastOptions?.chain).toBeUndefined()
+    expect(seatAdapter.lastOptions).toBeUndefined()
+  })
+
+  it('ignores legacy attempts/onCut keys on the document and on the resolved group', async () => {
+    const ctx = createContext()
+    const conversationAdapter = new RecordingAdapter(100_000)
+    const seatAdapter = new RecordingAdapter(100_000)
+    ctx.llm.registerAdapter([MODEL], conversationAdapter)
+    ctx.llm.registerAdapter([SEAT_PROVIDER], seatAdapter)
+    provideModelChains(ctx, {
+      fast: {
+        id: 'fast',
+        links: [{ provider: SEAT_PROVIDER, model: SEAT }],
+        attempts: 2,
+        onCut: 'continue',
+      },
+    })
+    withDocument(ctx, {
+      parameters: { compaction: { thresholdRatio: 0.005, retainTokens: 1 } },
+      personas: { compaction: { chain: 'fast', provider: SEAT_PROVIDER, model: SEAT } },
+      chains: {
+        fast: {
+          links: [{ provider: SEAT_PROVIDER, model: SEAT }],
+          attempts: 2,
+          onCut: 'continue',
+        },
+      },
+    })
+    expect(resolveCompactionSeat(ctx)).toEqual({ provider: SEAT_PROVIDER, model: SEAT, chain: 'fast' })
+
+    const result = await compactable(ctx).compactIfNeeded(
+      agent(conversation(6, 'legacy fixture '.repeat(60).trim())),
+      'pressure',
+      SIGNAL,
+    )
+    expect(result).not.toBeNull()
+    // Neither key selects a link, adds an attempt, or reroutes the call.
+    expect(seatAdapter.lastOptions).toMatchObject({ provider: SEAT_PROVIDER, model: SEAT, chain: 'fast' })
     expect(conversationAdapter.lastOptions).toBeUndefined()
   })
 })

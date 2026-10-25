@@ -573,7 +573,10 @@ export interface AnsweringLink {
 
 /**
  * One resolved model group (failover chain): an ordered list of links the
- * runtime tries before giving up on a request.
+ * runtime tries before giving up on a request. Only `id`, `label`, and `links`
+ * drive the core loop; retries inside one link belong to the key pool and
+ * step retries to `dsh-llm-retry`, so a group's other document keys are not
+ * part of this contract.
  */
 export interface ResolvedModelChain {
   /** Stable group id carried by {@link GenerateOptions.chain}. */
@@ -582,10 +585,6 @@ export interface ResolvedModelChain {
   label?: string
   /** Ordered links; mixed providers are the point. */
   links: readonly ModelChainLink[]
-  /** Attempts per link. The identity pool owns key rotation inside one link. */
-  attempts?: number
-  /** Consumer policy for a post-commit cut. The runtime never uses it. */
-  onCut?: 'failover' | 'continue'
 }
 
 /**

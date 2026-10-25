@@ -25,7 +25,10 @@ import type { SessionSeq } from '@deepseek-ai/dsh-session'
 export interface SummaryConfig {
   readonly summarizationProvider: string
   readonly summarizationModel: string
-  /** Model-group id the summariser route was resolved through, when a seat named a chain. */
+  /**
+   * Model-group id the seat named. The summariser request carries it so the
+   * LLM runtime can fail over across the group's remaining members.
+   */
   readonly summarizationChain?: string
   readonly maxTokens: number
 }

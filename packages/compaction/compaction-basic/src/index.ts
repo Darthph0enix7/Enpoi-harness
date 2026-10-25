@@ -380,7 +380,9 @@ export class BasicCompactionEngine extends CompactionEngine {
    * prompt, tools, and messages so the provider's KV cache is not invalidated.
    * The `personas.compaction` seat, when assigned, overrides the summariser
    * route (a different model loses the prefix cache and pays the region's full
-   * input price); when the summariser's own context window is smaller than the
+   * input price); a seat naming a model group carries the group id, so one
+   * summary request fails over across the group's members. When the
+   * summariser's own context window is smaller than the
    * region, the replay is capped to fit and the durable checkpoint records the
    * un-summarized seqs for recall. An unresolvable window is framed by the
    * conservative `summarizerUnknownWindowTokens` budget instead of the whole

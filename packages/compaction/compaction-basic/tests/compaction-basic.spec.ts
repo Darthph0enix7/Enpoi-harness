@@ -1708,8 +1708,11 @@ describe('default one-shot summarizer', () => {
 
   it('rejects empty or reasoning-only successful output', async () => {
     const { compact } = await summarizerHarness([{ type: 'reasoning', text: 'private' }])
+    // A reasoning-only answer is not a summary: the LLM runtime classifies a
+    // finished step with no text and no tool call as EMPTY_RESPONSE before the
+    // summarizer's own block checks run.
     await expect(compact.runSummarize(promptInput('history'), agent(conversation(1), MODEL)))
-      .rejects.toThrow(/no text summary content/)
+      .rejects.toMatchObject({ code: 'EMPTY_RESPONSE' })
   })
 
   it('rejects image summary output instead of silently dropping it', async () => {
@@ -1741,8 +1744,11 @@ describe('default one-shot summarizer', () => {
         height: 1,
       },
     }])
+    // An image-only answer carries no text, so the runtime reports it as empty
+    // before the summarizer sees the block. The image-with-text case above is
+    // the one that reaches the summarizer's own UNSUPPORTED_CONTENT check.
     await expect(compact.runSummarize(promptInput('history'), agent(conversation(1), MODEL)))
-      .rejects.toMatchObject({ code: 'UNSUPPORTED_CONTENT' })
+      .rejects.toMatchObject({ code: 'EMPTY_RESPONSE' })
   })
 })
 
