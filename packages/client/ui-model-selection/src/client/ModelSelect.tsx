@@ -43,7 +43,7 @@ import {
   IconSearch, IconStar, IconClock, IconGrip, IconChevron, IconCheck, IconBrain, IconChain,
 } from './icons.tsx'
 import {
-  MODEL_GROUPS_CHANGED_EVENT, assignableModelGroups, ensureModelGroups, modelGroupById, refreshModelGroups,
+  MODEL_GROUPS_CHANGED_EVENT, ensureModelGroups, modelGroupById, pickerModelGroups, refreshModelGroups,
 } from './model-groups.ts'
 import {
   CATALOG_VISIBILITY_CHANGED_EVENT, catalogVisibilitySnapshot, ensureCatalogVisibility,
@@ -150,7 +150,7 @@ export function ModelSelect(
 
   // Listen to preference changes across tabs / components
   useEffect(() => {
-    const onPrefsChange = () => setPrefsVersion(v => v + 1)
+    const onPrefsChange = () => { setPrefsVersion(v => v + 1) }
     const onGroupsChange = () => {
       void refreshModelGroups()
       setPrefsVersion(v => v + 1)
@@ -262,7 +262,7 @@ export function ModelSelect(
       }
     }
     document.addEventListener('mousedown', onDocClick)
-    return () => document.removeEventListener('mousedown', onDocClick)
+    return () => { document.removeEventListener('mousedown', onDocClick) }
   }, [pickerOpen, effortOpen, sheetMode])
 
   // Focus search input on open
@@ -338,7 +338,7 @@ export function ModelSelect(
 
   const selectedIndex = activeSel === null
     ? -1
-    : choices.findIndex(c => c.selection.provider === activeSel?.provider && c.selection.model === activeSel.model)
+    : choices.findIndex(c => c.selection.provider === activeSel.provider && c.selection.model === activeSel.model)
   const currentChoice = choices[selectedIndex]
   const reasoning = currentChoice?.model.reasoning
   const effectiveEffort = activeSel?.reasoningEffort ?? reasoning?.defaultEffort
@@ -507,22 +507,23 @@ export function ModelSelect(
     return keys
   }, [state.groups, q, activeSel, isHiddenCached, isShownCached, decisionFor])
 
-  // Assignable model groups: enabled groups with at least one link, read from
-  // the cached registry and refreshed on the groups-changed event.
-  const chainGroups = useMemo(() => assignableModelGroups(), [prefsVersion])
+  // Model groups render from the host's resolved projection: a selector-only
+  // group shows its resolved member count, and a retired group stays visible
+  // (marked disabled) instead of disappearing.
+  const chainGroups = useMemo(() => pickerModelGroups(), [prefsVersion])
 
   const filteredFavorites = useMemo(() => {
     if (!q) return favoriteItems
     return favoriteItems.filter(f => f.model.name.toLowerCase().includes(q) || f.model.id.toLowerCase().includes(q))
   }, [favoriteItems, q])
 
-  // Groups answer the same search box as models: label, id, or an ordered link.
+  // Groups answer the same search box as models: label, id, or a resolved member.
   const filteredChainGroups = useMemo(() => {
     if (!q) return chainGroups
     return chainGroups.filter(group =>
       group.label.toLowerCase().includes(q)
       || group.id.toLowerCase().includes(q)
-      || group.links.some(link => `${link.provider}/${link.model}`.toLowerCase().includes(q)))
+      || group.members.some(link => `${link.provider}/${link.model}`.toLowerCase().includes(q)))
   }, [chainGroups, q])
 
   // Reorder Provider Groups via Drag & Drop
@@ -596,13 +597,13 @@ export function ModelSelect(
           type="text"
           placeholder={t('search.placeholder')}
           value={searchQuery}
-          onChange={e => setSearchQuery(e.target.value)}
+          onChange={(e) => { setSearchQuery(e.target.value) }}
         />
         {searchQuery && (
           <button
             type="button"
             className={css.clearSearchBtn}
-            onClick={() => setSearchQuery('')}
+            onClick={() => { setSearchQuery('') }}
           >
             ×
           </button>
@@ -635,15 +636,42 @@ export function ModelSelect(
             {!collapsedSet.has('__chains__') && (
               <div className={css.groupBody}>
                 {filteredChainGroups.map((group) => {
-                  const first = group.links[0]
-                  if (first === undefined) return null
+                  // The head resolved member is what the runtime dispatches
+                  // first; a selector-only group carries its members here, so
+                  // no explicit link is needed to assign it.
+                  const first = group.members[0]
                   const isSelected = activeSel?.chain === group.id
+                  const selectable = !group.disabled && first !== undefined
+                  if (!selectable) {
+                    return (
+                      <div
+                        key={`chain-${group.id}`}
+                        className={clsx(css.modelRow, css.modelRowDisabled)}
+                        data-model-row=""
+                        data-model-disabled=""
+                        aria-disabled
+                        title={group.warnings.join('\n')}
+                      >
+                        <div className={css.modelRowLeft}>
+                          <span className={css.chainRowIcon}>
+                            <IconChain />
+                          </span>
+                          <span className={css.modelNameText}>{group.label}</span>
+                        </div>
+                        <div className={css.modelRowRight}>
+                          <span className={css.contextTag}>
+                            {group.disabled ? t('group.disabled') : t('group.noMembers')}
+                          </span>
+                        </div>
+                      </div>
+                    )
+                  }
                   return (
                     <div
                       key={`chain-${group.id}`}
                       className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
                       data-model-row=""
-                      title={group.links.map(link => `${link.provider}/${link.model}`).join('\n')}
+                      title={group.members.map(link => `${link.provider}/${link.model}`).join('\n')}
                       onClick={() => {
                         choose({
                           provider: first.provider,
@@ -661,12 +689,15 @@ export function ModelSelect(
                           <IconChain />
                         </span>
                         <span className={css.modelNameText}>{group.label}</span>
+                        {group.selectors.length > 0 && (
+                          <span className={css.dynamicTag}>{t('group.dynamic')}</span>
+                        )}
                       </div>
                       <div className={css.modelRowRight}>
                         <span className={css.contextTag}>
-                          {group.links.length === 1
-                            ? t('group.model', { count: group.links.length })
-                            : t('group.models', { count: group.links.length })}
+                          {group.members.length === 1
+                            ? t('group.model', { count: group.members.length })
+                            : t('group.models', { count: group.members.length })}
                         </span>
                         {isSelected && <IconCheck className={css.checkIcon} />}
                       </div>
@@ -712,10 +743,10 @@ export function ModelSelect(
                       className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
                       data-model-row=""
                       draggable={!q}
-                      onDragStart={e => handleFavoriteDragStart(e, fIdx)}
-                      onDragOver={e => e.preventDefault()}
-                      onDrop={e => handleFavoriteDrop(e, fIdx)}
-                      onClick={() => choose({ provider: fav.provider, model: fav.model.id })}
+                      onDragStart={(e) => { handleFavoriteDragStart(e, fIdx) }}
+                      onDragOver={(e) => { e.preventDefault() }}
+                      onDrop={(e) => { handleFavoriteDrop(e, fIdx) }}
+                      onClick={() => { choose({ provider: fav.provider, model: fav.model.id }) }}
                     >
                       <div className={css.modelRowLeft}>
                         {!q && (
@@ -783,7 +814,7 @@ export function ModelSelect(
                       key={`rec-${rec.provider}-${rec.model.id}`}
                       className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
                       data-model-row=""
-                      onClick={() => choose({ provider: rec.provider, model: rec.model.id })}
+                      onClick={() => { choose({ provider: rec.provider, model: rec.model.id }) }}
                     >
                       <div className={css.modelRowLeft}>
                         <span className={css.modelNameText}>{rec.model.name}</span>
@@ -832,8 +863,8 @@ export function ModelSelect(
             <div
               key={group.id}
               className={clsx(css.groupSection, dragOverItem === group.id && css.dragOver)}
-              onDragOver={e => handleProviderDragOver(e, group.id)}
-              onDrop={e => handleProviderDrop(e, group.id)}
+              onDragOver={(e) => { handleProviderDragOver(e, group.id) }}
+              onDrop={(e) => { handleProviderDrop(e, group.id) }}
             >
               <div
                 className={css.groupHeader}
@@ -849,8 +880,8 @@ export function ModelSelect(
                     <span
                       className={css.dragHandle}
                       draggable
-                      onDragStart={e => handleProviderDragStart(e, group.id)}
-                      onClick={e => e.stopPropagation()}
+                      onDragStart={(e) => { handleProviderDragStart(e, group.id) }}
+                      onClick={(e) => { e.stopPropagation() }}
                       title={t('provider.dragReorder')}
                     >
                       <IconGrip />
@@ -882,7 +913,7 @@ export function ModelSelect(
                         key={model.id}
                         className={clsx(css.modelRow, isSelected && css.modelRowSelected)}
                         data-model-row=""
-                        onClick={() => choose({ provider: group.id, model: model.id })}
+                        onClick={() => { choose({ provider: group.id, model: model.id }) }}
                       >
                         <div className={css.modelRowLeft}>
                           <span className={css.modelNameText}>{model.name}</span>
@@ -957,7 +988,7 @@ export function ModelSelect(
             key={level.key}
             type="button"
             className={clsx(css.effortItem, isSelected && css.effortItemSelected)}
-            onClick={() => chooseEffort(level.effort)}
+            onClick={() => { chooseEffort(level.effort) }}
           >
             <span>{level.label}</span>
             {isSelected && <IconCheck className={css.checkIcon} />}
@@ -1074,7 +1105,7 @@ export function ModelSelect(
           key={toast.seq}
           text={toast.text}
           anchor={rootRef.current?.closest<HTMLElement>('[data-composer-card]') ?? null}
-          onDone={() => setToast(null)}
+          onDone={() => { setToast(null) }}
         />
       )}
     </div>

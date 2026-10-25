@@ -2,23 +2,29 @@
  * Model groups row on the Providers page — the ONLY creation surface for
  * failover groups.
  *
- * Collapsed it is one line (`Model groups · <n>`); expanded it lists the stored
- * groups (label, link count, ordered provider preview, enable/disable, edit,
+ * Collapsed it is one line (`Model groups · <n>`); expanded it lists the groups
+ * the host's resolved projection reports (label, resolved member count, ordered
+ * provider preview, selector/dynamic marker, warnings, enable/disable, edit,
  * delete) plus an editor drawer whose link list adds and reorders links through
  * the shared model picker, with `attempts` and `onCut` behind an Advanced
  * disclosure. Every link row keeps that picker mounted over the stored route,
  * so its reasoning-effort pill (same catalog levels and names as a seat row)
- * edits `links[].effort` in place. The row renders nothing at all while the namespace carries no
- * group and this browser has never shown one, so a zero-group install looks
- * exactly as it did before the feature.
+ * edits `links[].effort` in place.
+ *
+ * The row reads the resolved-group artifact, never the raw `chains` map: a
+ * selector-only group shows its resolved members, and saving patches ONLY the
+ * fields the operator changed, so stored `selectors`/`adopt` survive an edit.
  */
-import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type DragEvent, type ReactNode } from 'react'
 import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-api-remotes/client'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
-import { ModelSelect, type ModelSelectOverride } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import {
-  groupWriteOps, isValidGroupId, linkLabel, linkProviderPreview,
-  readModelGroups, sameModelGroups, writeGroupOps,
+  ModelSelect, getModelGroupsSnapshot, refreshModelGroups, subscribeModelGroups,
+  type ModelSelectOverride,
+} from '@deepseek-ai/dsh-client-ui-model-selection/client'
+import {
+  groupEditOps, groupWriteOps, isValidGroupId, linkLabel, linkProviderPreview,
+  sameModelGroups, writeGroupOps,
   type GroupWriteFailure, type ModelGroup, type ModelGroupLink,
 } from './model-groups.ts'
 import type { ModelPickerFace } from './picker-face.ts'
@@ -110,9 +116,9 @@ function GripGlyph(): ReactNode {
 export function ModelGroupsRow({
   namespace, api, readOnly, picker, t, modelT, onSaved,
 }: ModelGroupsRowProps): ReactNode {
-  const stored = useMemo(() => readModelGroups(namespace), [namespace])
+  const stored = useSyncExternalStore(subscribeModelGroups, getModelGroupsSnapshot)
   const [expanded, setExpanded] = useState(false)
-  const [optimistic, setOptimistic] = useState<ModelGroup[] | null>(null)
+  const [optimistic, setOptimistic] = useState<readonly ModelGroup[] | null>(null)
   const [editorId, setEditorId] = useState<string | null>(null)
   const [draft, setDraft] = useState<GroupDraft | null>(null)
   const [advanced, setAdvanced] = useState(false)
@@ -123,12 +129,18 @@ export function ModelGroupsRow({
 
   const groups = optimistic ?? stored
 
+  // The settings mirror is the push signal: the host republished the artifact
+  // before forwarding the event, so re-reading here sees the new projection.
+  useEffect(() => {
+    void refreshModelGroups()
+  }, [namespace])
+
   // The settings echo republishes a fresh namespace object for the same stored
   // registry. The overlay is owned by the governed value moving, not by object
   // identity: an echo carrying the same parsed groups keeps the optimistic
   // value (the provider panel's Fix-44 reconciliation), and only a real group
   // move — our own commit landing, or another client's edit — clears it.
-  const lastStored = useRef<ModelGroup[]>(stored)
+  const lastStored = useRef<readonly ModelGroup[]>(stored)
   useEffect(() => {
     const previous = lastStored.current
     lastStored.current = stored
@@ -148,7 +160,7 @@ export function ModelGroupsRow({
     return t('groupsWriteRejected')
   }
 
-  const persist = async (ops: SettingsPathOpView[], previous: ModelGroup[]): Promise<boolean> => {
+  const persist = async (ops: SettingsPathOpView[], previous: readonly ModelGroup[]): Promise<boolean> => {
     setBusy(true)
     setStatus(null)
     const failure = await writeGroupOps(api, ops)
@@ -224,20 +236,42 @@ export function ModelGroupsRow({
     if (!isValidGroupId(id)) { setStatus(t('groupsIdInvalid')); return }
     if (creating && groups.some(group => group.id === id)) { setStatus(t('groupsIdTaken')); return }
     if (label === '') { setStatus(t('groupsLabelRequired')); return }
-    if (draft.links.length === 0) { setStatus(t('groupsLinksRequired')); return }
+    const original = groups.find(item => item.id === id)
+    // A selector-backed group is valid with no explicit link: its members
+    // resolve at run time, and the UI has no selector editor to re-add one.
+    const hasSelectors = (original?.selectors.length ?? 0) > 0
+    if (draft.links.length === 0 && !hasSelectors) { setStatus(t('groupsLinksRequired')); return }
     const attempts = Number(draft.attempts)
     if (!Number.isInteger(attempts) || attempts < 1) { setStatus(t('groupsAttemptsInvalid')); return }
-    const group: ModelGroup = {
-      id,
-      label,
-      links: draft.links,
-      attempts,
-      onCut: draft.onCut,
-      disabled: groups.find(item => item.id === id)?.disabled ?? false,
-    }
+    // The edited group keeps every projection field the draft does not edit
+    // (selectors, candidates, warnings, source); only the four editable values
+    // move and only those are written, so stored selectors survive an edit.
+    const group: ModelGroup = original === undefined
+      ? {
+        id,
+        label,
+        links: draft.links,
+        selectors: [],
+        selectorMatches: [],
+        members: draft.links,
+        candidates: [],
+        warnings: [],
+        attempts,
+        onCut: draft.onCut,
+        disabled: false,
+        source: 'settings',
+      }
+      : { ...original, label, links: draft.links, attempts, onCut: draft.onCut }
     const previous = groups
     applyGroup(group)
-    if (await persist(groupWriteOps(group), previous)) closeEditor()
+    if (creating || original === undefined) {
+      if (await persist(groupWriteOps(group), previous)) closeEditor()
+      return
+    }
+    const ops = groupEditOps(group, original)
+    // A save that changed nothing needs no write at all.
+    if (ops.length === 0) { closeEditor(); return }
+    if (await persist(ops, previous)) closeEditor()
   }
 
   const addLink = (selection: PickerSelection): void => {
@@ -322,18 +356,37 @@ export function ModelGroupsRow({
                 </div>
                 <div className={css.groupMeta}>
                   <span>
-                    {group.links.length === 1
+                    {group.members.length === 1
                       ? t('groupsLinkCountOne')
-                      : t('groupsLinkCount', { count: group.links.length })}
+                      : t('groupsLinkCount', { count: group.members.length })}
                   </span>
-                  {group.links.length > 0 && (
-                    <span className={css.groupPreview} title={group.links.map(linkLabel).join('\n')}>
+                  {group.members.length > 0 && (
+                    <span className={css.groupPreview} title={group.members.map(linkLabel).join('\n')}>
                       · {linkProviderPreview(group)}
+                    </span>
+                  )}
+                  {group.selectors.length > 0 && (
+                    <span
+                      className={css.groupDisabled}
+                      title={group.selectors
+                        .map(selector => selector.label ?? JSON.stringify(selector.when))
+                        .join('\n')}
+                    >
+                      · {t('groupsDynamic')}
+                    </span>
+                  )}
+                  {group.warnings.length > 0 && (
+                    <span className={css.groupDisabled} title={group.warnings.join('')}>
+                      · {group.warnings.length === 1
+                        ? t('groupsWarningOne')
+                        : t('groupsWarnings', { count: group.warnings.length })}
                     </span>
                   )}
                   {group.disabled && <span className={css.groupDisabled}>· {t('groupsDisabled')}</span>}
                 </div>
-                {group.links.length === 0 && <div className={css.groupWarning}>{t('groupsDangling')}</div>}
+                {group.members.length === 0 && group.selectors.length === 0 && (
+                  <div className={css.groupWarning}>{t('groupsDangling')}</div>
+                )}
               </div>
               <div className={css.groupActions}>
                 <button
@@ -458,7 +511,13 @@ export function ModelGroupsRow({
                   </button>
                 </div>
               ))}
-              {draft.links.length === 0 && <div className={css.editorHint}>{t('groupsNoLinks')}</div>}
+              {draft.links.length === 0 && (
+                <div className={css.editorHint}>
+                  {(groups.find(item => item.id === editorId)?.selectors.length ?? 0) > 0
+                    ? t('groupsNoExplicitLinks')
+                    : t('groupsNoLinks')}
+                </div>
+              )}
 
               <div className={css.addLinkRow}>
                 {picker !== null ? (

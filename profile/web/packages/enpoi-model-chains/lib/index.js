@@ -27,14 +27,14 @@ function parseChainSelector(raw, warn) {
     ...label !== void 0 ? { label } : {}
   });
 }
-function parseChainEntry(id, raw, warn) {
+function parseChainRaw(id, raw, warn) {
   if (raw === void 0 || raw === null) return void 0;
   if (!isRecord(raw)) {
     warn(`[enpoi-model-chains] chain "${id}" is not an object \u2014 ignored
 `);
     return void 0;
   }
-  if (raw.disabled === true) return void 0;
+  const disabled = raw.disabled === true;
   const rawLinks = raw.links;
   if (rawLinks !== void 0 && !Array.isArray(rawLinks)) {
     warn(`[enpoi-model-chains] chain "${id}" has no links array \u2014 ignored
@@ -93,14 +93,22 @@ function parseChainEntry(id, raw, warn) {
   const attemptsValue = raw.attempts;
   const attempts = typeof attemptsValue === "number" && Number.isFinite(attemptsValue) && attemptsValue >= 1 ? Math.floor(attemptsValue) : void 0;
   const onCut = raw.onCut === "continue" ? "continue" : raw.onCut === "failover" ? "failover" : void 0;
-  return Object.freeze({
-    id,
-    ...label !== void 0 ? { label } : {},
-    links: Object.freeze(links),
-    ...selectors.length > 0 ? { selectors: Object.freeze(selectors) } : {},
-    ...attempts !== void 0 ? { attempts } : {},
-    ...onCut !== void 0 ? { onCut } : {}
-  });
+  return {
+    disabled,
+    chain: Object.freeze({
+      id,
+      ...label !== void 0 ? { label } : {},
+      links: Object.freeze(links),
+      ...selectors.length > 0 ? { selectors: Object.freeze(selectors) } : {},
+      ...attempts !== void 0 ? { attempts } : {},
+      ...onCut !== void 0 ? { onCut } : {}
+    })
+  };
+}
+function parseChainEntry(id, raw, warn) {
+  const parsed = parseChainRaw(id, raw, warn);
+  if (parsed === void 0 || parsed.disabled) return void 0;
+  return parsed.chain;
 }
 function readRawChains(ctx) {
   try {
@@ -133,6 +141,8 @@ var ModelChainsResolver = class {
     this.options = options;
     this.raw = this.readRaw();
   }
+  readRaw;
+  options;
   raw;
   cache = /* @__PURE__ */ new Map();
   warned = /* @__PURE__ */ new Set();
@@ -140,11 +150,56 @@ var ModelChainsResolver = class {
   announced = /* @__PURE__ */ new Set();
   lastResolved = /* @__PURE__ */ new Map();
   baselines = /* @__PURE__ */ new Map();
+  /** Memoized resolved-group projection; cleared whenever an input moves. */
+  resolved;
   /** Re-read the settings document; the next resolve builds fresh snapshots. */
   refresh() {
     this.raw = this.readRaw();
     this.cache.clear();
+    this.resolved = void 0;
     this.baselines.clear();
+  }
+  /**
+   * Drop the memoized projection without re-baselining selectors. A catalogue
+   * change moves what the selectors match but is not an operator adoption
+   * decision, so `adopt: false` baselines must survive it.
+   */
+  invalidateResolvedGroups() {
+    this.resolved = void 0;
+  }
+  /**
+   * Project every stored group into its resolved state for the published
+   * artifact. Disabled groups are included (clients render them as disabled)
+   * and the projection never records an adoption baseline, so publishing it
+   * cannot change what a later `resolve()` answers.
+   * @returns the resolved state of every usable group, keyed by group id.
+   */
+  resolvedGroups() {
+    if (this.resolved !== void 0) return this.resolved;
+    const groups = {};
+    for (const [id, raw] of Object.entries(this.raw)) {
+      const parseWarnings = [];
+      const parsed = parseChainRaw(id, raw, (line) => parseWarnings.push(line));
+      if (parsed === void 0) continue;
+      const { chain, disabled } = parsed;
+      const expanded = this.expandChain(chain, false, false);
+      groups[id] = Object.freeze({
+        id,
+        ...chain.label !== void 0 ? { label: chain.label } : {},
+        links: chain.links,
+        selectors: chain.selectors ?? Object.freeze([]),
+        selectorMatches: Object.freeze(expanded.selectorMatches),
+        members: Object.freeze(expanded.links),
+        candidates: Object.freeze(expanded.candidates),
+        warnings: Object.freeze([...parseWarnings, ...expanded.warnings]),
+        ...chain.attempts !== void 0 ? { attempts: chain.attempts } : {},
+        ...chain.onCut !== void 0 ? { onCut: chain.onCut } : {},
+        disabled,
+        source: "settings"
+      });
+    }
+    this.resolved = Object.freeze(groups);
+    return this.resolved;
   }
   /** The warning sink: injected in tests, stderr in production. */
   warn(line) {
@@ -171,13 +226,17 @@ var ModelChainsResolver = class {
    * Merge explicit links with selector matches.
    * @param chain - parsed chain.
    * @param announce - whether newly joined links should be announced.
-   * @returns merged links, candidates held back by `adopt: false`, warnings.
+   * @param persist - whether an `adopt: false` baseline may be recorded (the
+   *   published artifact projects without touching resolve state).
+   * @returns merged links, candidates held back by `adopt: false`, warnings,
+   *   and the per-selector expansion the artifact carries.
    */
-  expandChain(chain, announce) {
+  expandChain(chain, announce, persist = true) {
     const links = [];
     const seen = /* @__PURE__ */ new Set();
     const warnings = [];
     const candidates = [];
+    const selectorMatches = [];
     const add = (link) => {
       const key = linkKey(link);
       if (seen.has(key)) return;
@@ -187,9 +246,20 @@ var ModelChainsResolver = class {
     for (const link of chain.links) add(link);
     const selectors = chain.selectors ?? [];
     selectors.forEach((selector, index) => {
+      const selectorWarnings = [];
       if (this.options.expandSelector === void 0) {
-        warnings.push(`[enpoi-model-chains] chain "${chain.id}" selector #${String(index + 1)}: catalogRules service absent \u2014 selector ignored
-`);
+        const line = `[enpoi-model-chains] chain "${chain.id}" selector #${String(index + 1)}: catalogRules service absent \u2014 selector ignored
+`;
+        selectorWarnings.push(line);
+        warnings.push(line);
+        selectorMatches.push(Object.freeze({
+          index,
+          when: selector.when,
+          adopt: selector.adopt,
+          ...selector.label !== void 0 ? { label: selector.label } : {},
+          links: Object.freeze([]),
+          warnings: Object.freeze(selectorWarnings)
+        }));
         return;
       }
       const selectionKey = `${chain.id}#${String(index)}`;
@@ -197,17 +267,38 @@ var ModelChainsResolver = class {
       try {
         expansion = this.options.expandSelector(selector, chain.id, index);
       } catch (error) {
-        warnings.push(`[enpoi-model-chains] chain "${chain.id}" selector #${String(index + 1)} failed: ${error instanceof Error ? error.message : String(error)}
-`);
+        const line = `[enpoi-model-chains] chain "${chain.id}" selector #${String(index + 1)} failed: ${error instanceof Error ? error.message : String(error)}
+`;
+        selectorWarnings.push(line);
+        warnings.push(line);
+        selectorMatches.push(Object.freeze({
+          index,
+          when: selector.when,
+          adopt: selector.adopt,
+          ...selector.label !== void 0 ? { label: selector.label } : {},
+          links: Object.freeze([]),
+          warnings: Object.freeze(selectorWarnings)
+        }));
         return;
       }
-      for (const line of expansion.warnings ?? []) warnings.push(line);
+      for (const line of expansion.warnings ?? []) {
+        selectorWarnings.push(line);
+        warnings.push(line);
+      }
       const matches = expansion.links.map((link) => Object.freeze({ provider: link.provider, model: link.model }));
+      selectorMatches.push(Object.freeze({
+        index,
+        when: selector.when,
+        adopt: selector.adopt,
+        ...selector.label !== void 0 ? { label: selector.label } : {},
+        links: Object.freeze(matches),
+        warnings: Object.freeze(selectorWarnings)
+      }));
       if (selector.adopt === false) {
         let baseline = this.baselines.get(selectionKey);
         if (baseline === void 0) {
           baseline = new Set(matches.map(linkKey));
-          this.baselines.set(selectionKey, baseline);
+          if (persist) this.baselines.set(selectionKey, baseline);
         }
         for (const link of matches) {
           if (baseline.has(linkKey(link))) add(link);
@@ -236,7 +327,7 @@ var ModelChainsResolver = class {
         }
       }
     }
-    return { links, candidates, warnings };
+    return { links, candidates, warnings, selectorMatches };
   }
   /** Write each expansion warning once per selector position. */
   reportWarnings(chainId, warnings) {
@@ -307,6 +398,8 @@ var ModelChainsResolver = class {
     });
   }
 };
+var RESOLVED_GROUPS_ARTIFACT = "modelChains.resolved";
+var CATALOG_NS = "llm-pi-ai";
 function apply(ctx) {
   const expander = (selector, chainId, selectorIndex) => {
     const rules = ctx.get("catalogRules");
@@ -319,20 +412,37 @@ function apply(ctx) {
     };
   };
   const resolver = new ModelChainsResolver(() => readRawChains(ctx), { expandSelector: expander });
+  const publishResolvedGroups = () => {
+    const writer = ctx.get("settings");
+    writer?.publishArtifact?.(RESOLVED_GROUPS_ARTIFACT, resolver.resolvedGroups());
+  };
   ctx.provide("modelChains", {
-    resolve: (id) => resolver.resolve(id),
+    resolve: (id) => {
+      const resolved = resolver.resolve(id);
+      publishResolvedGroups();
+      return resolved;
+    },
     preview: (id) => resolver.preview(id)
   });
   const onNamespaceChange = ((ns) => {
-    if (String(ns) !== ORCH_NS) return;
-    resolver.refresh();
+    const key = String(ns);
+    if (key === ORCH_NS) {
+      resolver.refresh();
+      publishResolvedGroups();
+      return;
+    }
+    if (key !== CATALOG_NS) return;
+    resolver.invalidateResolvedGroups();
+    queueMicrotask(publishResolvedGroups);
   });
   ctx.on("settings/document-updated", onNamespaceChange);
   ctx.on("settings/updated", onNamespaceChange);
+  publishResolvedGroups();
   process.stderr.write("[enpoi-model-chains] mounted\n");
 }
 export {
   ModelChainsResolver,
+  RESOLVED_GROUPS_ARTIFACT,
   apply,
   inject,
   name,

@@ -31,6 +31,19 @@ describe('chain attribution', () => {
     expect(chainAttribution('stable', 'mimo-v2.5')?.badge).toBe('Stable → mimo-v2.5')
   })
 
+  it('reads a selector-only group from its resolved members', () => {
+    // The mirror carries the artifact projection: no explicit link, one
+    // resolved member. The badge still names the group and the answer.
+    localStorage.setItem('dsh_model_groups_v1', JSON.stringify([{
+      id: 'free',
+      label: 'Free tools',
+      links: [],
+      members: [{ provider: 'groq', model: 'free-tool' }, { provider: 'groq', model: 'free-tools-pro' }],
+    }]))
+    expect(chainAttribution('free', 'free-tool')?.badge).toBe('Free tools (free-tool)')
+    expect(chainAttribution('free', 'free-tools-pro')?.badge).toBe('Free tools → free-tools-pro')
+  })
+
   it('falls back to the plain model when no group id was carried', () => {
     expect(chainAttribution(undefined, 'mimo-v2.5')).toBeUndefined()
     expect(chainAttribution('stable', undefined)).toBeUndefined()

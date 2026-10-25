@@ -1,74 +1,145 @@
 /**
- * Model groups (`enpoi-orchestration.chains`) as the picker and the chat badge
- * consume them.
+ * Model groups (`enpoi-orchestration.chains`) as the picker, the chat badge,
+ * and the Providers editor consume them.
  *
- * One settings.describe primes a module-level cache at load; the
- * `dsh:model-groups-changed` window event (dispatched by the Providers editor
- * after a committed write, or by any other client that changed the registry)
- * queues a re-read. The same payload is mirrored into
+ * The settings row stays authoritative; this module never parses the raw
+ * `chains` map. It reads the host's resolved-group projection
+ * (`modelChains.resolved`) through the settings artifact channel
+ * (`settings.describeArtifact`), so a selector-only group arrives with its
+ * resolved member count, candidates, and warnings, and a disabled group
+ * arrives marked disabled instead of disappearing. The revision-aware read
+ * answers `changed: false` without a payload when the projection did not move.
+ *
+ * The `dsh:model-groups-changed` window event (dispatched by the Providers
+ * editor after a committed write, or by any other client that changed the
+ * registry) queues a re-read. The same payload is mirrored into
  * {@link MODEL_GROUPS_STORAGE_KEY} so a surface that must not fetch settings
  * itself (the chat attribution badge) can resolve a group label synchronously.
  *
- * The stored parse and the `ModelGroup`/`ModelGroupLink` types live in the
- * shared `@deepseek-ai/dsh-client-ui-primitives` owner, re-exported here for
- * this package's consumers.
+ * The artifact parser and the `ModelGroup` types live in the shared
+ * `@deepseek-ai/dsh-client-ui-primitives` owner, re-exported here.
  */
-import { parseModelGroups, type ModelGroup } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  parseModelGroupList, parseModelGroups,
+  type ModelGroup,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 
-export { parseModelGroup, parseModelGroups } from '@deepseek-ai/dsh-client-ui-primitives'
-export type { ModelGroup, ModelGroupLink } from '@deepseek-ai/dsh-client-ui-primitives'
+export { parseModelGroup, parseModelGroupList, parseModelGroups, parseResolvedModelGroup } from '@deepseek-ai/dsh-client-ui-primitives'
+export type { ModelGroup, ModelGroupLink, ModelGroupSelector, ModelGroupSelectorMatch } from '@deepseek-ai/dsh-client-ui-primitives'
 
-/** localStorage mirror of the last loaded registry (read by ui-chat's badge). */
+/** localStorage mirror of the last loaded resolved groups (read by ui-chat's badge). */
 export const MODEL_GROUPS_STORAGE_KEY = 'dsh_model_groups_v1'
 
 /** Window event asking every consumer to re-read the registry. */
 export const MODEL_GROUPS_CHANGED_EVENT = 'dsh:model-groups-changed'
 
+/** Artifact name the host publishes the resolved-group projection under. */
+export const MODEL_GROUPS_ARTIFACT_KEY = 'modelChains.resolved'
+
 let groups: readonly ModelGroup[] = []
 let inflight: Promise<void> | undefined
+/** A publication landed (fetch or mirror). */
 let loaded = false
+/** The synchronous snapshot was initialized; keeps `getSnapshot` referentially stable. */
+let primed = false
+/** Serialized form of the last published list; a matching read is a no-op. */
+let lastSerialized: string | undefined
+/** Host artifact revision already folded into the cache; absent before the first read. */
+let artifactRevision: number | undefined
+const listeners = new Set<() => void>()
 
-/**
- * The shared coalesced `settings.describe` reader the connection wire root
- * publishes; absent in standalone bundles, where the local fetch stands in.
- * @returns the shared reader, or undefined.
- */
-function sharedDescribe(): (() => Promise<{ namespaces?: readonly unknown[] } | undefined>) | undefined {
-  const candidate = (globalThis as { __dshSettingsDescribe?: unknown }).__dshSettingsDescribe
-  return typeof candidate === 'function'
-    ? candidate as () => Promise<{ namespaces?: readonly unknown[] } | undefined>
-    : undefined
+function notify(): void {
+  for (const listener of listeners) {
+    try {
+      listener()
+    } catch {
+      // One broken subscriber must not starve the others.
+    }
+  }
+  try {
+    window.dispatchEvent(new CustomEvent(MODEL_GROUPS_CHANGED_EVENT))
+  } catch {
+    // No window (non-DOM caller): the in-memory cache still serves.
+  }
 }
 
 function publish(next: readonly ModelGroup[]): void {
+  const serialized = JSON.stringify(next)
+  // A read that resolves to the list already published is a no-op: keep the
+  // same reference and dispatch nothing, so consumers do not repaint and a
+  // listener that re-reads cannot loop.
+  if (serialized === lastSerialized) {
+    loaded = true
+    return
+  }
   groups = next
   loaded = true
+  primed = true
+  lastSerialized = serialized
   try {
-    localStorage.setItem(MODEL_GROUPS_STORAGE_KEY, JSON.stringify(next))
+    localStorage.setItem(MODEL_GROUPS_STORAGE_KEY, serialized)
   } catch {
     // Storage disabled (private mode, quota): the in-memory cache still serves.
   }
+  notify()
 }
 
 /** Read the mirror a previous load wrote, for a first paint before the fetch. */
 function readMirror(): readonly ModelGroup[] {
   try {
     const raw = localStorage.getItem(MODEL_GROUPS_STORAGE_KEY)
-    return raw === null ? [] : parseModelGroups(JSON.parse(raw))
+    if (raw === null) return []
+    const parsed = parseModelGroupList(JSON.parse(raw))
+    lastSerialized = JSON.stringify(parsed)
+    return parsed
   } catch {
     return []
   }
 }
 
-/** Every group the registry reported, in stored order. */
+/**
+ * Every group the projection reported, in stored order (disabled included).
+ * The returned reference only moves on a publication, so it is safe as a
+ * `useSyncExternalStore` snapshot.
+ * @returns the current registry.
+ */
 export function getModelGroups(): readonly ModelGroup[] {
-  if (groups.length === 0) groups = readMirror()
+  if (!primed) {
+    primed = true
+    if (!loaded) groups = readMirror()
+  }
   return groups
 }
 
-/** Groups a picker may assign: enabled, with at least one link. */
+/** Subscribe to registry publications (React `useSyncExternalStore`). */
+export function subscribeModelGroups(listener: () => void): () => void {
+  listeners.add(listener)
+  return () => {
+    listeners.delete(listener)
+  }
+}
+
+/** Stable snapshot reader for React `useSyncExternalStore`. */
+export function getModelGroupsSnapshot(): readonly ModelGroup[] {
+  return getModelGroups()
+}
+
+/**
+ * Groups a picker may assign: enabled, with at least one resolved member. A
+ * selector-only group qualifies once its selector matches the catalogue — no
+ * explicit link is required.
+ */
 export function assignableModelGroups(): readonly ModelGroup[] {
-  return getModelGroups().filter(group => !group.disabled && group.links.length > 0)
+  return getModelGroups().filter(group => !group.disabled && group.members.length > 0)
+}
+
+/**
+ * Groups a picker renders, disabled and member-less rows included: a retired
+ * group stays visible (marked disabled) instead of vanishing, so an operator
+ * can see why an assignment stopped resolving.
+ */
+export function pickerModelGroups(): readonly ModelGroup[] {
+  return getModelGroups().filter(group => group.members.length > 0 || group.selectors.length > 0 || group.disabled)
 }
 
 /** Resolve one group by id, including disabled groups (attribution still names them). */
@@ -86,36 +157,61 @@ export function ensureModelGroups(): Promise<void> {
 }
 
 /**
- * Re-read `enpoi-orchestration.chains` through the live gateway.
- * @returns nothing; the cache carries the outcome.
+ * Read the host artifact channel. `unsupported` means the host does not serve
+ * `settings.describeArtifact` (a 404/405), so the projection is empty and there
+ * is deliberately no raw-`chains` fallback. `unreachable` (offline, a 5xx, a
+ * malformed answer) keeps the last published registry instead of wiping it.
+ * @returns the changed flag with its value, or why the read did not answer.
  */
-export function refreshModelGroups(): Promise<void> {
-  if (inflight !== undefined) return inflight
-  const readNamespaces = async (): Promise<unknown> => {
-    const shared = sharedDescribe()
-    if (shared !== undefined) return (await shared())?.namespaces
-    const res = await fetch('/api/settings.describe', {
+async function readArtifact(): Promise<{ changed: boolean; value?: unknown } | 'unsupported' | 'unreachable'> {
+  try {
+    const res = await fetch('/api/settings.describeArtifact', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         type: 'client-request',
-        method: 'settings.describe',
-        rpcId: 'model-groups-describe',
-        payload: { args: {} },
+        method: 'settings.describeArtifact',
+        rpcId: 'model-groups-artifact',
+        payload: {
+          args: {
+            key: MODEL_GROUPS_ARTIFACT_KEY,
+            ...artifactRevision === undefined ? {} : { knownRevision: artifactRevision },
+          },
+        },
       }),
     })
-    if (!res.ok) return undefined
+    if (!res.ok) return res.status === 404 || res.status === 405 ? 'unsupported' : 'unreachable'
     const json: unknown = await res.json()
-    const response = json as { result?: { value?: { namespaces?: unknown } } } | null
-    return response?.result?.value?.namespaces
+    const result = (json as { result?: { ok?: unknown; value?: unknown } } | null)?.result
+    if (result?.ok !== true || result.value === null || typeof result.value !== 'object') return 'unreachable'
+    const read = result.value as { revision?: unknown; changed?: unknown; value?: unknown }
+    if (typeof read.revision !== 'number' || typeof read.changed !== 'boolean') return 'unreachable'
+    artifactRevision = read.revision
+    return { changed: read.changed, ...read.changed ? { value: read.value } : {} }
+  } catch {
+    return 'unreachable'
   }
-  const operation = readNamespaces()
-    .then((namespaces) => {
-      const namespace = Array.isArray(namespaces)
-        ? (namespaces as Array<{ ns?: string; value?: { chains?: unknown }; user?: { chains?: unknown } }>)
-          .find(entry => entry.ns === 'enpoi-orchestration')
-        : undefined
-      if (namespace !== undefined) publish(parseModelGroups(namespace.value?.chains ?? namespace.user?.chains))
+}
+
+/**
+ * Re-read the resolved-group projection.
+ * @returns nothing; the cache and its event carry the outcome.
+ */
+export function refreshModelGroups(): Promise<void> {
+  if (inflight !== undefined) return inflight
+  const operation = readArtifact()
+    .then((artifact) => {
+      if (artifact === 'unsupported') {
+        // No artifact route on this host: publish the empty projection rather
+        // than reading the raw document, so no surface forks the source of truth.
+        publish([])
+        return
+      }
+      if (artifact === 'unreachable') {
+        // Offline / transient: the last published registry stays until the next read.
+        return
+      }
+      if (artifact.changed) publish(parseModelGroups(artifact.value))
     })
     .catch(() => {
       // Offline answer: the last published registry stays until the next read.
@@ -127,7 +223,7 @@ export function refreshModelGroups(): Promise<void> {
   return operation
 }
 
-// Prime on import so the per-session pickers never pay the describe latency.
+// Prime on import so the per-session pickers never pay the artifact latency.
 if (typeof window !== 'undefined') {
   void refreshModelGroups()
 }

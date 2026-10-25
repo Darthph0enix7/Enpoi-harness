@@ -39,6 +39,17 @@ export type { ModelKey } from './locales.ts'
 // and Watchtower persona rows — same directory, favorites, and visibility).
 export { ModelSelect } from './ModelSelect.tsx'
 export type { ModelSelectOverride } from './ModelSelect.tsx'
+// Model groups: one registry fed by the host's resolved-group artifact
+// (`modelChains.resolved`); the Providers editor and every seat read it here.
+export {
+  MODEL_GROUPS_ARTIFACT_KEY, MODEL_GROUPS_CHANGED_EVENT, MODEL_GROUPS_STORAGE_KEY,
+  assignableModelGroups, ensureModelGroups, getModelGroups, getModelGroupsSnapshot,
+  modelGroupById, parseModelGroup, parseModelGroupList, parseModelGroups, parseResolvedModelGroup,
+  pickerModelGroups, refreshModelGroups, subscribeModelGroups,
+} from './model-groups.ts'
+export type {
+  ModelGroup, ModelGroupLink, ModelGroupSelector, ModelGroupSelectorMatch,
+} from './model-groups.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {

@@ -2,8 +2,9 @@
  * Model-group attribution for completed turns.
  *
  * The producing selection carries an optional group id (`chain`); the group's
- * label and its ordered links live in the settings registry, mirrored into
- * localStorage by ui-model-selection (`dsh_model_groups_v1`). The badge reads
+ * label and its ordered resolved members live in the host's model-group
+ * artifact (`modelChains.resolved`), mirrored into localStorage by
+ * ui-model-selection (`dsh_model_groups_v1`). The badge reads
  * that mirror synchronously — the chat package must not open a second settings
  * connection — and falls back to the plain model when the id is unknown
  * (dangling group: removed or renamed while a session still references it).
@@ -38,9 +39,12 @@ function registry(): Registry {
       const parsed: unknown = JSON.parse(raw)
       if (Array.isArray(parsed)) {
         for (const entry of parsed) {
-          const group = entry as { id?: unknown; label?: unknown; links?: unknown }
+          const group = entry as { id?: unknown; label?: unknown; links?: unknown; members?: unknown }
           if (typeof group.id !== 'string' || group.id === '') continue
-          const links = Array.isArray(group.links) ? group.links as MirroredLink[] : []
+          // A selector-only group has no explicit `links`: the resolved
+          // `members` are what the runtime dispatches.
+          const raw = Array.isArray(group.members) ? group.members : group.links
+          const links = Array.isArray(raw) ? raw as MirroredLink[] : []
           const firstModel = links
             .map(link => link.model)
             .find((model): model is string => typeof model === 'string' && model !== '')

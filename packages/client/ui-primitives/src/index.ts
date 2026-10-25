@@ -36,8 +36,10 @@ export { observeComposition } from './keyboard-composition.ts'
 export { focusWithoutRing } from './focus.ts'
 export { createHiddenSurfaces } from './hidden-surfaces.ts'
 export type { HiddenSurfaces, HiddenSurfacesConfig } from './hidden-surfaces.ts'
-export { parseModelGroup, parseModelGroups } from './model-groups.ts'
-export type { ModelGroup, ModelGroupLink } from './model-groups.ts'
+export { parseModelGroup, parseModelGroupList, parseModelGroups, parseResolvedModelGroup } from './model-groups.ts'
+export type {
+  ModelGroup, ModelGroupLink, ModelGroupSelector, ModelGroupSelectorMatch,
+} from './model-groups.ts'
 export { closeTopModal, isBehindModal, modalSelector, useModalLayer } from './useModalLayer.ts'
 export { Modal } from './Modal.tsx'
 export { Sheet, useSheetPresentation, SHEET_MAX_WIDTH } from './Sheet.tsx'

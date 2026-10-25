@@ -559,6 +559,31 @@
   cursor: default;
 }
 
+/* A retired (disabled) or member-less group: visible, never selectable. */
+.modelRowDisabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.modelRowDisabled:hover {
+  background: transparent;
+  color: var(--dsw-alias-label-primary, #e2e8f0);
+}
+
+/* Selector-backed group: its members resolve from the live catalogue. */
+.dynamicTag {
+  font-size: 10px;
+  font-weight: 500;
+  color: #94a3b8;
+  background: rgba(148, 163, 184, 0.1);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  padding: 1px 4px;
+  border-radius: 4px;
+  letter-spacing: 0.01em;
+  flex-shrink: 0;
+  line-height: 1.2;
+}
+
 .modelRowHidden:hover {
   background: transparent;
   color: var(--dsw-alias-label-primary, #e2e8f0);

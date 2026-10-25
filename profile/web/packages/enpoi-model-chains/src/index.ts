@@ -105,6 +105,58 @@ export interface ModelChain {
   onCut?: 'failover' | 'continue'
 }
 
+/** One selector's expansion, as the resolved-group artifact carries it. */
+export interface ResolvedSelectorMatch {
+  /** Selector position in the stored `selectors` array (0-based). */
+  index: number
+  /** The selector predicate, exactly as stored (raw, for editor display). */
+  when: Record<string, unknown>
+  /** Whether the selector auto-adopts new matches. */
+  adopt: boolean
+  /** Operator-facing selector label, when declared. */
+  label?: string
+  /** Every link this selector matched against the live catalogue (best-first). */
+  links: readonly ModelChainLink[]
+  /** Expansion warnings for this selector alone. */
+  warnings: readonly string[]
+}
+
+/**
+ * One group's resolved state, published under `modelChains.resolved`. This is
+ * a PROJECTION of the settings document — the settings row stays authoritative
+ * and every client surface renders from this artifact instead of parsing
+ * `chains` itself.
+ */
+export interface ResolvedModelGroup {
+  /** Group id (`chains.<id>`). */
+  id: string
+  /** Operator-facing label, when declared. */
+  label?: string
+  /** Explicit links declared on the settings row (ordered, adopted first). */
+  links: readonly ModelChainLink[]
+  /** Selectors declared on the settings row, unfiltered raw predicates included. */
+  selectors: readonly ChainSelector[]
+  /** Per-selector expansion, in declaration order. */
+  selectorMatches: readonly ResolvedSelectorMatch[]
+  /** Resolved members: explicit links plus adopted selector matches, deduped. */
+  members: readonly ModelChainLink[]
+  /** Selector matches an `adopt: false` selector holds back (opt-in adoption). */
+  candidates: readonly ModelChainLink[]
+  /** Parse and expansion warnings for this group. */
+  warnings: readonly string[]
+  /** Per-link attempt budget declared by the operator, when declared. */
+  attempts?: number
+  /** Cut policy declared by the operator, when declared. */
+  onCut?: 'failover' | 'continue'
+  /** Retire switch; a disabled group stays visible (as disabled) but never resolves. */
+  disabled: boolean
+  /** Where the group came from; built-in groups land in a later lane. */
+  source: 'settings'
+}
+
+/** The resolved state of every group, keyed by group id. */
+export type ResolvedModelGroups = Readonly<Record<string, ResolvedModelGroup>>
+
 /** One chain preview: what it resolves to now, and what changed since the last resolve. */
 export interface ChainPreview {
   /** Chain id. */
@@ -178,26 +230,32 @@ export function parseChainSelector(raw: unknown, warn: (line: string) => void): 
   })
 }
 
+/** One parsed entry: the usable chain plus the retire switch (kept for the artifact). */
+interface ParsedChainEntry {
+  chain: ModelChain
+  disabled: boolean
+}
+
 /**
- * Parse one raw `chains[id]` entry into a frozen snapshot. Malformed links and
- * selectors are dropped (with a warning); disabled, shapeless, and member-less
- * entries answer `undefined` so callers fail open.
+ * Parse one raw `chains[id]` entry, keeping the `disabled` switch the artifact
+ * needs. Malformed links and selectors are dropped (with a warning); shapeless
+ * and member-less entries answer `undefined` so callers fail open.
  * @param id - the chain id being parsed (used in warnings and the snapshot).
  * @param raw - the raw `chains[id]` settings value.
  * @param warn - stderr reporter; the resolver dedupes it per id.
- * @returns the frozen chain, or undefined when unusable.
+ * @returns the parsed entry (disabled included), or undefined when unusable.
  */
-export function parseChainEntry(
+function parseChainRaw(
   id: string,
   raw: unknown,
   warn: (line: string) => void,
-): ModelChain | undefined {
+): ParsedChainEntry | undefined {
   if (raw === undefined || raw === null) return undefined
   if (!isRecord(raw)) {
     warn(`[enpoi-model-chains] chain "${id}" is not an object — ignored\n`)
     return undefined
   }
-  if (raw.disabled === true) return undefined
+  const disabled = raw.disabled === true
   const rawLinks = raw.links
   if (rawLinks !== undefined && !Array.isArray(rawLinks)) {
     warn(`[enpoi-model-chains] chain "${id}" has no links array — ignored\n`)
@@ -251,14 +309,36 @@ export function parseChainEntry(
     ? Math.floor(attemptsValue)
     : undefined
   const onCut = raw.onCut === 'continue' ? 'continue' as const : raw.onCut === 'failover' ? 'failover' as const : undefined
-  return Object.freeze({
-    id,
-    ...(label !== undefined ? { label } : {}),
-    links: Object.freeze(links),
-    ...(selectors.length > 0 ? { selectors: Object.freeze(selectors) } : {}),
-    ...(attempts !== undefined ? { attempts } : {}),
-    ...(onCut !== undefined ? { onCut } : {}),
-  })
+  return {
+    disabled,
+    chain: Object.freeze({
+      id,
+      ...(label !== undefined ? { label } : {}),
+      links: Object.freeze(links),
+      ...(selectors.length > 0 ? { selectors: Object.freeze(selectors) } : {}),
+      ...(attempts !== undefined ? { attempts } : {}),
+      ...(onCut !== undefined ? { onCut } : {}),
+    }),
+  }
+}
+
+/**
+ * Parse one raw `chains[id]` entry into a frozen snapshot. Malformed links and
+ * selectors are dropped (with a warning); disabled, shapeless, and member-less
+ * entries answer `undefined` so callers fail open.
+ * @param id - the chain id being parsed (used in warnings and the snapshot).
+ * @param raw - the raw `chains[id]` settings value.
+ * @param warn - stderr reporter; the resolver dedupes it per id.
+ * @returns the frozen chain, or undefined when unusable.
+ */
+export function parseChainEntry(
+  id: string,
+  raw: unknown,
+  warn: (line: string) => void,
+): ModelChain | undefined {
+  const parsed = parseChainRaw(id, raw, warn)
+  if (parsed === undefined || parsed.disabled) return undefined
+  return parsed.chain
 }
 
 /**
@@ -295,6 +375,7 @@ interface ExpandedChain {
   links: ModelChainLink[]
   candidates: ModelChainLink[]
   warnings: string[]
+  selectorMatches: ResolvedSelectorMatch[]
 }
 
 /**
@@ -312,6 +393,8 @@ export class ModelChainsResolver implements ModelChainsService {
   private readonly announced = new Set<string>()
   private readonly lastResolved = new Map<string, readonly ModelChainLink[]>()
   private readonly baselines = new Map<string, Set<string>>()
+  /** Memoized resolved-group projection; cleared whenever an input moves. */
+  private resolved: ResolvedModelGroups | undefined
 
   /**
    * @param readRaw - reader for the raw `chains` map (ctx-bound in production).
@@ -328,9 +411,54 @@ export class ModelChainsResolver implements ModelChainsService {
   refresh(): void {
     this.raw = this.readRaw()
     this.cache.clear()
+    this.resolved = undefined
     // An operator edit re-baselines `adopt: false` selectors: the edited
     // document is the operator's latest adoption decision.
     this.baselines.clear()
+  }
+
+  /**
+   * Drop the memoized projection without re-baselining selectors. A catalogue
+   * change moves what the selectors match but is not an operator adoption
+   * decision, so `adopt: false` baselines must survive it.
+   */
+  invalidateResolvedGroups(): void {
+    this.resolved = undefined
+  }
+
+  /**
+   * Project every stored group into its resolved state for the published
+   * artifact. Disabled groups are included (clients render them as disabled)
+   * and the projection never records an adoption baseline, so publishing it
+   * cannot change what a later `resolve()` answers.
+   * @returns the resolved state of every usable group, keyed by group id.
+   */
+  resolvedGroups(): ResolvedModelGroups {
+    if (this.resolved !== undefined) return this.resolved
+    const groups: Record<string, ResolvedModelGroup> = {}
+    for (const [id, raw] of Object.entries(this.raw)) {
+      const parseWarnings: string[] = []
+      const parsed = parseChainRaw(id, raw, line => parseWarnings.push(line))
+      if (parsed === undefined) continue
+      const { chain, disabled } = parsed
+      const expanded = this.expandChain(chain, false, false)
+      groups[id] = Object.freeze({
+        id,
+        ...(chain.label !== undefined ? { label: chain.label } : {}),
+        links: chain.links,
+        selectors: chain.selectors ?? Object.freeze([]),
+        selectorMatches: Object.freeze(expanded.selectorMatches),
+        members: Object.freeze(expanded.links),
+        candidates: Object.freeze(expanded.candidates),
+        warnings: Object.freeze([...parseWarnings, ...expanded.warnings]),
+        ...(chain.attempts !== undefined ? { attempts: chain.attempts } : {}),
+        ...(chain.onCut !== undefined ? { onCut: chain.onCut } : {}),
+        disabled,
+        source: 'settings',
+      })
+    }
+    this.resolved = Object.freeze(groups)
+    return this.resolved
   }
 
   /** The warning sink: injected in tests, stderr in production. */
@@ -357,13 +485,17 @@ export class ModelChainsResolver implements ModelChainsService {
    * Merge explicit links with selector matches.
    * @param chain - parsed chain.
    * @param announce - whether newly joined links should be announced.
-   * @returns merged links, candidates held back by `adopt: false`, warnings.
+   * @param persist - whether an `adopt: false` baseline may be recorded (the
+   *   published artifact projects without touching resolve state).
+   * @returns merged links, candidates held back by `adopt: false`, warnings,
+   *   and the per-selector expansion the artifact carries.
    */
-  private expandChain(chain: ModelChain, announce: boolean): ExpandedChain {
+  private expandChain(chain: ModelChain, announce: boolean, persist = true): ExpandedChain {
     const links: ModelChainLink[] = []
     const seen = new Set<string>()
     const warnings: string[] = []
     const candidates: ModelChainLink[] = []
+    const selectorMatches: ResolvedSelectorMatch[] = []
     const add = (link: ModelChainLink): void => {
       const key = linkKey(link)
       if (seen.has(key)) return
@@ -373,8 +505,16 @@ export class ModelChainsResolver implements ModelChainsService {
     for (const link of chain.links) add(link)
     const selectors = chain.selectors ?? []
     selectors.forEach((selector, index) => {
+      const selectorWarnings: string[] = []
       if (this.options.expandSelector === undefined) {
-        warnings.push(`[enpoi-model-chains] chain "${chain.id}" selector #${String(index + 1)}: catalogRules service absent — selector ignored\n`)
+        const line = `[enpoi-model-chains] chain "${chain.id}" selector #${String(index + 1)}: catalogRules service absent — selector ignored\n`
+        selectorWarnings.push(line)
+        warnings.push(line)
+        selectorMatches.push(Object.freeze({
+          index, when: selector.when, adopt: selector.adopt,
+          ...(selector.label !== undefined ? { label: selector.label } : {}),
+          links: Object.freeze([]), warnings: Object.freeze(selectorWarnings),
+        }))
         return
       }
       const selectionKey = `${chain.id}#${String(index)}`
@@ -382,16 +522,34 @@ export class ModelChainsResolver implements ModelChainsService {
       try {
         expansion = this.options.expandSelector(selector, chain.id, index)
       } catch (error) {
-        warnings.push(`[enpoi-model-chains] chain "${chain.id}" selector #${String(index + 1)} failed: ${error instanceof Error ? error.message : String(error)}\n`)
+        const line = `[enpoi-model-chains] chain "${chain.id}" selector #${String(index + 1)} failed: ${error instanceof Error ? error.message : String(error)}\n`
+        selectorWarnings.push(line)
+        warnings.push(line)
+        selectorMatches.push(Object.freeze({
+          index, when: selector.when, adopt: selector.adopt,
+          ...(selector.label !== undefined ? { label: selector.label } : {}),
+          links: Object.freeze([]), warnings: Object.freeze(selectorWarnings),
+        }))
         return
       }
-      for (const line of expansion.warnings ?? []) warnings.push(line)
+      for (const line of expansion.warnings ?? []) {
+        selectorWarnings.push(line)
+        warnings.push(line)
+      }
       const matches = expansion.links.map(link => Object.freeze({ provider: link.provider, model: link.model }))
+      selectorMatches.push(Object.freeze({
+        index,
+        when: selector.when,
+        adopt: selector.adopt,
+        ...(selector.label !== undefined ? { label: selector.label } : {}),
+        links: Object.freeze(matches),
+        warnings: Object.freeze(selectorWarnings),
+      }))
       if (selector.adopt === false) {
         let baseline = this.baselines.get(selectionKey)
         if (baseline === undefined) {
           baseline = new Set(matches.map(linkKey))
-          this.baselines.set(selectionKey, baseline)
+          if (persist) this.baselines.set(selectionKey, baseline)
         }
         for (const link of matches) {
           if (baseline.has(linkKey(link))) add(link)
@@ -418,7 +576,7 @@ export class ModelChainsResolver implements ModelChainsService {
         }
       }
     }
-    return { links, candidates, warnings }
+    return { links, candidates, warnings, selectorMatches }
   }
 
   /** Write each expansion warning once per selector position. */
@@ -500,6 +658,21 @@ interface CatalogRulesSeam {
   expandSelector?(selector: { when: unknown; adopt?: boolean; label?: string }): SelectorExpansion
 }
 
+/** The derived-artifact seam the resolved-group projection rides when present. */
+interface SettingsArtifacts {
+  /** Publish a derived value beside the configuration document; revision moves only when it changes. */
+  publishArtifact?: (key: string, value: unknown) => number
+}
+
+/**
+ * Artifact the resolved-group projection is published under. Clients read it
+ * through `settings.describeArtifact` and never parse `chains` themselves.
+ */
+export const RESOLVED_GROUPS_ARTIFACT = 'modelChains.resolved'
+
+/** The catalogue namespace whose change re-evaluates selectors. */
+const CATALOG_NS = 'llm-pi-ai'
+
 /**
  * Mount the `modelChains` service and keep it in step with the namespace.
  * @param ctx - profile plugin Context.
@@ -515,17 +688,43 @@ export function apply(ctx: Context): void {
     }
   }
   const resolver = new ModelChainsResolver(() => readRawChains(ctx), { expandSelector: expander })
+  /**
+   * Publish the resolved-group projection the clients render from. The value
+   * is derived (the settings row stays authoritative) and `publishArtifact`
+   * keeps the revision when the projection did not move, so republishing on
+   * every resolve costs no document write and no revision churn.
+   */
+  const publishResolvedGroups = (): void => {
+    const writer = ctx.get('settings') as SettingsArtifacts | undefined
+    writer?.publishArtifact?.(RESOLVED_GROUPS_ARTIFACT, resolver.resolvedGroups())
+  }
   // Plain-object facade: the contract's methods are this-bound to nothing, so
   // a caller that destructures them (`const { resolve } = service`) still works.
   ctx.provide('modelChains', {
-    resolve: (id: string) => resolver.resolve(id),
+    resolve: (id: string) => {
+      const resolved = resolver.resolve(id)
+      publishResolvedGroups()
+      return resolved
+    },
     preview: (id: string) => resolver.preview(id),
   })
   const onNamespaceChange = ((ns: unknown) => {
-    if (String(ns) !== ORCH_NS) return
-    resolver.refresh()
+    const key = String(ns)
+    if (key === ORCH_NS) {
+      resolver.refresh()
+      publishResolvedGroups()
+      return
+    }
+    if (key !== CATALOG_NS) return
+    // The catalogue moved but the document did not: re-evaluate selectors
+    // without re-baselining `adopt: false` groups. The publish defers one
+    // microtask so the `catalogRules` engine (a sibling listener) has already
+    // refreshed the catalogue it expands against.
+    resolver.invalidateResolvedGroups()
+    queueMicrotask(publishResolvedGroups)
   }) as (...args: unknown[]) => unknown
   ctx.on('settings/document-updated', onNamespaceChange)
   ctx.on('settings/updated', onNamespaceChange)
+  publishResolvedGroups()
   process.stderr.write('[enpoi-model-chains] mounted\n')
 }
