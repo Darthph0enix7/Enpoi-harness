@@ -467,15 +467,24 @@ export async function summarizeWithLlm(
       purpose: 'compaction',
       ...signal === undefined ? {} : { signal },
     }
-    for await (const chunk of ctx.llm.stream(options)) assembler.push(chunk)
+    let answered: { provider: string; model: string } | undefined
+    for await (const chunk of ctx.llm.stream(options)) {
+      assembler.push(chunk)
+      // A model group can escalate away from the requested link; the finish
+      // chunk names the link that actually answered.
+      if (chunk.type === 'finish' && chunk.answeringLink !== undefined) {
+        answered = { provider: chunk.answeringLink.provider, model: chunk.answeringLink.model }
+      }
+    }
     const error = finishError(assembler.finish)
     if (error !== undefined) throw error
-    // A `llm/stream` listener may have rerouted the one-shot call; the
-    // dispatched pair, not the requested one, is what the checkpoint records.
+    // A `llm/stream` listener may have rerouted the one-shot call, and a group
+    // may have escalated: the answered pair, not the requested one, is what the
+    // checkpoint records.
     return {
       rawOutput: assembler.blocks(),
-      provider: options.provider,
-      model: options.model,
+      provider: answered?.provider ?? options.provider,
+      model: answered?.model ?? options.model,
       ...assembler.usage === undefined ? {} : { usage: assembler.usage },
     }
   }

@@ -1484,6 +1484,37 @@ describe('default one-shot summarizer', () => {
     if (system !== undefined) expect(session.surface.nodes[0]).toBe(nodes[0])
   })
 
+  it('records the group link that actually answered', async () => {
+    const { ctx } = await summarizerHarness([{ type: 'text', text: 'unused' }])
+    const session = conversation(2)
+    // A plain context face: cordis forbids replacing a service from another
+    // fiber, and this test only needs the one stream seam.
+    const streaming = {
+      llm: {
+        stream: async function* () {
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'summary from the fallback link' } }
+          yield {
+            type: 'finish',
+            reason: { kind: 'stop' },
+            answeringLink: { provider: 'fallback-provider', model: 'fallback-model' },
+          }
+        },
+      },
+      get: () => undefined,
+      logger: { warn: () => undefined },
+    } as unknown as Context
+    const result = await summarizeWithLlm(
+      streaming,
+      { summarizationProvider: 'seat-provider', summarizationModel: 'seat-model', maxTokens: 256 },
+      { messages: session.deriveMessages() },
+      agent(session, 'seat-model'),
+    )
+    expect(result.provider).toBe('fallback-provider')
+    expect(result.model).toBe('fallback-model')
+    expect(ctx).toBeDefined()
+  })
+
   it('requires complete raw output when a subclass marks one local LLM stream call', () => {
     expectTypeOf<{
       summary: ContentBlock[]
