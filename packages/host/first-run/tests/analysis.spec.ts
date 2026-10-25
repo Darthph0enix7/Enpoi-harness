@@ -4,12 +4,27 @@ import {
   type AnalysisConfig, type AnalysisDependencies, type AnalysisRunner,
 } from '../src/analysis.ts'
 import { documentViolations, type InvestigationOutcome } from '../src/investigation.ts'
+import { KILO_FREE_CHAIN_ID, KILO_MODEL_ID, KILO_ROUTE_ID } from '../src/index.ts'
 
 describe('analysis plugin config', () => {
   it('defaults the investigation session to the shipped system-analysis permission preset', () => {
     // The schema's call signature takes the resolved config; the loader passes
     // partial entries and the schema applies every default.
     expect(Config({} as AnalysisConfig)).toMatchObject({ permissionPreset: 'system-analysis' })
+  })
+
+  it('routes the investigation on the same free default as the chat seed', () => {
+    // Primary is the measured working free model; the shipped `free` group is
+    // the fallback, so the opt-in run is as resilient as the session default.
+    expect(Config({} as AnalysisConfig)).toMatchObject({
+      preset: 'sysadmin',
+      provider: KILO_ROUTE_ID,
+      model: KILO_MODEL_ID,
+      chain: KILO_FREE_CHAIN_ID,
+      timeoutMinutes: 15,
+      routes: true,
+    })
+    expect(KILO_MODEL_ID).toBe('poolside/laguna-s-2.1:free')
   })
 })
 

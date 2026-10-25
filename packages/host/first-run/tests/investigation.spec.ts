@@ -221,7 +221,8 @@ function run(options: {
 
 const RUN_OPTIONS = {
   provider: 'kilo',
-  model: 'kilo-auto/free',
+  model: 'poolside/laguna-s-2.1:free',
+  chain: 'free',
   preset: 'sysadmin',
   permissionPreset: 'workspace-write',
   timeoutMinutes: 15,
@@ -240,7 +241,11 @@ describe('runSystemInvestigation', () => {
     expect(result).toEqual({ profile: PROFILE, document: DOCUMENT })
     const createOptions = test.agents.create.mock.calls[0]?.[0] as Record<string, unknown>
     expect(createOptions['meta']).toMatchObject({ cwd: test.workspace, agentPreset: 'sysadmin' })
-    expect(createOptions['agentOptions']).toEqual({ provider: 'kilo', model: 'kilo-auto/free' })
+    expect(createOptions['agentOptions']).toEqual({
+      provider: 'kilo',
+      model: 'poolside/laguna-s-2.1:free',
+      chain: 'free',
+    })
     // The run's session id is the archived one, and it keeps the pinned prefix.
     const createdId = createOptions['sessionId']
     expect(createdId).toMatch(/^system-analysis-/u)

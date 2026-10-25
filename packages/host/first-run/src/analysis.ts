@@ -31,6 +31,7 @@ import {
   INVESTIGATION_STAGES, investigationWorkspacePath, runSystemInvestigation,
   type InvestigationOutcome, type InvestigationStage,
 } from './investigation.ts'
+import { KILO_FREE_CHAIN_ID, KILO_MODEL_ID, KILO_ROUTE_ID } from './index.ts'
 
 /** Route prefix this plugin owns. */
 export const ANALYSIS_ROUTE = '/system-analysis'
@@ -271,6 +272,8 @@ export interface AnalysisConfig {
   provider: string
   /** Model the investigation agent runs on. */
   model: string
+  /** Model group the investigation agent falls back through. */
+  chain: string
   /** Permission preset enforced on the investigation session. */
   permissionPreset: string
   /** Hard bound on one investigation, in minutes. */
@@ -281,8 +284,12 @@ export interface AnalysisConfig {
 export const Config: z<AnalysisConfig> = z.object({
   routes: z.boolean().default(true),
   preset: z.string().default('sysadmin'),
-  provider: z.string().default('kilo'),
-  model: z.string().default('kilo-auto/free'),
+  // The analysis rides the same free default the first-run seed writes: the
+  // measured working free model as the first attempt, and the shipped `free`
+  // group behind it, so an opt-in run is as resilient as the chat default.
+  provider: z.string().default(KILO_ROUTE_ID),
+  model: z.string().default(KILO_MODEL_ID),
+  chain: z.string().default(KILO_FREE_CHAIN_ID),
   // The investigation is read-only toward the host; the system-analysis preset
   // confines writes to its own scratch workspace and raises no approval prompt, so the unattended run cannot stall.
   permissionPreset: z.string().default('system-analysis'),
@@ -361,7 +368,7 @@ export function handleRequest(runner: AnalysisRunner, req: IncomingMessage, res:
 /**
  * Register the system-analysis routes over the host web server.
  * @param ctx - host context carrying the web server and the agent runtime.
- * @param config - route, preset, investigation route, and bound.
+ * @param config - route, model group, preset, investigation route, and bound.
  */
 export function apply(ctx: Context, config: AnalysisConfig): void {
   if (!config.routes) return
@@ -377,6 +384,7 @@ export function apply(ctx: Context, config: AnalysisConfig): void {
       workspace: investigationWorkspacePath(),
       provider: config.provider,
       model: config.model,
+      chain: config.chain,
       preset: config.preset,
       permissionPreset: config.permissionPreset,
       timeoutMinutes: config.timeoutMinutes,

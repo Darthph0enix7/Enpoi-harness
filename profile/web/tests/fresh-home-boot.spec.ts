@@ -28,6 +28,7 @@ import { JSON_SCHEMA, Type, load } from 'js-yaml'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   FIRST_RUN_SEED_VERSION,
+  KILO_FREE_CHAIN_ID,
   KILO_MODEL_ID,
   KILO_ROUTE_ID,
   seedFirstRun,
@@ -127,6 +128,7 @@ beforeAll(() => {
   return seedFirstRun(handle, {
     provider: KILO_ROUTE_ID,
     model: KILO_MODEL_ID,
+    chain: KILO_FREE_CHAIN_ID,
     version: FIRST_RUN_SEED_VERSION,
   }).then((outcome) => { seedOutcome = outcome })
 })
@@ -157,18 +159,30 @@ describe('fresh-home boot composition', () => {
     expect(seedOutcome).toBe('seeded')
     const providers = (seeded['llm-pi-ai'] as { providers?: Record<string, { keyless?: boolean }> } | undefined)?.providers
     expect(providers?.[KILO_ROUTE_ID]?.keyless).toBe(true)
-    expect(seeded['agent-default-model']).toEqual({ provider: KILO_ROUTE_ID, model: KILO_MODEL_ID })
+    // The measured working free model is the first attempt; the shipped free
+    // group is the fallback rung behind it.
+    expect(seeded['agent-default-model']).toEqual({
+      provider: KILO_ROUTE_ID,
+      model: KILO_MODEL_ID,
+      chain: KILO_FREE_CHAIN_ID,
+    })
   })
 
   it('seeds the keeper/compaction personas onto the Kilo route (never the template)', () => {
     // The tracked template carries no personas: they name a provider, so they
     // are route state the first-run seed writes once per home.
     expect(patchText).not.toContain('personas:')
-    expect(patchText).not.toContain('kilo-auto/free')
-    const personas = (seeded['enpoi-orchestration'] as { personas?: Record<string, { provider?: string; model?: string }> } | undefined)?.personas
+    expect(patchText).not.toContain(KILO_MODEL_ID)
+    const personas = (seeded['enpoi-orchestration'] as {
+    personas?: Record<string, { provider?: string; model?: string; chain?: string }>
+  } | undefined)?.personas
     expect(Object.keys(personas ?? {}).sort()).toEqual(['compaction', 'keeper'])
     for (const [id, entry] of Object.entries(personas ?? {})) {
-      expect(entry, `persona ${id}`).toEqual({ provider: KILO_ROUTE_ID, model: KILO_MODEL_ID })
+      expect(entry, `persona ${id}`).toEqual({
+        provider: KILO_ROUTE_ID,
+        model: KILO_MODEL_ID,
+        chain: KILO_FREE_CHAIN_ID,
+      })
     }
   })
 
@@ -189,8 +203,8 @@ describe('fresh-home boot composition', () => {
     // defaults below are what a fresh boot runs with.
     expect(document.capabilities).toBeUndefined()
     expect(document.personas).toEqual({
-      keeper: { provider: KILO_ROUTE_ID, model: KILO_MODEL_ID },
-      compaction: { provider: KILO_ROUTE_ID, model: KILO_MODEL_ID },
+      keeper: { provider: KILO_ROUTE_ID, model: KILO_MODEL_ID, chain: KILO_FREE_CHAIN_ID },
+      compaction: { provider: KILO_ROUTE_ID, model: KILO_MODEL_ID, chain: KILO_FREE_CHAIN_ID },
     })
     const registry = listRoleRegistry({ describe: () => [{ ns: 'enpoi-orchestration', value: document }] })
     expect(Object.keys(registry).sort()).toEqual(['designer', 'explorer', 'fixer', 'librarian', 'oracle'])

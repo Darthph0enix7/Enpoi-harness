@@ -223,6 +223,8 @@ export interface InvestigationOptions {
   readonly provider: string
   /** Model id on that route. */
   readonly model: string
+  /** Model group whose links follow the named route on a retryable failure. */
+  readonly chain?: string
   /** Agent preset that investigates (the sysadmin agent by default). */
   readonly preset: string
   /** Permission preset enforced for the investigation session. */
@@ -362,7 +364,11 @@ export async function runSystemInvestigation(
       sessionId,
       signal,
       meta: { cwd: options.workspace, agentPreset: preset.id },
-      agentOptions: { provider: options.provider, model: options.model },
+      agentOptions: {
+        provider: options.provider,
+        model: options.model,
+        ...options.chain === undefined ? {} : { chain: options.chain },
+      },
       setup: async (agentCtx) => {
         await presets.mount(agentCtx, preset.id)
       },

@@ -8,6 +8,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { KILO_FREE_CHAIN_ID, KILO_MODEL_ID } from '@deepseek-ai/dsh-host-first-run'
 import { launchWebScaffold, type WebScaffold } from './scaffold.ts'
 
 // The same three exact-fact classes the investigation's `documentViolations`
@@ -50,7 +51,10 @@ describe('first-run setup live proof', () => {
   it('seeds the keyless Kilo route and the default model into the temp document', async () => {
     const patch = await readFile(join(scaffold.harnessHome, 'profiles', 'scaffold', 'cordis.patch.yml'), 'utf8')
     expect(patch).toContain('https://api.kilo.ai/api/gateway')
-    expect(patch).toContain('kilo-auto/free')
+    // The measured working free model is the first attempt and the shipped
+    // free group is the fallback rung behind it.
+    expect(patch).toContain(KILO_MODEL_ID)
+    expect(patch).toContain(`chain: ${KILO_FREE_CHAIN_ID}`)
     expect(patch).toContain('seedVersion')
   }, 60_000)
 

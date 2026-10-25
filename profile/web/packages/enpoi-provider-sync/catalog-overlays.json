@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "source": "models.dev opencode-go provider snapshot 2026-10-08 (recon exp-26 edge correction); capacities, modalities, and prices copied verbatim from the models.dev cache, the display-name entry is a deliberate pin",
+  "source": "models.dev opencode-go provider snapshot 2026-10-08 (recon exp-26 edge correction); capacities, modalities, and prices copied verbatim from the models.dev cache, the display-name entry is a deliberate pin; the three -free upserts are gated because OpenCode serves that tier only to its own clients (403 FreeTierError)",
   "routes": {
     "opencode-go": {
       "remove": [
@@ -132,6 +132,8 @@
         },
         {
           "id": "longcat-2.5-preview-free",
+          "gated": true,
+          "gateReason": "free tier is limited to OpenCode clients",
           "name": "LongCat 2.5 Preview Free",
           "contextWindow": 1000000,
           "maxTokens": 131072,
@@ -227,6 +229,8 @@
         },
         {
           "id": "space-bunny-free",
+          "gated": true,
+          "gateReason": "free tier is limited to OpenCode clients",
           "name": "Space Bunny Free",
           "contextWindow": 1048576,
           "maxTokens": 524288,
@@ -250,6 +254,8 @@
         },
         {
           "id": "step-5-preview-free",
+          "gated": true,
+          "gateReason": "free tier is limited to OpenCode clients",
           "name": "Step 5 Preview Free",
           "contextWindow": 1000000,
           "maxTokens": 65536,

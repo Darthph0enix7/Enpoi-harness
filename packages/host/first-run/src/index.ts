@@ -1,9 +1,12 @@
 /**
  * First-run product defaults. On the first settled boot of a fresh settings
  * document the seed writes the keyless Kilo Gateway route and points the
- * default model at its free tier, so a new machine can talk to a model with no
- * key and no setup. The same write pins the keeper and compaction personas to
- * the seeded route: they name a provider, so they are route state and ship
+ * default model at a free model the gateway actually serves, so a new machine
+ * can talk to a model with no key and no setup. That model is the first
+ * attempt and the shipped `free` model group is the fallback: the seed names
+ * both, so one dead free id escalates through the group instead of leaving the
+ * session with nothing. The same write pins the keeper and compaction personas
+ * to the seeded route: they name a provider, so they are route state and ship
  * through this seed rather than the tracked profile template. The write goes
  * into the user layer, which keeps the route removable from the Models page:
  * removing it unsets the path, and the marker below stops any later boot from
@@ -20,8 +23,25 @@ import z from '@deepseek-ai/schemastery'
 
 /** Route id seeded on a fresh install. */
 export const KILO_ROUTE_ID = 'kilo'
-/** Free model the seeded route serves and the default model points at. */
-export const KILO_MODEL_ID = 'kilo-auto/free'
+/**
+ * Free model the seeded route serves, and the first attempt of the seeded
+ * session default. Measured against the live gateway on 2026-10-25: the old
+ * `kilo-auto/free` answered 200 with EMPTY content (it routes to a stealth
+ * model) and `kilo-auto/balanced` answered 400 "You need to sign in to use
+ * this model", while this id answered with real content (262k context, tools
+ * and reasoning advertised). A deployment that overrides it keeps the shipped
+ * `free` group as the fallback rung.
+ */
+export const KILO_MODEL_ID = 'poolside/laguna-s-2.1:free'
+/** Display name the seeded route carries for {@link KILO_MODEL_ID}. */
+export const KILO_MODEL_NAME = 'Poolside Laguna S 2.1 (free)'
+/**
+ * Shipped model group seeded as the default route's fallback. `free` is the
+ * built-in group the composition ships (zero-price, tool-capable, ungated,
+ * visible, ≥64k context), so a fresh install gets the live free catalogue as
+ * the rung after {@link KILO_MODEL_ID} without any settings write of its own.
+ */
+export const KILO_FREE_CHAIN_ID = 'free'
 /** Public gateway endpoint; a machine-local server is never assumed. */
 export const KILO_BASE_URL = 'https://api.kilo.ai/api/gateway'
 /** Credential reference the route names; keyless keeps it optional. */
@@ -45,6 +65,8 @@ export interface Config {
   provider: string
   /** Model the route serves and the session default points at. */
   model: string
+  /** Model group id seeded as the session default's fallback. */
+  chain: string
   /** Display name written into the route profile. */
   displayName: string
   /** llm-pi-ai wire protocol the route profile declares. */
@@ -64,6 +86,7 @@ export const Config: z<Config> = z.object({
   enabled: z.boolean().default(true),
   provider: z.string().default(KILO_ROUTE_ID),
   model: z.string().default(KILO_MODEL_ID),
+  chain: z.string().default(KILO_FREE_CHAIN_ID),
   displayName: z.string().default(KILO_DISPLAY_NAME),
   api: z.string().default(KILO_API),
   baseURL: z.string().default(KILO_BASE_URL),
@@ -96,15 +119,22 @@ export function kiloRouteValue(model: string = KILO_MODEL_ID, route: KiloRouteOv
     keyless: route.keyless ?? true,
     models: [{
       id: model,
-      name: model === KILO_MODEL_ID ? 'Kilo Auto (free)' : model,
+      name: model === KILO_MODEL_ID ? KILO_MODEL_NAME : model,
     }],
   }
 }
 
-/** The persona seeds written into the `enpoi-orchestration` user section. */
-export function kiloPersonaSeeds(provider: string, model: string): Record<string, { provider: string; model: string }> {
-  const seeds: Record<string, { provider: string; model: string }> = {}
-  for (const id of KILO_PERSONA_IDS) seeds[id] = { provider, model }
+/**
+ * The persona seeds written into the `enpoi-orchestration` user section. A
+ * blank chain is "no group", so it is omitted rather than written empty.
+ */
+export function kiloPersonaSeeds(
+  provider: string,
+  model: string,
+  chain: string = KILO_FREE_CHAIN_ID,
+): Record<string, { provider: string; model: string; chain?: string }> {
+  const seeds: Record<string, { provider: string; model: string; chain?: string }> = {}
+  for (const id of KILO_PERSONA_IDS) seeds[id] = { provider, model, ...chain === '' ? {} : { chain } }
   return seeds
 }
 
@@ -140,6 +170,8 @@ export type SeedOutcome =
 export interface SeedOptions extends KiloRouteOverrides {
   provider: string
   model: string
+  /** Model group id written onto the default seat and the personas. */
+  chain: string
   version: string
 }
 
@@ -153,7 +185,7 @@ function hasProviderRoutes(user: unknown): boolean {
 /**
  * Seed the first-run defaults, at most once per settings document.
  * @param settings - the live settings service, or undefined when it is not mounted.
- * @param options - resolved route fields, model, and marker version.
+ * @param options - resolved route fields, model, chain, and marker version.
  * @returns what this attempt decided.
  * @throws When the settings service refuses a write; the caller logs and continues.
  */
@@ -166,12 +198,23 @@ export async function seedFirstRun(
   if (providerSection === undefined) return 'unavailable'
   if (!hasProviderRoutes(providerSection.user)) {
     await settings.update('llm-pi-ai', { providers: { [options.provider]: kiloRouteValue(options.model, options) } })
-    await settings.update('agent-default-model', { provider: options.provider, model: options.model })
+    // Provider/model is the first attempt; the chain is the shipped free group
+    // appended behind it. The runtime starts at the named link and escalates
+    // through the group's selector matches on a retryable failure.
+    await settings.update('agent-default-model', {
+      provider: options.provider,
+      model: options.model,
+      // A blank configured group means "no fallback": omit the key instead of
+      // storing an empty group id.
+      ...options.chain === '' ? {} : { chain: options.chain },
+    })
     // The personas name the route just seeded, so they land in the same
     // once-only write. A profile without the fleet namespace (a non-Enpoi
     // composition) skips them instead of failing the whole seed.
     if (settings.describeNamespace(ORCHESTRATION_NAMESPACE) !== undefined) {
-      await settings.update(ORCHESTRATION_NAMESPACE, { personas: kiloPersonaSeeds(options.provider, options.model) })
+      await settings.update(ORCHESTRATION_NAMESPACE, {
+        personas: kiloPersonaSeeds(options.provider, options.model, options.chain),
+      })
     }
     await settings.update('first-run', { seedVersion: options.version })
     return 'seeded'
@@ -200,6 +243,7 @@ export function apply(ctx: Context, config: Config): void {
     .then(() => seedFirstRun(ctx.settings, {
       provider: config.provider,
       model: config.model,
+      chain: config.chain,
       version: FIRST_RUN_SEED_VERSION,
       displayName: config.displayName,
       api: config.api,
@@ -208,7 +252,9 @@ export function apply(ctx: Context, config: Config): void {
       keyless: config.keyless,
     }))
     .then((outcome) => {
-      if (outcome === 'seeded') ctx.logger.info('first-run: seeded the keyless %s route (%s)', config.provider, config.model)
+      if (outcome === 'seeded') {
+        ctx.logger.info('first-run: seeded the keyless %s route (%s, group %s)', config.provider, config.model, config.chain)
+      }
       else if (outcome === 'unavailable') ctx.logger.debug('first-run: settings namespaces are not mounted; seed skipped')
     })
     .catch((error: unknown) => {
