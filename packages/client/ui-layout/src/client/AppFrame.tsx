@@ -20,7 +20,7 @@ import type {
   InjectFace, HostObservable, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore,
 } from '@deepseek-ai/dsh-client-ui-slots'
 import type { DeviceSnapshot } from '@deepseek-ai/dsh-client-ui-primitives'
-import { computeColumns, RIGHTBAR_DEFAULT_RATIO, SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED, SIDEBAR_DEFAULT } from './columns.ts'
+import { computeColumns, resolveRightbarWidth, SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED, SIDEBAR_DEFAULT } from './columns.ts'
 import { DocumentTitle } from './DocumentTitle.tsx'
 import { MobileFrame } from './MobileFrame.tsx'
 import { publishShellInsets } from './overlay-insets.ts'
@@ -196,7 +196,9 @@ export function AppFrame({
   const sidebarPreference = sidebarCollapsed
     ? 0
     : layoutInfo.sidebar === 0 ? SIDEBAR_DEFAULT : layoutInfo.sidebar
-  const rightbarPreference = layoutInfo.rightbar ?? viewport * RIGHTBAR_DEFAULT_RATIO
+  // No stored preference means the shipped default: opening the panel never
+  // records one, so a default we change later reaches operators who never dragged.
+  const rightbarPreference = resolveRightbarWidth(layoutInfo.rightbar, viewport)
   // Desktop reopen controls occupy the macOS session header or Windows caption row.
   const collapsedWidth = document.documentElement.dataset.platform === 'darwin'
     || document.documentElement.hasAttribute('data-windows-titlebar') ? 0 : SIDEBAR_COLLAPSED

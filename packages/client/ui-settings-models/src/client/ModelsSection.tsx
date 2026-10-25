@@ -29,6 +29,7 @@ import { ModelGroupsRow } from './ModelGroupsRow.tsx'
 import { ORCHESTRATION_NS } from './model-groups.ts'
 import { cleanupFailureText, cleanupRemovedRoute } from './route-references.ts'
 import { applyFenced, fencedFailureText } from './fenced-mutate.ts'
+import { refreshRoutesViaPlugin, type ProviderSyncRouteStatusView } from './provider-sync-rpc.ts'
 import type { ModelPickerFace } from './picker-face.ts'
 import { IconSearch, IconServer } from './capability-icons.tsx'
 import { protocolChoices, providerKeyConfigured, type ModelsSettingsStore, type ProviderRow, type ModelsWire } from './store.ts'
@@ -104,6 +105,15 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [heavyUninstall, setHeavyUninstall] = useState(false)
+  // The page-level full refresh: one host pass over every discoverable route.
+  // Its statuses stay on screen (unlike the detail panel's toast) because the
+  // operator needs to see which endpoints answered and which are static.
+  const [refreshAll, setRefreshAll] = useState<{
+    running: boolean
+    message?: string
+    isError?: boolean
+    routes?: ProviderSyncRouteStatusView[]
+  }>({ running: false })
 
   // Ensure store is loaded
   useEffect(() => {
@@ -185,6 +195,38 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
       .filter(row => row.configured || row.entry.active)
       .map(row => row.entry.provider)
   }, [state.rows])
+
+  /** Translate one route status for the report list. */
+  const routeStateLabel = (status: ProviderSyncRouteStatusView['status']): string => {
+    switch (status) {
+      case 'ok': return t('refreshRouteOk')
+      case 'unreachable': return t('refreshRouteUnreachable')
+      case 'static-catalog': return t('refreshRouteStaticCatalog')
+      default: return t('refreshRouteNoListing')
+    }
+  }
+
+  /**
+   * Re-list every discoverable route. The host refreshes the online catalogue,
+   * fetches each route's own listing, persists the configured routes, and
+   * updates the discovery caches; the answer names what happened per route, so
+   * a route with no listing is reported instead of silently skipped.
+   */
+  const runRefreshAll = async (): Promise<void> => {
+    if (refreshAll.running || !state.writable) return
+    setRefreshAll({ running: true })
+    const answer = await refreshRoutesViaPlugin()
+    if (!answer.ok) {
+      setRefreshAll({ running: false, isError: true, message: t('refreshAllFailed', { message: answer.message }) })
+      return
+    }
+    const routes = answer.value.routes
+    const ok = routes.filter(route => route.status === 'ok').length
+    setRefreshAll({ running: false, routes, message: t('refreshAllDone', { ok, total: routes.length }) })
+    // Configured routes may have been rewritten by this pass; reload the
+    // shared mirror so the sidebar counts and the open panel read host truth.
+    await controller.load()
+  }
 
   // Delete Provider
   const confirmDelete = async () => {
@@ -294,7 +336,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
         role="button"
         tabIndex={0}
         // 0ms optimistic: synchronous state switch, no await before DOM update
-        onClick={() => setSelectedProviderId(row.entry.provider)}
+        onClick={() => { setSelectedProviderId(row.entry.provider) }}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') setSelectedProviderId(row.entry.provider)
         }}
@@ -367,7 +409,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
                 type="text"
                 placeholder={t('providersFilterPlaceholder')}
                 value={providerSearch}
-                onChange={e => setProviderSearch(e.target.value)}
+                onChange={(e) => { setProviderSearch(e.target.value) }}
               />
             </div>
           </div>
@@ -389,15 +431,44 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
           </div>
 
           <div className={styles['sidebarFooter']}>
-            <Button
-              variant="outline"
-              className={styles['addProviderBtn']}
-              onClick={() => setAddModalOpen(true)}
-              disabled={!state.writable}
-            >
-              <IconPlusOutlineRegular size={14} />
-              {t('addProviderAction')}
-            </Button>
+            <div className={styles['sidebarFooterRow']}>
+              <Button
+                variant="outline"
+                className={styles['addProviderBtn']}
+                onClick={() => { setAddModalOpen(true) }}
+                disabled={!state.writable}
+              >
+                <IconPlusOutlineRegular size={14} />
+                {t('addProviderAction')}
+              </Button>
+              <Button
+                variant="outline"
+                className={styles['addProviderBtn']}
+                onClick={() => { void runRefreshAll() }}
+                disabled={!state.writable || refreshAll.running}
+                title={t('refreshAllAction')}
+              >
+                {refreshAll.running ? t('refreshAllRunning') : t('refreshAllAction')}
+              </Button>
+            </div>
+            {refreshAll.message && (
+              <p className={refreshAll.isError ? styles['refreshAllError'] : styles['refreshAllMessage']}>
+                {refreshAll.message}
+              </p>
+            )}
+            {refreshAll.routes !== undefined && refreshAll.routes.length > 0 && (
+              <ul className={styles['refreshAllRoutes']}>
+                {refreshAll.routes.map(route => (
+                  <li key={route.route} className={styles['refreshAllRouteRow']}>
+                    <span className={styles['refreshAllRouteName']} title={route.message ?? route.authority}>
+                      {route.route}
+                    </span>
+                    <span className={styles['refreshAllRouteCount']}>{route.modelCount}</span>
+                    <span className={styles['refreshAllRouteState']}>{routeStateLabel(route.status)}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </aside>
 
@@ -467,14 +538,14 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
           className={styles['deleteDialog'] ?? ''}
           footer={
             <>
-              <Button variant="outline" disabled={deleting} onClick={() => setDeleteTarget(null)}>
+              <Button variant="outline" disabled={deleting} onClick={() => { setDeleteTarget(null) }}>
                 {t('cancel')}
               </Button>
               <Button
                 variant="outline"
                 className={styles['deleteConfirmBtn']}
                 disabled={deleting}
-                onClick={confirmDelete}
+                onClick={() => { void confirmDelete() }}
               >
                 {deleting ? (heavyDeleteManifest !== undefined && heavyUninstall ? t('heavyRemoving') : t('deletingAction')) : t('confirmDeleteAction')}
               </Button>
@@ -494,7 +565,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
                     type="checkbox"
                     checked={heavyUninstall}
                     disabled={deleting}
-                    onChange={event => setHeavyUninstall(event.target.checked)}
+                    onChange={(event) => { setHeavyUninstall(event.target.checked) }}
                   />
                   <span>{t('heavyAlsoUninstall')}</span>
                 </label>
@@ -581,7 +652,7 @@ export async function removeProviderProfile(
   // as an untouched route.
   if (!shipped && target.credentialRef) {
     const credRes = await face.api.credentials.unset(target.credentialRef)
-    if (!credRes.ok && credRes.error) {
+    if (!credRes.ok) {
       return face.t?.('deleteCredentialFailed', {
         provider: removedProvider ?? target.settingsNs,
         reason: credRes.error.message,

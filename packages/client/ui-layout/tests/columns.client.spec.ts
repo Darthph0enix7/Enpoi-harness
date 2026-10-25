@@ -1,11 +1,54 @@
 import { describe, expect, it } from 'vitest'
-import { clampWidth, computeColumns } from '../src/client/columns.ts'
+import {
+  clampWidth, computeColumns, defaultRightbarWidth, resolveRightbarWidth,
+  RIGHTBAR_DEFAULT_MAX, RIGHTBAR_MIN, SIDEBAR_DEFAULT,
+} from '../src/client/columns.ts'
 
 describe('clampWidth', () => {
   it('clamps into the range and rounds', () => {
     expect(clampWidth(250.4, 240, 420)).toBe(250)
     expect(clampWidth(100, 240, 420)).toBe(240)
     expect(clampWidth(9999, 240, 420)).toBe(420)
+  })
+})
+
+describe('defaultRightbarWidth', () => {
+  it.each([1280, 1920, 2560])('is slim, wider than the left sidebar, and above the floor at %ipx', (viewport) => {
+    const width = defaultRightbarWidth(viewport)
+    expect(width).toBeGreaterThanOrEqual(RIGHTBAR_MIN)
+    expect(width).toBeGreaterThan(SIDEBAR_DEFAULT)
+    expect(width).toBeLessThanOrEqual(RIGHTBAR_DEFAULT_MAX)
+    // The old 35% split-screen default must never come back.
+    expect(width).toBeLessThan(viewport * 0.35)
+  })
+
+  it('keeps the sidebar gap on a narrow frame and caps on a wide monitor', () => {
+    expect(defaultRightbarWidth(1280)).toBe(376)
+    expect(defaultRightbarWidth(1920)).toBe(420)
+    expect(defaultRightbarWidth(2560)).toBe(420)
+    expect(defaultRightbarWidth(1024)).toBe(376)
+    expect(defaultRightbarWidth(320)).toBe(376)
+  })
+})
+
+describe('resolveRightbarWidth', () => {
+  it('uses the shipped default while no preference is stored', () => {
+    expect(resolveRightbarWidth(null, 1920)).toBe(420)
+    expect(resolveRightbarWidth(null, 320)).toBe(300)
+  })
+
+  it('keeps a dragged px on its own frame and scales it on another', () => {
+    const preference = { px: 700, ratio: 700 / 1920 }
+    expect(resolveRightbarWidth(preference, 1920)).toBe(700)
+    expect(resolveRightbarWidth(preference, 960)).toBe(350)
+    expect(resolveRightbarWidth(preference, 2560)).toBe(933)
+    // Returning to the dragged frame restores the exact px.
+    expect(resolveRightbarWidth(preference, 1920)).toBe(700)
+  })
+
+  it('bounds a scaled preference by the drag range', () => {
+    expect(resolveRightbarWidth({ px: 300, ratio: 300 / 2560 }, 640)).toBe(300)
+    expect(resolveRightbarWidth({ px: 1200, ratio: 1200 / 1920 }, 1920)).toBe(1200)
   })
 })
 

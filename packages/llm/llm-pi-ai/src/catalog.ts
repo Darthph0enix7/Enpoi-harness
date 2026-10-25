@@ -697,6 +697,23 @@ function resolveModelCompat(
   return { compat: { ...inherited, ...configured } as ModelCompat }
 }
 
+/**
+ * The reasoning ladder a discovered record may declare. The cache stores level
+ * → wire tokens verbatim, including levels pi-ai does not model; only a ladder
+ * with at least one known thinking level (beyond `off`) is a declaration
+ * {@link resolveModelReasoning} can serve, so anything else is treated as
+ * "nothing disclosed" instead of making a cache-backed route unserviceable.
+ * @param record - one discovered record.
+ * @returns the ladder to materialize, or `undefined` when it offers no known level.
+ */
+function discoveredReasoningEfforts(record: DiscoveredModelRecord): PiAiReasoningEfforts | undefined {
+  const ladder = record.reasoningEfforts
+  if (ladder === undefined) return undefined
+  const usable = THINKING_LEVELS.some(level => level !== 'off'
+    && typeof ladder[level] === 'string' && ladder[level].length > 0)
+  return usable ? { ...ladder } : undefined
+}
+
 /** One route's materialized catalog, plus the request caps its profile chose. */
 export interface RouteCatalog {
   /** The materialized models in configuration order. */
@@ -775,13 +792,20 @@ export function resolveRouteModels(
     ? configured
     : defaults.size > 0
       ? [...defaults.values()].map(model => ({ id: model.id, ...overrides[model.id] }))
-      : (request.discoveredModels ?? []).map(record => ({
-        id: record.id,
-        ...record.name === undefined ? {} : { name: record.name },
-        ...record.contextWindow === undefined ? {} : { contextWindow: record.contextWindow },
-        ...record.maxTokens === undefined ? {} : { maxTokens: record.maxTokens },
-        ...record.input === undefined ? {} : { input: [...record.input] },
-      }))
+      : (request.discoveredModels ?? []).map((record) => {
+        // The cache carries the ladder a configured entry would carry; a
+        // record without one (an older cache, or an endpoint that disclosed
+        // nothing) keeps the route's conservative no-reasoning answer.
+        const efforts = discoveredReasoningEfforts(record)
+        return {
+          id: record.id,
+          ...record.name === undefined ? {} : { name: record.name },
+          ...record.contextWindow === undefined ? {} : { contextWindow: record.contextWindow },
+          ...record.maxTokens === undefined ? {} : { maxTokens: record.maxTokens },
+          ...record.input === undefined ? {} : { input: [...record.input] },
+          ...efforts === undefined ? {} : { reasoningEfforts: efforts },
+        }
+      })
   if (entries.length === 0) {
     invalid(provider, `${NO_MODELS_MARKER}; the installed catalog does not describe this route, so its models`
       + ' must be listed in configuration, fetched from its endpoint\'s /models listing, or added manually on the'

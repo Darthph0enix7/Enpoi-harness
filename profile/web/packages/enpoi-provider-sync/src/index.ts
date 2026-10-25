@@ -937,6 +937,15 @@ export function loadCommandCodeCatalog(path: string = commandCodeCatalogPath()):
       ...(entry.tool_call === true ? ['tools'] : []),
       ...(entry.reasoning === true ? ['reasoning'] : []),
     ]
+    // The snapshot publishes the selectable levels as an array of names. They
+    // are handed to the shared listing parser in its provider-neutral
+    // `capabilities.effort` shape, so the ladder the adapter serves is the
+    // same one the sync writes — never a second mapping of the same claim.
+    // The adapter serves no levels for a non-reasoning row, so the sync must
+    // not credit one with a ladder the picker would then offer.
+    const advertisedLevels = entry.reasoning === true && Array.isArray(entry.reasoningEfforts)
+      ? entry.reasoningEfforts.filter((level): level is string => typeof level === 'string' && level.length > 0)
+      : []
     const model = normalizeListingEntry({
       id,
       name: entry.name,
@@ -944,6 +953,9 @@ export function loadCommandCodeCatalog(path: string = commandCodeCatalogPath()):
       max_output_tokens: limit?.output,
       ...(Array.isArray(modalities?.input) ? { input_modalities: modalities.input } : {}),
       ...(supported.length === 0 ? {} : { supported_parameters: supported }),
+      ...(advertisedLevels.length === 0 ? {} : {
+        capabilities: { effort: Object.fromEntries(advertisedLevels.map(level => [level, { supported: true }])) },
+      }),
       ...(entry.cost === null || typeof entry.cost !== 'object' || Array.isArray(entry.cost) ? {} : { pricing: entry.cost }),
     })
     if (model === undefined) continue
@@ -1091,6 +1103,12 @@ export interface DiscoveredFileModel {
   input?: Array<LiveModality>
   tools?: boolean
   reasoning?: boolean
+  /**
+   * Selectable reasoning levels (picker id → wire value) the route disclosed.
+   * Persisted so a route resolving from this cache offers the same ladder a
+   * configured entry carries; absent means nothing disclosed one.
+   */
+  reasoningEfforts?: Readonly<Record<string, string>>
   pricing?: Record<string, string>
   isFree?: boolean
   /** Whether the listing marked the model sign-in/paid-only, mirroring the rules engine's `gated` entry flag. */
@@ -1107,6 +1125,13 @@ export interface DiscoveredFileModel {
    * left to the id hints (which are persisted only in `capabilityHints`).
    */
   unverified?: boolean
+  /**
+   * True when the endpoint stopped advertising this model while a route-local
+   * reference or an operator pin still names it: the record is kept so a
+   * configured default/chain/favorite does not break silently. A later pass
+   * that advertises the id again drops the marker.
+   */
+  deprecated?: boolean
   source: 'discovered'
   discoveredAt: number
 }
@@ -1235,10 +1260,20 @@ function discoveredContent(model: object): string {
  * construction: a model whose content is unchanged keeps its original
  * `discoveredAt`, so re-running a sync pass over an unchanged endpoint leaves
  * the file byte-identical instead of re-stamping every model every hour.
+ *
+ * The listing is authoritative for everything it advertises: a changed
+ * capacity, ladder, or modality replaces the prior record and re-stamps it;
+ * an id the endpoint stopped advertising is dropped — unless this pass names
+ * it in `retain` (a route-local reference or an operator pin). A retained
+ * record keeps its last disclosed fields, is stamped `deprecated: true`, and
+ * disappears on the first pass that no longer retains it. A retained id the
+ * endpoint advertises again is replaced by the fresh record, clearing the
+ * marker.
  * @param previous - the route's existing record, when one exists.
  * @param baseURL - the endpoint interrogated.
  * @param models - the freshly analyzed models, without provenance stamps.
  * @param now - the current epoch milliseconds.
+ * @param retain - prior ids to keep though the listing no longer advertises them.
  * @returns the record to persist.
  */
 export function mergeDiscoveredRoute(
@@ -1246,6 +1281,7 @@ export function mergeDiscoveredRoute(
   baseURL: string,
   models: Array<Omit<DiscoveredFileModel, 'source' | 'discoveredAt'>>,
   now: number,
+  retain: readonly string[] = [],
 ): DiscoveredFileRoute {
   const priorById = new Map((previous?.models ?? []).map(model => [model.id, model]))
   const merged: DiscoveredFileModel[] = models.map((model) => {
@@ -1258,6 +1294,21 @@ export function mergeDiscoveredRoute(
         : now,
     }
   })
+  // The endpoint is the membership authority; a reference keeps a retired id
+  // instead of breaking the default/chain/favorite that names it. The record
+  // keeps the last facts the endpoint disclosed and its original stamp, so an
+  // unchanged retention pass stays byte-identical.
+  const advertised = new Set(merged.map(model => model.id))
+  if (retain.length > 0) {
+    const seen = new Set(advertised)
+    for (const id of retain) {
+      if (seen.has(id)) continue
+      seen.add(id)
+      const prior = priorById.get(id)
+      if (prior === undefined) continue
+      merged.push({ ...prior, deprecated: true })
+    }
+  }
   const unchanged = previous !== undefined
     && previous.baseURL === baseURL
     && JSON.stringify(previous.models) === JSON.stringify(merged)
@@ -1598,6 +1649,18 @@ function analyzeModel(
   const gated = model.gated === true || model.isFree === false
   const gate = gated ? { gated: true, gateReason: model.gateReason ?? SIGN_IN_REQUIRED } : {}
 
+  // The discovered record carries the same ladder the settings record does,
+  // narrowed to wire-value strings the cache's own schema accepts. This is
+  // what keeps a route resolving from the cache from losing the efforts a
+  // configured route (or the Add flow) wrote.
+  const discoveredEfforts = reasoningEfforts === undefined
+    ? undefined
+    : Object.fromEntries(Object.entries(reasoningEfforts)
+      .filter(([, wire]) => typeof wire === 'string' && wire.length > 0)) as Record<string, string>
+  const discoveredEffortsValue = discoveredEfforts !== undefined && Object.keys(discoveredEfforts).length > 0
+    ? discoveredEfforts
+    : undefined
+
   return {
     settings: {
       id: model.id,
@@ -1623,6 +1686,7 @@ function analyzeModel(
       ...(modalityDisclosed ? { input: inputModalities } : {}),
       ...(tools === undefined ? {} : { tools }),
       ...(model.reasoning === undefined ? {} : { reasoning: model.reasoning }),
+      ...(discoveredEffortsValue === undefined ? {} : { reasoningEfforts: discoveredEffortsValue }),
       ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
       ...(model.isFree === undefined ? {} : { isFree: model.isFree }),
       ...(releaseDate === undefined ? {} : { releaseDate }),
@@ -2162,6 +2226,54 @@ export interface ProviderSyncRouteRefreshValue {
   fetchedAt: number
 }
 
+/**
+ * What one route's manual full-pass entry answered:
+ * - `ok` — its listing (or bundled catalog) answered and the route was planned;
+ * - `unreachable` — the route has an endpoint but the listing fetch failed;
+ * - `no-listing` — the route has no endpoint to list;
+ * - `static-catalog` — the installed pi-ai catalog serves the route and it is
+ *   not configured, so there is no profile to write a discovered listing into.
+ */
+export type ProviderSyncRouteState = 'ok' | 'unreachable' | 'no-listing' | 'static-catalog'
+
+/** One route's outcome from a manual full refresh. */
+export interface ProviderSyncRouteStatus {
+  /** The provider route key. */
+  route: string
+  /** What this pass could do for the route. */
+  status: ProviderSyncRouteState
+  /** Which listing answered: the live endpoint, the bundled catalog, or neither. */
+  source: 'live' | 'catalog' | 'none'
+  /** The membership authority the plan applied. */
+  authority: RouteAuthority
+  /** Models the listing advertised this pass, when it answered. */
+  advertised?: number
+  /** The route's planned model count (settings records for a configured route). */
+  modelCount: number
+  /** Ids the plan removed. */
+  removed: string[]
+  /** Ids kept only for a reference (deprecated upstream). */
+  deprecated: string[]
+  /** Whether removals were withheld this pass. */
+  degraded: boolean
+  /** Why removals were withheld, when they were. */
+  degradedReason?: string
+  /** Whether the discovered-model cache now holds this pass's listing. */
+  cached: boolean
+  /** Why the route was not probed, or the listing failure line. */
+  message?: string
+  /** The epoch milliseconds the route finished at. */
+  fetchedAt: number
+}
+
+/** The value `providerSync.refreshRoutes` returns to the client. */
+export interface ProviderSyncRoutesRefreshValue {
+  /** The epoch milliseconds the pass ran at. */
+  refreshedAt: number
+  /** One entry per discoverable route, in settings order. */
+  routes: ProviderSyncRouteStatus[]
+}
+
 function stringifyComparable(models: Array<Record<string, unknown>> | undefined): string {
   return JSON.stringify(
     (models ?? []).map(m => ({
@@ -2170,7 +2282,14 @@ function stringifyComparable(models: Array<Record<string, unknown>> | undefined)
       contextWindow: m.contextWindow,
       maxTokens: m.maxTokens,
       input: m.input ?? null,
-      reasoning: m.reasoningEfforts ? Object.keys(m.reasoningEfforts as object).sort() : null,
+      reasoning: m.reasoning ?? null,
+      // The ladder's wire spellings are part of the record: a provider that
+      // renames a level's wire value (or changes which levels exist) must be
+      // written, not treated as an unchanged key set.
+      reasoningEfforts: m.reasoningEfforts !== null && typeof m.reasoningEfforts === 'object'
+        && !Array.isArray(m.reasoningEfforts)
+        ? Object.entries(m.reasoningEfforts as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))
+        : null,
       tools: m.tools ?? null,
       cost: m.cost ?? null,
       releaseDate: m.releaseDate ?? null,
@@ -2296,6 +2415,10 @@ export function apply(ctx: Context, config: Config): void {
       /** Configured ids the listing did not advertise this pass. */
       unadvertised: string[]
       advertisedCount?: number
+      /** The listing failure, when the fetch did not answer usable models. */
+      fetchError?: string
+      /** Route-local references (default model, chain links, favorites) this pass read. */
+      references: RouteModelReference[]
       /** The fetched facts a settings-conflict retry re-plans against. */
       plan: PlanRecipe
     }
@@ -2424,10 +2547,12 @@ export function apply(ctx: Context, config: Config): void {
       const overlay = options.overlays.routes?.[route]
       const key = await resolveListingKey(profile)
       let live: LiveModel[] | undefined
+      let fetchError: string | undefined
       try {
         // Command Code serves no model listing; its bundled snapshot is the listing.
         live = ns === COMMANDCODE_NS ? loadCommandCodeCatalog() : await fetchModels(baseURL, key, profile?.api)
       } catch (error) {
+        fetchError = error instanceof Error ? error.message : String(error)
         logger.warn(describeSyncFailure(route, error, ns))
       }
       const recipe: PlanRecipe = {
@@ -2482,6 +2607,8 @@ export function apply(ctx: Context, config: Config): void {
         cleanup,
         unadvertised,
         ...live === undefined ? {} : { advertisedCount: live.length },
+        ...fetchError === undefined ? {} : { fetchError },
+        references,
         plan: recipe,
       }
     }
@@ -2601,24 +2728,28 @@ export function apply(ctx: Context, config: Config): void {
      * cache instead of silently falling back to the installed catalog.
      * @param outcome - the computed route refresh (its live listing is the cache source).
      * @param hints - the pass's capability hints.
-     * @returns fulfillment after the cache write settles.
+     * @returns whether the cache now holds this pass's listing.
      */
-    async function writeDiscoveredCache(outcome: RouteComputeOutcome, hints: CapabilityHintContext): Promise<void> {
-      if (outcome.live === undefined) return
+    async function writeDiscoveredCache(outcome: RouteComputeOutcome, hints: CapabilityHintContext): Promise<boolean> {
+      if (outcome.live === undefined) return false
       if (outcome.live.length === 0) {
         logger.warn(`route ${outcome.route}: endpoint advertised no models — discovered cache kept`)
-        return
+        return false
       }
       try {
         // Everything the endpoint advertised, provenanced and timestamped,
         // for the llm-pi-ai resolution layer to serve while this route has
-        // no configured models.
+        // no configured models. A retired id a route-local reference or an
+        // operator pin still names is retained and marked deprecated instead
+        // of vanishing and breaking that reference.
         const previous = readDiscoveredFile(discoveredCachePath()).routes[outcome.route]
+        const pinned = (value(config.pinnedModels) ?? {})[outcome.route] ?? []
         const record = mergeDiscoveredRoute(
           previous,
           outcome.baseURL,
           mergeDiscoveredModels(outcome.route, outcome.live, capacities, hints, routeProviderMap),
           Date.now(),
+          [...outcome.references.map(reference => reference.id), ...pinned],
         )
         if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(record)) {
           logger.debug(`route ${outcome.route}: ${String(outcome.live.length)} discovered models, no change`)
@@ -2628,10 +2759,13 @@ export function apply(ctx: Context, config: Config): void {
             logger.info(`route ${outcome.route}: discovered ${String(outcome.live.length)} models from ${outcome.baseURL} (source: discovered)`)
           } catch (error) {
             logger.warn(`route ${outcome.route}: discovered models could not be cached — ${error instanceof Error ? error.message : String(error)}`)
+            return false
           }
         }
+        return true
       } catch (error) {
-        logger.warn(describeSyncFailure(outcome.route, error))
+        logger.warn(describeSyncFailure(outcome.route))
+        return false
       }
     }
 
@@ -2780,6 +2914,101 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
+  /**
+   * Run the manual-refresh pipeline over every discoverable route: refresh the
+   * catalogue online (not from its cache), re-list each route's endpoint
+   * (bypassing the freshness windows and the unattended shrink guard), persist
+   * the configured routes' records, refresh every discovery cache, clean
+   * pruned visibility references, and report one status per route. This is the
+   * "Refresh all" action's host half; the per-route RPC remains the
+   * editor-scoped path that returns records for the caller to write.
+   *
+   * A route with no endpoint is reported as `no-listing`; a catalog route the
+   * operator has not configured is `static-catalog` because the installed
+   * pi-ai catalog is its model source and there is no profile to write a
+   * discovered listing into. A listing failure is `unreachable` and never
+   * aborts the remaining routes.
+   * @param requested - routes to refresh; omission refreshes every configured
+   *   route, every known endpoint, and the Command Code namespace.
+   * @returns one status per route plus the pass timestamp.
+   * @throws when the settings seam is absent.
+   */
+  async function refreshRoutesForClient(requested?: readonly string[]): Promise<ProviderSyncRoutesRefreshValue> {
+    const settings = ctx.get('settings') as SettingsSeam | undefined
+    if (settings === undefined) throw new Error('settings seam absent — cannot refresh routes')
+    const onlineOk = await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl)
+    const overlays = loadOverlays()
+    const hints = loadHints()
+    const llmProviders = sectionOf(settings, LLM_NS)?.providers
+    const commandCode = sectionOf(settings, COMMANDCODE_NS)?.providers
+    const routes = requested === undefined
+      ? [...new Set([
+        ...Object.keys(llmProviders ?? {}),
+        ...Object.keys(commandCode ?? {}),
+        ...Object.keys(endpoints),
+      ])]
+      : [...new Set(requested)]
+    const statuses: ProviderSyncRouteStatus[] = []
+    for (const route of routes) {
+      // computeRouteRefresh re-reads the profile from settings, so a route the
+      // caller saw a moment ago may already be gone by the time its turn runs.
+      const profile: ProviderProfile | undefined = llmProviders?.[route] ?? commandCode?.[route]
+      const catalogRoute = isCatalogRoute(route)
+      const baseURL = endpoints[route] ?? profile?.baseURL
+      const outcome = await computeRouteRefresh(route, { catalogOnlineOk: onlineOk, overlays, hints, settings, force: true })
+      if (outcome === undefined) {
+        const staticCatalog = profile === undefined && catalogRoute && baseURL !== undefined
+        statuses.push({
+          route,
+          status: staticCatalog ? 'static-catalog' : 'no-listing',
+          source: 'none',
+          authority: 'none',
+          modelCount: (profile?.models ?? []).length,
+          removed: [],
+          deprecated: [],
+          degraded: false,
+          cached: false,
+          message: staticCatalog
+            ? 'served by the installed pi-ai catalog; add this provider to refresh its endpoint listing'
+            : 'no baseURL and no known endpoint — this route has no endpoint to list',
+          fetchedAt: Date.now(),
+        })
+        continue
+      }
+      let final = outcome
+      if (outcome.hasProfile && (outcome.live !== undefined || (outcome.overlay !== undefined && outcome.configured.length > 0))) {
+        try {
+          final = await persistRouteModels(settings, outcome)
+          await cleanupPrunedReferences(settings, route, final.cleanup)
+        } catch (error) {
+          logger.warn(describeSyncFailure(route, error, outcome.ns))
+        }
+      }
+      // Same cache side effect as the hourly pass: a non-catalog llm-pi-ai
+      // route's listing is what the resolution layer reads while the route has
+      // no configured models. Command Code resolves its own adapter catalog.
+      const cached = outcome.ns === LLM_NS && !catalogRoute
+        ? await writeDiscoveredCache(outcome, hints)
+        : false
+      statuses.push({
+        route,
+        status: outcome.live === undefined ? 'unreachable' : 'ok',
+        source: outcome.report.source,
+        authority: outcome.report.authority,
+        ...outcome.advertisedCount === undefined ? {} : { advertised: outcome.advertisedCount },
+        modelCount: final.models.length,
+        removed: final.report.removed,
+        deprecated: final.report.deprecated,
+        degraded: final.report.degraded,
+        ...final.report.degradedReason === undefined ? {} : { degradedReason: final.report.degradedReason },
+        cached,
+        ...outcome.fetchError === undefined ? {} : { message: outcome.fetchError },
+        fetchedAt: Date.now(),
+      })
+    }
+    return { refreshedAt: Date.now(), routes: statuses }
+  }
+
   // The manual-refresh RPC is imported lazily, like the other profile
   // plugins: the @Remote decorator stays out of the unit-test import graph.
   // The mount runs inside an effect so a teardown that lands before the
@@ -2789,7 +3018,7 @@ export function apply(ctx: Context, config: Config): void {
     void import('./remote.ts').then(({ mountProviderSyncRemote }) => {
       if (disposed) return
       try {
-        mountProviderSyncRemote(ctx, refreshRouteForClient)
+        mountProviderSyncRemote(ctx, refreshRouteForClient, refreshRoutesForClient)
       } catch (error) {
         process.stderr.write(`[enpoi-provider-sync] providerSync remote mount failed: ${String(error)}\n`)
       }

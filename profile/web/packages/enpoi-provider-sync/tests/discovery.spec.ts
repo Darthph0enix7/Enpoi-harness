@@ -3,8 +3,9 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import { existsSync, readFileSync, readdirSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import type { Context } from '@deepseek-ai/cordis'
+import { Context } from '@deepseek-ai/cordis'
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from '@deepseek-ai/dsh-llm-pi-ai/src/config.ts'
+import { discoveredModelsFor, resetDiscoveredModelsCache } from '@deepseek-ai/dsh-llm-pi-ai/src/discovered.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Config } from '../src/index.ts'
 import {
@@ -25,6 +26,7 @@ import {
   modelsDevReleaseDate,
   normalizeListingEntry,
   osCacheDir,
+  planRouteModels,
   refreshModelsDevOnline,
   resolveDshHome,
   writeDiscoveredRoute,
@@ -33,9 +35,12 @@ import { loadCapabilityHints } from '../src/capability-hints.ts'
 
 const servers: Server[] = []
 const directories: string[] = []
+const contexts: Context[] = []
 
 afterEach(async () => {
   vi.unstubAllGlobals()
+  resetDiscoveredModelsCache()
+  for (const context of contexts.splice(0)) await context.fiber.dispose()
   Reflect.deleteProperty(process.env, 'DSH_DISCOVERED_MODELS')
   Reflect.deleteProperty(process.env, 'DSH_COMMANDCODE_CATALOG')
   Reflect.deleteProperty(process.env, 'DSH_MODELS_DEV_PATH')
@@ -292,6 +297,69 @@ describe('configured-model merge', () => {
   })
 })
 
+describe('changed disclosures on a healthy pass', () => {
+  it('updates changed capacities, modalities, and the ladder instead of keeping the stale record', () => {
+    const configured = [{
+      id: 'changing',
+      contextWindow: 131_072,
+      maxTokens: 8192,
+      input: ['text'],
+      reasoning: false,
+    }]
+    const live = [normalizeListingEntry({
+      id: 'changing',
+      context_window: 200_000,
+      max_output_tokens: 16_384,
+      input_modalities: ['text', 'image'],
+      capabilities: { effort: { low: { supported: true }, high: { supported: true } } },
+    })!]
+    const plan = planRouteModels({
+      route: 'kilo',
+      configured,
+      live,
+      catalogRoute: false,
+      endpointFresh: true,
+      catalogFresh: true,
+      now: 1000,
+    })
+    expect(plan.models[0]).toMatchObject({
+      id: 'changing',
+      contextWindow: 200_000,
+      maxTokens: 16_384,
+      input: ['text', 'image'],
+      reasoning: true,
+      reasoningEfforts: { low: 'low', high: 'high' },
+    })
+  })
+
+  it('keeps a manual entry\'s operator-declared ladder over a different advertised one', () => {
+    const configured = [{
+      id: 'hand-added',
+      source: 'manual',
+      reasoning: true,
+      reasoningEfforts: { high: 'high', max: 'max' },
+    }]
+    const live = [normalizeListingEntry({
+      id: 'hand-added',
+      capabilities: { effort: { low: { supported: true } } },
+    })!]
+    const plan = planRouteModels({
+      route: 'kilo',
+      configured,
+      live,
+      catalogRoute: false,
+      endpointFresh: true,
+      catalogFresh: true,
+      now: 1000,
+    })
+    expect(plan.models[0]).toMatchObject({
+      id: 'hand-added',
+      source: 'manual',
+      reasoningEfforts: { high: 'high', max: 'max' },
+    })
+  })
+})
+
 describe('honest fallbacks', () => {
   it('reports a failed fetch with the manual affordance, and never writes a record', async () => {
     const { url } = await listingServer(503, '{"error":"down"}')
@@ -456,6 +524,31 @@ describe('Command Code catalog', () => {
     })
     // `attachment: true` is the catalog's vision disclosure, like the adapter's own `visionOf`.
     expect(models[1]).toMatchObject({ id: 'vendor/model-b', input: ['text', 'image'] })
+  })
+
+  it('reads the snapshot reasoning ladder through the shared listing parser', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-snapshot-'))
+    directories.push(directory)
+    const path = join(directory, 'catalog.snapshot.json')
+    writeFileSync(path, JSON.stringify([
+      {
+        id: 'vendor/thinking',
+        name: 'Thinking Model',
+        reasoning: true,
+        reasoningEfforts: ['high', 'max'],
+        reasoning_efforts: ['ignored'],
+        limit: { context: 1_000_000, output: 384_000 },
+        modalities: { input: ['text'] },
+      },
+      { id: 'vendor/plain', name: 'Plain Model', reasoning: false, reasoningEfforts: ['high'] },
+    ]))
+    const models = loadCommandCodeCatalog(path)
+    expect(models[0]?.reasoningEfforts).toEqual({ high: 'high', max: 'max' })
+    // A non-reasoning row advertises no levels even when the array names one.
+    expect(models[1]?.reasoningEfforts).toBeUndefined()
+    const merged = mergeConfiguredModels('commandcode', undefined, models, undefined)
+    expect(merged.models[0]).toMatchObject({ reasoning: true, reasoningEfforts: { high: 'high', max: 'max' } })
+    expect(merged.models[1]).toMatchObject({ id: 'vendor/plain', reasoning: false })
   })
 
   it('resolves the sibling provider package snapshot by default', () => {
@@ -957,6 +1050,41 @@ describe('route passes', () => {
   })
 })
 
+describe('ladder-only updates', () => {
+  it('rewrites a route whose only change is an advertised ladder wire value', async () => {
+    const { url } = await listingServer(200, JSON.stringify({
+      data: [{ id: 'ladder-model', capabilities: { effort: { high: { supported: true } } } }],
+    }))
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-ladder-update-'))
+    directories.push(directory)
+    process.env.DSH_DISCOVERED_MODELS = join(directory, 'discovered-models.json')
+    process.env.DSH_MODELS_DEV_PATH = writeFreshCatalog(directory, {})
+    stubProviderNetwork()
+
+    // First pass: the endpoint's own record is what the sync writes.
+    const first = syncHarness({ alpha: { baseURL: url, api: 'openai-completions', models: [] } })
+    let fresh: Array<Record<string, unknown>> = []
+    try {
+      await vi.waitFor(() => { expect(first.mutations).toHaveLength(1) })
+      fresh = first.mutations[0]!.ops[0]!.value
+    } finally {
+      first.dispose()
+    }
+    expect(fresh[0]).toMatchObject({ reasoningEfforts: { high: 'high' } })
+
+    // Second pass: every field matches except the wire spelling, so only a
+    // comparator that reads the ladder's values notices the difference.
+    const stale = fresh.map(model => ({ ...model, reasoningEfforts: { high: 'HIGH' } }))
+    const second = syncHarness({ alpha: { baseURL: url, api: 'openai-completions', models: stale } })
+    try {
+      await vi.waitFor(() => { expect(second.mutations).toHaveLength(1) })
+      expect(second.mutations[0]!.ops[0]!.value[0]).toMatchObject({ reasoningEfforts: { high: 'high' } })
+    } finally {
+      second.dispose()
+    }
+  })
+})
+
 describe('route provider mapping', () => {
   /** One models.dev cache with the same model id under two providers. */
   function writeSharedIdCatalogue(directory: string): string {
@@ -1076,6 +1204,229 @@ describe('models.dev display tags', () => {
     } finally {
       if (previous === undefined) Reflect.deleteProperty(process.env, 'XDG_CACHE_HOME')
       else process.env.XDG_CACHE_HOME = previous
+    }
+  })
+})
+
+describe('cache capability round-trip', () => {
+  it('writes the advertised ladder and modalities through to the llm-pi-ai reader', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-roundtrip-'))
+    directories.push(directory)
+    process.env.DSH_DISCOVERED_MODELS = join(directory, 'discovered-models.json')
+    const record = mergeDiscoveredRoute(undefined, 'https://kilo.test', mergeDiscoveredModels('kilo', [{
+      id: 'thinking-vision',
+      contextWindow: 200_000,
+      maxTokens: 32_000,
+      input: ['text', 'image', 'pdf'],
+      reasoningEfforts: { low: 'low', high: 'high' },
+    }], undefined), 1234)
+    await writeDiscoveredRoute('kilo', record)
+    // The other package is the cache's reader, not a second copy of the shape.
+    resetDiscoveredModelsCache()
+    const [model] = discoveredModelsFor('kilo') ?? []
+    expect(model).toMatchObject({
+      id: 'thinking-vision',
+      contextWindow: 200_000,
+      maxTokens: 32_000,
+      input: ['text', 'image', 'pdf'],
+      reasoningEfforts: { low: 'low', high: 'high' },
+      source: 'discovered',
+      discoveredAt: 1234,
+    })
+  })
+})
+
+describe('hourly discovered-cache merge', () => {
+  it('updates changed capacities, modalities, and ladders, re-stamping only changed models', () => {
+    const first = mergeDiscoveredRoute(undefined, 'https://kilo.test', mergeDiscoveredModels('kilo', [
+      { id: 'changing', contextWindow: 131_072, maxTokens: 8192, input: ['text'] },
+      { id: 'stable', contextWindow: 65_536 },
+    ], undefined), 1000)
+    const changed = mergeDiscoveredModels('kilo', [
+      { id: 'changing', contextWindow: 200_000, maxTokens: 16_384, input: ['text', 'image'], reasoningEfforts: { high: 'high' } },
+      { id: 'stable', contextWindow: 65_536 },
+    ], undefined)
+    const second = mergeDiscoveredRoute(first, 'https://kilo.test', changed, 2000)
+    expect(second.models.find(model => model.id === 'changing')).toMatchObject({
+      contextWindow: 200_000,
+      maxTokens: 16_384,
+      input: ['text', 'image'],
+      reasoningEfforts: { high: 'high' },
+      discoveredAt: 2000,
+    })
+    expect(second.models.find(model => model.id === 'stable')?.discoveredAt).toBe(1000)
+  })
+
+  it('keeps a retired id a reference still names, marked deprecated, and drops it when unreferenced', () => {
+    const first = mergeDiscoveredRoute(undefined, 'https://kilo.test', mergeDiscoveredModels('kilo', [
+      { id: 'kept' },
+      { id: 'retired' },
+    ], undefined), 1000)
+    const advertised = mergeDiscoveredModels('kilo', [{ id: 'kept' }], undefined)
+
+    const retained = mergeDiscoveredRoute(first, 'https://kilo.test', advertised, 2000, ['retired'])
+    expect(retained.models.map(model => model.id)).toEqual(['kept', 'retired'])
+    expect(retained.models[1]).toMatchObject({ id: 'retired', deprecated: true, discoveredAt: 1000 })
+    expect(retained.fetchedAt).toBe(2000)
+
+    // Retention is idempotent: an unchanged pass keeps every stamp and the
+    // file's fetch time, so the hourly write stays byte-identical.
+    expect(mergeDiscoveredRoute(retained, 'https://kilo.test', advertised, 3000, ['retired'])).toEqual(retained)
+
+    // The same retired id without a reference is removed, exactly as before.
+    expect(mergeDiscoveredRoute(first, 'https://kilo.test', advertised, 4000).models.map(model => model.id))
+      .toEqual(['kept'])
+
+    // An advertised id clears the marker; a retained record drops once the
+    // reference that kept it is gone.
+    const readvertised = mergeDiscoveredRoute(retained, 'https://kilo.test', mergeDiscoveredModels('kilo', [
+      { id: 'kept' },
+      { id: 'retired' },
+    ], undefined), 5000, ['retired'])
+    expect(readvertised.models.find(model => model.id === 'retired')?.deprecated).toBeUndefined()
+    expect(mergeDiscoveredRoute(retained, 'https://kilo.test', advertised, 6000, []).models.map(model => model.id))
+      .toEqual(['kept'])
+  })
+})
+
+describe('manual full refresh', () => {
+  /** Mount the plugin over a real Context with one fixed settings document. */
+  async function mountedContext(input: {
+    providers: Record<string, HarnessRoute>
+    endpoints?: Record<string, string>
+    defaultModel?: Record<string, unknown>
+    mutate?: (ns: string, ops: unknown[]) => Promise<void>
+  }): Promise<Context & { providerSync: { refreshRoutes(routes?: string[]): Promise<unknown> } }> {
+    const ctx = new Context()
+    contexts.push(ctx)
+    ctx.provide('remote', { registerService: () => {} })
+    ctx.provide('settings', {
+      describe: () => [
+        { ns: 'llm-pi-ai', revision: 1, value: { providers: input.providers } },
+        ...input.defaultModel === undefined ? [] : [{ ns: 'agent-default-model', revision: 1, value: input.defaultModel }],
+      ],
+      mutate: input.mutate ?? (async () => {}),
+    })
+    const { apply: mountedApply } = await freshSyncModule()
+    mountedApply(ctx, {
+      intervalMs: { get: () => 3_600_000 },
+      syncOnStart: { get: () => false },
+      syncDelayMs: { get: () => 0 },
+      endpoints: { get: () => input.endpoints ?? {} },
+      capacityDefaults: { get: () => ({}) },
+      modelsDevUrl: { get: () => DEFAULT_MODELS_DEV_URL },
+      routeProviderMap: { get: () => ({}) },
+      pinnedModels: { get: () => ({}) },
+      endpointGraceMs: { get: () => 14 * 24 * 60 * 60 * 1000 },
+      catalogFreshMs: { get: () => 48 * 60 * 60 * 1000 },
+    } as unknown as Config)
+    await vi.waitFor(() => { expect((ctx as unknown as { providerSync?: unknown }).providerSync).toBeDefined() })
+    return ctx as Context & { providerSync: { refreshRoutes(routes?: string[]): Promise<unknown> } }
+  }
+
+  it('re-lists every route, reports ok / unreachable / no-listing / static-catalog, and persists each ok route', async () => {
+    const healthy = await listingServer(200, JSON.stringify({ object: 'list', data: [{ id: 'fresh-model', context_length: 64_000 }] }))
+    const refusing = await listingServer(404, '{"error":"not found"}')
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-full-pass-'))
+    directories.push(directory)
+    process.env.DSH_DISCOVERED_MODELS = join(directory, 'discovered-models.json')
+    process.env.DSH_MODELS_DEV_PATH = writeFreshCatalog(directory, {})
+    stubProviderNetwork()
+    const mutations: Array<{ ns: string; ops: Array<{ op: string; path: string[]; value: Array<Record<string, unknown>> }> }> = []
+    const ctx = await mountedContext({
+      providers: {
+        alpha: { baseURL: healthy.url, api: 'openai-completions', models: [{ id: 'stale-model' }] },
+        beta: { baseURL: refusing.url, api: 'openai-completions', models: [{ id: 'kept-model' }] },
+        gamma: { api: 'openai-completions', models: [{ id: 'unreachable-endpoint' }] },
+      },
+      endpoints: { huggingface: 'https://router.huggingface.co/v1' },
+      mutate: async (ns, ops) => { mutations.push({ ns, ops: ops as never }) },
+    })
+    const answer = await ctx.providerSync.refreshRoutes() as {
+      routes: Array<{ route: string; status: string; source: string; advertised?: number; modelCount: number; removed: string[]; cached: boolean; message?: string }>
+    }
+    expect(answer.routes.map(route => ({ route: route.route, status: route.status }))).toEqual([
+      { route: 'alpha', status: 'ok' },
+      { route: 'beta', status: 'unreachable' },
+      { route: 'gamma', status: 'no-listing' },
+      { route: 'huggingface', status: 'static-catalog' },
+    ])
+    expect(answer.routes[0]).toMatchObject({
+      source: 'live', advertised: 1, modelCount: 1, removed: ['stale-model'], cached: true, degraded: false,
+    })
+    expect(answer.routes[1]?.message).toContain('404')
+    expect(answer.routes[1]?.modelCount).toBe(1)
+    // The healthy route's plan was persisted; the failed route's was not.
+    expect(mutations).toHaveLength(1)
+    expect(mutations[0]?.ns).toBe('llm-pi-ai')
+    expect(mutations[0]?.ops[0]?.path).toEqual(['providers', 'alpha', 'models'])
+    expect(mutations[0]?.ops[0]?.value.map(model => model.id)).toEqual(['fresh-model'])
+    // Only the route whose listing answered has a cache entry.
+    const cache = JSON.parse(readFileSync(join(directory, 'discovered-models.json'), 'utf8')) as {
+      routes: Record<string, { models: Array<{ id: string }> }>
+    }
+    expect(Object.keys(cache.routes)).toEqual(['alpha'])
+    expect(cache.routes.alpha?.models.map(model => model.id)).toEqual(['fresh-model'])
+  })
+
+  it('keeps a referenced retired id in the cache across passes, then drops it once unreferenced', async () => {
+    const first = await listingServer(200, JSON.stringify({ data: [{ id: 'still-listed' }, { id: 'retired' }] }))
+    const second = await listingServer(200, JSON.stringify({ data: [{ id: 'still-listed' }] }))
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-retain-'))
+    directories.push(directory)
+    const cachePath = join(directory, 'discovered-models.json')
+    process.env.DSH_DISCOVERED_MODELS = cachePath
+    process.env.DSH_MODELS_DEV_PATH = writeFreshCatalog(directory, {})
+    stubProviderNetwork()
+
+    /** Read the cache, or undefined while the first pass has not written it. */
+    const readCache = (): Array<{ id: string; deprecated?: boolean }> | undefined => {
+      if (!existsSync(cachePath)) return undefined
+      const document = JSON.parse(readFileSync(cachePath, 'utf8')) as {
+        routes: Record<string, { models: Array<{ id: string; deprecated?: boolean }> }>
+      }
+      return document.routes.alpha?.models
+    }
+
+    const referenced = syncHarness(
+      { alpha: { baseURL: first.url, api: 'openai-completions', models: [] } },
+      {},
+      { defaultModel: { provider: 'alpha', model: 'retired' } },
+    )
+    try {
+      await vi.waitFor(() => { expect(readCache()?.map(model => model.id)).toEqual(['still-listed', 'retired']) })
+    } finally {
+      referenced.dispose()
+    }
+
+    // The endpoint now advertises only `still-listed`, but the default model
+    // still names `retired`: the cache keeps it, marked deprecated.
+    const stillReferenced = syncHarness(
+      { alpha: { baseURL: second.url, api: 'openai-completions', models: [] } },
+      {},
+      { defaultModel: { provider: 'alpha', model: 'retired' } },
+    )
+    try {
+      await vi.waitFor(() => {
+        expect(readCache()).toEqual([
+          expect.objectContaining({ id: 'still-listed' }),
+          expect.objectContaining({ id: 'retired', deprecated: true }),
+        ])
+      })
+    } finally {
+      stillReferenced.dispose()
+    }
+
+    // Nothing references it any more: the next pass drops it.
+    const unreferenced = syncHarness(
+      { alpha: { baseURL: second.url, api: 'openai-completions', models: [] } },
+      {},
+      { defaultModel: { provider: 'other', model: 'elsewhere' } },
+    )
+    try {
+      await vi.waitFor(() => { expect(readCache()?.map(model => model.id)).toEqual(['still-listed']) })
+    } finally {
+      unreferenced.dispose()
     }
   })
 })

@@ -122,6 +122,54 @@ describe('discovered-model cache parsing', () => {
     expect(models?.[1]?.costTiers).toBeUndefined()
   })
 
+  it('round-trips the disclosed reasoning ladder alongside modalities and the deprecation marker', async () => {
+    await cacheFile(cacheWith([
+      {
+        id: 'thinking',
+        input: ['text', 'image', 'pdf'],
+        reasoningEfforts: { low: 'low', high: 'high', off: 'off' },
+        source: 'discovered',
+        discoveredAt: 12,
+      },
+      { id: 'retired', deprecated: true, source: 'discovered', discoveredAt: 13 },
+      { id: 'bad-ladder', reasoningEfforts: { low: '', high: 7 }, source: 'discovered', discoveredAt: 14 },
+    ]))
+    const models = discoveredModelsFor('acme-gateway')
+    expect(models?.[0]).toMatchObject({
+      input: ['text', 'image', 'pdf'],
+      reasoningEfforts: { low: 'low', high: 'high', off: 'off' },
+    })
+    expect(models?.[1]).toMatchObject({ id: 'retired', deprecated: true })
+    // A level with no usable wire value is not a level; the rest of the record
+    // still reads instead of failing the cache.
+    expect(models?.[2]?.reasoningEfforts).toBeUndefined()
+  })
+
+  it('reads an old-shaped cache file without a ladder or deprecation fields', async () => {
+    // Exactly the shape the writer emitted before those fields existed: a
+    // version-1 document whose records carry id, capacities, and modalities.
+    await cacheFile({
+      version: DISCOVERED_CACHE_VERSION,
+      routes: {
+        'acme-gateway': {
+          baseURL: 'https://acme.test',
+          fetchedAt: 1_790_000_000_000,
+          models: [
+            { id: 'legacy', name: 'Legacy', contextWindow: 32_000, maxTokens: 4096, input: ['text', 'image'], reasoning: true, source: 'discovered', discoveredAt: 5 },
+          ],
+        },
+      },
+    })
+    const model = discoveredModelsFor('acme-gateway')?.[0]
+    expect(model).toMatchObject({ id: 'legacy', input: ['text', 'image'] })
+    expect(model?.reasoningEfforts).toBeUndefined()
+    expect(model?.deprecated).toBeUndefined()
+    // It still resolves: nothing disclosed a ladder, so the route keeps the
+    // conservative no-reasoning answer instead of guessing one.
+    const resolved = resolveProfiles(discoveredRoute().providers).get('acme-gateway')?.piProvider?.getModels()[0]
+    expect(resolved).toMatchObject({ id: 'legacy', reasoning: false, input: ['text', 'image'] })
+  })
+
   it('reads an unreadable or malformed cache as empty instead of failing resolution', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dsh-discovered-'))
     directories.push(directory)
@@ -174,6 +222,34 @@ describe('resolution over discovered models', () => {
       maxTokens: 65_536,
       reasoning: false,
     }])
+  })
+
+  it('materializes the cached effort ladder instead of losing it at resolution', async () => {
+    await cacheFile(cacheWith([
+      {
+        id: 'thinking',
+        contextWindow: 200_000,
+        maxTokens: 32_000,
+        reasoningEfforts: { low: 'low', medium: 'medium', high: 'high' },
+        source: 'discovered',
+        discoveredAt: 1,
+      },
+      // A ladder naming no level pi-ai models is not serviceable; the route
+      // resolves without reasoning instead of refusing the whole cache.
+      { id: 'foreign-ladder', reasoningEfforts: { thinking: 'thinking' }, source: 'discovered', discoveredAt: 2 },
+    ]))
+    const models = resolveProfiles(discoveredRoute().providers).get('acme-gateway')?.piProvider?.getModels()
+    expect(models?.[0]).toMatchObject({ id: 'thinking', reasoning: true })
+    expect(models?.[0]?.thinkingLevelMap).toMatchObject({
+      off: null,
+      minimal: null,
+      low: 'low',
+      medium: 'medium',
+      high: 'high',
+      xhigh: null,
+      max: null,
+    })
+    expect(models?.[1]).toMatchObject({ id: 'foreign-ladder', reasoning: false })
   })
 
   it('materializes an unverified model conservatively: text only, no reasoning, route capacity', async () => {

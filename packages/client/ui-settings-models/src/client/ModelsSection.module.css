@@ -976,6 +976,55 @@ select.input {
   font-weight: 500;
 }
 
+.refreshAllMessage,
+.refreshAllError {
+  margin: 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.refreshAllError {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.refreshAllRoutes {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 128px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.refreshAllRouteRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.refreshAllRouteName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refreshAllRouteCount {
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.refreshAllRouteState {
+  color: var(--dsw-alias-label-tertiary);
+}
+
 .browseCatalogBtn {
   flex-shrink: 0;
   display: flex;

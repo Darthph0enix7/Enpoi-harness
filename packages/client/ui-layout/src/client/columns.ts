@@ -25,8 +25,25 @@ export const SIDEBAR_AUTO_COLLAPSE = 1024
 export const RIGHTBAR_MIN = 300
 /** Maximum normal right panel width as a fraction of the frame. */
 export const RIGHTBAR_MAX_RATIO = 0.7
-/** First-open right panel preference as a fraction of the frame. */
-export const RIGHTBAR_DEFAULT_RATIO = 0.35
+/** Fraction of the frame the shipped right panel takes on a large frame. */
+export const RIGHTBAR_DEFAULT_RATIO = 0.22
+/** Px the shipped right panel adds beyond the default left sidebar. */
+export const RIGHTBAR_DEFAULT_GAP = 96
+/** Widest the shipped right panel grows without a drag; a wide monitor must not read as a split screen. */
+export const RIGHTBAR_DEFAULT_MAX = 420
+
+/**
+ * One stored right panel width: the dragged pixels and the frame ratio they
+ * were dragged at. Keeping both lets another frame scale the panel instead of
+ * adopting a stale absolute width, while the dragged px still wins on the
+ * frame it was chosen on.
+ */
+export interface RightbarPreference {
+  /** Width in px on the frame this preference was dragged on. */
+  readonly px: number
+  /** {@link px} divided by that frame's width; a different frame scales by this. */
+  readonly ratio: number
+}
 
 /**
  * Clamp a panel width into its contract range.
@@ -37,6 +54,41 @@ export const RIGHTBAR_DEFAULT_RATIO = 0.35
  */
 export function clampWidth(px: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(px)))
+}
+
+/**
+ * The shipped right panel width: a little wider than the default left sidebar,
+ * growing with the frame up to a fixed ceiling, so first open reads as a slim
+ * side panel at 1280, 1920, and 2560 alike.
+ * @param viewport - current frame width in px.
+ * @returns the default width, never below {@link RIGHTBAR_MIN}.
+ */
+export function defaultRightbarWidth(viewport: number): number {
+  return clampWidth(
+    Math.max(SIDEBAR_DEFAULT + RIGHTBAR_DEFAULT_GAP, viewport * RIGHTBAR_DEFAULT_RATIO),
+    RIGHTBAR_MIN,
+    RIGHTBAR_DEFAULT_MAX,
+  )
+}
+
+/**
+ * The right panel width to draw on one frame.
+ *
+ * A stored preference is scaled by the frame width, so resizing the window
+ * keeps the panel's share of the screen; the dragged px wins on the frame it
+ * was dragged on (the ratio rounds back to it there). Bound by the same 300px
+ * floor and 70% ceiling a drag applies.
+ * @param preference - the stored preference, or null while the panel follows the shipped default.
+ * @param viewport - current frame width in px.
+ * @returns the resolved width in px.
+ */
+export function resolveRightbarWidth(preference: RightbarPreference | null, viewport: number): number {
+  const max = Math.max(RIGHTBAR_MIN, viewport * RIGHTBAR_MAX_RATIO)
+  if (preference === null) return clampWidth(defaultRightbarWidth(viewport), RIGHTBAR_MIN, max)
+  // Both members are validated above zero at every boundary that stores one.
+  const captured = preference.px / preference.ratio
+  const px = Math.abs(captured - viewport) <= 1 ? preference.px : preference.ratio * viewport
+  return clampWidth(px, RIGHTBAR_MIN, max)
 }
 
 /**

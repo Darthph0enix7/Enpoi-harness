@@ -23,6 +23,7 @@ import { installAdaptiveStyles } from './adaptive-styles.ts'
 import { en, zh } from './shortcut-locales.ts'
 import { createLayoutStore } from './stores.ts'
 import { LayoutController } from './service.ts'
+import { createHostWidthSync } from './width-sync.ts'
 import { ThemePresenter } from './theme-presenter.ts'
 
 // Contract exports only (export-convergence rule: cross-package consumers
@@ -190,8 +191,13 @@ export function apply(ctx: ClientContext): void {
   installAdaptiveStyles(ctx)
 
   ctx.effect(() => {
-    const handle = createLayoutStore()
+    // The host record outlives this origin's cache: the local read seeds the
+    // first paint, then the host's record replaces it when it carries a
+    // preference. Adopting is refused once the operator resized in this page.
+    const hostWidths = createHostWidthSync()
+    const handle = createLayoutStore({ persistHost: (widths) => { hostWidths.mirror(widths) } })
     const instance = handle.create()
+    hostWidths.hydrate((widths) => { instance.actions.adoptWidths(widths) })
     const store: typeof handle = { ...handle, create: () => instance }
     const retainMainPanels = (): void => {
       instance.actions.retainMainPanels(ctx.slots.entries('main').flatMap(entry =>
@@ -241,6 +247,7 @@ export function apply(ctx: ClientContext): void {
     const disposePanels = ctx.slots.subscribe('main', retainMainPanels)
     retainMainPanels()
     return () => {
+      hostWidths.dispose()
       disposeShortcut()
       layout.dispose()
       disposePanels()

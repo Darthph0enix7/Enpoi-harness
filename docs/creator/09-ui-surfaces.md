@@ -57,7 +57,7 @@ Declared seats (`ui-conversation/src/client/contract/slots.ts:195-233`):
 
 ## Right panel + rail
 
-- Initial open preference is 35% of frame width (`RIGHTBAR_DEFAULT_RATIO = 0.35`, `packages/client/ui-layout/src/client/columns.ts:29`), clamped between 300px floor and 70% ceiling; user-dragged preferences persist in localStorage (`dsh.client.layout.widths`).
+- The shipped right-panel width is `defaultRightbarWidth(viewport)` (`packages/client/ui-layout/src/client/columns.ts`): the wider of the default sidebar plus 96px and 22% of the frame, capped at 420px and never below the 300px floor. Opening the panel records no preference, so a changed default still reaches operators who never dragged. A dragged width stores px plus the frame ratio it was dragged at (`resolveRightbarWidth` scales it on another frame) and persists both in the per-origin cache (`dsh.client.layout.widths`) and in the host `enpoiUiState.layout` record, which outranks the cache across origins. The drawn width keeps the 300px floor and 70% ceiling.
 - The rail never hides; one button per registered page kind, plus the bottom terminal-dock toggle and panel chrome (`ui-sidebar-right/src/client/shell/SidebarRight.tsx:363-440`).
 - Tab kinds come from `sidebarRightTabs.register`; fork operator tabs are `priority: 'extension'` with guide entries at orders 55-59 (`ui-brand-enpoi/src/client/index.ts:294-358`):
 

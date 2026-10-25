@@ -2,7 +2,21 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createLayoutStore } from '../src/client/stores.ts'
+import type { LayoutWidths } from '../src/client/stores.ts'
+import { defaultRightbarWidth, resolveRightbarWidth } from '../src/client/columns.ts'
 import type { MainPanelId } from '../src/client/service.ts'
+
+const WIDTHS_KEY = 'dsh.client.layout.widths'
+
+/** One preference as a drag on a given frame records it. */
+function preference(px: number, viewport: number): { px: number; ratio: number } {
+  return { px, ratio: px / viewport }
+}
+
+/** This origin's cached record as storage holds it. */
+function readStored(): { sidebar: number; rightbar: { px: number; ratio: number } | null } {
+  return JSON.parse(localStorage.getItem(WIDTHS_KEY) ?? 'null') as { sidebar: number; rightbar: { px: number; ratio: number } | null }
+}
 
 beforeEach(() => { vi.stubGlobal('innerWidth', 1920); localStorage.clear() })
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
@@ -17,6 +31,7 @@ describe('createLayoutStore', () => {
         viewportWidth: 1920,
         narrowExpanded: false,
         rightbar: null,
+        widthsEdited: false,
         rightbarShown: false,
         rightbarTrack: false,
         rightbarFullscreen: false,
@@ -40,47 +55,72 @@ describe('createLayoutStore', () => {
     first.actions.setRightbar(1000)
     const reopened = createLayoutStore().create()
     expect(reopened.store.getSnapshot().layoutInfo.sidebar).toBe(400)
-    expect(reopened.store.getSnapshot().layoutInfo.rightbar).toBe(1000)
+    expect(reopened.store.getSnapshot().layoutInfo.rightbar).toEqual(preference(1000, 1920))
+    expect(resolveRightbarWidth(reopened.store.getSnapshot().layoutInfo.rightbar, 1920)).toBe(1000)
   })
 
-  it('remembers a closed sidebar and the first-open right default as device preferences', () => {
+  it('never records a width for opening the panel', () => {
     const first = createLayoutStore().create()
     first.actions.openRightbar(true, false)
-    expect(first.store.getSnapshot().layoutInfo.rightbar).toBe(672)
+    expect(first.store.getSnapshot().layoutInfo.rightbar).toBeNull()
+    expect(localStorage.getItem(WIDTHS_KEY)).toBeNull()
+    // A sidebar gesture writes the record, and the untouched right panel stays
+    // on the shipped default rather than being stamped with one.
     first.actions.setSidebar(400)
     first.actions.toggleSidebar()
+    expect(readStored()).toEqual({ sidebar: 0, rightbar: null })
     const reopened = createLayoutStore().create()
-    expect(reopened.store.getSnapshot().layoutInfo.sidebar).toBe(0)
-    expect(reopened.store.getSnapshot().layoutInfo.rightbar).toBe(672)
+    expect(reopened.store.getSnapshot().layoutInfo).toMatchObject({ sidebar: 0, rightbar: null })
   })
 
   it('keeps a hydrated width across opening and closing without reseeding it', () => {
-    localStorage.setItem('dsh.client.layout.widths', JSON.stringify({ sidebar: 360, rightbar: 640 }))
+    localStorage.setItem(WIDTHS_KEY, JSON.stringify({ sidebar: 360, rightbar: preference(640, 1280) }))
     const { store, actions } = createLayoutStore().create()
-    expect(store.getSnapshot().layoutInfo).toMatchObject({ sidebar: 360, rightbar: 640 })
+    expect(store.getSnapshot().layoutInfo).toMatchObject({
+      sidebar: 360,
+      rightbar: preference(640, 1280),
+    })
     actions.closeRightbar()
     actions.openRightbar(true, false)
-    expect(store.getSnapshot().layoutInfo.rightbar).toBe(640)
+    expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(640, 1280))
   })
 
-  it('clamps stored widths to the ranges a drag applies in the current frame', () => {
-    localStorage.setItem('dsh.client.layout.widths', JSON.stringify({ sidebar: 9999, rightbar: 9999 }))
-    const { store } = createLayoutStore().create()
-    expect(store.getSnapshot().layoutInfo.sidebar).toBe(420)
-    expect(store.getSnapshot().layoutInfo.rightbar).toBe(Math.round(1920 * 0.7))
+  it('does not shrink a stored preference to the frame it boots on', () => {
+    // The old read clamped the stored px to 70% of the boot frame, and the next
+    // sidebar gesture persisted that clamped value: a narrow window silently
+    // reduced the operator's width for good.
+    localStorage.setItem(WIDTHS_KEY, JSON.stringify({ sidebar: 280, rightbar: preference(1200, 2560) }))
+    const { store, actions } = createLayoutStore().create()
+    expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(1200, 2560))
+    expect(resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, 1920)).toBe(900)
+    actions.setViewportWidth(1280)
+    actions.setSidebar(300)
+    expect(readStored().rightbar).toEqual(preference(1200, 2560))
+    expect(resolveRightbarWidth(readStored().rightbar, 2560)).toBe(1200)
   })
 
-  it('falls back to the contract defaults for absent or malformed entries', () => {
+  it('treats malformed or legacy width entries as absent', () => {
     const defaults = { sidebar: 0, rightbar: null }
     expect(createLayoutStore().create().store.getSnapshot().layoutInfo).toMatchObject(defaults)
-    localStorage.setItem('dsh.client.layout.widths', '{not json')
+    localStorage.setItem(WIDTHS_KEY, '{not json')
     expect(createLayoutStore().create().store.getSnapshot().layoutInfo).toMatchObject(defaults)
-    localStorage.setItem('dsh.client.layout.widths', 'null')
+    localStorage.setItem(WIDTHS_KEY, 'null')
     expect(createLayoutStore().create().store.getSnapshot().layoutInfo).toMatchObject(defaults)
-    localStorage.setItem('dsh.client.layout.widths', '42')
+    localStorage.setItem(WIDTHS_KEY, '42')
     expect(createLayoutStore().create().store.getSnapshot().layoutInfo).toMatchObject(defaults)
-    localStorage.setItem('dsh.client.layout.widths', JSON.stringify({ sidebar: 'wide', rightbar: 'tall' }))
+    localStorage.setItem(WIDTHS_KEY, JSON.stringify({ sidebar: 'wide', rightbar: 'tall' }))
     expect(createLayoutStore().create().store.getSnapshot().layoutInfo).toMatchObject(defaults)
+    // A numeric rightbar can only come from the removed first-open default
+    // stamp: it is not proof of a drag, so the shipped default wins again.
+    localStorage.setItem(WIDTHS_KEY, JSON.stringify({ sidebar: 280, rightbar: 672 }))
+    expect(createLayoutStore().create().store.getSnapshot().layoutInfo).toMatchObject({ sidebar: 280, rightbar: null })
+    for (const rightbar of [
+      { px: 500 }, { px: 0, ratio: 0.4 }, { px: 'wide', ratio: 0.4 }, { px: 500, ratio: 0 },
+      { px: 500, ratio: 2 }, { px: Number.NaN, ratio: 0.4 }, { px: 500, ratio: Number.NaN },
+    ]) {
+      localStorage.setItem(WIDTHS_KEY, JSON.stringify({ sidebar: 280, rightbar }))
+      expect(createLayoutStore().create().store.getSnapshot().layoutInfo.rightbar).toBeNull()
+    }
   })
 
   it('reads defaults and skips writes when the browser has no storage', () => {
@@ -96,7 +136,7 @@ describe('createLayoutStore', () => {
     const { store, actions } = createLayoutStore().create()
     actions.setSidebar(400)
     actions.openRightbar(true, false)
-    expect(store.getSnapshot().layoutInfo).toMatchObject({ sidebar: 400, rightbar: 672 })
+    expect(store.getSnapshot().layoutInfo).toMatchObject({ sidebar: 400, rightbar: null })
   })
 
   it('clamps the sidebar to 264–420px', () => {
@@ -203,18 +243,20 @@ describe('main panel selection', () => {
 })
 
 describe('right panel', () => {
-  it('initializes at 35% of the latest frame only on first opening', () => {
+  it('follows the shipped slim default without recording it', () => {
     const { store, actions } = createLayoutStore().create()
     actions.setViewportWidth(1000)
     expect(store.getSnapshot().layoutInfo.rightbar).toBeNull()
     actions.openRightbar(true, false)
-    expect(store.getSnapshot().layoutInfo.rightbar).toBe(350)
+    expect(store.getSnapshot().layoutInfo.rightbar).toBeNull()
+    expect(resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, 1000)).toBe(defaultRightbarWidth(1000))
     actions.setViewportWidth(2000)
     actions.openRightbar(true, true)
-    expect(store.getSnapshot().layoutInfo.rightbar).toBe(350)
+    expect(store.getSnapshot().layoutInfo.rightbar).toBeNull()
     actions.closeRightbar()
     actions.openRightbar(true, false)
-    expect(store.getSnapshot().layoutInfo.rightbar).toBe(350)
+    expect(store.getSnapshot().layoutInfo.rightbar).toBeNull()
+    expect(localStorage.getItem(WIDTHS_KEY)).toBeNull()
   })
 
   it('keeps track and fullscreen reports independent and clears both on close', () => {
@@ -229,34 +271,38 @@ describe('right panel', () => {
     expect(store.getSnapshot().layoutInfo).toMatchObject({ rightbarShown: false, rightbarTrack: false, rightbarFullscreen: false })
   })
 
-  it('keeps dragged px preferences across resize, close, and reopen', () => {
+  it('keeps a dragged px across resize, close, and reopen, scaled by the frame', () => {
     const { store, actions } = createLayoutStore().create()
     actions.openRightbar(true, false)
     actions.setRightbar(1100)
     actions.setViewportWidth(800)
-    expect(store.getSnapshot().layoutInfo.rightbar).toBe(1100)
+    const stored = store.getSnapshot().layoutInfo.rightbar
+    expect(stored).toEqual(preference(1100, 1920))
+    expect(resolveRightbarWidth(stored, 800)).toBe(Math.round(1100 / 1920 * 800))
     actions.closeRightbar()
     actions.openRightbar(false, true)
-    expect(store.getSnapshot().layoutInfo.rightbar).toBe(1100)
+    expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(1100, 1920))
+    expect(resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, 1920)).toBe(1100)
   })
 
   it('clamps drag preferences to 300px and 70% of the current frame', () => {
     const { store, actions } = createLayoutStore().create()
     actions.setViewportWidth(1600)
     actions.setRightbar(9999)
-    expect(store.getSnapshot().layoutInfo.rightbar).toBe(1120)
+    expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(1120, 1600))
     actions.setViewportWidth(1000)
     actions.setRightbar(9999)
-    expect(store.getSnapshot().layoutInfo.rightbar).toBe(700)
+    expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(700, 1000))
     actions.setRightbar(1)
-    expect(store.getSnapshot().layoutInfo.rightbar).toBe(300)
+    expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(300, 1000))
   })
 
-  it('retains a minimum normal preference when first opened fullscreen on a phone', () => {
+  it('draws the minimum width on a phone without recording a preference', () => {
     const { store, actions } = createLayoutStore().create()
     actions.setViewportWidth(320)
     actions.openRightbar(false, true)
-    expect(store.getSnapshot().layoutInfo.rightbar).toBe(300)
+    expect(store.getSnapshot().layoutInfo.rightbar).toBeNull()
+    expect(resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, 320)).toBe(300)
   })
 
   it('collapses a manually expanded narrow sidebar on opening, not presentation reports', () => {
@@ -282,6 +328,41 @@ describe('right panel', () => {
     actions.closeRightbar()
     actions.setViewportWidth(3000)
     expect(store.getSnapshot().layoutInfo).toMatchObject({ sidebar: 420, rightbarShown: false, rightbarTrack: false })
+  })
+})
+
+describe('host width record', () => {
+  it('mirrors each committed gesture with px and ratio', () => {
+    const persistHost = vi.fn<(widths: LayoutWidths) => void>()
+    const { actions } = createLayoutStore({ persistHost }).create()
+    actions.setRightbar(720)
+    expect(persistHost).toHaveBeenCalledWith({ sidebar: 0, rightbar: preference(720, 1920) })
+    actions.setSidebar(320)
+    expect(persistHost).toHaveBeenLastCalledWith({ sidebar: 320, rightbar: preference(720, 1920) })
+  })
+
+  it('adopts the host record over this origin cache and rewrites the local copy', () => {
+    localStorage.setItem(WIDTHS_KEY, JSON.stringify({ sidebar: 280, rightbar: preference(500, 1920) }))
+    const { store, actions } = createLayoutStore().create()
+    actions.adoptWidths({ sidebar: 360, rightbar: preference(720, 1920) })
+    expect(store.getSnapshot().layoutInfo.sidebar).toBe(360)
+    expect(resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, 1920)).toBe(720)
+    expect(readStored()).toEqual({ sidebar: 360, rightbar: preference(720, 1920) })
+  })
+
+  it('keeps a gesture made while the host read was in flight', () => {
+    const { store, actions } = createLayoutStore().create()
+    actions.setRightbar(640)
+    actions.adoptWidths({ sidebar: 400, rightbar: preference(900, 1920) })
+    expect(store.getSnapshot().layoutInfo.sidebar).toBe(0)
+    expect(resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, 1920)).toBe(640)
+  })
+
+  it('does not mirror an adopted record back to the host', () => {
+    const persistHost = vi.fn<(widths: LayoutWidths) => void>()
+    const { actions } = createLayoutStore({ persistHost }).create()
+    actions.adoptWidths({ sidebar: 360, rightbar: preference(720, 1920) })
+    expect(persistHost).not.toHaveBeenCalled()
   })
 })
 

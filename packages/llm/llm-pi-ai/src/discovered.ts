@@ -33,6 +33,7 @@
  *           "input": ["text", "image"],
  *           "tools": true,
  *           "reasoning": true,
+ *           "reasoningEfforts": { "low": "low", "medium": "medium", "high": "high" },
  *           "isFree": false,
  *           "gated": true,
  *           "gateReason": "sign-in required",
@@ -95,6 +96,14 @@ export interface DiscoveredModelRecord {
   readonly tools?: boolean | undefined
   /** Whether the endpoint advertised reasoning; absent means undisclosed. */
   readonly reasoning?: boolean | undefined
+  /**
+   * Selectable reasoning levels (picker id → wire value) the route disclosed —
+   * the endpoint's own ladder, or the one its models.dev/installed-catalog
+   * enrichment publishes. Persisted here so a route resolving from this cache
+   * offers the same ladder a configured route would, instead of falling back
+   * to pi-ai's defaulting. Absent means nothing disclosed one.
+   */
+  readonly reasoningEfforts?: Readonly<Record<string, string>> | undefined
   /** The listing's own price fields, kept verbatim for future consumers. */
   readonly pricing?: Readonly<Record<string, string>> | undefined
   /** Whether the endpoint's directory marked the model free. */
@@ -114,6 +123,13 @@ export interface DiscoveredModelRecord {
   readonly costTiers?: readonly DiscoveredCostTier[] | undefined
   /** True when neither models.dev, the installed catalog, nor the listing disclosed any capability. */
   readonly unverified?: boolean | undefined
+  /**
+   * True when the endpoint stopped advertising this model while a route-local
+   * reference (default model, chain link, favorite) or an operator pin still
+   * names it. The record is kept so the reference does not break silently; a
+   * later pass that advertises the id again clears the marker.
+   */
+  readonly deprecated?: boolean | undefined
   /** Provenance marker: this record came from an endpoint listing, not configuration. */
   readonly source: 'discovered'
   /** Epoch milliseconds of the discovery that produced this record's content. */
@@ -188,6 +204,23 @@ function readCostTier(value: unknown): DiscoveredCostTier | undefined {
   return { inputTokensAbove, ...input === undefined ? {} : { input }, ...output === undefined ? {} : { output } }
 }
 
+/**
+ * The selectable reasoning ladder a record carries: level → wire spelling.
+ * Only non-empty strings survive; an absent, empty, or malformed block reads
+ * as "nothing disclosed" rather than failing the record. The level named
+ * `__proto__` is refused because assigning it to a plain object would rewrite
+ * the prototype instead of recording a level.
+ */
+function readEfforts(value: unknown): Readonly<Record<string, string>> | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const ladder: Record<string, string> = {}
+  for (const [level, wire] of Object.entries(value as Record<string, unknown>)) {
+    if (level.length === 0 || level === '__proto__') continue
+    if (typeof wire === 'string' && wire.length > 0) ladder[level] = wire
+  }
+  return Object.keys(ladder).length === 0 ? undefined : ladder
+}
+
 /** Normalize one model entry, or `undefined` when it names no usable id. */
 function readModel(raw: unknown, fallbackStamp: number): DiscoveredModelRecord | undefined {
   if (raw === null || typeof raw !== 'object') return undefined
@@ -196,6 +229,7 @@ function readModel(raw: unknown, fallbackStamp: number): DiscoveredModelRecord |
   if (id === undefined) return undefined
   const input = readModalities(entry.input)
   const releaseDate = releaseDateValue(entry.releaseDate)
+  const reasoningEfforts = readEfforts(entry.reasoningEfforts)
   const costTiers = Array.isArray(entry.costTiers)
     ? entry.costTiers.flatMap((candidate): DiscoveredCostTier[] => {
       const tier = readCostTier(candidate)
@@ -219,6 +253,7 @@ function readModel(raw: unknown, fallbackStamp: number): DiscoveredModelRecord |
     ...input === undefined || input.length === 0 ? {} : { input },
     ...typeof entry.tools === 'boolean' ? { tools: entry.tools } : {},
     ...typeof entry.reasoning === 'boolean' ? { reasoning: entry.reasoning } : {},
+    ...reasoningEfforts === undefined ? {} : { reasoningEfforts },
     ...pricing === undefined || Object.keys(pricing).length === 0 ? {} : { pricing },
     ...typeof entry.isFree === 'boolean' ? { isFree: entry.isFree } : {},
     ...entry.gated === true ? { gated: true } : {},
@@ -226,6 +261,7 @@ function readModel(raw: unknown, fallbackStamp: number): DiscoveredModelRecord |
     ...releaseDate === undefined ? {} : { releaseDate },
     ...costTiers === undefined || costTiers.length === 0 ? {} : { costTiers },
     ...entry.unverified === true ? { unverified: true } : {},
+    ...entry.deprecated === true ? { deprecated: true } : {},
     source: 'discovered',
     discoveredAt: positiveInteger(entry.discoveredAt) ?? fallbackStamp,
   }

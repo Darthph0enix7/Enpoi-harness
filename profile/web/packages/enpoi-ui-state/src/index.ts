@@ -1,19 +1,24 @@
 /**
- * enpoi-ui-state — per-session UI state for the web operator surfaces.
+ * enpoi-ui-state — UI state for the web operator surfaces.
  *
  * A Typert Remote service (`enpoiUiState` namespace) that persists the two
- * pieces of per-session UI state the right sidebar owns: the unsent composer
- * draft and the open sidebar surface (tabs). Keeping the store server-side
+ * pieces of per-session UI state the right sidebar owns — the unsent composer
+ * draft and the open sidebar surface (tabs) — plus one host-wide layout record
+ * holding the frame's column widths. Keeping the session state server-side
  * and per-session lets unsent text and open tabs follow the operator across
- * devices.
+ * devices; the layout record is per host, not per session, because the panel
+ * width is the operator's preference for this harness rather than a fact of
+ * any conversation. localStorage remains the browser's first-paint cache, and
+ * because it is per origin (a tailnet address, its DNS name, a tunnel URL) the
+ * host record is what makes a resize survive a changed entry URL.
  *
  * The store is OFF the session log: nothing here is model-visible and no
  * method emits a session event. Records live in the `ui_state` storage domain
- * with the `per-record` layout (one json document per session under the
- * backend root), so one write rewrites one session's document. Reads answer
- * `{ updatedAt: 0 }` for a session with no stored state; invalid input —
- * unsafe session id, malformed draft, oversized payload — is rejected at the
- * Remote boundary.
+ * with the `per-record` layout (one json document per record key under the
+ * backend root), so one write rewrites one record's document. Reads answer
+ * `{ updatedAt: 0 }` for a record with no stored state; invalid input —
+ * unsafe session id, malformed draft, oversized payload, out-of-range width —
+ * is rejected at the Remote boundary.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -37,6 +42,10 @@ const MAX_DRAFT_TEXT_CHARS = 100_000
 const MAX_SURFACE_JSON_CHARS = 64_000
 /** Record keys become path segments in the per-record json backend. */
 const SESSION_ID_RE = /^[a-zA-Z0-9_-]+$/
+/** Key of the single host-wide layout record in its table. */
+export const LAYOUT_KEY = 'layout'
+/** Widest accepted width member in px; a frame wider than this does not exist. */
+const MAX_WIDTH_PX = 20_000
 
 /** One client's unsent composer text, timestamped by that client. */
 export interface UiStateDraft {
@@ -66,6 +75,24 @@ export interface UiStatePatch {
   surface?: unknown
 }
 
+/** The right panel's width as the client stores it: dragged px plus the frame ratio it was dragged at. */
+export interface LayoutRightbarWidths {
+  /** Width in px on the frame it was dragged on. */
+  px: number
+  /** {@link px} divided by that frame's width; another frame scales by this. */
+  ratio: number
+}
+
+/** One host's column width preferences; the operator's harness owns this record, sessions do not. */
+export interface LayoutWidths {
+  /** Sidebar width preference in px; 0 collapses to the icon rail. */
+  sidebar: number
+  /** Right panel width preference; absent while the panel follows the shipped default. */
+  rightbar?: LayoutRightbarWidths
+  /** Server clock (milliseconds) of the last accepted write; 0 when nothing is stored. */
+  updatedAt: number
+}
+
 /** Durable record schema for one session's document. */
 const uiStateRecordSchema = z.object({
   draft: z.object({
@@ -77,11 +104,19 @@ const uiStateRecordSchema = z.object({
   updatedAt: z.number(),
 })
 
+/** Durable record schema for the single layout document. */
+const layoutRecordSchema = z.object({
+  sidebar: z.number(),
+  rightbar: z.object({ px: z.number(), ratio: z.number() }).optional(),
+  updatedAt: z.number(),
+})
+
 /**
- * The `ui_state` domain: one `per-record` table keyed by session id, so a
- * write lands on that session's document alone. Malformed stored records are
- * moved aside instead of failing the whole open — one session's unreadable
- * UI state must not take the feature down for every session.
+ * The `ui_state` domain: one `per-record` table keyed by session id plus the
+ * single-key `layout` table, so a write lands on one record's document alone.
+ * Malformed stored records are moved aside instead of failing the whole open —
+ * one session's unreadable UI state must not take the feature down for every
+ * session.
  */
 const uiStateDomainSpec = defineDomain({
   name: 'ui_state',
@@ -95,6 +130,9 @@ const uiStateDomainSpec = defineDomain({
     // only the type-level skew of the duplicated zod copies.
     sessions: domainTable<string, UiStateValue>(
       uiStateRecordSchema as unknown as DomainTableSpec<string, UiStateValue>['valueSchema'],
+    ),
+    layout: domainTable<string, LayoutWidths>(
+      layoutRecordSchema as unknown as DomainTableSpec<string, LayoutWidths>['valueSchema'],
     ),
   },
 })
@@ -181,16 +219,61 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * The `enpoiUiState` Remote namespace: `get` and `put` over the shared Typert
- * Gateway. Writes are serialized per service instance, so two concurrent
- * `put` calls for one session merge in arrival order instead of losing the
- * earlier patch's untouched key.
+ * Validate one incoming frame width in px.
+ * @param value - raw width member.
+ * @param field - wire path used in the thrown message.
+ * @param options - whether 0 is meaningful (a collapsed sidebar).
+ * @returns the rounded width.
+ * @throws TypeError for a non-number; RangeError outside 0–{@link MAX_WIDTH_PX}.
  */
-class EnpoiUiStateService extends TypertRemoteService {
+function requireWidth(value: unknown, field: string, options: { readonly zero: boolean }): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new TypeError(`enpoiUiState: ${field} must be a finite number`)
+  }
+  if (value < 0 || (!options.zero && value === 0) || value > MAX_WIDTH_PX) {
+    const lower = options.zero ? 'a non-negative' : 'a positive'
+    throw new RangeError(`enpoiUiState: ${field} must be ${lower} width at most ${MAX_WIDTH_PX}px`)
+  }
+  return Math.round(value)
+}
+
+/**
+ * Validate one incoming layout record: the widths only, never the server stamp.
+ * @param value - raw `putLayout` argument.
+ * @returns the validated widths, with exactly the stored fields.
+ * @throws TypeError for a malformed record; RangeError for out-of-range widths.
+ */
+export function requireLayoutWidths(value: unknown): Omit<LayoutWidths, 'updatedAt'> {
+  if (!isRecord(value)) {
+    throw new TypeError('enpoiUiState: layout widths must be an object')
+  }
+  const sidebar = requireWidth(value.sidebar, 'layout.sidebar', { zero: true })
+  const rightbar = value.rightbar
+  if (rightbar === undefined) return { sidebar }
+  if (!isRecord(rightbar)) {
+    throw new TypeError('enpoiUiState: layout.rightbar must be an object')
+  }
+  const px = requireWidth(rightbar.px, 'layout.rightbar.px', { zero: false })
+  const ratio = rightbar.ratio
+  if (typeof ratio !== 'number' || !Number.isFinite(ratio) || ratio <= 0 || ratio > 1) {
+    throw new RangeError('enpoiUiState: layout.rightbar.ratio must be a finite fraction above 0 and at most 1')
+  }
+  return { sidebar, rightbar: { px, ratio } }
+}
+
+/**
+ * The `enpoiUiState` Remote namespace: `get`/`put` for one session's UI state
+ * and `getLayout`/`putLayout` for the host-wide column widths, over the shared
+ * Typert Gateway. Writes are serialized per service instance, so two
+ * concurrent calls for one record apply in arrival order instead of losing the
+ * earlier call's untouched key.
+ */
+export class EnpoiUiStateService extends TypertRemoteService {
   /** The domain form must be mounted before the store can open. */
   static inject = ['storageDomain']
 
-  private table?: KvTable<string, UiStateValue>
+  private sessions?: KvTable<string, UiStateValue>
+  private layout?: KvTable<string, LayoutWidths>
   private tail: Promise<unknown> = Promise.resolve()
 
   /**
@@ -200,11 +283,12 @@ class EnpoiUiStateService extends TypertRemoteService {
     super(ctx, 'enpoiUiState')
   }
 
-  /** Open the `ui_state` domain and keep its table handle for the service lifetime. */
+  /** Open the `ui_state` domain and keep its table handles for the service lifetime. */
   protected async [Service.init](): Promise<void> {
     const domain = await this.ctx.storageDomain.open(uiStateDomainSpec)
     this.ctx.effect(() => () => domain.close(), 'enpoiUiState.domainClose')
-    this.table = domain.table('sessions')
+    this.sessions = domain.table('sessions')
+    this.layout = domain.table('layout')
   }
 
   /**
@@ -215,7 +299,7 @@ class EnpoiUiStateService extends TypertRemoteService {
   @Remote
   async get(sessionId: string): Promise<UiStateValue> {
     const key = requireSessionId(sessionId)
-    return this.requireTable().get(key) ?? { updatedAt: 0 }
+    return this.requireTable(this.sessions).get(key) ?? { updatedAt: 0 }
   }
 
   /**
@@ -238,11 +322,35 @@ class EnpoiUiStateService extends TypertRemoteService {
     const surface = hasSurface ? requireSurface(patch.surface) : undefined
     const updatedAt = Date.now()
     await this.enqueue(async () => {
-      const table = this.requireTable()
+      const table = this.requireTable(this.sessions)
       const next: UiStateValue = { ...table.get(key), updatedAt }
       if (draft !== undefined) next.draft = draft
       if (surface !== undefined) next.surface = surface
       await table.put(key, next)
+    })
+    return { ok: true, updatedAt }
+  }
+
+  /**
+   * The host's column width preferences.
+   * @returns the stored record, or `{ sidebar: 0, updatedAt: 0 }` when nothing is stored.
+   */
+  @Remote
+  async getLayout(): Promise<LayoutWidths> {
+    return this.requireTable(this.layout).get(LAYOUT_KEY) ?? { sidebar: 0, updatedAt: 0 }
+  }
+
+  /**
+   * Replace the host's column width preferences.
+   * @param widths - the widths to store; the server stamps `updatedAt`.
+   * @returns the new server `updatedAt` after the write is durable.
+   */
+  @Remote
+  async putLayout(widths: LayoutWidths): Promise<{ ok: true; updatedAt: number }> {
+    const next = requireLayoutWidths(widths)
+    const updatedAt = Date.now()
+    await this.enqueue(async () => {
+      await this.requireTable(this.layout).put(LAYOUT_KEY, { ...next, updatedAt })
     })
     return { ok: true, updatedAt }
   }
@@ -255,11 +363,11 @@ class EnpoiUiStateService extends TypertRemoteService {
   }
 
   /** The opened domain table; a call before init resolves is a protocol violation. */
-  private requireTable(): KvTable<string, UiStateValue> {
-    if (this.table === undefined) {
+  private requireTable<T>(table: KvTable<string, T> | undefined): KvTable<string, T> {
+    if (table === undefined) {
       throw new Error('enpoiUiState is unavailable: the ui_state domain has not opened')
     }
-    return this.table
+    return table
   }
 }
 
