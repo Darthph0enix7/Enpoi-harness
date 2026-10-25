@@ -58,7 +58,7 @@ kind: "package-reference"
 
 面板取会话区的底色与正文字号，而不是自成一层浮起的表面：它是页面的一列，不是压在页面上的卡片。
 
-`rightbar` 入口是 root 作用域的控制器。它读取 `usePanelInfo`，仅在选中会话界面时挂载 session 作用域的 `rightbar.session` 子树。切换到全局面板会隐藏右侧 Sidebar 并释放框架列宽，但不删除会话的 tab 状态。
+`rightbar` 入口是 root 作用域的控制器。它为当前 Session 挂载 session 作用域的 `rightbar.session` 子树。全局面板只在 `main` 出口替换会话区，不卸载这一列，因此面板的展开状态与框架列宽在切换中保持不变，既不会收起也不会重新展开。
 
 <a id="state"></a>
 ## 状态

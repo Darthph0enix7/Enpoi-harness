@@ -350,20 +350,13 @@
 }
 
 /*
- * enpoi: with the panel collapsed the frame drops its right track, and the
- * rail hangs over the conversation's last 44px. Reserve that strip on the
- * centre column for exactly as long as the rail is mounted: the body marker
- * comes from the rail itself, so a global panel (which unmounts the seat)
- * keeps the full width.
- */
-/*
  * enpoi: the rail's strip is reserved on the centre column for exactly the
  * width of the parked track: 44 px while the panel is collapsed, easing to 0
  * with the frame's own --dsh-rightbar-progress — the same value the grid track
  * and the panel's slide read. One value for all three consumers means the
  * conversation's glass edge and the panel's moving left edge cannot separate,
  * including through a mid-ride retarget. The body marker comes from the rail
- * itself, so a global panel (which unmounts the seat) keeps the full width.
+ * itself, so a host with no rail column keeps the full width.
  */
 :global(body[data-sidebar-right-rail-mounted] div:has(+ [data-rightbar-col])) {
   padding-right: calc(44px * (1 - var(--dsh-rightbar-progress, 0)));

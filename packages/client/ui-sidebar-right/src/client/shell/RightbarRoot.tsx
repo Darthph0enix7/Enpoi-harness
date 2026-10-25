@@ -32,16 +32,21 @@ export type RightbarRootProps =
   & InjectFace<RightbarRootInjected>
 
 /**
- * Render the Session-bound Sidebar only while the Conversation is selected.
- * @param props - frame geometry, panel selection, and the authorized Session renderer.
+ * Render the Session-bound Sidebar for the current Session.
+ *
+ * The seat stays mounted while a global main panel occupies the center: a
+ * global panel replaces the Conversation, not the right column. Unmounting
+ * here would let the seat's leave report collapse the frame's right track and
+ * the remount would open it again, so switching panels visibly collapsed and
+ * restored the right bar. Keeping the seat mounted leaves its presentation
+ * report — and therefore the track and the open state — untouched.
+ * @param props - frame geometry, the rail's faces, and the authorized Session renderer.
  * @returns the current Session's right Sidebar, or the session-less icon rail.
  */
 export function RightbarRoot({
-  usePanelInfo, SessionProvider, renderSlot, width, viewportWidth, canShow, mobile,
+  SessionProvider, renderSlot, width, viewportWidth, canShow, mobile,
   useRail, useRailItems, stageKind, t,
 }: RightbarRootProps): ReactNode {
-  const visible = usePanelInfo(info => info.activePanelId === null)
-  if (!visible) return null
   // enpoi: the icon rail is chrome, not session content — it stays mounted in
   // the no-session state (the wizard tour spotlights it before any session
   // exists) and records the operator's kind so the first session opens it.

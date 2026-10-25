@@ -55,7 +55,9 @@ export function MobileSurfaces({ useRailItems, useRail, usePanelInfo, selectKind
       {items.map((item) => {
         const Icon = item.icon
         const label = item.title()
-        const active = rail.open && item.kind === activeKind
+        // No explicit intent leaves the restored surface to answer; the entry
+        // stays active unless the operator closed the panel.
+        const active = rail.open !== false && item.kind === activeKind
         return (
           <button
             key={item.kind}

@@ -12,8 +12,13 @@ import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client
 
 /** The persisted rail facts. */
 export interface SidebarRightRailState {
-  /** Whether the panel is open; only an explicit operator gesture flips this. */
-  readonly open: boolean
+  /**
+   * The operator's explicit open intent, or `null` until a gesture records one.
+   * A restored session surface supplies the effective state while it is absent:
+   * the surface record is host-mirrored, while this rail is per origin, so a
+   * fresh origin must not close a panel the host says was open.
+   */
+  readonly open: boolean | null
   /** The lit page kind; `null` until the first choice, resolved to the first rail item. */
   readonly kind: string | null
   /** The editor pane's width in px. */
@@ -41,6 +46,21 @@ export function clampEditorWidth(px: number): number {
   return Math.min(EDITOR_WIDTH_MAX, Math.max(EDITOR_WIDTH_MIN, Math.round(px)))
 }
 
+/**
+ * Resolve the panel's effective open state for the surface currently drawn.
+ *
+ * An explicit operator intent wins. Without one, the restored surface answers
+ * — the session record is host-mirrored and therefore outlives an entry
+ * origin, while the rail's own intent is stored per origin. Only a session
+ * with neither opens by default, which is the shipped first-load state.
+ * @param intent - the rail's explicit intent, or null while it has none.
+ * @param expanded - the drawn surface's expanded state, or undefined before it exists.
+ * @returns whether the panel should be open.
+ */
+export function resolveRailOpen(intent: boolean | null, expanded: boolean | undefined): boolean {
+  return intent ?? expanded ?? true
+}
+
 /** Root-owned rail preferences shared by the panel seat, the rail, and the corner expand button. */
 export class SidebarRightRail {
   /** The observable state; components read it through the inject hook compartment. */
@@ -52,12 +72,12 @@ export class SidebarRightRail {
    */
   constructor() {
     this.state = createSnapshotStore<SidebarRightRailState>(
-      { open: true, kind: null, editorWidth: EDITOR_WIDTH_DEFAULT },
+      { open: null, kind: null, editorWidth: EDITOR_WIDTH_DEFAULT },
       { persist: { name: STORAGE_KEY } },
     )
     const stored = this.state.getSnapshot()
     this.state.set({
-      open: typeof stored.open === 'boolean' ? stored.open : true,
+      open: typeof stored.open === 'boolean' ? stored.open : null,
       kind: typeof stored.kind === 'string' ? stored.kind : null,
       editorWidth: typeof stored.editorWidth === 'number' && Number.isFinite(stored.editorWidth)
         ? clampEditorWidth(stored.editorWidth)

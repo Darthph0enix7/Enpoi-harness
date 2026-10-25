@@ -51,7 +51,7 @@ import type { HalvesFit, LayoutState, PaneId } from '@deepseek-ai/dsh-client-ui-
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { GUIDE_KIND, pageAddress } from '../contract/seed.ts'
 import { dockLabels } from '../labels.ts'
-import { clampEditorWidth, EDITOR_WIDTH_MIN } from '../rail.ts'
+import { clampEditorWidth, EDITOR_WIDTH_MIN, resolveRailOpen } from '../rail.ts'
 import type { SidebarRightRailState } from '../rail.ts'
 import type { SidebarRightOpenTabOptions } from '../service.ts'
 import type { SidebarRightRailItem, SidebarRightTabDefinition } from '../tab-registry.ts'
@@ -61,6 +61,7 @@ import type { TabOccurrence } from '../tab-domain.ts'
 import type { SidebarRightTabNavigation } from '../contract/slots.ts'
 import type { TabHookContext } from '../tab-info.ts'
 import { closeWithPaneFocus, openWithPaneFocus } from './close-focus.ts'
+import { seatLeaveReports } from './leave-report.ts'
 import css from './SidebarRight.module.css'
 
 /** The store share the seat receives. */
@@ -386,7 +387,7 @@ export function Rail({
 }): ReactNode {
   // enpoi: the rail's stylesheet reserves its 44px strip on the centre column
   // while the panel is collapsed; the marker lets that rule require a mounted
-  // rail, since a global panel unmounts this seat entirely.
+  // rail, so a host with no rail column keeps the full width.
   useEffect(() => {
     document.body.setAttribute(RAIL_MARKER, '')
     return () => { document.body.removeAttribute(RAIL_MARKER) }
@@ -700,25 +701,6 @@ const EDITOR_RESIZE_MARKER = 'data-sidebar-right-editor-resizing'
  * frame learns the panel's presentation, and where `ctx.sidebarRight` learns
  * which session it is acting on, because this is the seat that knows both.
  */
-/**
- * enpoi: a seat leaving during a session switch would hand the frame a
- * transient no-surface report (collapse) that the replacement seat has to take
- * back in the same frame. The leave report is deferred by a microtask; the
- * replacement seat cancels it on mount, while a true unmount still reports.
- */
-let pendingLeaveReport: (() => void) | undefined
-function scheduleLeaveReport(report: () => void): void {
-  pendingLeaveReport = report
-  queueMicrotask(() => {
-    const run = pendingLeaveReport
-    pendingLeaveReport = undefined
-    run?.()
-  })
-}
-function cancelLeaveReport(): void {
-  pendingLeaveReport = undefined
-}
-
 export function RightbarSeat({
   sessionId, width, viewportWidth, canShow, mobile, useStore, actions, t, renderSlot, syncPresentation, bindService, openTab, closeTab,
   selectKind, setEditorWidth, setRightbarWidth, useTabTypes, useTabNavigation, useRail, useRailItems, occurrence,
@@ -750,8 +732,23 @@ export function RightbarSeat({
   // first registered page. It stays lit whether or not the panel is drawn.
   const litKind = railState.kind ?? railItems[0]?.kind
   const litDefinition = useTabTypes(list => list.find(definition => definition.kind === litKind))
+  // The rail's explicit intent is per origin; the surface it claims to describe
+  // is host-mirrored. Without an intent, the surface the seat first saw answers
+  // — the restored `expanded` value — so a fresh entry origin cannot close a
+  // panel the host says was open. A surface that becomes expanded from outside
+  // the rail (the host record arriving after the first paint) updates that
+  // fallback; an internal collapse does not, so a closed last tab keeps the
+  // rail's shipped open default.
+  const restoredOpen = useRef<{ sessionId: SessionId; expanded: boolean } | undefined>(undefined)
+  if (surface !== undefined) {
+    const held = restoredOpen.current
+    if (held?.sessionId !== sessionId || (surface.layout.expanded && !held.expanded)) {
+      restoredOpen.current = { sessionId, expanded: surface.layout.expanded }
+    }
+  }
+  const openIntent = resolveRailOpen(railState.open, restoredOpen.current?.expanded)
 
-  // enpoi: apply the global intent to whichever session this seat now draws: a switch
+  // enpoi: apply the intent to whichever session this seat now draws: a switch
   // from a session into a subagent session (and back) must not close the panel
   // or drop its page. The narrow frame's own collapse is a responsive fact, not
   // an operator choice, so `canShow` guards re-opening there.
@@ -762,7 +759,7 @@ export function RightbarSeat({
   // page, so no open animation plays for what the operator never closed.
   useLayoutEffect(() => {
     if (surface === undefined) {
-      if (railState.open && canShow && litKind !== undefined && litDefinition !== undefined) {
+      if (openIntent && canShow && litKind !== undefined && litDefinition !== undefined) {
         const address = pageAddress(litKind)
         actions.openContent(sessionId, {
           kind: litKind, contentId: address, title: litDefinition.title(address),
@@ -772,7 +769,7 @@ export function RightbarSeat({
       actions.open(sessionId)
       return
     }
-    if (railState.open) {
+    if (openIntent) {
       if (litKind === undefined || !canShow) return
       const address = pageAddress(litKind)
       // A kind that allows multiple pages stores each under its own address:
@@ -787,7 +784,7 @@ export function RightbarSeat({
     } else if (surface.layout.expanded) {
       actions.setExpanded(sessionId, false)
     }
-  }, [actions, canShow, litDefinition, litKind, railState.open, sessionId, surface])
+  }, [actions, canShow, litDefinition, litKind, openIntent, sessionId, surface])
 
   useLayoutEffect(() => {
     if (shown && !fullscreen && !canShow) actions.setExpanded(sessionId, false)
@@ -801,6 +798,8 @@ export function RightbarSeat({
     else actions.setMode(sessionId, 'push')
   }, shown && fullscreen)
 
+  // The seat's identity for the leave reports: one token per mounted seat.
+  const seatToken = useMemo(() => Symbol('rightbar-seat'), [])
   // Fullscreen leaves the previous column report in force until its own slide
   // completes. Normal presentation and zero-duration transitions report before paint.
   useLayoutEffect(() => {
@@ -808,7 +807,7 @@ export function RightbarSeat({
     // effect above opens it before paint; reporting the interim no-surface state
     // would hand the frame a collapse it would have to take back in the same
     // frame. The previous report stays in force for exactly that commit.
-    if (surface === undefined && railState.open && canShow) return
+    if (surface === undefined && openIntent && canShow) return
     let disposed = false
     const reportWhenCovered = (): void => {
       if (disposed) return
@@ -827,14 +826,19 @@ export function RightbarSeat({
     }
     reportWhenCovered()
     return () => { disposed = true }
-  }, [sessionId, shown, track, fullscreen, syncPresentation, surface, railState.open, canShow])
+  }, [sessionId, shown, track, fullscreen, syncPresentation, surface, openIntent, canShow])
   // Leaving is part of that report: a seat that unmounts with its session must
   // hand the track back rather than leave one sized for a surface nobody draws.
-  useLayoutEffect(() => () => {
-    scheduleLeaveReport(() => { syncPresentation({ shown: false, track: false, fullscreen: false }) })
-  }, [syncPresentation])
-  // The replacement seat (session switch) cancels the departing seat's report.
-  useLayoutEffect(() => { cancelLeaveReport() }, [])
+  // The report is keyed by this seat and deferred a microtask, so a replacement
+  // arriving in the same commit suppresses it while two true departures both run.
+  useLayoutEffect(() => {
+    seatLeaveReports.enter(seatToken)
+    return () => {
+      seatLeaveReports.leave(seatToken, () => {
+        syncPresentation({ shown: false, track: false, fullscreen: false })
+      })
+    }
+  }, [seatToken, syncPresentation])
 
   // Republished on every committed change: the service's readers answer from the
   // last commit, and its commands act on the session actually on screen.

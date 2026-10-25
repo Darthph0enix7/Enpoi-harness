@@ -13,7 +13,10 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SessionReference } from '@deepseek-ai/dsh-api-session-controller/client'
 import { apply, inject } from '../src/client/index.ts'
 import { intentsFor } from '../src/client/shell/SidebarRight.tsx'
+import { SeatLeaveReports } from '../src/client/shell/leave-report.ts'
 import { GUIDE_KIND } from '../src/client/contract/seed.ts'
+import { resolveRailOpen } from '../src/client/rail.ts'
+import { SURFACES_STORAGE_KEY } from '../src/client/surface-storage.ts'
 import type { SidebarRightTabInfo, SidebarRightTabMenuOwnerProps } from '../src/client/contract/slots.ts'
 import type { createSidebarRightStore } from '../src/client/stores.ts'
 
@@ -155,23 +158,76 @@ function element(container: HTMLElement, selector: string): HTMLElement {
 }
 
 describe('RightbarSeat presentation', () => {
-  it('hides for a global main panel and retains the Session sidebar state', async () => {
+  it('keeps the panel and its track through a global main panel switch', async () => {
     const h = await mountSeat()
-    h.open('retained.txt')
+    const record = h.open('retained.txt')
     const retained = h.layout()
+    const panel = element(h.view.container, '[data-sidebar-right-panel]')
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(true)
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
+    h.frame.openRightbar.mockClear()
+    h.frame.closeRightbar.mockClear()
     act(() => { h.runtime.panelInfo.set({ activePanelId: 'other-panel' as MainPanelId }) })
-    expect(h.view.container.querySelector('[data-sidebar-right-panel]')).toBeNull()
-    expect(h.frame.closeRightbar).toHaveBeenCalled()
+    // The seat is not unmounted by the main-panel switch: the same panel node
+    // stays open and the frame never sees a collapse it would have to undo.
+    expect(element(h.view.container, '[data-sidebar-right-panel]')).toBe(panel)
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(true)
+    expect(h.frame.closeRightbar).not.toHaveBeenCalled()
+    expect(h.frame.openRightbar).not.toHaveBeenCalled()
     expect(h.layout()).toBe(retained)
     act(() => { h.runtime.panelInfo.set({ activePanelId: null }) })
-    expect(h.view.container.querySelector('[data-sidebar-right-panel]')).not.toBeNull()
-    expect(h.layout()).toBe(retained)
+    expect(element(h.view.container, '[data-sidebar-right-panel]')).toBe(panel)
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(true)
+    expect(h.layout().tabs[record.id]).toBeDefined()
+    expect(h.frame.closeRightbar).not.toHaveBeenCalled()
+  })
+
+  it('keeps the panel open when a host-restored surface arrives after the first collapsed paint', async () => {
+    const h = await mountSeat(1440, true, 0)
+    expect(h.layout().expanded).toBe(false)
+    h.frame.closeRightbar.mockClear()
+    // The host adoption lands as a store commit, after the seat's first paint
+    // materialized the column collapsed with no rail intent recorded.
+    act(() => { h.actions.setExpanded(SESSION, true) })
+    expect(h.layout().expanded).toBe(true)
+    expect(h.frame.closeRightbar).not.toHaveBeenCalled()
+  })
+
+  it('keeps a host-restored open surface on a fresh origin with no rail intent', async () => {
+    // A fresh origin holds no rail record; the surface record is the
+    // host-mirrored fact and arrives as the session's stored column. Its
+    // `expanded: true` must stand until the operator records an intent.
+    localStorage.setItem(SURFACES_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      sessions: {
+        [SESSION]: {
+          layout: {
+            nodes: {
+              pane1: { kind: 'pane', id: 'pane1', host: 'dock', tabs: ['tab1'], activeTabId: 'tab1' },
+            },
+            tabs: {
+              tab1: { id: 'tab1', kind: 'text', contentId: 'sidebar://text', title: 'text' },
+            },
+            rootId: 'pane1', floats: [], activePaneId: 'pane1', expanded: true, mode: 'push',
+          },
+          minted: 2,
+          navigation: { tab1: { address: 'sidebar://text', revision: 1 } },
+          updatedAt: 1,
+        },
+      },
+    }))
+    const h = await mountSeat(1440, true, 1)
+    // The rail recorded no intent, and the restored surface answered instead.
+    expect(h.controller.rail.state.getSnapshot().open).toBeNull()
+    expect(h.layout().expanded).toBe(true)
+    expect(element(h.view.container, '[data-sidebar-right-panel]').hasAttribute('data-sidebar-right-open')).toBe(true)
+    expect(h.frame.closeRightbar).not.toHaveBeenCalled()
   })
 
   it('opens the first rail item at mount and keeps the tab strip controls reachable', async () => {
     const h = await mountSeat(1440, true, 2)
-    // The rail is global state, open by default: the panel shows the first
-    // registered page kind without a click.
+    // With no explicit intent, the shipped first-load default is open: the
+    // panel shows the first registered page kind without a click.
     const rail = element(h.view.container, '[data-sidebar-right-rail]')
     expect(rail.querySelectorAll('[data-sidebar-right-rail-item]')).toHaveLength(1)
     expect(h.layout().expanded).toBe(true)
@@ -892,5 +948,57 @@ describe('RightbarSeat on the mobile container', () => {
     expect(editorTabId).toBeDefined()
     expect(h.view.container.querySelector('[data-sidebar-right-file-push]')).toBeNull()
     expect(h.view.container.querySelector(`[data-sidebar-right-editor] [data-tab-body="${editorTabId}"]`)).not.toBeNull()
+  })
+})
+
+describe('resolveRailOpen', () => {
+  it('prefers explicit intent, then the restored surface, then the shipped open default', () => {
+    expect(resolveRailOpen(true, false)).toBe(true)
+    expect(resolveRailOpen(false, true)).toBe(false)
+    expect(resolveRailOpen(null, true)).toBe(true)
+    expect(resolveRailOpen(null, false)).toBe(false)
+    expect(resolveRailOpen(null, undefined)).toBe(true)
+  })
+})
+
+describe('SeatLeaveReports', () => {
+  it('runs both reports when two seats unmount in one commit', async () => {
+    const reports = new SeatLeaveReports()
+    const firstSeat = Symbol('first')
+    const secondSeat = Symbol('second')
+    const first = vi.fn()
+    const second = vi.fn()
+    reports.enter(firstSeat)
+    reports.enter(secondSeat)
+    reports.leave(firstSeat, first)
+    reports.leave(secondSeat, second)
+    await Promise.resolve()
+    expect(first).toHaveBeenCalledOnce()
+    expect(second).toHaveBeenCalledOnce()
+  })
+
+  it('keeps only the latest report for one seat token', async () => {
+    const reports = new SeatLeaveReports()
+    const seat = Symbol('seat')
+    const first = vi.fn()
+    const second = vi.fn()
+    reports.enter(seat)
+    reports.leave(seat, first)
+    reports.leave(seat, second)
+    await Promise.resolve()
+    expect(first).not.toHaveBeenCalled()
+    expect(second).toHaveBeenCalledOnce()
+  })
+
+  it('drops a departing report when a replacement seat mounts in the same commit', async () => {
+    const reports = new SeatLeaveReports()
+    const departing = Symbol('departing')
+    const replacement = Symbol('replacement')
+    const close = vi.fn()
+    reports.enter(departing)
+    reports.leave(departing, close)
+    reports.enter(replacement)
+    await Promise.resolve()
+    expect(close).not.toHaveBeenCalled()
   })
 })
