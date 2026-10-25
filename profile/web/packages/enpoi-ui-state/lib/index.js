@@ -19731,6 +19731,8 @@ var MAX_SESSION_ID_CHARS = 200;
 var MAX_DRAFT_TEXT_CHARS = 1e5;
 var MAX_SURFACE_JSON_CHARS = 64e3;
 var SESSION_ID_RE = /^[a-zA-Z0-9_-]+$/;
+var LAYOUT_KEY = "layout";
+var MAX_WIDTH_PX = 2e4;
 var uiStateRecordSchema = external_exports.object({
   draft: external_exports.object({
     text: external_exports.string(),
@@ -19738,6 +19740,11 @@ var uiStateRecordSchema = external_exports.object({
     clientId: external_exports.string()
   }).optional(),
   surface: external_exports.unknown().optional(),
+  updatedAt: external_exports.number()
+});
+var layoutRecordSchema = external_exports.object({
+  sidebar: external_exports.number(),
+  rightbar: external_exports.object({ px: external_exports.number(), ratio: external_exports.number() }).optional(),
   updatedAt: external_exports.number()
 });
 var uiStateDomainSpec = defineDomain({
@@ -19752,6 +19759,9 @@ var uiStateDomainSpec = defineDomain({
     // only the type-level skew of the duplicated zod copies.
     sessions: domainTable(
       uiStateRecordSchema
+    ),
+    layout: domainTable(
+      layoutRecordSchema
     )
   }
 });
@@ -19807,7 +19817,34 @@ function requireSurface(value) {
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-var _put_dec, _get_dec, _a3, _init, _b;
+function requireWidth(value, field, options) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new TypeError(`enpoiUiState: ${field} must be a finite number`);
+  }
+  if (value < 0 || !options.zero && value === 0 || value > MAX_WIDTH_PX) {
+    const lower = options.zero ? "a non-negative" : "a positive";
+    throw new RangeError(`enpoiUiState: ${field} must be ${lower} width at most ${MAX_WIDTH_PX}px`);
+  }
+  return Math.round(value);
+}
+function requireLayoutWidths(value) {
+  if (!isRecord(value)) {
+    throw new TypeError("enpoiUiState: layout widths must be an object");
+  }
+  const sidebar = requireWidth(value.sidebar, "layout.sidebar", { zero: true });
+  const rightbar = value.rightbar;
+  if (rightbar === void 0) return { sidebar };
+  if (!isRecord(rightbar)) {
+    throw new TypeError("enpoiUiState: layout.rightbar must be an object");
+  }
+  const px = requireWidth(rightbar.px, "layout.rightbar.px", { zero: false });
+  const ratio = rightbar.ratio;
+  if (typeof ratio !== "number" || !Number.isFinite(ratio) || ratio <= 0 || ratio > 1) {
+    throw new RangeError("enpoiUiState: layout.rightbar.ratio must be a finite fraction above 0 and at most 1");
+  }
+  return { sidebar, rightbar: { px, ratio } };
+}
+var _putLayout_dec, _getLayout_dec, _put_dec, _get_dec, _a3, _init, _b;
 var EnpoiUiStateService = class extends (_b = TypertRemoteService) {
   /**
    * @param ctx - owning Host Context (Typert binding is installed by the base).
@@ -19815,18 +19852,20 @@ var EnpoiUiStateService = class extends (_b = TypertRemoteService) {
   constructor(ctx) {
     super(ctx, "enpoiUiState");
     __runInitializers(_init, 5, this);
-    __publicField(this, "table");
+    __publicField(this, "sessions");
+    __publicField(this, "layout");
     __publicField(this, "tail", Promise.resolve());
   }
-  /** Open the `ui_state` domain and keep its table handle for the service lifetime. */
-  async [(_a3 = Service.init, _get_dec = [Remote], _put_dec = [Remote], _a3)]() {
+  /** Open the `ui_state` domain and keep its table handles for the service lifetime. */
+  async [(_a3 = Service.init, _get_dec = [Remote], _put_dec = [Remote], _getLayout_dec = [Remote], _putLayout_dec = [Remote], _a3)]() {
     const domain2 = await this.ctx.storageDomain.open(uiStateDomainSpec);
     this.ctx.effect(() => () => domain2.close(), "enpoiUiState.domainClose");
-    this.table = domain2.table("sessions");
+    this.sessions = domain2.table("sessions");
+    this.layout = domain2.table("layout");
   }
   async get(sessionId) {
     const key = requireSessionId(sessionId);
-    return this.requireTable().get(key) ?? { updatedAt: 0 };
+    return this.requireTable(this.sessions).get(key) ?? { updatedAt: 0 };
   }
   async put(sessionId, patch) {
     const key = requireSessionId(sessionId);
@@ -19839,11 +19878,25 @@ var EnpoiUiStateService = class extends (_b = TypertRemoteService) {
     const surface = hasSurface ? requireSurface(patch.surface) : void 0;
     const updatedAt = Date.now();
     await this.enqueue(async () => {
-      const table = this.requireTable();
+      const table = this.requireTable(this.sessions);
       const next = { ...table.get(key), updatedAt };
       if (draft !== void 0) next.draft = draft;
       if (surface !== void 0) next.surface = surface;
       await table.put(key, next);
+    });
+    return { ok: true, updatedAt };
+  }
+  async getLayout() {
+    return this.requireTable(this.layout).get(LAYOUT_KEY) ?? { sidebar: 0, updatedAt: 0 };
+  }
+  async putLayout(widths) {
+    const next = requireLayoutWidths(widths);
+    const updatedAt = Date.now();
+    await this.enqueue(async () => {
+      const table = this.requireTable(this.layout);
+      const merged = { ...table.get(LAYOUT_KEY), sidebar: next.sidebar, updatedAt };
+      if (next.rightbar !== void 0) merged.rightbar = next.rightbar;
+      await table.put(LAYOUT_KEY, merged);
     });
     return { ok: true, updatedAt };
   }
@@ -19854,16 +19907,18 @@ var EnpoiUiStateService = class extends (_b = TypertRemoteService) {
     return result;
   }
   /** The opened domain table; a call before init resolves is a protocol violation. */
-  requireTable() {
-    if (this.table === void 0) {
+  requireTable(table) {
+    if (table === void 0) {
       throw new Error("enpoiUiState is unavailable: the ui_state domain has not opened");
     }
-    return this.table;
+    return table;
   }
 };
 _init = __decoratorStart(_b);
 __decorateElement(_init, 1, "get", _get_dec, EnpoiUiStateService);
 __decorateElement(_init, 1, "put", _put_dec, EnpoiUiStateService);
+__decorateElement(_init, 1, "getLayout", _getLayout_dec, EnpoiUiStateService);
+__decorateElement(_init, 1, "putLayout", _putLayout_dec, EnpoiUiStateService);
 __decoratorMetadata(_init, EnpoiUiStateService);
 /** The domain form must be mounted before the store can open. */
 __publicField(EnpoiUiStateService, "inject", ["storageDomain"]);
@@ -19871,7 +19926,10 @@ function apply(ctx) {
   ctx.plugin(EnpoiUiStateService);
 }
 export {
+  EnpoiUiStateService,
+  LAYOUT_KEY,
   apply,
   inject,
-  name
+  name,
+  requireLayoutWidths
 };

@@ -79,13 +79,13 @@ describe('layout record', () => {
     expect(await service.getLayout()).toEqual({ ...widths, updatedAt: written.updatedAt })
   })
 
-  it('replaces the record wholesale, so a cleared right width stays cleared', async () => {
+  it('keeps the stored right width when a client without one writes its sidebar', async () => {
     const { service } = await openService()
     await service.putLayout(widths)
     await service.putLayout({ sidebar: 280 })
     const stored = await service.getLayout()
     expect(stored.sidebar).toBe(280)
-    expect(stored).not.toHaveProperty('rightbar')
+    expect(stored.rightbar).toEqual({ px: 720, ratio: 0.375 })
   })
 
   it('serializes concurrent writes and keeps the last one', async () => {

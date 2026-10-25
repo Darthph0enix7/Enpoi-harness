@@ -358,6 +358,40 @@ describe('host width record', () => {
     expect(resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, 1920)).toBe(640)
   })
 
+  it('keeps the local right width when the host record carries none', () => {
+    localStorage.setItem(WIDTHS_KEY, JSON.stringify({ sidebar: 280, rightbar: preference(700, 1920) }))
+    const { store, actions } = createLayoutStore().create()
+    actions.adoptWidths({ sidebar: 300 })
+    expect(store.getSnapshot().layoutInfo.sidebar).toBe(300)
+    expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(700, 1920))
+    expect(readStored()).toEqual({ sidebar: 300, rightbar: preference(700, 1920) })
+  })
+
+  it('never reports an opening to the host', () => {
+    const persistHost = vi.fn<(widths: LayoutWidths) => void>()
+    const { actions } = createLayoutStore({ persistHost }).create()
+    actions.openRightbar(true, false)
+    actions.closeRightbar()
+    actions.openRightbar(true, true)
+    expect(persistHost).not.toHaveBeenCalled()
+  })
+
+  it('survives an origin change through the host record', () => {
+    const pushed: LayoutWidths[] = []
+    const first = createLayoutStore({ persistHost: (widths) => { pushed.push(widths) } }).create()
+    first.actions.setRightbar(720)
+    expect(pushed).toHaveLength(1)
+    // Another origin starts with no cache at all.
+    localStorage.clear()
+    const second = createLayoutStore().create()
+    expect(second.store.getSnapshot().layoutInfo.rightbar).toBeNull()
+    const record = pushed[0]!
+    second.actions.adoptWidths(record.rightbar === null
+      ? { sidebar: record.sidebar }
+      : { sidebar: record.sidebar, rightbar: record.rightbar })
+    expect(resolveRightbarWidth(second.store.getSnapshot().layoutInfo.rightbar, 1920)).toBe(720)
+  })
+
   it('does not mirror an adopted record back to the host', () => {
     const persistHost = vi.fn<(widths: LayoutWidths) => void>()
     const { actions } = createLayoutStore({ persistHost }).create()

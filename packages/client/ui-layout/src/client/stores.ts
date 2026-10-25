@@ -22,6 +22,16 @@ export interface LayoutWidths {
 }
 
 /**
+ * The host record's width members. The right panel key exists only when some
+ * client dragged one: a device that never dragged a right panel (a phone, a
+ * fresh origin) must not erase the width another device chose.
+ */
+export interface HostLayoutWidths {
+  readonly sidebar: number
+  readonly rightbar?: RightbarPreference
+}
+
+/**
  * Read this origin's cached column widths. The record is deliberately not
  * clamped to the current frame: clamping a stored preference to a shrunken
  * window used to be persisted onward by the next sidebar gesture, which
@@ -140,7 +150,7 @@ type LayoutActions = {
   setRightbar: (draft: LayoutState, px: number) => void
   openRightbar: (draft: LayoutState, track: boolean, fullscreen: boolean) => void
   closeRightbar: (draft: LayoutState) => void
-  adoptWidths: (draft: LayoutState, widths: LayoutWidths) => void
+  adoptWidths: (draft: LayoutState, widths: HostLayoutWidths) => void
 }
 
 /** Host durability of the committed width record; the layout plugin supplies it at apply. */
@@ -255,13 +265,14 @@ export function createLayoutStore(options: LayoutStoreOptions = {}): EngineStore
         d.layoutInfo.rightbarFullscreen = false
       },
       // The host record outranks this origin's cache, but never a gesture the
-      // operator made while the read was in flight. The adopted value is
-      // written to the local cache only: mirroring it back is a no-op write.
-      adoptWidths: (d, widths: LayoutWidths) => {
+      // operator made while the read was in flight. A record without a right
+      // panel member leaves the local width alone; the adopted value is
+      // written to the local cache only, never mirrored back.
+      adoptWidths: (d, widths: HostLayoutWidths) => {
         if (d.layoutInfo.widthsEdited) return
         d.layoutInfo.sidebar = widths.sidebar === 0 ? 0 : clampWidth(widths.sidebar, SIDEBAR_MIN, SIDEBAR_MAX)
-        d.layoutInfo.rightbar = widths.rightbar
-        persistWidths({ sidebar: d.layoutInfo.sidebar, rightbar: widths.rightbar })
+        if (widths.rightbar !== undefined) d.layoutInfo.rightbar = widths.rightbar
+        persistWidths({ sidebar: d.layoutInfo.sidebar, rightbar: d.layoutInfo.rightbar })
       },
     },
   })

@@ -46,7 +46,7 @@ afterEach(() => {
 describe('readHostWidths', () => {
   it('accepts a stored record and drops the server stamp from the widths', () => {
     expect(readHostWidths(stored)).toEqual({ sidebar: 320, rightbar: { px: 720, ratio: 0.375 } })
-    expect(readHostWidths({ sidebar: 280, updatedAt: 3 })).toEqual({ sidebar: 280, rightbar: null })
+    expect(readHostWidths({ sidebar: 280, updatedAt: 3 })).toEqual({ sidebar: 280 })
   })
 
   it('treats "nothing stored" and malformed records as absent', () => {
@@ -186,6 +186,15 @@ describe('createHostWidthSync', () => {
     settle?.(jsonResponse(null, false))
     await flush()
     expect(error).not.toHaveBeenCalled()
+  })
+
+  it('never sends a right width from a client that has none', async () => {
+    vi.useFakeTimers()
+    const sync = createHostWidthSync()
+    sync.mirror({ sidebar: 340, rightbar: null })
+    await vi.advanceTimersByTimeAsync(500)
+    expect(calls).toEqual([{ method: 'enpoiUiState.putLayout', args: { widths: { sidebar: 340 } } }])
+    sync.dispose()
   })
 
   it('does not write after dispose', async () => {

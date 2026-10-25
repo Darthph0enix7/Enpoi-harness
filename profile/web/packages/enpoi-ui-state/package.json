@@ -1,7 +1,7 @@
 {
   "name": "dsh-enpoi-ui-state",
   "version": "0.1.0",
-  "description": "Per-session UI state (unsent drafts + sidebar surface) for the right sidebar — Typert Remote namespace enpoiUiState",
+  "description": "UI state for the operator surfaces: per-session drafts and right-sidebar surface plus the host-wide column width record — Typert Remote namespace enpoiUiState",
   "type": "module",
   "main": "lib/index.js",
   "scripts": {

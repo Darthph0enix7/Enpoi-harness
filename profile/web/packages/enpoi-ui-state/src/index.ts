@@ -341,8 +341,11 @@ export class EnpoiUiStateService extends TypertRemoteService {
   }
 
   /**
-   * Replace the host's column width preferences.
-   * @param widths - the widths to store; the server stamps `updatedAt`.
+   * Merge one client's column widths into the host record. `sidebar` is always
+   * present; `rightbar` is present only when that client dragged one, so a
+   * device that never dragged a right panel cannot erase another device's
+   * width. The server stamps `updatedAt` with its own clock.
+   * @param widths - the width members to store.
    * @returns the new server `updatedAt` after the write is durable.
    */
   @Remote
@@ -350,7 +353,10 @@ export class EnpoiUiStateService extends TypertRemoteService {
     const next = requireLayoutWidths(widths)
     const updatedAt = Date.now()
     await this.enqueue(async () => {
-      await this.requireTable(this.layout).put(LAYOUT_KEY, { ...next, updatedAt })
+      const table = this.requireTable(this.layout)
+      const merged: LayoutWidths = { ...table.get(LAYOUT_KEY), sidebar: next.sidebar, updatedAt }
+      if (next.rightbar !== undefined) merged.rightbar = next.rightbar
+      await table.put(LAYOUT_KEY, merged)
     })
     return { ok: true, updatedAt }
   }

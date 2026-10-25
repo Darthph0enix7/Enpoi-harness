@@ -10,7 +10,7 @@
  * a per-session fact. The local record stays the synchronous first-paint
  * cache and yields to the host record once that read settles.
  */
-import type { LayoutWidths } from './stores.ts'
+import type { HostLayoutWidths, LayoutWidths } from './stores.ts'
 
 /** The `enpoiUiState` Remote namespace (its session record is the sibling feature). */
 const NAMESPACE = 'enpoiUiState'
@@ -76,9 +76,10 @@ async function uiStateRpc<T>(method: string, args: Record<string, unknown>): Pro
  * Validate one host layout response. `{ updatedAt: 0 }` is the service's
  * "nothing stored" answer, so an equal-or-earlier stamp carries no preference.
  * @param value - the raw `enpoiUiState.getLayout` value.
- * @returns the adopted record, or null when the host holds nothing usable.
+ * @returns the adopted widths (the right panel member only when the host has
+ *   one), or null when the host holds nothing usable.
  */
-export function readHostWidths(value: unknown): LayoutWidths | null {
+export function readHostWidths(value: unknown): HostLayoutWidths | null {
   if (!isWireRecord(value)) return null
   const record = value as HostLayoutRecord
   const updatedAt = record.updatedAt
@@ -86,7 +87,7 @@ export function readHostWidths(value: unknown): LayoutWidths | null {
   const sidebar = record.sidebar
   if (typeof sidebar !== 'number' || !Number.isFinite(sidebar) || sidebar < 0) return null
   const rightbar = record.rightbar
-  if (rightbar === undefined) return { sidebar, rightbar: null }
+  if (rightbar === undefined) return { sidebar }
   if (!isWireRecord(rightbar)) return null
   const { px, ratio } = rightbar
   if (typeof px !== 'number' || !Number.isFinite(px) || px <= 0) return null
@@ -106,7 +107,7 @@ export interface HostWidthSync {
    * the local cache in force; the next gesture still pushes.
    * @param adopt - store action applying the record.
    */
-  hydrate(adopt: (widths: LayoutWidths) => void): void
+  hydrate(adopt: (widths: HostLayoutWidths) => void): void
   /** Cancel pending work when the plugin unloads. */
   dispose(): void
 }
@@ -123,9 +124,14 @@ export function createHostWidthSync(): HostWidthSync {
   let failureLogged = false
 
   const push = (next: LayoutWidths): void => {
-    const json = JSON.stringify(next)
+    // A client with no right panel drag sends only the sidebar, so a host
+    // record written from another device keeps its right width.
+    const wire: HostLayoutWidths = next.rightbar === null
+      ? { sidebar: next.sidebar }
+      : { sidebar: next.sidebar, rightbar: next.rightbar }
+    const json = JSON.stringify(wire)
     if (json === lastPushed) return
-    void uiStateRpc<unknown>(`${NAMESPACE}.putLayout`, { widths: next }).then((result) => {
+    void uiStateRpc<unknown>(`${NAMESPACE}.putLayout`, { widths: wire }).then((result) => {
       if (disposed) return
       if (!result.ok) {
         if (!failureLogged) {
