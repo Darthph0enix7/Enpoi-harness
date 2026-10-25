@@ -1,8 +1,24 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-24T18:18:29.308Z",
+  "generatedAt": "2026-10-25T17:27:55.864Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.108",
+      "commit": "7aa2029",
+      "releasedAt": "2026-10-25T17:13:18.000Z",
+      "notes": [
+        "chore(profile): rebuild the provider-sync bundle",
+        "feat(model-groups): ship a free group, and cool down routes that answer with nothing",
+        "feat(model-groups): resolve groups once, and let the editor keep their selectors",
+        "fix(compaction): record the link that actually answered",
+        "fix(sidebar): the right panel stops closing itself",
+        "feat(compaction): the seat can be a model group",
+        "fix(layout): a slim, durable right panel instead of a stamped 35%",
+        "fix(llm): model-group failover actually fails over",
+        "feat(provider-sync): carry capabilities in the cache, retain referenced models, refresh every route"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.107",
       "commit": "4b2b165",
@@ -370,14 +386,6 @@
       "releasedAt": "2026-10-11T23:25:08.000Z",
       "notes": [
         "fix(update): sweep the v2 apply journal after a successful switch"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.66",
-      "commit": "6a6d598",
-      "releasedAt": "2026-10-11T23:01:48.000Z",
-      "notes": [
-        "perf(update): stop refreshing the superseded tree's scan index"
       ]
     }
   ]
