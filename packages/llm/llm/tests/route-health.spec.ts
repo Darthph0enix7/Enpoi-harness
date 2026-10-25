@@ -119,6 +119,16 @@ describe('RouteHealthLedger', () => {
     expect(health.snapshot()).toEqual([])
   })
 
+  it('cools a provider gate like auth instead of retrying it every step', () => {
+    const health = ledger(() => 0)
+    expect(health.recordFailure('p', 'm', 'FREE_TIER_GATED')).toBe(true)
+    expect(health.snapshot()[0]!.class).toBe('auth')
+    expect(health.snapshot()[0]!.coolingUntil).toBe(POLICY.authCooldownMs)
+    expect(health.recordFailure('q', 'm', 'ENTITLEMENT_GATED')).toBe(true)
+    expect(health.snapshot().find(entry => entry.provider === 'q')!.coolingUntil)
+      .toBe(POLICY.authCooldownMs)
+  })
+
   it('drops an expired cooldown and restores the declared order', () => {
     vi.useFakeTimers()
     vi.setSystemTime(0)

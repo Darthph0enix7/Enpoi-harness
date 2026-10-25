@@ -96,7 +96,12 @@ function routeKey(link: RouteHealthLink): string {
 export function routeHealthClassOf(code: string): RouteHealthClass | undefined {
   switch (code) {
     case EMPTY_RESPONSE_CODE: return 'empty'
-    case 'AUTH': return 'auth'
+    // A provider gate (sign-in, subscription, free-tier) is a property of the
+    // route, not a transient failure: cool it like auth instead of retrying it
+    // on every step.
+    case 'AUTH':
+    case 'FREE_TIER_GATED':
+    case 'ENTITLEMENT_GATED': return 'auth'
     case 'RATE_LIMIT': return 'rate_limit'
     case 'SERVER':
     case 'TIMEOUT': return 'server'
