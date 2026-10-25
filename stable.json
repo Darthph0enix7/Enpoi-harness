@@ -1,8 +1,20 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-10-25T17:27:55.814Z",
+  "generatedAt": "2026-10-25T20:10:16.288Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.109",
+      "commit": "66db040",
+      "releasedAt": "2026-10-25T19:37:17.000Z",
+      "notes": [
+        "fix: every shipped default now names a free route that answers",
+        "feat(first-run): ship a free default that answers",
+        "fix(llm): a provider gate cools down like auth",
+        "fix(profile): the free-tier guard keeps its invariant, not its name magic",
+        "feat(model-groups): upgrade an untouched legacy free row to the shipped group"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.108",
       "commit": "7aa2029",
@@ -378,14 +390,6 @@
       "releasedAt": "2026-10-12T07:31:21.000Z",
       "notes": [
         "feat(update): single-line TTY progress, 6-hop diff chains, zero-I/O skips, parallel walks"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.67",
-      "commit": "06e0d4f",
-      "releasedAt": "2026-10-11T23:25:08.000Z",
-      "notes": [
-        "fix(update): sweep the v2 apply journal after a successful switch"
       ]
     }
   ]
