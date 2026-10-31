@@ -44,7 +44,7 @@ import { RuntimeContextProjection } from './runtime-context.ts'
 import { AssistantStreamAttempt } from './assistant-stream.ts'
 import { SystemPromptProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
-import { orderToolBatches } from './request-order.ts'
+import { orderToolBatches, completeToolBatches } from './request-order.ts'
 import { MAX_TOKENS_CONTINUATION_SOURCE, createMaxTokensContinuationMessage } from './max-tokens-continuation.ts'
 
 type Phase =
@@ -467,6 +467,12 @@ export class ReactLoopAgent implements Agent {
           // downgrade the turn outcome.
           if (turnEnds === null || turnEnds.kind !== 'max-tokens') turnEnds = stepEnd
         } finally {
+          // A step settles its own tool batch before closing: an assistant
+          // message can outlive a provider failure, cancellation, or scheduler
+          // failure with calls that never received a result, and that log
+          // shape poisons every later request on every provider. Synthetic
+          // results live inside the open step, matching crash repair's shape.
+          this.session.closeUnansweredToolCalls(turn, step)
           this.session.append('step/end', { turn, step })
         }
         signal.throwIfAborted()
@@ -972,8 +978,11 @@ export class ReactLoopAgent implements Agent {
     // Repair tool-batch adjacency on the wire only: an injected message that
     // landed between an assistant's tool calls and their results would be
     // rejected by strict providers, and would poison every later turn because
-    // the durable order never changes. Persisted events stay untouched.
-    const boundaryMessages = orderToolBatches(session.deriveMessages())
+    // the durable order never changes. Then synthesize a transient result for
+    // any call the history still leaves unanswered (an older or interior log
+    // the live turn close never reached): no provider may see an orphan call.
+    // Persisted events stay untouched.
+    const boundaryMessages = orderToolBatches(completeToolBatches(session.deriveMessages()))
     for (const message of boundaryMessages) {
       if (this.frozenMessages.has(message)) continue
       deepFreeze(message)

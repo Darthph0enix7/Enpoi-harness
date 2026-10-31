@@ -1,10 +1,12 @@
 /**
  * Synthetic closer events that balance a session log whose tail turn is open.
- * Two producers share the mechanism: crash recovery closes an interrupted
- * persisted log on reload, and fork-seed construction closes a prefix cut
- * inside the source's open turn. Both preserve every fully written event and
- * close the unfinished step and turn. Calls in already closed steps remain
- * unchanged, including any missing results.
+ * Three producers share the mechanism: crash recovery closes an interrupted
+ * persisted log on reload, fork-seed construction closes a prefix cut inside
+ * the source's open turn, and the live in-turn close answers a step's
+ * unanswered calls before `step/end`. The first two preserve every fully
+ * written event and close the unfinished step and turn; calls in already
+ * closed steps remain unchanged, including any missing results. All three
+ * share the recovery wording table and error codes.
  * @module @deepseek-ai/dsh-session/repair
  */
 
@@ -12,7 +14,7 @@ import { brandString } from '@deepseek-ai/dsh-brand'
 import type { MessageId, ToolCallId, ToolResultMessage } from '@deepseek-ai/dsh-llm'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import { SessionSeq } from './types.ts'
-import type { SessionEvent, SessionSeq as SessionSeqType } from './types.ts'
+import type { SessionEvent, SessionEventMap, SessionSeq as SessionSeqType, SurfaceIntent } from './types.ts'
 
 /** Recovery code for an assistant tool request that never reached a recorded call start. */
 export const TOOL_NOT_STARTED = 'TOOL_NOT_STARTED'
@@ -53,6 +55,14 @@ export const TOOL_APPROVAL_EXPIRED = 'TOOL_APPROVAL_EXPIRED'
  * about the call's recorded lifecycle.
  */
 export type OpenTurnCloseCause = { readonly kind: 'interrupted' } | { readonly kind: 'forked' }
+
+/** Model-visible wording and error identity of one synthetic recovery result. */
+export interface ToolRecoveryOutcome {
+  /** Text the model sees in the synthetic result's content. */
+  readonly text: string
+  /** Failure identity stored beside the message (the synthetic-result marker). */
+  readonly error: { readonly name: string; readonly code: string }
+}
 
 /** Model-visible wording of the synthetic error tool results, keyed by cause. */
 const CLOSER_TEXT = {
@@ -150,15 +160,174 @@ function approvalRecovery(
 }
 
 /**
+ * The `interrupted` cause's recovery outcome for one unanswered call. A call
+ * with a durable `tool/call` may already have run, so its outcome is unknown; a
+ * call with no start record never began. The live in-turn close and the
+ * request-boundary backstop share this wording with the open-tail closers.
+ *
+ * @param started - whether the log records the call's `tool/call` start event.
+ * @returns the model-visible text and the error identity that marks it synthetic.
+ */
+export function interruptedToolRecovery(started: boolean): ToolRecoveryOutcome {
+  return started
+    ? {
+      text: CLOSER_TEXT.interrupted.started,
+      error: { name: 'ToolOutcomeUnknownError', code: TOOL_OUTCOME_UNKNOWN },
+    }
+    : {
+      text: CLOSER_TEXT.interrupted.notStarted,
+      error: { name: 'ToolNotStartedError', code: TOOL_NOT_STARTED },
+    }
+}
+
+/**
+ * Build one synthetic recovery result message. The deterministic identity
+ * `${causeKind}-tool-result-${callId}-${seq}` is how a projection tells a
+ * synthetic result from one a tool produced.
+ *
+ * @param causeKind - cause naming the synthetic identity prefix.
+ * @param callId - the call this result answers.
+ * @param seq - the seq the appended event will occupy.
+ * @param text - model-visible recovery text.
+ * @returns the frozen tool-role message.
+ */
+function syntheticToolResultMessage(
+  causeKind: OpenTurnCloseCause['kind'],
+  callId: ToolCallId,
+  seq: SessionSeqType,
+  text: string,
+): ToolResultMessage {
+  return deepFreeze({
+    id: brandString<MessageId>(`${causeKind}-tool-result-${callId}-${seq}`),
+    role: 'tool',
+    toolCallId: callId,
+    isError: true,
+    source: { kind: 'tool', callId },
+    content: [{
+      type: 'text',
+      text,
+    }],
+  })
+}
+
+/** One assistant tool call the log recorded without a matching `tool/result`. */
+export interface UnansweredToolCall {
+  /** The call missing its result. */
+  readonly callId: ToolCallId
+  /** The recorded `tool/call` seq, absent when the start was never recorded. */
+  readonly callSeq?: SessionSeqType
+}
+
+/**
+ * Find assistant tool calls in step `step` of turn `turn` that the log never
+ * answered, in assistant call order. The scan starts at that step's own
+ * `step/start`, so earlier turns cost nothing and only calls inside the step
+ * are considered.
+ *
+ * @param events - committed log prefix containing the step.
+ * @param turn - the turn owning `step`.
+ * @param step - the step to inspect.
+ * @returns one entry per unanswered call; empty when every call has a result.
+ */
+export function unansweredToolCalls(
+  events: readonly SessionEvent[],
+  turn: number,
+  step: number,
+): UnansweredToolCall[] {
+  let start = 0
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type === 'step/start' && event.data.turn === turn && event.data.step === step) {
+      start = index
+      break
+    }
+  }
+  const pending = new Map<ToolCallId, { callSeq?: SessionSeqType }>()
+  for (let index = start; index < events.length; index += 1) {
+    const event = events[index]
+    if (event === undefined) continue
+    switch (event.type) {
+      case 'assistant/message':
+        if (event.data.turn !== turn || event.data.step !== step) break
+        for (const block of event.data.message.content) {
+          if (block.type === 'tool-call') pending.set(block.id, {})
+        }
+        break
+      case 'tool/call':
+        if (event.data.turn !== turn || event.data.step !== step) break
+        {
+          const entry = pending.get(event.data.callId)
+          if (entry) entry.callSeq = event.seq
+        }
+        break
+      case 'tool/result':
+        pending.delete(event.data.message.source.callId)
+        break
+      // Other event types do not move the pending-call cursor.
+      default:
+        break
+    }
+  }
+  return [...pending].map(([callId, { callSeq }]) => ({ callId, ...callSeq === undefined ? {} : { callSeq } }))
+}
+
+/** One synthetic result to append for an unanswered call in a live open step. */
+export interface UnansweredCallClose {
+  /** The durable `tool/result` payload. */
+  readonly data: SessionEventMap['tool/result']
+  /** Surface placement: append, citing the recorded `tool/call` when one exists. */
+  readonly intent: SurfaceIntent<'tool/result'>
+}
+
+/**
+ * Synthetic `interrupted`-cause results for the calls {@link unansweredToolCalls}
+ * finds, ready to append before `step/end`. The event shape matches the
+ * open-tail closers: one error `tool/result` per call, in call order, with the
+ * deterministic synthetic id and the shared wording table.
+ *
+ * Idempotence comes from the log: a call the log already answers is not
+ * returned, so a second call over the log's new prefix appends nothing.
+ *
+ * @param events - committed log prefix ending inside the open step.
+ * @param turn - the open turn owning `step`.
+ * @param step - the open step to close.
+ * @param nextSeq - the seq the first appended result will occupy.
+ * @returns one close per unanswered call, in assistant call order.
+ */
+export function unansweredCallCloses(
+  events: readonly SessionEvent[],
+  turn: number,
+  step: number,
+  nextSeq: number,
+): UnansweredCallClose[] {
+  let seq = nextSeq
+  return unansweredToolCalls(events, turn, step).map(({ callId, callSeq }) => {
+    const outcome = interruptedToolRecovery(callSeq !== undefined)
+    const message = syntheticToolResultMessage('interrupted', callId, SessionSeq(seq++), outcome.text)
+    return {
+      data: {
+        turn,
+        step,
+        message,
+        error: { name: outcome.error.name, code: outcome.error.code },
+      },
+      intent: { surfaceOp: 'append', ...callSeq === undefined ? {} : { sourceEventSeqs: [callSeq] } },
+    }
+  })
+}
+
+/**
  * Return deterministic synthetic events that close an open tail turn. Unmatched
  * calls in its open step receive error results, followed by `step/end` and a
  * `turn/end` carrying the cause's reason. Calls in closed steps remain unchanged.
  * Sequences continue the log and timestamps reuse the last real event. A balanced or empty log returns no
  * events.
  *
- * Package-internal: each cause has exactly one owner, so external callers go
- * through {@link interruptedTurnClosers} (persistence crash recovery) or
+ * Package-internal: external callers reach the closers through
+ * {@link interruptedTurnClosers} (persistence crash recovery) or
  * `buildForkSeed` in `./fork.ts` (fork seeds) instead of selecting a cause.
+ * {@link unansweredCallCloses} reuses the `interrupted` cause's wording for the
+ * live close without closing a turn.
  *
  * @param events - the log to scan: a valid committed prefix, possibly ending
  *   inside an open turn (a crash tail or a mid-turn fork cut).
@@ -256,17 +425,7 @@ export function openTurnClosers(events: readonly SessionEvent[], cause: OpenTurn
       contentText = text.notStarted
       error = { name: 'ToolNotStartedError', code: TOOL_NOT_STARTED }
     }
-    const message: ToolResultMessage = deepFreeze({
-      id: brandString<MessageId>(`${cause.kind}-tool-result-${callId}-${seq}`),
-      role: 'tool',
-      toolCallId: callId,
-      isError: true,
-      source: { kind: 'tool', callId },
-      content: [{
-        type: 'text',
-        text: contentText,
-      }],
-    })
+    const message = syntheticToolResultMessage(cause.kind, callId, SessionSeq(seq), contentText)
     closers.push({
       type: 'tool/result',
       seq: SessionSeq(seq++),

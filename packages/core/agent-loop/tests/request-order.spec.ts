@@ -19,14 +19,14 @@ import LlmRuntime, {
   createUserMessage,
 } from '@deepseek-ai/dsh-llm'
 import type { AssistantMessage, Message, UserMessage } from '@deepseek-ai/dsh-llm'
-import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
+import SessionStore, { SessionId, interruptedToolRecovery } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import { orderToolBatches } from '../src/request-order.ts'
+import { completeToolBatches, orderToolBatches } from '../src/request-order.ts'
 import { MockAdapter, textResponse, toolCallResponse } from './mock-adapter.ts'
 
 /** An assistant message carrying one tool call per id, in the given order. */
@@ -175,6 +175,80 @@ describe('orderToolBatches', () => {
 
     expect(ids(second)).toEqual(ids(first))
     second.forEach((message, index) => { expect(message).toBe(first[index]) })
+  })
+})
+
+describe('completeToolBatches', () => {
+  it('synthesizes one transient result per unanswered call, then the batch orders them', () => {
+    const assistant = assistantCalls('call_1', 'call_2')
+    const result1 = toolResult('call_1')
+    const input: Message[] = [user('go'), assistant, result1, user('later')]
+
+    const completed = completeToolBatches(input)
+    expect(completed).toHaveLength(input.length + 1)
+    // Input elements are returned by reference; nothing durable is mutated.
+    expect(completed[0]).toBe(input[0])
+    expect(completed[1]).toBe(input[1])
+    expect(completed[3]).toBe(input[2])
+    expect(completed[4]).toBe(input[3])
+    expect(input).toHaveLength(4)
+    const synthetic = completed[2]!
+    expect(synthetic).toMatchObject({
+      role: 'tool',
+      toolCallId: 'call_2',
+      isError: true,
+      source: { kind: 'tool', callId: 'call_2' },
+      content: [{ type: 'text', text: interruptedToolRecovery(true).text }],
+    })
+    expect(synthetic.id.startsWith('request-tool-result-call_2-')).toBe(true)
+    expect(Object.isFrozen(synthetic)).toBe(true)
+
+    // The wire shows the answered and synthesized results in call order.
+    const wire = orderToolBatches(completed)
+    const batch = wire.findIndex(message => message.id === assistant.id)
+    expect(wire.slice(batch + 1, batch + 3).map(message =>
+      message.role === 'tool' ? message.toolCallId : message.role)).toEqual(['call_1', 'call_2'])
+  })
+
+  it('returns the same references for a fully answered batch', () => {
+    const assistant = assistantCalls('call_1')
+    const input: Message[] = [user('go'), assistant, toolResult('call_1')]
+
+    const completed = completeToolBatches(input)
+
+    expect(completed).toHaveLength(input.length)
+    completed.forEach((message, index) => { expect(message).toBe(input[index]) })
+  })
+
+  it('is idempotent', () => {
+    const assistant = assistantCalls('call_1', 'call_2')
+    const first = completeToolBatches([user('go'), assistant, toolResult('call_1')])
+    const second = completeToolBatches(first)
+
+    expect(ids(second)).toEqual(ids(first))
+    second.forEach((message, index) => { expect(message).toBe(first[index]) })
+  })
+
+  it('does not cross into the next batch to answer an earlier call', () => {
+    const assistant1 = assistantCalls('call_1')
+    const assistant2 = assistantCalls('call_2')
+    const input: Message[] = [assistant1, assistant2, toolResult('call_2')]
+
+    const completed = completeToolBatches(input)
+
+    expect(completed).toHaveLength(4)
+    expect(completed[1]).toMatchObject({ role: 'tool', toolCallId: 'call_1' })
+    // Batch two stays untouched: its own result answers `call_2`.
+    expect(completed[2]).toBe(assistant2)
+    expect(completed[3]).toBe(input[2])
+  })
+
+  it('synthesizes once for duplicate call ids answered fewer times', () => {
+    const assistant = assistantCalls('call_1', 'call_1')
+    const input: Message[] = [assistant, toolResult('call_1')]
+
+    expect(completeToolBatches(input)).toHaveLength(3)
+    expect(completeToolBatches(completeToolBatches(input))).toHaveLength(3)
   })
 })
 

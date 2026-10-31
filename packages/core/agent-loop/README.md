@@ -97,7 +97,7 @@ After `agent/request`, `ctx.llm.prepareCall()` validates adapter-owned fields an
 
 ### Tool-batch ordering at the request boundary
 
-`buildRequest` passes the derived history through `orderToolBatches` (`src/request-order.ts`) before freezing it. For every assistant message carrying tool calls it emits that batch's results in call order and displaces any message a plugin interleaved while the batch was open (a context-checkpoint commit, for example) to after the results. The normalizer is pure, idempotent, and never invents or drops a message: an incomplete batch is left exactly as logged, because the session repair path owns synthesizing a result for an interrupted call. The durable log keeps its real order; only the wire order is normalized.
+`buildRequest` passes the derived history through `completeToolBatches` and then `orderToolBatches` (`src/request-order.ts`) before freezing it. `orderToolBatches` emits each assistant message's results in call order and displaces any message a plugin interleaved while the batch was open (a context-checkpoint commit, for example) to after the results; an incomplete batch is left exactly as logged. `completeToolBatches` then synthesizes one transient error result per still-unanswered call (an older or interior log the live close never reached) so no provider sees an orphan call. Both passes are pure and idempotent; the synthesized messages belong to that request only and never enter the durable log. Before every `step/end`, the loop calls `session.closeUnansweredToolCalls(turn, step)`, which durably appends the crash-repair shape for the same condition inside the open step. The durable log keeps its real order; only the wire order is normalized.
 
 The loop deep-freezes each derived message identity on its first request and reuses that proof only within the same agent. Restored messages keep their identity; request construction does not freeze their containing event wrappers. Each request freezes its local canonical header, fresh message array, and envelope while leaving the cancellation signal live. The [request-freeze decision](../../../.agents/notes/implemented/simplification/2026-09-06-agent-request-freeze-evidence.md) explains ownership and measurement.
 
@@ -195,6 +195,20 @@ One fixed error result per skipped call remains in history until compaction shad
 #### KV Cache effect
 
 Append-only; each synthetic result follows the reusable request prefix and does not invalidate existing KV Cache entries.
+
+### Unanswered tool calls at a turn boundary
+
+#### What the model sees
+
+A step that commits an assistant message with tool calls and then fails, aborts, or is cancelled while calls remain unanswered closes with one synthetic error result per call, using the crash-repair wording and codes. A call with a recorded `tool/call` gets `TOOL_OUTCOME_UNKNOWN` ("The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly."); a call with no start record gets `TOOL_NOT_STARTED` ("The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed."). The result follows the batch in call order. A history that still holds an orphan call — an older log or an interior turn — receives the `TOOL_OUTCOME_UNKNOWN` result only on the assembled request, never in the durable log.
+
+#### Token effect
+
+Zero tokens in an intact session; each durably repaired call adds its error text once, on every later request. A transiently repaired call adds the text on each request until the log records a real result.
+
+#### KV Cache effect
+
+Append-only; the synthetic result follows the reusable request prefix and does not invalidate existing KV Cache entries.
 
 ## Known Limitations and Deferred Work
 

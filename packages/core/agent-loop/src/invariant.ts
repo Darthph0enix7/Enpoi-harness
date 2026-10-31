@@ -7,7 +7,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { isAgentLoopRequest, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 import { foldRequestHeader } from '@deepseek-ai/dsh-session'
-import { orderToolBatches } from './request-order.ts'
+import { orderToolBatches, completeToolBatches } from './request-order.ts'
 
 const PACKAGE_NAME = '@deepseek-ai/dsh-agent-loop'
 
@@ -39,9 +39,10 @@ const install: InvariantInstaller = Object.assign((ctx: Context, fail: Invariant
       return fail('a loop-built request with no request/header event in its session log')
     }
     // The wire order additionally repairs tool-batch adjacency (a checkpoint
-    // committed mid-batch must not split calls from their results); the durable
-    // derivation stays as logged.
-    const expected = orderToolBatches(session.deriveMessages())
+    // committed mid-batch must not split calls from their results) and
+    // synthesizes a transient result for any call the durable derivation
+    // leaves unanswered; the durable derivation stays as logged.
+    const expected = orderToolBatches(completeToolBatches(session.deriveMessages()))
     if (JSON.stringify(options.messages) !== JSON.stringify(expected)) {
       fail(`llm request for session "${String(session.id)}" diverges from the dispatch-time durable derivation (log-reconstruction desync)`)
     }

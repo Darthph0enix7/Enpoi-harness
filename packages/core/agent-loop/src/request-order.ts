@@ -35,19 +35,25 @@
  * - Matched results are emitted in CALL order, never in log order.
  * - Messages interleaved between the assistant message and its last matched
  *   result are displaced to after the batch, preserving their relative order.
- * - A batch with any genuinely missing result is left exactly as logged; a
- *   separate repair path synthesizes results for unresolved calls. No message
- *   is ever invented, dropped, or mutated: the same frozen references are
- *   returned in a new array.
+ * - A batch with any genuinely missing result is left exactly as logged;
+ *   {@link completeToolBatches} is the separate repair path that synthesizes a
+ *   result for each unresolved call. No message is ever invented, dropped, or
+ *   mutated: the same frozen references are returned in a new array.
  * - The walk is single-pass: the cursor advances past each batch it rewrites,
  *   so the result is idempotent.
  *
  * @module dsh-agent-loop/request-order
  */
 
-import type { Message, ToolCallBlock, ToolCallId, ToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import type { Message, MessageId, ToolCallBlock, ToolCallId, ToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { interruptedToolRecovery } from '@deepseek-ai/dsh-session'
+import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 
 const NO_TOOL_CALLS: readonly ToolCallBlock[] = []
+
+/** Message-id prefix of a recovery result synthesized only for one request. */
+const REQUEST_TOOL_RESULT_PREFIX = 'request-tool-result'
 
 /** Whether a message is an assistant message carrying at least one tool call. */
 function hasToolCalls(message: Message): boolean {
@@ -136,4 +142,72 @@ export function orderToolBatches(messages: readonly Message[]): Message[] {
   }
 
   return ordered
+}
+
+/**
+ * Synthesize transient recovery results for assistant tool calls no `tool`
+ * message answers, so a request never carries an orphan call. This is the
+ * request-boundary backstop for logs that still hold an unanswered call —
+ * history written before the live turn close existed, a resumed interior turn,
+ * or a future path that bypasses both.
+ *
+ * Each batch collects the `tool` messages answering its calls until the next
+ * assistant message carrying tool calls begins. A call without an answer gets
+ * a frozen synthetic error message in call order; the message-level view
+ * cannot prove the call never started, so it states the shared
+ * `TOOL_OUTCOME_UNKNOWN` wording rather than the not-started text.
+ *
+ * Nothing here touches the session log: the returned array belongs to one
+ * request, and {@link orderToolBatches} normalizes adjacency afterwards. The
+ * input elements are returned by reference and never mutated. A second pass
+ * over the result adds nothing because every call is already answered.
+ *
+ * @param messages - the derived conversation, in durable order.
+ * @returns a new array holding the same messages plus one frozen recovery
+ *   result per unanswered call.
+ */
+export function completeToolBatches(messages: readonly Message[]): Message[] {
+  const recovered: Message[] = []
+  let syntheticIndex = 0
+  const outcome = interruptedToolRecovery(true)
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]
+    // The loop condition bounds the cursor; this guard keeps the read total.
+    if (message === undefined) break
+    recovered.push(message)
+
+    const calls = toolCallsOf(message)
+    if (calls.length === 0) continue
+
+    // Duplicate call ids consume their answers in encounter order, exactly as
+    // the adjacency pass pairs them.
+    const remaining = new Map<ToolCallId, number>()
+    for (const call of calls) remaining.set(call.id, (remaining.get(call.id) ?? 0) + 1)
+    for (let scan = index + 1; scan < messages.length; scan += 1) {
+      const candidate = messages[scan]
+      if (candidate === undefined) break
+      // A following batch owns everything from here on.
+      if (hasToolCalls(candidate)) break
+      if (candidate.role !== 'tool') continue
+      const needed = remaining.get(candidate.toolCallId) ?? 0
+      if (needed > 0) remaining.set(candidate.toolCallId, needed - 1)
+    }
+
+    for (const call of calls) {
+      const needed = remaining.get(call.id) ?? 0
+      if (needed === 0) continue
+      remaining.set(call.id, needed - 1)
+      recovered.push(deepFreeze({
+        id: brandString<MessageId>(`${REQUEST_TOOL_RESULT_PREFIX}-${call.id}-${syntheticIndex++}`),
+        role: 'tool',
+        toolCallId: call.id,
+        isError: true,
+        source: { kind: 'tool', callId: call.id },
+        content: [{ type: 'text', text: outcome.text }],
+      }))
+    }
+  }
+
+  return recovered
 }

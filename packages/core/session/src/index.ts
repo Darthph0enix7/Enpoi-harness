@@ -24,6 +24,7 @@ import type { ToolHistory } from '@deepseek-ai/dsh-llm'
 
 import { buildForkSeed } from './fork.ts'
 import { forkOwnedEventType } from './fork-vocabulary.ts'
+import { unansweredCallCloses } from './repair.ts'
 
 export { buildForkSeed } from './fork.ts'
 export { FORK_OWNED_SESSION_EVENT_TYPES, forkOwnedEventType } from './fork-vocabulary.ts'
@@ -32,6 +33,7 @@ export { SessionPreparation } from './preparation.ts'
 export type { SessionPreparationOptions } from './preparation.ts'
 export type { AssistantMessage, DeveloperMessage, SystemMessage, ToolResultMessage, UserMessage } from '@deepseek-ai/dsh-llm'
 export {
+  interruptedToolRecovery,
   interruptedTurnClosers,
   TOOL_APPROVAL_DENIED,
   TOOL_APPROVAL_EXPIRED,
@@ -39,6 +41,7 @@ export {
   TOOL_NOT_STARTED,
   TOOL_OUTCOME_UNKNOWN,
 } from './repair.ts'
+export type { ToolRecoveryOutcome } from './repair.ts'
 export type { SessionSurface, SurfaceFoldReplacement, SurfaceFoldResult, SessionMessageProjection, SessionMessageProjectionContext } from './surface.ts'
 export { deriveEventMessage, foldSurface, isAppendSurfaceEvent, isReplacementSurfaceEvent, isSurfaceEvent, isSurfaceEligibleType } from './surface.ts'
 export { canonicalHeader, foldRequestHeader, headerEquals } from './request-header.ts'
@@ -896,6 +899,31 @@ export class Session {
     }
     this.derivedNodes = nodes.length
     return [...this.derived]
+  }
+
+  /**
+   * Append synthetic recovery results for assistant tool calls in step `step`
+   * of turn `turn` that the log never answered. Runs before the step's own
+   * `step/end`, so a settled turn never records an assistant message whose
+   * tool call has no result — the shape every provider rejects as
+   * `Tool result is missing for tool call <id>`.
+   *
+   * The events match the crash-recovery closer: the `interrupted` cause's
+   * model-visible wording, `TOOL_OUTCOME_UNKNOWN` when the call's `tool/call`
+   * is recorded and `TOOL_NOT_STARTED` otherwise, an
+   * `interrupted-tool-result-<callId>-<seq>` message id, and a citation of the
+   * recorded `tool/call`. The error code marks the result synthetic.
+   *
+   * Idempotent: the unanswered set is derived from the committed log, so a
+   * second call over the log it already closed appends nothing.
+   * @param turn - the open turn owning the step.
+   * @param step - the open step to close.
+   * @returns the number of synthetic results appended.
+   */
+  closeUnansweredToolCalls(turn: number, step: number): number {
+    const closes = unansweredCallCloses(this.log, turn, step, this.log.length)
+    for (const close of closes) this.append('tool/result', close.data, close.intent)
+    return closes.length
   }
 
   /**

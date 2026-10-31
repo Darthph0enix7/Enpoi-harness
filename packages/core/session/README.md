@@ -100,7 +100,7 @@ The package is built on event sourcing: a `Session` is an append-only log of typ
 | [`src/surface.ts`](src/surface.ts) | Ordered surface projection, replacement validation, `deriveEventMessage` |
 | [`src/request-header.ts`](src/request-header.ts) | `request/header` folding and reconstruction |
 | [`dsh-util-values`](../../util/values/README.md) | Shared lossless JSON validation and detached snapshots |
-| [`src/repair.ts`](src/repair.ts) | Cold repair of crash-orphaned logs |
+| [`src/repair.ts`](src/repair.ts) | Crash-tail closers and the live unanswered-call close |
 | [`src/invariant.ts`](src/invariant.ts) | Invariant companion: seq, turn/step enclosure, tool call/result pairing |
 
 ### Append validation
@@ -155,9 +155,11 @@ Appended surface entries preserve reusable prefixes. A `replace` operation inval
 
 If recovery finds an assistant tool request with no durable `tool/call`, its synthetic `TOOL_NOT_STARTED` result says `The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.` If a durable `tool/call` has no result, recovery classifies the call from its durable approval audit: an ask with no decision yields `TOOL_APPROVAL_NOT_DECIDED` ("waiting for an approval that was never decided, so the tool was not executed"), a `rejected` decision yields `TOOL_APPROVAL_DENIED` ("approval was rejected, so the tool was not executed"), and a lapsed `cancelled`/`unavailable` gate yields `TOOL_APPROVAL_EXPIRED` ("approval gate lapsed without a decision, so the tool was not executed"); a granting decision (`allowed-once`, `allowed-always`, `allowed-always-broad`) or an outcome outside that vocabulary stays `TOOL_OUTCOME_UNKNOWN` — the call may have executed — whose text says `The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly.` Fork-generated results describe only the inherited records: the parent may have started or completed a call after the selected event. `TOOL_NOT_STARTED` means the prefix contains no start record; the other codes mean it contains a start but no result, and only the `TOOL_APPROVAL_*` codes prove the call never began. Calls with side effects require external verification or user input before retrying. See the [fork decision](../../../.agents/notes/implemented/feature/2026-08-18-arbitrary-seq-session-fork.md).
 
+The same shape is written live. Before a step closes, `Session.closeUnansweredToolCalls(turn, step)` appends one synthetic result for every assistant tool call in that step the log never answered — `TOOL_OUTCOME_UNKNOWN` when its `tool/call` is recorded, `TOOL_NOT_STARTED` otherwise — so a settled turn never stores an orphan call. The unanswered set is derived from the committed log, so the close is idempotent and a crash-recovery reload never duplicates a result it already wrote. The agent loop's request boundary additionally synthesizes a transient `TOOL_OUTCOME_UNKNOWN` result for a call that still lacks one in the assembled messages; that message belongs to the request only and is never appended.
+
 #### Token effect
 
-Zero tokens in an intact session. Each repaired call adds its retained risk-specific error text on resume.
+Zero tokens in an intact session. Each live- or crash-repaired call adds its risk-specific error text once; a transiently repaired call adds it on every request until the log records a result.
 
 #### KV Cache effect
 
