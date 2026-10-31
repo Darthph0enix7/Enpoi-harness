@@ -54,6 +54,29 @@ async function harness(baseURL: string, overrides: Record<string, unknown> = {})
   return ctx
 }
 
+/** Two hand-declared OpenAI-compatible routes, each pointed at its own server. */
+async function twoRoutes(firstURL: string, secondURL: string): Promise<Context> {
+  const ctx = new Context()
+  await ctx.plugin(LlmRuntime)
+  await ctx.plugin(LlmPiAi, {
+    providers: {
+      first: {
+        apiKeyEnv: 'PI_TEST_KEY',
+        api: 'openai-completions',
+        baseURL: `${firstURL}/v1`,
+        models: [{ id: 'first-headless', contextWindow: 65_536, maxTokens: 4096 }],
+      },
+      second: {
+        apiKeyEnv: 'PI_TEST_KEY',
+        api: 'openai-completions',
+        baseURL: `${secondURL}/v1`,
+        models: [{ id: 'second-headless', contextWindow: 65_536, maxTokens: 4096 }],
+      },
+    },
+  })
+  return ctx
+}
+
 /** Direct adapter over the real profile resolver, with a fixed key per call. */
 function adapterOf(
   providers: Record<string, LlmPiAi.PiAiProviderProfile>,
@@ -401,6 +424,116 @@ describe('PiAiAdapter provider routing', () => {
       kind: 'error',
       failure: { providerRetryAfterMs: 2_500 },
     })
+  })
+
+  it('captures the pre-stream status and Retry-After header the SDK flattens away', async () => {
+    const server = await mockServer([{
+      status: 429,
+      headers: { 'retry-after': '120' },
+      body: JSON.stringify({ error: { message: 'slow down' } }),
+    }])
+    const ctx = await harness(server.url)
+
+    const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: 'RATE_LIMIT', status: 429, providerRetryAfterMs: 120_000 },
+    })
+  })
+
+  it('keeps a pre-stream 401 status alongside its AUTH classification', async () => {
+    const server = await mockServer([{
+      status: 401,
+      body: JSON.stringify({ error: { message: 'invalid key' } }),
+    }])
+    const ctx = await harness(server.url)
+
+    const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'AUTH', status: 401 } })
+    const failure = result.finish.kind === 'error' ? result.finish.failure : undefined
+    expect(failure?.providerRetryAfterMs).toBeUndefined()
+  })
+
+  it('keeps concurrent Retry-After captures on their own requests', async () => {
+    const longWait = await mockServer([{
+      status: 429,
+      delayMs: 25,
+      headers: { 'retry-after': '120' },
+      body: JSON.stringify({ error: { message: 'slow down' } }),
+    }])
+    const shortWait = await mockServer([{
+      status: 429,
+      delayMs: 25,
+      headers: { 'retry-after': '2' },
+      body: JSON.stringify({ error: { message: 'slow down' } }),
+    }])
+    const ctx = await twoRoutes(longWait.url, shortWait.url)
+
+    const [long, short] = await Promise.all([
+      assemble(ctx, { provider: 'first', model: 'first-headless', messages: [] }),
+      assemble(ctx, { provider: 'second', model: 'second-headless', messages: [] }),
+    ])
+
+    expect(long.finish).toMatchObject({
+      kind: 'error',
+      failure: { status: 429, providerRetryAfterMs: 120_000 },
+    })
+    expect(short.finish).toMatchObject({
+      kind: 'error',
+      failure: { status: 429, providerRetryAfterMs: 2_000 },
+    })
+  })
+
+  it('does not post a custom fetch to a protocol that rejects one', async () => {
+    const server = await mockServer([])
+    const googleModel = getBuiltinModels('google')[0]
+    if (googleModel === undefined) throw new Error('missing Google catalog model')
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: { google: { apiKeyEnv: 'PI_TEST_KEY', baseURL: server.url } },
+    })
+
+    const result = await assemble(ctx, {
+      provider: 'google',
+      model: googleModel.id,
+      messages: [createUserMessage({
+        content: [{ type: 'text', text: 'hi' }],
+        source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+      })],
+    })
+
+    // Google's adapter throws on any custom fetch, so the capture stays unused
+    // and the request reaches the wire with the SDK's own transport.
+    expect(result.finish).toMatchObject({ kind: 'error' })
+    expect(server.paths.length).toBeGreaterThan(0)
+  })
+
+  it('leaves no fetch patch or stale response facts behind', async () => {
+    const failing = await mockServer([{
+      status: 429,
+      headers: { 'retry-after': '120' },
+      body: JSON.stringify({ error: { message: 'slow down' } }),
+    }])
+    const succeeding = await mockServer([{ events: textEvents }])
+    const ctx = await twoRoutes(failing.url, succeeding.url)
+    const originalFetch = globalThis.fetch
+
+    const failed = await assemble(ctx, { provider: 'first', model: 'first-headless', messages: [] })
+    expect(failed.finish).toMatchObject({ kind: 'error', failure: { status: 429, providerRetryAfterMs: 120_000 } })
+
+    const succeeded = await assemble(ctx, { provider: 'second', model: 'second-headless', messages: [] })
+    expect(succeeded.finish).toEqual({ kind: 'stop' })
+    expect(globalThis.fetch).toBe(originalFetch)
+
+    // The failing script is exhausted: a plain 500 with no Retry-After must not
+    // inherit the earlier attempt's hint.
+    const later = await assemble(ctx, { provider: 'first', model: 'first-headless', messages: [] })
+    const laterFailure = later.finish.kind === 'error' ? later.finish.failure : undefined
+    expect(laterFailure).toMatchObject({ status: 500 })
+    expect(laterFailure?.providerRetryAfterMs).toBeUndefined()
   })
 
   it('uses OpenAI Responses against an Azure project v1 path with its API key header', async () => {

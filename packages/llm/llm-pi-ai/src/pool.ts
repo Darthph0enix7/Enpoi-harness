@@ -312,6 +312,12 @@ export class PoolEngine {
   readonly #dirty = new Set<string>()
   /** Tail of the serialized write chain per state file; each new write queues behind it. */
   readonly #writeChains = new Map<string, Promise<void>>()
+  /**
+   * Writes enqueued but not yet started, per provider. Their snapshot is taken
+   * when they start, so one is enough to persist every change recorded before
+   * that point; `flush()` must not queue a duplicate behind it.
+   */
+  readonly #queuedWrites = new Map<string, number>()
 
   /** Round-robin cursor per `provider:model` for the `balanced` strategy.
    *  In-memory only: a restart restarts rotation at the first identity, which
@@ -510,16 +516,44 @@ export class PoolEngine {
     return this.#sleep(ms, signal)
   }
 
-  /** Flush any pending writes (tests, shutdown). */
+  /**
+   * Completion barrier for persisted state (tests, shutdown).
+   *
+   * Resolves only when no provider is dirty and every write already in flight
+   * has finished. Each pass drains debounce timers, queues at most one write
+   * per dirty provider behind the current tail, and awaits every tail. A
+   * mutation during the awaits re-dirties its provider and schedules a timer,
+   * and a concurrent flush may append a new tail, so the pass repeats until
+   * neither dirt nor an unawaited tail remains. Repeating on tail identity is
+   * what keeps a write that started before this call from escaping the
+   * barrier, and skipping the queue while a write is already waiting to start
+   * keeps that pass from duplicating it: the queued write snapshots the state
+   * after the change. The per-provider chain still serializes all writes.
+   */
   async flush(): Promise<void> {
-    const pending = new Set([...this.#dirty])
-    for (const provider of pending) {
-      const timer = this.#saveTimers.get(provider)
-      if (timer !== undefined) {
-        clearTimeout(timer)
-        this.#saveTimers.delete(provider)
+    for (;;) {
+      const providers = new Set([...this.#dirty, ...this.#writeChains.keys()])
+      for (const provider of providers) {
+        const timer = this.#saveTimers.get(provider)
+        if (timer !== undefined) {
+          clearTimeout(timer)
+          this.#saveTimers.delete(provider)
+        }
+        // A queued write has not taken its snapshot yet, so it will include
+        // the current dirt; queueing another behind it would duplicate it.
+        if (this.#dirty.has(provider) && (this.#queuedWrites.get(provider) ?? 0) === 0) {
+          void this.#enqueueWrite(provider)
+        }
       }
-      await this.#enqueueWrite(provider)
+      const tails = new Map<string, Promise<void>>()
+      for (const provider of providers) {
+        const tail = this.#writeChains.get(provider)
+        if (tail !== undefined) tails.set(provider, tail)
+      }
+      await Promise.all(tails.values())
+      const drained = this.#dirty.size === 0
+        && [...this.#writeChains].every(([provider, tail]) => tails.get(provider) === tail)
+      if (drained) return
     }
   }
 
@@ -663,11 +697,15 @@ export class PoolEngine {
   #enqueueWrite(provider: string): Promise<void> {
     const previous = this.#writeChains.get(provider) ?? Promise.resolve()
     const next = previous.catch(() => {}).then(() => this.#writeNow(provider))
+    this.#queuedWrites.set(provider, (this.#queuedWrites.get(provider) ?? 0) + 1)
     this.#writeChains.set(provider, next)
     return next
   }
 
   async #writeNow(provider: string): Promise<void> {
+    const queued = (this.#queuedWrites.get(provider) ?? 0) - 1
+    if (queued > 0) this.#queuedWrites.set(provider, queued)
+    else this.#queuedWrites.delete(provider)
     const state = this.#providers.get(provider)
     if (state === undefined) return
     this.#dirty.delete(provider)

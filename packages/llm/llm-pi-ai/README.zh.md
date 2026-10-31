@@ -116,7 +116,7 @@ profile 的 `models` 列表会替换而非扩展路由的已安装目录；每�
 
 ### 失败与恢复
 
-pi-ai 不提供的路由需要 `api`、`baseURL` 与非空 `models` 列表；无法服务的 profile 会在写入处被拒绝，并点名路由与模型。失败携带稳定 code：无法使用的凭据以 `INVALID_CREDENTIAL` 失败并点名路由与引用，`apiKeyEnv` 引用解析为空的路由以 `MISSING_CREDENTIAL` 失败，未配置模型以 `UNKNOWN_MODEL` 失败，终止性提供方失败则区分 `QUOTA` 与暂时性 `RATE_LIMIT`；流内错误体携带 `retry_after`（秒；优先 `retry_after_ms`）时还会给出该失败的提供方重置提示，使较长的限流窗口能进入重试策略。`GenerateOptions.stop` 以 `UNSUPPORTED_OPTION` 被拒绝，因为 pi-ai 的通用流式 UI 无法跨提供方保证它。
+pi-ai 不提供的路由需要 `api`、`baseURL` 与非空 `models` 列表；无法服务的 profile 会在写入处被拒绝，并点名路由与模型。失败携带稳定 code：无法使用的凭据以 `INVALID_CREDENTIAL` 失败并点名路由与引用，`apiKeyEnv` 引用解析为空的路由以 `MISSING_CREDENTIAL` 失败，未配置模型以 `UNKNOWN_MODEL` 失败，终止性提供方失败则区分 `QUOTA` 与暂时性 `RATE_LIMIT`；流内错误体携带 `retry_after`（秒；优先 `retry_after_ms`）时还会给出该失败的提供方重置提示，使较长的限流窗口能进入重试策略。预流式 HTTP 失败即使先被 pi-ai 压平成文本，也会携带响应的 `status` 与 `Retry-After` 标头：适配器通过每尝试独立的 `fetch` 包装记录它们，并在终止事件处读取。两者同时存在时正文提示优先于标头，因为正文属于恰好失败的那次尝试，而 `Retry-After` 可能由并非限流主体的中间层盖上。`GenerateOptions.stop` 以 `UNSUPPORTED_OPTION` 被拒绝，因为 pi-ai 的通用流式 UI 无法跨提供方保证它。
 
 提交前失败使路由的凭据池轮换到另一身份时，适配器会追加一条持久的 `llm/attempt-failed` 记录，点名失败的身份、路由、失败 code 与消息，以及下一个身份；身份 id 是持久的，凭据值绝不进入记录。该记录要求请求携带会话身份且组合已挂载会话存储；缺少任一时轮换只留在日志中。
 
@@ -151,6 +151,7 @@ Settings 写入会在合并组合层与用户层后严格校验每个新增或�
 | [`src/listing.ts`](src/listing.ts) | 端点发现与 heavy provider 规划器共用的模型列表解析器 |
 | [`src/models.ts`](src/models.ts) | 基于 pi-ai 窄入口的 model collection、静态 provider 与 reasoning level |
 | [`src/provider.ts`](src/provider.ts) | 受支持协议表与提供方构建 |
+| [`src/response-capture.ts`](src/response-capture.ts) | 在 pi-ai 压平之前按尝试记录非 2xx 状态与 `Retry-After` |
 | [`src/context.ts`](src/context.ts) | Harness 到 pi-ai 的上下文转换、图片处理、回放恢复 |
 | [`src/stream.ts`](src/stream.ts) | 把 pi-ai 事件转换为 harness `StreamChunk` 值 |
 | [`src/replay.ts`](src/replay.ts) | 带版本的 `ReplayEnvelope` 存储与校验 |
@@ -234,7 +235,7 @@ pi-ai 事件变成 harness 的推理、文本、工具调用、用量与 finish 
 - **未认证路由取决于其协议**——不点名凭据的路由解析为已配置但无密钥，但 pi-ai 的 OpenAI 兼容实现仍要求 API 密钥或 `Authorization` 标头，因此无密钥本地服务器需要由 `apiKeyEnv` 引用或 `headers` 中的 `Authorization` 条目提供的占位凭据。
 - **不支持 `GenerateOptions.stop`**——pi-ai 的通用流式选项无法跨提供方保证停止序列行为。
 - **只有历史中首条 `system` 消息会成为 pi-ai 的 `systemPrompt`**——pi-ai 只有一个系统槽位，因此后续的 `system` 消息，或在同时设置了 `GenerateOptions.system` 时的首条消息，会在原位置折叠为 `user` 消息；系统提示词的提供方专属放置遵循 pi-ai，而非 harness 自有的协议覆盖。system 或 assistant 历史中的图片（包括首条系统消息中的图片）在两条转换路径上都会以 `UNSUPPORTED_CONTENT` 失败。
-- **提供方 HTTP 状态不可用**——pi-ai 错误事件不跨提供方暴露稳定 HTTP 状态。
+- **部分传输不可用预流式 HTTP 事实**——捕获依赖 pi-ai 的 `fetch` 钩子：Google 适配器拒绝自定义 fetch，Bedrock 忽略它，WebSocket 传输则绕过它；这些路径上的失败仍从压平的错误文本分类，但不携带 `status` 或来自标头的重置提示。
 - **QUOTA 冷却下限从 60 分钟降到 30 秒**——`CLASS_COOLDOWN_MS.QUOTA` 从 `60*60_000` 改为 `30_000`，`parseResetMs` 现在以替换而非 `Math.max` 的方式夹取到 `[30s,24h]`；没有 `Resets in` 提示的月度耗尽密钥每 30 秒被重新探测一次，在每个请求周期烧掉一次 `429` 尝试，直到出现提示或 `recordSuccess` 清除状态。这对滚动窗口是有意为之，但会打击月度配额——滚动与月度窗口的区分被延期。
 - **重试策略由提供方自有，而非 SDK 重试**——pi-ai SDK 重试保持禁用，因此持久 agent（智能体）步骤与 `llm/retry` 事件拥有每个可见尝试，直接 `ctx.llm.stream()` 调用仍是单次尝试。
 - **流式工具调用参数只在调用结束时解析一次**——安装的 pi-ai 带有 [`patches/@earendil-works__pi-ai@0.85.1.patch`](../../../patches/@earendil-works__pi-ai@0.85.1.patch)，它移除了每个流适配器中对整段累计参数 JSON 的逐 delta 重新解析（上游 [earendil-works/pi#9265](https://github.com/earendil-works/pi/issues/9265)）；未打补丁时，数 MB 的参数流会在事件循环上消耗 O(n²) CPU，并使进程内所有会话停滞。在 `toolcall_end` 之前，pi-ai partial 的工具调用 `arguments` 保持为 `{}`；本适配器只读取 delta 字符串与最终参数。每次升级 pi-ai 时都要重新应用或撤销该补丁。

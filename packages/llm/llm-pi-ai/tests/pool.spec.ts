@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -317,6 +317,95 @@ describe('PoolEngine persistence', () => {
     const persisted = await readPersisted('route')
     expect(persisted.identities.a?.m?.cooldownUntil).toBeGreaterThan(0)
     expect(persisted.identities.b?.m?.cooldownUntil).toBeGreaterThan(0)
+  })
+
+  it('waits for a write the debounce timer already started', async () => {
+    const e = engine()
+    fsGate.enabled = true
+    try {
+      e.recordFailure('route', 'a', 'm', 'AUTH', '401')
+      // The 5ms debounce fires on its own; that write clears #dirty before it
+      // parks at rename — the state where flush() used to resolve early.
+      await vi.waitFor(() => { expect(fsGate.pending).toHaveLength(1) })
+      expect(fsGate.writes).toHaveLength(1)
+      let flushed = false
+      const barrier = e.flush().then(() => { flushed = true })
+      for (let turn = 0; turn < 20; turn++) await Promise.resolve()
+      expect(flushed).toBe(false)
+      fsGate.pending.shift()?.()
+      await barrier
+      expect(flushed).toBe(true)
+    } finally {
+      fsGate.enabled = false
+      for (const release of fsGate.pending.splice(0)) release()
+    }
+    const persisted = await readPersisted('route')
+    expect(persisted.identities.a?.m?.cooldownUntil).toBeGreaterThan(0)
+  })
+
+  it('persists a mutation that lands during an in-flight write before resolving', async () => {
+    const e = engine()
+    fsGate.enabled = true
+    try {
+      e.recordFailure('route', 'a', 'm', 'AUTH', '401')
+      const first = e.flush()
+      await vi.waitFor(() => { expect(fsGate.pending).toHaveLength(1) })
+      e.recordFailure('route', 'b', 'm', 'AUTH', '401')
+      let flushed = false
+      const barrier = e.flush().then(() => { flushed = true })
+      // The delta queues behind the held write instead of starting a second
+      // one; the barrier must not resolve until that queued write lands.
+      for (let turn = 0; turn < 20; turn++) await Promise.resolve()
+      expect(fsGate.writes).toHaveLength(1)
+      expect(flushed).toBe(false)
+      fsGate.pending.shift()?.()
+      await vi.waitFor(() => { expect(fsGate.pending).toHaveLength(1) })
+      expect(fsGate.writes).toHaveLength(2)
+      expect(flushed).toBe(false)
+      fsGate.pending.shift()?.()
+      await Promise.all([first, barrier])
+    } finally {
+      fsGate.enabled = false
+      for (const release of fsGate.pending.splice(0)) release()
+    }
+    const persisted = await readPersisted('route')
+    expect(persisted.identities.a?.m?.cooldownUntil).toBeGreaterThan(0)
+    expect(persisted.identities.b?.m?.cooldownUntil).toBeGreaterThan(0)
+  })
+
+  it('waits for concurrent writes to every dirty provider', async () => {
+    const e = engine()
+    fsGate.enabled = true
+    try {
+      e.recordFailure('one', 'a', 'm', 'AUTH', '401')
+      e.recordFailure('two', 'b', 'm', 'AUTH', '401')
+      let flushed = false
+      const barrier = e.flush().then(() => { flushed = true })
+      await vi.waitFor(() => { expect(fsGate.pending).toHaveLength(2) })
+      expect(fsGate.writes).toHaveLength(2)
+      for (let turn = 0; turn < 20; turn++) await Promise.resolve()
+      expect(flushed).toBe(false)
+      // One provider has landed; the other write still holds the barrier.
+      fsGate.pending.shift()?.()
+      expect(flushed).toBe(false)
+      fsGate.pending.shift()?.()
+      await barrier
+      expect(flushed).toBe(true)
+    } finally {
+      fsGate.enabled = false
+      for (const release of fsGate.pending.splice(0)) release()
+    }
+    const first = await readPersisted('one')
+    const second = await readPersisted('two')
+    expect(first.identities.a?.m?.cooldownUntil).toBeGreaterThan(0)
+    expect(second.identities.b?.m?.cooldownUntil).toBeGreaterThan(0)
+  })
+
+  it('resolves on an idle engine without writing', async () => {
+    const e = engine()
+    await e.flush()
+    expect(fsGate.writes).toHaveLength(0)
+    expect(await readdir(stateDir)).toEqual([])
   })
 
   it('starts clean from corrupt or unknown-shaped files', async () => {

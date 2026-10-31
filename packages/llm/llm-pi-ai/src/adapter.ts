@@ -30,6 +30,7 @@ import type {
   Api,
   AuthContext,
   CredentialStore,
+  FetchFunction,
   Model,
   Models,
   ModelThinkingLevel,
@@ -76,6 +77,7 @@ import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { toPiContext } from './context.ts'
 import { createModels, getSupportedThinkingLevels } from './models.ts'
+import { captureResponse } from './response-capture.ts'
 import { toStreamChunks } from './stream.ts'
 
 /** One resolution's frozen view: the profiles and the collection built from them. */
@@ -504,7 +506,11 @@ export class PiAiAdapter extends LlmAdapter {
        * header is deployment-owned. Any supplied key on an authenticated route
        * keeps the normal header.
        */
-      const attemptOptions = (apiKeyOverride: string | undefined, identityId?: string): SimpleStreamOptions => {
+      const attemptOptions = (
+        apiKeyOverride: string | undefined,
+        identityId?: string,
+        fetch?: FetchFunction,
+      ): SimpleStreamOptions => {
         const keyless = profile.keyless && apiKeyOverride === undefined
         const headers: Record<string, string | null> = { ...commonHeaders }
         if (keyless) {
@@ -514,6 +520,7 @@ export class PiAiAdapter extends LlmAdapter {
         return {
           ...profileOptions(profile, reasoning, keyless ? KEYLESS_REQUEST_KEY : apiKeyOverride),
           ...commonOptions,
+          ...fetch === undefined ? {} : { fetch },
           // Pooled attempts attribute the response's rate-limit headers to the
           // identity that served them, so the Keys card can show live quota for
           // upstreams that expose it. Responses without those headers record
@@ -533,11 +540,15 @@ export class PiAiAdapter extends LlmAdapter {
         apiKeyOverride: string | undefined,
         signal: AbortSignal,
         identityId?: string,
-      ): AsyncGenerator<StreamChunk> =>
-        toStreamChunks(snapshot.models.streamSimple(model, context, {
-          ...attemptOptions(apiKeyOverride, identityId),
+      ): AsyncGenerator<StreamChunk> => {
+        // One response record per attempt: a rotated-away identity's HTTP facts
+        // must never describe the next attempt's failure.
+        const capture = captureResponse(model.api)
+        return toStreamChunks(snapshot.models.streamSimple(model, context, {
+          ...attemptOptions(apiKeyOverride, identityId, capture.fetch),
           signal,
-        }), model.contextWindow, signal)[Symbol.asyncIterator]()
+        }), model.contextWindow, signal, undefined, capture.facts)[Symbol.asyncIterator]()
+      }
 
       // Pooled route: rotate across identities until one commits. The
       // committal barrier is the first NON-usage chunk — pi-ai delivers
@@ -814,11 +825,18 @@ export class PiAiAdapter extends LlmAdapter {
         }
       }
 
+      const capture = captureResponse(model.api)
       const events = snapshot.models.streamSimple(model, context, {
-        ...attemptOptions(apiKey),
+        ...attemptOptions(apiKey, undefined, capture.fetch),
         signal: watchdog.signal,
       })
-      const iterator = toStreamChunks(events, model.contextWindow, options.signal, model.id)[Symbol.asyncIterator]()
+      const iterator = toStreamChunks(
+        events,
+        model.contextWindow,
+        options.signal,
+        model.id,
+        capture.facts,
+      )[Symbol.asyncIterator]()
       let exhausted = false
       try {
         while (true) {

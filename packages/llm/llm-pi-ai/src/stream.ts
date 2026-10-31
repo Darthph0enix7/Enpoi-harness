@@ -19,6 +19,7 @@ import type { FinishReason, StreamChunk, TokenUsage, ToolCallId } from '@deepsee
 import { isContextOverflow } from '@earendil-works/pi-ai/utils/overflow'
 import type { AssistantMessage, AssistantMessageEvent, Usage as PiUsage } from '@earendil-works/pi-ai'
 import { toPiReplayState } from './replay.ts'
+import type { HttpResponseFacts } from './response-capture.ts'
 
 /**
  * Map pi-ai usage (reasoning folded into output by pi-ai).
@@ -154,28 +155,56 @@ function providerErrorEnvelope(
 export function providerErrorDetail(text: string): string | undefined {
   const envelope = providerErrorEnvelope(text)
   if (envelope === undefined) return undefined
-  const record = envelope.inner ?? envelope.outer
   // OpenAI-shaped envelopes carry `code`; Anthropic Messages carries the same
-  // idea as `type` (`authentication_error`).
-  const code = typeof record.code === 'string' && record.code.length > 0
-    ? record.code
-    : typeof record.type === 'string' && record.type.length > 0 ? record.type : undefined
-  const detail = typeof record.message === 'string' && record.message.length > 0 ? record.message : undefined
+  // idea as `type` (`authentication_error`). The nested record answers each
+  // field first and the outer envelope fills a gap it leaves, because gateways
+  // nest only the machine code while repeating the human message beside it (or
+  // the reverse).
+  const code = textField(envelope.inner, 'code') ?? textField(envelope.inner, 'type')
+    ?? textField(envelope.outer, 'code') ?? textField(envelope.outer, 'type')
+  const detail = textField(envelope.inner, 'message') ?? textField(envelope.outer, 'message')
   if (code !== undefined && detail !== undefined) return `${code}: ${detail}`
   return detail ?? code
+}
+
+/** Read one non-empty string field out of an envelope record. */
+function textField(record: Record<string, unknown> | undefined, field: string): string | undefined {
+  const value = record?.[field]
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * Resolve the provider reset hint for one terminal error.
+ *
+ * The body envelope wins when both sources carry a hint: it belongs to the
+ * exact failed attempt and gateways put their own queue delay in
+ * `retry_after_ms`, while `Retry-After` may be stamped by an intermediary that
+ * is not the principal enforcing the limit. The captured header is the
+ * fallback for a hint the body does not repeat; the core parser interprets both.
+ */
+function providerResetMs(text: string, facts: HttpResponseFacts | undefined): number | undefined {
+  return parseProviderRetryAfterMs({ message: text })
+    ?? parseProviderRetryAfterMs({ retryAfterHeader: facts?.retryAfterHeader })
 }
 
 /**
  * Map a terminal pi-ai event to the harness finish reason.
  * @param message - the assistant message carried by the `done` or `error` event.
  * @param contextWindow - resolved catalog capacity for usage-based overflow detection.
+ * @param responseFacts - HTTP facts captured before pi-ai flattened a pre-stream
+ *   failure into error text; absent for in-stream errors and stream protocols
+ *   that cannot accept a custom fetch.
  * @returns the mapped harness reason. Recognized error text, `stop` usage above
  *   `contextWindow`, and zero-output `length` usage that fills the window map
  *   to `CONTEXT_WINDOW_EXCEEDED`; a completed `stop` with no non-empty text
  *   block and no tool call maps to an `EMPTY_RESPONSE` error, while terminal
  *   `pending` and `deferred` states map to non-retryable `PI_AI_ERROR` failures.
  */
-export function mapStopReason(message: AssistantMessage, contextWindow?: number): FinishReason {
+export function mapStopReason(
+  message: AssistantMessage,
+  contextWindow?: number,
+  responseFacts?: HttpResponseFacts,
+): FinishReason {
   const piAiOverflow = isContextOverflow(message, contextWindow)
   const harnessOverflow = message.stopReason === 'error'
     && message.errorMessage !== undefined
@@ -240,15 +269,17 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
         : code === ENTITLEMENT_GATED_CODE
           ? `${text} — ${ENTITLEMENT_GATED_EXPLANATION}`
           : detail ?? text
-      // In-stream error bodies bypass pi-ai's HTTP `Retry-After` handling, so
-      // the reset hint parsed from the same envelope is the only way the retry
-      // policy can honor a long provider window on this route.
-      const retryAfterMs = parseProviderRetryAfterMs({ message: text })
+      // pi-ai flattens a pre-stream HTTP failure to text, so the response body
+      // becomes the message envelope here; the captured header is the only
+      // remaining source for a `Retry-After` the SDK consumed.
+      const retryAfterMs = providerResetMs(text, responseFacts)
+      const status = responseFacts?.status
       return {
         kind: 'error',
         failure: {
           message: explained,
           code,
+          ...status === undefined ? {} : { status },
           ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
         },
       }
@@ -265,6 +296,9 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
  * @param callerSignal - caller cancellation state; an aborted caller makes any
  *   in-band terminal error an aborted finish.
  * @param requestedModel - request model identity recorded for durable replay.
+ * @param responseFacts - reads the HTTP facts captured for this attempt; called
+ *   at the terminal event so a pre-stream failure carries its response status
+ *   and header hint that pi-ai flattened away.
  * @returns the harness chunks, ending with `usage` then `finish`; throws
  *   `LlmError` (`STREAM_CLOSED`) if the source ends without a terminal event.
  */
@@ -273,6 +307,7 @@ export async function* toStreamChunks(
   contextWindow?: number,
   callerSignal?: AbortSignal,
   requestedModel?: string,
+  responseFacts?: () => HttpResponseFacts | undefined,
 ): AsyncGenerator<StreamChunk> {
   // pi-ai contentIndex ↔ our block index map 1:1 (both count blocks from 0
   // in stream order), but we track ids per index for tool calls.
@@ -338,7 +373,7 @@ export async function* toStreamChunks(
         yield { type: 'usage', usage: mapUsage(event.message.usage) }
         yield {
           type: 'finish',
-          reason: mapStopReason(event.message, contextWindow),
+          reason: mapStopReason(event.message, contextWindow, responseFacts?.()),
           replayState: toPiReplayState(event.message, requestedModel),
         }
         return
@@ -351,6 +386,7 @@ export async function* toStreamChunks(
           reason: mapStopReason(
             callerSignal?.aborted ? { ...event.error, stopReason: 'aborted' } : event.error,
             contextWindow,
+            responseFacts?.(),
           ),
         }
         return

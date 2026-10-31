@@ -56,9 +56,15 @@ export async function mockServer(script: {
       requests.push(body.length === 0 ? undefined : JSON.parse(body))
       headers.push(request.headers)
       const behavior = script.shift() ?? { status: 500, body: 'script exhausted' }
-      if (behavior.status !== undefined && behavior.status !== 200) {
-        response.writeHead(behavior.status, { 'content-type': 'application/json', ...behavior.headers })
-        response.end(behavior.body ?? '{}')
+      const status = behavior.status
+      if (status !== undefined && status !== 200) {
+        // A delayed rejection keeps two concurrent callers in flight together.
+        const reject = (): void => {
+          response.writeHead(status, { 'content-type': 'application/json', ...behavior.headers })
+          response.end(behavior.body ?? '{}')
+        }
+        if (behavior.delayMs === undefined) reject()
+        else setTimeout(reject, behavior.delayMs)
         return
       }
       if (behavior.body !== undefined) {

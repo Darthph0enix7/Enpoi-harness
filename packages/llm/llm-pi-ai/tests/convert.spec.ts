@@ -8,7 +8,7 @@ import { transformMessages } from '@earendil-works/pi-ai/api/transform-messages'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { toPiContext } from '../src/context.ts'
 import { toPiReplayState } from '../src/replay.ts'
-import { mapStopReason, mapUsage, toStreamChunks } from '../src/stream.ts'
+import { mapStopReason, mapUsage, providerErrorDetail, toStreamChunks } from '../src/stream.ts'
 
 function usage(input = 0, output = 0, cacheRead = 0, cacheWrite = 0): Usage {
   return {
@@ -816,6 +816,24 @@ describe('toStreamChunks', () => {
     })
   })
 
+  it('reads the attempt response facts at the terminal error event', async () => {
+    const error = assistant({ stopReason: 'error', errorMessage: '429: {"error":{"message":"slow down"}}' })
+    const chunks = await collect(toStreamChunks(
+      feed({ type: 'error', reason: 'error', error }),
+      undefined,
+      undefined,
+      undefined,
+      () => ({ status: 429, retryAfterHeader: '120' }),
+    ))
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: { code: 'RATE_LIMIT', status: 429, providerRetryAfterMs: 120_000 },
+      },
+    })
+  })
+
   it('rejects a stream that ends without done or error', async () => {
     await expect(collect(toStreamChunks(feed({ type: 'start', partial: assistant() }))))
       .rejects.toThrow(/without done\/error/)
@@ -969,6 +987,81 @@ describe('mapStopReason / mapUsage', () => {
       stopReason: 'error',
       errorMessage: '{"message":"rate limit exceeded","retry_after_ms":120000}',
     }))).toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT', providerRetryAfterMs: 120_000 } })
+  })
+
+  it('uses a captured Retry-After header when the flattened body carries no hint', () => {
+    expect(mapStopReason(
+      assistant({ stopReason: 'error', errorMessage: '429: {"error":{"message":"slow down"}}' }),
+      undefined,
+      { status: 429, retryAfterHeader: '120' },
+    )).toEqual({
+      kind: 'error',
+      failure: {
+        message: '429: {"error":{"message":"slow down"}}',
+        code: 'RATE_LIMIT',
+        status: 429,
+        providerRetryAfterMs: 120_000,
+      },
+    })
+  })
+
+  it('prefers the body hint over the captured header when both exist', () => {
+    // The body is the attempt's own instruction; a gateway header may be
+    // stamped by an intermediary rather than the limit's owner.
+    expect(mapStopReason(
+      assistant({
+        stopReason: 'error',
+        errorMessage: '429: {"error":{"message":"slow down","retry_after_ms":2500}}',
+      }),
+      undefined,
+      { status: 429, retryAfterHeader: '120' },
+    )).toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT', status: 429, providerRetryAfterMs: 2_500 } })
+  })
+
+  it('keeps the captured status alongside the AUTH classification', () => {
+    expect(mapStopReason(
+      assistant({
+        stopReason: 'error',
+        errorMessage: '401: {"error":{"code":"INVALID_TOKEN","message":"bad key"}}',
+      }),
+      undefined,
+      { status: 401 },
+    )).toEqual({
+      kind: 'error',
+      failure: { message: 'INVALID_TOKEN: bad key', code: 'AUTH', status: 401 },
+    })
+  })
+
+  it('leaves the body-only envelope path unchanged without captured facts', () => {
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '{"error":{"type":"rate_limit_error","message":"slow down","retry_after":90}}',
+    }))).toEqual({
+      kind: 'error',
+      failure: { message: '{"error":{"type":"rate_limit_error","message":"slow down","retry_after":90}}', code: 'RATE_LIMIT', providerRetryAfterMs: 90_000 },
+    })
+  })
+
+  it('merges a top-level message into the nested error detail', () => {
+    expect(providerErrorDetail(
+      '401: {"error":{"code":"PAID_MODEL_AUTH_REQUIRED"},"message":"You need to sign in."}',
+    )).toBe('PAID_MODEL_AUTH_REQUIRED: You need to sign in.')
+    expect(providerErrorDetail(
+      '401: {"error":{"code":"PAID_MODEL_AUTH_REQUIRED","message":"Nested wins."},"message":"Top level."}',
+    )).toBe('PAID_MODEL_AUTH_REQUIRED: Nested wins.')
+    expect(providerErrorDetail('401: {"message":"Top level only."}')).toBe('Top level only.')
+    // The nested record answers the code concept before the outer envelope,
+    // but the outer code still fills a gap the nested record leaves.
+    expect(providerErrorDetail(
+      '401: {"type":"outer_type","error":{"type":"authentication_error","message":"bad key"}}',
+    )).toBe('authentication_error: bad key')
+    expect(providerErrorDetail('401: {"code":"OUTER_CODE","error":{"message":"nested message"}}'))
+      .toBe('OUTER_CODE: nested message')
+    expect(providerErrorDetail('429: {"type":"rate_limit_error","message":"slow"}'))
+      .toBe('rate_limit_error: slow')
+    // Empty and non-string fields are gaps, not detail.
+    expect(providerErrorDetail('401: {"code":"","message":""}')).toBeUndefined()
+    expect(providerErrorDetail('401: {"code":401,"message":"numeric code"}')).toBe('numeric code')
   })
 
   it('ignores missing, zero, negative, and non-finite reset hints', () => {
