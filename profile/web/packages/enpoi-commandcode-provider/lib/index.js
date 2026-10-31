@@ -463,6 +463,21 @@ function buildRequest(input) {
   const names = toolNamesById(input.messages);
   const messages = [];
   let system = input.system ?? "";
+  const flushForwardedImages = () => {
+    if (forwarder.images.length === 0) return;
+    const pending = forwarder.images.splice(0, forwarder.images.length);
+    messages.push({
+      role: "user",
+      content: [
+        { type: "text", text: "Images returned by the tool call(s) above:" },
+        ...pending.map((image) => ({ type: "image", image: image.dataUri, mimeType: image.mediaType }))
+      ]
+    });
+  };
+  const pushMessage = (message) => {
+    if (message.role !== "tool") flushForwardedImages();
+    messages.push(message);
+  };
   for (const message of input.messages) {
     if (message.role === "system") {
       if (typeof message.content === "string") {
@@ -475,7 +490,7 @@ function buildRequest(input) {
     }
     if (message.role === "developer") continue;
     if (message.role === "user") {
-      messages.push({
+      pushMessage({
         role: "user",
         content: convertUserContent(message.content, forwarder, input.resolveImage, userImagePlan, scrub)
       });
@@ -499,7 +514,7 @@ function buildRequest(input) {
           }
         }
       }
-      if (parts.length > 0) messages.push({ role: "assistant", content: parts });
+      if (parts.length > 0) pushMessage({ role: "assistant", content: parts });
       continue;
     }
     const results = [];
@@ -512,17 +527,8 @@ function buildRequest(input) {
       output: message.isError === true ? { type: "error-text", value } : { type: "text", value }
     });
     messages.push({ role: "tool", content: results });
-    if (forwarder.images.length > 0) {
-      const pending = forwarder.images.splice(0, forwarder.images.length);
-      messages.push({
-        role: "user",
-        content: [
-          { type: "text", text: "Images returned by the tool call(s) above:" },
-          ...pending.map((image) => ({ type: "image", image: image.dataUri, mimeType: image.mediaType }))
-        ]
-      });
-    }
   }
+  flushForwardedImages();
   const params = {
     model: input.model,
     messages,

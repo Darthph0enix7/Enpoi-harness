@@ -11,11 +11,13 @@
  * 1. media-type detection order is `mediaType → mimeType → media_type → the
  *    `data:` header → application/octet-stream` (checking only `mimeType`
  *    inlined raw base64 as text and produced ~1.5M-token requests);
- * 2. a binary image inside a tool result is hoisted out and re-emitted as a
- *    synthetic user message immediately after the tool message (the API
- *    accepts images only in user content), and user-attached images ride a
- *    per-request size budget (12 images / 16 MiB, 8 MiB per image) that keeps
- *    the newest and omits the oldest — the request's only image budget;
+ * 2. a binary image inside a tool result is hoisted out and re-emitted as one
+ *    synthetic user message after the last result of its contiguous
+ *    tool-result batch (the API accepts images only in user content and
+ *    requires every result of an assistant tool-call batch to follow it
+ *    directly); user-attached images ride a per-request size budget (12
+ *    images / 16 MiB, 8 MiB per image) that keeps the newest and omits the
+ *    oldest — the request's only image budget;
  * 3. text sanitization (embedded-base64 scrub, 200k cap) happens here, at the
  *    conversion seam, when the route has no keypool proxy in front of it
  *    (`sanitizeText` input). The default keypool route leaves it to the proxy
@@ -412,8 +414,8 @@ function imageFingerprint(dataUri: string): string {
 
 /**
  * Decide what happens to one binary tool-result part: images ride the
- * forwarder (re-emitted as a user message after the tool message), everything
- * else — and every over-budget image — becomes a short note.
+ * forwarder (re-emitted as one user message after the last result of the
+ * batch), everything else — and every over-budget image — becomes a short note.
  */
 function handleBinaryPart(part: CcInputPart, forwarder: ImageForwarder): string {
   const mediaType = detectMediaType(part)
@@ -500,6 +502,30 @@ export function buildRequest(input: BuildRequestInput): CcEnvelope {
   const messages: CcMessage[] = []
   let system = input.system ?? ''
 
+  /**
+   * Emit the images forwarded since the last flush as one user message. Called
+   * only when the current tool-result batch ends: images cannot ride inside a
+   * tool result, and splitting the batch's results with a user message makes
+   * the API reject every call after the split as missing its result.
+   */
+  const flushForwardedImages = (): void => {
+    if (forwarder.images.length === 0) return
+    const pending = forwarder.images.splice(0, forwarder.images.length)
+    messages.push({
+      role: 'user',
+      content: [
+        { type: 'text', text: 'Images returned by the tool call(s) above:' },
+        ...pending.map(image => ({ type: 'image', image: image.dataUri, mimeType: image.mediaType })),
+      ],
+    })
+  }
+
+  /** Append one wire message; any non-tool message ends the tool-result batch. */
+  const pushMessage = (message: CcMessage): void => {
+    if (message.role !== 'tool') flushForwardedImages()
+    messages.push(message)
+  }
+
   for (const message of input.messages) {
     if (message.role === 'system') {
       if (typeof message.content === 'string') {
@@ -516,7 +542,7 @@ export function buildRequest(input: BuildRequestInput): CcEnvelope {
     if (message.role === 'developer') continue
 
     if (message.role === 'user') {
-      messages.push({
+      pushMessage({
         role: 'user',
         content: convertUserContent(message.content, forwarder, input.resolveImage, userImagePlan, scrub),
       })
@@ -541,7 +567,7 @@ export function buildRequest(input: BuildRequestInput): CcEnvelope {
           }
         }
       }
-      if (parts.length > 0) messages.push({ role: 'assistant', content: parts })
+      if (parts.length > 0) pushMessage({ role: 'assistant', content: parts })
       continue
     }
 
@@ -559,21 +585,11 @@ export function buildRequest(input: BuildRequestInput): CcEnvelope {
         ? { type: 'error-text', value }
         : { type: 'text', value },
     })
+    // Contiguous results stay adjacent; the batch's images flush from
+    // `pushMessage` (next non-tool message) or the flush below (list end).
     messages.push({ role: 'tool', content: results })
-
-    // Images cannot ride inside a tool result: re-emit them as the very next
-    // user message, exactly as the vendor CLI's hoistToolResultImages does.
-    if (forwarder.images.length > 0) {
-      const pending = forwarder.images.splice(0, forwarder.images.length)
-      messages.push({
-        role: 'user',
-        content: [
-          { type: 'text', text: 'Images returned by the tool call(s) above:' },
-          ...pending.map(image => ({ type: 'image', image: image.dataUri, mimeType: image.mediaType })),
-        ],
-      })
-    }
   }
+  flushForwardedImages()
 
   const params: CcEnvelope['params'] = {
     model: input.model,

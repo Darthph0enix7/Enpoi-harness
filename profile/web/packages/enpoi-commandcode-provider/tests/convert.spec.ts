@@ -77,6 +77,132 @@ it('hoists tool-result images into a synthetic user message right after the tool
   expect(parts[1]).toEqual({ type: 'image', image: `data:image/png;base64,${PNG}`, mimeType: 'image/png' })
 })
 
+const PNG_B = 'B'.repeat(2048)
+
+function assistantCalls(...ids: string[]): CcInputMessage {
+  return {
+    role: 'assistant',
+    content: ids.map(toolCallId => ({ type: 'tool-call', toolCallId, toolName: 'read', arguments: '{}' })),
+  }
+}
+
+function toolImage(toolCallId: string, data: string = PNG): CcInputMessage {
+  return { role: 'tool', content: [{ type: 'file', data, mediaType: 'image/png' }], toolCallId }
+}
+
+it('flushes one user image message after the last result of a multi-call batch', () => {
+  const envelope = buildRequest({
+    model: 'm',
+    messages: [assistantCalls('c1', 'c2'), toolImage('c1', PNG), toolImage('c2', PNG_B)],
+  })
+  const wire = envelope.params.messages
+  expect(wire.map(message => message.role)).toEqual(['assistant', 'tool', 'tool', 'user'])
+  // The assistant's results follow it contiguously: no user message between them.
+  expect(wire.slice(1, 3).map(message => message.role)).toEqual(['tool', 'tool'])
+  const parts = (wire[3] as { content: Array<Record<string, unknown>> }).content
+  expect(parts).toEqual([
+    { type: 'text', text: 'Images returned by the tool call(s) above:' },
+    { type: 'image', image: `data:image/png;base64,${PNG}`, mimeType: 'image/png' },
+    { type: 'image', image: `data:image/png;base64,${PNG_B}`, mimeType: 'image/png' },
+  ])
+})
+
+it('defers the batch flush when only the first result carried an image', () => {
+  const envelope = buildRequest({
+    model: 'm',
+    messages: [
+      assistantCalls('c1', 'c2'),
+      toolImage('c1'),
+      { role: 'tool', content: 'plain', toolCallId: 'c2' },
+    ],
+  })
+  const wire = envelope.params.messages
+  expect(wire.map(message => message.role)).toEqual(['assistant', 'tool', 'tool', 'user'])
+  const parts = (wire[3] as { content: Array<Record<string, unknown>> }).content
+  expect(parts).toEqual([
+    { type: 'text', text: 'Images returned by the tool call(s) above:' },
+    { type: 'image', image: `data:image/png;base64,${PNG}`, mimeType: 'image/png' },
+  ])
+})
+
+it('adds no synthetic user message for an image-free batch', () => {
+  const envelope = buildRequest({
+    model: 'm',
+    messages: [
+      assistantCalls('c1', 'c2'),
+      { role: 'tool', content: 'one', toolCallId: 'c1' },
+      { role: 'tool', content: 'two', toolCallId: 'c2' },
+    ],
+  })
+  expect(envelope.params.messages.map(message => message.role)).toEqual(['assistant', 'tool', 'tool'])
+})
+
+it('flushes once per batch across consecutive batches', () => {
+  const envelope = buildRequest({
+    model: 'm',
+    messages: [assistantCalls('c1'), toolImage('c1', PNG), assistantCalls('c2'), toolImage('c2', PNG_B)],
+  })
+  const wire = envelope.params.messages
+  expect(wire.map(message => message.role)).toEqual(['assistant', 'tool', 'user', 'assistant', 'tool', 'user'])
+  expect((wire[2]!.content as Array<Record<string, unknown>>).slice(1)).toEqual([
+    { type: 'image', image: `data:image/png;base64,${PNG}`, mimeType: 'image/png' },
+  ])
+  expect((wire[5]!.content as Array<Record<string, unknown>>).slice(1)).toEqual([
+    { type: 'image', image: `data:image/png;base64,${PNG_B}`, mimeType: 'image/png' },
+  ])
+})
+
+it('flushes a batch that ends the message list after its last result', () => {
+  const envelope = buildRequest({
+    model: 'm',
+    messages: [
+      assistantCalls('c1', 'c2'),
+      { role: 'tool', content: 'plain', toolCallId: 'c1' },
+      toolImage('c2'),
+    ],
+  })
+  const wire = envelope.params.messages
+  expect(wire.map(message => message.role)).toEqual(['assistant', 'tool', 'tool', 'user'])
+  const parts = (wire[3] as { content: Array<Record<string, unknown>> }).content
+  expect(parts).toEqual([
+    { type: 'text', text: 'Images returned by the tool call(s) above:' },
+    { type: 'image', image: `data:image/png;base64,${PNG}`, mimeType: 'image/png' },
+  ])
+})
+
+it('flushes the batch before a following user message', () => {
+  const envelope = buildRequest({
+    model: 'm',
+    messages: [assistantCalls('c1'), toolImage('c1'), user([{ type: 'text', text: 'next' }])],
+  })
+  expect(envelope.params.messages.map(message => message.role)).toEqual(['assistant', 'tool', 'user', 'user'])
+  expect((envelope.params.messages[2]!.content as Array<Record<string, unknown>>)[0])
+    .toEqual({ type: 'text', text: 'Images returned by the tool call(s) above:' })
+  expect(envelope.params.messages[3]!.content).toBe('next')
+})
+
+it('leaves image-free histories byte-for-byte unchanged', () => {
+  const envelope = buildRequest({
+    model: 'm',
+    messages: [
+      assistantCalls('c1'),
+      { role: 'tool', content: [{ type: 'text', text: 'ok' }], toolCallId: 'c1' },
+      { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    ],
+  })
+  expect(JSON.stringify(envelope.params.messages)).toBe(JSON.stringify([
+    {
+      role: 'assistant',
+      content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'read', input: {} }],
+    },
+    {
+      role: 'tool',
+      content: [{ type: 'tool-result', toolCallId: 'c1', toolName: 'read', output: { type: 'text', value: 'ok' } }],
+    },
+    { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+  ]))
+})
+
 it('resolves the tool name from assistant history and parses tool-call input', () => {
   const envelope = buildRequest({
     model: 'm',
