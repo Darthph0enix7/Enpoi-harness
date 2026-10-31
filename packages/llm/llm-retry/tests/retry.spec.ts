@@ -483,41 +483,168 @@ describe('provider-routed retry policy', () => {
     expect(adapter.requests).toHaveLength(2)
   })
 
-  it('uses a bounded provider Retry-After verbatim and delegates an over-cap instruction', async () => {
-    vi.useFakeTimers()
-    const accepted = new ScriptedAdapter([
-      new LlmError('wait', 'RATE_LIMIT', { providerRetryAfterMs: 2_000 }),
-      textResponse('done'),
-    ])
-    ;({ ctx: context } = await harness(accepted, { mock: normalConfig({
-      backoff: { jitterRatio: 1 },
-    }) }))
-    const acceptedAgent = await context.agentLoop.create(SessionId('retry-after-accepted'), { provider: 'mock', model: 'mock' })
-    const scheduled = waitForRetry(context, acceptedAgent, 1)
-    acceptedAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
-    expect((await scheduled).data.delayMs).toBe(2_000)
-    const acceptedIdle = waitForIdle(context, acceptedAgent)
-    await vi.advanceTimersByTimeAsync(2_000)
-    await acceptedIdle
-    expect(accepted.requests).toHaveLength(2)
-
-    await context.fiber.dispose()
-    const rejected = new ScriptedAdapter([
-      new LlmError('wait too long', 'RATE_LIMIT', { providerRetryAfterMs: 10_001 }),
-    ])
-    ;({ ctx: context } = await harness(rejected))
-    const rejectedAgent = await context.agentLoop.create(SessionId('retry-after-rejected'), { provider: 'mock', model: 'mock' })
-    const rejectedIdle = waitForIdle(context, rejectedAgent)
-    rejectedAgent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
-    await rejectedIdle
-    expect(rejected.requests).toHaveLength(1)
-    expect(rejectedAgent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
-  })
-
-  it('uses local jittered backoff when always mode receives an over-cap Retry-After', async () => {
+  it('surfaces a rate-limit wait instead of retrying when the provider reset exceeds the cap', async () => {
     vi.useFakeTimers()
     const adapter = new ScriptedAdapter([
-      new LlmError('wait too long', 'AUTH', { providerRetryAfterMs: 10 }),
+      new LlmError('rate limited', 'RATE_LIMIT', { status: 429, providerRetryAfterMs: 17_337 }),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
+      maxRetries: 5,
+      backoff: { jitterRatio: 0.1 },
+    }) }))
+    const agent = await context.agentLoop.create(SessionId('retry-after-over-cap'), { provider: 'mock', model: 'mock' })
+    const idle = waitForIdle(context, agent)
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await idle
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+      type: 'turn/end',
+      data: {
+        reason: {
+          kind: 'error',
+          error: { message: 'rate limited by the provider; retry in 17s', code: 'RATE_LIMIT' },
+        },
+      },
+    })
+  })
+
+  it('surfaces the wait when the remaining attempt budget cannot cover the reset', async () => {
+    vi.useFakeTimers()
+    const adapter = new ScriptedAdapter([
+      new LlmError('rate limited', 'RATE_LIMIT', { providerRetryAfterMs: 2_000 }),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({ maxRetries: 0 }) }))
+    const agent = await context.agentLoop.create(SessionId('retry-after-exhausted'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const idle = waitForIdle(context, agent)
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await idle
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+      type: 'turn/end',
+      data: {
+        reason: {
+          kind: 'error',
+          error: { message: 'rate limited by the provider; retry in 2s', code: 'RATE_LIMIT' },
+        },
+      },
+    })
+  })
+
+  it('schedules a rate-limit retry at the provider reset, jittered upward', async () => {
+    vi.useFakeTimers()
+    const adapter = new ScriptedAdapter([
+      new LlmError('rate limited', 'RATE_LIMIT', { providerRetryAfterMs: 2_000 }),
+      textResponse('done'),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
+      backoff: { jitterRatio: 0.1 },
+    }) }, undefined, { random: () => 1 }))
+    const agent = await context.agentLoop.create(SessionId('retry-after-accepted'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const scheduled = waitForRetry(context, agent, 1)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    const delayMs = (await scheduled).data.delayMs
+    expect(delayMs).toBeGreaterThanOrEqual(2_000)
+    expect(delayMs).toBe(2_200)
+
+    const idle = waitForIdle(context, agent)
+    await vi.advanceTimersByTimeAsync(2_199)
+    expect(adapter.requests).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(1)
+    await idle
+    expect(adapter.requests).toHaveLength(2)
+  })
+
+  it('keeps the exponential sequence for a rate limit without a reset hint', async () => {
+    vi.useFakeTimers()
+    const adapter = new ScriptedAdapter([
+      new LlmError('busy one', 'RATE_LIMIT'),
+      new LlmError('busy two', 'RATE_LIMIT'),
+      textResponse('done'),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
+      backoff: { initialDelayMs: 500, maxDelayMs: 10_000, jitterRatio: 0 },
+    }) }))
+    const agent = await context.agentLoop.create(SessionId('retry-rate-limit-no-hint'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const first = waitForRetry(context, agent, 1)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    expect((await first).data.delayMs).toBe(500)
+
+    const second = waitForRetry(context, agent, 2)
+    await vi.advanceTimersByTimeAsync(500)
+    expect((await second).data.delayMs).toBe(1_000)
+
+    const idle = waitForIdle(context, agent)
+    await vi.advanceTimersByTimeAsync(1_000)
+    await idle
+    expect(adapter.requests).toHaveLength(3)
+  })
+
+  it('ignores a provider reset hint on a non-rate-limit failure', async () => {
+    vi.useFakeTimers()
+    const adapter = new ScriptedAdapter([
+      new LlmError('overloaded', 'SERVER', { providerRetryAfterMs: 2_000 }),
+      textResponse('done'),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
+      backoff: { initialDelayMs: 500, maxDelayMs: 10_000, jitterRatio: 0 },
+    }) }))
+    const agent = await context.agentLoop.create(SessionId('retry-server-hint-ignored'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const scheduled = waitForRetry(context, agent, 1)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    expect((await scheduled).data.delayMs).toBe(500)
+    const idle = waitForIdle(context, agent)
+    await vi.advanceTimersByTimeAsync(500)
+    await idle
+    expect(adapter.requests).toHaveLength(2)
+  })
+
+  it('keeps a rate-limit hint exactly at the max wait deterministic', async () => {
+    vi.useFakeTimers()
+    const adapter = new ScriptedAdapter([
+      new LlmError('rate limited', 'RATE_LIMIT', { providerRetryAfterMs: 10_000 }),
+      textResponse('done'),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({
+      backoff: { maxDelayMs: 10_000, jitterRatio: 1 },
+    }) }, undefined, { random: () => 1 }))
+    const agent = await context.agentLoop.create(SessionId('retry-after-boundary'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const scheduled = waitForRetry(context, agent, 1)
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    expect((await scheduled).data.delayMs).toBe(10_000)
+    const idle = waitForIdle(context, agent)
+    await vi.advanceTimersByTimeAsync(10_000)
+    await idle
+    expect(adapter.requests).toHaveLength(2)
+  })
+
+  it('uses local jittered backoff when always mode receives an over-cap rate-limit hint', async () => {
+    vi.useFakeTimers()
+    const adapter = new ScriptedAdapter([
+      new LlmError('wait too long', 'RATE_LIMIT', { providerRetryAfterMs: 10 }),
       textResponse('done'),
     ])
     ;({ ctx: context } = await harness(adapter, { mock: alwaysConfig({

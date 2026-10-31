@@ -10,6 +10,7 @@ import type { Context, Events } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { z as zod } from 'zod'
 import type { Agent, RequestErrorAction } from '@deepseek-ai/dsh-agent'
+import { LlmError } from '@deepseek-ai/dsh-llm'
 import type { LlmFailure, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import { RetryId } from './brand.ts'
@@ -56,11 +57,69 @@ async function settleDownstream(
   }
 }
 
+/** Stable code whose provider reset hint takes precedence over local backoff. */
+const RATE_LIMIT_CODE = 'RATE_LIMIT'
+
 function localDelay(config: ResolvedRetryPolicy, retry: number, random: () => number): number {
   const exponent = Math.min(retry - 1, 1024)
   const exponential = Math.min(config.initialDelayMs * 2 ** exponent, config.maxDelayMs)
   const jitter = 1 - config.jitterRatio + 2 * config.jitterRatio * random()
   return Math.min(exponential * jitter, config.maxDelayMs)
+}
+
+/**
+ * Read the provider reset hint that belongs to rate-limit semantics.
+ * @param failure - the failed attempt's provider-neutral facts.
+ * @returns a positive finite delay in milliseconds, or undefined when absent or inapplicable.
+ */
+function providerResetHint(failure: LlmFailure): number | undefined {
+  if (failure.code !== RATE_LIMIT_CODE) return undefined
+  const hint = failure.providerRetryAfterMs
+  return hint !== undefined && Number.isFinite(hint) && hint > 0 ? hint : undefined
+}
+
+/**
+ * Schedule a hinted retry no earlier than the provider reset. Jitter only
+ * lengthens the wait so the retry never starts inside the window the provider
+ * named; `maxDelayMs` remains the ceiling, which makes a hint exactly at the
+ * boundary deterministic.
+ * @param config - resolved provider policy owning the cap and jitter ratio.
+ * @param retry - 1-based retry number, used for the local exponential floor.
+ * @param hintMs - validated provider reset delay.
+ * @param random - jitter sample in the inclusive zero-to-one range.
+ * @returns the jittered, capped delay in milliseconds.
+ */
+function hintedDelay(
+  config: ResolvedRetryPolicy,
+  retry: number,
+  hintMs: number,
+  random: () => number,
+): number {
+  const exponent = Math.min(retry - 1, 1024)
+  const exponential = Math.min(config.initialDelayMs * 2 ** exponent, config.maxDelayMs)
+  const base = Math.min(Math.max(hintMs, exponential), config.maxDelayMs)
+  return Math.min(base * (1 + config.jitterRatio * random()), config.maxDelayMs)
+}
+
+/** Render an operator-actionable wait for a provider reset. */
+function providerWaitMessage(hintMs: number): string {
+  const seconds = Math.max(1, Math.round(hintMs / 1000))
+  return `rate limited by the provider; retry in ${seconds}s`
+}
+
+/**
+ * Terminal failure surfaced when the provider reset cannot be honored inside
+ * the policy's maximum wait (or its remaining attempt budget).
+ */
+function providerWaitError(failure: LlmFailure, hintMs: number): LlmError {
+  return new LlmError(providerWaitMessage(hintMs), failure.code, {
+    cause: failure,
+    ...failure.status === undefined ? {} : { status: failure.status },
+    providerRetryAfterMs: hintMs,
+    ...failure.requestId === undefined ? {} : { requestId: failure.requestId },
+    ...failure.provider === undefined ? {} : { provider: failure.provider },
+    ...failure.model === undefined ? {} : { model: failure.model },
+  })
 }
 
 function retryPolicyKey(policy: ResolvedRetryPolicy): string {
@@ -220,22 +279,23 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     const retryState = ctx.sessionProjections.stateOf(agent.session, 'llmRetry') as LlmRetryState
     const previous = retryState[retryStateKey(provider, policyKey)]
     const previousRetry = previous?.retry ?? 0
-    if (policy.mode === 'normal' && previousRetry >= policy.maxRetries) return next()
+    const hintMs = providerResetHint(failure)
+    const budgetExhausted = policy.mode === 'normal' && previousRetry >= policy.maxRetries
+    // A provider reset wider than the maximum wait, or one the remaining
+    // attempt budget cannot reach, must not spend attempts retrying inside a
+    // window the provider named. Surface the wait instead of delegating,
+    // because the raw provider text rarely states an actionable delay.
+    if (hintMs !== undefined && policy.mode === 'normal'
+      && (hintMs > policy.maxDelayMs || budgetExhausted)) {
+      throw providerWaitError(failure, hintMs)
+    }
+    if (budgetExhausted) return next()
     const retry = previousRetry + 1
     const retryId = previous?.retryId ?? RetryId(randomUUID())
-    let delayMs: number
-    if (failure.providerRetryAfterMs !== undefined
-      && Number.isFinite(failure.providerRetryAfterMs)
-      && failure.providerRetryAfterMs > 0) {
-      if (failure.providerRetryAfterMs > policy.maxDelayMs) {
-        if (policy.mode === 'normal') return next()
-        delayMs = localDelay(policy, retry, random)
-      } else {
-        delayMs = failure.providerRetryAfterMs
-      }
-    } else {
-      delayMs = localDelay(policy, retry, random)
-    }
+    const delayMs = hintMs !== undefined && hintMs <= policy.maxDelayMs
+      ? hintedDelay(policy, retry, hintMs, random)
+      // An over-cap hint under always mode keeps the unbounded-retry guarantee.
+      : localDelay(policy, retry, random)
 
     return backoff(agent, turn, step, failure, provider, policy, policyKey, retry, retryId, delayMs, signal)
   }

@@ -51,11 +51,11 @@ Omission of `retryPolicy` uses normal mode: five retries for `EMPTY_RESPONSE`, `
 
 ### What you can observe
 
-Each scheduled retry is durable before its wait: the plugin appends a non-surface `llm/retry` event carrying the retry id, provider, mode, policy key, failure, and scheduled delay, then a `llm/retry-started` event immediately before the retry begins. A valid `Retry-After` from the provider replaces local backoff when it fits the policy bounds. When the wait completes, the loop re-runs the failed step inside the same open turn over the same durable history, so the retried request is reconstructable from the session log exactly like the original. Cancellation or plugin disposal aborts active backoff, drains active delegated recovery, and makes a callback captured before disposal fail closed.
+Each scheduled retry is durable before its wait: the plugin appends a non-surface `llm/retry` event carrying the retry id, provider, mode, policy key, failure, and scheduled delay, then a `llm/retry-started` event immediately before the retry begins. A `RATE_LIMIT` failure carrying a provider reset (`Retry-After` or `providerRetryAfterMs`) waits at least that reset — jittered upward and capped by `maxDelayMs` — so a retry never starts inside the window the provider named. A reset wider than that cap, or a turn whose remaining attempt budget cannot reach it, ends the turn immediately with a `RATE_LIMIT` failure naming the wait instead of spending attempts. When the wait completes, the loop re-runs the failed step inside the same open turn over the same durable history, so the retried request is reconstructable from the session log exactly like the original. Cancellation or plugin disposal aborts active backoff, drains active delegated recovery, and makes a callback captured before disposal fail closed.
 
 ### Failures and recovery
 
-A failure before any final adapter is selected has no provider policy and delegates downstream unchanged. In normal mode, a failure code outside the eligible set, or an exhausted budget, delegates; in always mode, an over-cap provider delay uses the configured local backoff so the policy cannot terminate on that instruction. Nothing here is model-visible: no retry event, delay, provider error, or failed partial output reaches the model or derived messages.
+A failure before any final adapter is selected has no provider policy and delegates downstream unchanged. In normal mode, a failure code outside the eligible set delegates; an exhausted budget also delegates, except that a `RATE_LIMIT` carrying a provider reset surfaces the wait. A reset wider than `maxDelayMs` surfaces that wait immediately rather than spending attempts. In always mode, an over-cap provider delay uses the configured local backoff so the policy cannot terminate on that instruction. Hints on other codes are ignored because reset semantics belong to rate limits. Nothing here is model-visible: no retry event, delay, provider error, or failed partial output reaches the model or derived messages.
 
 -----
 
@@ -82,7 +82,7 @@ The executor is built on one rule: **durable before wait, open-step boundaries.*
 
 ### Recovery flow
 
-A failed step arrives on the waterfall with its provider and resolved policy. Always mode settles downstream recovery first and honors a downstream `retry` decision; normal mode first checks that the failure code is eligible and the budget is not exhausted. The plugin computes the delay — provider `Retry-After` when valid and within bounds, otherwise local bounded exponential backoff with symmetric jitter — appends the `llm/retry` event, waits on a cancellable timer, appends `llm/retry-started`, and returns `{ kind: 'retry' }`. The loop then re-runs the failed step inside the same open turn over the same durable history.
+A failed step arrives on the waterfall with its provider and resolved policy. Always mode settles downstream recovery first and honors a downstream `retry` decision; normal mode first checks that the failure code is eligible and the budget is not exhausted. The plugin computes the delay — for `RATE_LIMIT`, the provider reset when it fits the cap, jittered upward; otherwise local bounded exponential backoff with symmetric jitter — appends the `llm/retry` event, waits on a cancellable timer, appends `llm/retry-started`, and returns `{ kind: 'retry' }`. The loop then re-runs the failed step inside the same open turn over the same durable history.
 
 ### Waterfall composition
 
