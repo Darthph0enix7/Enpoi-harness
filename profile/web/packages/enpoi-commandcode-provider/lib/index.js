@@ -187,6 +187,9 @@ import {
 } from "@deepseek-ai/dsh-llm";
 import { parseQuotaHeaders, ROTATING_CLASSES } from "@deepseek-ai/dsh-llm-pi-ai";
 
+// src/convert.ts
+import { placeToolBatchExtras } from "@deepseek-ai/dsh-llm/src/tool-batch.ts";
+
 // src/sanitize.ts
 var MAX_INLINE_TOOL_TEXT_CHARS = 2e5;
 var EMBEDDED_B64_RE = /data:image\/[^;]{1,64};base64,[A-Za-z0-9+/=]{512,}/g;
@@ -461,23 +464,15 @@ function buildRequest(input) {
   const forwarder = createImageForwarder(input.visionEnabled !== false);
   const userImagePlan = forwarder.enabled ? planUserImages(input.messages, input.resolveImage) : /* @__PURE__ */ new Map();
   const names = toolNamesById(input.messages);
-  const messages = [];
+  const entries = [];
   let system = input.system ?? "";
-  const flushForwardedImages = () => {
-    if (forwarder.images.length === 0) return;
-    const pending = forwarder.images.splice(0, forwarder.images.length);
-    messages.push({
-      role: "user",
-      content: [
-        { type: "text", text: "Images returned by the tool call(s) above:" },
-        ...pending.map((image) => ({ type: "image", image: image.dataUri, mimeType: image.mediaType }))
-      ]
-    });
-  };
-  const pushMessage = (message) => {
-    if (message.role !== "tool") flushForwardedImages();
-    messages.push(message);
-  };
+  const renderForwardedImages = (pending) => ({
+    role: "user",
+    content: [
+      { type: "text", text: "Images returned by the tool call(s) above:" },
+      ...pending.map((image) => ({ type: "image", image: image.dataUri, mimeType: image.mediaType }))
+    ]
+  });
   for (const message of input.messages) {
     if (message.role === "system") {
       if (typeof message.content === "string") {
@@ -490,9 +485,12 @@ function buildRequest(input) {
     }
     if (message.role === "developer") continue;
     if (message.role === "user") {
-      pushMessage({
-        role: "user",
-        content: convertUserContent(message.content, forwarder, input.resolveImage, userImagePlan, scrub)
+      entries.push({
+        kind: "message",
+        message: {
+          role: "user",
+          content: convertUserContent(message.content, forwarder, input.resolveImage, userImagePlan, scrub)
+        }
       });
       continue;
     }
@@ -514,7 +512,7 @@ function buildRequest(input) {
           }
         }
       }
-      if (parts.length > 0) pushMessage({ role: "assistant", content: parts });
+      if (parts.length > 0) entries.push({ kind: "message", message: { role: "assistant", content: parts } });
       continue;
     }
     const results = [];
@@ -526,9 +524,15 @@ function buildRequest(input) {
       toolName: names.get(callId) ?? "unknown",
       output: message.isError === true ? { type: "error-text", value } : { type: "text", value }
     });
-    messages.push({ role: "tool", content: results });
+    entries.push({ kind: "message", message: { role: "tool", content: results } });
+    for (const image of forwarder.images.splice(0, forwarder.images.length)) {
+      entries.push({ kind: "extra", extra: image });
+    }
   }
-  flushForwardedImages();
+  const messages = placeToolBatchExtras(entries, {
+    isToolResult: (message) => message.role === "tool",
+    renderExtras: renderForwardedImages
+  });
   const params = {
     model: input.model,
     messages,
