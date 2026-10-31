@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-31T16:30:31.269Z",
+  "generatedAt": "2026-10-31T17:18:17.959Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.113",
+      "commit": "e0acea9",
+      "releasedAt": "2026-10-31T16:49:58.000Z",
+      "notes": [
+        "ci(e2e): let a keyless fork's nightly skip instead of failing forever"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.112",
       "commit": "8addce3",
@@ -390,14 +398,6 @@
       "releasedAt": "2026-10-12T10:06:09.000Z",
       "notes": [
         "ux(update): no silent phase - sweep start+timing, checksum completion, install start line"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.69",
-      "commit": "8fafa0a",
-      "releasedAt": "2026-10-12T09:37:40.000Z",
-      "notes": [
-        "feat(update): retire the delta updater - simple prebuilt flow + residue scrub + health proof"
       ]
     }
   ]
