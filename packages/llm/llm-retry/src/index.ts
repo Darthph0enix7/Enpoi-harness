@@ -101,10 +101,27 @@ function hintedDelay(
   return Math.min(base * (1 + config.jitterRatio * random()), config.maxDelayMs)
 }
 
+/**
+ * Render an operator-actionable wait in the longest sensible unit pair. Every
+ * value rounds up, so the printed reset is never earlier than the true one.
+ * @param hintMs - validated provider reset delay in milliseconds.
+ * @returns `{n}h{m}m`, `{n}m{s}s`, or `{n}s`.
+ */
+function providerWaitText(hintMs: number): string {
+  const seconds = Math.max(1, Math.ceil(hintMs / 1_000))
+  if (seconds >= 3_600) {
+    // Ceil the total minutes first so a remainder that rounds to 60 carries
+    // into the hour instead of printing `1h60m`.
+    const minutes = Math.ceil(seconds / 60)
+    return `${Math.floor(minutes / 60)}h${minutes % 60}m`
+  }
+  if (seconds >= 60) return `${Math.floor(seconds / 60)}m${seconds % 60}s`
+  return `${seconds}s`
+}
+
 /** Render an operator-actionable wait for a provider reset. */
 function providerWaitMessage(hintMs: number): string {
-  const seconds = Math.max(1, Math.round(hintMs / 1000))
-  return `rate limited by the provider; retry in ${seconds}s`
+  return `rate limited by the provider; retry in ${providerWaitText(hintMs)}`
 }
 
 /**

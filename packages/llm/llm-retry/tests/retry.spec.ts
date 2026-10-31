@@ -505,7 +505,64 @@ describe('provider-routed retry policy', () => {
       data: {
         reason: {
           kind: 'error',
-          error: { message: 'rate limited by the provider; retry in 17s', code: 'RATE_LIMIT' },
+          error: { message: 'rate limited by the provider; retry in 18s', code: 'RATE_LIMIT' },
+        },
+      },
+    })
+  })
+
+  it('surfaces a multi-hour provider reset as hours and minutes', async () => {
+    vi.useFakeTimers()
+    // The live Claude Max window: 17337 seconds after the countdown settled.
+    const adapter = new ScriptedAdapter([
+      new LlmError('rate limited', 'RATE_LIMIT', { status: 429, providerRetryAfterMs: 17_337_000 }),
+    ])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({ maxRetries: 5 }) }))
+    const agent = await context.agentLoop.create(SessionId('retry-after-multi-hour'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const idle = waitForIdle(context, agent)
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await idle
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    expect(vi.getTimerCount()).toBe(0)
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+      type: 'turn/end',
+      data: {
+        reason: {
+          kind: 'error',
+          error: { message: 'rate limited by the provider; retry in 4h49m', code: 'RATE_LIMIT' },
+        },
+      },
+    })
+  })
+
+  it.each([
+    [90_000, '1m30s'],
+    [2_500, '3s'],
+  ])('formats a %d ms provider reset as %s, rounding up', async (hintMs, wait) => {
+    vi.useFakeTimers()
+    const adapter = new ScriptedAdapter([new LlmError('rate limited', 'RATE_LIMIT', { providerRetryAfterMs: hintMs })])
+    ;({ ctx: context } = await harness(adapter, { mock: normalConfig({ maxRetries: 0 }) }))
+    const agent = await context.agentLoop.create(SessionId(`retry-after-${hintMs}`), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const idle = waitForIdle(context, agent)
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await idle
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+      type: 'turn/end',
+      data: {
+        reason: {
+          kind: 'error',
+          error: { message: `rate limited by the provider; retry in ${wait}`, code: 'RATE_LIMIT' },
         },
       },
     })

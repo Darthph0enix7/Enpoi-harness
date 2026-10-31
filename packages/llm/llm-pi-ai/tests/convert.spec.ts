@@ -940,6 +940,65 @@ describe('mapStopReason / mapUsage', () => {
       .toEqual({ kind: 'error', failure: { code: 'AUTH', message: 'HTTP 401: bad key' } })
   })
 
+  it('recovers a provider reset hint from the flattened error body', () => {
+    // meridian's live in-stream rate-limit body: pi-ai throws the SSE `error`
+    // payload as text, so the retry policy never sees the HTTP header path.
+    const body = '{"type":"error","error":{"type":"rate_limit_error","message":"Claude Max rate limit reached. Wait a moment and try again.","retry_after":17337}}'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: body }))).toEqual({
+      kind: 'error',
+      failure: {
+        message: body,
+        code: 'RATE_LIMIT',
+        providerRetryAfterMs: 17_337_000,
+      },
+    })
+  })
+
+  it('prefers retry_after_ms over retry_after', () => {
+    const body = '{"type":"error","error":{"type":"rate_limit_error","message":"slow down","retry_after":60,"retry_after_ms":2500}}'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: body })))
+      .toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT', providerRetryAfterMs: 2_500 } })
+  })
+
+  it('accepts top-level reset hints', () => {
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '429: {"type":"error","message":"rate limit exceeded","retry_after":90}',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT', providerRetryAfterMs: 90_000 } })
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '{"message":"rate limit exceeded","retry_after_ms":120000}',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'RATE_LIMIT', providerRetryAfterMs: 120_000 } })
+  })
+
+  it('ignores missing, zero, negative, and non-finite reset hints', () => {
+    const bodies = [
+      '{"error":{"type":"rate_limit_error","message":"rate limit reached"}}',
+      '{"error":{"type":"rate_limit_error","message":"rate limit reached","retry_after":0}}',
+      '{"error":{"type":"rate_limit_error","message":"rate limit reached","retry_after":-5}}',
+      '{"error":{"type":"rate_limit_error","message":"rate limit reached","retry_after_ms":0}}',
+      '{"error":{"type":"rate_limit_error","message":"rate limit reached","retry_after":1e999}}',
+    ]
+    for (const body of bodies) {
+      const mapped = mapStopReason(assistant({ stopReason: 'error', errorMessage: body }))
+      expect(mapped).toEqual({ kind: 'error', failure: { message: body, code: 'RATE_LIMIT' } })
+    }
+  })
+
+  it('clamps an absurd reset hint to seven days', () => {
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '{"error":{"type":"rate_limit_error","message":"rate limit reached","retry_after":999999999}}',
+    }))).toMatchObject({ kind: 'error', failure: { providerRetryAfterMs: 7 * 24 * 60 * 60 * 1_000 } })
+  })
+
+  it('leaves error text without a reset hint byte-for-byte unchanged', () => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 429: rate limit' })))
+      .toEqual({ kind: 'error', failure: { message: 'HTTP 429: rate limit', code: 'RATE_LIMIT' } })
+    expect(mapStopReason(assistant({ stopReason: 'stop', content: [{ type: 'text', text: 'ok' }] })))
+      .toEqual({ kind: 'stop' })
+  })
+
   it('classifies a 400 sign-in wall as AUTH rather than INVALID_REQUEST', () => {
     // Kilo answers the paid-model wall with 400, not 401/403. It is a
     // route-level sign-in rejection, so a group must be able to fail over.

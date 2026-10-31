@@ -114,6 +114,33 @@ function classifyPiAiError(message: string): string {
 }
 
 /**
+ * Parse the JSON error envelope carried inside a flattened pi-ai error text.
+ * @param text - the flattened pi-ai error message.
+ * @returns the outer object and, when present, its nested `error` object.
+ */
+function providerErrorEnvelope(
+  text: string,
+): { outer: Record<string, unknown>; inner?: Record<string, unknown> } | undefined {
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start < 0 || end <= start) return undefined
+  let body: unknown
+  try {
+    body = JSON.parse(text.slice(start, end + 1))
+  } catch {
+    return undefined
+  }
+  if (typeof body !== 'object' || body === null) return undefined
+  const outer = body as Record<string, unknown>
+  return {
+    outer,
+    ...typeof outer.error === 'object' && outer.error !== null
+      ? { inner: outer.error as Record<string, unknown> }
+      : {},
+  }
+}
+
+/**
  * Recover the provider's own `code: message` from the JSON error envelope pi-ai
  * flattens into its error text. pi-ai composes a non-2xx body as
  * `<status>: <json body>` (upstream `utils/error-body.ts`) and discards the
@@ -125,20 +152,9 @@ function classifyPiAiError(message: string): string {
  * @returns `CODE: message`, a lone `message`, or undefined when no JSON envelope is present.
  */
 export function providerErrorDetail(text: string): string | undefined {
-  const start = text.indexOf('{')
-  const end = text.lastIndexOf('}')
-  if (start < 0 || end <= start) return undefined
-  let body: unknown
-  try {
-    body = JSON.parse(text.slice(start, end + 1))
-  } catch {
-    return undefined
-  }
-  if (typeof body !== 'object' || body === null) return undefined
-  const outer = body as { error?: unknown }
-  const record = typeof outer.error === 'object' && outer.error !== null
-    ? outer.error as Record<string, unknown>
-    : outer as Record<string, unknown>
+  const envelope = providerErrorEnvelope(text)
+  if (envelope === undefined) return undefined
+  const record = envelope.inner ?? envelope.outer
   // OpenAI-shaped envelopes carry `code`; Anthropic Messages carries the same
   // idea as `type` (`authentication_error`).
   const code = typeof record.code === 'string' && record.code.length > 0
@@ -147,6 +163,50 @@ export function providerErrorDetail(text: string): string | undefined {
   const detail = typeof record.message === 'string' && record.message.length > 0 ? record.message : undefined
   if (code !== undefined && detail !== undefined) return `${code}: ${detail}`
   return detail ?? code
+}
+
+/** Longest provider reset accepted from a body hint: seven days. */
+const PROVIDER_RESET_MAX_MS = 7 * 24 * 60 * 60 * 1_000
+
+const RESET_FIELDS = [
+  // `retry_after_ms` is authoritative when a gateway sends both fields.
+  ['retry_after_ms', 1],
+  // Anthropic Messages `retry_after` is in seconds: live `meridian` attempts
+  // decremented one unit per second of wall time (17360 → 17337 over 34 s),
+  // and 17337 units is the ≈4 h 49 m Claude Max window.
+  ['retry_after', 1_000],
+] as const
+
+function resetFieldMs(
+  record: Record<string, unknown> | undefined,
+  field: string,
+  scale: number,
+): number | undefined {
+  const value = record?.[field]
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined
+  const milliseconds = value * scale
+  return Number.isFinite(milliseconds) ? Math.min(milliseconds, PROVIDER_RESET_MAX_MS) : undefined
+}
+
+/**
+ * Recover a provider reset delay from the same flattened JSON envelope that
+ * carries the machine code. The nested `error` object is read first, then the
+ * top level; `retry_after_ms` is preferred over Anthropic's `retry_after`
+ * seconds, non-positive and non-finite values are ignored, and the hint is
+ * clamped to seven days.
+ * @param text - the flattened pi-ai error message.
+ * @returns the reset delay in milliseconds, or undefined when the body carries no usable hint.
+ */
+export function providerRetryAfterMs(text: string): number | undefined {
+  const envelope = providerErrorEnvelope(text)
+  if (envelope === undefined) return undefined
+  for (const [field, scale] of RESET_FIELDS) {
+    for (const record of [envelope.inner, envelope.outer]) {
+      const milliseconds = resetFieldMs(record, field, scale)
+      if (milliseconds !== undefined) return milliseconds
+    }
+  }
+  return undefined
 }
 
 /**
@@ -224,7 +284,18 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
         : code === ENTITLEMENT_GATED_CODE
           ? `${text} — ${ENTITLEMENT_GATED_EXPLANATION}`
           : detail ?? text
-      return { kind: 'error', failure: { message: explained, code } }
+      // In-stream error bodies bypass pi-ai's HTTP `Retry-After` handling, so
+      // the reset hint parsed from the same envelope is the only way the retry
+      // policy can honor a long provider window on this route.
+      const retryAfterMs = providerRetryAfterMs(text)
+      return {
+        kind: 'error',
+        failure: {
+          message: explained,
+          code,
+          ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
+        },
+      }
     }
   }
 }
