@@ -1,8 +1,18 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-10-31T17:18:17.922Z",
+  "generatedAt": "2026-10-31T18:14:06.556Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.114",
+      "commit": "2fb2cf4",
+      "releasedAt": "2026-10-31T17:53:14.000Z",
+      "notes": [
+        "fix(update): install published releases, never build on a client",
+        "fix(llm-pi-ai): keep the HTTP status and Retry-After a pre-stream failure names",
+        "test(llm-pi-ai): stop leaking pool engines between specs"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.113",
       "commit": "e0acea9",
@@ -390,14 +400,6 @@
       "releasedAt": "2026-10-12T10:52:11.000Z",
       "notes": [
         "fix(health): context-robust service probe; service-only failures never restore files"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.70",
-      "commit": "c73db7d",
-      "releasedAt": "2026-10-12T10:06:09.000Z",
-      "notes": [
-        "ux(update): no silent phase - sweep start+timing, checksum completion, install start line"
       ]
     }
   ]
