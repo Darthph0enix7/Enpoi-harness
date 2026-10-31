@@ -1,7 +1,7 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { LLM_ATTEMPT_FAILED_EVENT, LlmError } from '@deepseek-ai/dsh-llm'
 import type { AttemptRecordSink } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
@@ -10,14 +10,37 @@ import { PoolEngine } from '../src/pool.ts'
 import { memoryAuth } from './auth-double.ts'
 import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
 
-afterEach(async () => {
-  await closeMockServers()
+let stateDir: string
+/** Every engine and state directory this test created. */
+const engines: PoolEngine[] = []
+const stateDirs: string[] = []
+
+beforeEach(async () => {
+  stateDir = await tempStateDir('adapter-pool-spec-')
+  engines.length = 0
+  stateDirs.length = 0
+  stateDirs.push(stateDir)
 })
 
-let stateDir: string
+afterEach(async () => {
+  await closeMockServers()
+  // Drain debounce timers before the fixture disappears so a stray 5ms write
+  // cannot land during a later test or recreate a removed directory.
+  await Promise.all(engines.map(engine => engine.flush().catch(() => {})))
+  await Promise.all(stateDirs.map(dir => rm(dir, { recursive: true, force: true })))
+})
+
+async function tempStateDir(prefix: string): Promise<string> {
+  return mkdtemp(join(tmpdir(), prefix))
+}
+
+function track(engine: PoolEngine): PoolEngine {
+  engines.push(engine)
+  return engine
+}
+
 async function engineOf(): Promise<PoolEngine> {
-  stateDir = await mkdtemp(join(tmpdir(), 'adapter-pool-spec-'))
-  return new PoolEngine({ stateDir, saveDebounceMs: 5 })
+  return track(new PoolEngine({ stateDir, saveDebounceMs: 5 }))
 }
 
 /** A pooled anthropic-messages route: the reset hint arrives in the SSE error body. */
@@ -145,6 +168,7 @@ describe('PiAiAdapter credential pools', () => {
         identity: 'exhausted',
         code: 'RATE_LIMIT',
         message: '429: {"message":"Rate limit exceeded. Resets in 46min."}',
+        status: 429,
         next: { identity: 'healthy' },
       },
       opts: { ignorable: true },
@@ -222,7 +246,7 @@ describe('PiAiAdapter credential pools', () => {
 
   it('keeps serving after a cooldown expires (sticky recovery)', async () => {
     let now = 1_000_000
-    const engine = new PoolEngine({ stateDir, now: () => now, saveDebounceMs: 5 })
+    const engine = track(new PoolEngine({ stateDir, now: () => now, saveDebounceMs: 5 }))
     const server = await mockServer([
       { status: 429, body: JSON.stringify({ error: { message: 'quota. Resets in 1min.' } }) },
       { events: textEvents },
@@ -423,13 +447,14 @@ describe('PiAiAdapter credential pools', () => {
   it('skips a CAPACITY backoff tier that would consume the pool deadline', async () => {
     const t0 = 1_000_000
     const sleeps: number[] = []
-    const clampStateDir = await mkdtemp(join(tmpdir(), 'adapter-pool-clamp-'))
-    const engine = new PoolEngine({
+    const clampStateDir = await tempStateDir('adapter-pool-clamp-')
+    stateDirs.push(clampStateDir)
+    const engine = track(new PoolEngine({
       stateDir: clampStateDir,
       now: () => t0,
       saveDebounceMs: 5,
       sleep: async (milliseconds) => { sleeps.push(milliseconds) },
-    })
+    }))
     // Both identities start cooling, so the pass probes both (priority-first)
     // and the first CAPACITY failure sees no healthy peer. Five prior CAPACITY
     // failures on the priority-1 identity select the 60 s tier.
@@ -469,13 +494,14 @@ describe('PiAiAdapter credential pools', () => {
   it('keeps a CAPACITY backoff tier that fits inside the pool deadline', async () => {
     const t0 = 1_000_000
     const sleeps: number[] = []
-    const fitStateDir = await mkdtemp(join(tmpdir(), 'adapter-pool-fit-'))
-    const engine = new PoolEngine({
+    const fitStateDir = await tempStateDir('adapter-pool-fit-')
+    stateDirs.push(fitStateDir)
+    const engine = track(new PoolEngine({
       stateDir: fitStateDir,
       now: () => t0,
       saveDebounceMs: 5,
       sleep: async (milliseconds) => { sleeps.push(milliseconds) },
-    })
+    }))
     // Two prior CAPACITY failures: the next one selects the 20 s tier.
     for (let attempt = 0; attempt < 2; attempt++) {
       engine.recordFailure('deepseek', 'exhausted', 'deepseek-v4-flash', 'CAPACITY', '503 server busy')

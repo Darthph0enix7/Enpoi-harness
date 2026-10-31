@@ -1,6 +1,6 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   CAPACITY_BACKOFF_TIERS_MS,
@@ -13,36 +13,84 @@ import {
 } from '../src/pool.ts'
 
 /**
- * Holds `rename` so one test can keep a write between its temp-file write and
+ * Holds renames so one test can keep a write between its temp-file write and
  * its atomic replace, then observe whether a concurrent flush starts a
- * competing write (it must not) or queues behind the held one. Disabled for
- * every other suite in this file.
+ * competing write (it must not) or queues behind the held one. Only paths
+ * inside the current test's state directory are gated: every engine from an
+ * earlier test schedules a debounce save whose timer can fire during this
+ * test, and a stray rename from one of those must neither park here nor count
+ * as a competing flush. Disabled for every other suite in this file.
  */
-const fsGate = vi.hoisted(() => ({ enabled: false, pending: [] as Array<() => void> }))
+const fsGate = vi.hoisted(() => ({
+  enabled: false,
+  scope: '',
+  pending: [] as Array<() => void>,
+  /** Temp-file writes that reached `writeFile` inside the scoped directory. */
+  writes: [] as string[],
+}))
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>()
+  const gated = (path: unknown): boolean => {
+    if (!fsGate.enabled || fsGate.scope === '' || typeof path !== 'string') return false
+    return path === fsGate.scope || path.startsWith(`${fsGate.scope}${sep}`)
+  }
   return {
     ...actual,
+    // The scoped directory already exists, so a resolved mkdir keeps every
+    // write between `flush()` and `rename` on the microtask queue; the test
+    // can then prove "no second write started" without a wall-clock sleep.
+    mkdir: async (...args: Parameters<typeof actual.mkdir>) => {
+      if (gated(args[0])) return undefined
+      return actual.mkdir(...args)
+    },
+    writeFile: async (...args: Parameters<typeof actual.writeFile>) => {
+      const path = args[0]
+      if (typeof path === 'string' && gated(path)) fsGate.writes.push(path)
+      return actual.writeFile(...args)
+    },
     rename: async (...args: Parameters<typeof actual.rename>) => {
-      if (fsGate.enabled) await new Promise<void>((resolve) => { fsGate.pending.push(resolve) })
+      if (gated(args[1])) await new Promise<void>((resolve) => { fsGate.pending.push(resolve) })
       await actual.rename(...args)
     },
   }
 })
 
 let stateDir: string
+/** Every engine this test created; drained before its fixture is removed. */
+const engines: PoolEngine[] = []
 
 beforeEach(async () => {
   stateDir = await mkdtemp(join(tmpdir(), 'pool-spec-'))
+  fsGate.scope = stateDir
+  fsGate.enabled = false
+  fsGate.writes.length = 0
+  for (const release of fsGate.pending.splice(0)) release()
+  engines.length = 0
 })
 
 afterEach(async () => {
+  // Drain debounced writes before removing the fixture: a 5ms timer left over
+  // from this test would otherwise fire during a later test (and could park in
+  // the fs gate) or recreate this state directory after teardown.
+  await Promise.all(engines.map(instance => instance.flush().catch(() => {})))
   await rm(stateDir, { recursive: true, force: true })
+  fsGate.scope = ''
 })
 
 function engine(options: Partial<ConstructorParameters<typeof PoolEngine>[0]> = {}): PoolEngine {
-  return new PoolEngine({ stateDir, saveDebounceMs: 5, ...options })
+  const instance = new PoolEngine({ stateDir, saveDebounceMs: 5, ...options })
+  engines.push(instance)
+  return instance
+}
+
+interface PersistedFile {
+  version: number
+  identities: Record<string, Record<string, { cooldownUntil: number; consecutiveFailures: number }>>
+}
+
+async function readPersisted(provider: string): Promise<PersistedFile> {
+  return JSON.parse(await readFile(join(stateDir, `${provider}.json`), 'utf8')) as PersistedFile
 }
 
 describe('parseResetMs', () => {
@@ -229,9 +277,9 @@ describe('PoolEngine persistence', () => {
     const first = engine()
     first.recordFailure('myroute', 'key-1', 'model-a', 'QUOTA', 'Resets in 2hr.')
     await first.flush()
-    const raw = JSON.parse(await readFile(join(stateDir, 'myroute.json'), 'utf8'))
+    const raw = await readPersisted('myroute')
     expect(raw.version).toBe(1)
-    expect(raw.identities['key-1']['model-a'].cooldownUntil).toBeGreaterThan(0)
+    expect(raw.identities['key-1']?.['model-a']?.cooldownUntil).toBeGreaterThan(0)
 
     const second = engine()
     await second.hydrate('myroute')
@@ -245,24 +293,30 @@ describe('PoolEngine persistence', () => {
       e.recordFailure('route', 'a', 'm', 'AUTH', '401')
       const first = e.flush()
       await vi.waitFor(() => { expect(fsGate.pending).toHaveLength(1) })
+      expect(fsGate.writes).toHaveLength(1)
       // The second flush starts while the first write sits between its temp
       // file and its rename: it must queue behind that write instead of
       // racing it, or the older snapshot can rename last and drop the delta.
       e.recordFailure('route', 'b', 'm', 'AUTH', '401')
       const second = e.flush()
-      await new Promise(resolve => setTimeout(resolve, 20))
+      // Draining microtasks covers the whole write path up to the held rename
+      // (mkdir is mocked as already resolved), so a competing write would have
+      // reached `writeFile` by now. No wall-clock wait is involved.
+      for (let turn = 0; turn < 20; turn++) await Promise.resolve()
+      expect(fsGate.writes).toHaveLength(1)
       expect(fsGate.pending).toHaveLength(1)
       fsGate.pending.shift()?.()
       await vi.waitFor(() => { expect(fsGate.pending).toHaveLength(1) })
+      expect(fsGate.writes).toHaveLength(2)
       fsGate.pending.shift()?.()
       await Promise.all([first, second])
     } finally {
       fsGate.enabled = false
       for (const release of fsGate.pending.splice(0)) release()
     }
-    const persisted = JSON.parse(await readFile(join(stateDir, 'route.json'), 'utf8'))
-    expect(persisted.identities.a.m.cooldownUntil).toBeGreaterThan(0)
-    expect(persisted.identities.b.m.cooldownUntil).toBeGreaterThan(0)
+    const persisted = await readPersisted('route')
+    expect(persisted.identities.a?.m?.cooldownUntil).toBeGreaterThan(0)
+    expect(persisted.identities.b?.m?.cooldownUntil).toBeGreaterThan(0)
   })
 
   it('starts clean from corrupt or unknown-shaped files', async () => {
@@ -307,9 +361,9 @@ describe('PoolEngine persistence', () => {
     // ...and the early in-memory failure stays authoritative for its own key.
     expect(e.snapshot('early').b?.m2?.consecutiveFailures).toBe(1)
     await e.flush()
-    const persisted = JSON.parse(await readFile(join(stateDir, 'early.json'), 'utf8'))
-    expect(persisted.identities.k.m.cooldownUntil).toBeGreaterThan(0)
-    expect(persisted.identities.b.m2.consecutiveFailures).toBe(1)
+    const persisted = await readPersisted('early')
+    expect(persisted.identities.k?.m?.cooldownUntil).toBeGreaterThan(0)
+    expect(persisted.identities.b?.m2?.consecutiveFailures).toBe(1)
   })
 })
 

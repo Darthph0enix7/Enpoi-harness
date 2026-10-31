@@ -9,19 +9,23 @@ import { memoryAuth } from './auth-double.ts'
 import { createFakeOpenAI } from '../../../support/fake-openai/src/index.ts'
 
 let stateDir: string
-let lastEngine: PoolEngine | undefined
+const engines: PoolEngine[] = []
 beforeEach(async () => {
   stateDir = await mkdtemp(join(tmpdir(), 'fake-matrix-'))
-  lastEngine = undefined
+  engines.length = 0
 })
 afterEach(async () => {
-  if (lastEngine) await lastEngine.flush().catch(() => {})
+  // Flush every engine, not only the newest: a replaced engine's 5ms debounce
+  // timer would otherwise fire after the fixture is removed and recreate it.
+  await Promise.all(engines.map(engine => engine.flush().catch(() => {})))
   const { rm } = await import('node:fs/promises')
   await rm(stateDir, { recursive: true, force: true }).catch(() => {})
 })
 
 function engineOf(opts: Partial<ConstructorParameters<typeof PoolEngine>[0]> = {}): PoolEngine {
-  return new PoolEngine({ stateDir, saveDebounceMs: 5, ...opts })
+  const engine = new PoolEngine({ stateDir, saveDebounceMs: 5, ...opts })
+  engines.push(engine)
+  return engine
 }
 
 const POOLED = (baseURL: string, strategy: 'priority-sticky' | 'balanced' = 'priority-sticky') => ({
@@ -78,8 +82,8 @@ describe('parseResetMs — anchored first phrase (oracle Link 1)', () => {
 })
 
 describe('classifyFailure ordering — 429 vs 503', () => {
-  it('429+capacity vocab → QUOTA', () => expect(classifyFailure('429 capacity limit')).toBe('QUOTA'))
-  it('503+quota vocab → CAPACITY', () => expect(classifyFailure('503 quota')).toBe('CAPACITY'))
+  it('429+capacity vocab → QUOTA', () => { expect(classifyFailure('429 capacity limit')).toBe('QUOTA') })
+  it('503+quota vocab → CAPACITY', () => { expect(classifyFailure('503 quota')).toBe('CAPACITY') })
 })
 
 describe('fake proxy — exhaustive pool matrix', () => {
@@ -94,7 +98,6 @@ describe('fake proxy — exhaustive pool matrix', () => {
     try {
       let now = 1_000_000
       const engine = engineOf({ now: () => now })
-      lastEngine = engine
       const adapter = adapterOf(POOLED(fake.url), engine, { K1: 'k1', K2: 'k2', K3: 'k3' })
       await streamText(adapter)
       expect(fake.requests[0]?.keyId).toBe('pri-1')
@@ -124,7 +127,6 @@ describe('fake proxy — exhaustive pool matrix', () => {
     const fake = await createFakeOpenAI({ keys: [{ id: 'pri-1', key: 'k1' }, { id: 'pri-2', key: 'k2' }, { id: 'pri-3', key: 'k3' }] })
     try {
       const engine = engineOf()
-      lastEngine = engine
       const adapter = adapterOf(POOLED(fake.url, 'balanced'), engine, { K1: 'k1', K2: 'k2', K3: 'k3' })
       await streamText(adapter)
       expect(fake.requests[0]?.keyId).toBe('pri-1')
@@ -142,7 +144,6 @@ describe('fake proxy — exhaustive pool matrix', () => {
   it('all-cooling probe order is priority-first not cooldown-sorted (oracle Link 2/3)', async () => {
     const now = 1_000_000
     const engine = engineOf({ now: () => now })
-    lastEngine = engine
     engine.recordFailure('deepseek', 'pri-1', 'deepseek-v4-flash', 'QUOTA', 'Resets in 60min.')
     engine.recordFailure('deepseek', 'pri-2', 'deepseek-v4-flash', 'QUOTA', 'Resets in 5min.')
     const order = engine.orderFor('deepseek', [{ id: 'pri-1', priority: 1 }, { id: 'pri-2', priority: 2 }], 'deepseek-v4-flash')
@@ -154,13 +155,11 @@ describe('fake proxy — exhaustive pool matrix', () => {
     try {
       const now = 1_000_000
       const engine = engineOf({ now: () => now })
-      lastEngine = engine
       const adapter = adapterOf(POOLED(fake.url), engine, { K1: 'k1', K2: 'k2', K3: undefined }, 5000)
       fake.setScenario('pri-1', { remaining: 0, resetAfterMs: 60_000, failMode: '429' })
       fake.setScenario('pri-2', { remaining: 0, resetAfterMs: 60_000, failMode: '429' })
       await expect(streamText(adapter)).rejects.toMatchObject({ code: 'PROVIDER_POOL_EXHAUSTED' })
       const e2 = engineOf()
-      lastEngine = e2
       e2.recordFailure('deepseek', 'pri-1', 'deepseek-v4-flash', 'QUOTA', 'Resets in 1min.')
       const order2 = e2.orderFor('deepseek', [{ id: 'pri-1', priority: 1 }, { id: 'pri-3', priority: 3 }], 'deepseek-v4-flash')
       expect(order2[0]?.id).toBe('pri-3')
@@ -173,7 +172,6 @@ describe('fake proxy — exhaustive pool matrix', () => {
     const fake500 = await createFakeOpenAI({ keys: [{ id: 'pri-1', key: 'k1' }, { id: 'pri-2', key: 'k2' }] })
     try {
       const engine = engineOf()
-      lastEngine = engine
       const adapter = adapterOf(POOLED(fake500.url), engine, { K1: 'k1', K2: 'k2' })
       fake500.setScenario('pri-1', { failMode: '500', errorBody: { error: { message: 'model is unavailable right now' } } })
       await expect(streamText(adapter)).rejects.toMatchObject({ code: 'PROVIDER_MODEL_OUTAGE' })
@@ -186,7 +184,6 @@ describe('fake proxy — exhaustive pool matrix', () => {
 
   it('header reset precedence: x-ratelimit headers win over body, body over fallback', async () => {
     const engine = engineOf()
-    lastEngine = engine
     engine.recordQuota('deepseek', 'pri-1', 'deepseek-v4-flash', { remainingFraction: 0, resetTime: '2026-01-01T00:01:00Z', source: 'headers' })
     const snap = engine.snapshot('deepseek')
     expect(snap['pri-1']?.['deepseek-v4-flash']?.quota?.remainingFraction).toBe(0)
@@ -194,7 +191,6 @@ describe('fake proxy — exhaustive pool matrix', () => {
 
   it('resetCooldown restores a cooled identity to ready', async () => {
     const engine = engineOf()
-    lastEngine = engine
     engine.recordFailure('deepseek', 'pri-1', 'deepseek-v4-flash', 'QUOTA', 'Resets in 10min.')
     expect(engine.cooldownRemaining('deepseek', 'pri-1', 'deepseek-v4-flash')).toBeGreaterThan(0)
     engine.resetCooldown('deepseek', 'pri-1')
@@ -205,7 +201,6 @@ describe('fake proxy — exhaustive pool matrix', () => {
 describe('CAPACITY peek not advancing (oracle #5a)', () => {
   it('peek=true does not advance balanced rotation cursor', () => {
     const engine = engineOf()
-    lastEngine = engine
     const identities = [{ id: 'pri-1', priority: 1 }, { id: 'pri-2', priority: 2 }, { id: 'pri-3', priority: 3 }]
     const firstPeek = engine.orderFor('deepseek', identities, 'deepseek-v4-flash', 'balanced', true)
     const secondPeek = engine.orderFor('deepseek', identities, 'deepseek-v4-flash', 'balanced', true)
@@ -223,7 +218,6 @@ describe('CAPACITY peek not advancing (oracle #5a)', () => {
 
   it('peek also keeps priority-sticky stable', () => {
     const engine = engineOf()
-    lastEngine = engine
     const identities = [{ id: 'pri-1', priority: 1 }, { id: 'pri-2', priority: 2 }]
     const p1 = engine.orderFor('deepseek', identities, 'deepseek-v4-flash', 'priority-sticky', true)
     const p2 = engine.orderFor('deepseek', identities, 'deepseek-v4-flash', 'priority-sticky', true)
@@ -235,7 +229,6 @@ describe('CAPACITY peek not advancing (oracle #5a)', () => {
 describe('CAPACITY backoff tier (oracle #5b)', () => {
   it('consecutiveFailures selects correct backoff tier', () => {
     const engine = engineOf()
-    lastEngine = engine
     // Force consecutive failures to 1..5 and check tier mapping
     engine.recordFailure('deepseek', 'pri-1', 'deepseek-v4-flash', 'CAPACITY', '503 overloaded')
     let snap = engine.snapshot('deepseek')
@@ -269,11 +262,12 @@ describe('CAPACITY backoff tier (oracle #5b)', () => {
         now: () => 1_000_000,
         sleep: (ms, signal) => {
           sleeps.push(ms)
-          if (signal.aborted) return Promise.reject(signal.reason)
+          if (signal.aborted) {
+            return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error('backoff aborted'))
+          }
           return Promise.resolve()
         },
       })
-      lastEngine = engine
       // Pre-cool both so healthy set is empty -> order includes both as all-cooling probe, maxAttempts 2, othersHealthy false -> backoff
       engine.recordFailure('deepseek', 'pri-1', 'deepseek-v4-flash', 'QUOTA', 'Resets in 10min.')
       engine.recordFailure('deepseek', 'pri-2', 'deepseek-v4-flash', 'QUOTA', 'Resets in 10min.')
@@ -322,7 +316,6 @@ describe('503/529 rotation (oracle #5c)', () => {
     const fake = await createFakeOpenAI({ keys: [{ id: 'pri-1', key: 'k1' }, { id: 'pri-2', key: 'k2' }] })
     try {
       const engine = engineOf()
-      lastEngine = engine
       const adapter = adapterOf(POOLED(fake.url), engine, { K1: 'k1', K2: 'k2' })
       fake.setScenario('pri-1', { failMode: '503' })
       await streamText(adapter)
@@ -340,7 +333,6 @@ describe('503/529 rotation (oracle #5c)', () => {
     const fake = await createFakeOpenAI({ keys: [{ id: 'pri-1', key: 'k1' }, { id: 'pri-2', key: 'k2' }] })
     try {
       const engine = engineOf()
-      lastEngine = engine
       const adapter = adapterOf(POOLED(fake.url), engine, { K1: 'k1', K2: 'k2' })
       fake.setScenario('pri-1', { failMode: '529' })
       await streamText(adapter)
@@ -358,7 +350,6 @@ describe('hydrate dirty skip (oracle #5d)', () => {
     await mkdir(stateDir, { recursive: true })
     await writeFile(join(stateDir, 'deepseek.json'), JSON.stringify({ version: 1, identities: { 'pri-1': { 'deepseek-v4-flash': { cooldownUntil: 0, consecutiveFailures: 0 } } } }), 'utf8')
     const engine = engineOf({ now: () => 2_000_000 })
-    lastEngine = engine
     // Start hydrate in background (reads the clean file)
     const hydrating = engine.hydrate('deepseek')
     // Immediately mutate: recordFailure marks dirty and sets cooldown
@@ -376,7 +367,6 @@ describe('mid-stream (oracle #5e)', () => {
     const fake = await createFakeOpenAI({ keys: [{ id: 'pri-1', key: 'k1' }, { id: 'pri-2', key: 'k2' }] })
     try {
       const engine = engineOf()
-      lastEngine = engine
       const adapter = adapterOf(POOLED(fake.url), engine, { K1: 'k1', K2: 'k2' })
       fake.setScenario('pri-1', { failMode: 'mid-stream' })
       // Collect chunks manually to observe mid-stream behavior
@@ -415,7 +405,6 @@ describe('MISSING_CREDENTIAL when no resolvable identity (oracle #7)', () => {
     const fake = await createFakeOpenAI({ keys: [{ id: 'pri-1', key: 'k1' }, { id: 'pri-2', key: 'k2' }] })
     try {
       const engine = engineOf()
-      lastEngine = engine
       const adapter = adapterOf(POOLED(fake.url), engine, { K1: undefined, K2: undefined })
       await expect(streamText(adapter)).rejects.toMatchObject({ code: 'MISSING_CREDENTIAL' })
       expect(fake.requests.length).toBe(0)
@@ -428,7 +417,6 @@ describe('MISSING_CREDENTIAL when no resolvable identity (oracle #7)', () => {
     const fake = await createFakeOpenAI({ keys: [{ id: 'pri-1', key: 'k1' }] })
     try {
       const engine = engineOf()
-      lastEngine = engine
       const adapter = adapterOf(POOLED(fake.url), engine, {})
       try {
         await streamText(adapter)
