@@ -1,8 +1,24 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-10-25T20:10:16.321Z",
+  "generatedAt": "2026-10-31T16:30:31.269Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.112",
+      "commit": "8addce3",
+      "releasedAt": "2026-10-31T15:56:38.000Z",
+      "notes": [
+        "ci(release): build the arm64 mac on a supported runner label",
+        "chore(profile): rebuild the command-code bundle on the core batch rule",
+        "chore(catalog): regenerate the Cordis and persistence catalogs",
+        "fix(chat): a replaced turn stops showing its status",
+        "refactor(llm): one hint parser and one tool-batch rule for every provider",
+        "fix(core): close unanswered tool calls before a turn settles",
+        "fix(llm): read the reset hint the provider actually sent",
+        "fix(llm-retry): wait for the rate limit the provider names",
+        "fix(commandcode): keep a tool batch contiguous when hoisting images"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.109",
       "commit": "66db040",
@@ -382,14 +398,6 @@
       "releasedAt": "2026-10-12T09:37:40.000Z",
       "notes": [
         "feat(update): retire the delta updater - simple prebuilt flow + residue scrub + health proof"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.68",
-      "commit": "6d7c3d5",
-      "releasedAt": "2026-10-12T07:31:21.000Z",
-      "notes": [
-        "feat(update): single-line TTY progress, 6-hop diff chains, zero-I/O skips, parallel walks"
       ]
     }
   ]
