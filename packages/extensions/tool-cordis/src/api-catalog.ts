@@ -94,7 +94,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'async saveSelection(next: ModelSelection): Promise<void>',
-        description: 'Save the complete default model selection. A deployment without a configuration editor keeps its composition entry. Saves commit in submission order; a failed save rejects its caller without blocking later saves. A `chain` the optional `modelChains` registry cannot route is dropped before the profile write. The deployment\'s `baseline` policy is not part of a selection and is carried over from the live entry, so a model pick never silently re-enables the Kilo fallback an owner turned off.',
+        description: 'Save the complete default model selection. A deployment without a configuration editor keeps its composition entry. Saves commit in submission order; a failed save rejects its caller without blocking later saves. A `chain` the optional `modelChains` registry cannot route is dropped before the profile write. The deployment\'s `baseline` policy is not part of a selection and is carried over from the live entry, so a model pick never silently re-enables the Kilo fallback an owner turned off; an entry that carries no legal policy (a legacy row) records the live Config value, so every saved row has one. The write re-validates the picked route against the live registry: a route removed while the save waited in the queue is not resurrected as a dangling default — the write falls back to the baseline pair instead.',
         parameters: [{ name: 'next', description: 'resolved selection accepted by an entry point.' }],
         returns: 'fulfillment after the optional profile write settles.',
       },
@@ -994,6 +994,56 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'feedbackCollect',
+    summary: 'Collect one payload\'s sections from a live session and the host context.',
+    description: 'Collect one payload\'s sections from a live session and the host context.',
+    methods: [
+      {
+        signature: 'collect(input: { session: unknown; share: FeedbackShareFlags }): Promise<FeedbackPayloadSections | null>',
+        description: 'Build the shared sections for one session, honoring the share flags.',
+        parameters: [{ name: 'input', description: 'live session plus resolved share flags.' }],
+        returns: 'the sections, or null when even the session could not be read.',
+      },
+    ],
+  },
+  {
+    key: 'feedbackSubmit',
+    summary: 'POST client for the feedback endpoint.',
+    description: 'POST client for the feedback endpoint.',
+    methods: [
+      {
+        signature: 'enabled(): boolean',
+        description: 'Whether submission is enabled by configuration.',
+        parameters: [],
+        returns: 'true when submissions are enabled.',
+      },
+      {
+        signature: 'async submit(payload: FeedbackEndpointPayload): Promise<{ id: string } | null>',
+        description: 'POST one payload to the configured endpoint with at most one retry.',
+        parameters: [{ name: 'payload', description: 'the endpoint payload.' }],
+        returns: 'the server id, or null on any failure.',
+      },
+    ],
+  },
+  {
+    key: 'feedbackTriage',
+    summary: 'Service wrapper: routes `triage()` through the injectable runner.',
+    description: 'Service wrapper: routes `triage()` through the injectable runner.',
+    methods: [
+      {
+        signature: 'runner: FeedbackTriageRunner',
+        description: 'The runner seam; tests replace it with a fake.',
+        parameters: [],
+      },
+      {
+        signature: 'async triage(input: { message: string; category?: string; sections: FeedbackPayloadSections }): Promise<FeedbackTriage | null>',
+        description: 'Triage one payload in an isolated session.',
+        parameters: [{ name: 'input', description: 'the message plus the shared sections.' }],
+        returns: 'the parsed triage, or null on any miss.',
+      },
+    ],
+  },
+  {
     key: 'fileReferences',
     summary: 'Host capability for cancellable file-reference discovery.',
     description: 'Host capability for cancellable file-reference discovery.',
@@ -1375,6 +1425,12 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     summary: 'The abstract `llm` service: an adapter registry plus a streaming model-call API, interceptable via the `llm/stream` waterfall.',
     description: 'The abstract `llm` service: an adapter registry plus a streaming model-call API, interceptable via the `llm/stream` waterfall.',
     methods: [
+      {
+        signature: 'routeHealth(): readonly RouteHealthEntry[]',
+        description: 'The in-memory route-health view: every `provider/model` whose latest failures still hold a cooldown, sorted by route. It is the status surface a host artifact projects (the model-chains plugin publishes it as `llm/route-health`); reading it performs no settings write.',
+        parameters: [],
+        returns: 'the frozen cooling entries, empty when every route is healthy.',
+      },
       {
         signature: 'registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle',
         description: 'Register an adapter for the given provider routes. Throws `LlmError` with code `DUPLICATE_ADAPTER` if any provider already has an adapter (all-or-nothing). Disposed with the fiber.',
@@ -1803,9 +1859,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     methods: [
       {
         signature: '@Remote async fastest(): Promise<string | null>',
-        description: 'Race npm and npmmirror HTTPS ping responses through the Host\'s fetch proxy. Concurrent readers share a probe; a winner cancels and awaits the other request.',
+        description: 'Race the configured registry ping endpoints through the Host\'s fetch proxy. Concurrent readers share a probe; a winner cancels and awaits the other request.',
         parameters: [],
-        returns: 'the first registry with a successful response, or null when disabled or neither responds successfully; results are cached.',
+        returns: 'the first registry with a successful response, or null when disabled or none responds successfully; results are cached.',
         throws: ['rejects when the service has been unloaded.'],
       },
     ],
@@ -2060,7 +2116,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: '@Remote(\'revert\') revert(request: SessionRevertRequest): Promise<SessionRevertValue>',
         description: 'Revert the conversation from a user message (revert-from-here).',
         parameters: [{ name: 'request', description: 'session and the user-message seq anchoring the revert.' }],
-        returns: 'the reverted query text and count for the input card; a no-op receipt (`noop`, `notice`) when the anchor has nothing to shadow.',
+        returns: 'the reverted query text and count for the input card; an unusable anchor is rejected with `revert-invalid`.',
       },
       {
         signature: '@Remote(\'revertRestore\') revertRestore(request: SessionRevertRestoreRequest): Promise<SessionRevertRestoreValue>',
@@ -2181,7 +2237,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'Host Remote through which a product surface records a Session-level remark.',
     methods: [
       {
-        signature: '@Remote(\'record\') record(request: SessionFeedbackRecordRequest): Promise<SessionFeedbackRecordResult>',
+        signature: '@Remote(\'record\') async record(request: SessionFeedbackRecordRequest): Promise<SessionFeedbackRecordResult>',
         description: 'Record one remark on a live Session.',
         parameters: [{ name: 'request', description: 'target Session plus the optional text and category.' }],
         returns: 'the recorded postcondition, or `session-not-found` when no live Session carries the id.',
@@ -3222,9 +3278,9 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'async assemble(context: AssembleContext = {}): Promise<PromptAssembly>',
-        description: 'Assemble global and scoped providers, detach tool parameters, apply canonical ordering, then run the assembly waterfall. Scoped sections and variables shadow globals. The returned waterfall value is authoritative except that an effective complete section is restored afterwards as the sole prompt section.',
+        description: 'Assemble global and scoped providers, detach tool parameters, apply canonical ordering, then run the assembly waterfall. Scoped sections and variables shadow globals. The returned waterfall value is authoritative except that an effective complete section is restored afterwards as the sole prompt section, and the built-in identity section gains the routed provider/model data line (see SystemPrompt.withRouteIdentity).',
         parameters: [{ name: 'context', description: 'the optional scope and plugin-defined assembly fields.' }],
-        returns: 'the post-waterfall assembly with any complete prompt enforced.',
+        returns: 'the post-waterfall assembly with any complete prompt enforced and the identity route line stated.',
       },
     ],
   },
@@ -4323,6 +4379,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [],
   },
   {
+    name: 'llm/route-health-updated',
+    mode: 'emit',
+    signature: '\'llm/route-health-updated\'(): void',
+    summary: 'The in-memory route-health view moved: a `provider/model` cooled down, a consecutive run grew, or a successful attempt cleared the route.',
+    description: 'The in-memory route-health view moved: a `provider/model` cooled down, a consecutive run grew, or a successful attempt cleared the route. The view is process-local and never persisted, so this notification exists only for status projections; consumers re-read `ctx.llm.routeHealth()`. A listener failure is contained and cannot change a request\'s outcome.',
+    parameters: [],
+  },
+  {
     name: 'llm/stream',
     mode: 'waterfall',
     signature: '\'llm/stream\'(this: LlmRuntime, options: GenerateOptions, next: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk>',
@@ -5367,6 +5431,46 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type FeedbackCategory = \'task-result\' | \'instruction-following\' | \'product-interaction\' | \'service-stability\' | \'resource-cost\' | \'security-privacy-permission\' | \'other\';',
   },
   {
+    name: 'FeedbackContextMessage',
+    declaration: 'export interface FeedbackContextMessage {\n    readonly role: \'user\' | \'assistant\' | \'system\';\n    readonly text: string;\n}',
+  },
+  {
+    name: 'FeedbackContextSection',
+    declaration: 'export interface FeedbackContextSection {\n    readonly messages: readonly FeedbackContextMessage[];\n    readonly toolCalls: readonly FeedbackContextToolCall[];\n    readonly errors: readonly string[];\n}',
+  },
+  {
+    name: 'FeedbackContextToolCall',
+    declaration: 'export interface FeedbackContextToolCall {\n    readonly name: string;\n    readonly arguments: string;\n}',
+  },
+  {
+    name: 'FeedbackEndpointPayload',
+    declaration: 'export interface FeedbackEndpointPayload {\n    readonly app: {\n        readonly name: string;\n        readonly version: string;\n        readonly commit: string;\n    };\n    readonly message?: string;\n    readonly category?: string;\n    readonly flags: FeedbackShareFlags;\n    readonly system?: FeedbackSystemSection;\n    readonly context?: FeedbackContextSection;\n    readonly session?: FeedbackSessionSection;\n    readonly analysis?: FeedbackTriage;\n    readonly meta: {\n        readonly submittedAt: string;\n        readonly installIdHash: string;\n    };\n}',
+  },
+  {
+    name: 'FeedbackPayloadSections',
+    declaration: 'export interface FeedbackPayloadSections {\n    readonly system?: FeedbackSystemSection;\n    readonly context?: FeedbackContextSection;\n    readonly session?: FeedbackSessionSection;\n}',
+  },
+  {
+    name: 'FeedbackSessionSection',
+    declaration: 'export interface FeedbackSessionSection {\n    readonly sessionIdHash: string;\n    readonly eventCount: number;\n    readonly turnCount: number;\n    readonly preset: string | null;\n    readonly model: string | null;\n    readonly recentErrors: readonly string[];\n}',
+  },
+  {
+    name: 'FeedbackSeverity',
+    declaration: 'export type FeedbackSeverity = \'low\' | \'medium\' | \'high\';',
+  },
+  {
+    name: 'FeedbackSystemSection',
+    declaration: 'export interface FeedbackSystemSection {\n    readonly app: {\n        readonly name: string;\n        readonly version: string;\n        readonly commit: string;\n    };\n    readonly platform: string;\n    readonly arch: string;\n    readonly node: string;\n    readonly providers: readonly string[];\n    readonly defaultModel: string | null;\n}',
+  },
+  {
+    name: 'FeedbackTriage',
+    declaration: 'export interface FeedbackTriage {\n    readonly category: string;\n    readonly severity: FeedbackSeverity;\n    readonly summary: string;\n    readonly details?: string;\n}',
+  },
+  {
+    name: 'FeedbackTriageRunner',
+    declaration: 'export type FeedbackTriageRunner = (input: {\n    message: string;\n    category?: string;\n    sections: FeedbackPayloadSections;\n}, signal: AbortSignal) => Promise<FeedbackTriage | null>;',
+  },
+  {
     name: 'FiberState',
     declaration: 'export const enum FiberState {\n    PENDING,\n    LOADING,\n    ACTIVE,\n    FAILED,\n    DISPOSED,\n    UNLOADING\n}',
   },
@@ -5788,7 +5892,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmDiscoveredModel',
-    declaration: 'export interface LlmDiscoveredModel {\n    id: string;\n    name?: string;\n    contextWindow?: number;\n    maxTokens?: number;\n    inputModalities?: readonly ModelModality[];\n}',
+    declaration: 'export interface LlmDiscoveredModel {\n    id: string;\n    name?: string;\n    contextWindow?: number;\n    maxTokens?: number;\n    inputModalities?: readonly ModelModality[];\n    reasoningEfforts?: Readonly<Record<string, string>>;\n}',
   },
   {
     name: 'LlmFailure',
@@ -5840,7 +5944,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmRuntime',
-    declaration: 'export class LlmRuntime extends TypertRemoteService {\n    constructor(ctx: Context);\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    @Remote\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    @Remote\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest, signal?: AbortSignal) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal?: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    registerPoolOperations(settingsNs: string, ops: LlmPoolOperations): () => void;\n    @Remote\n    async poolStatus(settingsNs: string, provider: string): Promise<LlmPoolIdentityStatus[]>;\n    @Remote\n    async poolResetCooldown(settingsNs: string, provider: string, identityId?: string): Promise<void>;\n    @Remote\n    async poolTestIdentity(settingsNs: string, provider: string, identityId: string, apiKey?: string): Promise<{\n        ok: boolean;\n        status?: number;\n        latencyMs?: number;\n        error?: string;\n        modelsCount?: number;\n    }>;\n    @Remote(\'discoverModels\')\n    async remoteDiscoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    providerRetryPolicy(provider: string): ResolvedR /* …truncated — full shape in source */',
+    declaration: 'export class LlmRuntime extends TypertRemoteService {\n    static Config: Schema<Config>;\n    constructor(ctx: Context, config: Partial<Config> = {});\n    routeHealth(): readonly RouteHealthEntry[];\n    registerAdapter(providers: string[], adapter: LlmAdapter): AdapterRegistrationHandle;\n    @Remote\n    listProviders(): LlmProviderInfo[];\n    registerConfigurableProviders(entries: readonly LlmConfigurableProvider[]): DirectoryRegistrationHandle;\n    @Remote\n    listConfigurableProviders(): LlmConfigurableProvider[];\n    registerModelDiscovery(settingsNs: string, discover: (request: LlmModelDiscoveryRequest, signal?: AbortSignal) => Promise<readonly LlmDiscoveredModel[]>): () => void;\n    async discoverModels(settingsNs: string, request: LlmModelDiscoveryRequest, signal?: AbortSignal): Promise<LlmDiscoveredModel[]>;\n    registerPoolOperations(settingsNs: string, ops: LlmPoolOperations): () => void;\n    @Remote\n    async poolStatus(settingsNs: string, provider: string): Promise<LlmPoolIdentityStatus[]>;\n    @Remote\n    async poolResetCooldown(settingsNs: string, provider: string, identityId?: string): Promise<void>;\n    @Remote\n    async poolTestIdentity(settingsNs: string, provider: string, identityId: string, apiKey?: string): Promise<{\n        ok: boolean;\n        status?: number;\n        latencyMs?: number;\n        error?: string;\n        modelsCount?: number;\n    }>;\n    @Remote(\'discoverModels\')\n    async remoteDiscoverModels(settingsNs: string, request: LlmModelDiscoveryR /* …truncated — full shape in source */',
   },
   {
     name: 'LoadedPeerPairings',
@@ -6024,7 +6128,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ModelModalityMap',
-    declaration: 'export interface ModelModalityMap {\n    text: \'text\';\n    image: \'image\';\n}',
+    declaration: 'export interface ModelModalityMap {\n    text: \'text\';\n    image: \'image\';\n    audio: \'audio\';\n    video: \'video\';\n    pdf: \'pdf\';\n}',
   },
   {
     name: 'ModelProviderGroup',
@@ -6136,7 +6240,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PeerBinding',
-    declaration: 'export interface PeerBinding {\n    readonly sessionId: SessionId;\n    readonly device: PeerDeviceName;\n    readonly createdAt: number;\n}',
+    declaration: 'export interface PeerBinding {\n    readonly sessionId: SessionId;\n    readonly device: PeerDeviceName;\n    readonly createdAt: number;\n    readonly retired?: readonly RetiredPeerBinding[];\n}',
   },
   {
     name: 'PeerCancelRequest',
@@ -6671,12 +6775,24 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ResumeAgentOptions {\n    readonly resumeSessionId: SessionId;\n    readonly parentAgent?: Agent;\n    readonly agentOptions?: AgentOptions;\n    readonly signal?: AbortSignal;\n    readonly setup?: AgentSetup;\n}',
   },
   {
+    name: 'RetiredPeerBinding',
+    declaration: 'export interface RetiredPeerBinding {\n    readonly sessionId: SessionId;\n    readonly device: PeerDeviceName;\n    readonly createdAt: number;\n    readonly retiredAt: number;\n}',
+  },
+  {
     name: 'RevertFileConflict',
     declaration: 'export interface RevertFileConflict {\n    readonly conflictId: string;\n    readonly targetKey: string;\n    readonly displayPath: string;\n    readonly state: \'conflict\' | \'missing\' | \'unavailable\';\n    readonly reason: string;\n    readonly mode?: \'revert\' | \'restore\';\n    readonly boundarySeq?: number | null;\n    readonly spanStartSeq?: number;\n    readonly targetBlobSha?: string | null;\n    readonly targetAbsent?: boolean;\n    readonly spanPreExisted?: boolean;\n}',
   },
   {
     name: 'RevertFileOutcome',
     declaration: 'export interface RevertFileOutcome {\n    readonly status: string;\n    readonly fromSha?: string | null;\n    readonly toSha?: string | null;\n    readonly dest?: string;\n    readonly reason?: string;\n}',
+  },
+  {
+    name: 'RouteHealthClass',
+    declaration: 'export type RouteHealthClass = \'empty\' | \'auth\' | \'rate_limit\' | \'server\';',
+  },
+  {
+    name: 'RouteHealthEntry',
+    declaration: 'export interface RouteHealthEntry {\n    readonly provider: string;\n    readonly model: string;\n    readonly class: RouteHealthClass;\n    readonly failures: number;\n    readonly code: string;\n    readonly coolingUntil: number;\n    readonly cooling: boolean;\n}',
   },
   {
     name: 'RpcId',
@@ -6836,7 +6952,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'Session',
-    declaration: 'export class Session {\n    get surface(): SessionSurface;\n    readonly header: SessionHeader;\n    readonly inheritedEventCount: SessionLogOffset;\n    get id(): SessionId;\n    readonly firstLiveSeq: SessionLogOffset;\n    readonly firstLifecycleSeq: SessionLogOffset;\n    static create(id: SessionId, seed?: readonly SessionEvent[], header?: SessionHeader, inheritedEventCount?: SessionLogOffset, projections?: readonly SessionMessageProjection[]): Session;\n    static fromRestore(id: SessionId, seed: readonly SessionEvent[], header: SessionHeader, inheritedEventCount: SessionLogOffset, eventState: SessionSeedEventState, projections?: readonly SessionMessageProjection[]): Session;\n    eventAt(seq: SessionSeq): SessionEvent | undefined;\n    snapshotEvents(fromSeq: SessionLogOffset = SessionLogOffset(0), toSeqExclusive: SessionLogOffset = this.seq): readonly SessionEvent[];\n    ownEvents(): readonly SessionEvent[];\n    isOwnSeq(seq: SessionSeq): boolean;\n    get seq(): SessionLogOffset;\n    append<T extends SessionEventType>(type: T, data: SessionEventMap[T], ...opts: T extends SurfaceEventType ? [\n        opts: SurfaceIntent<T>\n    ] : [\n        opts?: {\n            ignorable?: true;\n        }\n    ]): SessionEvent<T>;\n    requestHeader(): EpochHeader | undefined;\n    requestContext(): RequestContext | undefined;\n    toolHistory(): ToolHistory;\n    deriveMessages(): Message[];\n    deriveEventMessage(event: SessionEvent): Message | null;\n}',
+    declaration: 'export class Session {\n    get surface(): SessionSurface;\n    readonly header: SessionHeader;\n    readonly inheritedEventCount: SessionLogOffset;\n    get id(): SessionId;\n    readonly firstLiveSeq: SessionLogOffset;\n    readonly firstLifecycleSeq: SessionLogOffset;\n    static create(id: SessionId, seed?: readonly SessionEvent[], header?: SessionHeader, inheritedEventCount?: SessionLogOffset, projections?: readonly SessionMessageProjection[]): Session;\n    static fromRestore(id: SessionId, seed: readonly SessionEvent[], header: SessionHeader, inheritedEventCount: SessionLogOffset, eventState: SessionSeedEventState, projections?: readonly SessionMessageProjection[]): Session;\n    eventAt(seq: SessionSeq): SessionEvent | undefined;\n    snapshotEvents(fromSeq: SessionLogOffset = SessionLogOffset(0), toSeqExclusive: SessionLogOffset = this.seq): readonly SessionEvent[];\n    ownEvents(): readonly SessionEvent[];\n    isOwnSeq(seq: SessionSeq): boolean;\n    get seq(): SessionLogOffset;\n    append<T extends SessionEventType>(type: T, data: SessionEventMap[T], ...opts: T extends SurfaceEventType ? [\n        opts: SurfaceIntent<T>\n    ] : [\n        opts?: {\n            ignorable?: true;\n        }\n    ]): SessionEvent<T>;\n    requestHeader(): EpochHeader | undefined;\n    requestContext(): RequestContext | undefined;\n    toolHistory(): ToolHistory;\n    deriveMessages(): Message[];\n    closeUnansweredToolCalls(turn: number, step: number): number;\n    deriveEventMessage(event: SessionEvent) /* …truncated — full shape in source */',
   },
   {
     name: 'SessionAccess',
@@ -7024,7 +7140,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionFeedbackRecordRequest',
-    declaration: 'export interface SessionFeedbackRecordRequest {\n    readonly sessionId: SessionId;\n    readonly text?: string;\n    readonly category?: FeedbackCategory;\n}',
+    declaration: 'export interface SessionFeedbackRecordRequest {\n    readonly sessionId: SessionId;\n    readonly text?: string;\n    readonly category?: FeedbackCategory;\n    readonly share?: {\n        readonly systemInfo?: boolean;\n        readonly context?: boolean;\n        readonly session?: boolean;\n        readonly message?: boolean;\n    };\n    readonly submit?: boolean;\n}',
   },
   {
     name: 'SessionFeedbackRecordResult',
@@ -7032,7 +7148,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionFeedbackRecordValue',
-    declaration: 'export interface SessionFeedbackRecordValue {\n    readonly recorded: true;\n}',
+    declaration: 'export interface SessionFeedbackRecordValue {\n    readonly recorded: true;\n    readonly submitted: {\n        readonly id: string;\n    } | null;\n    readonly analysis: import(\'@deepseek-ai/dsh-feedback-collect/types\').FeedbackTriage | null;\n}',
   },
   {
     name: 'SessionFeedbackSessionNotFound',

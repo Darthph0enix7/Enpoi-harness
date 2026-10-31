@@ -9993,7 +9993,7 @@
       "kind": "event",
       "event": "llm/attempt-failed",
       "surface": false,
-      "digest": "a8faf601655057183e2ab1a7b72e3c1a11fb0420db0f61d1a4c2e82f67580384",
+      "digest": "946eb1b89fe299bfe8ebb0257e67386fada612d12b7b0e11e62b6e03e940db9d",
       "schema": {
         "root": 0,
         "nodes": [
@@ -10074,6 +10074,11 @@
                 "optional": false
               },
               {
+                "name": "providerRetryAfterMs",
+                "type": 4,
+                "optional": true
+              },
+              {
                 "name": "requestId",
                 "type": 3,
                 "optional": true
@@ -10142,6 +10147,11 @@
                 "name": "provider",
                 "type": 3,
                 "optional": false
+              },
+              {
+                "name": "providerRetryAfterMs",
+                "type": 4,
+                "optional": true
               },
               {
                 "name": "requestId",
@@ -22638,7 +22648,7 @@
         "packages/subagent/tool-subagent/src/model-selection.ts#AllowedModelRoute"
       ],
       "sources": [
-        "packages/core/session/src/types.ts:601",
+        "packages/core/session/src/types.ts:603",
         "packages/llm/llm/src/types.ts:576",
         "packages/session/session-title/src/types.ts:20",
         "packages/subagent/tool-subagent/src/model-selection.ts:9"
@@ -23144,7 +23154,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:611"
+        "packages/core/session/src/types.ts:615"
       ]
     },
     {
@@ -39824,6 +39834,165 @@
       ]
     },
     {
+      "digest": "31cf4710cd6dbbb7af3a4f1c2bd3a0376994c009bb21b21774fe806958c2930d",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "union",
+            "types": [
+              1,
+              5
+            ]
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "chain",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "code",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "link",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "message",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "model",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "next",
+                "type": 4,
+                "optional": false
+              },
+              {
+                "name": "provider",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "providerRetryAfterMs",
+                "type": 3,
+                "optional": true
+              },
+              {
+                "name": "requestId",
+                "type": 2,
+                "optional": true
+              },
+              {
+                "name": "status",
+                "type": 3,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "model",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "provider",
+                "type": 2,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "code",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "identity",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "message",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "model",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "next",
+                "type": 6,
+                "optional": false
+              },
+              {
+                "name": "provider",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "providerRetryAfterMs",
+                "type": 3,
+                "optional": true
+              },
+              {
+                "name": "requestId",
+                "type": 2,
+                "optional": true
+              },
+              {
+                "name": "status",
+                "type": 3,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "identity",
+                "type": 2,
+                "optional": false
+              }
+            ],
+            "indices": []
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
+    },
+    {
       "digest": "326a9bfda27dda5882fb3cbe6e715df41dae2298fdae3d66437457268a665693",
       "schema": {
         "root": 0,
@@ -39958,7 +40127,7 @@
         "packages/core/session/src/types.ts#SurfaceOp"
       ],
       "sources": [
-        "packages/core/session/src/types.ts:663"
+        "packages/core/session/src/types.ts:667"
       ]
     },
     {
@@ -60205,7 +60374,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:621"
+        "packages/core/session/src/types.ts:625"
       ]
     },
     {
@@ -60607,83 +60776,6 @@
       "names": [],
       "sources": [
         "packages/llm/llm/src/assistant-stream.ts:28"
-      ]
-    },
-    {
-      "digest": "7257567bd521fd27cc9b32215522f358da648cc95b737c82f6747bdc850c799a",
-      "schema": {
-        "root": 0,
-        "nodes": [
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "code",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "identity",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "message",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "model",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "next",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "provider",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "requestId",
-                "type": 1,
-                "optional": true
-              },
-              {
-                "name": "status",
-                "type": 3,
-                "optional": true
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "primitive",
-            "type": "string"
-          },
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "identity",
-                "type": 1,
-                "optional": false
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "primitive",
-            "type": "number"
-          }
-        ]
-      },
-      "names": [],
-      "sources": [
-        "packages/core/session/src/types.ts:603"
       ]
     },
     {
@@ -68239,6 +68331,204 @@
       "sources": []
     },
     {
+      "digest": "946eb1b89fe299bfe8ebb0257e67386fada612d12b7b0e11e62b6e03e940db9d",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "data",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "ignorable",
+                "type": 8,
+                "optional": true
+              },
+              {
+                "name": "seq",
+                "type": 4,
+                "optional": false
+              },
+              {
+                "name": "time",
+                "type": 4,
+                "optional": false
+              },
+              {
+                "name": "type",
+                "type": 9,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "union",
+            "types": [
+              2,
+              6
+            ]
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "chain",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "code",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "link",
+                "type": 4,
+                "optional": false
+              },
+              {
+                "name": "message",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "model",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "next",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "provider",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "providerRetryAfterMs",
+                "type": 4,
+                "optional": true
+              },
+              {
+                "name": "requestId",
+                "type": 3,
+                "optional": true
+              },
+              {
+                "name": "status",
+                "type": 4,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "model",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "provider",
+                "type": 3,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "code",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "identity",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "message",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "model",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "next",
+                "type": 7,
+                "optional": false
+              },
+              {
+                "name": "provider",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "providerRetryAfterMs",
+                "type": 4,
+                "optional": true
+              },
+              {
+                "name": "requestId",
+                "type": 3,
+                "optional": true
+              },
+              {
+                "name": "status",
+                "type": 4,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "identity",
+                "type": 3,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "literal",
+            "value": true
+          },
+          {
+            "kind": "literal",
+            "value": "llm/attempt-failed"
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
+    },
+    {
       "digest": "94c56aeb1564ad735eb773d88636b40761d063efa1610f1308004d32923f5378",
       "schema": {
         "root": 0,
@@ -75366,194 +75656,6 @@
       "sources": []
     },
     {
-      "digest": "a8faf601655057183e2ab1a7b72e3c1a11fb0420db0f61d1a4c2e82f67580384",
-      "schema": {
-        "root": 0,
-        "nodes": [
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "data",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "ignorable",
-                "type": 8,
-                "optional": true
-              },
-              {
-                "name": "seq",
-                "type": 4,
-                "optional": false
-              },
-              {
-                "name": "time",
-                "type": 4,
-                "optional": false
-              },
-              {
-                "name": "type",
-                "type": 9,
-                "optional": false
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "union",
-            "types": [
-              2,
-              6
-            ]
-          },
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "chain",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "code",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "link",
-                "type": 4,
-                "optional": false
-              },
-              {
-                "name": "message",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "model",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "next",
-                "type": 5,
-                "optional": false
-              },
-              {
-                "name": "provider",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "requestId",
-                "type": 3,
-                "optional": true
-              },
-              {
-                "name": "status",
-                "type": 4,
-                "optional": true
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "primitive",
-            "type": "string"
-          },
-          {
-            "kind": "primitive",
-            "type": "number"
-          },
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "model",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "provider",
-                "type": 3,
-                "optional": false
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "code",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "identity",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "message",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "model",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "next",
-                "type": 7,
-                "optional": false
-              },
-              {
-                "name": "provider",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "requestId",
-                "type": 3,
-                "optional": true
-              },
-              {
-                "name": "status",
-                "type": 4,
-                "optional": true
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "identity",
-                "type": 3,
-                "optional": false
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "literal",
-            "value": true
-          },
-          {
-            "kind": "literal",
-            "value": "llm/attempt-failed"
-          }
-        ]
-      },
-      "names": [],
-      "sources": []
-    },
-    {
       "digest": "a9059a81430b320792bbb7c2ee1f8f6c77ff71e40ee44c18aec72e157c522694",
       "schema": {
         "root": 0,
@@ -79845,7 +79947,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:665"
+        "packages/core/session/src/types.ts:669"
       ]
     },
     {
@@ -80850,6 +80952,98 @@
       ],
       "sources": [
         "packages/subagent/subagent/src/descriptor.ts:91"
+      ]
+    },
+    {
+      "digest": "c5f052e68bb0313c2dbb01c1dc57ee132b0a98086bc75d205cb3edc5fefc79b3",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "chain",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "code",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "link",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "message",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "model",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "next",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "provider",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "providerRetryAfterMs",
+                "type": 2,
+                "optional": true
+              },
+              {
+                "name": "requestId",
+                "type": 1,
+                "optional": true
+              },
+              {
+                "name": "status",
+                "type": 2,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "model",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "provider",
+                "type": 1,
+                "optional": false
+              }
+            ],
+            "indices": []
+          }
+        ]
+      },
+      "names": [],
+      "sources": [
+        "packages/core/session/src/types.ts:592"
       ]
     },
     {
@@ -92564,155 +92758,6 @@
       ]
     },
     {
-      "digest": "e01dac4004228d9d9ff24229247c03c076e52c4fb93ae81df7742110d70afe30",
-      "schema": {
-        "root": 0,
-        "nodes": [
-          {
-            "kind": "union",
-            "types": [
-              1,
-              5
-            ]
-          },
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "chain",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "code",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "link",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "message",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "model",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "next",
-                "type": 4,
-                "optional": false
-              },
-              {
-                "name": "provider",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "requestId",
-                "type": 2,
-                "optional": true
-              },
-              {
-                "name": "status",
-                "type": 3,
-                "optional": true
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "primitive",
-            "type": "string"
-          },
-          {
-            "kind": "primitive",
-            "type": "number"
-          },
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "model",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "provider",
-                "type": 2,
-                "optional": false
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "code",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "identity",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "message",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "model",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "next",
-                "type": 6,
-                "optional": false
-              },
-              {
-                "name": "provider",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "requestId",
-                "type": 2,
-                "optional": true
-              },
-              {
-                "name": "status",
-                "type": 3,
-                "optional": true
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "identity",
-                "type": 2,
-                "optional": false
-              }
-            ],
-            "indices": []
-          }
-        ]
-      },
-      "names": [],
-      "sources": []
-    },
-    {
       "digest": "e0a787e6ec76c7c94fecbc501b489164ab0293db05bc947914077ad01e674f05",
       "schema": {
         "root": 0,
@@ -97594,93 +97639,6 @@
       "sources": []
     },
     {
-      "digest": "ef6a24df94df359c1f487b3d340cf4a2a3f8e0cedfc5a6c769b5f5421ff990a1",
-      "schema": {
-        "root": 0,
-        "nodes": [
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "chain",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "code",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "link",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "message",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "model",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "next",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "provider",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "requestId",
-                "type": 1,
-                "optional": true
-              },
-              {
-                "name": "status",
-                "type": 2,
-                "optional": true
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "primitive",
-            "type": "string"
-          },
-          {
-            "kind": "primitive",
-            "type": "number"
-          },
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "model",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "provider",
-                "type": 1,
-                "optional": false
-              }
-            ],
-            "indices": []
-          }
-        ]
-      },
-      "names": [],
-      "sources": [
-        "packages/core/session/src/types.ts:592"
-      ]
-    },
-    {
       "digest": "f05fb85e715af4ab4de0b6ba111166dd0435bd8bb74a0fa0f32b9d174113fc7c",
       "schema": {
         "root": 0,
@@ -98386,6 +98344,88 @@
       },
       "names": [],
       "sources": []
+    },
+    {
+      "digest": "f68e5760e48c218053963d53cb0ad6d2346c065f44905de5edaa095e3386be42",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "code",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "identity",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "message",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "model",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "next",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "provider",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "providerRetryAfterMs",
+                "type": 3,
+                "optional": true
+              },
+              {
+                "name": "requestId",
+                "type": 1,
+                "optional": true
+              },
+              {
+                "name": "status",
+                "type": 3,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "identity",
+                "type": 1,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          }
+        ]
+      },
+      "names": [],
+      "sources": [
+        "packages/core/session/src/types.ts:605"
+      ]
     },
     {
       "digest": "f6afe41e3926f422fe849debe90819fddd739f0f59e20be9c71018b9554a7f09",

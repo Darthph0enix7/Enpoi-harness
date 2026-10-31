@@ -218,9 +218,9 @@ Compares public registry responses on the Host; the Client owns the initial sele
 
 ```ts cordis-catalog
 /**
- * Race npm and npmmirror HTTPS ping responses through the Host's fetch proxy.
+ * Race the configured registry ping endpoints through the Host's fetch proxy.
  * Concurrent readers share a probe; a winner cancels and awaits the other request.
- * @returns the first registry with a successful response, or null when disabled or neither responds successfully; results are cached.
+ * @returns the first registry with a successful response, or null when disabled or none responds successfully; results are cached.
  * @throws rejects when the service has been unloaded.
  */
 @Remote async fastest(): Promise<string | null>

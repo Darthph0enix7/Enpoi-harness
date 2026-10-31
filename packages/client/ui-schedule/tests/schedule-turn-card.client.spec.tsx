@@ -77,6 +77,7 @@ function turnLocation(turn: number, data?: ScheduleTurnData, endSeq?: number): T
     turn,
     start: undefined,
     status: 'closed',
+    active: true,
     steps: [],
     data: store,
     end: endSeq === undefined ? undefined : at(endSeq, 'turn/end', { turn }).event as SessionEvent<'turn/end'>,

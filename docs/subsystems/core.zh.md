@@ -447,7 +447,11 @@ currentSelection(): ModelSelection
  * `modelChains` registry cannot route is dropped before the profile write.
  * The deployment's `baseline` policy is not part of a selection and is carried
  * over from the live entry, so a model pick never silently re-enables the Kilo
- * fallback an owner turned off.
+ * fallback an owner turned off; an entry that carries no legal policy (a
+ * legacy row) records the live Config value, so every saved row has one.
+ * The write re-validates the picked route against the live registry: a route
+ * removed while the save waited in the queue is not resurrected as a dangling
+ * default — the write falls back to the baseline pair instead.
  * @param next - resolved selection accepted by an entry point.
  * @returns fulfillment after the optional profile write settles.
  */

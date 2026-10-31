@@ -65,7 +65,10 @@ export class FeedbackSubmit extends Service implements FeedbackSubmitService {
   private readonly _timeoutMs: number
   private readonly _retryDelayMs: number
 
-  /** Whether submission is enabled by configuration. */
+  /**
+   * Whether submission is enabled by configuration.
+   * @returns true when submissions are enabled.
+   */
   enabled(): boolean {
     return this._enabled
   }

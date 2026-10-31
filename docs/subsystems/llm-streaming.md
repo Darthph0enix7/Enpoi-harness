@@ -927,6 +927,15 @@ The abstract `llm` service: an adapter registry plus a streaming model-call API,
 
 ```ts cordis-catalog
 /**
+ * The in-memory route-health view: every `provider/model` whose latest
+ * failures still hold a cooldown, sorted by route. It is the status surface
+ * a host artifact projects (the model-chains plugin publishes it as
+ * `llm/route-health`); reading it performs no settings write.
+ * @returns the frozen cooling entries, empty when every route is healthy.
+ */
+routeHealth(): readonly RouteHealthEntry[]
+
+/**
  * Register an adapter for the given provider routes. Throws `LlmError` with code
  * `DUPLICATE_ADAPTER` if any provider already has an adapter (all-or-nothing).
  * Disposed with the fiber.
@@ -1133,6 +1142,26 @@ The provider topology changed: an adapter registered or unregistered routes, or 
  * @mode emit
  */
 'llm/adapters-updated'(): void
+```
+
+Source: [`packages/llm/llm/src/types.ts`](../../packages/llm/llm/src/types.ts)
+
+<a id="llmroute-health-updated--emit"></a>
+
+#### `llm/route-health-updated` — emit
+
+The in-memory route-health view moved: a `provider/model` cooled down, a consecutive run grew, or a successful attempt cleared the route. The view is process-local and never persisted, so this notification exists only for status projections; consumers re-read `ctx.llm.routeHealth()`. A listener failure is contained and cannot change a request's outcome.
+
+```ts cordis-catalog
+/**
+ * The in-memory route-health view moved: a `provider/model` cooled down, a
+ * consecutive run grew, or a successful attempt cleared the route. The
+ * view is process-local and never persisted, so this notification exists
+ * only for status projections; consumers re-read `ctx.llm.routeHealth()`.
+ * A listener failure is contained and cannot change a request's outcome.
+ * @mode emit
+ */
+'llm/route-health-updated'(): void
 ```
 
 Source: [`packages/llm/llm/src/types.ts`](../../packages/llm/llm/src/types.ts)

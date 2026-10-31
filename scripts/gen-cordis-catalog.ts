@@ -53,6 +53,9 @@ export const SERVICE_PAGE: Record<string, string> = {
   speechToText: 'voice-input.md',
   speechController: 'voice-input.md',
   productTelemetry: 'product-telemetry.md',
+  feedbackCollect: 'feedback.md',
+  feedbackSubmit: 'feedback.md',
+  feedbackTriage: 'feedback.md',
   connection: 'web-server.md',
   pluginManager: 'boot.md',
   pluginRegistryProbe: 'boot.md',
@@ -281,6 +284,7 @@ export const EVENT_WALK_EXEMPTIONS: Record<string, string> = {
 export const LINK_MAP: Readonly<Record<string, string>> = {
   ProductTelemetryRecord: 'product-telemetry.md',
   ProductTelemetryScalar: 'product-telemetry.md',
+  RouteHealthEntry: 'llm-streaming.md',
   WorkspaceChangesSummary: 'deliverables.md',
   WorkspaceFileDiff: 'deliverables.md',
   Reload: 'boot.md',
@@ -846,6 +850,10 @@ export const FOUNDATION_TYPE_NAMES: ReadonlySet<string> = new Set([
 
 /** Project types deliberately documented outside the subsystems catalog. */
 export const TYPE_LINK_EXEMPTIONS: Readonly<Record<string, string>> = {
+  FeedbackPayloadSections: 'feedback payload sections are owned by packages/feedback/feedback-collect/README.md',
+  FeedbackShareFlags: 'feedback share flags are owned by packages/feedback/feedback-collect/README.md',
+  FeedbackEndpointPayload: 'the endpoint payload is owned by packages/feedback/feedback-submit/README.md',
+  FeedbackTriage: 'the triage decision is owned by packages/feedback/feedback-triage/README.md',
   ConnectionFetchHandler: 'shared Fetch dispatch is owned by packages/client/connection/src/rpc.ts',
   ConnectionRequestRejection: 'transport rejection status is owned by packages/client/connection/src/rpc.ts',
   ConnectionTrustRequest: 'transport authentication input is owned by packages/client/connection/src/rpc.ts',

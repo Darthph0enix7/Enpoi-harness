@@ -322,6 +322,63 @@ fork 种子可以包含父 Session 的反馈事件，但 payload 保留父级 `s
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
 
+<a id="ctxfeedbackcollect--feedbackcollector"></a>
+
+### `ctx.feedbackCollect` — `FeedbackCollector`
+
+Collect one payload's sections from a live session and the host context.
+
+```ts cordis-catalog
+/**
+ * Build the shared sections for one session, honoring the share flags.
+ * @param input - live session plus resolved share flags.
+ * @returns the sections, or null when even the session could not be read.
+ */
+collect(input: { session: unknown; share: FeedbackShareFlags }): Promise<FeedbackPayloadSections | null>
+```
+
+Source: [`packages/feedback/feedback-collect/src/index.ts`](../../packages/feedback/feedback-collect/src/index.ts)
+
+<a id="ctxfeedbacksubmit--feedbacksubmit"></a>
+
+### `ctx.feedbackSubmit` — `FeedbackSubmit`
+
+POST client for the feedback endpoint.
+
+```ts cordis-catalog
+/**
+ * Whether submission is enabled by configuration.
+ * @returns true when submissions are enabled.
+ */
+enabled(): boolean
+
+/**
+ * POST one payload to the configured endpoint with at most one retry.
+ * @param payload - the endpoint payload.
+ * @returns the server id, or null on any failure.
+ */
+async submit(payload: FeedbackEndpointPayload): Promise<{ id: string } | null>
+```
+
+Source: [`packages/feedback/feedback-submit/src/index.ts`](../../packages/feedback/feedback-submit/src/index.ts)
+
+<a id="ctxfeedbacktriage--feedbacktriagesession"></a>
+
+### `ctx.feedbackTriage` — `FeedbackTriageSession`
+
+Service wrapper: routes `triage()` through the injectable runner.
+
+```ts cordis-catalog
+/**
+ * Triage one payload in an isolated session.
+ * @param input - the message plus the shared sections.
+ * @returns the parsed triage, or null on any miss.
+ */
+async triage(input: { message: string; category?: string; sections: FeedbackPayloadSections }): Promise<FeedbackTriage | null>
+```
+
+Source: [`packages/feedback/feedback-triage/src/index.ts`](../../packages/feedback/feedback-triage/src/index.ts)
+
 <a id="ctxmessagefeedback--messagefeedbackservice"></a>
 
 ### `ctx.messageFeedback` — `MessageFeedbackService`
@@ -367,7 +424,7 @@ Host Remote through which a product surface records a Session-level remark.
  * @returns the recorded postcondition, or `session-not-found` when no live
  * Session carries the id.
  */
-@Remote('record') record(request: SessionFeedbackRecordRequest): Promise<SessionFeedbackRecordResult>
+@Remote('record') async record(request: SessionFeedbackRecordRequest): Promise<SessionFeedbackRecordResult>
 ```
 
 Source: [`packages/feedback/command-feedback/src/index.ts`](../../packages/feedback/command-feedback/src/index.ts)

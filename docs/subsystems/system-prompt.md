@@ -166,9 +166,10 @@ variable(name: string, provider: (context: AssembleContext) => string | undefine
  * canonical ordering, then run the assembly waterfall. Scoped sections and
  * variables shadow globals. The returned waterfall value is authoritative
  * except that an effective complete section is restored afterwards as the
- * sole prompt section.
+ * sole prompt section, and the built-in identity section gains the routed
+ * provider/model data line (see {@link SystemPrompt.withRouteIdentity}).
  * @param context - the optional scope and plugin-defined assembly fields.
- * @returns the post-waterfall assembly with any complete prompt enforced.
+ * @returns the post-waterfall assembly with any complete prompt enforced and the identity route line stated.
  */
 async assemble(context: AssembleContext = {}): Promise<PromptAssembly>
 ```
