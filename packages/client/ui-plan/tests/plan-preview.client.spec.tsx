@@ -138,7 +138,7 @@ it('updates plan cards only for their Turn’s plan data and preserves invocatio
   const store = builder.empty.nodes
   const source = store.turnDataSource(1, 'submitted-plan')
   const turn = (id: number): TurnLocation => ({
-    turn: id, start: undefined, end: undefined, status: 'unknown', steps: [],
+    turn: id, start: undefined, end: undefined, status: 'unknown', active: true, steps: [],
     data: { get: () => undefined, source: () => createSnapshotStore(undefined) },
   })
   const node = (id: string, seq: number, owner = 1): ChatNode<'submitted-plan'> => ({

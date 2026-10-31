@@ -99,7 +99,7 @@ class TestTurnDataStore implements ConversationLocationDataStore<ConversationTur
 const turnLocation = (turn: number, deliverables?: DeliverablesTurnData): TurnLocation => {
   const data = new TestTurnDataStore()
   if (deliverables !== undefined) data.set('deliverables', deliverables)
-  return { turn, start: undefined, end: undefined, status: 'closed', steps: [], data }
+  return { turn, start: undefined, end: undefined, status: 'closed', active: true, steps: [], data }
 }
 
 const produced = (...values: ReadonlyArray<readonly [seq: number, path: string]>): DeliverablesTurnData => ({

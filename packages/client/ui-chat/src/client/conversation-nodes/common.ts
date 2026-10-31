@@ -47,14 +47,22 @@ export function chatNode<Kind extends ChatNodeKind>(
     readonly visibility?: 'visible' | 'hidden'
   } = {},
 ): ChatNode<Kind> {
+  const location = options.location ?? contextLocation(context)
+  // A Turn whose opening message left the active branch keeps its log-only
+  // status rows hidden. Every Chat node goes through here, so retry rows,
+  // terminal errors, max-tokens notices, and the Turn tail hide together and
+  // return when the branch is restored.
+  const turnActive = location.kind !== 'turn' && location.kind !== 'step'
+    ? true
+    : location.turn.active
   return {
     key: context.key,
     kind,
     id: context.id,
     target: 'chat',
     anchorSeq,
-    location: options.location ?? contextLocation(context),
-    visibility: options.visibility ?? 'visible',
+    location,
+    visibility: turnActive ? options.visibility ?? 'visible' : 'hidden',
     data,
   }
 }

@@ -9,7 +9,7 @@ import { ConversationGroupStore } from '../../ui-conversation/src/client/convers
 import type { ProcessGroupData } from '../src/client/contract/process-groups.ts'
 
 const turn: TurnLocation = {
-  turn: 1, status: 'open', steps: [], end: undefined,
+  turn: 1, status: 'open', active: true, steps: [], end: undefined,
   start: { type: 'turn/start', seq: SessionSeq(1), time: 1, data: { turn: 1 } },
   data: { get: () => undefined, source: () => ({ getSnapshot: () => undefined, subscribe: () => () => {} }) },
 }

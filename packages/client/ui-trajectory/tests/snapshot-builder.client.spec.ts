@@ -47,6 +47,7 @@ function stepLocation(turn: number, step: number): TrajectoryRequestHeaderState[
     start: undefined,
     end: undefined,
     status: 'unknown' as const,
+    active: true,
     steps: [stepLocation],
     data,
   }

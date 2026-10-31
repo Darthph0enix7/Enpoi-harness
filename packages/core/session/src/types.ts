@@ -596,6 +596,8 @@ export interface SessionEventMap {
       message: string
       status?: number
       requestId?: string
+      /** Provider reset hint in milliseconds, when the failure carried one. */
+      providerRetryAfterMs?: number
       chain: string
       link: number
       next: { provider: string; model: string }
@@ -607,6 +609,8 @@ export interface SessionEventMap {
       message: string
       status?: number
       requestId?: string
+      /** Provider reset hint in milliseconds, when the failure carried one. */
+      providerRetryAfterMs?: number
       identity: string
       next: { identity: string }
     }

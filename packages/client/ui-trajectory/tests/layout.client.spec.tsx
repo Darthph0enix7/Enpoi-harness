@@ -303,7 +303,7 @@ describe('deriveTrajectoryLayout', () => {
     const data = EMPTY_LOCATION_DATA
     const step = { turn: 1, step: 2, start: undefined, end: undefined, status: 'open' as const, data }
     const turn = {
-      turn: 1, start: undefined, end: undefined, status: 'open' as const, steps: [step], data,
+      turn: 1, start: undefined, end: undefined, status: 'open' as const, active: true, steps: [step], data,
     }
     const eventLocations = new Map<number, ConversationLocation>([[
       3,
@@ -335,7 +335,7 @@ describe('deriveTrajectoryLayout', () => {
     const data = EMPTY_LOCATION_DATA
     const step = { turn: 1, step: 2, start: undefined, end: undefined, status: 'open' as const, data }
     const turn = {
-      turn: 1, start: undefined, end: undefined, status: 'open' as const, steps: [step], data,
+      turn: 1, start: undefined, end: undefined, status: 'open' as const, active: true, steps: [step], data,
     }
     const eventLocations = new Map<number, ConversationLocation>([[
       3,
@@ -862,7 +862,7 @@ describe('deriveTrajectoryLayout revert records', () => {
 
   it('labels the active boundary from the shared Session fold', () => {
     const turns = deriveTrajectoryLayout({
-      nodes: revertedNodes.slice(0, 4) as unknown as LegacyConversationSlice['nodes'],
+      nodes: revertedNodes.slice(0, 4),
       partial: null,
       runningCalls: [],
       reverts: [{ seq: 6, time: timestamp(6), fromSeq: 3, cause: 'revert' }],
@@ -907,7 +907,7 @@ describe('deriveTrajectoryLayout revert records', () => {
 
   it('renders restore boundaries and leaves a non-reverted session without revert records', () => {
     const restored = deriveTrajectoryLayout({
-      nodes: revertedNodes.slice(0, 4) as unknown as LegacyConversationSlice['nodes'],
+      nodes: revertedNodes.slice(0, 4),
       partial: null,
       runningCalls: [],
       reverts: [{ seq: 6, time: timestamp(6), fromSeq: null, cause: 'restore' }],
@@ -915,7 +915,7 @@ describe('deriveTrajectoryLayout revert records', () => {
     const restoredCells = [...restored].flatMap(turn => turn.groups.flatMap(group => group.cells))
     expect(restoredCells.map(cell => cell.text)).toContain('Revert fully restored')
     const restoredOne = deriveTrajectoryLayout({
-      nodes: revertedNodes.slice(0, 4) as unknown as LegacyConversationSlice['nodes'],
+      nodes: revertedNodes.slice(0, 4),
       partial: null,
       runningCalls: [],
       reverts: [{ seq: 6, time: timestamp(6), fromSeq: 3, cause: 'restore' }],
@@ -924,7 +924,7 @@ describe('deriveTrajectoryLayout revert records', () => {
       .map(cell => cell.text)).toContain('Restored from #3')
 
     const untouched = deriveTrajectoryLayout({
-      nodes: revertedNodes.slice(0, 4) as unknown as LegacyConversationSlice['nodes'],
+      nodes: revertedNodes.slice(0, 4),
       partial: null,
       runningCalls: [],
     })
@@ -934,7 +934,7 @@ describe('deriveTrajectoryLayout revert records', () => {
 
   it('attributes a restore-all batch and an unknown-anchor boundary without inventing rows', () => {
     const turns = deriveTrajectoryLayout({
-      nodes: revertedNodes as unknown as LegacyConversationSlice['nodes'],
+      nodes: revertedNodes,
       partial: null,
       runningCalls: [],
       reverts: [

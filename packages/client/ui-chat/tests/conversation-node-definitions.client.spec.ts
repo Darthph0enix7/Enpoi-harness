@@ -170,6 +170,13 @@ function node(value: ChatSnapshot, kind: string): ChatConversationViewNode | und
   return value.nodes.values().find(candidate => candidate.kind === kind)
 }
 
+/** The first rendered row of one kind; hidden projection nodes stay out of `order`. */
+function visibleNode(value: ChatSnapshot, kind: string): ChatConversationViewNode | undefined {
+  return value.order
+    .map(key => value.nodes.get(key))
+    .find(candidate => candidate?.kind === kind)
+}
+
 function promptNodes(value: ChatSnapshot): ChatConversationViewNode[] {
   const prompts = value.nodes.values().filter(candidate => candidate.kind === 'system-prompt')
   for (const prompt of prompts) expect(value.order).not.toContain(prompt.key)
@@ -2624,6 +2631,195 @@ describe('built-in conversation node Definitions', () => {
 
     expect(node(snapshot(value), 'model-retry')).toBeUndefined()
     expect(node(snapshot(value), 'tool-call')).toBeUndefined()
+  })
+
+  it('keeps a normal failed turn card beside its opening message', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'user/message', textMessage('normal-failure', 'please continue'), { surfaceOp: 'append' }),
+      at(4, 'turn/end', {
+        turn: 1,
+        reason: { kind: 'error', error: { code: 'TRANSPORT', message: 'still failing' } },
+      }),
+    ])
+    const current = snapshot(value)
+    expect(current.timeline.turns.get(1)?.active).toBe(true)
+    expect(visibleNode(current, 'turn-error')?.data).toMatchObject({
+      turn: 1, code: 'TRANSPORT', message: 'still failing',
+    })
+  })
+
+  it('hides a reverted failed turn and restores it when its variant branch returns', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'user/message', textMessage('first-attempt', 'continue'), { surfaceOp: 'append' }),
+      at(4, 'llm/retry', {
+        retryId: 'retry-abandoned',
+        turn: 1,
+        step: 1,
+        provider: 'fake',
+        mode: 'normal',
+        policyKey: 'fake-normal',
+        retry: 1,
+        maxRetries: 1,
+        delayMs: 10,
+        failure: { code: 'TRANSPORT', message: 'abandoned retry' },
+      }),
+      at(5, 'step/end', { turn: 1, step: 1 }),
+      at(6, 'turn/end', {
+        turn: 1,
+        reason: { kind: 'error', error: { code: 'PROVIDER_POOL_EXHAUSTED', message: 'all providers exhausted' } },
+      }),
+      at(7, 'revert/state', { fromSeq: 3, cause: 'revert' }),
+      at(8, 'turn/start', { turn: 2 }),
+      at(9, 'user/message', textMessage('second-attempt', 'continue'), {
+        surfaceOp: { op: 'replace', startSeq: 3, endSeq: 3 },
+      }),
+      at(10, 'revert/iteration', {
+        groupAnchor: 3,
+        previousSeq: 3,
+        variantSeq: 9,
+        startSeq: 3,
+        endSeq: 3,
+        cause: 'commit',
+      }),
+      at(11, 'revert/state', { fromSeq: null, cause: 'commit' }),
+      at(12, 'step/start', { turn: 2, step: 1 }),
+      at(13, 'llm/retry', {
+        retryId: 'retry-active',
+        turn: 2,
+        step: 1,
+        provider: 'fake',
+        mode: 'normal',
+        policyKey: 'fake-normal',
+        retry: 1,
+        maxRetries: 1,
+        delayMs: 10,
+        failure: { code: 'TRANSPORT', message: 'active retry' },
+      }),
+      at(14, 'step/end', { turn: 2, step: 1 }),
+      at(15, 'turn/end', {
+        turn: 2,
+        reason: { kind: 'error', error: { code: 'TRANSPORT', message: 'second failure' } },
+      }),
+    ])
+
+    const current = snapshot(value)
+    expect(current.timeline.turns.get(1)?.active).toBe(false)
+    expect(current.timeline.turns.get(2)?.active).toBe(true)
+    expect(visibleNode(current, 'turn-error')?.data).toMatchObject({ turn: 2, code: 'TRANSPORT' })
+    const activeRetries = visibleNode(current, 'model-retry')?.data as RetryChatData
+    expect(activeRetries.attempts.every(attempt => attempt.turn === 2)).toBe(true)
+    const abandonedError = [...current.nodes.values()].find(candidate =>
+      candidate.kind === 'turn-error' && (candidate.data as { turn: number }).turn === 1)
+    expect(abandonedError?.visibility).toBe('hidden')
+    expect(current.order).not.toContain(abandonedError?.key)
+    const abandonedRetry = [...current.nodes.values()].find(candidate =>
+      candidate.kind === 'model-retry'
+      && (candidate.data as RetryChatData).attempts.every(attempt => attempt.turn === 1))
+    expect(abandonedRetry?.visibility).toBe('hidden')
+    expect(current.order).not.toContain(abandonedRetry?.key)
+
+    value.append(at(16, 'revert/branch', {
+      groupAnchor: 3,
+      variantSeq: 3,
+      previousVariantSeq: 9,
+      startSeq: 9,
+      endSeq: 9,
+      shadowedSeqs: [9],
+      restoredSeqs: [3],
+    }))
+    value.flush()
+
+    const restored = snapshot(value)
+    expect(restored.timeline.turns.get(1)?.active).toBe(true)
+    expect(restored.timeline.turns.get(2)?.active).toBe(false)
+    expect(visibleNode(restored, 'turn-error')?.data).toMatchObject({
+      turn: 1, code: 'PROVIDER_POOL_EXHAUSTED',
+    })
+    const restoredRetries = visibleNode(restored, 'model-retry')?.data as RetryChatData
+    expect(restoredRetries.attempts.every(attempt => attempt.turn === 1)).toBe(true)
+  })
+
+  it('hides every node of a reverted turn that already appended surface output', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'user/message', textMessage('partial-branch', 'inspect the build'), { surfaceOp: 'append' }),
+      at(4, 'tool/call', {
+        turn: 1, step: 1, callId: 'call-partial', name: 'read', arguments: '{}',
+      }),
+      at(5, 'tool/result', {
+        turn: 1, step: 1, message: toolResult('call-partial', 'partial result'),
+      }, { surfaceOp: 'append' }),
+      at(6, 'step/end', { turn: 1, step: 1 }),
+      at(7, 'turn/end', {
+        turn: 1,
+        reason: { kind: 'error', error: { code: 'TRANSPORT', message: 'abandoned' } },
+      }),
+      at(8, 'revert/state', { fromSeq: 3, cause: 'revert' }),
+      at(9, 'turn/start', { turn: 2 }),
+      at(10, 'user/message', textMessage('replacement', 'inspect the build again'), {
+        surfaceOp: { op: 'replace', startSeq: 3, endSeq: 5 },
+      }),
+      at(11, 'revert/iteration', {
+        groupAnchor: 3,
+        previousSeq: 3,
+        variantSeq: 10,
+        startSeq: 3,
+        endSeq: 5,
+        cause: 'commit',
+      }),
+      at(12, 'revert/state', { fromSeq: null, cause: 'commit' }),
+      at(13, 'turn/end', { turn: 2, reason: { kind: 'completed' } }),
+    ])
+
+    const current = snapshot(value)
+    expect(visibleNode(current, 'turn-error')).toBeUndefined()
+    expect(visibleNode(current, 'tool-call')).toBeUndefined()
+    expect((visibleNode(current, 'user')?.data as { seq: number }).seq).toBe(10)
+    const hiddenTool = [...current.nodes.values()].find(candidate => candidate.kind === 'tool-call')
+    expect(hiddenTool?.visibility).toBe('hidden')
+  })
+
+  it('hides max-tokens notices for a reverted turn and its continuation turn', () => {
+    const value = assembler([
+      at(1, 'turn/start', { turn: 1 }),
+      at(2, 'step/start', { turn: 1, step: 1 }),
+      at(3, 'user/message', textMessage('truncated-prompt', 'write a long answer'), { surfaceOp: 'append' }),
+      at(4, 'assistant/message', {
+        turn: 1, step: 1, message: assistantMessage('truncated-answer', 'partial answer'),
+      }, { surfaceOp: 'append' }),
+      at(5, 'step/end', { turn: 1, step: 1 }),
+      at(6, 'turn/end', { turn: 1, reason: { kind: 'max-tokens' } }),
+      at(7, 'turn/start', { turn: 2 }),
+      at(8, 'step/start', { turn: 2, step: 1 }),
+      at(9, 'user/message', {
+        id: 'continuation',
+        role: 'user',
+        content: [{ type: 'text', text: 'continue from where you stopped' }],
+        source: { kind: 'max-tokens-continuation', form: 'notice', summary: 'continuing' },
+      }, { surfaceOp: 'append' }),
+      at(10, 'step/end', { turn: 2, step: 1 }),
+      at(11, 'turn/end', { turn: 2, reason: { kind: 'max-tokens' } }),
+      at(12, 'revert/state', { fromSeq: 3, cause: 'revert' }),
+      at(13, 'turn/start', { turn: 3 }),
+      at(14, 'user/message', textMessage('replacement-prompt', 'write a shorter answer'), {
+        surfaceOp: { op: 'replace', startSeq: 3, endSeq: 9 },
+      }),
+      at(15, 'revert/state', { fromSeq: null, cause: 'commit' }),
+      at(16, 'turn/end', { turn: 3, reason: { kind: 'completed' } }),
+    ])
+
+    const current = snapshot(value)
+    expect(current.timeline.turns.get(1)?.active).toBe(false)
+    expect(current.timeline.turns.get(2)?.active).toBe(false)
+    expect(current.timeline.turns.get(3)?.active).toBe(true)
+    expect(visibleNode(current, 'turn-max-tokens')).toBeUndefined()
+    expect([...current.nodes.values()].filter(candidate => candidate.kind === 'turn-max-tokens'))
+      .toHaveLength(2)
   })
 
   it('renders the exhausted-retry turn error in a partial tail window and after prepending the chain', () => {

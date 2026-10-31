@@ -97,6 +97,15 @@ export interface TurnLocation {
   readonly start: SessionEvent<'turn/start'> | undefined
   readonly end: SessionEvent<'turn/end'> | undefined
   readonly status: 'open' | 'closed' | 'unknown'
+  /**
+   * Whether this Turn's opening user message still belongs to the active
+   * conversation branch. A reverted or branch-switched-away Turn stays in the
+   * log but is inactive; its transcript and turn-positioned status must not
+   * render until the branch is restored. Compaction checkpoints and other
+   * model-only rewrites keep the branch active because the human transcript
+   * remains. A Turn with no loaded branch anchor (partial history) is active.
+   */
+  readonly active: boolean
   readonly steps: readonly StepLocation[]
   /** Stable reader for Turn-scoped business values. */
   readonly data: ConversationLocationDataStore<ConversationTurnDataMap>

@@ -263,7 +263,9 @@ export class ConversationNodeAssembler implements ConversationViewSnapshotStore 
       this.replayContexts(this.refreshMatchLocations(changed))
       if (changed.size > 0) publication = 'immediate'
     } else {
-      this.locationIndex.appendNonBoundary(event)
+      const changed = this.locationIndex.appendNonBoundary(event)
+      this.replayContexts(this.refreshMatchLocations(changed))
+      if (changed.size > 0) publication = 'immediate'
     }
     publication = maximumPublication(publication, this.matchInput(record))
     if (this.replayRevisedDependents()) publication = 'immediate'

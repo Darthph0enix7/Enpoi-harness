@@ -172,6 +172,84 @@ function fallbackDefinition(start: () => string): ConversationNodeDefinition<str
 }
 
 describe('ConversationNodeAssembler', () => {
+  it('marks a Turn inactive when its opening message leaves the surface and restores it on a branch switch', () => {
+    const index = new ConversationLocationIndex()
+    const withSurface = (entry: SessionEvent, surfaceOp: unknown): SessionEvent => ({
+      ...entry,
+      surfaceOp,
+    } as SessionEvent)
+    const user = (seq: number, id: string): SessionEvent => at(SessionSeq(seq), 'user/message', {
+      id,
+      role: 'user',
+      content: [{ type: 'text', text: id }],
+      source: { kind: 'user' },
+    })
+    const opening = withSurface(user(3, 'first'), 'append')
+    const partial = withSurface(at(SessionSeq(5), 'tool/result', {
+      turn: 1,
+      step: 1,
+      message: {
+        id: 'result',
+        role: 'tool',
+        toolCallId: 'call',
+        source: { kind: 'tool', callId: 'call' },
+        content: [{ type: 'text', text: 'partial' }],
+      },
+    }), 'append')
+    const replacement = withSurface(user(10, 'second'), { op: 'replace', startSeq: 3, endSeq: 5 })
+    const branch = at(SessionSeq(13), 'revert/branch', {
+      groupAnchor: 3,
+      variantSeq: 3,
+      previousVariantSeq: 10,
+      startSeq: 10,
+      endSeq: 10,
+      shadowedSeqs: [10],
+      restoredSeqs: [3, 5],
+    })
+    const entries = [
+      input(at(SessionSeq(1), 'turn/start', { turn: 1 })),
+      input(at(SessionSeq(2), 'step/start', { turn: 1, step: 1 })),
+      input(opening),
+      input(at(SessionSeq(4), 'tool/call', { turn: 1, step: 1, callId: 'call', name: 'read', arguments: '{}' })),
+      input(partial),
+      input(at(SessionSeq(6), 'step/end', { turn: 1, step: 1 })),
+      input(at(SessionSeq(7), 'turn/end', {
+        turn: 1,
+        reason: { kind: 'error', error: { code: 'TRANSPORT', message: 'failed' } },
+      })),
+      input(at(SessionSeq(8), 'revert/state', { fromSeq: 3, cause: 'revert' })),
+      input(at(SessionSeq(9), 'turn/start', { turn: 2 })),
+      input(replacement),
+      input(at(SessionSeq(11), 'revert/state', { fromSeq: null, cause: 'commit' })),
+      input(at(SessionSeq(12), 'turn/end', { turn: 2, reason: { kind: 'completed' } })),
+    ]
+    const active = (seq: number): boolean => {
+      const location = index.locationOf((entries[seq - 1] as SessionLiveEventEntry).event)
+      if (location.kind !== 'turn' && location.kind !== 'step') {
+        throw new Error(`event ${String(seq)} has no Turn location`)
+      }
+      return location.turn.active
+    }
+
+    index.rebuild(entries.slice(0, 7))
+    expect(active(3)).toBe(true)
+    const reverted = index.appendNonBoundary((entries[7] as SessionLiveEventEntry).event)
+    expect(reverted.has(3)).toBe(true)
+    expect(active(3)).toBe(false)
+
+    index.rebuild(entries)
+    expect(active(3)).toBe(false)
+    expect(active(5)).toBe(false)
+    expect(active(10)).toBe(true)
+
+    const restored = index.appendNonBoundary(branch)
+    expect(restored.has(3)).toBe(true)
+    expect(restored.has(10)).toBe(true)
+    expect(active(3)).toBe(true)
+    expect(active(5)).toBe(true)
+    expect(active(10)).toBe(false)
+  })
+
   it('reports boundary changes only when the owning Turn location changes', () => {
     const index = new ConversationLocationIndex()
     const boundaries = [

@@ -133,8 +133,119 @@ interface TurnDraft {
   readonly steps: Map<number, StepDraft>
 }
 
+/**
+ * Loaded model-surface facts that decide whether a Turn's branch anchor (its
+ * opening user message, or first surface event for a turn no user message
+ * opened) still represents the branch.
+ */
+interface SurfaceState {
+  /** Loaded surface node seqs, including branch-restored records. */
+  readonly nodes: Set<number>
+  /** Turn number → the first user-origin surface message that opened it. */
+  readonly openingByTurn: Map<number, number>
+  /** Turn number → its first surface event, used when no user message opened it. */
+  readonly firstSurfaceByTurn: Map<number, number>
+  /** Armed revert boundary: opening messages at or after it are hidden. */
+  revertFromSeq: number | null
+}
+
 const SESSION_LOCATION = { kind: 'session' } as const
 const UNRESOLVED_LOCATION = { kind: 'unresolved' } as const
+
+function emptySurfaceState(): SurfaceState {
+  return {
+    nodes: new Set(),
+    openingByTurn: new Map(),
+    firstSurfaceByTurn: new Map(),
+    revertFromSeq: null,
+  }
+}
+
+/** Events that can change which Turn's opening message represents its branch. */
+function changesTurnActivity(event: SessionEventLike): boolean {
+  return event.type === 'revert/state' || event.type === 'revert/branch' || event.type === 'user/message'
+}
+
+/** Shared empty result for the append hot path. */
+const EMPTY_CHANGED_SEQS: ReadonlySet<number> = new Set()
+
+/** Whether prepending this page needs a complete replay instead of a standalone fold. */
+function needsSurfaceReplay(entries: readonly SessionEventLikeEntry[]): boolean {
+  for (const { event } of entries) {
+    if (event.type === 'assistant/live-chunk') continue
+    if (event.type === 'revert/state' || event.type === 'revert/branch') return true
+    if (event.surfaceOp !== undefined && event.surfaceOp !== 'append') return true
+  }
+  return false
+}
+
+/**
+ * Fold one event into the loaded surface state. The projection only needs
+ * membership and the Turn→opening-message edge; message content stays with the
+ * owning Definitions.
+ */
+function applySurfaceEvent(
+  state: SurfaceState,
+  event: SessionEventLike,
+  turn: number | undefined,
+): void {
+  if (event.type === 'assistant/live-chunk') return
+  if (event.type === 'revert/state') {
+    const fromSeq = (event.data as { readonly fromSeq?: unknown }).fromSeq
+    state.revertFromSeq = typeof fromSeq === 'number' ? fromSeq : null
+    return
+  }
+  if (event.type === 'revert/branch') {
+    // The branch switch is log-only: it re-activates the target branch's
+    // original records and shadows the displaced branch span.
+    const data = event.data as {
+      readonly shadowedSeqs?: unknown
+      readonly restoredSeqs?: unknown
+    }
+    if (Array.isArray(data.shadowedSeqs)) {
+      for (const seq of data.shadowedSeqs) {
+        if (typeof seq === 'number') state.nodes.delete(seq)
+      }
+    }
+    if (Array.isArray(data.restoredSeqs)) {
+      for (const seq of data.restoredSeqs) {
+        if (typeof seq === 'number') state.nodes.add(seq)
+      }
+    }
+    return
+  }
+  const rawOp: unknown = event.surfaceOp
+  if (rawOp === undefined) return
+  const sourceKind = event.type === 'user/message'
+    ? (event.data.source as { readonly kind?: unknown }).kind
+    : undefined
+  if (turn !== undefined) {
+    if (sourceKind === 'user' && !state.openingByTurn.has(turn)) {
+      state.openingByTurn.set(turn, event.seq)
+    }
+    if (!state.firstSurfaceByTurn.has(turn)) state.firstSurfaceByTurn.set(turn, event.seq)
+  }
+  if (rawOp === 'append') {
+    state.nodes.add(event.seq)
+    return
+  }
+  if (typeof rawOp !== 'object' || rawOp === null) return
+  const op = rawOp as {
+    readonly op?: unknown
+    readonly startSeq?: unknown
+    readonly endSeq?: unknown
+  }
+  if (op.op !== 'replace' || typeof op.startSeq !== 'number' || typeof op.endSeq !== 'number') return
+  // Only a user-origin replacement (revert commit) retires an opening message.
+  // Compaction checkpoints and other model-only rewrites leave the human
+  // transcript for the Turn intact, so its status must stay visible.
+  if (sourceKind === 'user') {
+    for (const seq of state.nodes) {
+      if (seq >= op.startSeq && seq <= op.endSeq) state.nodes.delete(seq)
+    }
+  }
+  state.nodes.add(event.seq)
+}
 
 function payloadCoordinates(event: SessionEventLike): Coordinates {
   const data = event.data as unknown as { turn?: unknown; step?: unknown }
@@ -161,6 +272,7 @@ function sameStep(left: StepLocation | undefined, right: StepLocation): boolean 
 function sameTurn(left: TurnLocation | undefined, right: TurnLocation): boolean {
   return left !== undefined
     && left.start === right.start && left.end === right.end && left.status === right.status
+    && left.active === right.active
     && left.data === right.data && sameReferences(left.steps, right.steps)
 }
 
@@ -186,6 +298,7 @@ export class ConversationLocationIndex {
   private readonly changedTurns = new Set<number>()
   private currentTurn: number | undefined
   private currentStep: number | undefined
+  private surface = emptySurfaceState()
 
   /**
    * Return the current reference-stable timeline.
@@ -278,7 +391,8 @@ export class ConversationLocationIndex {
    */
   rebuild(entries: readonly SessionEventLikeEntry[]): ReadonlySet<number> {
     const previousLocations = this.locations
-    const { coordinates, turns, currentTurn, currentStep } = this.foldEvents(entries)
+    const { coordinates, turns, currentTurn, currentStep, surface } = this.foldEvents(entries)
+    this.surface = surface
 
     const previousTurns = this.timeline.turns
     const nextTurns = new Map<number, TurnLocation>()
@@ -344,10 +458,17 @@ export class ConversationLocationIndex {
     }
     const folded = this.foldEvents(entries)
     if (folded.currentTurn !== undefined || folded.currentStep !== undefined) return undefined
+    // A replacement, branch switch, or revert boundary may shadow or restore
+    // records already in the loaded window; only a complete replay can resolve
+    // it. Append-only pages merge into the existing surface state.
+    if (needsSurfaceReplay(entries)) return undefined
     const orderedDrafts = [...folded.turns.values()].sort((left, right) => left.firstSeq - right.firstSeq)
     for (const draft of orderedDrafts) {
       if (this.timeline.turns.has(draft.turn)) return undefined
     }
+    for (const seq of folded.surface.nodes) this.surface.nodes.add(seq)
+    for (const [turn, opening] of folded.surface.openingByTurn) this.surface.openingByTurn.set(turn, opening)
+    for (const [turn, first] of folded.surface.firstSurfaceByTurn) this.surface.firstSurfaceByTurn.set(turn, first)
 
     const turns = new Map(this.timeline.turns)
     const prepended: number[] = []
@@ -373,11 +494,13 @@ export class ConversationLocationIndex {
   private foldEvents(entries: readonly SessionEventLikeEntry[]): {
     readonly coordinates: Map<number, Coordinates>
     readonly turns: Map<number, TurnDraft>
+    readonly surface: SurfaceState
     readonly currentTurn: number | undefined
     readonly currentStep: number | undefined
   } {
     const turns = new Map<number, TurnDraft>()
     const coordinates = new Map<number, Coordinates>()
+    const surface = emptySurfaceState()
     let currentTurn: number | undefined
     let currentStep: number | undefined
 
@@ -426,6 +549,7 @@ export class ConversationLocationIndex {
         ...turn === undefined ? {} : { turn },
         ...turn === undefined || step === undefined ? {} : { step },
       })
+      applySurfaceEvent(surface, event, turn)
       if (turn !== undefined) turnDraft(turn, event.seq)
       if (turn !== undefined && step !== undefined) stepDraft(turn, step, event.seq)
 
@@ -447,7 +571,7 @@ export class ConversationLocationIndex {
         currentStep = undefined
       }
     }
-    return { coordinates, turns, currentTurn, currentStep }
+    return { coordinates, turns, surface, currentTurn, currentStep }
   }
 
   /**
@@ -479,10 +603,23 @@ export class ConversationLocationIndex {
       start: draft.start,
       end: draft.end,
       status: draft.end !== undefined ? 'closed' : draft.start === undefined ? 'unknown' : 'open',
+      active: this.isTurnActive(draft.turn),
       steps,
       data: this.turnData(draft.turn),
     }
     return sameTurn(previousTurn, value) ? previousTurn as TurnLocation : value
+  }
+
+  /**
+   * Whether a Turn's branch anchor still represents its branch.
+   * @param turn - Turn number to inspect.
+   * @returns false only when a known anchor was shadowed or reverted.
+   */
+  private isTurnActive(turn: number): boolean {
+    const anchor = this.surface.openingByTurn.get(turn) ?? this.surface.firstSurfaceByTurn.get(turn)
+    if (anchor === undefined) return true
+    if (this.surface.revertFromSeq !== null && anchor >= this.surface.revertFromSeq) return false
+    return this.surface.nodes.has(anchor)
   }
 
   /**
@@ -546,6 +683,7 @@ export class ConversationLocationIndex {
       status: event.type === 'turn/end' || previousTurn?.end !== undefined
         ? 'closed'
         : event.type === 'turn/start' || previousTurn?.start !== undefined ? 'open' : 'unknown',
+      active: this.isTurnActive(turnNumber),
       steps,
       data: this.turnData(turnNumber),
     }
@@ -579,13 +717,15 @@ export class ConversationLocationIndex {
   /**
    * Index one non-boundary tail event without rescanning the window.
    * @param event - contiguous appended event.
+   * @returns seqs whose immutable Location reference changed.
    */
-  appendNonBoundary(event: SessionEventLike): void {
+  appendNonBoundary(event: SessionEventLike): ReadonlySet<number> {
     const explicit = payloadCoordinates(event)
     if (explicit.session === true) {
       this.coordinates.set(event.seq, {})
+      applySurfaceEvent(this.surface, event, undefined)
       this.locations.set(event.seq, SESSION_LOCATION)
-      return
+      return changesTurnActivity(event) ? this.refreshTurnActivity() : EMPTY_CHANGED_SEQS
     }
     if (explicit.turn !== undefined) {
       if (this.currentTurn !== explicit.turn) this.currentStep = undefined
@@ -599,7 +739,30 @@ export class ConversationLocationIndex {
       ...turn === undefined || step === undefined ? {} : { step },
     })
     if (turn !== undefined) this.indexTurnSeq(turn, event.seq)
+    applySurfaceEvent(this.surface, event, turn)
     this.locations.set(event.seq, this.resolve(event.seq))
+    return changesTurnActivity(event) ? this.refreshTurnActivity() : EMPTY_CHANGED_SEQS
+  }
+
+  /**
+   * Re-materialize Turns whose opening-message representation changed.
+   * @returns event seqs whose published Location reference changed.
+   */
+  private refreshTurnActivity(): ReadonlySet<number> {
+    const changed = new Set<number>()
+    let turns: Map<number, TurnLocation> | undefined
+    for (const [turnNumber, turn] of this.timeline.turns) {
+      const active = this.isTurnActive(turnNumber)
+      if (turn.active === active) continue
+      turns ??= new Map(this.timeline.turns)
+      turns.set(turnNumber, { ...turn, active })
+      this.changedTurns.add(turnNumber)
+      for (const seq of this.seqsByTurn.get(turnNumber) ?? []) changed.add(seq)
+    }
+    if (turns === undefined) return changed
+    this.timeline = { turnOrder: this.timeline.turnOrder, turns }
+    for (const seq of changed) this.locations.set(seq, this.resolve(seq))
+    return changed
   }
 
   /**

@@ -314,6 +314,7 @@ export function chatSnapshotFixture(input: {
         data: { turn, reason: { kind: 'completed' } },
       },
       status: endSeq === undefined ? 'open' : 'closed',
+      active: true,
       steps: EMPTY,
       data,
     })
