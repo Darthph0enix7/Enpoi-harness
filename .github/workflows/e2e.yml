@@ -90,26 +90,41 @@ jobs:
       # "all skipped". This job only runs on trusted events (the `if:` above
       # excludes keyless PRs), so the secret MUST be present — fail loudly if not.
       - name: Preflight (require DEEPSEEK_API_KEY)
+        id: preflight
         env:
           # Repo secret DEEPSEEK_API_KEY_EXTERNAL holds the external-API key;
           # the tests read process.env.DEEPSEEK_API_KEY, so map it across here.
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY_EXTERNAL }}
         run: |
           set -euo pipefail
-          if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
-            echo "::error::DEEPSEEK_API_KEY is empty. The e2e suite would self-skip and"
-            echo "::error::report a false green. Configure the repo secret DEEPSEEK_API_KEY_EXTERNAL."
-            exit 1
+          if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+            echo "have_key=true" >> "${GITHUB_OUTPUT}"
+            echo "DEEPSEEK_API_KEY present."
+            exit 0
           fi
-          echo "DEEPSEEK_API_KEY present."
+          echo "have_key=false" >> "${GITHUB_OUTPUT}"
+          # A fork that has not configured the secret must not fail its nightly
+          # run forever: the schedule is a convenience, and the suite self-skips
+          # without a key anyway. Every trusted push / PR / manual run still
+          # fails loudly, because a green run over a self-skipping suite would be
+          # a false green.
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+            echo "::warning::DEEPSEEK_API_KEY_EXTERNAL is not configured; skipping the nightly real-API e2e run."
+            exit 0
+          fi
+          echo "::error::DEEPSEEK_API_KEY is empty. The e2e suite would self-skip and"
+          echo "::error::report a false green. Configure the repo secret DEEPSEEK_API_KEY_EXTERNAL."
+          exit 1
 
       # The e2e suites boot the example bins in `lib` mode (DSH_EXAMPLE_MODE=lib):
       # the built artifact under plain Node, resolving plugins through real package
       # exports — the shape a real consumer runs. That requires a prior build.
-      - name: Build (lib for the e2e example bins)
+      - if: steps.preflight.outputs.have_key == 'true'
+        name: Build (lib for the e2e example bins)
         run: pnpm run build:official
 
-      - name: Prepare Office runtime
+      - if: steps.preflight.outputs.have_key == 'true'
+        name: Prepare Office runtime
         run: pnpm run prepare:primary-runtime --target linux-x64 --output .cache/e2e-office
 
       # Real-API end-to-end tests only. The keyless gates (lint/typecheck/
@@ -117,7 +132,8 @@ jobs:
       # ci-master.yml (master push standby).
       # DEEPSEEK_BASE_URL is pinned to the external API; the secret is scoped to
       # this step (and preflight) only — never exposed to checkout/setup/install.
-      - name: E2E tests (real DeepSeek API)
+      - if: steps.preflight.outputs.have_key == 'true'
+        name: E2E tests (real DeepSeek API)
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY_EXTERNAL }}
           DEEPSEEK_BASE_URL: https://api.deepseek.com/anthropic
