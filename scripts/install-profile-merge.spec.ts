@@ -1434,29 +1434,25 @@ describe('release-based prebuilt resolution', () => {
     expect(result.stdout).toContain('G=ge')
   })
 
-  it('flags a release/channel commit divergence only when both sides are known', () => {
+  it('compares the update no-op against the newest published release, not the channel head', () => {
     const script = [
       'export DSH_INSTALL_LIB_ONLY=1',
       '. "$INSTALL_SH" 2>/dev/null',
-      'RELEASE_COMMIT=aaaaaaaaaaaaaaaa; TARGET_COMMIT=bbbbbbbbbbbbbbbb',
-      'if release_commit_diverges; then echo "A=diverges"; else echo "A=same"; fi',
-      'RELEASE_COMMIT=aaaaaaaaaaaaaaaa; TARGET_COMMIT=aaaaaaaaaaaaaaaa',
-      'if release_commit_diverges; then echo "B=diverges"; else echo "B=same"; fi',
-      'RELEASE_COMMIT=""; TARGET_COMMIT=bbbbbbbbbbbbbbbb',
-      'if release_commit_diverges; then echo "C=diverges"; else echo "C=same"; fi',
-      'RELEASE_COMMIT=aaaaaaaaaaaaaaaa; TARGET_COMMIT=""',
-      'if release_commit_diverges; then echo "D=diverges"; else echo "D=same"; fi',
+      'DSH_RELEASE_TAG=v0.1.7-enpoi.2.112',
+      // The head is ahead of the release; it must not change the no-op answer.
+      'TARGET_COMMIT=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+      'printf "A=%s\n" "$(latest_release_is_installed 0.1.7-enpoi.2.112)"',
+      'printf "B=[%s]\n" "$(latest_release_is_installed 0.1.7-enpoi.2.109)"',
+      'printf "C=%s\n" "$(prepare_target_probe)"',
     ].join('\n')
     const result = spawnSync('bash', ['-c', script], {
       env: { ...process.env, INSTALL_SH: installSh },
       encoding: 'utf8',
     })
     expect(result.status).toBe(0)
-    expect(result.stdout).toContain('A=diverges')
-    expect(result.stdout).toContain('B=same')
-    // An unresolved side (no git, no API) must never trigger the fallback.
-    expect(result.stdout).toContain('C=same')
-    expect(result.stdout).toContain('D=same')
+    expect(result.stdout).toContain('A=v0.1.7-enpoi.2.112')
+    expect(result.stdout).toContain('B=[]')
+    expect(result.stdout).toContain('C=0.1.7-enpoi.2.112')
   })
 
   it('stages the newest release, verifies it, and accepts the tree base version', () => {

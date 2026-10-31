@@ -86,6 +86,21 @@ describe('UpdateCheckCore', () => {
     expect((await ahead.core.checkNow()).state).toBe('current')
   })
 
+  it('reports current at the newest PUBLISHED release even when the channel head is ahead', async () => {
+    // The catalog only carries published releases. Installing 2.112 while the
+    // stable branch already points at a newer CI commit (the 2.109 -> 2.112
+    // regression) must read as up to date, never offer the same release again.
+    const { core } = harness({
+      version: '0.1.7-enpoi.2.112',
+      commit: '8addce3',
+      entries: [entry('0.1.7-enpoi.2.112', ['release note'], '8addce3')],
+    })
+    const status = await core.checkNow()
+    expect(status.state).toBe('current')
+    expect(status.latest?.version).toBe('0.1.7-enpoi.2.112')
+    expect(status.error).toBeUndefined()
+  })
+
   it('reports current when the installed commit is the catalog commit, despite a bare base version', async () => {
     // The source-build fallback stamps `0.1.7-enpoi.2+g<sha>` (or the bare
     // base); the catalog target is `0.1.7-enpoi.2.88`. Same revision, so the

@@ -96,8 +96,9 @@ The engine never runs in the browser and never inside the process it replaces.
   new version. Before `switch`, the user keeps working.
 - **Safety (already in the engine, reused; not rebuilt):** checksum-verified prebuilt,
   atomic symlink switch, post-switch self-check, automatic rollback, user-file
-  backups + pre-switch restore, version retention (K=3), divergence fallback to a real
-  source build, disk-full halt. New: the state file + run log make the process
+  backups + pre-switch restore, version retention (K=3), prebuilt-only updates (head-ahead
+  installs the newest published release; source only with an explicit `--source`),
+  disk-full halt. New: the state file + run log make the process
   observable and resumable from the UI.
 
 ## 6. UI pieces
@@ -111,7 +112,7 @@ The engine never runs in the browser and never inside the process it replaces.
 
 | Case | Handling |
 |---|---|
-| Branch advanced, its release still building | Catalog carries published releases only; `available` shows the newest published; the divergence path is a runner concern (already fixed). |
+| Branch advanced, its release still building | Catalog carries published releases only; `available` shows the newest published. The runner installs that published release even when the branch head is ahead — head-ahead is informational, never a source build; no release errors with the publish/`--source` remedy. |
 | Offline / fetch fails | Silent retry next interval; status stays `unknown`; never blocks the UI. |
 | Multiple tabs / devices | One host-side run; all tabs see the same pushed state; other devices check independently. |
 | Active agent run during `switch` | Engine waits for the turn/uses its existing quiesce; UI shows "will interrupt" before the user-triggered switch. |

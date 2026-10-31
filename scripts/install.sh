@@ -14,12 +14,16 @@
 #      downloads the official Node tarball into   <prefix>/runtime/node/<ver>;
 #   2. enables pnpm through corepack (ships with Node) — no system packages,
 #      no sudo, ever;
-#   3. fetches the channel build — the newest published GitHub Release tarball
-#      when one carries an asset for this platform, otherwise the GitHub tarball
-#      for the channel ref (or --source for a local path/tarball/URL) — into
-#      <prefix>/harness/<version>;
-#   4. pnpm install --frozen-lockfile + pnpm run build (host), then the
-#      profile's own plugin build when the profile ships one;
+#   3. fetches the channel build — ALWAYS the newest published GitHub Release
+#      tarball for this platform when one exists. A published release is the
+#      channel's artifact even when the channel head has moved ahead of it; the
+#      head moving is informational, never a reason to build. Source archives
+#      (a local path, tarball, URL, or the channel ref) are used only when the
+#      operator explicitly asks with --source or --no-prebuilt — there is no
+#      automatic source build, and no release means a clear error;
+#   4. a prebuilt tree lands fully built (no dependency install, no compile);
+#      only an explicit source request runs pnpm install + pnpm run build, then
+#      the profile's own plugin build when the profile ships one;
 #   5. when --profile-source / DSH_PROFILE_SOURCE names the companion profile
 #      (default: the Enpoi web profile repo for --profile web), fetches it at
 #      the selected channel's ref into $DSH_HOME/profiles/<name> before the
@@ -36,7 +40,8 @@
 #      `tailscale serve` on macOS); DSH_NO_TAILNET=1 opts out.
 #
 # Update is the same engine via `--update` (delegated by `dsh update`):
-#   fetch -> install -> build -> migrations -> switch `current` -> service
+#   fetch -> install (prebuilt; an explicit --source/--no-prebuilt request
+#   builds) -> migrations -> switch `current` -> service
 #   restart (only when a unit for this install exists) -> projection backfill
 #   (when present) -> self-check -> roll back to the previous versioned dir and
 #   restore backups on failure. Idempotent, re-runnable. When the update runs
@@ -48,10 +53,12 @@
 # Build identity: every published release gets its own version — the tree's
 # package version plus the workflow run number (`0.1.7-enpoi.2.42`, tagged
 # `v0.1.7-enpoi.2.42`) — and a prebuilt install lands in a directory named
-# after it, so `current` can roll back per build. When no release is reachable
-# the source archive at the channel ref builds the tree's own base version, and
-# the target ref's commit SHA (git ls-remote, then the GitHub API) decides
-# whether a moved rolling branch rebuilds into `<version>-<short-sha>`.
+# after it, so `current` can roll back per build. The update check compares the
+# installed version against that newest PUBLISHED release (never the channel
+# head), so a branch that moved past the release cannot offer the same release
+# twice. Only an explicit source request builds the tree's own base version,
+# and the target ref's commit SHA decides whether a moved rolling branch
+# rebuilds into `<version>+g<short-sha>`.
 #
 # Invariants: the repo tree is pull-only and disposable; $DSH_HOME is only ever
 # seeded (never overwritten); versioned dirs make rollback a symlink move.
@@ -95,7 +102,8 @@ PROFILE_INSTALL_TIMEOUT="${DSH_PROFILE_INSTALL_TIMEOUT:-900}"
 # ── Defaults (empty means "fill from state / default" below) ────────────────
 PREFIX="${PREFIX:-}"
 CHANNEL=""
-SOURCE=""
+SOURCE="${SOURCE:-}"
+RECORDED_SOURCE_IGNORED=""
 SOURCE_URL=""
 REF=""
 PROFILE=""
@@ -150,6 +158,7 @@ BUILD_COMMIT=""
 BUILD_DIRTY=""
 TARGET_COMMIT=""
 RELEASE_COMMIT=""
+PREBUILT_TAG=""
 INSTALLED_COMMIT=""
 TREE_DIR_NAME=""
 REUSED_TREE_DIR=""
@@ -790,8 +799,10 @@ Options:
   --prefix DIR        install root (default: $HOME/.dsh)
   --bin-dir DIR       where the `dsh` shim goes (default: $HOME/.local/bin)
   --channel NAME      stable | beta (default: stable)
-  --source SRC        local directory, local tarball, or tarball/archive URL
-                      (default: the GitHub archive of the channel ref)
+  --source SRC        explicit source build: local directory, local tarball,
+                      or tarball/archive URL. Without it (and without
+                      --no-prebuilt) the newest published release is installed
+                      and no source build ever runs
   --ref REF           override the git ref fetched from GitHub (default: channel)
   --profile NAME      profile to seed (default: web)
   --profile-source SRC  companion profile: local dir, local tarball, tarball
@@ -807,9 +818,9 @@ Options:
   --no-tailnet        do not configure tailnet peer exposure (the dsh-tailnet
                       forwarder, the tailnet HTTPS port claim, and the web
                       service's --trusted-host flags; also DSH_NO_TAILNET=1)
-  --no-prebuilt       always build from the source archive; skip the verified
-                      prebuilt download from the newest published release
-                      (also DSH_NO_PREBUILT=1)
+  --no-prebuilt       explicit source build: skip the verified prebuilt
+                      download from the newest published release and build the
+                      channel archive (also DSH_NO_PREBUILT=1)
   --dsh-home DIR      harness home override (default: $DSH_HOME or $HOME/.dsh);
                       update fails loudly when it disagrees with install-state.json
   --merge-baseline F  run the profile's three-way merge engine against F
@@ -894,6 +905,8 @@ Environment:
   DSH_TAILNET_PORT                   tailnet HTTPS port the harness owns
                                      (default 8443)
   DSH_NO_PREBUILT                    same as --no-prebuilt
+  SOURCE                             same as --source (explicit source build;
+                                     default is the newest published release)
   DSH_NO_PROFILE_MERGE               same as --no-profile-merge
   DSH_CANCEL_TIMEOUT                 seconds to wait after SIGTERM before
                                      SIGKILLing a run cancelled by
@@ -1764,8 +1777,10 @@ stage_remote() { # url
 #   dsh-harness-<release version>-<os>-<arch>.tar.gz (+ .sha256)
 # The release tag names the build — no commit SHA appears anywhere in the asset
 # name — and installing it removes the pnpm install + full build (~5 minutes)
-# and needs no build toolchain. The checksum is mandatory; any failure falls
-# back to the source build with a warning, never to an unverified artifact.
+# and needs no build toolchain. The checksum is mandatory; a failed download,
+# checksum, extraction, or payload check never installs unverified bytes and
+# never triggers an automatic source build — the run stops with an error (or
+# takes the operator's explicit --source/--no-prebuilt path).
 sha256_of() { # file
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
@@ -1787,8 +1802,9 @@ verify_checksum_ticked() { # file label
 # Newest published release tag, from the `/releases/latest` redirect: anonymous,
 # outside the API rate limit, and GitHub excludes draft releases (a build still
 # in progress) and prereleases. Both channels resolve this same stream because
-# the two channel branches are pushed with the same commit; the source-archive
-# fallback still uses the channel ref. Empty when no release exists yet.
+# the two channel branches are pushed with the same commit. This is the only
+# automatic update target; the channel ref is used solely by an explicit
+# --source/--no-prebuilt build. Empty when no release exists yet.
 latest_release_tag() { # -> `v<version>` or empty
   local target=""
   # Explicit pin (fixtures, bisecting): the updater targets exactly this tag.
@@ -1798,6 +1814,35 @@ latest_release_tag() { # -> `v<version>` or empty
     */releases/tag/*) printf '%s' "${target##*/}";;
     *) printf '';;
   esac
+}
+
+# The newest PUBLISHED release tag when it is exactly the installed version.
+# This is the update no-op comparison: the channel head is deliberately not
+# consulted, so a release that was newer than the installed tree yesterday and
+# whose branch has since moved still reads as "up to date" today.
+latest_release_is_installed() { # installed_version -> `v<version>` or empty
+  local tag=""
+  tag="$(latest_release_tag 2>/dev/null || true)"
+  [ -n "$tag" ] || return 0
+  [ "${tag#v}" = "$1" ] && printf '%s' "$tag"
+  return 0
+}
+
+# How far the channel head is ahead of a release's tag commit, for the one
+# informational line an update prints. Best-effort: an unavailable answer is
+# an empty string and the caller omits the count; it never changes the plan.
+channel_head_ahead_count() { # release_commit head_commit -> count or empty
+  local release="$1" head="$2" raw="" count=""
+  [ -n "$release" ] && [ -n "$head" ] || { printf ''; return 0; }
+  case "$DSH_GITHUB_URL" in
+    https://github.com/*)
+      raw="$(run_limited 20 curl -fsSL --connect-timeout 10 --max-time 20 \
+        "https://api.github.com/repos/$DSH_GITHUB_REPO/compare/$release...$head" 2>/dev/null || true)"
+      count="$(awk -F'[:,]' '/"ahead_by"/ { gsub(/[^0-9]/, "", $2); print $2; exit }' <<<"$raw")"
+      ;;
+  esac
+  case "$count" in ''|*[!0-9]*) count="";; esac
+  printf '%s' "$count"
 }
 
 # A release tag appends one numeric build suffix to the tree's own version:
@@ -2245,7 +2290,7 @@ resolve_fast_downloader() { # cache_dir -> prints ABSOLUTE path to the downloade
   printf '%s\n' "$target"
 }
 
-stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall back
+stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = no usable prebuilt
   [ "${NO_PREBUILT:-0}" = 1 ] && return 1
   [ "${DSH_NO_PREBUILT:-0}" = 1 ] && return 1
   [ -n "$SOURCE" ] && return 1
@@ -2256,6 +2301,7 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
     return 1
   fi
   case "$tag" in v?*) : ;; *) return 1;; esac
+  PREBUILT_TAG="$tag"
   version="${tag#v}"
   base="$(release_base_version "$version")"
   asset="dsh-harness-$version-$OS-$ARCH.tar.gz"
@@ -2263,23 +2309,19 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
   sha_url="$url.sha256"
   cache_dir="$PREFIX/harness/.cache"
   asset_file="$cache_dir/$asset"
-  # The release's build commit is resolved BEFORE any bytes are fetched. When
-  # the channel head has moved past the newest release, that release belongs to
-  # a different channel state: its tarball would be downloaded only to be
-  # discarded (the live 2.88 run fetched 304 MiB in 301 s and then fell back),
-  # so the divergence is detected up front and the run goes straight to the
-  # source build. Both sides use the same resolution the update path already
-  # relies on; an unresolvable side keeps the prebuilt path (no false skip).
-  PREBUILT_DIVERGED=0
+  # The release's build commit is resolved BEFORE any bytes are fetched. It is
+  # recorded as the staged tree's identity and printed once when the channel
+  # head has moved past the release: that is informational only. A published
+  # release IS the channel's artifact; a moved head never causes a source build.
   substep_info "resolving the release commit…"
   local commit_started
   commit_started="$(date +%s)"
   RELEASE_COMMIT="$(resolve_target_commit "$tag" "$DSH_GITHUB_URL")"
   substep_ok "release commit resolved ($(( $(date +%s) - commit_started ))s)"
-  if release_commit_diverges; then
-    PREBUILT_DIVERGED=1
-    warn "prebuilt: release $tag was built from ${RELEASE_COMMIT:0:12} but the $CHANNEL channel resolves to ${TARGET_COMMIT:0:12}; skipping the prebuilt download and building from source to honor the requested channel"
-    return 1
+  if [ -n "${RELEASE_COMMIT:-}" ] && [ -n "${TARGET_COMMIT:-}" ] && ! commit_same "$TARGET_COMMIT" "$RELEASE_COMMIT"; then
+    local ahead
+    ahead="$(channel_head_ahead_count "$RELEASE_COMMIT" "$TARGET_COMMIT")"
+    log "$CHANNEL head is ahead of $tag${ahead:+ by $ahead commits}; installing the newest published release $tag"
   fi
   mkdir -p "$cache_dir" || return 1
 
@@ -2366,7 +2408,7 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
       rm -rf "$asset_file.chunks"
       if ! DSH_RUN_LOG_PROGRESS_FILE="$asset_file.download" DSH_RUN_LOG_PROGRESS_TOTAL="$asset_bytes" \
         run_logged "Downloading prebuilt harness ($OS-$ARCH)" "${DSH_PREBUILT_TIMEOUT:-1800}" "$PREFIX" curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors --connect-timeout 30 --speed-limit 10240 --speed-time 60 -C - "$url" -o "$asset_file.download"; then
-        log "prebuilt: download failed; keeping the partial for a resumable retry ($asset_file.download); building from source for now"
+        log "prebuilt: download failed; keeping the partial for a resumable retry ($asset_file.download)"
         return 1
       fi
       mv "$asset_file.download" "$asset_file" || return 1
@@ -2375,7 +2417,7 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
     if [ ! -s "$asset_file.sha256" ]; then
       if ! curl -fsSL --retry 1 --connect-timeout 20 "$sha_url" -o "$asset_file.sha256" 2>/dev/null; then
         rm -f "$asset_file" "$asset_file.sha256"
-        warn "prebuilt: checksum file unavailable; falling back to the source build"
+        warn "prebuilt: checksum file unavailable; this release cannot be installed"
         return 1
       fi
       expected="$(awk 'NR==1 {print $1}' "$asset_file.sha256" 2>/dev/null || true)"
@@ -2384,7 +2426,7 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
   expected="$(awk 'NR==1 {print $1}' "$asset_file.sha256")"
   actual="$(verify_checksum_ticked "$asset_file" "prebuilt")"
   if [ -z "$actual" ] || [ "$actual" != "$expected" ]; then
-    warn "prebuilt: checksum mismatch; falling back to the source build"
+    warn "prebuilt: checksum mismatch; this release cannot be installed"
     rm -f "$asset_file" "$asset_file.sha256"
     return 1
   fi
@@ -2394,7 +2436,7 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
   # file count while tar runs (the [2/9] -> [5/9] silent gap in the drill).
   if ! DSH_RUN_LOG_TICK_DIR="$STAGED" DSH_HEARTBEAT_INTERVAL=3 \
     run_logged "Unpacking prebuilt release ($(human_bytes "$(file_size "$asset_file" 2>/dev/null || printf 0)"))" 600 "$PREFIX" tar -C "$STAGED" -xzf "$asset_file"; then
-    warn "prebuilt: extraction failed; falling back to the source build"
+    warn "prebuilt: extraction failed; this release cannot be installed"
     rm -rf "$STAGED"; STAGED=""
     return 1
   fi
@@ -2404,28 +2446,20 @@ stage_prebuilt() { # stages the verified prebuilt tree into $STAGED; 1 = fall ba
   # number; the tree's package.json keeps the base. Accept either so a
   # manually tagged release at the exact tree version also validates.
   if [ "$staged_version" != "$version" ] && [ "$staged_version" != "$base" ]; then
-    warn "prebuilt: payload version '$staged_version' is neither the release version '$version' nor its base '$base'; falling back to the source build"
+    warn "prebuilt: payload version '$staged_version' is neither the release version '$version' nor its base '$base'; this release cannot be installed"
     rm -rf "$STAGED"; STAGED=""
     return 1
   fi
   # The tag's own commit is the recorded build identity; it was resolved (and
-  # checked against the channel head) before any download, above.
-  # Only a release that survives every check is the prebuilt target: the
-  # divergence fallback above must leave PREBUILT unset, or the source tree
-  # staged next would skip its dependency/build step and switch in unbuilt
-  # (--version/--help fail, self-check rolls the update back).
+  # compared with the channel head only to print one informational line) before
+  # any download, above.
+  # Only a release that survives every check is the prebuilt target: any
+  # failure leaves PREBUILT unset, and prepare_source then errors (or takes the
+  # operator's explicit --source/--no-prebuilt path) instead of staging an
+  # unbuilt source tree. A source tree switched in unbuilt would fail --version
+  # and roll the update back.
   VERSION="$version"
   PREBUILT=1
-  return 0
-}
-
-# True when the newest release and the requested channel name different
-# commits, both known. Installing the release then would silently give the
-# device the other channel's code while claiming the requested channel, so the
-# caller falls back to the source path for the channel's own commit.
-release_commit_diverges() {
-  [ -n "${RELEASE_COMMIT:-}" ] && [ -n "${TARGET_COMMIT:-}" ] || return 1
-  commit_same "$TARGET_COMMIT" "$RELEASE_COMMIT" && return 1
   return 0
 }
 
@@ -2433,16 +2467,34 @@ prepare_source() {
   if [ -z "$SOURCE" ]; then
     local ref="${REF:-$CHANNEL}"
     # The channel ref names the tree; resolve its commit before choosing the
-    # archive URL. Fetching by the resolved commit closes the window where a
-    # branch advances between resolution and download: the staged tree is then
-    # exactly the commit the cache key, the prebuilt asset, and the recorded
-    # build identity name. `/archive/<ref>.tar.gz` resolves branches, tags, and
-    # commit SHAs alike; the `refs/heads/` form 404s for a tag or pinned commit.
+    # archive URL (used only by an explicit source build) and before the
+    # prebuilt path prints its one head-ahead line. Fetching by the resolved
+    # commit closes the window where a branch advances between resolution and
+    # download: the staged tree is then exactly the commit the cache key, the
+    # prebuilt asset, and the recorded build identity name.
+    # `/archive/<ref>.tar.gz` resolves branches, tags, and commit SHAs alike;
+    # the `refs/heads/` form 404s for a tag or pinned commit.
     SOURCE_URL="$DSH_GITHUB_URL/archive/$ref.tar.gz"
     resolve_target_for_source
     if [ -n "$TARGET_COMMIT" ]; then
       SOURCE_URL="$DSH_GITHUB_URL/archive/$TARGET_COMMIT.tar.gz"
     fi
+    # Prebuilt-first policy: a published release is the channel's artifact even
+    # when the head has moved past it. A complete source tree at the head and
+    # the channel archive are reachable only through an explicit
+    # --no-prebuilt/--source request, never as an automatic fallback.
+    if [ "$NO_PREBUILT" != 1 ] && [ "${DSH_NO_PREBUILT:-0}" != 1 ]; then
+      PREBUILT_TAG=""
+      if stage_prebuilt; then
+        substep_ok "Prebuilt release v$VERSION installed ($OS-$ARCH)"
+        return 0
+      fi
+      if [ -z "${PREBUILT_TAG:-}" ]; then
+        die "no published release on the $CHANNEL channel: this installer installs prebuilt release assets only. Publish a release on $CHANNEL (or let the release workflow finish), or pass --source <dir|tarball|url> to build from source explicitly."
+      fi
+      die "the newest published release $PREBUILT_TAG on the $CHANNEL channel could not be installed for $OS-$ARCH; source builds are disabled. Fix the release asset or the network and retry, or pass --source <dir|tarball|url> to build from source explicitly."
+    fi
+    log "prebuilt: disabled by the operator (--no-prebuilt); building from source"
     # If the target commit is known and already built and complete, reuse it directly
     if [ "${FORCE:-0}" != 1 ] && [ -n "$TARGET_COMMIT" ]; then
       local d name c
@@ -2478,17 +2530,6 @@ prepare_source() {
           fi
         fi
       done
-    fi
-    if stage_prebuilt; then
-      substep_ok "Prebuilt release v$VERSION installed ($OS-$ARCH)"
-      return 0
-    fi
-    if [ "$NO_PREBUILT" = 1 ] || [ "${DSH_NO_PREBUILT:-0}" = 1 ]; then
-      log "prebuilt: disabled; building from source"
-    elif [ "${PREBUILT_DIVERGED:-0}" = 1 ]; then
-      log "prebuilt: the newest release diverges from the $CHANNEL channel; building from source"
-    else
-      log "no prebuilt for $OS-$ARCH; building from source (~5 min)"
     fi
     stage_remote "$SOURCE_URL" || die "could not fetch the $CHANNEL channel build from $SOURCE_URL"
   elif [ -d "$SOURCE" ]; then
@@ -8053,6 +8094,27 @@ update_step_label() { # n
   esac
 }
 
+# The source request for this update invocation. A `source` recorded in
+# install-state.json is history, not a standing request: prebuilt-only updates
+# never build from it. Only an explicit --source (or a non-empty SOURCE in this
+# process) selects the source path; the recorded value is named once so the
+# operator knows why the release is being installed instead.
+load_update_source() { # state_file -> sets SOURCE (empty) and RECORDED_SOURCE_IGNORED
+  local state="$1" recorded=""
+  [ -n "${SOURCE:-}" ] && return 0
+  recorded="$(json_field "$state" source 2>/dev/null || true)"
+  if [ -n "$recorded" ]; then RECORDED_SOURCE_IGNORED="$recorded"; fi
+  SOURCE=""
+  return 0
+}
+
+# Name the ignored recorded source once the update log exists (dry runs never
+# open one), so the operator sees why the published release is being used.
+report_ignored_source() {
+  [ -n "${RECORDED_SOURCE_IGNORED:-}" ] || return 0
+  log "recorded source '$RECORDED_SOURCE_IGNORED' is not reused: source builds require an explicit --source on this run; using the published release path"
+}
+
 do_update() {
   local state="$PREFIX/harness/install-state.json" current backup late_backup rc recorded_home recorded_bin installed_version deferred_restart transport_engine
   STEP_TOTAL=9
@@ -8076,7 +8138,7 @@ do_update() {
   resolve_node 0 || die "no usable Node.js found for the update"
   if [ -z "$CHANNEL" ]; then CHANNEL="$(json_field "$state" channel)"; [ -n "$CHANNEL" ] || CHANNEL=stable; fi
   case "$CHANNEL" in stable|beta) :;; *) die "unknown channel in $state: $CHANNEL (expected stable|beta)";; esac
-  if [ -z "$SOURCE" ]; then SOURCE="$(json_field "$state" source)"; fi
+  if [ -z "$SOURCE" ]; then load_update_source "$state"; fi
   if [ -z "$REF" ]; then REF="$(json_field "$state" ref)"; fi
   if [ -z "$PROFILE" ]; then PROFILE="$(json_field "$state" profile)"; [ -n "$PROFILE" ] || PROFILE=web; fi
   if [ -z "$PROFILE_SOURCE" ]; then PROFILE_SOURCE="$(json_field "$state" profileSource)"; fi
@@ -8135,9 +8197,15 @@ do_update() {
     return $?
   fi
   if [ "$DRY_RUN" = 1 ]; then
-    local target_value="" dry_target_commit=""
+    local target_value="" dry_target_commit="" dry_release_tag=""
     if [ -z "$SOURCE" ]; then
-      say "  source:   $DSH_GITHUB_URL/archive/${REF:-$CHANNEL}.tar.gz (version resolved at fetch time)"
+      dry_release_tag="$(latest_release_tag 2>/dev/null || true)"
+      if [ -n "$dry_release_tag" ]; then
+        target_value="${dry_release_tag#v}"
+        say "  source:   newest published release $dry_release_tag (prebuilt)"
+      else
+        say "  source:   no published release on the $CHANNEL channel (an update would stop; pass --source to build explicitly)"
+      fi
     elif [ -d "$SOURCE" ]; then
       target_value="$("$NODE" -e 'const fs=require("fs");const p=JSON.parse(fs.readFileSync(process.argv[1]+"/package.json","utf8"));process.stdout.write(String(p.version||""))' "$SOURCE" 2>/dev/null || true)"
       say "  source:   $SOURCE (version ${target_value:-unknown})"
@@ -8146,8 +8214,8 @@ do_update() {
     fi
     if [ -n "$SOURCE" ] && [ -d "$SOURCE/.git" ]; then
       dry_target_commit="$(git -C "$SOURCE" rev-parse HEAD 2>/dev/null || true)"
-    elif [ -z "$SOURCE" ]; then
-      dry_target_commit="$(resolve_target_commit "${REF:-$CHANNEL}" "$DSH_GITHUB_URL")"
+    elif [ -z "$SOURCE" ] && [ -n "$dry_release_tag" ]; then
+      dry_target_commit="$(resolve_target_commit "$dry_release_tag" "$DSH_GITHUB_URL")"
     fi
     case "$dry_target_commit" in *[!0-9a-fA-F]*|'') dry_target_commit="";; esac
     say "dsh update dry run (no writes)"
@@ -8157,8 +8225,10 @@ do_update() {
     if [ -n "$dry_target_commit" ]; then
       if commit_same "$dry_target_commit" "$INSTALLED_COMMIT"; then
         say "  commit:   $dry_target_commit (already built)"
+      elif [ -n "$dry_release_tag" ] && [ -z "$SOURCE" ]; then
+        say "  commit:   $dry_target_commit (release $dry_release_tag; prebuilt, no source rebuild)"
       else
-        say "  commit:   $dry_target_commit (newer than the installed build; the fetch resolves the newest release or rebuilds ${target_value:-<version>}-$(printf '%s' "$dry_target_commit" | cut -c1-7))"
+        say "  commit:   $dry_target_commit (newer than the installed build; an explicit source build resolves ${target_value:-<version>})"
       fi
     fi
     [ -n "$target_value" ] && say "  target:   $target_value"
@@ -8242,6 +8312,7 @@ do_update() {
   # Without this, every run_logged call in update mode redirects to an empty
   # path and fails. After the dry-run return, so --dry-run opens no log file.
   init_log_file
+  report_ignored_source
   sudo_trap
   # Disk hygiene before fetching: failed trees are never keep-eligible, so
   # reclaim them before the new tree needs the space.
@@ -8278,11 +8349,13 @@ do_update() {
   else
     # Default flow: one cheap release-tag redirect decides "already current"
     # before any 300 MB download (the full tarball is otherwise fetched and
-    # then discarded by the no-op check below).
+    # then discarded by the no-op check below). The comparison is against the
+    # newest PUBLISHED release, never the channel head: a head that moved past
+    # the same release must not offer an update loop.
     local quick_current=0 quick_tag=""
     if [ -z "$SOURCE" ] && [ "$FORCE" != 1 ]; then
-      quick_tag="$(latest_release_tag 2>/dev/null || true)"
-      [ -n "$quick_tag" ] && [ "${quick_tag#v}" = "$installed_version" ] && quick_current=1
+      quick_tag="$(latest_release_is_installed "$installed_version")"
+      [ -n "$quick_tag" ] && quick_current=1
     fi
     if [ "$quick_current" = 1 ]; then
       VERSION="$installed_version"

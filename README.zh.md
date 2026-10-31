@@ -16,7 +16,7 @@ Enpoi Harness 是**上游 [DeepSeek Harness](https://github.com/deepseek-ai/deep
 curl -fsSL https://raw.githubusercontent.com/Darthph0enix7/enpoi-harness/stable/scripts/install.sh | bash
 ```
 
-安装脚本会自动检测系统与架构，优先使用 `PATH` 中已有的 Node ≥ 22.19（缺失时下载隔离运行时至安装前缀目录），通过 corepack 启用 pnpm，拉取版本化构建并编译，初始化 `$DSH_HOME` 配置（设置、预设、技能），并将 `dsh` 启动脚本写入 `~/.local/bin`。整个过程无需 root/sudo 权限，不会覆盖已有的用户设置，且具备幂等性与自愈能力。
+安装脚本会自动检测系统与架构，优先使用 `PATH` 中已有的 Node ≥ 22.19（缺失时下载隔离运行时至安装前缀目录），通过 corepack 启用 pnpm，安装最新**已发布**的预构建版本（校验和验证，无需构建工具链），初始化 `$DSH_HOME` 配置（设置、预设、技能），并将 `dsh` 启动脚本写入 `~/.local/bin`。整个过程无需 root/sudo 权限，不会覆盖已有的用户设置，且具备幂等性与自愈能力。
 
 <a id="run-from-source"></a>
 
@@ -39,7 +39,7 @@ dsh update --channel beta     # switch to beta (then back with --channel stable)
 dsh update --dry-run          # show the plan without touching anything
 ```
 
-`dsh update` 使用并行分块引擎下载最新平台压缩包（进度条、校验和播报、带计数解包），按标准流程安装、执行健康证明，失败时回滚到上一个版本化目录；`$DSH_HOME` 中的用户数据仅作增量初始化，绝不会被覆盖。旧的 delta/保留更新器已归档（git 分支与标签 `archive/delta-updater-v2`，tip `6d7c3d5bed`），仅在 `DSH_DELTA=1` 时运行；新发布只包含三个平台压缩包、对应 `.sha256` 与 `SHA256SUMS`。服务重启请使用 `dsh restart --after-turn` 安全调度 —— 严禁在智能体运行回合内直接重启服务。
+`dsh update` 使用并行分块引擎下载最新**已发布**的平台压缩包（进度条、校验和播报、带计数解包），按标准流程安装、执行健康证明，失败时回滚到上一个版本化目录。已发布版本始终是更新工件：即使通道分支头已领先，也只会输出一行提示并安装该发布版本，绝不会自动改为源码构建；只有操作员显式传入 `--source` 才会执行源码构建，通道没有任何发布版本时则以明确错误停止。`$DSH_HOME` 中的用户数据仅作增量初始化，绝不会被覆盖。旧的 delta/保留更新器已归档（git 分支与标签 `archive/delta-updater-v2`，tip `6d7c3d5bed`），仅在 `DSH_DELTA=1` 时运行；新发布只包含三个平台压缩包、对应 `.sha256` 与 `SHA256SUMS`。服务重启请使用 `dsh restart --after-turn` 安全调度 —— 严禁在智能体运行回合内直接重启服务。
 
 ## 自研组件与上游分工
 

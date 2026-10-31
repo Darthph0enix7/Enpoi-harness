@@ -9,6 +9,11 @@
 # which owns their semantics. A plain `dsh update` meeting a live run attaches
 # to it (progress subscription) instead of failing.
 #
+# Update policy (owned by install.sh): the newest PUBLISHED release is the
+# update artifact even when the channel head is ahead. There is no automatic
+# source build; only an explicit --source/--no-prebuilt request builds, and a
+# channel with no published release fails with the publish/--source remedy.
+#
 # $DSH_HOME is a user-scoped setting, not a prefix property, and the shim only
 # knows the install prefix. Derive the configured home here — an explicit
 # --dsh-home or DSH_HOME always wins, otherwise the value recorded in

@@ -16,7 +16,7 @@ The Enpoi Harness is **upstream [DeepSeek Harness](https://github.com/deepseek-a
 curl -fsSL https://raw.githubusercontent.com/Darthph0enix7/enpoi-harness/stable/scripts/install.sh | bash
 ```
 
-The installer detects OS/arch, uses Node ≥ 22.19 from `PATH` (or downloads one into the prefix), enables pnpm through corepack, fetches a versioned harness build, builds it, seeds `$DSH_HOME` (settings, presets, skills), and installs the `dsh` shim into `~/.local/bin`. It never uses sudo, never overwrites seeded settings, and is idempotent.
+The installer detects OS/arch, uses Node ≥ 22.19 from `PATH` (or downloads one into the prefix), enables pnpm through corepack, installs the newest published prebuilt harness release (checksum-verified; no build toolchain), seeds `$DSH_HOME` (settings, presets, skills), and installs the `dsh` shim into `~/.local/bin`. It never uses sudo, never overwrites seeded settings, and is idempotent.
 
 <a id="run-from-source"></a>
 
@@ -39,7 +39,7 @@ dsh update --channel beta     # switch to beta (then back with --channel stable)
 dsh update --dry-run          # show the plan without touching anything
 ```
 
-`dsh update` downloads the newest platform tarball with a parallel chunk engine (progress bar, checksum announce, ticked unpack), installs it with the standard mechanics, proves health, and rolls back to the previous versioned directory on failure; `$DSH_HOME` is only ever seeded, never overwritten. The older delta/preservation updater is archived (git branch/tag `archive/delta-updater-v2`, tip `6d7c3d5bed`) and runs only with `DSH_DELTA=1`; new releases publish just the three platform tarballs, their `.sha256` sidecars, and `SHA256SUMS`. A restart is scheduled safely with `dsh restart --after-turn` — never restart the service from inside an agent turn.
+`dsh update` downloads the newest published platform release tarball with a parallel chunk engine (progress bar, checksum announce, ticked unpack), installs it with the standard mechanics, proves health, and rolls back to the previous versioned directory on failure; a published release is always the update artifact (a branch head ahead of it is informational), and source builds run only when the operator passes `--source` explicitly; `$DSH_HOME` is only ever seeded, never overwritten. The older delta/preservation updater is archived (git branch/tag `archive/delta-updater-v2`, tip `6d7c3d5bed`) and runs only with `DSH_DELTA=1`; new releases publish just the three platform tarballs, their `.sha256` sidecars, and `SHA256SUMS`. A restart is scheduled safely with `dsh restart --after-turn` — never restart the service from inside an agent turn.
 
 ## What is ours vs upstream
 

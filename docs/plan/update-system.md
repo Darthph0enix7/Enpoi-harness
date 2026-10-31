@@ -31,8 +31,8 @@ commit pushed to `stable` (and `beta`, same commit — only `stable` triggers)
        catalog: update-catalog.mjs upserts the tag into stable.json + beta.json
                 → upload as release assets → push both files to the `catalog` branch (fail-soft)
   └─ device (terminal `dsh update` or the UI's updateCheck.start)
-       prepare: resolve /releases/latest → resolve release commit vs channel head (divergence pre-check)
-                → download + checksum-verify the platform tarball (or build the channel ref from source)
+       prepare: resolve /releases/latest → resolve the release commit (head-ahead is informational)
+                → download + checksum-verify the platform tarball (source only with explicit --source/--no-prebuilt)
                 → install tree → profile refresh + deps + plugin build → migrations
                 → write $PREFIX/harness/.staged-apply.json → exit 0 (current, service, state untouched)
        apply:   atomic switch of harness/current → restart the recorded service (systemd/launchd)
@@ -49,8 +49,8 @@ The engine never runs in the browser and never inside the process it replaces; t
 - A source build stamps `<base>+g<short commit>` (git-describe style, e.g. `0.1.7-enpoi.2+gbb12abc`) into the tree directory itself, the `.dsh-install-complete` marker, `install-state.json` (`version` + `harnessDir`), the backfill identity, `dsh --version`, the health proof, and the client build environment (`scripts/install.sh:1409-1426`, `scripts/install.sh:7807-7819`). Legacy `base`/`base-<short>` trees stay reusable and are upgraded on their next source build.
 - Identity validation treats the marker as consistent when it descends from the tree's package.json base (`base`, `base.*`, `base-*`, `base+*`); a split is a conflict healed to the `current` symlink truth before planning, and the poisoned commit is ignored in favor of the tree build environment and the recorded state (`scripts/install.sh:1218-1267`, `scripts/install.sh:1272-1307`).
 - Prebuilt releases ship the full release version to client artifacts: the build job exports the prepare job's full version as `DSH_CLIENT_VERSION`, so the Web UI's Settings → General row names the release while the installer keeps comparing the base (`.github/workflows/harness-release.yml:178-193`; `packages/client/ui-update/src/client/version.ts:12-29` renders the `+g<sha>` qualifier as a locale-owned "(source build)" label).
-- Both channels (`stable`, `beta`) resolve the same newest published release because the two branches are pushed with the same commit; the channel still selects the source-archive ref when no release applies (`scripts/install.sh:1592-1604`, `.github/workflows/harness-release.yml:26-35`).
-- Divergence pre-check: `stage_prebuilt` resolves the release's own commit and the channel head before fetching any bytes; when they differ the release is skipped up front with one warning and the run goes straight to the source build (`scripts/install.sh:2051-2068`, `scripts/install.sh:2204-2212`). An unresolvable side keeps the download path — never a false skip.
+- Both channels (`stable`, `beta`) resolve the same newest published release because the two branches are pushed with the same commit. The channel ref selects an archive only for an explicit `--source`/`--no-prebuilt` build; no release is a hard error, never an automatic source build (`scripts/install.sh`, `.github/workflows/harness-release.yml:26-35`).
+- **Prebuilt-only update policy:** a published release is the channel's artifact even when the channel head has moved past it. `stage_prebuilt` resolves the release's own commit before fetching any bytes, logs one informational line when the head is ahead (`stable head is ahead of vX by N commits; installing the newest published release vX`), and installs the release — head-ahead never selects the source path. Source builds happen only with an explicit `--source` or `--no-prebuilt` on that invocation (a `source` recorded in install-state is history, not a standing request); no release, a missing platform asset, or a checksum/version failure stops with an error naming the release and the `--source` escape hatch. The update no-op and the client update check both compare against the newest published release, never the branch head, so the next run reports up to date.
 
 ## 4. The engine: two-phase prepare / apply
 
@@ -171,7 +171,7 @@ Core invariants (each verifiable in the cited code):
 5. **One writer, one run, one lock.** The installer is the marker's sole writer; the plugin owns at most one run per instance; the engine holds one lock per prefix and one lock per process (`scripts/install.sh:7356-7360`, `scripts/install.sh:7236-7242`, `run-service.ts:1-22`).
 6. **The catalog is advisory; release artifacts are authoritative.** A tampered catalog can at worst show wrong notes; the tarball is checksum-verified and the release commit is compared with the channel head before fetching (`docs/plan/ui-update-manifest.md` §3, `scripts/install.sh:2051-2068`).
 
-The exhaustive symptom → cause → fix table is maintained in [`../creator/14-update-maintenance.md`](../creator/14-update-maintenance.md) §8 (including the attach/refusal rows, the pnpm no-TTY hardening, and the divergence and source-stamp fixes); do not duplicate it here. Quick recovery map for the surfaces this document owns:
+The exhaustive symptom → cause → fix table is maintained in [`../creator/14-update-maintenance.md`](../creator/14-update-maintenance.md) §8 (including the attach/refusal rows, the pnpm no-TTY hardening, the prebuilt-only policy, and the source-stamp fixes); do not duplicate it here. Quick recovery map for the surfaces this document owns:
 
 | Symptom | First move |
 |---|---|
@@ -179,21 +179,21 @@ The exhaustive symptom → cause → fix table is maintained in [`../creator/14-
 | Stale "Updating…" pill / block after a dead run | Reconnect or a status read heals it; the dialog's "Clear update state & retry" calls `updateCheck/clearStale` |
 | Apply failed after the switch | The engine rolled back and kept the staged record; when the tree survived, **Retry** re-applies it, otherwise the surfaces offer **Update now** (fresh prepare) — a broken staged tree is never replayed; "Clear update state & retry" is the escape when the record is stuck |
 | `dsh update --cancel` refuses | The run is past the switch — let it finish; rollback is the protected path |
-| A release was skipped / source-built instead of pruned | Check the divergence warning; expected when the channel head moved past the newest release |
+| A release was skipped / a source build ran unexpectedly | Head-ahead is informational and must never skip a published release; check the error names `--source`. An automatic client source build is a bug — the prebuilt-only policy requires the newest published release |
 
 ## 13. Fleet reference
 
 | Device | OS | Service path | Channel | Notes |
 |---|---|---|---|---|
 | serverlocal | Linux | user systemd, **dev/source run** (`dsh-web.service`: `node --import tsx/esm apps/cli/src/bin.ts web`) | beta | Primary development host; live-verified the full UI prepare→apply flow (2.85) and the 2.90 cross-device pass |
-| The PC | Linux | installed service | beta | Live-verified the clean prebuilt update with the divergence pre-check and full-version display (2.90); reported at 2.92 |
+| The PC | Linux | installed service | beta | Live-verified the clean prebuilt update and full-version display (2.90); reported at 2.92; prebuilt-only head-ahead policy verified by `scripts/install-update-policy.spec.ts` |
 | The MacBook | macOS | LaunchAgent | beta | Live-verified the plugin mount after the profile-bundle merge fix (2.86); exercises the mkdir lock + `launchctl` rung |
 
 Versions advance: the table is a topology reference, not a version ledger — read the device's `dsh --version` / `install-state.json` for the current release. Cross-device verification evidence lives in the status line of [`ui-update-manifest.md`](ui-update-manifest.md) and the arc log in [`update-release-log.md`](update-release-log.md).
 
 ## 14. Source index
 
-- Engine: `scripts/install.sh` (lock 7160-7318, marker + signal deferral + progress staleness 7359-7556, flags 640-710, prepare stop 8031-8053, apply 8147-8255, attach 8275-8371, cancel 8380-8534, divergence 2033-2212, source identity 1409-1426, 7807-7819), `scripts/update.sh` (delegation).
+- Engine: `scripts/install.sh` (lock 7160-7318, marker + signal deferral + progress staleness 7359-7556, flags 640-710, prepare stop 8031-8053, apply 8147-8255, attach 8275-8371, cancel 8380-8534, prebuilt policy 1810-2212, source identity 1409-1426, 7807-7819), `scripts/update.sh` (delegation).
 - Host plugin: `profile/web/packages/enpoi-update-check/src/{index,service,catalog,store,remote,run,run-service,marker,launcher,probe,cancel}.ts`.
 - Client: `packages/client/ui-update/src/client/{index,controller,rpc,version,UpdateIndicator,UpdateSettingsRow}.tsx?`.
 - Pipeline: `.github/workflows/harness-release.yml`, `scripts/update-catalog.mjs`.
