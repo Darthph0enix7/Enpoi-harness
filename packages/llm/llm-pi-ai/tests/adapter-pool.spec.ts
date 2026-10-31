@@ -20,6 +20,29 @@ async function engineOf(): Promise<PoolEngine> {
   return new PoolEngine({ stateDir, saveDebounceMs: 5 })
 }
 
+/** A pooled anthropic-messages route: the reset hint arrives in the SSE error body. */
+const POOLED_ANTHROPIC = (baseURL: string) => ({
+  deepseek: {
+    api: 'anthropic-messages',
+    baseURL,
+    models: [{ id: 'deepseek-v4-flash', contextWindow: 128_000, maxTokens: 8192 }],
+    pool: {
+      identities: [
+        { id: 'exhausted', credentialRef: 'POOL_KEY_A', priority: 1 },
+        { id: 'healthy', credentialRef: 'POOL_KEY_B', priority: 2 },
+      ],
+    },
+  },
+})
+
+/** One Anthropic Messages SSE error frame carrying a millisecond reset hint. */
+const anthropicError = (message: string, retryAfterMs: number): string[] => [
+  `event: error\ndata: ${JSON.stringify({
+    type: 'error',
+    error: { type: 'rate_limit_error', message, retry_after_ms: retryAfterMs },
+  })}\n\n`,
+]
+
 const POOLED_PROVIDERS = (baseURL: string) => ({
   deepseek: {
     baseURL,
@@ -318,6 +341,61 @@ describe('PiAiAdapter credential pools', () => {
     expect(engine.cooldownRemaining('deepseek', 'exhausted', 'deepseek-v4-flash')).toBe(0)
   })
 
+  it('hands a pooled Anthropic reset hint to the caller and the attempt record', async () => {
+    const server = await mockServer([
+      { rawEvents: anthropicError('rate limit exceeded, retry later', 2_500) },
+      { rawEvents: anthropicError('rate limit exceeded, retry later', 2_500) },
+    ])
+    const engine = await engineOf()
+    const records: { type: string; data: unknown }[] = []
+    const adapter = pooledAdapter(POOLED_ANTHROPIC(server.url), engine, {
+      POOL_KEY_A: 'key-a',
+      POOL_KEY_B: 'key-b',
+    }, () => ({
+      get: () => ({
+        append: (type: string, data: unknown) => { records.push({ type, data }) },
+      }),
+    }))
+
+    const error = await collect(adapter, server.url, 'reset-hint-session').catch((e: unknown) => e)
+
+    // Exhaustion keeps the LAST attempt's facts, including the reset window.
+    expect(error).toBeInstanceOf(LlmError)
+    expect((error as LlmError).failure).toMatchObject({
+      code: 'PROVIDER_POOL_EXHAUSTED',
+      providerRetryAfterMs: 2_500,
+    })
+    // The rotation record keeps the same window for diagnostics.
+    expect(records).toHaveLength(1)
+    expect(records[0]?.data).toMatchObject({
+      code: 'RATE_LIMIT',
+      providerRetryAfterMs: 2_500,
+      next: { identity: 'healthy' },
+    })
+  })
+
+  it('keeps the reset hint on a non-rotating pool failure too', async () => {
+    const server = await mockServer([
+      { rawEvents: anthropicError('invalid argument: bad schema', 2_500) },
+      { rawEvents: anthropicError('invalid argument: bad schema', 2_500) },
+    ])
+    const engine = await engineOf()
+    const adapter = pooledAdapter(POOLED_ANTHROPIC(server.url), engine, {
+      POOL_KEY_A: 'key-a',
+      POOL_KEY_B: 'key-b',
+    })
+
+    const error = await collect(adapter, server.url).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(LlmError)
+    expect((error as LlmError).failure).toMatchObject({
+      code: 'INVALID_REQUEST',
+      providerRetryAfterMs: 2_500,
+    })
+    // A payload rejection never rotates: only the first identity was tried.
+    expect(server.requests).toHaveLength(1)
+  })
+
   it('records quota headers from a pooled response against the serving identity', async () => {
     const server = await mockServer([{
       events: textEvents,
@@ -365,7 +443,7 @@ describe('PiAiAdapter credential pools', () => {
     ])
     let clockCalls = 0
     const adapter = new PiAiAdapter({
-      profiles: () => resolveProfiles(POOLED_PROVIDERS(server.url) as Parameters<typeof resolveProfiles>[0]),
+      profiles: () => resolveProfiles(POOLED_PROVIDERS(server.url)),
       resolveApiKey: () => Promise.resolve('unused'),
       pool: engine,
       resolveCredential: async reference => ({ POOL_KEY_A: 'key-a', POOL_KEY_B: 'key-b' })[reference],
@@ -409,7 +487,7 @@ describe('PiAiAdapter credential pools', () => {
     ])
     let clockCalls = 0
     const adapter = new PiAiAdapter({
-      profiles: () => resolveProfiles(POOLED_PROVIDERS(server.url) as Parameters<typeof resolveProfiles>[0]),
+      profiles: () => resolveProfiles(POOLED_PROVIDERS(server.url)),
       resolveApiKey: () => Promise.resolve('unused'),
       pool: engine,
       resolveCredential: async reference => ({ POOL_KEY_A: 'key-a', POOL_KEY_B: 'key-b' })[reference],

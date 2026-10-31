@@ -138,7 +138,7 @@ export class DeepSeekAdapter<C extends Connection = Connection> extends LlmAdapt
           }
           const detail = providerErrorDetail(raw)
           if (await files.retry(detail)) continue
-          const failure = providerError(raw, response.status, response.headers)
+          const failure = providerError(raw, response.status, response.headers, text)
           const message = files.errorMessage(response.status, failure.message, detail)
           throw new LlmError(message, failure.code, { ...failure.failure, cause: new Error(text) })
         }

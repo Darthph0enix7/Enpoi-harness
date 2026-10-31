@@ -76,6 +76,8 @@ export * from './message.ts'
 export * from './retry-policy.ts'
 export * from './route-health.ts'
 export * from './wire-sessions.ts'
+export * from './provider-retry.ts'
+export * from './tool-batch.ts'
 export { BlockAssembler, STREAM_CUT_CODE } from './assembler.ts'
 export { callConfigEquals, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
 export type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
@@ -317,6 +319,8 @@ export interface LlmAttemptFailedFacts {
   readonly status?: number
   /** Opaque provider-issued request identifier, when available. */
   readonly requestId?: ProviderRequestId
+  /** Provider-requested reset delay in milliseconds, when available. */
+  readonly providerRetryAfterMs?: number
 }
 
 /** Record of one chain link that failed before commit. */
@@ -1975,6 +1979,7 @@ export class LlmRuntime extends TypertRemoteService {
       next: Object.freeze(linkRoute(next)),
       ...failure.status === undefined ? {} : { status: failure.status },
       ...failure.requestId === undefined ? {} : { requestId: failure.requestId },
+      ...failure.providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs: failure.providerRetryAfterMs },
     })
     appendAttemptFailedRecord(this.ctx.get('sessions') as AttemptRecordSink | undefined, sessionId, record)
   }

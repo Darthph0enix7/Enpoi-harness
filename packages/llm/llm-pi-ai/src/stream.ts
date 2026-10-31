@@ -13,7 +13,7 @@ import {
   STREAM_CLOSED_CODE, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, ENTITLEMENT_GATED_CODE,
   ENTITLEMENT_GATED_EXPLANATION, FREE_TIER_GATED_CODE, FREE_TIER_GATED_EXPLANATION,
   isContextWindowExceededError, isEntitlementGatedError, isFreeTierGatedError, isQuotaExceededError,
-  LlmError, QUOTA_EXCEEDED_CODE,
+  LlmError, parseProviderRetryAfterMs, QUOTA_EXCEEDED_CODE,
 } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai/utils/overflow'
@@ -165,50 +165,6 @@ export function providerErrorDetail(text: string): string | undefined {
   return detail ?? code
 }
 
-/** Longest provider reset accepted from a body hint: seven days. */
-const PROVIDER_RESET_MAX_MS = 7 * 24 * 60 * 60 * 1_000
-
-const RESET_FIELDS = [
-  // `retry_after_ms` is authoritative when a gateway sends both fields.
-  ['retry_after_ms', 1],
-  // Anthropic Messages `retry_after` is in seconds: live `meridian` attempts
-  // decremented one unit per second of wall time (17360 → 17337 over 34 s),
-  // and 17337 units is the ≈4 h 49 m Claude Max window.
-  ['retry_after', 1_000],
-] as const
-
-function resetFieldMs(
-  record: Record<string, unknown> | undefined,
-  field: string,
-  scale: number,
-): number | undefined {
-  const value = record?.[field]
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined
-  const milliseconds = value * scale
-  return Number.isFinite(milliseconds) ? Math.min(milliseconds, PROVIDER_RESET_MAX_MS) : undefined
-}
-
-/**
- * Recover a provider reset delay from the same flattened JSON envelope that
- * carries the machine code. The nested `error` object is read first, then the
- * top level; `retry_after_ms` is preferred over Anthropic's `retry_after`
- * seconds, non-positive and non-finite values are ignored, and the hint is
- * clamped to seven days.
- * @param text - the flattened pi-ai error message.
- * @returns the reset delay in milliseconds, or undefined when the body carries no usable hint.
- */
-export function providerRetryAfterMs(text: string): number | undefined {
-  const envelope = providerErrorEnvelope(text)
-  if (envelope === undefined) return undefined
-  for (const [field, scale] of RESET_FIELDS) {
-    for (const record of [envelope.inner, envelope.outer]) {
-      const milliseconds = resetFieldMs(record, field, scale)
-      if (milliseconds !== undefined) return milliseconds
-    }
-  }
-  return undefined
-}
-
 /**
  * Map a terminal pi-ai event to the harness finish reason.
  * @param message - the assistant message carried by the `done` or `error` event.
@@ -287,7 +243,7 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
       // In-stream error bodies bypass pi-ai's HTTP `Retry-After` handling, so
       // the reset hint parsed from the same envelope is the only way the retry
       // policy can honor a long provider window on this route.
-      const retryAfterMs = providerRetryAfterMs(text)
+      const retryAfterMs = parseProviderRetryAfterMs({ message: text })
       return {
         kind: 'error',
         failure: {

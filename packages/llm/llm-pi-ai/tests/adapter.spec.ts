@@ -382,6 +382,27 @@ describe('PiAiAdapter provider routing', () => {
     expect(server.paths).toEqual(['/v1/responses'])
   })
 
+  it('surfaces a pre-stream reset hint through the final failure normalization', async () => {
+    const server = await mockServer([{
+      status: 429,
+      body: JSON.stringify({ error: { message: 'slow down', retry_after_ms: 2_500 } }),
+    }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: { openai: { apiKeyEnv: 'PI_TEST_KEY', baseURL: `${server.url}/v1` } },
+    })
+
+    const result = await assemble(ctx, { provider: 'openai', model: 'gpt-4.1', messages: [] })
+
+    // The adapter never saw a stream chunk; the SDK-flattened body still reaches
+    // the terminal failure exactly like an in-stream provider hint.
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { providerRetryAfterMs: 2_500 },
+    })
+  })
+
   it('uses OpenAI Responses against an Azure project v1 path with its API key header', async () => {
     const server = await mockServer([{ status: 401, body: JSON.stringify({ error: { message: 'expected mock failure' } }) }])
     const ctx = new Context()

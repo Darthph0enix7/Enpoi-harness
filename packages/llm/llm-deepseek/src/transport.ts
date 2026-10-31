@@ -1,6 +1,6 @@
 /** Normalize HTTP and in-band Messages errors into provider-neutral failures. */
 
-import { isContextWindowExceededError, isQuotaExceededError, LlmError, ProviderRequestId } from '@deepseek-ai/dsh-llm'
+import { isContextWindowExceededError, isQuotaExceededError, LlmError, parseProviderRetryAfterMs, ProviderRequestId } from '@deepseek-ai/dsh-llm'
 
 /** Read only provider error fields used by bounded Files recovery.
  * @param raw - decoded HTTP error response.
@@ -17,9 +17,10 @@ export function providerErrorDetail(raw: unknown): string {
  * @param raw - decoded response or in-band error event.
  * @param status - HTTP status when the error preceded streaming.
  * @param headers - response headers for retry delay and request identity.
+ * @param bodyText - raw response text, for a reset hint carried only as a flattened envelope.
  * @returns a stable error consumed by LlmRuntime and llm-retry.
  */
-export function providerError(raw: unknown, status: number | undefined, headers?: Headers): LlmError {
+export function providerError(raw: unknown, status: number | undefined, headers?: Headers, bodyText?: string): LlmError {
   const envelope = typeof raw === 'object' && raw !== null ? raw as Record<string, unknown> : {}
   const error = typeof envelope.error === 'object' && envelope.error !== null ? envelope.error as Record<string, unknown> : {}
   const message = typeof error.message === 'string' ? error.message : `DeepSeek Messages request failed (${status ?? 'stream error'})`
@@ -33,12 +34,15 @@ export function providerError(raw: unknown, status: number | undefined, headers?
   else if (status === 400 || status === 413 || type === 'invalid_request_error') code = 'INVALID_REQUEST'
   else if ((status !== undefined && status >= 500) || ['api_error', 'overloaded_error'].includes(type)) code = 'SERVER'
   else code = status === undefined ? 'SERVER' : `HTTP_${status}`
-  const retry = headers?.get('retry-after')
-  const delay = retry == null ? NaN : /^\d+(?:\.\d+)?$/u.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now()
+  const delay = parseProviderRetryAfterMs({
+    retryAfterHeader: headers?.get('retry-after'),
+    body: raw,
+    message: bodyText,
+  })
   const id = headers?.get('request-id') ?? headers?.get('x-request-id') ?? headers?.get('x-deepseek-request-id')
   return new LlmError(message, code, {
     ...status === undefined ? {} : { status },
     ...id ? { requestId: ProviderRequestId(id) } : {},
-    ...Number.isFinite(delay) && delay > 0 ? { providerRetryAfterMs: delay } : {},
+    ...delay === undefined ? {} : { providerRetryAfterMs: delay },
   })
 }

@@ -5,6 +5,7 @@
  */
 
 import { HarnessError } from './error.ts'
+import { parseProviderRetryAfterMs } from './provider-retry.ts'
 import type { LlmFailure } from './types.ts'
 
 /**
@@ -20,11 +21,61 @@ export function normalizeLlmFailure(value: unknown): LlmFailure {
   // Cross-package copies preserve own data but not class identity. Trust the
   // carried facts only when both own properties agree after validation.
   const carried = ownFailureSnapshot(error)
-  if (carried !== undefined && carried.code === ownErrorCode(error)) return carried
+  if (carried !== undefined && carried.code === ownErrorCode(error)) {
+    return withRetryHint(carried, retryHintOf(error))
+  }
+  const message = errorMessage(error)
+  const retryAfterMs = retryHintOf(error)
   return Object.freeze({
-    message: errorMessage(error),
+    message,
     code: harnessErrorCode(error),
+    ...retryAfterMs === undefined ? {} : { providerRetryAfterMs: retryAfterMs },
   })
+}
+
+/**
+ * Pre-stream HTTP errors reach this boundary as SDK errors, not as a harness
+ * `failure` snapshot: the SDK keeps the status, headers, and parsed body under
+ * its own names. Recover the reset hint from those the same way every adapter
+ * does, so a 429 rejected before streaming hands `llm-retry` the same window an
+ * in-stream failure does.
+ */
+function retryHintOf(error: Error): number | undefined {
+  let retryAfterHeader: string | null | undefined
+  let body: unknown
+  let message: string | undefined
+  try {
+    const headers: unknown = (error as { headers?: unknown }).headers
+    if (typeof headers === 'object' && headers !== null
+      && 'get' in headers && typeof (headers as { get?: unknown }).get === 'function') {
+      const value = (headers as { get(name: string): unknown }).get('retry-after')
+      if (typeof value === 'string') retryAfterHeader = value
+    }
+  } catch (_sdkHeadersTrap) {
+    // A trapped headers getter simply yields no header hint.
+  }
+  try {
+    const parsed: unknown = (error as { error?: unknown }).error
+    if (parsed !== undefined) body = parsed
+    else {
+      const raw: unknown = (error as { body?: unknown }).body
+      if (typeof raw === 'string' || (typeof raw === 'object' && raw !== null)) body = raw
+    }
+  } catch (_sdkBodyTrap) {
+    // A trapped body getter simply yields no body hint.
+  }
+  try {
+    message = error.message
+  } catch (_sdkMessageGetter) {
+    // A trapped message getter simply yields no text hint.
+  }
+  return parseProviderRetryAfterMs({ retryAfterHeader, body, message })
+}
+
+/** Attach a reset hint recovered beside a carried failure snapshot. */
+function withRetryHint(failure: LlmFailure, hint: number | undefined): LlmFailure {
+  if (failure.providerRetryAfterMs !== undefined || hint === undefined) return failure
+  return Object.freeze({ ...failure, providerRetryAfterMs: hint })
 }
 
 /** Render a non-Error throw without letting hostile coercion escape normalization. */

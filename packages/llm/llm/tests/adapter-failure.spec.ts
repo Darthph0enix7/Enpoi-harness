@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { normalizeLlmFailure } from '../src/adapter-failure.ts'
+import { LlmError, ProviderRequestId } from '../src/index.ts'
 
 describe('adapter failure normalization', () => {
   it('contains hostile non-Error coercion', () => {
@@ -64,5 +65,48 @@ describe('adapter failure normalization', () => {
     const error = new Error('provider failed')
     Object.defineProperty(error, 'message', { get() { throw new Error('message getter failed') } })
     expect(normalizeLlmFailure(error)).toEqual({ message: 'LLM adapter failed', code: 'UNKNOWN' })
+  })
+})
+
+describe('adapter failure reset hints', () => {
+  it('recovers a pre-stream reset hint from an SDK header, body, or flattened message', () => {
+    const header = Object.assign(new Error('429: Too Many Requests'), {
+      status: 429,
+      headers: new Headers({ 'retry-after': '2' }),
+    })
+    expect(normalizeLlmFailure(header)).toEqual({
+      message: '429: Too Many Requests',
+      code: 'UNKNOWN',
+      providerRetryAfterMs: 2_000,
+    })
+
+    const body = Object.assign(new Error('429 refused'), {
+      status: 429,
+      error: { retry_after_ms: 2_500 },
+    })
+    expect(normalizeLlmFailure(body)).toEqual({
+      message: '429 refused',
+      code: 'UNKNOWN',
+      providerRetryAfterMs: 2_500,
+    })
+
+    const text = new Error('429: {"type":"error","error":{"retry_after":17}}')
+    expect(normalizeLlmFailure(text)).toEqual({
+      message: text.message,
+      code: 'UNKNOWN',
+      providerRetryAfterMs: 17_000,
+    })
+  })
+
+  it('adds the hint beside a carried failure without replacing its facts', () => {
+    const failure = new LlmError('rate limited', 'RATE_LIMIT', { status: 429, requestId: ProviderRequestId('req-1') })
+    const withHeader = Object.assign(failure, { headers: new Headers({ 'retry-after': '3' }) })
+    expect(normalizeLlmFailure(withHeader)).toEqual({
+      message: 'rate limited',
+      code: 'RATE_LIMIT',
+      status: 429,
+      requestId: 'req-1',
+      providerRetryAfterMs: 3_000,
+    })
   })
 })

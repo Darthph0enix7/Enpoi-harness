@@ -26,6 +26,8 @@
  * @module dsh-enpoi-commandcode-provider/convert
  */
 
+import { placeToolBatchExtras } from '@deepseek-ai/dsh-llm/src/tool-batch.ts'
+import type { ToolBatchEntry } from '@deepseek-ai/dsh-llm/src/tool-batch.ts'
 import { sanitizeText } from './sanitize.js'
 
 /** One part-like object accepted from a caller (AI-SDK-shaped or harness-built). */
@@ -499,32 +501,23 @@ export function buildRequest(input: BuildRequestInput): CcEnvelope {
     ? planUserImages(input.messages, input.resolveImage)
     : new Map<CcInputPart, string | null>()
   const names = toolNamesById(input.messages)
-  const messages: CcMessage[] = []
+  const entries: ToolBatchEntry<CcMessage, ForwardedImage>[] = []
   let system = input.system ?? ''
 
   /**
-   * Emit the images forwarded since the last flush as one user message. Called
-   * only when the current tool-result batch ends: images cannot ride inside a
-   * tool result, and splitting the batch's results with a user message makes
-   * the API reject every call after the split as missing its result.
+   * Render the images forwarded for one tool-result batch as one user message.
+   * `placeToolBatchExtras` guarantees this lands after the batch's LAST result:
+   * images cannot ride inside a tool result, and splitting the batch's results
+   * with a user message makes the API reject every call after the split as
+   * missing its result.
    */
-  const flushForwardedImages = (): void => {
-    if (forwarder.images.length === 0) return
-    const pending = forwarder.images.splice(0, forwarder.images.length)
-    messages.push({
-      role: 'user',
-      content: [
-        { type: 'text', text: 'Images returned by the tool call(s) above:' },
-        ...pending.map(image => ({ type: 'image', image: image.dataUri, mimeType: image.mediaType })),
-      ],
-    })
-  }
-
-  /** Append one wire message; any non-tool message ends the tool-result batch. */
-  const pushMessage = (message: CcMessage): void => {
-    if (message.role !== 'tool') flushForwardedImages()
-    messages.push(message)
-  }
+  const renderForwardedImages = (pending: readonly ForwardedImage[]): CcMessage => ({
+    role: 'user',
+    content: [
+      { type: 'text', text: 'Images returned by the tool call(s) above:' },
+      ...pending.map(image => ({ type: 'image', image: image.dataUri, mimeType: image.mediaType })),
+    ],
+  })
 
   for (const message of input.messages) {
     if (message.role === 'system') {
@@ -542,9 +535,12 @@ export function buildRequest(input: BuildRequestInput): CcEnvelope {
     if (message.role === 'developer') continue
 
     if (message.role === 'user') {
-      pushMessage({
-        role: 'user',
-        content: convertUserContent(message.content, forwarder, input.resolveImage, userImagePlan, scrub),
+      entries.push({
+        kind: 'message',
+        message: {
+          role: 'user',
+          content: convertUserContent(message.content, forwarder, input.resolveImage, userImagePlan, scrub),
+        },
       })
       continue
     }
@@ -567,7 +563,7 @@ export function buildRequest(input: BuildRequestInput): CcEnvelope {
           }
         }
       }
-      if (parts.length > 0) pushMessage({ role: 'assistant', content: parts })
+      if (parts.length > 0) entries.push({ kind: 'message', message: { role: 'assistant', content: parts } })
       continue
     }
 
@@ -585,11 +581,17 @@ export function buildRequest(input: BuildRequestInput): CcEnvelope {
         ? { type: 'error-text', value }
         : { type: 'text', value },
     })
-    // Contiguous results stay adjacent; the batch's images flush from
-    // `pushMessage` (next non-tool message) or the flush below (list end).
-    messages.push({ role: 'tool', content: results })
+    // Extras from this result join the batch; the core helper moves them after
+    // the batch's LAST result, never between two results.
+    entries.push({ kind: 'message', message: { role: 'tool', content: results } })
+    for (const image of forwarder.images.splice(0, forwarder.images.length)) {
+      entries.push({ kind: 'extra', extra: image })
+    }
   }
-  flushForwardedImages()
+  const messages = placeToolBatchExtras(entries, {
+    isToolResult: message => message.role === 'tool',
+    renderExtras: renderForwardedImages,
+  })
 
   const params: CcEnvelope['params'] = {
     model: input.model,

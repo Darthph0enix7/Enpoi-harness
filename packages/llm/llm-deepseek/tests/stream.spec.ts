@@ -136,4 +136,13 @@ describe('SSE framing and provider failures', () => {
     expect(providerError({}, 503, new Headers({ 'retry-after': new Date(Date.now() + 60_000).toUTCString(), 'x-request-id': 'r2' })).failure.providerRetryAfterMs).toBeGreaterThan(0)
     expect(providerError({}, 500, new Headers({ 'retry-after': 'invalid', 'x-deepseek-request-id': 'r3' })).failure).toMatchObject({ requestId: 'r3' })
   })
+  it('retains a reset hint carried only in the body envelope', () => {
+    expect(providerError({ error: { message: 'slow down', retry_after_ms: 2_500 } }, 429).failure)
+      .toMatchObject({ code: 'RATE_LIMIT', providerRetryAfterMs: 2_500 })
+    expect(providerError({ error: { message: 'slow down', retry_after: 90 } }, 429).failure)
+      .toMatchObject({ code: 'RATE_LIMIT', providerRetryAfterMs: 90_000 })
+    // A gateway that answers non-JSON still carries an envelope in its text.
+    expect(providerError({}, 429, undefined, '429: {"retry_after_ms":1200}').failure)
+      .toMatchObject({ code: 'RATE_LIMIT', providerRetryAfterMs: 1_200 })
+  })
 })

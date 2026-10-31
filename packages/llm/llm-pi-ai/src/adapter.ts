@@ -56,6 +56,7 @@ import type {
   LlmModelInfo,
   LlmProviderInfo,
   LlmResolvedModelInfo,
+  LlmErrorOptions,
   LlmFailure,
   PreparedAdapterCall,
   ReasoningEffortId as ReasoningEffortIdType,
@@ -93,6 +94,34 @@ interface PiAiSnapshot {
  * Messages — so the request reaches the wire with no auth header at all.
  */
 const KEYLESS_REQUEST_KEY = 'unused'
+
+/**
+ * Provider facts a terminal adapter rethrow must keep from the attempt that
+ * produced them. A fresh `LlmError` that names only the pool outcome would
+ * discard the provider reset window, status, and request id the retry layer
+ * needs — exactly the facts a single-route failure still carries.
+ */
+function attemptFailureFacts(failure: LlmFailure | undefined): LlmErrorOptions {
+  if (failure === undefined) return {}
+  return {
+    ...failure.status === undefined ? {} : { status: failure.status },
+    ...failure.providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs: failure.providerRetryAfterMs },
+    ...failure.requestId === undefined ? {} : { requestId: failure.requestId },
+    ...failure.provider === undefined ? {} : { provider: failure.provider },
+    ...failure.model === undefined ? {} : { model: failure.model },
+    ...failure.offloadImages === undefined ? {} : { offloadImages: failure.offloadImages },
+  }
+}
+
+/** Throw a terminal failure while preserving the collected attempt it replaces. */
+function throwAttemptFailure(message: string, code: string, failure: LlmFailure | undefined): never {
+  throw new LlmError(message, code, {
+    ...attemptFailureFacts(failure),
+    ...failure === undefined ? {} : {
+      cause: new LlmError(failure.message, failure.code, attemptFailureFacts(failure)),
+    },
+  })
+}
 
 /** Whether deployment headers already carry a non-empty value for one header. */
 function hasHeader(headers: Readonly<Record<string, string>>, name: string): boolean {
@@ -572,6 +601,7 @@ export class PiAiAdapter extends LlmAdapter {
         const deadline = now() + deadlineMs
         let attempts = 0
         let lastFailure = 'no identity was attempted'
+        let lastFailureFacts: LlmFailure | undefined
         /** Failure class of every completed attempt, for the exhaustion summary. */
         const attemptedFailureClasses: PoolFailureClass[] = []
         for (const candidate of resolvableOrder) {
@@ -655,12 +685,14 @@ export class PiAiAdapter extends LlmAdapter {
           // key), so it ends the request terminally instead of burning pool
           // identities.
           if (keylessAttempt && failureClass === 'AUTH') {
-            throw new LlmError(
+            throwAttemptFailure(
               `llm-pi-ai: keyless provider "${options.provider}" answered an auth failure (AUTH):`
               + ` ${failure?.message ?? 'unknown failure'}`,
               'AUTH',
+              failure,
             )
           }
+          if (failure !== undefined) lastFailureFacts = failure
           engine.recordFailure(options.provider, identity.id, options.model, failureClass, failure?.message ?? 'unknown failure')
           lastFailure = failure?.message ?? lastFailure
           if (!ROTATING_CLASSES.has(failureClass)) {
@@ -670,12 +702,13 @@ export class PiAiAdapter extends LlmAdapter {
             // is a property of the route itself and keeps its terminal code and
             // explanation. Entitlement gates are identity-specific and rotate,
             // so they never reach this branch.
-            throw new LlmError(
+            throwAttemptFailure(
               `llm-pi-ai: provider "${options.provider}" request failed without failover (${failureClass}): ${lastFailure}`
               + (failureClass === 'POLICY' ? ` — ${FREE_TIER_GATED_EXPLANATION}` : ''),
               failureClass === 'GATEWAY_OUTAGE' ? 'PROVIDER_MODEL_OUTAGE'
                 : failureClass === 'POLICY' ? FREE_TIER_GATED_CODE
                   : 'INVALID_REQUEST',
+              failure,
             )
           }
           // A rotation the pool will actually make: another resolvable identity
@@ -693,6 +726,7 @@ export class PiAiAdapter extends LlmAdapter {
               message: failure?.message ?? 'the attempt ended without a terminal failure event',
               next: Object.freeze({ identity: nextIdentity.id }),
               ...failure?.status === undefined ? {} : { status: failure.status },
+              ...failure?.providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs: failure.providerRetryAfterMs },
             }))
           }
           attemptController.abort('llm-pi-ai pool rotated to the next identity')
@@ -776,7 +810,7 @@ export class PiAiAdapter extends LlmAdapter {
               ? ` — ${ENTITLEMENT_GATED_EXPLANATION}`
               : ` — ${entitlementAttempts} of ${attemptedFailureClasses.length} attempts were entitlement-gated`
           }
-          throw new LlmError(enriched, 'PROVIDER_POOL_EXHAUSTED')
+          throwAttemptFailure(enriched, 'PROVIDER_POOL_EXHAUSTED', lastFailureFacts)
         }
       }
 

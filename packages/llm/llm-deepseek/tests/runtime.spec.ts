@@ -1391,6 +1391,20 @@ describe('DeepSeekAdapter against a mock server', () => {
     })
   })
 
+  it('retains a body-only reset hint from a non-2xx response', async () => {
+    const server = await mockServer([{
+      kind: 'http-error',
+      status: 429,
+      body: JSON.stringify({ error: { message: 'slow down', retry_after_ms: 2_500 } }),
+    }])
+    const ctx = await harness(server.url)
+    const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+    expect(result.finish).toMatchObject({
+      kind: 'error',
+      failure: { code: 'RATE_LIMIT', providerRetryAfterMs: 2_500 },
+    })
+  })
+
   it('parses a future Retry-After HTTP date and the DeepSeek request-id fallback', async () => {
     const now = 1_800_000_000_000
     const dateNow = vi.spyOn(Date, 'now').mockReturnValue(now)

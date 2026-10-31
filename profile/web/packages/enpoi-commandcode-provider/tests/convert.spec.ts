@@ -6,7 +6,10 @@
  */
 import { expect, it } from 'vitest'
 import { buildRequest, detectMediaType } from '../src/convert.js'
-import type { CcInputMessage, CcInputPart } from '../src/convert.js'
+import type { CcEnvelope, CcInputMessage, CcInputPart } from '../src/convert.js'
+import { toCcMessages } from '../src/adapter.js'
+import { assertToolBatchContract, toolBatchHistory, toolBatchImages } from '../../../../../packages/llm/llm/tests/tool-batch-fixture.ts'
+import type { WireView } from '../../../../../packages/llm/llm/tests/tool-batch-fixture.ts'
 import { MAX_INLINE_TOOL_TEXT_CHARS } from '../src/sanitize.js'
 
 const PNG = 'A'.repeat(2048)
@@ -370,4 +373,50 @@ it('leaves text untouched on the single-key legacy path, where a loopback proxy 
   expect(envelope.params.messages[0]!.content as string).toBe(uri)
   const tool = envelope.params.messages[1] as { content: Array<{ output: { value: string } }> }
   expect(tool.content[0]!.output.value).toBe(long)
+})
+
+
+/**
+ * The command-code row of the shared tool-batch contract matrix (the same
+ * fixture and assertions the root-package matrix uses). Add a new adapter by
+ * normalizing its wire output into a `WireView` and calling
+ * `assertToolBatchContract`, exactly like the rows beside it.
+ */
+function commandCodeView(envelope: CcEnvelope): WireView {
+  return {
+    units: envelope.params.messages.flatMap((message): WireView['units'][number][] => {
+      if (message.role === 'assistant') {
+        return [{
+          kind: 'assistant',
+          callIds: message.content.flatMap(block => block.type === 'tool-call' ? [block.toolCallId] : []),
+        }]
+      }
+      if (message.role === 'tool') {
+        return message.content.map(block => ({ kind: 'tool-result' as const, callId: block.toolCallId }))
+      }
+      return [{ kind: 'other' }]
+    }),
+  }
+}
+
+it('tool-batch contract: two results stay contiguous and both images follow the batch', async () => {
+  const history = toolBatchHistory()
+  const versions = toolBatchImages()
+  const input = await toCcMessages(
+    { provider: 'commandcode', model: 'm', messages: history },
+    async (ref) => {
+      const version = versions.get(ref.attachmentId)
+      return version === undefined ? undefined : { data: version.data, mediaType: version.mediaType }
+    },
+  )
+  const envelope = buildRequest({ model: 'm', messages: input, visionEnabled: true })
+
+  assertToolBatchContract(commandCodeView(envelope), 1)
+
+  // The escaped extras are one user message and carry both result images.
+  const extras = envelope.params.messages.at(-1)
+  expect(extras?.role).toBe('user')
+  const parts = extras?.content
+  expect(Array.isArray(parts)).toBe(true)
+  expect((parts as Array<{ type: string }>).filter(part => part.type === 'image')).toHaveLength(2)
 })
