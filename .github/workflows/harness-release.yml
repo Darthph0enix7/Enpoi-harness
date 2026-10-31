@@ -35,7 +35,10 @@
 #
 # Runner labels: `macos-13` (x86_64) was retired on 2025-12-08. The closest
 # documented GitHub-hosted x86_64 image is `macos-15-intel` (the last Intel
-# image, available until ~August 2027); `macos-14` is arm64.
+# image, available until ~August 2027); `macos-15` is arm64. The `macos-14`
+# label was retired on 2026-11-02 (with brownout windows from 2026-10-29 on)
+# and cancels its job before a runner is assigned — keep this on a supported
+# arm64 label.
 #
 # The artifact keeps the full built node_modules closure: `pnpm install --prod`
 # and `pnpm prune --prod` were both measured and are unusable for this
@@ -148,7 +151,7 @@ jobs:
           - runner: ubuntu-24.04
             os: linux
             arch: x64
-          - runner: macos-14
+          - runner: macos-15
             os: darwin
             arch: arm64
           - runner: macos-15-intel
