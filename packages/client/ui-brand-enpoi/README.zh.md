@@ -45,7 +45,7 @@ kind: "package-reference"
 
 `src/client/index.ts` 在一个 Cordis 效果链中注册所有占位组件：品牌标记、Watchtower `conversation.view`、键控的 `sidebar.right.pane.tab` 主体、`settings.section` 页面、会话头部徽标、键控 `tool.call.toolview` 卡片以及 `shell.overlay` 底部终端坞。注册拥有各自的插槽身份与顺序；只有主体组件被延迟加载。
 
-重型主体是包内动态导入。`src/client/lazy-surface.tsx` 渲染 `Suspense` 回退与一个错误边界，其重试会构建新的 `React.lazy` 组件，因此临时的分块获取失败不会污染整个页面。`src/client/lazy-bodies.tsx` 持有 Watchtower、Agent Models、Subagent Sessions、Git、Orchestration、Permissions 与 Dynamic 的加载器；`terminal/lazy-terminal-view.tsx` 持有终端模拟器加载器。图标、终端标签条与共享存储保留在入口中，因为标签页边框与注册时的引导胶囊会在任何主体打开前使用它们。
+终端模拟器是包内动态导入（`terminal/lazy-terminal-view.tsx`）。`src/client/lazy-surface.tsx` 渲染 `Suspense` 回退与一个错误边界，其重试会构建新的 `React.lazy` 组件，因此临时的分块获取失败不会污染整个页面。模拟器（`TerminalView.tsx`）、其 xterm.js 依赖及样式表移入 `lib/client.TerminalView.js`。图标、终端标签条与共享存储保留在入口中，因为标签页边框与注册时的引导胶囊会在任何主体打开前使用它们。
 
 终端模拟器模块拥有 `@xterm/xterm`、`@xterm/addon-fit` 与 xterm 样式表。客户端打包预设将该全局 CSS 导入转换为标记为此插件的样式注入器，包内 `client.TerminalView.js` 分块只在终端标签页首次渲染时获取。`terminal/registry.ts` 中的注册表不导入 xterm：它独立于视图创建进程、连接套接字并重放转录。
 

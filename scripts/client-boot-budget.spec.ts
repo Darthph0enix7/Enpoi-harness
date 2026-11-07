@@ -17,18 +17,6 @@ const CLIENT_ENTRY = `${PACKAGE}/src/client/index.ts`
 const TERMINAL_VIEW = `${PACKAGE}/src/client/terminal/TerminalView.tsx`
 const TERMINAL_LAZY = `${PACKAGE}/src/client/terminal/lazy-terminal-view.tsx`
 const TERMINAL_REGISTRY = `${PACKAGE}/src/client/terminal/registry.ts`
-const LAZY_BODIES = `${PACKAGE}/src/client/lazy-bodies.tsx`
-
-/** Bodies that must ship as package-local chunks, never in the eager entry. */
-const DEFERRED_BODIES = [
-  `${PACKAGE}/src/client/WatchtowerView.tsx`,
-  `${PACKAGE}/src/client/AgentModelsBody.tsx`,
-  `${PACKAGE}/src/client/SubagentSessionsBody.tsx`,
-  `${PACKAGE}/src/client/GitBody.tsx`,
-  `${PACKAGE}/src/client/OrchestrationSettings.tsx`,
-  `${PACKAGE}/src/client/PermissionsSettings.tsx`,
-  `${PACKAGE}/src/client/dynamic/DynamicSettings.tsx`,
-] as const
 
 /** Heavy client rows whose emitted bytes the informational snapshot records. */
 const HEAVY_ROWS = [
@@ -173,13 +161,9 @@ describe('ui-brand-enpoi boot budget', () => {
     expect(externalSpecifiers.filter(specifier => specifier.startsWith('@xterm/'))).toEqual([])
   })
 
-  it('keeps the emulator and every deferred body behind a dynamic import', () => {
+  it('keeps the emulator behind a package-local dynamic import', () => {
     expect(graph.files).not.toContain(TERMINAL_VIEW)
-    for (const body of DEFERRED_BODIES) expect(graph.files).not.toContain(body)
-    expect(graph.dynamicEdges).toEqual(expect.arrayContaining([
-      { from: TERMINAL_LAZY, to: TERMINAL_VIEW },
-      ...DEFERRED_BODIES.map(body => ({ from: LAZY_BODIES, to: body })),
-    ]))
+    expect(graph.dynamicEdges).toContainEqual({ from: TERMINAL_LAZY, to: TERMINAL_VIEW })
   })
 
   it('proves the deferred module still owns the xterm imports', () => {

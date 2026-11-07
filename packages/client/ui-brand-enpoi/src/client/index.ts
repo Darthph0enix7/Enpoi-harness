@@ -14,27 +14,29 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { EnpoiBrandMark, EnpoiBrandName } from './Brand.tsx'
 import { installDocumentBrand } from './document-brand.ts'
 import { en as brandEnpoiEn, zh as brandEnpoiZh, type BrandEnpoiKey } from './locales.ts'
-import type { AgentModelsDirectoryFace, AgentModelsInjected } from './AgentModelsBody.tsx'
+import { WatchtowerView } from './WatchtowerView.tsx'
+import {
+  AgentModelsBody,
+  type AgentModelsDirectoryFace,
+  type AgentModelsInjected,
+} from './AgentModelsBody.tsx'
 import { CapabilitiesBody, CapabilitiesIcon, ensureCouncilsFresh, getCouncilRegistry, refreshCapabilities, refreshCouncils, setOpenSettingsHandler, subscribeCouncilRegistry } from './CapabilitiesBody.tsx'
 import { setOpenSettingsSection } from './settings-nav.ts'
-import type { SubagentSessionsInjected } from './SubagentSessionsBody.tsx'
 import {
-  LazyAgentModelsBody,
-  LazyDynamicSettings,
-  LazyGitBody,
-  LazyOrchestrationSettings,
-  LazyPermissionsSettings,
-  LazySubagentSessionsBody,
-  LazyWatchtowerView,
-} from './lazy-bodies.tsx'
+  SubagentSessionsBody,
+  type SubagentSessionsInjected,
+} from './SubagentSessionsBody.tsx'
+import { GitBody } from './GitBody.tsx'
 import { FleetRoutingIcon, GitIcon, SubagentSessionsIcon } from './sidebar-icons.tsx'
 import { TheMarkTaskCardAdapter } from './TheMarkTaskCardAdapter.tsx'
-import type { OrchestrationSettingsInjected } from './OrchestrationSettings.tsx'
+import { OrchestrationSettings, type OrchestrationSettingsInjected } from './OrchestrationSettings.tsx'
 import {
   getCompactionPolicy,
   refreshCompactionPolicy,
   subscribeCompactionPolicy,
 } from './compaction-policy.ts'
+import { PermissionsSettings } from './PermissionsSettings.tsx'
+import { DynamicSettings } from './dynamic/DynamicSettings.tsx'
 import { en as dynamicSkillsEn, zh as dynamicSkillsZh, type DynamicSkillsKey } from './dynamic/skills-locales.ts'
 import { McpMountsChip } from './McpMountsChip.tsx'
 import { en as mcpMountsEn, zh as mcpMountsZh, type McpMountsKey } from './mcp-mounts-locales.ts'
@@ -248,7 +250,7 @@ export function apply(ctx: Context): void {
       order: 30,
       label: () => t('tabWatchtower'),
       locale: NS,
-    }, LazyWatchtowerView)
+    }, WatchtowerView)
   })
 
   // 2b. Orchestration parameters settings section (doc 38). The effective
@@ -294,7 +296,7 @@ export function apply(ctx: Context): void {
         ctx.get('modelDirectories')?.catalog.load().catch(() => { /* surfaced on the catalog store */ })
       },
     }),
-  }, LazyOrchestrationSettings))
+  }, OrchestrationSettings))
 
   // 2d. Dynamic entities settings section (doc 59): roles, councils, MCPs,
   // skills/tools, and the prompts behind them. The Skills & tools panel owns
@@ -319,7 +321,7 @@ export function apply(ctx: Context): void {
     label: () => t('tabDynamic'),
     locale: NS,
     inject: () => ({ skillsT: ctx.locale.bind('settings.dynamicSkills') }),
-  }, LazyDynamicSettings))
+  }, DynamicSettings))
 
   // 2c. Permission policy settings section (doc 55)
   ctx.slots.inject('settings.section', () => ctx.slots.register({
@@ -328,7 +330,7 @@ export function apply(ctx: Context): void {
     order: 21,
     label: () => t('tabPermissions'),
     locale: NS,
-  }, LazyPermissionsSettings))
+  }, PermissionsSettings))
 
   // 3. Global operator tabs: right-Sidebar tab types (guide-discoverable) with
   // their bodies under the same implementation id.
@@ -475,7 +477,7 @@ export function apply(ctx: Context): void {
         // Groups title and "n models" rows resolve instead of echoing raw keys.
         modelT: ctx.locale.bind('model'),
       }),
-    }, LazyAgentModelsBody)
+    }, AgentModelsBody)
     yield ctx.slots.register({
       name: 'sidebar.right.pane.tab',
       key: SUBAGENT_SESSIONS_ID,
@@ -499,12 +501,12 @@ export function apply(ctx: Context): void {
           refreshSessions: async () => { await sessions?.refresh() },
         }
       },
-    }, LazySubagentSessionsBody)
+    }, SubagentSessionsBody)
     yield ctx.slots.register({
       name: 'sidebar.right.pane.tab',
       key: GIT_ID,
       locale: NS,
-    }, LazyGitBody)
+    }, GitBody)
     yield ctx.slots.register({
       name: 'sidebar.right.pane.tab',
       key: TERMINAL_ID,
