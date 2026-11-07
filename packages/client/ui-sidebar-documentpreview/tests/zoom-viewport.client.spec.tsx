@@ -7,20 +7,33 @@ import { fitWidthZoom, ZoomViewport, zoomSurfaceClass } from '../src/client/zoom
 import { FIT_WIDTH, type ZoomPreference } from '../src/client/zoom/types.ts'
 
 let width = 500
-let resize: ResizeObserverCallback | undefined
+const resizeObservers: Array<{ callback: ResizeObserverCallback; observed: Element[] }> = []
 let elementFromPointDescriptor: PropertyDescriptor | undefined
 
 beforeEach(() => {
   width = 500
+  resizeObservers.length = 0
   elementFromPointDescriptor = Object.getOwnPropertyDescriptor(document, 'elementFromPoint')
   Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: () => null })
   vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => width)
   vi.stubGlobal('ResizeObserver', class {
-    constructor(callback: ResizeObserverCallback) { resize = callback }
-    observe(): void {}
+    readonly observed: Element[] = []
+    constructor(readonly callback: ResizeObserverCallback) {
+      resizeObservers.push({ callback, observed: this.observed })
+    }
+    observe(element: Element): void { this.observed.push(element) }
     disconnect(): void {}
   })
 })
+
+/** Resize only the viewport's scrollport observer; an open menu adds its own observers. */
+function resizeScrollport(): void {
+  for (const observer of resizeObservers) {
+    if (observer.observed.some(element => element.hasAttribute('data-document-zoom-scrollport'))) {
+      observer.callback([], {} as ResizeObserver)
+    }
+  }
+}
 
 afterEach(() => {
   cleanup()
@@ -47,13 +60,13 @@ it('fits without upscaling, follows resize, and leaves fixed zoom unchanged', ()
   expect(onRenderZoom).toHaveBeenLastCalledWith(0.48)
   expect(view.container.querySelector('[data-document-zoom-mode]')?.getAttribute('data-document-zoom-mode')).toBe('fit-width')
   width = 320
-  act(() => { resize?.([], {} as ResizeObserver) })
+  act(resizeScrollport)
   expect(screen.getByRole('button', { name: 'Choose zoom' }).textContent).toContain('30%')
   expect(onRenderZoom).toHaveBeenLastCalledWith(0.3)
   fireEvent.click(screen.getByRole('button', { name: 'Choose zoom' }))
   fireEvent.click(screen.getByRole('menuitem', { name: '100%' }))
   width = 220
-  act(() => { resize?.([], {} as ResizeObserver) })
+  act(resizeScrollport)
   expect(screen.getByRole('button', { name: 'Choose zoom' }).textContent).toContain('100%')
   expect(onRenderZoom).toHaveBeenLastCalledWith(1)
   fireEvent.click(screen.getByRole('button', { name: 'Choose zoom' }))

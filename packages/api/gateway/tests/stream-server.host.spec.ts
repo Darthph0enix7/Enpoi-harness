@@ -30,7 +30,7 @@ afterEach(async () => {
 describe('Remote stream mux server carrier lifecycle', () => {
   it('sends Ping control frames and application heartbeats without another message', async () => {
     const entry = await startMux(async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal), 20)
-    const client = await connect(entry.url)
+    const client = await connect(`${entry.url}/?heartbeat=1`)
     const serverSocket = acceptedSocket(entry.mux)
     const messages: string[] = []
     client.on('message', (data) => {
@@ -64,7 +64,7 @@ describe('Remote stream mux server carrier lifecycle', () => {
     )
     vi.useFakeTimers()
     try {
-      await connect(entry.url)
+      await connect(`${entry.url}/?heartbeat=1`)
       const serverSocket = acceptedSocket(entry.mux)
       const sent = vi.spyOn(serverSocket, 'send')
       const ping = vi.spyOn(serverSocket, 'ping')
@@ -89,7 +89,7 @@ describe('Remote stream mux server carrier lifecycle', () => {
     )
     vi.useFakeTimers()
     try {
-      const client = await connect(entry.url)
+      const client = await connect(`${entry.url}/?heartbeat=1`)
       const serverSocket = acceptedSocket(entry.mux)
       const sent = vi.spyOn(serverSocket, 'send')
 
@@ -108,9 +108,15 @@ describe('Remote stream mux server carrier lifecycle', () => {
     }
   })
 
-  it('requires two missed heartbeats before terminating an unresponsive socket', async () => {
-    const entry = await startMux(async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal), 20)
-    const client = await connect(entry.url)
+  it('terminates an unresponsive socket after the configured liveness deadline', async () => {
+    const entry = await startMux(
+      async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal),
+      20,
+      262_144,
+      undefined,
+      45,
+    )
+    const client = await connect(entry.url, false)
     const serverSocket = acceptedSocket(entry.mux)
     serverSocket.removeAllListeners('pong')
     const terminated = vi.spyOn(serverSocket, 'terminate')
@@ -123,8 +129,68 @@ describe('Remote stream mux server carrier lifecycle', () => {
     await closed
   })
 
-  it('keeps the socket when a delayed Pong arrives before the final check', async () => {
+  it('keeps a socket whose Pong round trip exceeds the Ping cadence but fits the liveness deadline', async () => {
+    const entry = await startMux(
+      async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal),
+      100,
+      262_144,
+      undefined,
+      400,
+    )
+    const client = await delayedPongClient(entry.url, 250)
+    await new Promise<void>((resolve) => { setTimeout(resolve, 650) })
+    expect(client.readyState).toBe(WebSocket.OPEN)
+    const closed = once(client, 'close')
+    client.close()
+    await closed
+  })
+
+  it('clamps the liveness deadline to at least two Ping intervals when configured smaller', async () => {
+    // Interval 50 ms, timeout configured as 20 ms -> clamped to 100 ms (2 intervals).
+    const entry = await startMux(
+      async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal),
+      50,
+      262_144,
+      undefined,
+      20,
+    )
+    const client = await delayedPongClient(entry.url, 10)
+    // Sockets should NOT be terminated at 40-70 ms because the deadline is 100 ms.
+    await new Promise<void>((resolve) => { setTimeout(resolve, 80) })
+    expect(client.readyState).toBe(WebSocket.OPEN)
+    const closed = once(client, 'close')
+    client.close()
+    await closed
+  })
+
+  it('sends application heartbeats only to sockets that request the capability', async () => {
     const entry = await startMux(async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal), 20)
+    const legacy = await connect(entry.url)
+    const capable = await connect(`${entry.url}/?heartbeat=1`)
+    const legacyMessages: string[] = []
+    const capableMessages: string[] = []
+    legacy.on('message', (data) => { legacyMessages.push(rawDataText(data)) })
+    capable.on('message', (data) => { capableMessages.push(rawDataText(data)) })
+
+    await vi.waitFor(() => { expect(capableMessages.length).toBeGreaterThan(0) })
+    expect(capableMessages.every(message => message === REMOTE_STREAM_HEARTBEAT_TEXT)).toBe(true)
+    expect(legacyMessages).toEqual([])
+
+    const legacyClosed = once(legacy, 'close')
+    const capableClosed = once(capable, 'close')
+    legacy.close()
+    capable.close()
+    await Promise.all([legacyClosed, capableClosed])
+  })
+
+  it('keeps the socket when a delayed Pong arrives before the final check', async () => {
+    const entry = await startMux(
+      async (_endpoint, _payload, _uplink, _peer, control) => waitForAbort(control.signal),
+      20,
+      262_144,
+      undefined,
+      45,
+    )
     const client = await connect(entry.url, false)
     const serverSocket = acceptedSocket(entry.mux)
     const terminated = vi.spyOn(serverSocket, 'terminate')
@@ -147,6 +213,30 @@ describe('Remote stream mux server carrier lifecycle', () => {
       client.close()
       await closed
     }
+  })
+
+  it('closes a socket whose buffered downlink exceeds the configured ceiling', async () => {
+    let opened!: () => void
+    const didOpen = new Promise<void>((resolve) => { opened = resolve })
+    const release = Promise.withResolvers<undefined>()
+    const entry = await startMux(
+      async () => delayedItem(release.promise, opened),
+      2_000,
+      262_144,
+      undefined,
+      30_000,
+      1_024,
+    )
+    const client = await connect(entry.url)
+    const serverSocket = acceptedSocket(entry.mux)
+    client.send(openFrame('overflow'))
+    await didOpen
+    Object.defineProperty(serverSocket, 'bufferedAmount', { configurable: true, value: 2_048 })
+    const closed = once(client, 'close')
+    release.resolve(undefined)
+    const closeEvent = await closed
+    expect(closeEvent[0]).toBe(1011)
+    expect(String(closeEvent[1])).toBe('Remote stream backpressure exceeded')
   })
 
   it('rejects binary, malformed, and duplicate logical-stream messages', async () => {
@@ -556,9 +646,18 @@ async function startMux(
   heartbeatIntervalMs = 2_000,
   streamInboxBytes = 262_144,
   peer?: PeerScope,
+  heartbeatTimeoutMs = 30_000,
+  maxBufferedBytes = 16 * 1024 * 1024,
 ): Promise<RunningMux> {
   const admitted = peer ?? await fixturePeer()
-  const mux = new RemoteStreamMuxServer(open, mapFailure, heartbeatIntervalMs, streamInboxBytes)
+  const mux = new RemoteStreamMuxServer(
+    open,
+    mapFailure,
+    heartbeatIntervalMs,
+    streamInboxBytes,
+    heartbeatTimeoutMs,
+    maxBufferedBytes,
+  )
   const http = createServer()
   http.on('upgrade', (request, socket, head) => { mux.handleUpgrade(request, socket, head, admitted) })
   await new Promise<void>((resolve, reject) => {
@@ -591,6 +690,25 @@ async function connect(url: string, autoPong = true): Promise<WebSocket> {
   const socket = new WebSocket(url, { autoPong })
   await once(socket, 'open')
   return socket
+}
+
+function delayedPongClient(url: string, delayMs: number): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(url, { autoPong: false })
+    socket.on('ping', () => {
+      setTimeout(() => {
+        if (socket.readyState === WebSocket.OPEN) socket.pong()
+      }, delayMs)
+    })
+    socket.once('open', () => { resolve(socket) })
+    socket.once('error', reject)
+  })
+}
+
+function rawDataText(data: import('ws').RawData): string {
+  if (Array.isArray(data)) return Buffer.concat(data).toString('utf8')
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8')
+  return Buffer.from(data).toString('utf8')
 }
 
 function acceptedSocket(mux: RemoteStreamMuxServer): WebSocket {

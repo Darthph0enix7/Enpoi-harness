@@ -19,6 +19,7 @@ import LlmRuntime, {
   STREAM_CLOSED_CODE,
   type GenerateOptions,
   type LlmAttemptFailedEventData,
+  type LlmModelContext,
   type LlmResolvedModelInfo,
   type ResolvedModelChain,
   type ResolvedRetryPolicy,
@@ -136,6 +137,23 @@ class ContextScriptedAdapter extends ScriptedAdapter {
       id: model,
       name: model,
       ...contextWindow === undefined ? {} : { context: { contextWindow } },
+    })
+  }
+}
+
+/** {@link ScriptedAdapter} whose models expose exact context metadata. */
+class CapacityScriptedAdapter extends ScriptedAdapter {
+  constructor(script: StreamChunk[], private readonly contexts: Readonly<Record<string, LlmModelContext>>) {
+    super(script)
+  }
+
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    const context = this.contexts[model]
+    return Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      ...context === undefined ? {} : { context },
     })
   }
 }
@@ -1084,6 +1102,63 @@ describe('model-group failover', () => {
     expect(tooSmall.calls).toHaveLength(0)
     expect(large.calls).toHaveLength(1)
     expect(chunks).toEqual(answeredBy('chain-b', 'm-large'))
+  })
+
+  it('skips a member whose input-only cap is smaller than the estimated request', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    // The combined window is ample, but the prompt-side cap is not: the
+    // estimate prices input only, so the input cap binds first.
+    const capped = new CapacityScriptedAdapter(SCRIPT, {
+      'm-capped': { contextWindow: 200_000, maxInputTokens: 1 },
+    })
+    const large = new ContextScriptedAdapter(SCRIPT, { 'm-large': 100_000 })
+    ctx.llm.registerAdapter(['chain-a'], capped)
+    ctx.llm.registerAdapter(['chain-b'], large)
+    provideChains(ctx, id => id === 'input-cap' ? group('input-cap', ['chain-a', 'm-capped'], ['chain-b', 'm-large']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-capped',
+      chain: 'input-cap',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(1_000) }] }],
+    }))
+
+    expect(capped.calls).toHaveLength(0)
+    expect(large.calls).toHaveLength(1)
+    expect(chunks).toEqual(answeredBy('chain-b', 'm-large'))
+  })
+
+  it('never filters a member on a default-source context or input cap', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    // Both capacities are execution fallbacks nobody disclosed. The first
+    // member must still run instead of being dropped from the chain.
+    const assumed = new CapacityScriptedAdapter(SCRIPT, {
+      'm-assumed': {
+        contextWindow: 1,
+        maxInputTokens: 1,
+        maxInputTokensSource: 'default',
+        source: 'default',
+      },
+    })
+    const large = new ContextScriptedAdapter(SCRIPT, { 'm-large': 100_000 })
+    ctx.llm.registerAdapter(['chain-a'], assumed)
+    ctx.llm.registerAdapter(['chain-b'], large)
+    provideChains(ctx, id => id === 'assumed-capacity' ? group('assumed-capacity', ['chain-a', 'm-assumed'], ['chain-b', 'm-large']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-assumed',
+      chain: 'assumed-capacity',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'x'.repeat(1_000) }] }],
+    }))
+
+    expect(assumed.calls).toHaveLength(1)
+    expect(large.calls).toHaveLength(0)
+    expect(chunks).toEqual(SCRIPT)
   })
 
   it('tries every member in order when the prefilter finds them all too small', async () => {

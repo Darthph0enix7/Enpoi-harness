@@ -4,7 +4,7 @@
     {
       "key": "SessionHeader",
       "kind": "header",
-      "digest": "1a3440e3577382704d42a6263aa463504eb74c566734a55e9503a63efcd02445",
+      "digest": "22c6899a78214dd841c266348ae997027ef391174ddb21127f1b71dc1b362824",
       "schema": {
         "root": 0,
         "nodes": [
@@ -77,7 +77,7 @@
           },
           {
             "kind": "literal",
-            "value": 4
+            "value": 5
           }
         ]
       }
@@ -10730,7 +10730,7 @@
       "kind": "event",
       "event": "request/context",
       "surface": false,
-      "digest": "37cbc9cf06d494cfe5c67f078af1605eacb8e4c2c853e9e26455b73de0ee7ccf",
+      "digest": "429ad19b7ae2b6270c50c98e807a5b227511c31b07c0db58cfe26a6ff84476eb",
       "schema": {
         "root": 0,
         "nodes": [
@@ -10744,7 +10744,7 @@
               },
               {
                 "name": "ignorable",
-                "type": 5,
+                "type": 14,
                 "optional": true
               },
               {
@@ -10759,7 +10759,7 @@
               },
               {
                 "name": "type",
-                "type": 6,
+                "type": 15,
                 "optional": false
               }
             ],
@@ -10779,13 +10779,18 @@
                 "optional": false
               },
               {
+                "name": "nativeFileInputs",
+                "type": 4,
+                "optional": true
+              },
+              {
                 "name": "provider",
                 "type": 3,
                 "optional": false
               },
               {
                 "name": "systemPromptUpdate",
-                "type": 4,
+                "type": 13,
                 "optional": true
               }
             ],
@@ -10798,6 +10803,128 @@
           {
             "kind": "primitive",
             "type": "string"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "encoders",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "maxPayloadBytes",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "perFileBytes",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "tokenReserve",
+                "type": 11,
+                "optional": false
+              },
+              {
+                "name": "totalBytes",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "version",
+                "type": 12,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "application/pdf",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "audio/flac",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "audio/mpeg",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "audio/ogg",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "audio/wav",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "video/mp4",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "video/webm",
+                "type": 6,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "union",
+            "types": [
+              7,
+              8,
+              9,
+              10
+            ]
+          },
+          {
+            "kind": "literal",
+            "value": "anthropic-document"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-file"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-input-audio"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-video-url"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "perByte",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "perFile",
+                "type": 2,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "literal",
+            "value": 1
           },
           {
             "kind": "literal",
@@ -22408,6 +22535,82 @@
       "sources": []
     },
     {
+      "digest": "012fc95a7734963e44321a551ed8b592e82cfb068efc836e5e255b8af38e06d8",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "application/pdf",
+                "type": 1,
+                "optional": true
+              },
+              {
+                "name": "audio/flac",
+                "type": 1,
+                "optional": true
+              },
+              {
+                "name": "audio/mpeg",
+                "type": 1,
+                "optional": true
+              },
+              {
+                "name": "audio/ogg",
+                "type": 1,
+                "optional": true
+              },
+              {
+                "name": "audio/wav",
+                "type": 1,
+                "optional": true
+              },
+              {
+                "name": "video/mp4",
+                "type": 1,
+                "optional": true
+              },
+              {
+                "name": "video/webm",
+                "type": 1,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "union",
+            "types": [
+              2,
+              3,
+              4,
+              5
+            ]
+          },
+          {
+            "kind": "literal",
+            "value": "anthropic-document"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-file"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-input-audio"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-video-url"
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
+    },
+    {
       "digest": "0203243b72fc867afc81aff5f4cf2167e564ed342534eb612fc92f295cf07789",
       "schema": {
         "root": 0,
@@ -22510,7 +22713,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:226"
+        "packages/core/session/src/types.ts:227"
       ]
     },
     {
@@ -22612,7 +22815,7 @@
         "packages/core/session/src/types.ts#SessionSeq"
       ],
       "sources": [
-        "packages/core/session/src/types.ts:33"
+        "packages/core/session/src/types.ts:34"
       ]
     },
     {
@@ -22648,8 +22851,8 @@
         "packages/subagent/tool-subagent/src/model-selection.ts#AllowedModelRoute"
       ],
       "sources": [
-        "packages/core/session/src/types.ts:603",
-        "packages/llm/llm/src/types.ts:576",
+        "packages/core/session/src/types.ts:614",
+        "packages/llm/llm/src/types.ts:915",
         "packages/session/session-title/src/types.ts:20",
         "packages/subagent/tool-subagent/src/model-selection.ts:9"
       ]
@@ -23113,7 +23316,7 @@
         "packages/llm/llm/src/types.ts#ReplayEnvelope"
       ],
       "sources": [
-        "packages/llm/llm/src/types.ts:493"
+        "packages/llm/llm/src/types.ts:832"
       ]
     },
     {
@@ -23154,7 +23357,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:615"
+        "packages/core/session/src/types.ts:626"
       ]
     },
     {
@@ -28178,7 +28381,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:447"
+        "packages/core/session/src/types.ts:458"
       ]
     },
     {
@@ -28421,91 +28624,6 @@
       },
       "names": [],
       "sources": []
-    },
-    {
-      "digest": "1a3440e3577382704d42a6263aa463504eb74c566734a55e9503a63efcd02445",
-      "schema": {
-        "root": 0,
-        "nodes": [
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "agentPreset",
-                "type": 1,
-                "optional": true
-              },
-              {
-                "name": "createdAt",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "cwd",
-                "type": 1,
-                "optional": true
-              },
-              {
-                "name": "delegationDepth",
-                "type": 2,
-                "optional": true
-              },
-              {
-                "name": "id",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "isSeeded",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "origin",
-                "type": 4,
-                "optional": true
-              },
-              {
-                "name": "parentSession",
-                "type": 1,
-                "optional": true
-              },
-              {
-                "name": "version",
-                "type": 5,
-                "optional": false
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "primitive",
-            "type": "string"
-          },
-          {
-            "kind": "primitive",
-            "type": "number"
-          },
-          {
-            "kind": "primitive",
-            "type": "boolean"
-          },
-          {
-            "kind": "literal",
-            "value": "subagent"
-          },
-          {
-            "kind": "literal",
-            "value": 4
-          }
-        ]
-      },
-      "names": [
-        "packages/core/session/src/types.ts#SessionHeader"
-      ],
-      "sources": [
-        "packages/core/session/src/types.ts:95"
-      ]
     },
     {
       "digest": "1ab2ef1296f157ba96998f179bb5daa9d21a82480da2901127aeab2730797c92",
@@ -28838,7 +28956,7 @@
       },
       "names": [],
       "sources": [
-        "packages/llm/llm/src/types.ts:176"
+        "packages/llm/llm/src/types.ts:178"
       ]
     },
     {
@@ -29593,7 +29711,7 @@
         "packages/core/session/src/types.ts#TurnEndCancelCause"
       ],
       "sources": [
-        "packages/core/session/src/types.ts:211"
+        "packages/core/session/src/types.ts:212"
       ]
     },
     {
@@ -30119,6 +30237,91 @@
       },
       "names": [],
       "sources": []
+    },
+    {
+      "digest": "22c6899a78214dd841c266348ae997027ef391174ddb21127f1b71dc1b362824",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "agentPreset",
+                "type": 1,
+                "optional": true
+              },
+              {
+                "name": "createdAt",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "cwd",
+                "type": 1,
+                "optional": true
+              },
+              {
+                "name": "delegationDepth",
+                "type": 2,
+                "optional": true
+              },
+              {
+                "name": "id",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "isSeeded",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "origin",
+                "type": 4,
+                "optional": true
+              },
+              {
+                "name": "parentSession",
+                "type": 1,
+                "optional": true
+              },
+              {
+                "name": "version",
+                "type": 5,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "primitive",
+            "type": "boolean"
+          },
+          {
+            "kind": "literal",
+            "value": "subagent"
+          },
+          {
+            "kind": "literal",
+            "value": 5
+          }
+        ]
+      },
+      "names": [
+        "packages/core/session/src/types.ts#SessionHeader"
+      ],
+      "sources": [
+        "packages/core/session/src/types.ts:96"
+      ]
     },
     {
       "digest": "234142ee4f996f38cc9fa3b8b3e3de29b03c9aefe5ebf6c224eddd564505aa85",
@@ -32953,7 +33156,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:331"
+        "packages/core/session/src/types.ts:339"
       ]
     },
     {
@@ -33178,7 +33381,7 @@
       },
       "names": [],
       "sources": [
-        "packages/llm/llm/src/types.ts:177"
+        "packages/llm/llm/src/types.ts:179"
       ]
     },
     {
@@ -33486,7 +33689,7 @@
       },
       "names": [],
       "sources": [
-        "packages/llm/llm/src/types.ts:518"
+        "packages/llm/llm/src/types.ts:857"
       ]
     },
     {
@@ -40127,7 +40330,7 @@
         "packages/core/session/src/types.ts#SurfaceOp"
       ],
       "sources": [
-        "packages/core/session/src/types.ts:667"
+        "packages/core/session/src/types.ts:678"
       ]
     },
     {
@@ -40719,93 +40922,6 @@
       "sources": []
     },
     {
-      "digest": "37cbc9cf06d494cfe5c67f078af1605eacb8e4c2c853e9e26455b73de0ee7ccf",
-      "schema": {
-        "root": 0,
-        "nodes": [
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "data",
-                "type": 1,
-                "optional": false
-              },
-              {
-                "name": "ignorable",
-                "type": 5,
-                "optional": true
-              },
-              {
-                "name": "seq",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "time",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "type",
-                "type": 6,
-                "optional": false
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "contextWindow",
-                "type": 2,
-                "optional": true
-              },
-              {
-                "name": "model",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "provider",
-                "type": 3,
-                "optional": false
-              },
-              {
-                "name": "systemPromptUpdate",
-                "type": 4,
-                "optional": true
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "primitive",
-            "type": "number"
-          },
-          {
-            "kind": "primitive",
-            "type": "string"
-          },
-          {
-            "kind": "literal",
-            "value": "in-history"
-          },
-          {
-            "kind": "literal",
-            "value": true
-          },
-          {
-            "kind": "literal",
-            "value": "request/context"
-          }
-        ]
-      },
-      "names": [],
-      "sources": []
-    },
-    {
       "digest": "383cf73ae4748e5beb281ae74857ba1ffb92ae01075b9fbf51af78b666007a8f",
       "schema": {
         "root": 0,
@@ -40920,6 +41036,20 @@
       "sources": [
         "packages/feedback/message-feedback/src/types.ts:17"
       ]
+    },
+    {
+      "digest": "3a6622b6c13e29cc2a15b1e8f581008a43ce2e606bd8a472c9602949b4124ba9",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "literal",
+            "value": "openai-chat-file"
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
     },
     {
       "digest": "3abae7324356f155cb42450c00b806d134ec93bd6439d2063b8d724162d58604",
@@ -41359,7 +41489,7 @@
         "packages/core/session/src/types.ts#OptionalSessionSeq"
       ],
       "sources": [
-        "packages/core/session/src/types.ts:66"
+        "packages/core/session/src/types.ts:67"
       ]
     },
     {
@@ -41503,7 +41633,7 @@
       },
       "names": [],
       "sources": [
-        "packages/llm/llm/src/types.ts:516"
+        "packages/llm/llm/src/types.ts:855"
       ]
     },
     {
@@ -42013,7 +42143,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:317"
+        "packages/core/session/src/types.ts:325"
       ]
     },
     {
@@ -42942,7 +43072,7 @@
         "packages/llm/llm/src/types.ts#StreamChunk"
       ],
       "sources": [
-        "packages/llm/llm/src/types.ts:515"
+        "packages/llm/llm/src/types.ts:854"
       ]
     },
     {
@@ -45980,6 +46110,220 @@
       "sources": []
     },
     {
+      "digest": "429ad19b7ae2b6270c50c98e807a5b227511c31b07c0db58cfe26a6ff84476eb",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "data",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "ignorable",
+                "type": 14,
+                "optional": true
+              },
+              {
+                "name": "seq",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "time",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "type",
+                "type": 15,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "contextWindow",
+                "type": 2,
+                "optional": true
+              },
+              {
+                "name": "model",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "nativeFileInputs",
+                "type": 4,
+                "optional": true
+              },
+              {
+                "name": "provider",
+                "type": 3,
+                "optional": false
+              },
+              {
+                "name": "systemPromptUpdate",
+                "type": 13,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "encoders",
+                "type": 5,
+                "optional": false
+              },
+              {
+                "name": "maxPayloadBytes",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "perFileBytes",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "tokenReserve",
+                "type": 11,
+                "optional": false
+              },
+              {
+                "name": "totalBytes",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "version",
+                "type": 12,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "application/pdf",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "audio/flac",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "audio/mpeg",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "audio/ogg",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "audio/wav",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "video/mp4",
+                "type": 6,
+                "optional": true
+              },
+              {
+                "name": "video/webm",
+                "type": 6,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "union",
+            "types": [
+              7,
+              8,
+              9,
+              10
+            ]
+          },
+          {
+            "kind": "literal",
+            "value": "anthropic-document"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-file"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-input-audio"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-video-url"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "perByte",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "perFile",
+                "type": 2,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "literal",
+            "value": 1
+          },
+          {
+            "kind": "literal",
+            "value": "in-history"
+          },
+          {
+            "kind": "literal",
+            "value": true
+          },
+          {
+            "kind": "literal",
+            "value": "request/context"
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
+    },
+    {
       "digest": "42cb6b02e308e58bef3becf2ae7ce078227eb6685a49caf6e46c24551ec882f8",
       "schema": {
         "root": 0,
@@ -46281,7 +46625,7 @@
         "packages/llm/llm/src/types.ts#FinishReason"
       ],
       "sources": [
-        "packages/llm/llm/src/types.ts:184"
+        "packages/llm/llm/src/types.ts:186"
       ]
     },
     {
@@ -49036,7 +49380,7 @@
         "packages/llm/llm/src/types.ts#ToolRemovalBlock"
       ],
       "sources": [
-        "packages/llm/llm/src/types.ts:146"
+        "packages/llm/llm/src/types.ts:148"
       ]
     },
     {
@@ -51132,7 +51476,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:208"
+        "packages/core/session/src/types.ts:209"
       ]
     },
     {
@@ -51172,10 +51516,10 @@
         "packages/workflow/workflow/src/types.ts#WorkflowRunId"
       ],
       "sources": [
-        "packages/api/session-controller/src/types.ts:924",
+        "packages/api/session-controller/src/types.ts:978",
         "packages/attachment/attachment/src/brand.ts:6",
         "packages/compaction/compaction/src/brand.ts:4",
-        "packages/core/session/src/types.ts:21",
+        "packages/core/session/src/types.ts:22",
         "packages/experimental/agent-team/src/types.ts:20",
         "packages/experimental/agent-team/src/types.ts:32",
         "packages/experimental/agent-team/src/types.ts:8",
@@ -51920,7 +52264,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:539"
+        "packages/core/session/src/types.ts:550"
       ]
     },
     {
@@ -52518,7 +52862,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:395"
+        "packages/core/session/src/types.ts:403"
       ]
     },
     {
@@ -52557,7 +52901,7 @@
         "packages/core/session/src/types.ts#RequestHeaderReason"
       ],
       "sources": [
-        "packages/core/session/src/types.ts:293"
+        "packages/core/session/src/types.ts:301"
       ]
     },
     {
@@ -55236,7 +55580,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:241"
+        "packages/core/session/src/types.ts:242"
       ]
     },
     {
@@ -55581,7 +55925,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:198"
+        "packages/core/session/src/types.ts:199"
       ]
     },
     {
@@ -57516,7 +57860,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:361"
+        "packages/core/session/src/types.ts:369"
       ]
     },
     {
@@ -57599,7 +57943,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:480"
+        "packages/core/session/src/types.ts:491"
       ]
     },
     {
@@ -58510,7 +58854,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:375"
+        "packages/core/session/src/types.ts:383"
       ]
     },
     {
@@ -58695,8 +59039,57 @@
         "packages/llm/llm/src/types.ts#ToolSchema"
       ],
       "sources": [
-        "packages/llm/llm/src/types.ts:543"
+        "packages/llm/llm/src/types.ts:882"
       ]
+    },
+    {
+      "digest": "6701d056fc8194d178c422d8388903db9ffb86dbaf42d35f25df8c453d16db06",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "union",
+            "types": [
+              1,
+              2,
+              3,
+              4
+            ]
+          },
+          {
+            "kind": "literal",
+            "value": "anthropic-document"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-file"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-input-audio"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-video-url"
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
+    },
+    {
+      "digest": "671d5e9b827b8c15eff9f1f42850769dcfbe8199a93f859623168b163e0ecf97",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "literal",
+            "value": "anthropic-document"
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
     },
     {
       "digest": "672c4aa2a9b736e3d6e5da6346d2e2ed5e3573f2d0baafa18e7407c9f3fee3db",
@@ -59193,7 +59586,7 @@
         "packages/core/session/src/types.ts#TurnEndReason"
       ],
       "sources": [
-        "packages/core/session/src/types.ts:252"
+        "packages/core/session/src/types.ts:253"
       ]
     },
     {
@@ -60191,7 +60584,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:350"
+        "packages/core/session/src/types.ts:358"
       ]
     },
     {
@@ -60218,7 +60611,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:206"
+        "packages/core/session/src/types.ts:207"
       ]
     },
     {
@@ -60268,7 +60661,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:207"
+        "packages/core/session/src/types.ts:208"
       ]
     },
     {
@@ -60374,7 +60767,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:625"
+        "packages/core/session/src/types.ts:636"
       ]
     },
     {
@@ -60900,6 +61293,34 @@
       "sources": [
         "packages/api/session-controller/src/types.ts:109"
       ]
+    },
+    {
+      "digest": "74a0248be81ed94b64910f5b86e3ea93b1bb5255abc610b68f047fc82164cbc8",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "literal",
+            "value": "openai-chat-input-audio"
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
+    },
+    {
+      "digest": "74fcbac234394b9c646b1a4cd1d0c089efaf6410097733ba57690361bc56e3b1",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "literal",
+            "value": 5
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
     },
     {
       "digest": "7554565be416b0342053ee6a46256c9dab07c487349b4a5f10bab1edc151c619",
@@ -65221,7 +65642,7 @@
         "packages/llm/llm/src/types.ts#ContentBlockType"
       ],
       "sources": [
-        "packages/llm/llm/src/types.ts:167"
+        "packages/llm/llm/src/types.ts:169"
       ]
     },
     {
@@ -65822,7 +66243,7 @@
         "packages/llm/llm/src/types.ts#ContentBlock"
       ],
       "sources": [
-        "packages/llm/llm/src/types.ts:169"
+        "packages/llm/llm/src/types.ts:171"
       ]
     },
     {
@@ -65942,7 +66363,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:552"
+        "packages/core/session/src/types.ts:563"
       ]
     },
     {
@@ -66569,7 +66990,7 @@
       },
       "names": [],
       "sources": [
-        "packages/llm/llm/src/types.ts:519"
+        "packages/llm/llm/src/types.ts:858"
       ]
     },
     {
@@ -67406,7 +67827,7 @@
       },
       "names": [],
       "sources": [
-        "packages/llm/llm/src/types.ts:180"
+        "packages/llm/llm/src/types.ts:182"
       ]
     },
     {
@@ -67614,7 +68035,7 @@
         "packages/llm/llm/src/types.ts#ToolAdditionBlock"
       ],
       "sources": [
-        "packages/llm/llm/src/types.ts:134"
+        "packages/llm/llm/src/types.ts:136"
       ]
     },
     {
@@ -68584,7 +69005,7 @@
       },
       "names": [],
       "sources": [
-        "packages/llm/llm/src/types.ts:517"
+        "packages/llm/llm/src/types.ts:856"
       ]
     },
     {
@@ -69134,7 +69555,7 @@
         "packages/core/session/src/types.ts#EpochHeader"
       ],
       "sources": [
-        "packages/core/session/src/types.ts:260"
+        "packages/core/session/src/types.ts:261"
       ]
     },
     {
@@ -72075,7 +72496,7 @@
       },
       "names": [],
       "sources": [
-        "packages/llm/llm/src/types.ts:179"
+        "packages/llm/llm/src/types.ts:181"
       ]
     },
     {
@@ -72992,7 +73413,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:403",
+        "packages/core/session/src/types.ts:411",
         "packages/core/tools/src/types.ts:24"
       ]
     },
@@ -76035,8 +76456,8 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:234",
-        "packages/llm/llm/src/types.ts:178"
+        "packages/core/session/src/types.ts:235",
+        "packages/llm/llm/src/types.ts:180"
       ]
     },
     {
@@ -76270,7 +76691,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:410"
+        "packages/core/session/src/types.ts:418"
       ]
     },
     {
@@ -77177,20 +77598,6 @@
       "sources": []
     },
     {
-      "digest": "af6e173f7be819bcd0a5c8d77918649c10ce761d8a184ff472f2e01ce64eb2e0",
-      "schema": {
-        "root": 0,
-        "nodes": [
-          {
-            "kind": "literal",
-            "value": 4
-          }
-        ]
-      },
-      "names": [],
-      "sources": []
-    },
-    {
       "digest": "aff60ef947c18b012644852bdd0d5bfe72065e061dd563787c76c646b4a10f6b",
       "schema": {
         "root": 0,
@@ -77425,58 +77832,6 @@
       ],
       "sources": [
         "packages/attachment/attachment/src/types.ts:11"
-      ]
-    },
-    {
-      "digest": "b158f3ff6923714807c0d73882f0b05dc87f8fa85c9e90814852d48bbc866081",
-      "schema": {
-        "root": 0,
-        "nodes": [
-          {
-            "kind": "object",
-            "properties": [
-              {
-                "name": "contextWindow",
-                "type": 1,
-                "optional": true
-              },
-              {
-                "name": "model",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "provider",
-                "type": 2,
-                "optional": false
-              },
-              {
-                "name": "systemPromptUpdate",
-                "type": 3,
-                "optional": true
-              }
-            ],
-            "indices": []
-          },
-          {
-            "kind": "primitive",
-            "type": "number"
-          },
-          {
-            "kind": "primitive",
-            "type": "string"
-          },
-          {
-            "kind": "literal",
-            "value": "in-history"
-          }
-        ]
-      },
-      "names": [
-        "packages/core/session/src/types.ts#RequestContext"
-      ],
-      "sources": [
-        "packages/core/session/src/types.ts:274"
       ]
     },
     {
@@ -78938,7 +79293,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:217"
+        "packages/core/session/src/types.ts:218"
       ]
     },
     {
@@ -79313,7 +79668,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:566"
+        "packages/core/session/src/types.ts:577"
       ]
     },
     {
@@ -79910,6 +80265,185 @@
       "sources": []
     },
     {
+      "digest": "bc9d1e3cfeae7434fa828c0faaaaae9b5090d7a31ad5084ebd5ef7d69ba24ea9",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "contextWindow",
+                "type": 1,
+                "optional": true
+              },
+              {
+                "name": "model",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "nativeFileInputs",
+                "type": 3,
+                "optional": true
+              },
+              {
+                "name": "provider",
+                "type": 2,
+                "optional": false
+              },
+              {
+                "name": "systemPromptUpdate",
+                "type": 12,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "primitive",
+            "type": "string"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "encoders",
+                "type": 4,
+                "optional": false
+              },
+              {
+                "name": "maxPayloadBytes",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "perFileBytes",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "tokenReserve",
+                "type": 10,
+                "optional": false
+              },
+              {
+                "name": "totalBytes",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "version",
+                "type": 11,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "application/pdf",
+                "type": 5,
+                "optional": true
+              },
+              {
+                "name": "audio/flac",
+                "type": 5,
+                "optional": true
+              },
+              {
+                "name": "audio/mpeg",
+                "type": 5,
+                "optional": true
+              },
+              {
+                "name": "audio/ogg",
+                "type": 5,
+                "optional": true
+              },
+              {
+                "name": "audio/wav",
+                "type": 5,
+                "optional": true
+              },
+              {
+                "name": "video/mp4",
+                "type": 5,
+                "optional": true
+              },
+              {
+                "name": "video/webm",
+                "type": 5,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "union",
+            "types": [
+              6,
+              7,
+              8,
+              9
+            ]
+          },
+          {
+            "kind": "literal",
+            "value": "anthropic-document"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-file"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-input-audio"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-video-url"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "perByte",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "perFile",
+                "type": 1,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "literal",
+            "value": 1
+          },
+          {
+            "kind": "literal",
+            "value": "in-history"
+          }
+        ]
+      },
+      "names": [
+        "packages/core/session/src/types.ts#RequestContext"
+      ],
+      "sources": [
+        "packages/core/session/src/types.ts:275"
+      ]
+    },
+    {
       "digest": "bcf0caf62d964b2fcf5404bd5c909cfa9a21c3f3c96e6b7e36d9e33565223825",
       "schema": {
         "root": 0,
@@ -79947,7 +80481,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:669"
+        "packages/core/session/src/types.ts:680"
       ]
     },
     {
@@ -80340,7 +80874,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:458"
+        "packages/core/session/src/types.ts:469"
       ]
     },
     {
@@ -80402,7 +80936,7 @@
         "packages/llm/llm/src/types.ts#ToolCallBlock"
       ],
       "sources": [
-        "packages/llm/llm/src/types.ts:124"
+        "packages/llm/llm/src/types.ts:126"
       ]
     },
     {
@@ -81043,7 +81577,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:592"
+        "packages/core/session/src/types.ts:603"
       ]
     },
     {
@@ -83984,7 +84518,7 @@
       },
       "names": [],
       "sources": [
-        "packages/llm/llm/src/types.ts:522"
+        "packages/llm/llm/src/types.ts:861"
       ]
     },
     {
@@ -84043,6 +84577,146 @@
       },
       "names": [],
       "sources": []
+    },
+    {
+      "digest": "cde963d4d3de6b0d01ce233699e3639c5f9ec2cb4588086493fa7c17a2a574c4",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "encoders",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "maxPayloadBytes",
+                "type": 7,
+                "optional": false
+              },
+              {
+                "name": "perFileBytes",
+                "type": 7,
+                "optional": false
+              },
+              {
+                "name": "tokenReserve",
+                "type": 8,
+                "optional": false
+              },
+              {
+                "name": "totalBytes",
+                "type": 7,
+                "optional": false
+              },
+              {
+                "name": "version",
+                "type": 9,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "application/pdf",
+                "type": 2,
+                "optional": true
+              },
+              {
+                "name": "audio/flac",
+                "type": 2,
+                "optional": true
+              },
+              {
+                "name": "audio/mpeg",
+                "type": 2,
+                "optional": true
+              },
+              {
+                "name": "audio/ogg",
+                "type": 2,
+                "optional": true
+              },
+              {
+                "name": "audio/wav",
+                "type": 2,
+                "optional": true
+              },
+              {
+                "name": "video/mp4",
+                "type": 2,
+                "optional": true
+              },
+              {
+                "name": "video/webm",
+                "type": 2,
+                "optional": true
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "union",
+            "types": [
+              3,
+              4,
+              5,
+              6
+            ]
+          },
+          {
+            "kind": "literal",
+            "value": "anthropic-document"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-file"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-input-audio"
+          },
+          {
+            "kind": "literal",
+            "value": "openai-chat-video-url"
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          },
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "perByte",
+                "type": 7,
+                "optional": false
+              },
+              {
+                "name": "perFile",
+                "type": 7,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "literal",
+            "value": 1
+          }
+        ]
+      },
+      "names": [
+        "packages/llm/llm/src/types.ts#LlmNativeFileInputs"
+      ],
+      "sources": [
+        "packages/llm/llm/src/types.ts:309"
+      ]
     },
     {
       "digest": "ce1dc3fd5de67ced3b475abc3e2cfa5b51459f4b0223a108ce5f7dc78e193467",
@@ -84119,7 +84793,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:537"
+        "packages/core/session/src/types.ts:548"
       ]
     },
     {
@@ -86303,7 +86977,7 @@
       },
       "names": [],
       "sources": [
-        "packages/llm/llm/src/types.ts:520"
+        "packages/llm/llm/src/types.ts:859"
       ]
     },
     {
@@ -86638,7 +87312,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:515"
+        "packages/core/session/src/types.ts:526"
       ]
     },
     {
@@ -89647,7 +90321,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:224"
+        "packages/core/session/src/types.ts:225"
       ]
     },
     {
@@ -95638,7 +96312,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:381"
+        "packages/core/session/src/types.ts:389"
       ]
     },
     {
@@ -96150,7 +96824,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:232"
+        "packages/core/session/src/types.ts:233"
       ]
     },
     {
@@ -96631,7 +97305,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:211"
+        "packages/core/session/src/types.ts:212"
       ]
     },
     {
@@ -96789,7 +97463,41 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:248"
+        "packages/core/session/src/types.ts:249"
+      ]
+    },
+    {
+      "digest": "ed81ed19bafdcd56ba131748d9565437b79416c5eab1fadc5940210992e41852",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "object",
+            "properties": [
+              {
+                "name": "perByte",
+                "type": 1,
+                "optional": false
+              },
+              {
+                "name": "perFile",
+                "type": 1,
+                "optional": false
+              }
+            ],
+            "indices": []
+          },
+          {
+            "kind": "primitive",
+            "type": "number"
+          }
+        ]
+      },
+      "names": [
+        "packages/llm/llm/src/types.ts#LlmNativeFileTokenReserve"
+      ],
+      "sources": [
+        "packages/llm/llm/src/types.ts:291"
       ]
     },
     {
@@ -97400,7 +98108,7 @@
       },
       "names": [],
       "sources": [
-        "packages/api/session-controller/src/types.ts:929"
+        "packages/api/session-controller/src/types.ts:983"
       ]
     },
     {
@@ -97620,8 +98328,8 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:319",
-        "packages/core/session/src/types.ts:321"
+        "packages/core/session/src/types.ts:327",
+        "packages/core/session/src/types.ts:329"
       ]
     },
     {
@@ -97778,7 +98486,7 @@
       },
       "names": [],
       "sources": [
-        "packages/llm/llm/src/types.ts:521"
+        "packages/llm/llm/src/types.ts:860"
       ]
     },
     {
@@ -97968,7 +98676,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:550"
+        "packages/core/session/src/types.ts:561"
       ]
     },
     {
@@ -98031,7 +98739,7 @@
         "packages/llm/llm/src/types.ts#FileBlock"
       ],
       "sources": [
-        "packages/llm/llm/src/types.ts:117"
+        "packages/llm/llm/src/types.ts:119"
       ]
     },
     {
@@ -98049,7 +98757,7 @@
         "packages/llm/llm/src/types.ts#SystemPromptUpdate"
       ],
       "sources": [
-        "packages/llm/llm/src/types.ts:459"
+        "packages/llm/llm/src/types.ts:784"
       ]
     },
     {
@@ -98424,7 +99132,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:605"
+        "packages/core/session/src/types.ts:616"
       ]
     },
     {
@@ -98552,7 +99260,7 @@
       },
       "names": [],
       "sources": [
-        "packages/core/session/src/types.ts:308",
+        "packages/core/session/src/types.ts:316",
         "packages/deliverables/workspace-changes/src/types.ts:106"
       ]
     },
@@ -98956,7 +99664,7 @@
         "packages/llm/llm/src/types.ts#TokenUsage"
       ],
       "sources": [
-        "packages/llm/llm/src/types.ts:194"
+        "packages/llm/llm/src/types.ts:196"
       ]
     },
     {
@@ -98967,6 +99675,20 @@
           {
             "kind": "literal",
             "value": "instructions"
+          }
+        ]
+      },
+      "names": [],
+      "sources": []
+    },
+    {
+      "digest": "fee75ada26544e86abd0d0213e0d11344f31801e9a89a3fdc6e4fcb5c9cdf495",
+      "schema": {
+        "root": 0,
+        "nodes": [
+          {
+            "kind": "literal",
+            "value": "openai-chat-video-url"
           }
         ]
       },

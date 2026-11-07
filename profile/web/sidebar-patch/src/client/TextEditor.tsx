@@ -27,6 +27,7 @@ import { cmSurfaceTheme, CmThemeCompartment } from './cm-themes.ts'
 import { isDarkScheme, subscribeColorScheme } from './theme.ts'
 import { SandboxStatusBar } from './SandboxStatusBar.tsx'
 import { appendToDraft } from './conversation-draft.ts'
+import { createIntervalPoll } from './poll-scheduler.ts'
 import { buildSelectionInsert, linesOfSelection } from './selection-payload.ts'
 import { lazyChunkComponent } from './lazy-chunk.tsx'
 import { splitMermaidBlocks, type MermaidMarkdownProps } from './mermaid-blocks.ts'
@@ -271,7 +272,11 @@ export function TextEditor(props: FileViewerProps) {
     view.dispatch({ effects: wrapComp.reconfigure(next ? CodeMirrorView.lineWrapping : []) })
   }
 
-  // External change detection: polls fs.stat every 1s while visible (no focus gate).
+  // External change detection: polls fs.stat every 1s while this editor tab is
+  // actually visible (no focus gate). Hidden tabs stay mounted in the sidebar,
+  // so an IntersectionObserver pauses their host I/O; document visibility does
+  // the same for a backgrounded page, and either resume runs one immediate
+  // tick before restarting the interval.
   // When disk changes and editor is clean, auto-swap in place (preserve undo);
   // when dirty, show a banner with Reload instead of clobbering the draft.
   // Truncated files still poll and show the banner (they cannot auto-swap safely
@@ -339,10 +344,37 @@ export function TextEditor(props: FileViewerProps) {
         // stat/read failures (file deleted) are silent
       }
     }
-    const timer = window.setInterval(() => { void tick() }, 1000)
-    // Prime immediately after a short delay so first tick stores stat
-    const prime = window.setTimeout(() => { void tick() }, 300)
-    return () => { cancelled = true; window.clearInterval(timer); window.clearTimeout(prime) }
+    let tabVisible = true
+    const poll = createIntervalPoll(() => { void tick() })
+    const stop = (): void => { poll.stop() }
+    const start = (): void => {
+      if (cancelled) return
+      poll.start()
+    }
+    const sync = (): void => {
+      if (cancelled) return
+      if (document.visibilityState === 'visible' && tabVisible) start()
+      else stop()
+    }
+    const observer = typeof IntersectionObserver === 'function'
+      ? new IntersectionObserver((entries) => {
+        const entry = entries.at(-1)
+        tabVisible = entry?.isIntersecting === true
+        sync()
+      })
+      : undefined
+    if (observer !== undefined && hostRef.current !== null) observer.observe(hostRef.current)
+    document.addEventListener('visibilitychange', sync)
+    // Prime immediately after a short delay so the first tick stores stat; the
+    // delay also gives the observer its first hidden-tab verdict.
+    const prime = window.setTimeout(() => { sync() }, 300)
+    return () => {
+      cancelled = true
+      stop()
+      observer?.disconnect()
+      document.removeEventListener('visibilitychange', sync)
+      window.clearTimeout(prime)
+    }
     // Stable deps only: `scope` is a fresh object per render — including it
     // would re-run the effect (and reset lastStat) on every render.
   }, [content, path, scope.sessionId, scope.cwd])

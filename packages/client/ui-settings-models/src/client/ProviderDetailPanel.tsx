@@ -16,10 +16,10 @@ import {
 import {
   CATALOG_DECISIONS_CHANGED_EVENT, modelVisibility, readCatalogDecisions,
 } from './model-visibility.ts'
-import { idCapabilityHints } from './capability-hints.ts'
 import { deriveKeyRef, messageOf, protocolChoices, type ProviderRow, type ModelsWire } from './store.ts'
 import { refreshRouteViaPlugin, type ProviderSyncRefreshView } from './provider-sync-rpc.ts'
 import { applyRefreshedModels } from './provider-sync-apply.ts'
+import { normalizeReasoningEfforts, withAdoptedReasoningEfforts, type AdoptedReasoningEfforts } from './reasoning-efforts.ts'
 import { applyFenced, fencedFailureText } from './fenced-mutate.ts'
 import { HeavyProviderCard } from './HeavyProviderCard.tsx'
 import { resolveHeavyManifest } from './heavy-manifest-source.ts'
@@ -48,9 +48,30 @@ type ModelItem = {
   name?: string
   contextWindow?: number
   maxTokens?: number
-  reasoningEfforts?: Record<string, unknown>
-  reasoning?: boolean | object
+  /** An explicit `false` disables reasoning; `{}` states no selectable level. */
+  reasoningEfforts?: false | Record<string, unknown>
+  reasoning?: boolean | object | null
   input?: string[]
+  /**
+   * Effective input modalities when the catalog projection provides them.
+   * Audio/video/pdf appear only when the exact model opted into a native
+   * descriptor; otherwise the pi-ai wire encoding sends text/image only.
+   */
+  inputModalities?: string[]
+  /** Modalities the provider advertises, including disclosure-only tokens. */
+  advertisedInputModalities?: string[]
+  /**
+   * The route's explicit native-file descriptor for this exact model. A
+   * configured model row declares one encoder plus the MIME types it admits;
+   * a resolved catalog fact may instead carry the encoder map. Either form
+   * names the media the adapter genuinely sends natively.
+   */
+  nativeFileInputs?: {
+    /** Declared MIME types the descriptor's encoder carries. */
+    mime?: string[]
+    /** Resolved MIME-to-encoder map carried by catalog facts. */
+    encoders?: Record<string, string>
+  }
   architecture?: { input_modalities?: string[] }
   supported_parameters?: string[]
   tools?: boolean
@@ -102,59 +123,65 @@ interface DiscoveredModel {
   maxTokens?: number
   inputModalities?: readonly string[]
   reasoning?: boolean | object
-  reasoningEfforts?: Record<string, unknown>
+  /** An explicit `false` disables reasoning; `{}` states no selectable level. */
+  reasoningEfforts?: false | Record<string, unknown>
   supported_parameters?: string[]
   tools?: boolean
   cost?: unknown
   gated?: boolean
   gateReason?: string
   isFree?: boolean
-}
-
-/** One positive integer route field, or `undefined` when it is not one. */
-function positiveInteger(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
+  /** Where the row came from: a live endpoint listing or the installed catalog. */
+  source?: 'endpoint' | 'catalog'
+  /** Why the installed catalog answered instead of the endpoint. */
+  fallbackReason?: string
 }
 
 /**
  * The capability fields one discovered row disclosed, as a stored model row
- * carries them. A field the discovery said nothing about stays out, and a gate
- * reason rides its gate.
+ * carries them. A field the discovery said nothing about stays out, a gate
+ * reason rides its gate, and the reasoning ladder adopts through the shared
+ * normalization: a disclosed `false` and a valid ladder are preserved while a
+ * stated-but-empty ladder is omitted (the settings schema refuses an empty
+ * dictionary). The ladder's `declared` flag lets a merge clear a stale
+ * configured mapping the endpoint has retracted.
  */
-function disclosedCapabilities(discovered: DiscoveredModel): Partial<ModelItem> {
+function disclosedCapabilities(discovered: DiscoveredModel): {
+  fields: Partial<ModelItem>
+  ladder: AdoptedReasoningEfforts
+} {
+  const ladder = normalizeReasoningEfforts(discovered.reasoningEfforts)
   return {
-    ...discovered.reasoning === undefined ? {} : { reasoning: discovered.reasoning },
-    ...discovered.reasoningEfforts === undefined ? {} : { reasoningEfforts: discovered.reasoningEfforts },
-    ...discovered.supported_parameters === undefined ? {} : { supported_parameters: discovered.supported_parameters },
-    ...discovered.tools === undefined ? {} : { tools: discovered.tools },
-    ...discovered.cost === undefined ? {} : { cost: discovered.cost },
-    ...discovered.gated === true ? { gated: true } : {},
-    ...discovered.gated === true && discovered.gateReason !== undefined ? { gateReason: discovered.gateReason } : {},
-    ...discovered.isFree === undefined ? {} : { isFree: discovered.isFree },
+    ladder,
+    fields: {
+      ...discovered.reasoning === undefined ? {} : { reasoning: discovered.reasoning },
+      ...ladder.value === undefined ? {} : { reasoningEfforts: ladder.value },
+      ...discovered.supported_parameters === undefined ? {} : { supported_parameters: discovered.supported_parameters },
+      ...discovered.tools === undefined ? {} : { tools: discovered.tools },
+      ...discovered.cost === undefined ? {} : { cost: discovered.cost },
+      ...discovered.gated === true ? { gated: true } : {},
+      ...discovered.gated === true && discovered.gateReason !== undefined ? { gateReason: discovered.gateReason } : {},
+      ...discovered.isFree === undefined ? {} : { isFree: discovered.isFree },
+    },
   }
 }
 
 /**
  * Merge one discovery answer into a route's configured models without
- * deleting any: an advertised id refreshes the fields the answer disclosed
- * while keeping every per-id field the answer did not mention, an id the
- * answer omits stays exactly as configured, and an id configuration does not
- * name is appended. An undisclosed capacity falls back to the route's
- * configured default, then stays absent so the adapter's own default applies
- * at resolution — the panel never invents a number.
+ * deleting any: only values the answer actually disclosed refresh a row, an
+ * advertised id the answer names but leaves bare keeps its configured fields,
+ * an id the answer omits stays exactly as configured, and an id configuration
+ * does not name is appended with only its disclosed fields. The route's
+ * `defaultContextWindow` / `defaultMaxTokens` are execution fallbacks, never
+ * per-model facts, so the merge never writes them.
  * @param configured - the route's current `models` array.
  * @param discovered - one discovery answer, in endpoint order.
- * @param capacityDefaults - the route profile's fallback capacities
- *   (`defaultContextWindow` / `defaultMaxTokens`); unusable values are ignored.
  * @returns the merged list, configured entries first.
  */
 export function mergeRefreshedModels(
   configured: readonly ModelItem[],
   discovered: readonly DiscoveredModel[],
-  capacityDefaults: { contextWindow?: unknown; maxTokens?: unknown } = {},
 ): ModelItem[] {
-  const contextFallback = positiveInteger(capacityDefaults.contextWindow)
-  const maxTokensFallback = positiveInteger(capacityDefaults.maxTokens)
   const advertised = new Map<string, DiscoveredModel>()
   for (const model of discovered) {
     if (advertised.has(model.id)) continue
@@ -175,31 +202,32 @@ export function mergeRefreshedModels(
       merged.push(model)
       continue
     }
-    const contextWindow = fresh.contextWindow ?? model.contextWindow ?? contextFallback
-    const maxTokens = fresh.maxTokens ?? model.maxTokens ?? maxTokensFallback
-    merged.push({
+    const disclosed = disclosedCapabilities(fresh)
+    const refreshed: ModelItem = {
       ...model,
       name: fresh.name !== undefined && fresh.name !== fresh.id ? fresh.name : model.name ?? fresh.id,
-      ...contextWindow === undefined ? {} : { contextWindow },
-      ...maxTokens === undefined ? {} : { maxTokens },
+      ...fresh.contextWindow === undefined ? {} : { contextWindow: fresh.contextWindow },
+      ...fresh.maxTokens === undefined ? {} : { maxTokens: fresh.maxTokens },
       ...model.input === undefined && fresh.inputModalities !== undefined && fresh.inputModalities.length > 0
         ? { input: [...fresh.inputModalities] } : {},
-      ...disclosedCapabilities(fresh),
-    })
+      ...disclosed.fields,
+    }
+    // A stated ladder that normalizes away is still an answer: drop the stale
+    // configured mapping instead of carrying it through the spread above.
+    if (disclosed.ladder.declared && disclosed.ladder.value === undefined) delete refreshed.reasoningEfforts
+    merged.push(refreshed)
   }
   for (const model of discovered) {
     if (seen.has(model.id)) continue
     seen.add(model.id)
-    const contextWindow = model.contextWindow ?? contextFallback
-    const maxTokens = model.maxTokens ?? maxTokensFallback
     merged.push({
       id: model.id,
       name: model.name !== undefined && model.name !== model.id ? model.name : model.id,
-      ...contextWindow === undefined ? {} : { contextWindow },
-      ...maxTokens === undefined ? {} : { maxTokens },
+      ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
+      ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
       ...model.inputModalities === undefined || model.inputModalities.length === 0
         ? {} : { input: [...model.inputModalities] },
-      ...disclosedCapabilities(model),
+      ...disclosedCapabilities(model).fields,
     })
   }
   return merged
@@ -223,17 +251,25 @@ function refreshReportText(
     : t('refreshedModelsReport', { count, removed: report.removed.length, deprecated: report.deprecated.length })
 }
 
-/** Which badges rest on the shared id-hint table rather than a disclosure. */
-interface HintedBadges {
-  reasoning: boolean
-  vision: boolean
-  audio: boolean
-  video: boolean
-  files: boolean
-  tools: boolean
+/**
+ * The warning text for a discovery answer the installed catalog answered. A
+ * 401 on a catalog-backed route must not read as a successful live probe.
+ * @param models - one discovery answer.
+ * @param t - the panel translate.
+ * @returns the warning text, or undefined for a live endpoint answer.
+ */
+function catalogFallbackNotice(
+  models: readonly DiscoveredModel[],
+  t: (key: keyof typeof en, params?: Record<string, unknown>) => string,
+): string | undefined {
+  const fallback = models.find(model => model.source === 'catalog')
+  if (fallback === undefined) return undefined
+  return fallback.fallbackReason === undefined || fallback.fallbackReason.trim() === ''
+    ? t('discoveryCatalogFallbackNoReason')
+    : t('discoveryCatalogFallback', { reason: fallback.fallbackReason })
 }
 
-/** One model row's capability badges plus each badge's provenance. */
+/** The capability badges one row can state, and where each rests. */
 interface CapabilityView {
   hasReasoning: boolean
   hasVision: boolean
@@ -241,48 +277,92 @@ interface CapabilityView {
   hasVideo: boolean
   hasFiles: boolean
   hasTools: boolean
-  hinted: HintedBadges
+  /** Badges backed only by a stored hint claim, never a disclosure. */
+  hinted: {
+    reasoning: boolean
+    vision: boolean
+    audio: boolean
+    video: boolean
+    files: boolean
+  }
+  /** Advertised audio/video/pdf tokens the adapter does not send natively. */
+  declaredOnly: string[]
+}
+
+/** Modality tokens no native pi-ai request encodes; they are disclosure-side. */
+const DISCLOSURE_ONLY_MODALITIES: ReadonlySet<string> = new Set(['audio', 'video', 'pdf'])
+
+/** Disclosure-only modality tokens in display order. */
+const DISCLOSURE_ONLY_ORDER = ['pdf', 'audio', 'video'] as const
+
+/**
+ * Disclosure-only modality kinds a stored model's native-file descriptor
+ * actually encodes. The configured row declares `mime` types; a resolved
+ * catalog fact may carry the `encoders` map instead.
+ * @param model - one stored model row.
+ * @returns kinds named by the descriptor; empty when it encodes none.
+ */
+function nativeInputKinds(model: ModelItem): ReadonlySet<string> {
+  const kinds = new Set<string>()
+  const descriptor = model.nativeFileInputs
+  const mimes = [
+    ...descriptor?.mime ?? [],
+    ...Object.keys(descriptor?.encoders ?? {}),
+  ]
+  for (const mime of mimes) {
+    if (mime === 'application/pdf') kinds.add('pdf')
+    else if (mime.startsWith('audio/')) kinds.add('audio')
+    else if (mime.startsWith('video/')) kinds.add('video')
+  }
+  return kinds
+}
+
+/** One stored row's stated input tokens, most authoritative source first. */
+function statedInputs(model: ModelItem): string[] {
+  if (Array.isArray(model.inputModalities)) return model.inputModalities
+  if (Array.isArray(model.input)) return model.input
+  return Array.isArray(model.architecture?.input_modalities) ? model.architecture.input_modalities : []
 }
 
 /**
  * Detect the capability badges one model row renders.
  *
- * Data-first: `input` / `architecture.input_modalities` is authoritative, and
- * an explicit `vision`/`audio`/`video`/`files`/`tools` flag or a boolean
- * `reasoning` is a disclosed fact the hints never override. For a capability
- * nothing disclosed, the shared id table (or the sync's override-applied
- * `capabilityHints` field, which wins when present) supplies a HINT: the
- * badge renders with the hint treatment and is never read as truth.
+ * Only disclosed data supports a badge: `inputModalities` (or the stored
+ * `input` / architecture fallback) is authoritative for input, an explicit
+ * `reasoning`/`tools` flag or `supported_parameters` entry states those
+ * capabilities, and an advertised audio/video/pdf token reads as native
+ * support only when the model's own `nativeFileInputs` descriptor carries an
+ * encoder for that kind. A stored `capabilityHints` claim may still render a
+ * badge, but only under the unverified treatment — the panel never infers
+ * capabilities from an id.
  */
 function detectCapabilities(model: ModelItem): CapabilityView {
-  const id = (model.id || '').toLowerCase()
-  const inputs: string[] = Array.isArray(model.input)
-    ? model.input
-    : Array.isArray(model.architecture?.input_modalities)
-      ? model.architecture.input_modalities
-      : []
-  const hasStructured = inputs.length > 0
+  const stated = statedInputs(model)
+  // The effective set excludes disclosure-only tokens unless the model's own
+  // native-file descriptor admits that kind: a stored `input: ['text','audio']`
+  // declares audio upstream, and only an encoder makes it native support.
+  const native = nativeInputKinds(model)
+  const effective = stated.filter(token => !DISCLOSURE_ONLY_MODALITIES.has(token) || native.has(token))
+  for (const kind of DISCLOSURE_ONLY_ORDER) {
+    if (native.has(kind) && !effective.includes(kind)) effective.push(kind)
+  }
+  const advertised = new Set<string>([
+    ...model.advertisedInputModalities ?? [],
+    ...stated.filter(token => DISCLOSURE_ONLY_MODALITIES.has(token)),
+  ])
+  if (model.audio === true) advertised.add('audio')
+  if (model.video === true) advertised.add('video')
+  if (model.files === true) advertised.add('pdf')
+  const declaredOnly = [...advertised]
+    .filter(token => DISCLOSURE_ONLY_MODALITIES.has(token) && !effective.includes(token))
 
-  // The persisted `capabilityHints` field is the sync's override-applied hint
-  // set and wins over the shipped table. Client inference runs only when the
-  // row carries no structured input and the sync left no labeled hints; stored
-  // hints also apply beside the sync's floor `input: ['text']`, because that
-  // floor is not a disclosure of absence. The id-level exclusion list stays
-  // shipped: the owner override does not carry a tools family.
   const stored = model.capabilityHints
-  const idHints = idCapabilityHints(id)
-  const computed = stored === undefined && !hasStructured ? idHints : undefined
-  const hintInputs: readonly string[] = stored?.input ?? computed?.input ?? []
-  const hintedReasoning = stored?.reasoning ?? computed?.reasoning ?? false
-  const hintedVision = hintInputs.includes('image')
-  const hintedAudio = hintInputs.includes('audio')
-  const hintedVideo = hintInputs.includes('video')
-  const hintedFiles = hintInputs.includes('pdf')
+  const hintInputs: readonly string[] = stored?.input ?? []
 
   // 1. REASONING / THINKING — an explicit boolean/object/efforts/parameters
   // fact wins. `false` beside a stored hint set is the sync's schema floor,
   // not a disclosure of absence, so it yields to the hint; without stored
-  // hints it is a disclosure and blocks the heuristics.
+  // hints it is a disclosure and blocks the heuristic.
   const reasoningFact: boolean | undefined =
     typeof model.reasoning === 'boolean' ? model.reasoning
       : typeof model.reasoning === 'object' && model.reasoning !== null ? true
@@ -293,34 +373,33 @@ function detectCapabilities(model: ModelItem): CapabilityView {
             ? true
             : undefined
   const disclosedReasoningFact = reasoningFact === false && stored !== undefined ? undefined : reasoningFact
-  const hasReasoning = disclosedReasoningFact ?? hintedReasoning
-  const reasoningHinted = disclosedReasoningFact === undefined && hintedReasoning
+  const hasReasoning = disclosedReasoningFact ?? stored?.reasoning === true
+  const reasoningHinted = disclosedReasoningFact === undefined && stored?.reasoning === true
 
-  // 2. VISION / IMAGE INPUT
-  const visionFact = model.vision ?? (hasStructured && (inputs.includes('image') || inputs.includes('vision')) ? true : undefined)
-  const hasVision = visionFact ?? hintedVision
-  const visionHinted = visionFact === undefined && hintedVision
+  // 2. VISION / IMAGE INPUT — effective image input only.
+  const visionFact = model.vision ?? (effective.includes('image') || effective.includes('vision') ? true : undefined)
+  const hasVision = visionFact ?? hintInputs.includes('image')
+  const visionHinted = visionFact === undefined && hintInputs.includes('image')
 
-  // 3. AUDIO INPUT
-  const audioFact = model.audio ?? (hasStructured && (inputs.includes('audio') || inputs.includes('voice')) ? true : undefined)
-  const hasAudio = audioFact ?? hintedAudio
-  const audioHinted = audioFact === undefined && hintedAudio
+  // 3. AUDIO INPUT — a native audio badge requires an effective audio token;
+  // an explicit audio flag or an advertised-only token is rendered by
+  // `declaredOnly`, never as native support.
+  const hasAudio = effective.includes('audio')
+  const audioHinted = !hasAudio && !declaredOnly.includes('audio') && hintInputs.includes('audio')
 
-  // 4. VIDEO INPUT
-  const videoFact = model.video ?? (hasStructured && inputs.includes('video') ? true : undefined)
-  const hasVideo = videoFact ?? hintedVideo
-  const videoHinted = videoFact === undefined && hintedVideo
+  // 4. VIDEO INPUT — same native/disclosure split as audio.
+  const hasVideo = effective.includes('video')
+  const videoHinted = !hasVideo && !declaredOnly.includes('video') && hintInputs.includes('video')
 
-  // 5. TOOL CALLING — a disclosed tools flag wins; otherwise the badge is the
-  // shared list's default (on, minus the exclusion operands), and a hint.
+  // 5. TOOL CALLING — only a disclosed flag or parameter supports the badge;
+  // there is no default-on state.
   const toolsFact = model.tools ?? (model.supported_parameters?.includes('tools') ? true : undefined)
-  const hasTools = toolsFact ?? !idHints.toolsExcluded
-  const toolsHinted = toolsFact === undefined
+  const hasTools = toolsFact === true
 
-  // 6. DOCUMENTS & FILES (native document parsing, not general text context)
-  const filesFact = model.files ?? (hasStructured && (inputs.includes('file') || inputs.includes('pdf') || inputs.includes('document')) ? true : undefined)
-  const hasFiles = filesFact ?? hintedFiles
-  const filesHinted = filesFact === undefined && hintedFiles
+  // 6. DOCUMENTS & FILES — native file/document tokens only; advertised pdf
+  // is disclosure-side.
+  const hasFiles = effective.includes('file') || effective.includes('document') || effective.includes('pdf')
+  const filesHinted = !hasFiles && !declaredOnly.includes('pdf') && hintInputs.includes('pdf')
 
   return {
     hasReasoning,
@@ -335,8 +414,8 @@ function detectCapabilities(model: ModelItem): CapabilityView {
       audio: audioHinted,
       video: videoHinted,
       files: filesHinted,
-      tools: toolsHinted,
     },
+    declaredOnly,
   }
 }
 
@@ -672,10 +751,14 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       })
       const latencyMs = Math.round(performance.now() - startTime)
       if (res.ok) {
-        const count = (res.value as unknown[] | undefined)?.length ?? 0
+        const discovered = (res.value as DiscoveredModel[] | undefined) ?? []
+        const count = discovered.length
+        const fallback = catalogFallbackNotice(discovered, t)
         setTestStatus({
           state: 'success',
-          message: t('connectedModels', { count }),
+          message: fallback === undefined
+            ? t('connectedModels', { count })
+            : `${t('connectedModels', { count })} — ${fallback}`,
           latencyMs,
           modelCount: count,
         })
@@ -735,24 +818,29 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     catalogRefreshInFlight.current = true
     if (options.silent !== true) setRefreshState({ isRefreshing: true })
     try {
-      if (options.silent !== true) {
-        const hosted = await refreshRouteViaPlugin(providerId)
-        if (hosted.ok) {
-          const report = hosted.value
-          let count = 0
-          const outcome = await applyFenced(api, namespace.ns, (view) => {
-            const merged = applyRefreshedModels(modelsAt(view), report.models, report.removed)
-            count = merged.length
-            return {
-              ops: [{ op: 'set', path: [...row.entry.settingsPath, 'models'], value: merged as unknown as JsonValue }],
-            }
-          })
-          if (outcome.error !== null) throw new Error(fencedFailureText(t, outcome.error))
-          setRefreshState({ isRefreshing: false, message: refreshReportText(t, report, count), isError: false })
-          scheduleRefreshClear(4000)
-          onSaved()
-          return count > 0
-        }
+      // The removal-aware host pipeline is preferred even for the automatic
+      // (silent) pass: it owns membership, protections, and provenance. Only
+      // an unavailable/refused RPC falls back to plain discovery, which then
+      // merges disclosed values only.
+      const hosted = await refreshRouteViaPlugin(providerId)
+      if (hosted.ok) {
+        const report = hosted.value
+        let count = 0
+        const outcome = await applyFenced(api, namespace.ns, (view) => {
+          // The host answer is the canonical membership, but a degraded or
+          // older sync may still hand back an empty ladder the settings schema
+          // refuses; the shared normalization keeps the persisted route valid.
+          const merged = applyRefreshedModels(modelsAt(view), report.models.map(withAdoptedReasoningEfforts), report.removed)
+          count = merged.length
+          return {
+            ops: [{ op: 'set', path: [...row.entry.settingsPath, 'models'], value: merged as unknown as JsonValue }],
+          }
+        })
+        if (outcome.error !== null) throw new Error(fencedFailureText(t, outcome.error))
+        setRefreshState({ isRefreshing: false, message: refreshReportText(t, report, count), isError: false })
+        scheduleRefreshClear(4000)
+        onSaved()
+        return count > 0
       }
       const res = await api.llm.discoverModels(namespace.ns, {
         provider: providerId,
@@ -764,20 +852,22 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         const discovered = (res.value as DiscoveredModel[] | undefined) || []
         let count = 0
         const outcome = await applyFenced(api, namespace.ns, (view) => {
-          const fresh = profileAt(view)
           // Merge, never replace: a Refresh may add and update models, but
-          // deleting one is the operator's decision, not a listing's.
-          const merged = mergeRefreshedModels(modelsAt(view), discovered, {
-            contextWindow: fresh.defaultContextWindow,
-            maxTokens: fresh.defaultMaxTokens,
-          })
+          // deleting one is the operator's decision, not a listing's. Only
+          // disclosed fields land; route defaults stay virtual.
+          const merged = mergeRefreshedModels(modelsAt(view), discovered)
           count = merged.length
           return {
             ops: [{ op: 'set', path: [...row.entry.settingsPath, 'models'], value: merged as unknown as JsonValue }],
           }
         })
         if (outcome.error !== null) throw new Error(fencedFailureText(t, outcome.error))
-        setRefreshState({ isRefreshing: false, message: t('refreshedModels', { count }), isError: false })
+        const fallback = catalogFallbackNotice(discovered, t)
+        setRefreshState({
+          isRefreshing: false,
+          message: fallback === undefined ? t('refreshedModels', { count }) : `${t('refreshedModels', { count })} — ${fallback}`,
+          isError: false,
+        })
         scheduleRefreshClear(4000)
         onSaved()
         return count > 0
@@ -799,7 +889,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       catalogRefreshInFlight.current = false
     }
   }, [
-    api, baseURL, keyInput, modelsAt, namespace.ns, onSaved, profileAt,
+    api, baseURL, keyInput, modelsAt, namespace.ns, onSaved,
     providerId, protocol, readOnly, row.entry.settingsPath, scheduleRefreshClear, t,
   ])
 
@@ -1186,6 +1276,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   }
 
   const isConfigured = keyState?.configured === true
+  const poolIdentityCount = poolConfig?.identities?.length ?? 0
   // Dashboard links for a non-heavy provider that declares one; the heavy card
   // (below) renders the heavy manifest's own detected/local dashboards.
   const heavyProvider = resolveHeavyManifest(providerId)
@@ -1376,7 +1467,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                         type="button"
                         className={styles['iconMiniBtn']}
                         onClick={() => handleMoveIdentity(idx, 1)}
-                        disabled={idx === (poolConfig?.identities?.length ?? 1) - 1 || readOnly || busy}
+                        disabled={idx === poolIdentityCount - 1 || readOnly || busy}
                         title={t('poolMoveDown')}
                       >
                         <IconArrowDown size={12} />
@@ -1754,6 +1845,15 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                           </span>
                         )
                         : null}
+                      {m.unverified === true && (
+                        <span
+                          className={styles['modelBadge']}
+                          data-model-badge="unverified"
+                          title={t('capUnverifiedHint')}
+                        >
+                          {t('capUnverifiedBadge')}
+                        </span>
+                      )}
                       <span className={styles['modelIdTag']}>{m.id}</span>
                     </div>
 
@@ -1772,8 +1872,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                       <div className={styles['capIconsList']}>
                         {caps.hasTools && (
                           <span
-                            className={`${styles['capIcon']}${caps.hinted.tools ? ` ${styles['capIconHint']}` : ''}`}
-                            data-hint={caps.hinted.tools ? 'tools' : undefined}
+                            className={styles['capIcon']}
                             title={t('capTools')}
                           >
                             <IconTools size={10} />
@@ -1783,7 +1882,8 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                           <span
                             className={`${styles['capIcon']} ${styles['capIconReasoning']}${caps.hinted.reasoning ? ` ${styles['capIconHint']}` : ''}`}
                             data-hint={caps.hinted.reasoning ? 'reasoning' : undefined}
-                            title={t('capReasoning')}
+                            data-unverified={caps.hinted.reasoning ? 'true' : undefined}
+                            title={caps.hinted.reasoning ? `${t('capReasoning')} — ${t('capHintUnverified')}` : t('capReasoning')}
                           >
                             <IconBrain size={10} />
                           </span>
@@ -1792,36 +1892,67 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                           <span
                             className={`${styles['capIcon']}${caps.hinted.vision ? ` ${styles['capIconHint']}` : ''}`}
                             data-hint={caps.hinted.vision ? 'vision' : undefined}
-                            title={t('capVision')}
+                            data-unverified={caps.hinted.vision ? 'true' : undefined}
+                            title={caps.hinted.vision ? `${t('capVision')} — ${t('capHintUnverified')}` : t('capVision')}
                           >
                             <IconVision size={10} />
                           </span>
                         )}
-                        {caps.hasAudio && (
+                        {(caps.hasAudio || caps.hinted.audio) && (
                           <span
                             className={`${styles['capIcon']}${caps.hinted.audio ? ` ${styles['capIconHint']}` : ''}`}
                             data-hint={caps.hinted.audio ? 'audio' : undefined}
-                            title={t('capAudio')}
+                            data-unverified={caps.hinted.audio ? 'true' : undefined}
+                            title={caps.hinted.audio ? `${t('capAudio')} — ${t('capHintUnverified')}` : t('capAudio')}
                           >
                             <IconAudio size={10} />
                           </span>
                         )}
-                        {caps.hasVideo && (
+                        {(caps.hasVideo || caps.hinted.video) && (
                           <span
                             className={`${styles['capIcon']}${caps.hinted.video ? ` ${styles['capIconHint']}` : ''}`}
                             data-hint={caps.hinted.video ? 'video' : undefined}
-                            title={t('capVideo')}
+                            data-unverified={caps.hinted.video ? 'true' : undefined}
+                            title={caps.hinted.video ? `${t('capVideo')} — ${t('capHintUnverified')}` : t('capVideo')}
                           >
                             <IconVideo size={10} />
                           </span>
                         )}
-                        {caps.hasFiles && (
+                        {(caps.hasFiles || caps.hinted.files) && (
                           <span
                             className={`${styles['capIcon']}${caps.hinted.files ? ` ${styles['capIconHint']}` : ''}`}
                             data-hint={caps.hinted.files ? 'files' : undefined}
-                            title={t('capFiles')}
+                            data-unverified={caps.hinted.files ? 'true' : undefined}
+                            title={caps.hinted.files ? `${t('capFiles')} — ${t('capHintUnverified')}` : t('capFiles')}
                           >
                             <IconFile size={10} />
+                          </span>
+                        )}
+                        {caps.declaredOnly.map(modality => (
+                          <span
+                            key={`declared-${modality}`}
+                            className={`${styles['capIcon']} ${styles['capIconHint']}`}
+                            data-advertised-only={modality}
+                            title={t('capDeclaredNotNativeTitle', {
+                              capability: modality === 'audio'
+                                ? t('capAudio')
+                                : modality === 'video' ? t('capVideo') : t('capFiles'),
+                            })}
+                          >
+                            {modality === 'audio'
+                              ? <IconAudio size={10} />
+                              : modality === 'video' ? <IconVideo size={10} /> : <IconFile size={10} />}
+                          </span>
+                        ))}
+                        {caps.declaredOnly.length > 0 && (
+                          <span className={styles['modelBadge']} data-model-badge="declared-not-sent">
+                            {t('capDeclaredNotNative')}
+                          </span>
+                        )}
+                        {(caps.hinted.reasoning || caps.hinted.vision || caps.hinted.audio
+                          || caps.hinted.video || caps.hinted.files) && (
+                          <span className={styles['modelBadge']} data-model-badge="unverified-hint">
+                            {t('capHintUnverified')}
                           </span>
                         )}
                       </div>

@@ -1,7 +1,7 @@
 // contextBreakdown projection: heuristic system/tools/message composition,
 // plus the shared estimator's pricing branches.
 
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { createMessage, createSystemMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, ToolSchema } from '@deepseek-ai/dsh-llm'
@@ -439,9 +439,14 @@ describe('contextBreakdown session projection', () => {
         val: { nodes: [{ seq: 0, heuristicTokens: -1, system: true }], breakdown: { systemTokens: 0, toolsTokens: 0, messageTokens: 0 } },
       },
     }
-    expect(() => ctx.sessionProjections.restore(
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const refolded = ctx.sessionProjections.restore(
       invalid, session.snapshotEvents(), SessionLogOffset(0), session.header, session.inheritedEventCount,
-    )).toThrow()
+    )
+    expect(refolded.snapshot.values.contextBreakdown).toEqual({ systemTokens: 5, toolsTokens: 0, messageTokens: 10 })
+    expect(refolded.checkpoint['contextBreakdown']?.ver).toBe(5)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('contextBreakdown'))
+    warn.mockRestore()
   })
 
   it('discards lower-layer version-3 scalar caches and refolds the full surface', async () => {

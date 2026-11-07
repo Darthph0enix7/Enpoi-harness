@@ -29,6 +29,7 @@
  *           "id": "kilo-auto/efficient",
  *           "name": "Auto Efficient",
  *           "contextWindow": 1000000,
+ *           "maxInputTokens": 900000,
  *           "maxTokens": 65536,
  *           "input": ["text", "image"],
  *           "tools": true,
@@ -53,13 +54,19 @@
  * with a guess. A model whose id the installed catalog *does* know is never
  * read from here at all — the catalog's capacities always win.
  *
+ * A successful listing that advertised no models is retained as an empty
+ * `models` array with its `fetchedAt`; dropping it would turn a known-empty
+ * route back into an absence and let a later reader refill or fail instead of
+ * serving the empty catalog the endpoint stated. A failed fetch is not written
+ * in that shape, so it is never read as an empty listing.
+ *
  * @module dsh-llm-pi-ai/discovered
  */
 
 import { closeSync, openSync, readFileSync, readSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { MODALITIES } from './catalog.ts'
+import { MODALITIES, THINKING_LEVELS } from './catalog.ts'
 import type { PiAiModality } from './catalog.ts'
 
 /** Cache format version; a file stamped otherwise is ignored rather than guessed at. */
@@ -83,6 +90,12 @@ export interface DiscoveredModelRecord {
   readonly name?: string | undefined
   /** Maximum combined request and response context, when disclosed. */
   readonly contextWindow?: number | undefined
+  /**
+   * Maximum input tokens (the prompt-side budget), when the endpoint or its
+   * enrichment disclosed one separately. Distinct from {@link contextWindow},
+   * which combines input and output capacity; never derived from it.
+   */
+  readonly maxInputTokens?: number | undefined
   /** Maximum output tokens, when disclosed. */
   readonly maxTokens?: number | undefined
   /**
@@ -101,9 +114,17 @@ export interface DiscoveredModelRecord {
    * the endpoint's own ladder, or the one its models.dev/installed-catalog
    * enrichment publishes. Persisted here so a route resolving from this cache
    * offers the same ladder a configured route would, instead of falling back
-   * to pi-ai's defaulting. Absent means nothing disclosed one.
+   * to pi-ai's defaulting. Only canonical {@link THINKING_LEVELS} names appear;
+   * an explicit empty dict records an explicit empty ladder, which disables
+   * inferred reasoning, while absence means nothing disclosed one.
    */
   readonly reasoningEfforts?: Readonly<Record<string, string>> | undefined
+  /**
+   * Effort names the cache advertised that no configured profile accepts,
+   * preserved verbatim for diagnostics. They never reach a materialized ladder
+   * and are never renamed to a canonical level.
+   */
+  readonly unsupportedReasoningEfforts?: readonly string[] | undefined
   /** The listing's own price fields, kept verbatim for future consumers. */
   readonly pricing?: Readonly<Record<string, string>> | undefined
   /** Whether the endpoint's directory marked the model free. */
@@ -181,6 +202,17 @@ function readModalities(value: unknown): PiAiModality[] | undefined {
   return value.filter((token): token is PiAiModality => typeof token === 'string' && MODALITY_TOKENS.has(token))
 }
 
+/** The canonical level names a configured profile accepts. */
+const THINKING_LEVEL_TOKENS: ReadonlySet<string> = new Set(THINKING_LEVELS)
+
+/** One recorded effort ladder split into serveable levels and diagnostic names. */
+interface ReadEfforts {
+  /** Canonical levels with their exact wire spellings; `{}` is an explicit empty ladder. */
+  readonly supported: Readonly<Record<string, string>>
+  /** Advertised names no configured profile accepts, in document order. */
+  readonly unsupported: readonly string[]
+}
+
 /** A parseable `YYYY-MM-DD` release date, or `undefined`. */
 function releaseDateValue(value: unknown): string | undefined {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined
@@ -206,19 +238,33 @@ function readCostTier(value: unknown): DiscoveredCostTier | undefined {
 
 /**
  * The selectable reasoning ladder a record carries: level → wire spelling.
- * Only non-empty strings survive; an absent, empty, or malformed block reads
- * as "nothing disclosed" rather than failing the record. The level named
- * `__proto__` is refused because assigning it to a plain object would rewrite
- * the prototype instead of recording a level.
+ * Only canonical {@link THINKING_LEVELS} names with non-empty string values
+ * become serveable levels; other advertised names are kept for diagnostics so
+ * a future reader can report them without ever materializing them. An explicit
+ * empty dict survives as an empty ladder — it disables inference rather than
+ * becoming absent, which would let the catalog answer instead. A malformed
+ * block with no usable entry at all reads as "nothing disclosed". The level
+ * named `__proto__` is refused because assigning it to a plain object would
+ * rewrite the prototype instead of recording a level.
+ * @param value - the raw `reasoningEfforts` field.
+ * @returns the split ladder, or `undefined` when the block is unusable.
  */
-function readEfforts(value: unknown): Readonly<Record<string, string>> | undefined {
+function readEfforts(value: unknown): ReadEfforts | undefined {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
-  const ladder: Record<string, string> = {}
+  const supported: Record<string, string> = {}
+  const unsupported: string[] = []
+  let usable = false
   for (const [level, wire] of Object.entries(value as Record<string, unknown>)) {
     if (level.length === 0 || level === '__proto__') continue
-    if (typeof wire === 'string' && wire.length > 0) ladder[level] = wire
+    if (typeof wire !== 'string' || wire.length === 0) continue
+    usable = true
+    if (THINKING_LEVEL_TOKENS.has(level)) supported[level] = wire
+    else unsupported.push(level)
   }
-  return Object.keys(ladder).length === 0 ? undefined : ladder
+  // An empty object is a stated empty ladder; anything else with no usable
+  // entry is a malformed disclosure that says nothing.
+  if (!usable) return Object.keys(value).length === 0 ? { supported: {}, unsupported: [] } : undefined
+  return { supported, unsupported }
 }
 
 /** Normalize one model entry, or `undefined` when it names no usable id. */
@@ -229,7 +275,8 @@ function readModel(raw: unknown, fallbackStamp: number): DiscoveredModelRecord |
   if (id === undefined) return undefined
   const input = readModalities(entry.input)
   const releaseDate = releaseDateValue(entry.releaseDate)
-  const reasoningEfforts = readEfforts(entry.reasoningEfforts)
+  const efforts = readEfforts(entry.reasoningEfforts)
+  const maxInputTokens = positiveInteger(entry.maxInputTokens)
   const costTiers = Array.isArray(entry.costTiers)
     ? entry.costTiers.flatMap((candidate): DiscoveredCostTier[] => {
       const tier = readCostTier(candidate)
@@ -249,11 +296,13 @@ function readModel(raw: unknown, fallbackStamp: number): DiscoveredModelRecord |
     id,
     ...nonEmptyString(entry.name) === undefined ? {} : { name: nonEmptyString(entry.name) },
     ...positiveInteger(entry.contextWindow) === undefined ? {} : { contextWindow: positiveInteger(entry.contextWindow) },
+    ...maxInputTokens === undefined ? {} : { maxInputTokens },
     ...positiveInteger(entry.maxTokens) === undefined ? {} : { maxTokens: positiveInteger(entry.maxTokens) },
     ...input === undefined || input.length === 0 ? {} : { input },
     ...typeof entry.tools === 'boolean' ? { tools: entry.tools } : {},
     ...typeof entry.reasoning === 'boolean' ? { reasoning: entry.reasoning } : {},
-    ...reasoningEfforts === undefined ? {} : { reasoningEfforts },
+    ...efforts === undefined ? {} : { reasoningEfforts: efforts.supported },
+    ...efforts === undefined || efforts.unsupported.length === 0 ? {} : { unsupportedReasoningEfforts: efforts.unsupported },
     ...pricing === undefined || Object.keys(pricing).length === 0 ? {} : { pricing },
     ...typeof entry.isFree === 'boolean' ? { isFree: entry.isFree } : {},
     ...entry.gated === true ? { gated: true } : {},
@@ -267,7 +316,15 @@ function readModel(raw: unknown, fallbackStamp: number): DiscoveredModelRecord |
   }
 }
 
-/** Normalize one route entry; `undefined` when it carries no usable models. */
+/**
+ * Normalize one route entry. A successful empty listing is retained: its
+ * `models` array and positive `fetchedAt` are the route-level evidence that
+ * the endpoint answered and advertised nothing, which an authoritative
+ * resolver must be able to serve as an empty catalog. An empty array without
+ * a successful-fetch stamp is not that evidence and is dropped.
+ * @param raw - the raw route entry.
+ * @returns the normalized route, or `undefined` when it is unusable.
+ */
 function readRoute(raw: unknown): DiscoveredRouteRecord | undefined {
   if (raw === null || typeof raw !== 'object') return undefined
   const entry = raw as Record<string, unknown>
@@ -281,7 +338,10 @@ function readRoute(raw: unknown): DiscoveredRouteRecord | undefined {
     seen.add(model.id)
     models.push(model)
   }
-  if (models.length === 0) return undefined
+  // Only a literal empty array with a successful-fetch stamp is a known-empty
+  // listing. Rows that were all malformed keep the old drop behavior instead of
+  // masquerading as an endpoint that answered with no models.
+  if (models.length === 0 && (entry.models.length > 0 || fetchedAt === 0)) return undefined
   return {
     ...nonEmptyString(entry.baseURL) === undefined ? {} : { baseURL: nonEmptyString(entry.baseURL) },
     fetchedAt,
@@ -380,6 +440,8 @@ export function discoveredRoutes(path: string = discoveredModelsPath()): Readonl
 /** The discovered models for one route, or `undefined` when the cache says nothing about it. */
 export function discoveredModelsFor(provider: string): readonly DiscoveredModelRecord[] | undefined {
   const record = discoveredRoutes().get(provider)
+  // An empty array is a retained successful empty listing, deliberately
+  // distinct from `undefined` (no evidence about the route).
   return record === undefined ? undefined : record.models
 }
 

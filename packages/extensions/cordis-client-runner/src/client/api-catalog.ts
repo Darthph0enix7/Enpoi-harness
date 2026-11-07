@@ -537,7 +537,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ConnectionGenerationSource',
-    declaration: 'export type ConnectionGenerationSource = (signal: AbortSignal, ready: (host: ConnectionHostInfo) => void, activity: () => void) => Promise<void>;',
+    declaration: 'export type ConnectionGenerationSource = (signal: AbortSignal, ready: (host: ConnectionHostInfo) => void, activity: () => void, heartbeat?: () => void) => Promise<void>;',
   },
   {
     name: 'ConnectionGenerationState',
@@ -557,7 +557,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ConnectionRecoveryConfig',
-    declaration: 'export interface ConnectionRecoveryConfig {\n    backoffBaseMs?: number;\n    backoffFactor?: number;\n    backoffMaxMs?: number;\n    generationReadyWarnMs?: number;\n    generationReadyTimeoutMs?: number;\n}',
+    declaration: 'export interface ConnectionRecoveryConfig {\n    backoffBaseMs?: number;\n    backoffFactor?: number;\n    backoffMaxMs?: number;\n    generationReadyWarnMs?: number;\n    generationReadyTimeoutMs?: number;\n    stableConnectionMs?: number;\n    wakeReconnectDebounceMs?: number;\n    wakeStaleThresholdMs?: number;\n    wakeConnectingGraceMs?: number;\n    watchdogIntervalMs?: number;\n    watchdogStaleMs?: number;\n    networkDebounceMs?: number;\n    reconnectStaggerMs?: number;\n    rpcTimeoutMs?: number;\n}',
   },
   {
     name: 'ConnectionRpcFailure',

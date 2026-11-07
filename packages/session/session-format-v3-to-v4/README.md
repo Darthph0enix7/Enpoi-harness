@@ -40,7 +40,7 @@ Restore supported released V3 Sessions as V4 without rewriting their stored gene
 <a id="use-this-package"></a>
 ## Use this package
 
-Use the [catalog](../session-format-catalog/README.md) for complete restoration. Direct imports serve catalog assembly and tests; this library has no Cordis mount configuration. Its [public exports](src/index.ts) provide the adjacent migration, the released V3 source codec, the V4 codec, and target validators. The source codec remains owned by [V2-to-V3](../session-format-v2-to-v3/README.md).
+Use the [catalog](../session-format-catalog/README.md) for complete restoration. Direct imports serve catalog assembly and tests; this library has no Cordis mount configuration. Its [public exports](src/index.ts) provide the adjacent migration, the released V3 source codec, the V4 codec, target validators, and the V4 row admission used by the V5 edge. The source codec remains owned by [V2-to-V3](../session-format-v2-to-v3/README.md).
 
 Header-only migration validates and advances metadata without reading the body or collecting children:
 

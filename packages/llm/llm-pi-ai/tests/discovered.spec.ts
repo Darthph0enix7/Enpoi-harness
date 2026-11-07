@@ -11,6 +11,7 @@ import {
   resetDiscoveredModelsCache,
 } from '../src/discovered.ts'
 import { assertServiceable, resolveProfiles, type Options } from '../src/config.ts'
+import { resolveRouteModels } from '../src/catalog.ts'
 
 const directories: string[] = []
 
@@ -145,6 +146,91 @@ describe('discovered-model cache parsing', () => {
     expect(models?.[2]?.reasoningEfforts).toBeUndefined()
   })
 
+  it('retains a successful empty listing and drops an unstamped empty route', async () => {
+    const document = {
+      version: DISCOVERED_CACHE_VERSION,
+      routes: {
+        'acme-gateway': { baseURL: 'https://acme.test', fetchedAt: 1_790_000_000_000, models: [] },
+        'unstamped-gateway': { baseURL: 'https://unstamped.test', models: [] },
+        'corrupt-gateway': { baseURL: 'https://corrupt.test', fetchedAt: 1_790_000_000_000, models: [{ id: '' }] },
+      },
+    }
+    await cacheFile(document)
+    expect(parseDiscoveredCache(document).routes['acme-gateway']).toEqual({
+      baseURL: 'https://acme.test',
+      fetchedAt: 1_790_000_000_000,
+      models: [],
+    })
+    // An empty array without a successful-fetch stamp is not evidence that the
+    // endpoint answered, so it stays absent rather than becoming known-empty.
+    expect(parseDiscoveredCache(document).routes['unstamped-gateway']).toBeUndefined()
+    // An array of unusable rows is malformed data, not an empty listing.
+    expect(parseDiscoveredCache(document).routes['corrupt-gateway']).toBeUndefined()
+    expect(discoveredModelsFor('acme-gateway')).toEqual([])
+    expect(discoveredModelsFor('unstamped-gateway')).toBeUndefined()
+    expect(discoveredModelsFor('corrupt-gateway')).toBeUndefined()
+  })
+
+  it('keeps an input-only capacity separate from the combined context window', async () => {
+    await cacheFile(cacheWith([
+      {
+        id: 'sized',
+        contextWindow: 200_000,
+        maxInputTokens: 128_000,
+        maxTokens: 8192,
+        source: 'discovered',
+        discoveredAt: 15,
+      },
+      { id: 'bad-cap', contextWindow: 200_000, maxInputTokens: 0, source: 'discovered', discoveredAt: 16 },
+    ]))
+    const models = discoveredModelsFor('acme-gateway')
+    expect(models?.[0]).toMatchObject({
+      contextWindow: 200_000,
+      maxInputTokens: 128_000,
+      maxTokens: 8192,
+    })
+    // A non-positive cap is undisclosed, not clamped and not copied from the
+    // combined window.
+    expect(models?.[1]?.maxInputTokens).toBeUndefined()
+    expect(models?.[1]?.contextWindow).toBe(200_000)
+  })
+
+  it('keeps only canonical effort names and preserves an explicit empty ladder', async () => {
+    await cacheFile(cacheWith([
+      {
+        id: 'mixed',
+        reasoning: true,
+        reasoningEfforts: { low: 'low', high: 'high', ultra: 'ultra' },
+        source: 'discovered',
+        discoveredAt: 17,
+      },
+      {
+        id: 'empty',
+        reasoning: true,
+        reasoningEfforts: {},
+        source: 'discovered',
+        discoveredAt: 18,
+      },
+    ]))
+    const models = discoveredModelsFor('acme-gateway')
+    expect(models?.[0]?.reasoningEfforts).toEqual({ low: 'low', high: 'high' })
+    // An unsupported name stays diagnostic metadata; it is never renamed to a
+    // canonical level such as max.
+    expect(models?.[0]?.unsupportedReasoningEfforts).toEqual(['ultra'])
+    expect(models?.[1]?.reasoningEfforts).toEqual({})
+
+    const resolved = resolveProfiles(discoveredRoute().providers).get('acme-gateway')?.piProvider?.getModels()
+    expect(resolved?.[0]?.thinkingLevelMap).toMatchObject({
+      low: 'low',
+      high: 'high',
+      max: null,
+      xhigh: null,
+    })
+    // `reasoning: true` never synthesizes a ladder, and the explicit empty
+    // ladder disables inferred reasoning instead of becoming undefined.
+    expect(resolved?.[1]).toMatchObject({ id: 'empty', reasoning: false })
+  })
+
   it('reads an old-shaped cache file without a ladder or deprecation fields', async () => {
     // Exactly the shape the writer emitted before those fields existed: a
     // version-1 document whose records carry id, capacities, and modalities.
@@ -164,10 +250,12 @@ describe('discovered-model cache parsing', () => {
     expect(model).toMatchObject({ id: 'legacy', input: ['text', 'image'] })
     expect(model?.reasoningEfforts).toBeUndefined()
     expect(model?.deprecated).toBeUndefined()
-    // It still resolves: nothing disclosed a ladder, so the route keeps the
-    // conservative no-reasoning answer instead of guessing one.
+    // The support flag survives without inventing any selectable effort level.
     const resolved = resolveProfiles(discoveredRoute().providers).get('acme-gateway')?.piProvider?.getModels()[0]
-    expect(resolved).toMatchObject({ id: 'legacy', reasoning: false, input: ['text', 'image'] })
+    expect(resolved).toMatchObject({ id: 'legacy', reasoning: true, input: ['text', 'image'] })
+    expect(resolved?.thinkingLevelMap).toEqual({
+      off: null, minimal: null, low: null, medium: null, high: null, xhigh: null, max: null,
+    })
   })
 
   it('reads an unreadable or malformed cache as empty instead of failing resolution', async () => {
@@ -182,6 +270,107 @@ describe('discovered-model cache parsing', () => {
     process.env.DSH_DISCOVERED_MODELS = join(directory, 'missing.json')
     resetDiscoveredModelsCache()
     expect(discoveredModelsFor('acme-gateway')).toBeUndefined()
+  })
+})
+
+describe('endpoint-authoritative serving', () => {
+  /** The route a preset would add, but with the endpoint as catalog authority. */
+  function endpointRoute(): Options {
+    return {
+      providers: {
+        'acme-gateway': { api: 'openai-completions', baseURL: 'https://acme.test', catalogAuthority: 'endpoint' },
+      },
+    }
+  }
+
+  it('serves an empty catalog from a retained successful empty listing', async () => {
+    await cacheFile(cacheWith([]))
+    expect(() => { assertServiceable(endpointRoute()) }).not.toThrow()
+    const resolved = resolveProfiles(endpointRoute().providers).get('acme-gateway')
+    expect(resolved?.piProvider?.getModels()).toEqual([])
+    expect(resolved?.catalogError).toBeUndefined()
+
+    const catalog = resolveRouteModels({
+      provider: 'acme-gateway',
+      api: 'openai-completions',
+      baseURL: 'https://acme.test',
+      discoveredModels: [],
+      catalogAuthority: 'endpoint',
+      defaultContextWindow: 262_144,
+      defaultMaxTokens: 32_768,
+      defaultInput: ['text'],
+    })
+    expect(catalog).toMatchObject({ models: [], knownEmpty: true })
+  })
+
+  it('does not treat a missing discovered record as an empty listing', async () => {
+    process.env.DSH_DISCOVERED_MODELS = join(tmpdir(), `missing-${String(Date.now())}.json`)
+    resetDiscoveredModelsCache()
+    expect(() => resolveProfiles(endpointRoute().providers)).toThrow(/resolves no models/)
+  })
+
+  it('excludes deprecated records from endpoint authority but keeps them for inspection', async () => {
+    await cacheFile(cacheWith([
+      { id: 'current', source: 'discovered', discoveredAt: 1 },
+      { id: 'retired', deprecated: true, source: 'discovered', discoveredAt: 2 },
+    ]))
+    // The read layer keeps the retained record so a diagnostics surface can
+    // still inspect the facts the endpoint last disclosed.
+    expect(discoveredModelsFor('acme-gateway')?.map(model => model.id)).toEqual(['current', 'retired'])
+
+    const endpoint = resolveProfiles(endpointRoute().providers).get('acme-gateway')?.piProvider?.getModels()
+    expect(endpoint?.map(model => model.id)).toEqual(['current'])
+    // Existing catalog-authority behavior is untouched: a retained record in
+    // use is not blanket-hidden.
+    const catalog = resolveProfiles(discoveredRoute().providers).get('acme-gateway')?.piProvider?.getModels()
+    expect(catalog?.map(model => model.id)).toEqual(['current', 'retired'])
+  })
+
+  it('serves a retained record again when a later listing clears its deprecation', async () => {
+    const path = await cacheFile(cacheWith([
+      { id: 'retired', deprecated: true, source: 'discovered', discoveredAt: 1 },
+    ]))
+    const ids = (): readonly string[] | undefined =>
+      resolveProfiles(endpointRoute().providers).get('acme-gateway')?.piProvider?.getModels().map(model => model.id)
+    expect(ids()).toEqual([])
+    await writeFile(path, JSON.stringify(cacheWith([
+      { id: 'retired', source: 'discovered', discoveredAt: 2 },
+    ])), 'utf8')
+    resetDiscoveredModelsCache()
+    expect(ids()).toEqual(['retired'])
+  })
+
+  it('returns input-cap facts distinct from the combined window', () => {
+    const catalog = resolveRouteModels({
+      provider: 'acme-gateway',
+      api: 'openai-completions',
+      baseURL: 'https://acme.test',
+      catalogAuthority: 'endpoint',
+      discoveredModels: [{
+        id: 'sized',
+        contextWindow: 200_000,
+        maxInputTokens: 128_000,
+        maxTokens: 8192,
+        input: ['text', 'image'],
+        source: 'discovered',
+        discoveredAt: 1,
+      }],
+      defaultContextWindow: 262_144,
+      defaultMaxTokens: 32_768,
+      defaultInput: ['text'],
+    })
+    expect(catalog.models[0]).toMatchObject({ contextWindow: 200_000, maxTokens: 8192 })
+    expect(catalog.facts.get('sized')).toEqual({
+      contextWindow: 'discovered',
+      maxTokens: 'discovered',
+      input: 'discovered',
+      inputModalities: ['text', 'image'],
+      maxInputTokens: 128_000,
+      maxInputTokensSource: 'discovered',
+    })
+    // A disclosed output capability sizes the model; it never becomes the
+    // per-request cap a deployment chose to send.
+    expect(catalog.configuredMaxTokens.size).toBe(0)
   })
 })
 
@@ -220,7 +409,8 @@ describe('resolution over discovered models', () => {
       input: ['text', 'image'],
       contextWindow: 1_000_000,
       maxTokens: 65_536,
-      reasoning: false,
+      // Disclosed support is kept; no selectable level is invented for it.
+      reasoning: true,
     }])
   })
 

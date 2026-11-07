@@ -63,9 +63,9 @@ export interface RecallFraming {
   readonly footer?: string
 }
 
-/** Leading `user/message` surface nodes to keep verbatim after the system head. */
+/** Leading human `user/message` surface nodes to keep verbatim after the system head. */
 export interface PinLeadingOptions {
-  /** Maximum number of leading user messages to pin; `0` disables pinning. */
+  /** Maximum number of leading human user messages to pin; `0` disables pinning. */
   readonly count: number
   /** Per-message price ceiling; the first failing message stops the pin run. */
   readonly maxTokens: number
@@ -96,6 +96,8 @@ type SummarizedCompaction = PreparedCompaction & SummaryResult & {
   readonly checkpointMessage: UserMessage
   /** Bounded cause recorded when a summarization failure forced the mechanical stub. */
   readonly summarizationFailure?: SummarizationFailure
+  /** Prior mechanical summary records merged into this notice, cited on its replacement. */
+  readonly carriedSourceEventSeqs?: readonly SessionSeq[]
 }
 
 interface CompactionTransactionOptions {
@@ -152,6 +154,180 @@ class SummaryNotSmallerError extends Error {
 }
 
 /**
+ * A model summary would replace a prior checkpoint that the summariser window
+ * clipped out of its replay. The replacement could neither retain the prior
+ * exact text nor honestly claim to have merged it, so the transaction falls
+ * back to preserving the checkpoint and omitting only the suffix.
+ */
+class PriorCheckpointUnreplayedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'PriorCheckpointUnreplayedError'
+  }
+}
+
+/**
+ * A summariser result carries no nonempty text block to commit. An empty or
+ * non-text-only result would otherwise frame and commit an authoritative
+ * checkpoint that shadows real source messages without preserving any of their
+ * content, so the transaction treats it exactly like a failed summary.
+ */
+class EmptySummaryContentError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'EmptySummaryContentError'
+  }
+}
+
+/**
+ * How one durable compaction checkpoint was produced, read from its paired
+ * `compaction/summary` event. A model summary names its route and has no
+ * recorded failure; the deterministic omission has an empty route and a
+ * recorded failure. Any other combination is unclassified and is preserved
+ * like an authoritative summary, because deleting it would destroy checkpoint
+ * text that no mechanical replacement can reconstruct.
+ */
+type CheckpointOrigin = 'authoritative' | 'mechanical' | 'unknown'
+
+/**
+ * Classify one surface node as a compaction checkpoint and resolve its origin.
+ * @param session - session supplying the durable checkpoint event and its sources.
+ * @param seq - current surface seq of the candidate checkpoint.
+ * @returns the classified origin, or `undefined` when the node is not a checkpoint.
+ */
+function checkpointOrigin(session: Session, seq: SessionSeq): CheckpointOrigin | undefined {
+  // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+  const event = session.eventAt(seq)
+  if (event?.type !== 'user/message' || event.data.source.kind !== 'compact-checkpoint') {
+    return undefined
+  }
+  /* v8 ignore next -- this backend's checkpoints always cite their summary source. */
+  for (const source of event.sourceEventSeqs ?? []) {
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+    const candidate = session.eventAt(source)
+    if (candidate?.type !== 'compaction/summary') continue
+    const { provider, model, summarizationFailure } = candidate.data
+    if (summarizationFailure !== undefined && provider.length === 0 && model.length === 0) {
+      return 'mechanical'
+    }
+    if (summarizationFailure === undefined && provider.length > 0 && model.length > 0) {
+      return 'authoritative'
+    }
+    return 'unknown'
+  }
+  /* v8 ignore next -- a marker without a paired summary event has no current producer. */
+  return 'unknown'
+}
+
+/**
+ * Whether one surface node is a checkpoint a mechanical omission must keep:
+ * an authoritative model summary, or a checkpoint this build cannot classify.
+ * Only an explicitly classified mechanical omission may be cut and merged.
+ * @param session - session supplying the durable checkpoint event.
+ * @param seq - current surface seq of the candidate node.
+ * @returns whether the node must survive a mechanical replacement.
+ */
+function isPreservedCheckpoint(session: Session, seq: SessionSeq): boolean {
+  const origin = checkpointOrigin(session, seq)
+  return origin !== undefined && origin !== 'mechanical'
+}
+
+/**
+ * Count the preserved checkpoints at the head of one selected span, in surface
+ * order. A mechanical cut starts after them so their exact summary text stays
+ * live; a later preserved checkpoint inside the span bounds the cut instead.
+ * @param session - session supplying durable checkpoint classification.
+ * @param seqs - selected surface seqs, in order.
+ * @returns the length of the leading preserved-checkpoint run.
+ */
+function leadingPreservedCheckpointCount(session: Session, seqs: readonly SessionSeq[]): number {
+  let count = 0
+  for (const seq of seqs) {
+    if (!isPreservedCheckpoint(session, seq)) break
+    count += 1
+  }
+  return count
+}
+
+/** Most earlier omitted ranges one merged mechanical notice carries in its text. */
+const MAX_CARRIED_OMITTED_RANGES = 8
+
+/** Text blocks of one checkpoint message. */
+function checkpointText(event: SessionEvent<'user/message'>): string {
+  return event.data.content.map(block => (block.type === 'text' ? block.text : '')).join('')
+}
+
+/**
+ * Read the omitted seq ranges a mechanical notice states in its own body. The
+ * backend writes one canonical `seqs A–B` form for both the current removal and
+ * any inherited ranges, so a later merge can carry them without a new event
+ * field or a session-format change.
+ * @param text - the marker's durable text.
+ * @returns the ranges named inside `<compacted-omission>`, in order.
+ */
+function markerOmittedRanges(text: string): { start: SessionSeq; end: SessionSeq }[] {
+  const body = text.match(/<compacted-omission>([\s\S]*?)<\/compacted-omission>/)?.[1] ?? ''
+  const ranges: { start: SessionSeq; end: SessionSeq }[] = []
+  for (const match of body.matchAll(/(\d+)–(\d+)/g)) {
+    const start = Number(match[1]) as SessionSeq
+    const end = Number(match[2]) as SessionSeq
+    if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && start <= end) {
+      ranges.push({ start, end })
+    }
+  }
+  return ranges
+}
+
+/**
+ * Collect the omission ranges and summary records of mechanical markers inside
+ * a cut. A marker's text already names its inherited ranges, so repeated merges
+ * remain one hop from the new notice; the paired summary seqs are cited on the
+ * replacement for an independent log reader.
+ * @param session - session supplying the cut nodes and their durable records.
+ * @param seqs - the exact surface seqs the new notice replaces.
+ * @returns bounded inherited ranges, overflow state, and cited summary seqs.
+ */
+function collectCarriedOmissions(
+  session: Session,
+  seqs: readonly SessionSeq[],
+): { ranges: { start: SessionSeq; end: SessionSeq }[]; overflow: boolean; sourceSeqs: SessionSeq[] } {
+  const ranges: { start: SessionSeq; end: SessionSeq }[] = []
+  const sourceSeqs: SessionSeq[] = []
+  const seen = new Set<string>()
+  for (const seq of seqs) {
+    if (checkpointOrigin(session, seq) !== 'mechanical') continue
+    // Existing Session history read; migration deferred.
+    // oxlint-disable-next-line typescript/no-deprecated
+    const event = session.eventAt(seq)
+    if (event?.type !== 'user/message') continue
+    /* v8 ignore next -- a classified mechanical marker always cites its summary event. */
+    for (const source of event.sourceEventSeqs ?? []) {
+      // Existing Session history read; migration deferred.
+      // oxlint-disable-next-line typescript/no-deprecated
+      const candidate = session.eventAt(source)
+      if (candidate?.type !== 'compaction/summary') continue
+      sourceSeqs.push(candidate.seq)
+      const named = markerOmittedRanges(checkpointText(event))
+      const inherited = named.length > 0 ? named : [candidate.data.shadowedRange]
+      for (const range of inherited) {
+        const key = `${range.start}:${range.end}`
+        if (seen.has(key)) continue
+        seen.add(key)
+        ranges.push({ start: range.start, end: range.end })
+      }
+      break
+    }
+  }
+  ranges.sort((left, right) => left.start - right.start)
+  const overflow = ranges.length > MAX_CARRIED_OMITTED_RANGES
+  return {
+    ranges: overflow ? ranges.slice(-MAX_CARRIED_OMITTED_RANGES) : ranges,
+    overflow,
+    sourceSeqs: [...new Set(sourceSeqs)],
+  }
+}
+
+/**
  * The `system/message` holding surface node 0, or `undefined` when another
  * message-producing event starts the surface.
  * @param session - session supplying the log behind the current surface.
@@ -167,16 +343,19 @@ function systemHead(session: Session, headSeq: SessionSeq): SessionEvent<'system
 }
 
 /**
- * Resolve the next range starting at the first non-system, non-pinned surface
+ * Resolve the next range starting at the first non-system, retained surface
  * node while retaining a priced recent tail and never splitting an assistant
  * tool-call/result pair. A `system/message` at surface node 0 is never inside
- * the range; without one the range starts at node 0. Pinned messages are the
- * contiguous `user/message` run directly after the system head whose price is
- * at most `pin.maxTokens`; a checkpoint or any other node ends the run.
+ * the range; without one the range starts at node 0. The retained leading run
+ * is the contiguous `user/message` run directly after the system head whose
+ * price is at most `pin.maxTokens`; a checkpoint or any other node ends the
+ * run. Only human-authored user messages consume `pin.count`: synthetic
+ * keeper/runtime-context user messages stay verbatim in the same run without
+ * displacing a real prompt.
  * @param session - session supplying authoritative current surface positions.
  * @param measurement - unified pressure and surface measurement from the conversation meter.
  * @param retainTokens - minimum recent tail budget retained verbatim.
- * @param pin - leading user messages to keep verbatim; `0` restores the pre-pin selection exactly.
+ * @param pin - leading human user messages to keep verbatim; `0` restores the pre-pin selection exactly.
  * @returns the inclusive positional seq range to compact, or `null`.
  */
 export function selectCompactableRange(
@@ -199,6 +378,7 @@ export function selectCompactableRange(
   // Pinned nodes are surface nodes the next request keeps byte-identical, so
   // the summarizer's replay can reuse their cache prefix.
   let pinned = 0
+  let leading = 0
   for (let index = firstIdx; index < pricedNodes.length && pinned < pin.count; index += 1) {
     // oxlint-disable-next-line typescript/no-non-null-assertion
     const seq = surfaceNodes[index]!
@@ -209,9 +389,10 @@ export function selectCompactableRange(
     if (isCheckpointMessage(event.data)) break
     // oxlint-disable-next-line typescript/no-non-null-assertion
     if (pricedNodes[index]!.tokens > pin.maxTokens) break
-    pinned += 1
+    leading += 1
+    if (isHumanUserMessage(event.data)) pinned += 1
   }
-  const firstCompactableIdx = firstIdx + pinned
+  const firstCompactableIdx = firstIdx + leading
 
   let accumulated = 0
   let keepFromIdx = pricedNodes.length
@@ -240,6 +421,19 @@ export function selectCompactableRange(
 /** Whether one `user/message` is a compaction-produced replacement checkpoint. */
 function isCheckpointMessage(data: { readonly source?: { readonly kind?: string } }): boolean {
   return data.source?.kind === 'compact-checkpoint'
+}
+
+/**
+ * Whether one user message was authored by a person rather than synthesized by
+ * a runtime context provider. Peer-addressed messages remain agent input, so
+ * only the `user` producer without a peer participant counts as human.
+ * @param data - the user message's durable data.
+ * @returns whether the message is a real human prompt.
+ */
+function isHumanUserMessage(data: {
+  readonly source: { readonly kind: string; readonly participant?: { readonly kind: 'human' | 'peer' } }
+}): boolean {
+  return data.source.kind === 'user' && data.source.participant?.kind !== 'peer'
 }
 
 /**
@@ -591,6 +785,24 @@ function frameSummarizedCompaction(
   compactionId: CompactionResult['compactionId'],
   sourceCommandId: CommandId | undefined,
 ): SummarizedCompaction {
+  // A checkpoint must carry the model's text. An empty, whitespace-only, or
+  // non-text result would shadow the source span with an authoritative-looking
+  // node that preserves nothing, so fail before framing and let the automatic
+  // path record the honest mechanical omission (manual stays fail-loud).
+  if (!summaryResult.summary.some(block => block.type === 'text' && block.text.trim().length > 0)) {
+    throw new EmptySummaryContentError('summarization produced no nonempty text summary content')
+  }
+  // The window cap keeps only the newest region messages. A prior checkpoint
+  // sits at the oldest edge, so any non-empty clip excludes its text while the
+  // replacement would still shadow it: retaining it and omitting only the
+  // suffix is the honest outcome.
+  if (summaryResult.windowClipped === true
+    && prepared.shadowedSeqs.some(seq => isPreservedCheckpoint(agent.session, seq))) {
+    throw new PriorCheckpointUnreplayedError(
+      'the summariser window clipped a prior checkpoint out of the replay; '
+      + 'replacing it without its exact text would erase an authoritative summary',
+    )
+  }
   const framing = dependencies.framing(agent)
   const clippedCause = summaryResult.conservativeWindowClip === true
     ? "the summariser's context window could not be resolved, so the replay was capped to a conservative budget"
@@ -666,6 +878,13 @@ function shrinkReplayRegion(
   }
   // oxlint-disable-next-line typescript/no-non-null-assertion -- index is a valid surface position.
   if (keepFromIdx > endIdx || !toolPairingBalancedBefore(session, nodes[keepFromIdx]!)) return null
+  // Shrinking drops the oldest prefix, but a preserved checkpoint there would
+  // stay live outside the new range while the model summary arrives as a second
+  // one. Keep it inside the input or let the mechanical suffix path preserve it.
+  for (let index = startIdx; index < keepFromIdx; index += 1) {
+    // oxlint-disable-next-line typescript/no-non-null-assertion -- index is a valid surface position.
+    if (isPreservedCheckpoint(session, nodes[index]!)) return null
+  }
   // oxlint-disable-next-line typescript/no-non-null-assertion -- index is a valid surface position.
   const selection = validateSurfaceRegion(session, nodes[keepFromIdx]!, prepared.end)
   // Replay only the smaller region: the nodes dropped from the oldest end are
@@ -675,15 +894,18 @@ function shrinkReplayRegion(
 }
 
 /**
- * The deterministic model-free fallback: drop the oldest balanced prefix of
- * the selected span and replace exactly that prefix with one pointer/omission
- * stub citing the session log and the recall tools. The rest of the selected
- * span stays verbatim; the removed events stay in the log (surface `replace`
- * only), so the transcript is intact and the session is promptable.
+ * The deterministic model-free fallback: drop the oldest removable balanced run
+ * of the selected span and replace exactly that run with one pointer/omission
+ * stub citing the session log and the recall tools. Leading authoritative
+ * checkpoints (and any preserved checkpoint inside the span) stay verbatim with
+ * their exact text, and the free-share target is priced from the nodes actually
+ * dropped. The rest of the selected span stays verbatim; the removed events
+ * stay in the log (surface `replace` only), so the transcript is intact and the
+ * session is promptable.
  * @param agent - compacting agent whose tool scope gates the recall wording.
  * @param failure - bounded cause of the failure that selected this fallback.
  * @returns the committed replacement carrying its failure record, or `null`
- *   when even the whole span is no larger than the stub (nothing can be freed;
+ *   when the removable run is no larger than the stub (nothing can be freed;
  *   the caller rethrows).
  */
 function mechanicalCompaction(
@@ -696,6 +918,28 @@ function mechanicalCompaction(
   failure: SummarizationFailure,
 ): SummarizedCompaction | null {
   const framing = dependencies.framing(agent)
+  // A prior model summary must stay live with its exact text: start the cut
+  // after the leading preserved checkpoints, and stop before any later one.
+  // A prior mechanical omission marker is not preserved, so cutting through it
+  // merges it into the single replacement notice.
+  const preservedPrefix = leadingPreservedCheckpointCount(session, prepared.shadowedSeqs)
+  // Nothing but preserved checkpoints: replacing them would erase exactly the
+  // text this fallback exists to keep, so the caller reports the failure.
+  if (preservedPrefix >= prepared.shadowedSeqs.length) return null
+  let droppableEndIdx = prepared.shadowedSeqs.length - 1
+  for (let index = preservedPrefix; index < prepared.shadowedSeqs.length; index += 1) {
+    // oxlint-disable-next-line typescript/no-non-null-assertion -- index is a valid selected position.
+    if (isPreservedCheckpoint(session, prepared.shadowedSeqs[index]!)) {
+      droppableEndIdx = index - 1
+      break
+    }
+  }
+  const droppableTokens = prepared.selectedNodes
+    .slice(preservedPrefix, droppableEndIdx + 1)
+    .reduce((total, node) => total + node.tokens, 0)
+  // oxlint-disable-next-line typescript/no-non-null-assertion -- preservedPrefix is a selected position.
+  const droppableStart = prepared.shadowedSeqs[preservedPrefix]!
+
   const probe = createUserMessage({
     content: frameMechanicalOmission(
       prepared.start,
@@ -707,21 +951,22 @@ function mechanicalCompaction(
   })
   const stubTokenCount = dependencies.meter.estimateMessage(probe)
 
-  // Free at least the configured share of the selected span, not merely enough
-  // to beat the stub's own price: a stub that frees 0.5k of a 590k region is a
-  // "success" that cannot relieve pressure and invites another identical pass.
-  // The stub price is still the hard floor (a replacement must shrink its
-  // source) and the whole selected span is the clamp — the retained tail lies
+  // Free at least the configured share of the nodes actually available to this
+  // cut, not the whole selected span: a preserved summary is never removed, so
+  // pricing its tokens as removable would overstate the relief and destroy the
+  // suffix. The stub price is still the hard floor (a replacement must shrink
+  // its source) and the removable run is the clamp — the retained tail lies
   // outside it.
   const targetTokens = Math.max(
     stubTokenCount + 1,
-    Math.ceil(prepared.shadowedRouteTokenCount * dependencies.summarizerPolicy.mechanicalFreeShare)
+    Math.ceil(droppableTokens * dependencies.summarizerPolicy.mechanicalFreeShare)
       + stubTokenCount,
   )
   let droppedTokens = 0
   let cut: SessionSeq | undefined
-  for (const [index, node] of prepared.selectedNodes.entries()) {
-    droppedTokens += node.tokens
+  for (let index = preservedPrefix; index <= droppableEndIdx; index += 1) {
+    // oxlint-disable-next-line typescript/no-non-null-assertion -- index is a valid selected position.
+    droppedTokens += prepared.selectedNodes[index]!.tokens
     // oxlint-disable-next-line typescript/no-non-null-assertion -- selectedNodes and shadowedSeqs are parallel.
     const seq = prepared.shadowedSeqs[index]!
     if (droppedTokens >= targetTokens && toolPairingBalancedAfter(session, seq)) {
@@ -730,28 +975,32 @@ function mechanicalCompaction(
     }
   }
   if (cut === undefined) {
-    // Clamp to the whole selected span: the newest balanced boundary at or
-    // before its end. Nothing beyond the span is ever removed, so the retained
-    // tail keeps its verbatim budget.
-    for (let index = prepared.shadowedSeqs.length - 1; index >= 0; index -= 1) {
-      // oxlint-disable-next-line typescript/no-non-null-assertion -- index is a valid position.
+    // Clamp to the removable run: the newest balanced boundary at or before its
+    // end. Nothing beyond that run is ever removed, so the preserved
+    // checkpoints and the retained tail keep their verbatim budget.
+    for (let index = droppableEndIdx; index >= preservedPrefix; index -= 1) {
+      // oxlint-disable-next-line typescript/no-non-null-assertion -- index is a valid selected position.
       const seq = prepared.shadowedSeqs[index]!
+      /* v8 ignore next -- a validated span always has a balanced boundary in its removable run. */
       if (toolPairingBalancedAfter(session, seq)) {
         cut = seq
         break
       }
     }
   }
+  /* v8 ignore next -- the same validated balanced endpoint makes the clamp above find a cut. */
   if (cut === undefined) return null
 
-  const selection = validateSurfaceRegion(session, prepared.start, cut)
+  const selection = validateSurfaceRegion(session, droppableStart, cut)
   const dropped = prepareCompaction(dependencies, session, selection)
+  const carried = collectCarriedOmissions(session, dropped.shadowedSeqs)
   const checkpointMessage = createUserMessage({
     content: frameMechanicalOmission(
       dropped.start,
       dropped.end,
       dropped.shadowedSeqs.length,
       framing.searchRead,
+      { ranges: carried.ranges, overflow: carried.overflow },
     ),
     source: compactCheckpointSource(compactionId, sourceCommandId),
   })
@@ -767,6 +1016,7 @@ function mechanicalCompaction(
     // Why this level of the failure ladder ran outlives the live journal.
     summarizationFailure: failure,
     checkpointMessage,
+    ...carried.sourceSeqs.length === 0 ? {} : { carriedSourceEventSeqs: carried.sourceSeqs },
   }
 }
 
@@ -827,6 +1077,7 @@ function commitCompactionBody(
     maxTokens,
     usage,
     summarizationFailure,
+    carriedSourceEventSeqs,
     checkpointMessage,
   } = summarized
   const callRecord = summarized.llmStreamCall === true
@@ -850,7 +1101,12 @@ function commitCompactionBody(
   })
   session.append('user/message', checkpointMessage, {
     surfaceOp: { op: 'replace', startSeq: start, endSeq: end },
-    sourceEventSeqs: [startEvent.seq, summaryEvent.seq, ...shadowedSeqs],
+    sourceEventSeqs: [...new Set([
+      startEvent.seq,
+      summaryEvent.seq,
+      ...shadowedSeqs,
+      ...(carriedSourceEventSeqs ?? []),
+    ])],
   })
   return {
     compactionId: startEvent.data.compactionId,

@@ -48,6 +48,28 @@ describe('McpMountsChip', () => {
     expect(screen.queryByRole('button')).toBeNull()
   })
 
+  it('keeps the mount selector identity stable between reads of an unchanged snapshot', () => {
+    const state = {
+      byId: { s1: { projectionValues: { mcpMounts: { mounted: ['unreal-mcp', 7] } } } },
+    }
+    const selectors: Array<(snapshot: typeof state) => unknown> = []
+    render(<McpMountsChip {...({
+      sessionId: 's1',
+      useSessions: (selector: (snapshot: typeof state) => unknown) => {
+        selectors.push(selector)
+        return selector(state)
+      },
+      t: translate,
+    } as unknown as McpMountsChipProps)} />)
+    const selector = selectors[0]
+    expect(selector).toBeDefined()
+    const first = selector!(state)
+    const second = selector!(state)
+    expect(first).toBe(second)
+    // The render filters non-string entries without changing the selected reference.
+    expect(screen.getByRole('button', { name: en.chipLabel.replace('{count}', '1') })).toBeTruthy()
+  })
+
   it('shows the count and lists the live rows on open', async () => {
     const fetchMock = renderChip(['unreal-mcp'], async () => jsonResponse(MOUNTS))
     const chip = screen.getByRole('button', { name: en.chipLabel.replace('{count}', '1') })

@@ -2383,6 +2383,11 @@ select.input {
   color: var(--dsw-alias-state-error-primary);
 }
 
+.heavyHealthBadge[data-ok='auth'] {
+  border-color: var(--dsw-alias-state-warn-primary);
+  color: var(--dsw-alias-state-warn-label);
+}
+
 .heavyLinkBtn {
   border: none;
   background: none;
@@ -2566,6 +2571,33 @@ select.input {
   color: var(--dsw-alias-state-success-primary);
 }
 
+.heavyPreflight[data-state='auth-required'] {
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.heavyInstalledPanel {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.heavyInstalledRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.heavyInstalledInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
 .heavyOnlineDot {
   width: 7px;
   height: 7px;
@@ -2580,6 +2612,10 @@ select.input {
 
 .heavyOnlineDot[data-state='offline'] {
   background: var(--dsw-alias-state-error-primary);
+}
+
+.heavyOnlineDot[data-state='auth'] {
+  background: var(--dsw-alias-state-warn-primary);
 }
 
 .heavyDocs {

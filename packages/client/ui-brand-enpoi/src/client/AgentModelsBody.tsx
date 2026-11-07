@@ -42,25 +42,6 @@ function MicroIcon({ d, size = 10 }: { d: string; size?: number }) {
   )
 }
 
-/** Monochrome tab glyph for Agent Models (thin stroke, currentColor), also the guide capsule icon. */
-export function FleetRoutingIcon({
-  size = 16,
-  className,
-}: {
-  size?: number | undefined
-  active?: boolean | undefined
-  className?: string | undefined
-}) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
-      <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-      <circle cx="5.5" cy="4.5" r="1.4" fill="var(--dsh-sidebar-bg, #0f172a)" stroke="currentColor" strokeWidth="1.1" />
-      <circle cx="10.5" cy="8" r="1.4" fill="var(--dsh-sidebar-bg, #0f172a)" stroke="currentColor" strokeWidth="1.1" />
-      <circle cx="7.5" cy="11.5" r="1.4" fill="var(--dsh-sidebar-bg, #0f172a)" stroke="currentColor" strokeWidth="1.1" />
-    </svg>
-  )
-}
-
 /** One resolved model picker face: a live directory plus its load trigger. */
 export interface AgentModelsDirectoryFace {
   available: boolean

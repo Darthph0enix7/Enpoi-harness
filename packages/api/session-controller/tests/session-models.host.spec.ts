@@ -13,7 +13,7 @@ import AttachmentStore from '@deepseek-ai/dsh-attachment'
 import LlmRuntime, { LlmAdapter, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type {
   GenerateOptions, LlmCallConfig, LlmCallConfigAdapterDefaults, LlmModelInfo,
-  LlmModelReasoningInfo, LlmProviderInfo, LlmResolvedModelInfo, StreamChunk,
+  LlmModelReasoningInfo, LlmProviderInfo, LlmResolvedModelInfo, ModelModality, StreamChunk,
   UserMessage,
 } from '@deepseek-ai/dsh-llm'
 import SessionStore from '@deepseek-ai/dsh-session'
@@ -45,6 +45,7 @@ class CatalogAdapter extends LlmAdapter {
     private readonly models: readonly LlmModelInfo[] | Error,
     private readonly reasoning?: LlmModelReasoningInfo,
     private readonly exactError?: Error,
+    private readonly resolveExact?: (provider: string, model: string) => LlmResolvedModelInfo,
   ) {
     super()
   }
@@ -61,6 +62,7 @@ class CatalogAdapter extends LlmAdapter {
 
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     if (this.exactError !== undefined) return Promise.reject(this.exactError)
+    if (this.resolveExact !== undefined) return Promise.resolve(this.resolveExact(provider, model))
     return Promise.resolve({
       provider,
       id: model,
@@ -383,6 +385,9 @@ describe('Web session model selection', () => {
       { provider: 'deepseek-account', id: 'first-model', name: 'First' },
       { provider: 'deepseek-account', id: 'second-model', name: 'Second' },
     ], REASONING)))
+    ctx.effect(() => ctx.llm.registerAdapter(['removed'], new CatalogAdapter('Removed', [
+      { provider: 'removed', id: 'saved', name: 'Saved' },
+    ], REASONING)))
     const describe = vi.fn(async () => ({ configured: configuredKey, writable: true }))
     ctx.provide('credentials', { describe } as never)
     ctx.effect(() => ctx.llm.registerConfigurableProviders([
@@ -441,6 +446,8 @@ describe('Web session model selection', () => {
         message: 'adapter returned invalid or duplicate model metadata for provider "duplicate"',
       },
     ])
+    expect(catalog.groups.some(group => group.id === 'empty')).toBe(false)
+    expect(catalog.failures.some(failure => failure.id === 'empty')).toBe(false)
     await ctx.fiber.dispose()
   })
 
@@ -483,6 +490,109 @@ describe('Web session model selection', () => {
     expect(catalog.failures).toContainEqual({
       id: 'string-failure', name: 'String Failure', message: 'string catalog failure',
     })
+    await ctx.fiber.dispose()
+  })
+
+  it('keeps a DeepSeek-style request cap as defaultMaxTokens without fabricating an output capability', async () => {
+    const { ctx } = await harness()
+    ctx.llm.registerAdapter(['deepseek-catalog'], new CatalogAdapter('DeepSeek', [
+      { provider: 'deepseek-catalog', id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+    ], undefined, undefined, (provider, model) => ({
+      provider,
+      id: model,
+      name: 'DeepSeek V4 Flash',
+      context: { contextWindow: 1_000_000, source: 'default' },
+      defaultMaxTokens: 256_000,
+    })))
+    createSessionTestRemote(ctx, {
+      defaultModelSelection: () => ({ provider: 'deepseek-catalog', model: 'deepseek-v4-flash' }),
+      cwd: '/tmp',
+    })
+
+    const catalog = await buildModelCatalog(ctx)
+    expect(catalog.groups.find(group => group.id === 'deepseek-catalog')?.models).toEqual([{
+      id: 'deepseek-v4-flash',
+      name: 'DeepSeek V4 Flash',
+      contextWindow: 1_000_000,
+      contextWindowSource: 'default',
+      defaultMaxTokens: 256_000,
+    }])
+    await ctx.fiber.dispose()
+  })
+
+  it('projects output capability and request defaults with detached capacity provenance', async () => {
+    const { ctx } = await harness()
+    const effective: ModelModality[] = ['text', 'image']
+    const advertised: ModelModality[] = ['text', 'image', 'audio', 'pdf']
+    const unsupported = ['ultra']
+    ctx.llm.registerAdapter(['capable'], new CatalogAdapter('Capable', [
+      { provider: 'capable', id: 'known', name: 'Known' },
+      { provider: 'capable', id: 'assumed', name: 'Assumed' },
+    ], undefined, undefined, (provider, model) => ({
+      provider,
+      id: model,
+      name: model === 'known' ? 'Known' : 'Assumed',
+      context: model === 'known'
+        ? {
+          contextWindow: 128_000,
+          maxInputTokens: 120_000,
+          maxInputTokensSource: 'discovered',
+          source: 'discovered',
+        }
+        : { contextWindow: 32_000, source: 'default' },
+      maxOutputTokens: model === 'known' ? 128_000 : 8_000,
+      maxOutputTokensSource: model === 'known' ? 'installed' : 'default',
+      defaultMaxTokens: 4_000,
+      inputModalities: effective,
+      advertisedInputModalities: advertised,
+      tools: true,
+      unsupportedReasoningEfforts: unsupported,
+    })))
+    createSessionTestRemote(ctx, {
+      defaultModelSelection: () => ({ provider: 'capable', model: 'known' }),
+      cwd: '/tmp',
+    })
+
+    const catalog = await buildModelCatalog(ctx)
+    const group = catalog.groups.find(group => group.id === 'capable')
+    expect(group?.models).toEqual([
+      {
+        id: 'known',
+        name: 'Known',
+        contextWindow: 128_000,
+        contextWindowSource: 'discovered',
+        maxInputTokens: 120_000,
+        maxInputTokensSource: 'discovered',
+        maxTokens: 128_000,
+        maxTokensSource: 'installed',
+        defaultMaxTokens: 4_000,
+        inputModalities: ['text', 'image'],
+        advertisedInputModalities: ['text', 'image', 'audio', 'pdf'],
+        tools: true,
+        unsupportedReasoningEfforts: ['ultra'],
+      },
+      {
+        id: 'assumed',
+        name: 'Assumed',
+        contextWindow: 32_000,
+        contextWindowSource: 'default',
+        maxTokens: 8_000,
+        maxTokensSource: 'default',
+        defaultMaxTokens: 4_000,
+        inputModalities: ['text', 'image'],
+        advertisedInputModalities: ['text', 'image', 'audio', 'pdf'],
+        tools: true,
+        unsupportedReasoningEfforts: ['ultra'],
+      },
+    ])
+    // Adapter-owned lists are copied, so later mutation cannot rewrite the
+    // capacity facts already projected for either model.
+    effective.push('video')
+    advertised.length = 0
+    unsupported.push('max')
+    expect(group?.models[0]?.inputModalities).toEqual(['text', 'image'])
+    expect(group?.models[0]?.advertisedInputModalities).toEqual(['text', 'image', 'audio', 'pdf'])
+    expect(group?.models[0]?.unsupportedReasoningEfforts).toEqual(['ultra'])
     await ctx.fiber.dispose()
   })
 

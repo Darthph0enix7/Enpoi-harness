@@ -1,8 +1,77 @@
 diff --git a/lib/client.js b/lib/client.js
-index c794079..d76fff1 100644
+index c794079..fb9c8bd 100644
 --- a/lib/client.js
 +++ b/lib/client.js
-@@ -613,7 +613,7 @@ window.__ModuleLoader__.load({
+@@ -402,6 +402,7 @@ window.__ModuleLoader__.load({
+ 		const sourceSets = /* @__PURE__ */ new WeakMap();
+ 		const contentObservers = /* @__PURE__ */ new WeakMap();
+ 		const contentFrames = /* @__PURE__ */ new WeakMap();
++		const contentMatches = /* @__PURE__ */ new WeakMap();
+ 		/** Write a marker attribute only when the desired state is not applied yet. */
+ 		function applyMarker(el, attr, active) {
+ 			if (el === null) return;
+@@ -442,12 +443,40 @@ window.__ModuleLoader__.load({
+ 		* data-chat-anchor-key nodes during a switch; a body-wide query would count
+ 		* those stale rows and flash the composer frost over the new empty topic.
+ 		*/
++		function findConversationContent(doc) {
++			const cached = contentMatches.get(doc);
++			if (cached !== undefined && cached.isConnected) return cached;
++			const found = doc.body === null ? null : doc.body.querySelector(ACTIVE_CONVERSATION_CONTENT_SELECTOR);
++			if (found === null) contentMatches.delete(doc);
++			else contentMatches.set(doc, found);
++			return found;
++		}
+ 		function updateConversationContent(doc) {
+-			const has = doc.body !== null && doc.body.querySelector(ACTIVE_CONVERSATION_CONTENT_SELECTOR) !== null;
++			const has = doc.body !== null && findConversationContent(doc) !== null;
+ 			applyMarker(doc.body, CONVERSATION_CONTENT_ATTR, has);
+ 			applyMarker(doc.documentElement, CONVERSATION_CONTENT_ATTR, has);
+ 		}
+ 		/**
++		* True when a batch can change the content marker. Once a connected row is
++		* cached only its removal matters; before that only an insertion that is
++		* (or contains) a row matters.
++		*/
++		function relevantConversationContentMutation(doc, records) {
++			const cached = contentMatches.get(doc);
++			const live = cached !== undefined && cached.isConnected ? cached : null;
++			for (const record of records) {
++				if (cached !== undefined) {
++					for (const node of record.removedNodes) if (node.nodeType === 1 && node.contains(cached)) return true;
++				}
++				if (live !== null) continue;
++				for (const node of record.addedNodes) {
++					if (node.nodeType !== 1) continue;
++					if (node.matches(ACTIVE_CONVERSATION_CONTENT_SELECTOR) || node.querySelector(ACTIVE_CONVERSATION_CONTENT_SELECTOR) !== null) return true;
++				}
++			}
++			return false;
++		}
++		/**
+ 		* Coalesce the mutation bursts of a streaming conversation into one content
+ 		* check per frame; a check scheduled for a document that stopped observing is
+ 		* dropped so a late frame can never re-add the marker after teardown.
+@@ -471,7 +500,9 @@ window.__ModuleLoader__.load({
+ 			updateConversationContent(doc);
+ 			const win = doc.defaultView;
+ 			if (win === null || typeof win.MutationObserver !== "function") return;
+-			const observer = new win.MutationObserver(() => scheduleConversationContent(doc));
++			const observer = new win.MutationObserver((records) => {
++				if (relevantConversationContentMutation(doc, records)) scheduleConversationContent(doc);
++			});
+ 			observer.observe(doc.body ?? doc.documentElement, {
+ 				childList: true,
+ 				subtree: true
+@@ -480,6 +511,7 @@ window.__ModuleLoader__.load({
+ 		}
+ 		/** Stop the content observer, cancel pending work and drop the marker. */
+ 		function stopContentObserver(doc) {
++			contentMatches.delete(doc);
+ 			const frame = contentFrames.get(doc);
+ 			if (frame !== void 0) {
+ 				const win = doc.defaultView;
+@@ -613,7 +645,7 @@ window.__ModuleLoader__.load({
  		* persisted selection and the card-driven descriptor resolution.
  		*/
  		var WallpaperController = class {
@@ -11,7 +80,7 @@ index c794079..d76fff1 100644
  			selectionValue = "";
  			modeValue = "live";
  			fitValue = "cover";
-@@ -959,7 +959,7 @@ window.__ModuleLoader__.load({
+@@ -959,7 +991,7 @@ window.__ModuleLoader__.load({
  			}
  			readAll() {
  				const value = this.scope.getSnapshot().value ?? {};
@@ -20,6 +89,476 @@ index c794079..d76fff1 100644
  				this.selectionValue = typeof value.selection === "string" ? value.selection : "";
  				this.modeValue = value.mode === "frame" ? "frame" : "live";
  				const rawFit = value.fit;
+@@ -3115,6 +3147,12 @@ window.__ModuleLoader__.load({
+ 			persist;
+ 			/** The fixed backdrop-filter element, present only while active blur > 0. */
+ 			blurElement = null;
++			/** The backdrop-filter value currently written on blurElement. */
++			appliedBlur = "";
++			/** The last conversation row found; reused while it stays connected. */
++			contentNode = null;
++			/** Attribute-only MutationObserver on <html> for visual-mode switches. */
++			rootObserver = null;
+ 			/** The body MutationObserver, installed lazily once a blur is active. */
+ 			observer = null;
+ 			/** Pending requestAnimationFrame id for a coalesced recheck. */
+@@ -3189,14 +3227,14 @@ window.__ModuleLoader__.load({
+ 			}
+ 			setBlurEmpty(value) {
+ 				this.blurEmptyValue = this.clampBlur(value);
+-				this.ensureObserver();
++				this.ensureContentObserver();
+ 				this.syncBlur();
+ 				this.publish();
+ 				this.persist(this.snapshot());
+ 			}
+ 			setBlurContent(value) {
+ 				this.blurContentValue = this.clampBlur(value);
+-				this.ensureObserver();
++				this.ensureContentObserver();
+ 				this.syncBlur();
+ 				this.publish();
+ 				this.persist(this.snapshot());
+@@ -3226,6 +3264,12 @@ window.__ModuleLoader__.load({
+ 					this.observer.disconnect();
+ 					this.observer = null;
+ 				}
++				if (this.rootObserver !== null) {
++					this.rootObserver.disconnect();
++					this.rootObserver = null;
++				}
++				this.contentNode = null;
++				this.appliedBlur = "";
+ 			}
+ 			/** Copy one config into the live fields, defaults filling the gaps. */
+ 			assign(config) {
+@@ -3272,22 +3316,63 @@ window.__ModuleLoader__.load({
+ 			*/
+ 			syncBlur() {
+ 				if (this.disposed) return;
+-				if (this.hasWallpaper()) {
++				this.ensureRootObserver();
++				if (!this.hasPaintedBackdrop() || this.hasWallpaper()) {
+ 					this.removeBlurElement();
++					this.stopContentObserver();
+ 					return;
+ 				}
+ 				if (!this.enabledValue) {
+ 					this.removeBlurElement();
++					this.stopContentObserver();
+ 					return;
+ 				}
+-				this.ensureObserver();
++				this.ensureContentObserver();
+ 				const active = this.hasConversationContent() ? this.blurContentValue : this.blurEmptyValue;
+ 				if (active > 0) this.ensureBlurElement(active);
+ 				else this.removeBlurElement();
+ 			}
++			/** True when a skin or custom theme paints its own backdrop art. */
++			hasPaintedBackdrop() {
++				const root = document.documentElement;
++				return root !== null && (root.hasAttribute("data-dsh-skin") || root.hasAttribute("data-dsh-custom-theme"));
++			}
+ 			/** True when the conversation pane hosts at least one message row. */
+ 			hasConversationContent() {
+-				return document.querySelector(CONVERSATION_CONTENT_SELECTOR) !== null;
++				if (this.contentNode !== null && this.contentNode.isConnected) return true;
++				this.contentNode = document.querySelector(CONVERSATION_CONTENT_SELECTOR);
++				return this.contentNode !== null;
++			}
++			/**
++			* True when a mutation batch can change the empty/content blur strength.
++			* Once a connected row is cached only a removal (or a class change on
++			* that row) can change the answer, so unrelated structural churn never
++			* schedules a frame or re-queries the document.
++			*/
++			hasRelevantBlurMutation(records) {
++				const cached = this.contentNode;
++				const live = cached !== null && cached.isConnected ? cached : null;
++				for (const record of records) {
++					if (record.type === "attributes") {
++						if (live !== null) {
++							if (record.target !== live) continue;
++							if (!live.matches(CONVERSATION_CONTENT_SELECTOR)) this.contentNode = null;
++							return true;
++						}
++						const target = record.target;
++						if (target.nodeType === 1 && target.matches(CONVERSATION_CONTENT_SELECTOR)) return true;
++						continue;
++					}
++					if (cached !== null) {
++						for (const node of record.removedNodes) if (node.nodeType === 1 && node.contains(cached)) return true;
++					}
++					if (live !== null) continue;
++					for (const node of record.addedNodes) {
++						if (node.nodeType !== 1) continue;
++						if (node.matches(CONVERSATION_CONTENT_SELECTOR) || node.querySelector(CONVERSATION_CONTENT_SELECTOR) !== null) return true;
++					}
++				}
++				return false;
+ 			}
+ 			/** True while a Wallpaper Engine wallpaper is mounted. */
+ 			hasWallpaper() {
+@@ -3295,6 +3380,7 @@ window.__ModuleLoader__.load({
+ 			}
+ 			/** Create (if needed) and size the fixed backdrop-filter element. */
+ 			ensureBlurElement(active) {
++				const blur = "blur(" + active + "px)";
+ 				if (this.blurElement === null) {
+ 					const element = document.createElement("div");
+ 					element.style.position = "fixed";
+@@ -3303,9 +3389,11 @@ window.__ModuleLoader__.load({
+ 					element.style.pointerEvents = "none";
+ 					element.setAttribute("aria-hidden", "true");
+ 					this.blurElement = element;
++					this.appliedBlur = "";
+ 					document.body.appendChild(element);
+ 				}
+-				const blur = "blur(" + active + "px)";
++				if (this.appliedBlur === blur) return;
++				this.appliedBlur = blur;
+ 				this.blurElement.style.backdropFilter = blur;
+ 				this.blurElement.style.setProperty("-webkit-backdrop-filter", blur);
+ 			}
+@@ -3314,26 +3402,45 @@ window.__ModuleLoader__.load({
+ 				if (this.blurElement === null) return;
+ 				this.blurElement.remove();
+ 				this.blurElement = null;
++				this.appliedBlur = "";
+ 			}
+ 			/**
+-			* Install the MutationObserver on document.body only when either blur
+-			* field is active, so a fully-disabled blur never pays the observation
+-			* cost. Runs lazily on the first non-zero set.
++			* Watch the visual-mode switches on <html> so a live skin or custom
++			* theme activation re-evaluates the backdrop gate. One element and
++			* three attributes only, so the stock look pays almost nothing.
+ 			*/
+-			ensureObserver() {
++			ensureRootObserver() {
++				if (this.disposed || this.rootObserver !== null) return;
++				if (this.blurEmptyValue <= 0 && this.blurContentValue <= 0) return;
++				this.rootObserver = new MutationObserver(() => this.scheduleRecheck());
++				this.rootObserver.observe(document.documentElement, {
++					attributes: true,
++					attributeFilter: ["data-dsh-skin", "data-dsh-custom-theme", "data-dsh-wallpaper-active"]
++				});
++			}
++			/**
++			* Watch conversation rows only while a painted backdrop can be blurred.
++			* The callback filters the batch before scheduling a frame, so unrelated
++			* structural churn pays no frame and no document query.
++			*/
++			ensureContentObserver() {
+ 				if (this.disposed || this.observer !== null) return;
+ 				if (this.blurEmptyValue <= 0 && this.blurContentValue <= 0) return;
+-				this.observer = new MutationObserver(() => this.scheduleRecheck());
++				this.observer = new MutationObserver((records) => {
++					if (this.hasRelevantBlurMutation(records)) this.scheduleRecheck();
++				});
+ 				this.observer.observe(document.body, {
+ 					childList: true,
+ 					subtree: true,
+ 					attributes: true,
+ 					attributeFilter: ["class"]
+ 				});
+-				this.observer.observe(document.documentElement, {
+-					attributes: true,
+-					attributeFilter: ["data-dsh-wallpaper-active"]
+-				});
++			}
++			/** Drop the body-wide content watch (stock look, wallpaper, teardown). */
++			stopContentObserver() {
++				if (this.observer === null) return;
++				this.observer.disconnect();
++				this.observer = null;
+ 			}
+ 			/** Coalesce burst mutations into one rAF-delayed recheck. */
+ 			scheduleRecheck() {
+@@ -4117,6 +4224,16 @@ window.__ModuleLoader__.load({
+ 				if (observedComposer !== null && observedComposer.isConnected) return observedComposer;
+ 				return doc.body === null ? null : doc.body.querySelector(composerSelector);
+ 			};
++			/**
++			* After the composer is located, watch only its parent's direct children;
++			* the ResizeObserver owns size, this only detects a replacement.
++			*/
++			const watchComposerParent = (composer) => {
++				const parent = composer.parentNode;
++				if (mutationObserver === null || parent === null) return;
++				mutationObserver.disconnect();
++				mutationObserver.observe(parent, { childList: true });
++			};
+ 			const syncHeight = () => {
+ 				if (doc.body === null) return;
+ 				const composer = resolveComposer();
+@@ -4125,6 +4242,7 @@ window.__ModuleLoader__.load({
+ 					if (observedComposer !== null && resizeObserver !== null) resizeObserver.unobserve(observedComposer);
+ 					observedComposer = composer;
+ 					if (resizeObserver !== null) resizeObserver.observe(composer);
++					watchComposerParent(composer);
+ 				}
+ 				const rect = composer.getBoundingClientRect();
+ 				if (rect.height <= 0) return;
+@@ -4146,9 +4264,30 @@ window.__ModuleLoader__.load({
+ 					syncHeight();
+ 				});
+ 			};
+-			if (win !== null && typeof win.ResizeObserver === "function") resizeObserver = new win.ResizeObserver(() => syncHeight());
++			if (win !== null && typeof win.ResizeObserver === "function") resizeObserver = new win.ResizeObserver(() => {
++				if (observedComposer !== null && !observedComposer.isConnected) observedComposer = null;
++				syncHeight();
++			});
+ 			if (win !== null && typeof win.MutationObserver === "function" && doc.body !== null) {
+-				mutationObserver = new win.MutationObserver(() => scheduleSync());
++				mutationObserver = new win.MutationObserver((records) => {
++					for (const record of records) {
++						for (const node of record.addedNodes) {
++							if (node.nodeType !== 1) continue;
++							if (node.matches(composerSelector) || node.querySelector(composerSelector) !== null) {
++								scheduleSync();
++								return;
++							}
++						}
++						for (const node of record.removedNodes) {
++							if (node.nodeType !== 1) continue;
++							if (node === observedComposer || (observedComposer !== null && node.contains(observedComposer))) {
++								observedComposer = null;
++								scheduleSync();
++								return;
++							}
++						}
++					}
++				});
+ 				mutationObserver.observe(doc.body, {
+ 					childList: true,
+ 					subtree: true
+@@ -4226,7 +4365,209 @@ window.__ModuleLoader__.load({
+ 		}
+ 		/** Remove every node an activation left in a layer (used on dispose). */
+ 		function clearLayer(layer) {
+-			while (layer.firstChild) layer.removeChild(layer.firstChild);
++			while (layer.firstChild) {
++				const child = layer.firstChild;
++				const release = backgroundReleases.get(child);
++				if (release !== void 0) {
++					backgroundReleases.delete(child);
++					release();
++				}
++				layer.removeChild(child);
++			}
++		}
++		/** Max long edge for a manifest background image (decode/GPU memory guard). */
++		const BACKGROUND_MAX_EDGE = 1920;
++		/** WebP quality for the background derivative (JPEG fallback uses it too). */
++		const BACKGROUND_WEBP_QUALITY = .82;
++		/** Session cache: original URL -> shared derivative entry. */
++		const backgroundDerivatives = /* @__PURE__ */ new Map();
++		/** Release handle per mounted background node (see clearLayer). */
++		const backgroundReleases = /* @__PURE__ */ new WeakMap();
++		/** Apply token per mounted background node; a newer token invalidates old work. */
++		const backgroundTokens = /* @__PURE__ */ new WeakMap();
++		let backgroundTokenSeq = 0;
++		/**
++		* True when the URL is a same-origin JPEG, the only source this pass
++		* re-encodes. Animated GIF, (A)PNG, WebP, SVG and video are left alone.
++		*/
++		function compressibleBackgroundSource(doc, src) {
++			try {
++				const url = new URL(src, doc.baseURI);
++				return url.origin === doc.location.origin && /\.jpe?g$/i.test(url.pathname);
++			} catch {
++				return false;
++			}
++		}
++		/** Drop one reference; revoke and forget the blob URL when the last one goes. */
++		function releaseBackgroundDerivative(src) {
++			const entry = backgroundDerivatives.get(src);
++			if (entry === void 0) return;
++			entry.refs -= 1;
++			if (entry.refs > 0) return;
++			backgroundDerivatives.delete(src);
++			if (entry.url !== null && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(entry.url);
++		}
++		/** Run the one-time encode between paints, never during the skin switch. */
++		function scheduleBackgroundWork(doc, task) {
++			const win = doc.defaultView;
++			if (win !== null && typeof win.requestIdleCallback === "function") {
++				win.requestIdleCallback(() => task(), { timeout: 2e3 });
++				return;
++			}
++			setTimeout(task, 0);
++		}
++		/**
++		* Draw a loaded background image to a capped canvas and encode it as WebP,
++		* falling back to JPEG when the browser cannot encode WebP. Null on any
++		* unsupported API or failure; the caller keeps the original image.
++		*/
++		function encodeBackgroundDerivative(doc, img, width, height) {
++			return new Promise((resolve) => {
++				let canvas;
++				try {
++					canvas = doc.createElement("canvas");
++					canvas.width = width;
++					canvas.height = height;
++					const context = typeof canvas.getContext === "function" ? canvas.getContext("2d", {
++						alpha: true,
++						colorSpace: "srgb"
++					}) : null;
++					if (context === null) {
++						resolve(null);
++						return;
++					}
++					context.drawImage(img, 0, 0, width, height);
++				} catch {
++					resolve(null);
++					return;
++				}
++				if (typeof canvas.toBlob !== "function") {
++					resolve(null);
++					return;
++				}
++				const encode = (blob) => {
++					if (blob !== null && blob.type === "image/webp") {
++						resolve(blob);
++						return;
++					}
++					try {
++						canvas.toBlob((jpeg) => resolve(jpeg !== null && jpeg.type === "image/jpeg" ? jpeg : null), "image/jpeg", BACKGROUND_WEBP_QUALITY);
++					} catch {
++						resolve(null);
++					}
++				};
++				try {
++					canvas.toBlob(encode, "image/webp", BACKGROUND_WEBP_QUALITY);
++				} catch {
++					resolve(null);
++				}
++			});
++		}
++		/**
++		* Downscale one loaded background <img> to a cached blob URL when its long
++		* edge exceeds BACKGROUND_MAX_EDGE. Fails open: unsupported sources, small
++		* images, missing canvas APIs and encode errors keep the original src. The
++		* node is guarded by a token and isConnected, so a replaced or removed
++		* background never receives a stale blob.
++		*/
++		function shrinkBackgroundImage(doc, img, src) {
++			if (!compressibleBackgroundSource(doc, src)) return;
++			const token = ++backgroundTokenSeq;
++			backgroundTokens.set(img, token);
++			let held = false;
++			let applied = false;
++			const release = () => {
++				if (backgroundTokens.get(img) === token) backgroundTokens.set(img, 0);
++				if (!held) return;
++				held = false;
++				releaseBackgroundDerivative(src);
++			};
++			const apply = (url) => {
++				if (url === null) return;
++				if (backgroundTokens.get(img) !== token || !img.isConnected) {
++					release();
++					return;
++				}
++				applied = true;
++				img.src = url;
++			};
++			backgroundReleases.set(img, release);
++			const ready = backgroundDerivatives.get(src);
++			if (ready !== void 0 && ready.status === "ready") {
++				held = true;
++				ready.refs += 1;
++			}
++			const start = () => {
++				if (backgroundTokens.get(img) !== token) {
++					release();
++					return;
++				}
++				const width = img.naturalWidth;
++				const height = img.naturalHeight;
++				if (!(width > 0) || !(height > 0) || Math.max(width, height) <= BACKGROUND_MAX_EDGE) {
++					release();
++					return;
++				}
++				const entry = backgroundDerivatives.get(src);
++				if (entry !== void 0 && entry.status === "ready") {
++					if (!held) {
++						held = true;
++						entry.refs += 1;
++					}
++					apply(entry.url);
++					return;
++				}
++				if (entry !== void 0 && entry.status === "pending") {
++					if (!held) {
++						held = true;
++						entry.refs += 1;
++					}
++					entry.waiters.push(apply);
++					return;
++				}
++				const scale = BACKGROUND_MAX_EDGE / Math.max(width, height);
++				const current = {
++					status: "pending",
++					url: null,
++					refs: 1,
++					waiters: [apply]
++				};
++				held = true;
++				backgroundDerivatives.set(src, current);
++				encodeBackgroundDerivative(doc, img, Math.max(1, Math.round(width * scale)), Math.max(1, Math.round(height * scale))).then((blob) => {
++					let url = null;
++					if (blob !== null && typeof URL.createObjectURL === "function") {
++						try {
++							url = URL.createObjectURL(blob);
++						} catch {
++							url = null;
++						}
++					}
++					const live = backgroundDerivatives.get(src);
++					if (live !== current || current.refs <= 0) {
++						if (url !== null && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(url);
++						if (live === current) backgroundDerivatives.delete(src);
++						return;
++					}
++					if (url === null) {
++						backgroundDerivatives.delete(src);
++						return;
++					}
++					current.status = "ready";
++					current.url = url;
++					const waiters = current.waiters;
++					current.waiters = [];
++					for (const notify of waiters) notify(url);
++				}).catch(() => {
++					if (backgroundDerivatives.get(src) === current) backgroundDerivatives.delete(src);
++				});
++			};
++			const request = () => scheduleBackgroundWork(doc, start);
++			if (img.complete && img.naturalWidth > 0) request();
++			else img.addEventListener("load", request, { once: true });
++			img.addEventListener("error", () => {
++				if (!applied) release();
++			}, { once: true });
+ 		}
+ 		/**
+ 		* Build the background media element for a manifest backgroundMedia layer.
+@@ -4238,11 +4579,13 @@ window.__ModuleLoader__.load({
+ 			const fullBleed = "position:absolute;top:0;right:0;bottom:0;left:0;width:100%;height:100%;object-fit:cover;";
+ 			if (layer.type === "image") {
+ 				const img = doc.createElement("img");
+-				img.src = `${assetBase}/${layer.src}`;
++				const src = `${assetBase}/${layer.src}`;
++				img.src = src;
+ 				img.alt = "";
+ 				img.setAttribute("aria-hidden", "true");
+ 				img.style.cssText = fullBleed;
+ 				nodes.push(img);
++				shrinkBackgroundImage(doc, img, img.src);
+ 			} else {
+ 				const video = doc.createElement("video");
+ 				video.src = `${assetBase}/${layer.src}`;
 diff --git a/lib/index.js b/lib/index.js
 index 9affcbf..5ed4e58 100644
 --- a/lib/index.js

@@ -17,6 +17,17 @@ export function historyEntries(
 }
 
 /**
+ * Keep only durable Client window entries as history transport records.
+ * @param entries - current Client event-window entries.
+ * @returns the contiguous durable records, without transient Assistant rows.
+ */
+export function durableHistoryRecords(
+  entries: readonly SessionEventLikeEntry[],
+): readonly SessionHistoryRecord[] {
+  return entries.filter(entry => entry.type === 'event') as unknown as readonly SessionHistoryRecord[]
+}
+
+/**
  * Read the first logical sequence represented by one wire record.
  * @param record - validated Session event.
  * @returns inclusive first Session sequence.

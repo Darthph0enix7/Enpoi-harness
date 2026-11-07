@@ -6,7 +6,7 @@ import type {
 } from '@deepseek-ai/dsh-attachment'
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { LlmAttemptId, MessageId } from '@deepseek-ai/dsh-llm/brand'
-import type { ParticipantTag, TextBlock } from '@deepseek-ai/dsh-llm'
+import type { ModelModality, ParticipantTag, TextBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionId, SessionSeqCursor } from '@deepseek-ai/dsh-session/types'
 import type { SessionProjectionMap } from '@deepseek-ai/dsh-session-projection/types'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
@@ -147,6 +147,12 @@ export interface ModelReasoning {
   readonly defaultEffort?: string
 }
 
+/**
+ * Provenance of one catalog capacity. `default` means no source stated the
+ * value and a route fallback stands in for execution, not a disclosed limit.
+ */
+export type ModelCatalogCapacitySource = 'configured' | 'discovered' | 'installed' | 'default'
+
 /** One model displayed inside its provider group. */
 export interface ModelCatalogModel {
   readonly id: string
@@ -154,8 +160,56 @@ export interface ModelCatalogModel {
   readonly description?: string
   /** Provider-owned input context capacity in tokens, when known. */
   readonly contextWindow?: number
-  /** Adapter-configured per-request output cap in tokens, when known. */
+  /**
+   * Provenance of {@link contextWindow}; absent means the adapter did not
+   * label it, while `default` names a route fallback rather than a disclosed
+   * capacity.
+   */
+  readonly contextWindowSource?: ModelCatalogCapacitySource
+  /**
+   * Maximum input (prompt-side) tokens when configuration or discovery stated
+   * it separately from {@link contextWindow}; never derived or defaulted.
+   */
+  readonly maxInputTokens?: number
+  /**
+   * Provenance of {@link maxInputTokens}; absent means the adapter did not
+   * label it, while `default` names a route fallback rather than a disclosed
+   * prompt-side cap.
+   */
+  readonly maxInputTokensSource?: ModelCatalogCapacitySource
+  /**
+   * Output-token capability of the model. A value whose
+   * {@link maxTokensSource} is `default` is the route's execution fallback,
+   * not a disclosed cap.
+   */
   readonly maxTokens?: number
+  /** Provenance of {@link maxTokens}; absent means the adapter did not label it. */
+  readonly maxTokensSource?: ModelCatalogCapacitySource
+  /**
+   * Adapter-configured per-request output cap materialized when callers omit
+   * one; a request budget, distinct from the {@link maxTokens} capability.
+   */
+  readonly defaultMaxTokens?: number
+  /**
+   * Effective request input modalities; absent means unknown, while a present
+   * list is the exact set the adapter sends.
+   */
+  readonly inputModalities?: readonly ModelModality[]
+  /**
+   * Input modalities a catalog or endpoint advertised, including tokens no
+   * native request encoding carries yet.
+   */
+  readonly advertisedInputModalities?: readonly ModelModality[]
+  /** Whether a source stated tool-call support; absent means undisclosed. */
+  readonly tools?: boolean
+  /**
+   * Whether this row's facts rest on labeled id-hints or on no disclosure at
+   * all. Absent means the row's stored settings record carried no unverified
+   * marker; a picker renders the tag only for `true`.
+   */
+  readonly unverified?: boolean
+  /** Advertised effort identifiers no selectable level accepts. */
+  readonly unsupportedReasoningEfforts?: readonly string[]
   readonly reasoning?: ModelReasoning
 }
 
@@ -1014,6 +1068,13 @@ export interface SessionFollowRequest extends Pick<SessionPageRequest, 'maxMessa
   readonly address: SessionAddress
   /** Include process-local assistant presentation frames for the Web client. */
   readonly assistantStream?: true
+  /**
+   * Inclusive durable seq the Client already holds for this address. Absent
+   * on a first open. The Host resumes only when the seq is inside the current
+   * append-only log and the dense index equals the seq; otherwise it sends
+   * the ordinary full snapshot.
+   */
+  readonly afterSeq?: SessionSeqCursor
 }
 
 /** One active assistant attempt in a reconnect opening snapshot. */
@@ -1115,6 +1176,12 @@ export type SessionFollowFrame =
     readonly revert: SessionRevertFold
     readonly projections: SessionProjectionBaseline
     readonly assistantStream?: SessionAssistantStreamBaseline
+    /**
+     * Present exactly when this opening continues a Client-held window.
+     * Echoes the request's `afterSeq`; `cursor` is the new tail and `records`
+     * is the inclusive range `(resumedFromSeq, cursor]`.
+     */
+    readonly resumedFromSeq?: SessionSeqCursor
   }
   | SessionEventEntry
   | { readonly type: 'assistant-stream'; readonly frame: SessionAssistantStreamFrame }

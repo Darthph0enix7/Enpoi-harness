@@ -211,6 +211,21 @@ export class ProjectionValueStore {
     }
   }
 
+  /**
+   * Retire the previous Host generation's watermarks while keeping its values
+   * visible. A demoted row is a cached value: the reconnected generation's
+   * baseline, frame, history seed, or list block replaces it, so a dead
+   * generation cannot outrank the new Host even when its seq exceeds the new
+   * baseline's.
+   */
+  demote(): void {
+    for (const [key, row] of this.rows) {
+      if (row.kind !== 'sequenced') continue
+      this.rows.set(key, { kind: 'cached', value: row.value })
+      this.changed(key)
+    }
+  }
+
   /** Discard one Host generation's values and watermarks while preserving subscribed faces. */
   clear(): void {
     for (const key of this.rows.keys()) {

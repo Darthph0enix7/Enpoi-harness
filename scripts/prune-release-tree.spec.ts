@@ -67,6 +67,14 @@ beforeAll(() => {
   write('profile/web/packages/enpoi-demo/tests/keeper.spec.ts', 'test\n')
   write('lib/desktop-keyboard-test-types/tests/types.spec.ts', 'test\n')
 
+  // Kept: the CLIProxyAPI provider's runtime helper scripts, metadata bundle,
+  // and upstream license are read by the shipped installer/sync, not tests.
+  write('profile/web/packages/enpoi-heavy-providers/scripts/cliproxyapi-install.mjs', '// helper\n')
+  write('profile/web/packages/enpoi-heavy-providers/scripts/cliproxyapi-release.mjs', '// release helper\n')
+  write('profile/web/packages/enpoi-heavy-providers/scripts/cliproxyapi-install.d.mts', 'export {}\n')
+  write('profile/web/packages/enpoi-provider-sync/cliproxyapi-metadata.v8.0.54.json', '{}\n')
+  write('profile/web/packages/enpoi-provider-sync/CLIProxyAPI-LICENSE.txt', 'MIT License\n')
+
   // Removed: Agent Notes (`.agents/skills` stays).
   write('.agents/notes/README.i18n.yaml', 'x\n')
   write('.agents/notes/implemented/process/note.md', 'x\n')
@@ -183,6 +191,18 @@ describe('prune-release-tree.sh', () => {
       'apps/web/dist/index.html',
       'package.json',
       'THIRD_PARTY_NOTICES.md',
+    ]) {
+      expect(exists(path), path).toBe(true)
+    }
+  })
+
+  it('keeps the CLIProxyAPI helper scripts, metadata bundle, and license', () => {
+    for (const path of [
+      'profile/web/packages/enpoi-heavy-providers/scripts/cliproxyapi-install.mjs',
+      'profile/web/packages/enpoi-heavy-providers/scripts/cliproxyapi-release.mjs',
+      'profile/web/packages/enpoi-heavy-providers/scripts/cliproxyapi-install.d.mts',
+      'profile/web/packages/enpoi-provider-sync/cliproxyapi-metadata.v8.0.54.json',
+      'profile/web/packages/enpoi-provider-sync/CLIProxyAPI-LICENSE.txt',
     ]) {
       expect(exists(path), path).toBe(true)
     }

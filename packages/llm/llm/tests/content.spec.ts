@@ -5,6 +5,7 @@ import {
   ToolCallId,
   contentHasFile,
   createDeveloperMessage,
+  createMessage,
   createToolResultMessage,
   createUserMessage,
   fileHandleText,
@@ -17,8 +18,16 @@ import {
   requiredImageOffload,
   resolveImageAttachmentAccess,
   requestImageHandleText,
+  validateLlmNativeFileInputs,
 } from '../src/index.ts'
-import type { ContentBlock, RequestMessage, RequestUserInput, ToolHistory, ToolSchema } from '../src/index.ts'
+import type {
+  ContentBlock,
+  LlmNativeFileInputs,
+  RequestMessage,
+  RequestUserInput,
+  ToolHistory,
+  ToolSchema,
+} from '../src/index.ts'
 
 const source = { kind: 'test' as const }
 
@@ -439,6 +448,68 @@ describe('file projection', () => {
     // The durable message is untouched: projection returns shallow copies.
     expect(messages[1]!.content[0]!.type).toBe('file')
     expect(messages[2]!.content[0]!.type).toBe('file')
+  })
+
+  const nativeInputs: LlmNativeFileInputs = {
+    version: 1,
+    encoders: { 'application/pdf': 'anthropic-document' },
+    perFileBytes: 10_000,
+    totalBytes: 20_000,
+    maxPayloadBytes: 30_000,
+    tokenReserve: { perFile: 50, perByte: 0.25 },
+  }
+
+  it('rejects unknown versions and incompatible native-file encoders', () => {
+    const valid = {
+      version: 1,
+      encoders: { 'application/pdf': 'anthropic-document' },
+      perFileBytes: 10,
+      totalBytes: 20,
+      maxPayloadBytes: 30,
+      tokenReserve: { perFile: 1, perByte: 0.5 },
+    }
+    expect(validateLlmNativeFileInputs(valid)).toEqual(valid)
+    expect(() => validateLlmNativeFileInputs({ ...valid, version: 2 })).toThrow(/version/)
+    expect(() => validateLlmNativeFileInputs({
+      ...valid,
+      encoders: { 'application/pdf': 'openai-chat-input-audio' },
+    })).toThrow(/incompatible/)
+    expect(() => validateLlmNativeFileInputs({
+      ...valid,
+      encoders: { 'text/plain': 'anthropic-document' },
+    })).toThrow(/unknown MIME/)
+    expect(() => validateLlmNativeFileInputs({
+      ...valid,
+      tokenReserve: { perFile: 1, perByte: -1 },
+    })).toThrow(/non-negative/)
+  })
+
+  it('preserves an accepted user-role file block when the descriptor is active', () => {
+    const block = fileBlock('notes.pdf')
+    const message = createUserMessage({ content: [{ type: 'text', text: 'read' }, block], source })
+    const projected = projectFilesToText([message], () => '/copies/notes.pdf', nativeInputs)
+    expect(projected).toEqual([message])
+    expect(projected[0]?.content[1]).toEqual(block)
+  })
+
+  it('keeps unsupported user files and non-user files as handle text', () => {
+    const unsupported = createUserMessage({ content: [fileBlock('recording.wav')], source })
+    const assistant = createMessage({
+      role: 'assistant',
+      content: [fileBlock('notes.pdf')],
+      source: { kind: 'model', provider: 'mock', model: 'mock' },
+    })
+    const tool = createToolResultMessage({ callId: ToolCallId('call'), content: [fileBlock('notes.pdf')], isError: false })
+    const projected = projectFilesToText(
+      [unsupported, assistant, tool],
+      ref => `/copies/${ref.name}`,
+      nativeInputs,
+    )
+    expect(projected.map(message => message.content)).toEqual([
+      [{ type: 'text', text: fileHandleText(fileBlock('recording.wav').attachment, '/copies/recording.wav') }],
+      [{ type: 'text', text: fileHandleText(fileBlock('notes.pdf').attachment, '/copies/notes.pdf') }],
+      [{ type: 'text', text: fileHandleText(fileBlock('notes.pdf').attachment, '/copies/notes.pdf') }],
+    ])
   })
 })
 

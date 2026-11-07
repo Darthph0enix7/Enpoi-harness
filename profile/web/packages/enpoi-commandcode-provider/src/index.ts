@@ -453,6 +453,8 @@ export function apply(ctx: Context, config: Config = {}): void {
         ...contextWindow === undefined ? {} : { contextWindow },
         ...maxTokens === undefined ? {} : { maxTokens },
         ...input === undefined ? {} : { inputModalities: input },
+        ...entry.tool_call === undefined ? {} : { tools: entry.tool_call },
+        ...entry.reasoning === undefined ? {} : { reasoning: entry.reasoning },
       }
     })
   })

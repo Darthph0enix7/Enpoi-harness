@@ -15,6 +15,9 @@ export class FakeGenerationSource {
   /** Every activity reporter passed to a generation, retained across replacement. */
   readonly reporters: Array<() => void> = []
 
+  /** Every heartbeat reporter passed to a generation, retained across replacement. */
+  readonly heartbeats: Array<() => void> = []
+
   /** When true, the source never reports ready. */
   suppressReady = false
 
@@ -24,8 +27,9 @@ export class FakeGenerationSource {
   private heldReady: Array<() => void> = []
 
   /** Open one generation. */
-  readonly source: ConnectionGenerationSource = (signal, ready, activity) => {
+  readonly source: ConnectionGenerationSource = (signal, ready, activity, heartbeat = () => {}) => {
     this.reporters.push(activity)
+    this.heartbeats.push(heartbeat)
     return this.open(signal, ready, activity)
   }
 
@@ -49,6 +53,11 @@ export class FakeGenerationSource {
   /** Report one inbound frame on every active generation. */
   pulse(): void {
     for (const connection of [...this.connections]) connection.activity()
+  }
+
+  /** Report one inbound heartbeat frame on every active generation. */
+  heartbeat(): void {
+    for (const report of [...this.heartbeats]) report()
   }
 
   /** Number of currently active generations. */

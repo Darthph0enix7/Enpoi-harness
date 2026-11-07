@@ -16,15 +16,21 @@ class WindowProbe extends EventTarget {
   }
 }
 
-function createController(stale = false): {
+function createController(stale = false, connectingFor?: number): {
   setNetworkAvailable: ReturnType<typeof vi.fn<(available: boolean) => void>>
   reconnect: ReturnType<typeof vi.fn<() => void>>
   isProbablyStale: ReturnType<typeof vi.fn<(thresholdMs: number) => boolean>>
+  hasObservedInboundHeartbeat: ReturnType<typeof vi.fn<() => boolean>>
+  wakeJitterMs: ReturnType<typeof vi.fn<() => number>>
+  connectingForMs: ReturnType<typeof vi.fn<() => number | undefined>>
 } {
   return {
     setNetworkAvailable: vi.fn<(available: boolean) => void>(),
     reconnect: vi.fn<() => void>(),
     isProbablyStale: vi.fn<(thresholdMs: number) => boolean>(() => stale),
+    hasObservedInboundHeartbeat: vi.fn<() => boolean>(() => true),
+    wakeJitterMs: vi.fn<() => number>(() => 0),
+    connectingForMs: vi.fn<() => number | undefined>(() => connectingFor),
   }
 }
 
@@ -55,7 +61,8 @@ describe('browser network watch', () => {
     expect(controller.setNetworkAvailable).not.toHaveBeenCalled()
   })
 
-  it('publishes the initial network state and follows online/offline transitions', () => {
+  it('publishes the initial network state and follows debounced online/offline transitions', () => {
+    vi.useFakeTimers()
     const win = new WindowProbe()
     win.navigator.onLine = false
     vi.stubGlobal('window', win)
@@ -64,9 +71,53 @@ describe('browser network watch', () => {
 
     expect(controller.setNetworkAvailable.mock.calls).toEqual([[false]])
     win.setOnline(true)
+    expect(controller.setNetworkAvailable).toHaveBeenLastCalledWith(false)
+    vi.advanceTimersByTime(1_000)
     expect(controller.setNetworkAvailable).toHaveBeenLastCalledWith(true)
     win.setOnline(false)
+    expect(controller.setNetworkAvailable).toHaveBeenLastCalledWith(true)
+    vi.advanceTimersByTime(1_000)
     expect(controller.setNetworkAvailable).toHaveBeenLastCalledWith(false)
+    dispose()
+  })
+
+  it('coalesces a burst of network flaps into no recovery transition', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    vi.stubGlobal('window', win)
+    const controller = createController()
+    const dispose = watchBrowserNetwork(controller, () => 'connected')
+
+    for (let cycle = 0; cycle < 4; cycle++) {
+      win.setOnline(false)
+      vi.advanceTimersByTime(10)
+      win.setOnline(true)
+      vi.advanceTimersByTime(10)
+    }
+    vi.advanceTimersByTime(2_000)
+    expect(controller.setNetworkAvailable.mock.calls).toEqual([[true]])
+    expect(controller.reconnect).not.toHaveBeenCalled()
+    dispose()
+  })
+
+  it('leaves a recently started handshake alone and replaces it after the grace', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    const doc = Object.assign(new EventTarget(), { visibilityState: 'visible' })
+    vi.stubGlobal('window', win)
+    vi.stubGlobal('document', doc)
+    const controller = createController(false, 0)
+    const dispose = watchBrowserNetwork(controller, () => 'connecting')
+
+    doc.dispatchEvent(new Event('visibilitychange'))
+    win.dispatchEvent(new Event('pageshow'))
+    vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS)
+    expect(controller.reconnect).not.toHaveBeenCalled()
+
+    controller.connectingForMs.mockReturnValue(3_000)
+    win.dispatchEvent(new Event('pageshow'))
+    vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
     dispose()
   })
 
@@ -82,7 +133,7 @@ describe('browser network watch', () => {
     doc.dispatchEvent(new Event('visibilitychange'))
     vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS * 2)
     expect(controller.reconnect).not.toHaveBeenCalled()
-    expect(vi.getTimerCount()).toBe(0)
+    expect(vi.getTimerCount()).toBe(1)
     dispose()
   })
 
@@ -143,7 +194,7 @@ describe('browser network watch', () => {
     vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS * 10)
     expect(controller.reconnect).not.toHaveBeenCalled()
     expect(controller.isProbablyStale).toHaveBeenCalledWith(WAKE_STALE_THRESHOLD_MS)
-    expect(vi.getTimerCount()).toBe(0)
+    expect(vi.getTimerCount()).toBe(1)
 
     state = 'connecting'
     win.dispatchEvent(new Event('pageshow'))
@@ -218,7 +269,7 @@ describe('browser network watch', () => {
     win.dispatchEvent(new Event('pageshow'))
     vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS * 2)
     expect(controller.reconnect).not.toHaveBeenCalled()
-    expect(vi.getTimerCount()).toBe(0)
+    expect(vi.getTimerCount()).toBe(1)
 
     // A scheduled attempt is dropped when the outcome is retracted before it fires.
     state = 'connecting'
@@ -240,7 +291,7 @@ describe('browser network watch', () => {
     win.dispatchEvent(new Event('pageshow'))
     vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS * 2)
     expect(controller.reconnect).not.toHaveBeenCalled()
-    expect(vi.getTimerCount()).toBe(0)
+    expect(vi.getTimerCount()).toBe(1)
     dispose()
   })
 
@@ -255,8 +306,10 @@ describe('browser network watch', () => {
     win.setOnline(false)
     vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS * 2)
     expect(controller.reconnect).not.toHaveBeenCalled()
+    expect(controller.setNetworkAvailable).toHaveBeenLastCalledWith(true)
+    vi.advanceTimersByTime(1_000)
     expect(controller.setNetworkAvailable).toHaveBeenLastCalledWith(false)
-    expect(vi.getTimerCount()).toBe(0)
+    expect(vi.getTimerCount()).toBe(1)
     dispose()
   })
 
@@ -294,5 +347,95 @@ describe('browser network watch', () => {
     vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS * 2)
     expect(controller.reconnect).not.toHaveBeenCalled()
     expect(controller.setNetworkAvailable.mock.calls).toEqual([[true]])
+  })
+
+  it('reconnects one silent connected generation once from the autonomous watchdog', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    vi.stubGlobal('window', win)
+    const controller = createController()
+    const dispose = watchBrowserNetwork(controller, () => 'connected')
+
+    vi.advanceTimersByTime(5_000)
+    expect(controller.reconnect).not.toHaveBeenCalled()
+
+    controller.isProbablyStale.mockReturnValue(true)
+    vi.advanceTimersByTime(5_000)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
+    vi.advanceTimersByTime(10_000)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
+
+    controller.isProbablyStale.mockReturnValue(false)
+    vi.advanceTimersByTime(5_000)
+    controller.isProbablyStale.mockReturnValue(true)
+    vi.advanceTimersByTime(5_000)
+    expect(controller.reconnect).toHaveBeenCalledTimes(2)
+    dispose()
+  })
+
+  it('does not run the watchdog while connecting or offline', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    vi.stubGlobal('window', win)
+    let state: ConnectionState | undefined = 'connecting'
+    const controller = createController(true)
+    const dispose = watchBrowserNetwork(controller, () => state)
+
+    vi.advanceTimersByTime(20_000)
+    expect(controller.reconnect).not.toHaveBeenCalled()
+
+    state = 'connected'
+    win.setOnline(false)
+    vi.advanceTimersByTime(20_000)
+    expect(controller.reconnect).not.toHaveBeenCalled()
+    dispose()
+  })
+
+  it('keeps the watchdog disarmed for a generation that never received a heartbeat', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    vi.stubGlobal('window', win)
+    const controller = createController(true)
+    controller.hasObservedInboundHeartbeat.mockReturnValue(false)
+    const dispose = watchBrowserNetwork(controller, () => 'connected')
+
+    vi.advanceTimersByTime(300_000)
+    expect(controller.hasObservedInboundHeartbeat).toHaveBeenCalled()
+    expect(controller.reconnect).not.toHaveBeenCalled()
+    dispose()
+  })
+
+  it('reconnects exactly once after a heartbeat-armed generation goes silent', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    vi.stubGlobal('window', win)
+    const controller = createController(false)
+    const dispose = watchBrowserNetwork(controller, () => 'connected')
+
+    vi.advanceTimersByTime(60_000)
+    expect(controller.reconnect).not.toHaveBeenCalled()
+
+    controller.isProbablyStale.mockReturnValue(true)
+    vi.advanceTimersByTime(5_000)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
+    vi.advanceTimersByTime(295_000)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
+    dispose()
+  })
+
+  it('offsets the wake reconnect by the per-tab stagger', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    vi.stubGlobal('window', win)
+    const controller = createController()
+    controller.wakeJitterMs.mockReturnValue(150)
+    const dispose = watchBrowserNetwork(controller, () => 'disconnected')
+
+    win.dispatchEvent(new Event('pageshow'))
+    vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS + 149)
+    expect(controller.reconnect).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
+    dispose()
   })
 })

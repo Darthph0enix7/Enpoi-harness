@@ -613,6 +613,7 @@ function main(): void {
 
   for (const file of files) {
     const path = resolve(root, file)
+    if (!existsSync(path)) continue
     const before = readFileSync(path, 'utf8')
     const { text: after, lines } = rewrite(before, file, all)
     if (after === before) continue

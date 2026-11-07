@@ -285,6 +285,109 @@ describe('ui-model-selection dual entry', () => {
     })
   })
 
+  it('clears a stale saved effort when the same no-ladder model is picked again', async () => {
+    const b = await bench()
+    b.mint('s1')
+    b.setProjected(sid('s1'), {
+      lastUsed: null,
+      next: { provider: 'external', model: 'deepseek-v4-flash', reasoningEffort: 'high' },
+    })
+    const options = await b.popup().options(projection('s1'), new AbortController().signal)
+    const external = options.find((o: SelectOption) => o.label === 'External Flash')!
+    await b.popup().onSelect(external, projection('s1'))
+    // The external model discloses no ladder, so the stale effort is dropped
+    // and the Host resolves the provider default instead of refusing it.
+    expect(b.hostCurrent()).toEqual({ provider: 'external', model: 'deepseek-v4-flash' })
+  })
+
+  it('drops a saved effort the destination mapped model does not offer', async () => {
+    const b = await bench()
+    const customGroups = [{
+      id: 'provider',
+      name: 'Provider',
+      models: [
+        {
+          id: 'source',
+          name: 'Source',
+          description: 'Source model.',
+          reasoning: {
+            efforts: [{ id: 'high', name: 'High' }, { id: 'max', name: 'Max' }],
+            defaultEffort: 'high',
+          },
+        },
+        {
+          id: 'target',
+          name: 'Target',
+          description: 'Target model.',
+          reasoning: {
+            efforts: [{ id: 'standard', name: 'Standard' }],
+            defaultEffort: 'standard',
+          },
+        },
+      ],
+    }]
+    b.setGroups(customGroups)
+    b.remote.emit('llm/adapters-updated', [])
+    await vi.waitFor(() => {
+      expect(b.ctx.modelDirectories.catalog.store.getSnapshot().value?.groups).toEqual(customGroups)
+    })
+    b.mint('s1')
+    b.setProjected(sid('s1'), {
+      lastUsed: null,
+      next: { provider: 'provider', model: 'source', reasoningEffort: 'max' },
+    })
+    const options = await b.popup().options(projection('s1'), new AbortController().signal)
+    const target = options.find((o: SelectOption) => o.label === 'Target')!
+    await b.popup().onSelect(target, projection('s1'))
+    // 'max' is not a target level, and the destination default is not
+    // substituted for a stale saved effort: the provider default applies.
+    expect(b.hostCurrent()).toEqual({ provider: 'provider', model: 'target' })
+  })
+
+  it('retains a saved effort the destination mapped model explicitly offers', async () => {
+    const b = await bench()
+    const customGroups = [{
+      id: 'provider',
+      name: 'Provider',
+      models: [
+        {
+          id: 'source',
+          name: 'Source',
+          description: 'Source model.',
+          reasoning: {
+            efforts: [{ id: 'high', name: 'High' }, { id: 'max', name: 'Max' }],
+            defaultEffort: 'max',
+          },
+        },
+        {
+          id: 'target',
+          name: 'Target',
+          description: 'Target model.',
+          reasoning: {
+            efforts: [{ id: 'standard', name: 'Standard' }, { id: 'high', name: 'High' }],
+            defaultEffort: 'standard',
+          },
+        },
+      ],
+    }]
+    b.setGroups(customGroups)
+    b.remote.emit('llm/adapters-updated', [])
+    await vi.waitFor(() => {
+      expect(b.ctx.modelDirectories.catalog.store.getSnapshot().value?.groups).toEqual(customGroups)
+    })
+    b.mint('s1')
+    b.setProjected(sid('s1'), {
+      lastUsed: null,
+      next: { provider: 'provider', model: 'source', reasoningEffort: 'high' },
+    })
+    const options = await b.popup().options(projection('s1'), new AbortController().signal)
+    const target = options.find((o: SelectOption) => o.label === 'Target')!
+    await b.popup().onSelect(target, projection('s1'))
+    // The target offers 'high' explicitly, so the saved choice survives the
+    // switch instead of falling back to its own 'standard' default.
+    expect(b.hostCurrent()).toEqual({ provider: 'provider', model: 'target', reasoningEffort: 'high' })
+  })
+
   it.each(['en', 'zh'] as const)('localizes account provider details in the %s model popup', async (locale) => {
     const b = await bench(locale)
     try {

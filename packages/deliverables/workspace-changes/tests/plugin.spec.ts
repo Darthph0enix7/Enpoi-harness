@@ -10,6 +10,9 @@ import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
 import * as WorkspaceChanges from '../src/index.ts'
 import { changes, endTurn, git, mutate, scratchDir, settle, startTurn, toolCall } from './support.ts'
 
+// Real repositories and git subprocesses cross the 5s default under load; this suite has no fake clock.
+vi.setConfig({ testTimeout: 20_000 })
+
 const cleanups: Array<() => Promise<unknown>> = []
 afterEach(async () => {
   for (const cleanup of cleanups.reverse()) await cleanup()

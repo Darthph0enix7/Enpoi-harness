@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { createSessionFormatCatalogWithChildren, sessionFormatCatalog } from '@deepseek-ai/dsh-session-format-catalog'
+import { v4Catalog as sessionFormatCatalog, v4CatalogWithChildren as createSessionFormatCatalogWithChildren, currentSessionHeader } from './catalog.ts'
+import { Session, SessionId, SessionLogOffset, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionFormatEventCollector } from '@deepseek-ai/dsh-session-format'
 import type { SessionFormatArtifact, SessionFormatEvent } from '@deepseek-ai/dsh-session-format'
 import { releasedV4SessionFormatCodec, restoreReleasedV4Artifact } from '../src/index.ts'
@@ -35,7 +36,15 @@ function reopen(artifact: SessionFormatArtifact) {
     recovery: 'strict', validation: 'current',
   })
   for (const event of artifact.events) restore.decodeRow(sessionFormatCatalog.encodeCurrentEvent(event))
-  return restore.finish()
+  const result = restore.finish()
+  Session.fromRestore(
+    SessionId(result.header.id),
+    result.events as readonly SessionEvent[],
+    currentSessionHeader(result.header),
+    SessionLogOffset(result.inheritedEventCount),
+    'detached',
+  )
+  return result
 }
 
 describe('canonical V4 integration', () => {

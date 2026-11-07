@@ -73,7 +73,13 @@ export function modelInfo(
     ...configured === undefined
       ? { provider, id: model, name: model, inputModalities: ['text' as const] }
       : catalogModelInfo(provider, configured),
-    context: { contextWindow },
+    context: {
+      contextWindow,
+      source: configured?.contextWindow === undefined ? 'default' : 'configured',
+    },
+    // The configured/profile cap sizes requests; it is not a disclosed output
+    // capability, so it stays `defaultMaxTokens` and never becomes
+    // `maxOutputTokens`.
     defaultMaxTokens: configured?.maxTokens ?? connection.maxTokens,
     ...configured?.systemPromptUpdate === undefined ? {} : { systemPromptUpdate: configured.systemPromptUpdate },
     ...configured?.toolUpdate === undefined ? {} : { toolUpdate: configured.toolUpdate },

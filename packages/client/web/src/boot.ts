@@ -31,6 +31,8 @@ export class AppWebEntry {
   private stopDragRecall: (() => void) | undefined
   private modules!: ClientModuleSystem
   private manifest!: BootManifest
+  /** Monotone boot-progress counter consumed by the page-health deadline. */
+  private bootProgress = 0
 
   /**
    * Draw the boot page; {@link run} starts the loader.
@@ -54,7 +56,10 @@ export class AppWebEntry {
     // error/rejection breadcrumb, or a fatal render crash all have one owner,
     // and the boot deadline covers everything the failure rendering below
     // cannot see.
-    const health = this.health ??= installClientHealth({ container: this.container })
+    const health = this.health ??= installClientHealth({
+      container: this.container,
+      bootProgress: () => this.bootProgress,
+    })
     try {
       // Boot-readiness gate: whichever bootstrap applies the injection table
       // settles this deferred once every row has taken effect — the served
@@ -63,6 +68,7 @@ export class AppWebEntry {
       // row, or rejects it into the failure rendering below. An absent global
       // means no bootstrap owns the document and there is nothing to wait for.
       await (globalThis as { __DSH_BOOT_READY__?: { promise: Promise<void> } }).__DSH_BOOT_READY__?.promise
+      this.bootProgress += 1
       const win = globalThis as DshWindow
       const moduleLoader = win.__ModuleLoader__
       if (moduleLoader === undefined) {
@@ -76,6 +82,7 @@ export class AppWebEntry {
       const transport = (globalThis as {
         __DSH_TRANSPORT__?: { loadBundle?: ClientModuleCreateOptions['loadBundle'] }
       }).__DSH_TRANSPORT__
+      this.bootProgress += 1
       this.modules = moduleLoader.create({
         boot: win.__DSH_BOOT__,
         staticModules: getStaticModules(),
@@ -92,14 +99,17 @@ export class AppWebEntry {
       this.ctx = ctx
       this.page.setTotal(this.manifest.plugins.length)
       await prefetching
+      this.bootProgress += 1
       await bootClient({
         ctx,
         modules: this.modules,
         manifest: this.manifest,
         onEntryState: (name, state) => {
+          this.bootProgress += 1
           if (onFailure === undefined || state !== 'failed') this.page.setState(name, state)
         },
       })
+      this.bootProgress += 1
       // The shell owns the one watcher that keeps Electron's window drag rects in
       // step with the rows that own them (electron#32341), so no chrome row has to
       // know that trap. It installs before the first mount, so the surface the
@@ -109,6 +119,7 @@ export class AppWebEntry {
       // by the gate budget) and the mount then hydrates it in one transition.
       this.page.setHint('Preparing workspace…')
       await gate.settled()
+      this.bootProgress += 1
       await mountClient(ctx, this.container)
       health.markBootComplete()
     } catch (reason) {
@@ -139,6 +150,6 @@ export class AppWebEntry {
       .filter(row => row.immediately)
       .map(row => this.modules.prefetch(row.id).catch((_prefetchError: unknown) => {
         // Prefetch only starts transport early; the Loader import retries and reports this bundle failure.
-      })))
+      }).finally(() => { this.bootProgress += 1 })))
   }
 }

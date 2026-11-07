@@ -7,8 +7,12 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
 import { afterEach, expect, it, vi } from 'vitest'
+import { HeavyJobManager } from '../src/jobs.js'
 import { manifestById, HEAVY_MANIFESTS } from '../src/manifests.js'
+import { HeavyProvidersService } from '../src/remote.js'
+import { lifecycleOf } from '../src/state.js'
 import {
   chooseLocalPath,
   detectInstance,
@@ -19,6 +23,7 @@ import {
   overlayInjectionRow,
   overlayManifest,
   readServerOverlay,
+  substitute,
   type FetchLike,
   type HeavyDeps,
   type RuntimeProbe,
@@ -33,6 +38,16 @@ function scratchDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'heavy-preflight-'))
   scratch.push(dir)
   return dir
+}
+
+/** Wait for a job to settle across event-loop turns. */
+async function settled(manager: HeavyJobManager, id: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const job = manager.snapshot(id)
+    if (job !== undefined && job.state !== 'running') return
+    await new Promise(resolve => setImmediate(resolve))
+  }
+  throw new Error('job did not settle')
 }
 
 function depsWith(fetch: FetchLike): HeavyDeps {
@@ -139,6 +154,17 @@ it('preflight picks the per-platform best path and names what is missing', () =>
   expect(chooseLocalPath(manifestById('antigravity')!, 'darwin', { ...node, systemdUser: false }).path).toBe('node')
   // commandcode has no user unit; node alone keeps its setup path approved.
   expect(chooseLocalPath(manifestById('commandcode')!, 'linux', { ...node, systemdUser: false }).path).toBe('node')
+  // CLIProxyAPI's helper provisions a systemd user unit even though its step
+  // command says only `node ... install`; the structured requirement (not a
+  // command scan) refuses the path without a user manager.
+  const cpa = manifestById('cliproxyapi')!
+  expect(chooseLocalPath(cpa, 'linux', node).path).toBe('node')
+  const cpaNoSystemd = chooseLocalPath(cpa, 'linux', { ...node, systemdUser: false })
+  expect(cpaNoSystemd.path).toBe('unsupported')
+  expect(cpaNoSystemd.requires).toEqual(['systemd-user'])
+  expect(cpaNoSystemd.missing).toEqual(['A reachable systemd user session (`systemctl --user`)'])
+  // macOS provisions launchd, so the same probe stays approved there.
+  expect(chooseLocalPath(cpa, 'darwin', { ...node, systemdUser: false }).path).toBe('node')
 
   // Windows local provisioning is refused with the manifest's own reason.
   const win = chooseLocalPath(manifestById('commandcode')!, 'win32', node)
@@ -146,6 +172,21 @@ it('preflight picks the per-platform best path and names what is missing', () =>
   expect(win.missing.join(' ')).toContain('Windows')
 
   expect(chooseLocalPath(freellmapi, 'linux', { docker: true, podman: true, node: false, systemdUser: false }, 3210).path).toBe('detected')
+})
+
+it('the helper file requirement blocks a missing plugin helper before any path is offered', () => {
+  const dir = scratchDir()
+  const cpa = manifestById('cliproxyapi')!
+  const node: RuntimeProbe = { docker: false, podman: false, node: true, nodeMajor: 22, systemdUser: true }
+  const missingPath = join(dir, 'missing', 'cliproxyapi-install.mjs')
+  const missing = chooseLocalPath(cpa, 'linux', node, undefined, { home: dir, dshHome: join(dir, '.dsh'), helperPath: missingPath })
+  expect(missing.path).toBe('unsupported')
+  expect(missing.missing[0]).toContain('installer helper')
+  const presentPath = join(dir, 'cliproxyapi-install.mjs')
+  writeFileSync(presentPath, '', 'utf8')
+  expect(chooseLocalPath(cpa, 'linux', node, undefined, { home: dir, dshHome: join(dir, '.dsh'), helperPath: presentPath }).path).toBe('node')
+  // Without a helper-path seam the check cannot prove the file missing.
+  expect(chooseLocalPath(cpa, 'linux', node).path).toBe('node')
 })
 
 it('a node path is refused when the reported major is below the declared requirement', () => {
@@ -267,8 +308,24 @@ it('the overlay disables a provider and overrides label, summary, links, steps, 
 
   // The effective host table drops disabled providers and applies the rest.
   const effective = effectiveHeavyManifests(HEAVY_MANIFESTS, overlay)
-  expect(effective.map(manifest => manifest.id)).toEqual(['antigravity', 'commandcode', 'meridian'])
+  expect(effective.map(manifest => manifest.id)).toEqual(['antigravity', 'commandcode', 'meridian', 'cliproxyapi'])
   expect(effective[1]?.fallbackModel).toBeUndefined()
+})
+
+it('the overlay can set a validated releaseSource and drops an invalid one', () => {
+  const dir = scratchDir()
+  writeFileSync(join(dir, 'heavy-server-overlay.json'), JSON.stringify({
+    providers: {
+      cliproxyapi: { releaseSource: 'fork/CLIProxyAPI' },
+      freellmapi: { releaseSource: 'http://insecure.example/releases' },
+    },
+  }), 'utf8')
+  const overlay = readServerOverlay(dir)
+  const cpa = overlayManifest(manifestById('cliproxyapi')!, overlay['cliproxyapi'])
+  expect(cpa.releaseSource).toBe('fork/CLIProxyAPI')
+  // An invalid value carries nothing usable, so the entry is not created.
+  expect(overlay['freellmapi']).toBeUndefined()
+  expect(manifestById('cliproxyapi')!.releaseSource).toBeUndefined()
 })
 
 it('a malformed overlay field is dropped instead of reaching execution', () => {
@@ -303,4 +360,145 @@ it('publishes the overlay as a page-bootstrap row only when providers are overri
     name: HEAVY_OVERLAY_GLOBAL,
     value: { providers: { freellmapi: { disabled: true }, antigravity: { label: 'Overlaid' } } },
   })
+})
+
+
+it('the install RPC refuses a missing runtime preflight before creating any job', async () => {
+  const deps = depsWith(async () => ({ ok: false, status: 503, text: async () => 'down' }))
+  const manager = new HeavyJobManager({ dir: join(deps.dshHome, 'cache', 'heavy-jobs'), run: deps.runStep })
+  const service = new HeavyProvidersService(new Context(), { deps: () => deps, jobs: manager })
+  const value = await service.install({ id: 'antigravity', key: 'sk-not-stored' })
+  expect(value.ok).toBe(false)
+  expect(value.blocked?.reason).toContain('Node.js >= 18')
+  expect(manager.snapshot('antigravity')).toBeUndefined()
+})
+
+it('the helper port preflight refuses before any install job is created', async () => {
+  const deps = depsWith(async () => ({ ok: true, status: 200, text: async () => '{"status":"ok"}' }))
+  deps.runStep = async () => ({ exitCode: 0, output: 'available:node\nnode-major:22\navailable:systemd-user\n' })
+  deps.installPreflight = async () => ({ ok: false, reason: 'port 8317 is held by a foreign listener' })
+  const manager = new HeavyJobManager({ dir: join(deps.dshHome, 'cache', 'heavy-jobs'), run: deps.runStep })
+  const service = new HeavyProvidersService(new Context(), { deps: () => deps, jobs: manager })
+  const value = await service.install({ id: 'cliproxyapi' })
+  expect(value.ok).toBe(false)
+  expect(value.blocked?.reason).toContain('foreign listener')
+  expect(manager.snapshot('cliproxyapi')).toBeUndefined()
+})
+
+it('a missing installer helper blocks the CPA install before any job starts', async () => {
+  const deps = depsWith(async () => ({ ok: true, status: 200, text: async () => '{"status":"ok"}' }))
+  deps.runStep = async () => ({ exitCode: 0, output: 'available:node\nnode-major:22\navailable:systemd-user\n' })
+  deps.installHelperPath = join(scratchDir(), 'missing', 'cliproxyapi-install.mjs')
+  const manager = new HeavyJobManager({ dir: join(deps.dshHome, 'cache', 'heavy-jobs'), run: deps.runStep })
+  const service = new HeavyProvidersService(new Context(), { deps: () => deps, jobs: manager })
+  const value = await service.install({ id: 'cliproxyapi' })
+  expect(value.ok).toBe(false)
+  expect(value.blocked?.reason).toContain('installer helper')
+  expect(manager.snapshot('cliproxyapi')).toBeUndefined()
+})
+
+it('the install RPC checks a duplicate route before the runtime preflight and starts no job', async () => {
+  const deps = depsWith(async () => ({ ok: false, status: 503, text: async () => 'down' }))
+  const settings = {
+    describe: () => [{
+      ns: 'llm-pi-ai',
+      revision: 1,
+      value: { providers: { antigravity: { baseURL: 'http://127.0.0.1:8082', models: [] } } },
+    }],
+    mutate: async () => {},
+  }
+  const configured = { ...deps, settings }
+  const manager = new HeavyJobManager({ dir: join(deps.dshHome, 'cache', 'heavy-jobs'), run: deps.runStep })
+  const service = new HeavyProvidersService(new Context(), { deps: () => configured, jobs: manager })
+  const value = await service.install({ id: 'antigravity', key: 'sk-not-stored' })
+  expect(value.ok).toBe(false)
+  expect(value.blocked?.reason).toContain('already has a configured route')
+  expect(value.blocked?.reason).not.toContain('Node.js')
+  expect(manager.snapshot('antigravity')).toBeUndefined()
+})
+
+it('a declared {profileDir} expands only when the producer supplied the profile root', () => {
+  expect(substitute('node {profileDir}/packages/x/install.mjs', '/h', '/d', '/profiles/web'))
+    .toBe('node /profiles/web/packages/x/install.mjs')
+  // No producer value: leave the placeholder visible instead of guessing a
+  // `profiles/web` layout the host does not own.
+  expect(substitute('{profileDir}/x', '/h', '/d')).toBe('{profileDir}/x')
+})
+
+
+it('a browser-supplied receipt is rejected and never grants ownership or teardown', async () => {
+  const deps = depsWith(async () => ({ ok: false, status: 503, text: async () => 'down' }))
+  const runStep = vi.fn(async () => ({ exitCode: 0, output: '' }))
+  deps.runStep = runStep
+  const manager = new HeavyJobManager({ dir: join(deps.dshHome, 'cache', 'heavy-jobs'), run: deps.runStep })
+  const service = new HeavyProvidersService(new Context(), { deps: () => deps, jobs: manager })
+  // A typed object (not an inline literal) so the extra field exercises the
+  // actual wire rejection rather than TypeScript excess-property checking.
+  const forged = { id: 'antigravity', key: 'sk-not-owned', receipt: 'forged-client-proof' }
+  await expect(service.install(forged)).rejects.toThrow('install does not accept a client ownership receipt')
+  expect(manager.snapshot('antigravity')).toBeUndefined()
+  expect(lifecycleOf(deps.dshHome, 'antigravity')).toBeUndefined()
+
+  const removed = await service.remove({ id: 'antigravity', uninstall: true })
+  expect(removed.summary?.teardown.ran).toBe(false)
+  expect(runStep).not.toHaveBeenCalled()
+})
+
+it('only the trusted host installer callback can record ownership and enable teardown', async () => {
+  const deps = depsWith(async () => ({ ok: false, status: 503, text: async () => 'down' }))
+  const stepped: string[] = []
+  deps.runStep = async (step) => {
+    stepped.push(step.label)
+    return { exitCode: 0, output: 'available:node\navailable:systemd-user\n' }
+  }
+  deps.readInstallReceipt = async id => id === 'antigravity' ? 'trusted-host-proof' : undefined
+  deps.settings = {
+    describe: () => [{ ns: 'llm-pi-ai', revision: 1, value: { providers: {} } }],
+    mutate: async () => {},
+  }
+  const manager = new HeavyJobManager({ dir: join(deps.dshHome, 'cache', 'heavy-jobs'), run: deps.runStep })
+  const service = new HeavyProvidersService(new Context(), { deps: () => deps, jobs: manager })
+
+  const value = await service.install({ id: 'antigravity' })
+  expect(value.ok).toBe(true)
+  await settled(manager, 'antigravity')
+  const job = manager.snapshot('antigravity')
+  expect(job?.error).toBeUndefined()
+  expect(job?.state).toBe('succeeded')
+  expect(lifecycleOf(deps.dshHome, 'antigravity')).toMatchObject({
+    mode: 'local',
+    installedByHarness: true,
+    receipt: 'trusted-host-proof',
+  })
+
+  const removed = await service.remove({ id: 'antigravity', uninstall: true })
+  expect(removed.summary?.teardown.ran).toBe(true)
+  expect(removed.summary?.teardown.ok).toBe(true)
+  expect(stepped).toContain('Remove the config directory (accounts.json OAuth tokens, usage history, presets)')
+  expect(lifecycleOf(deps.dshHome, 'antigravity')).toBeUndefined()
+})
+
+
+it('an install without a host receipt reader stays unowned and its static teardown is refused', async () => {
+  const deps = depsWith(async () => ({ ok: false, status: 503, text: async () => 'down' }))
+  const stepped: string[] = []
+  deps.runStep = async (step) => {
+    stepped.push(step.label)
+    return { exitCode: 0, output: 'available:node\navailable:systemd-user\n' }
+  }
+  deps.settings = {
+    describe: () => [{ ns: 'llm-pi-ai', revision: 1, value: { providers: {} } }],
+    mutate: async () => {},
+  }
+  const manager = new HeavyJobManager({ dir: join(deps.dshHome, 'cache', 'heavy-jobs'), run: deps.runStep })
+  const service = new HeavyProvidersService(new Context(), { deps: () => deps, jobs: manager })
+
+  await service.install({ id: 'antigravity' })
+  await settled(manager, 'antigravity')
+  expect(manager.snapshot('antigravity')?.state).toBe('succeeded')
+  expect(lifecycleOf(deps.dshHome, 'antigravity')).toBeUndefined()
+
+  const removed = await service.remove({ id: 'antigravity', uninstall: true })
+  expect(removed.summary?.teardown.ran).toBe(false)
+  expect(stepped).not.toContain('Remove the config directory (accounts.json OAuth tokens, usage history, presets)')
 })

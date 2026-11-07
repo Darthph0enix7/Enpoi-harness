@@ -70,6 +70,23 @@ describe('shared config schema catalog', () => {
     expect(provider?.pastes?.[0]?.text).toBe('export type Config = BrowserConfig')
   })
 
+  it('unwraps Partial for a plugin parameter config type', () => {
+    const { root, write } = fixture()
+    write('packages/test/provider/src/index.ts', `
+import Schema from '@deepseek-ai/schemastery'
+export interface Config {
+  /** Cooldown in milliseconds. */
+  cooldownMs: number
+}
+export const Config = Schema.object({ cooldownMs: Schema.natural() })
+export function apply(ctx: unknown, config: Partial<Config>): void {}
+`)
+    const provider = collectConfigCatalog(root).find(entry => entry.pkg === '@test/provider')
+    expect(provider?.configTypeName).toBe('Config')
+    expect(provider?.pastes?.[0]?.text).toContain('export interface Config')
+    expect(provider?.schemaKeys).toEqual(['cooldownMs'])
+  })
+
   it('rejects a schema field absent from the shared config type', () => {
     const { root } = fixture(sharedSchema.replace('headless: Schema.boolean()', 'headless: Schema.boolean(), hidden: Schema.string()'))
     expect(() => collectConfigCatalog(root)).toThrow("schema validates key 'hidden' but config type 'Config' declares no such member")

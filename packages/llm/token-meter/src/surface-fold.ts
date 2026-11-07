@@ -35,6 +35,8 @@ export interface MeterSurfaceNode {
   readonly images: readonly ImageBlock[]
   /** Durable file occurrences in message order; empty for file-free nodes. */
   readonly files: readonly FileAttachmentRef[]
+  /** Role that owns {@link files}; native admission applies only to user files. */
+  readonly fileRole: Message['role'] | undefined
 }
 
 /** One validated surface transition that has not mutated the priced surface yet. */
@@ -79,6 +81,7 @@ function analyzeNode(seq: SessionSeq, message: Message | null): MeterSurfaceNode
       fileStructuralTokens: 0,
       images: [],
       files: [],
+      fileRole: undefined,
     }
   }
   const heuristicTokens = estimateMessage(message)
@@ -92,6 +95,7 @@ function analyzeNode(seq: SessionSeq, message: Message | null): MeterSurfaceNode
     fileStructuralTokens: structural.fileTokens,
     images,
     files,
+    fileRole: message.role,
   }
 }
 

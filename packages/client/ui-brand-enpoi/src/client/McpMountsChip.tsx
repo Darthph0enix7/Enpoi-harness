@@ -4,7 +4,7 @@
  * is the durable `mcpMounts` session projection; the popover reads the live
  * rows and unmounts through the `enpoiCapabilities` remote.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls the ui-conversation SlotMap merge (the header actions).
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -28,6 +28,8 @@ interface MountRow {
   serverName: string
   toolCount: number
 }
+
+const EMPTY_MOUNT_IDS: readonly unknown[] = []
 
 let rpcSeq = 0
 
@@ -92,14 +94,21 @@ async function unmountServer(sessionId: string, server: string): Promise<{ ok: b
  * @returns the chip with its popover.
  */
 export function McpMountsChip({ sessionId, useSessions, t }: McpMountsChipProps) {
+  // The selector returns the projection's own array: it keeps one identity
+  // until the mount set actually moves, so unrelated session-list snapshots
+  // do not re-render this header chip. Filtering happens in render, below.
   const mounted = useSessions((state) => {
     const value = state.byId[sessionId]?.projectionValues?.mcpMounts as { mounted?: unknown } | undefined
-    return Array.isArray(value?.mounted) ? value.mounted.filter((id): id is string => typeof id === 'string') : []
+    return Array.isArray(value?.mounted) ? value.mounted as readonly unknown[] : EMPTY_MOUNT_IDS
   })
+  const mountedIds = useMemo(
+    () => mounted.filter((id): id is string => typeof id === 'string'),
+    [mounted],
+  )
   const [open, setOpen] = useState(false)
   const [rows, setRows] = useState<MountRow[] | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const mountedKey = mounted.join(',')
+  const mountedKey = mountedIds.join(',')
   useEffect(() => {
     if (!open) return
     let cancelled = false
@@ -111,7 +120,7 @@ export function McpMountsChip({ sessionId, useSessions, t }: McpMountsChipProps)
     })
     return () => { cancelled = true }
   }, [open, sessionId, mountedKey, t])
-  if (mounted.length === 0) return null
+  if (mountedIds.length === 0) return null
   const close = async (server: string): Promise<void> => {
     const outcome = await unmountServer(sessionId, server)
     if (!outcome.ok) {
@@ -128,10 +137,10 @@ export function McpMountsChip({ sessionId, useSessions, t }: McpMountsChipProps)
         type="button"
         className={css.chip}
         aria-expanded={open}
-        aria-label={t('chipLabel', { count: mounted.length })}
+        aria-label={t('chipLabel', { count: mountedIds.length })}
         onClick={() => { setOpen(value => !value) }}
       >
-        {t('chipLabel', { count: mounted.length })}
+        {t('chipLabel', { count: mountedIds.length })}
       </button>
       {open && (
         <div className={css.popover} role="dialog" aria-label={t('title')} data-mcp-mounts-popover="">

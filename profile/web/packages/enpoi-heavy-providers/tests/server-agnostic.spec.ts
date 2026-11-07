@@ -18,7 +18,7 @@ const FORBIDDEN = [
   /100\.122\.163\.25/,
   /enpoi\.vip/i,
   /serverlocal/i,
-  /tailscale/i,
+  /pike-acrux\.ts\.net/i,
   /\/home\/[A-Za-z0-9._-]+/,
 ]
 
@@ -104,4 +104,9 @@ it('the sweep itself rejects a planted /home/ literal', () => {
   const matched = FORBIDDEN.some(pattern => pattern.test(planted))
   expect(matched).toBe(true)
   expect(strings({ nested: ['ok', planted] })).toContain(planted)
+})
+
+it('allows portable network commands but rejects the operator tailnet hostname', () => {
+  expect(FORBIDDEN.some(pattern => pattern.test('tailscale serve --https=8443'))).toBe(false)
+  expect(FORBIDDEN.some(pattern => pattern.test('https://other-device.pike-acrux.ts.net'))).toBe(true)
 })

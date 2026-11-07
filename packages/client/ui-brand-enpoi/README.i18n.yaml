@@ -1,0 +1,52 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/client/ui-brand-enpoi/README.md
+/:
+  en: 2987d4e0f702ef40
+  zh: ee966b1973c6a824
+/deepseek-ai-dsh-client-ui-brand-enpoi:
+  en: 16fc27f5ad6a6589
+  zh: dbd5a15c5a6a572d
+/deepseek-ai-dsh-client-ui-brand-enpoi/summary:
+  en: 687bfe876b09fc67
+  zh: db2411a868069685
+/deepseek-ai-dsh-client-ui-brand-enpoi/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: 364c80ee00a374ff
+/deepseek-ai-dsh-client-ui-brand-enpoi/use-this-package:
+  en: dd45f0b57ca85dcd
+  zh: 9d38a9ac572da599
+/deepseek-ai-dsh-client-ui-brand-enpoi/use-this-package/when-to-choose-it:
+  en: af0699844c3e98ea
+  zh: 8d4c0ac90893498d
+/deepseek-ai-dsh-client-ui-brand-enpoi/use-this-package/terminal-pages:
+  en: 7ddf5f5980cf84c7
+  zh: b63817fc327be4ed
+/deepseek-ai-dsh-client-ui-brand-enpoi/understand-the-implementation:
+  en: 1456e0084469b93f
+  zh: 89af7280c23c476f
+/deepseek-ai-dsh-client-ui-brand-enpoi/further-exploration:
+  en: 3ece217a8b4fe07e
+  zh: a703db289a61534d
+/deepseek-ai-dsh-client-ui-brand-enpoi/model-experience:
+  en: 215e7ba838619b7b
+  zh: a311da3843709f90
+/deepseek-ai-dsh-client-ui-brand-enpoi/model-experience/browser-operator-surfaces:
+  en: 87ffe101fcc1bde9
+  zh: 3137c3553733b618
+/deepseek-ai-dsh-client-ui-brand-enpoi/model-experience/browser-operator-surfaces/what-the-model-sees:
+  en: 6bd3bf266429e7a5
+  zh: 4fd96e25095a06c2
+/deepseek-ai-dsh-client-ui-brand-enpoi/model-experience/browser-operator-surfaces/token-effect:
+  en: 61ea07d9840168dd
+  zh: 100b4fb5bd78e973
+/deepseek-ai-dsh-client-ui-brand-enpoi/model-experience/browser-operator-surfaces/kv-cache-effect:
+  en: ca75c51c89c2c9b0
+  zh: 6e9f63985e00208e
+/deepseek-ai-dsh-client-ui-brand-enpoi/known-limitations-and-deferred-work:
+  en: e089f3d11296f86f
+  zh: e60c0060f62a8524
+/deepseek-ai-dsh-client-ui-brand-enpoi/known-limitations-and-deferred-work/dev-note:
+  en: 40919ff62a919cf0
+  zh: 24fd6bccb5277fd2

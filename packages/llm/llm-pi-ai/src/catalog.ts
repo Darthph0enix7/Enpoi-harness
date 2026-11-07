@@ -14,7 +14,21 @@
 
 import { builtinProviders, getBuiltinModels, getBuiltinProviders } from '@earendil-works/pi-ai/providers/all'
 import type { BuiltinProvider } from '@earendil-works/pi-ai/providers/all'
-import type { ModelModality } from '@deepseek-ai/dsh-llm'
+import {
+  isLlmNativeFileEncoder,
+  isLlmNativeFileEncoderCompatible,
+  isLlmNativeFileMimeType,
+  LLM_NATIVE_FILE_ENCODERS,
+  LLM_NATIVE_FILE_MIME_TYPES,
+  validateLlmNativeFileInputs,
+} from '@deepseek-ai/dsh-llm'
+import type {
+  LlmNativeFileEncoder,
+  LlmNativeFileInputs,
+  LlmNativeFileMimeType,
+  LlmNativeFileTokenReserve,
+  ModelModality,
+} from '@deepseek-ai/dsh-llm'
 import {
   allOfferedCompatFields,
   compatGate,
@@ -452,6 +466,133 @@ function assertOfferedCompatFields(
   }
 }
 
+/** Native-file encoders and the wire protocols each is valid on. */
+const NATIVE_FILE_ENCODER_APIS: Readonly<Record<LlmNativeFileEncoder, readonly string[]>> = {
+  'anthropic-document': ['anthropic-messages'],
+  'openai-chat-file': ['openai-completions'],
+  'openai-chat-input-audio': ['openai-completions'],
+  'openai-chat-video-url': ['openai-completions'],
+}
+
+/** Every field a {@link PiAiNativeFileInputs} declaration may carry. */
+const NATIVE_FILE_INPUT_FIELDS: ReadonlySet<string> = new Set([
+  'version',
+  'encoder',
+  'mime',
+  'perFileBytes',
+  'totalBytes',
+  'maxPayloadBytes',
+  'tokenReserve',
+])
+
+/**
+ * Explicit native-file admission for one exact pi-ai model. The declaration is
+ * per model, never inferred from the model name, endpoint, protocol, or an
+ * advertised modality. Omission keeps every file as deterministic handle text.
+ */
+export interface PiAiNativeFileInputs {
+  /** Declaration version this build accepts. */
+  version: 1
+  /** Wire encoder the route's gateway translates; must match the model's api. */
+  encoder: LlmNativeFileEncoder
+  /** MIME types admitted natively; each must be one the encoder can carry. */
+  mime: LlmNativeFileMimeType[]
+  /** Largest raw source file the route admits. */
+  perFileBytes: number
+  /** Largest raw source bytes across all native files in one request. */
+  totalBytes: number
+  /** Largest serialized provider payload the route admits. */
+  maxPayloadBytes: number
+  /** Tokens reserved per native occurrence instead of the handle text. */
+  tokenReserve: LlmNativeFileTokenReserve
+}
+
+/**
+ * Resolve one model's native-file declaration into the adapter descriptor.
+ *
+ * Validation is the only place an unsupported encoder/transport pair can be
+ * stopped before bytes exist: `anthropic-document` is Anthropic Messages and
+ * PDF only; the `openai-chat-*` encoders are Chat Completions only and carry
+ * exactly their own media kind. `openai-responses` is refused here rather than
+ * during a request.
+ * @param provider - provider route key, for diagnostics.
+ * @param entry - the configured model entry.
+ * @param api - the model's resolved wire protocol.
+ * @returns the adapter descriptor, or undefined when the model declares none.
+ * @throws {PiAiCatalogError} when any field or encoder/transport pair is unsupported.
+ */
+function resolveNativeFileInputs(
+  provider: string,
+  entry: PiAiModelProfile,
+  api: string,
+): LlmNativeFileInputs | undefined {
+  // A config-boundary value: schemastery can omit keys a full declaration
+  // would require, so every field is re-checked before the descriptor exists.
+  const declared: Partial<PiAiNativeFileInputs> | undefined = entry.nativeFileInputs
+  if (declared === undefined) return undefined
+  const encoder: unknown = declared.encoder
+  const mime: unknown = declared.mime
+  const tokenReserve: unknown = declared.tokenReserve
+  const reserveStated = typeof tokenReserve === 'object' && tokenReserve !== null
+    && Object.values(tokenReserve).some(value => value !== undefined)
+  const stated = encoder !== undefined
+    || (Array.isArray(mime) && mime.length > 0)
+    || declared.perFileBytes !== undefined
+    || declared.totalBytes !== undefined
+    || declared.maxPayloadBytes !== undefined
+    || reserveStated
+  // Schemastery materializes an omitted nested object as `{ mime: [], tokenReserve: {} }`;
+  // that is the absence of a declaration, not an empty one.
+  if (!stated) return undefined
+  for (const field of Object.keys(declared)) {
+    if (!NATIVE_FILE_INPUT_FIELDS.has(field)) {
+      invalid(provider, `model "${entry.id}" nativeFileInputs has unknown field "${field}"; the declared fields`
+        + ` are ${[...NATIVE_FILE_INPUT_FIELDS].join(', ')}`)
+    }
+  }
+  if (!isLlmNativeFileEncoder(encoder)) {
+    invalid(provider, `model "${entry.id}" nativeFileInputs.encoder must be one of`
+      + ` ${LLM_NATIVE_FILE_ENCODERS.join(', ')}; no encoder is inferred from the model, endpoint, or protocol`)
+  }
+  const protocols = NATIVE_FILE_ENCODER_APIS[encoder]
+  if (!protocols.includes(api)) {
+    invalid(provider, `model "${entry.id}" declares nativeFileInputs encoder "${encoder}", which is valid only`
+      + ` on api ${protocols.join(' or ')}; its resolved api is "${api}"`)
+  }
+  if (!Array.isArray(mime) || mime.length === 0) {
+    invalid(provider, `model "${entry.id}" nativeFileInputs.mime must list at least one MIME type`)
+  }
+  const mimeTypes: LlmNativeFileMimeType[] = []
+  const encoders: Partial<Record<LlmNativeFileMimeType, LlmNativeFileEncoder>> = {}
+  for (const candidate of mime) {
+    if (!isLlmNativeFileMimeType(candidate)) {
+      invalid(provider, `model "${entry.id}" nativeFileInputs.mime names "${String(candidate)}", which is not`
+        + ` one of ${LLM_NATIVE_FILE_MIME_TYPES.join(', ')}`)
+    }
+    if (!isLlmNativeFileEncoderCompatible(encoder, candidate)) {
+      invalid(provider, `model "${entry.id}" nativeFileInputs maps "${candidate}" to encoder "${encoder}", which`
+        + ' cannot carry it')
+    }
+    if (mimeTypes.includes(candidate)) {
+      invalid(provider, `model "${entry.id}" nativeFileInputs.mime lists "${candidate}" more than once`)
+    }
+    mimeTypes.push(candidate)
+    encoders[candidate] = encoder
+  }
+  try {
+    return validateLlmNativeFileInputs({
+      version: declared.version,
+      encoders,
+      perFileBytes: declared.perFileBytes,
+      totalBytes: declared.totalBytes,
+      maxPayloadBytes: declared.maxPayloadBytes,
+      tokenReserve: declared.tokenReserve,
+    })
+  } catch (error) {
+    invalid(provider, `model "${entry.id}" nativeFileInputs is invalid: ${(error as Error).message}`)
+  }
+}
+
 /** One configured model entry: an id plus the catalog fields it overrides. */
 export interface PiAiModelProfile {
   /** Model id sent to the provider and accepted by {@link GenerateOptions.model}. */
@@ -460,6 +601,13 @@ export interface PiAiModelProfile {
   name?: string
   /** Maximum combined request and response context in tokens. */
   contextWindow?: number
+  /**
+   * Maximum input tokens (the prompt-side budget), when a source states it
+   * separately from {@link contextWindow}. Stored as a capability and returned
+   * through {@link RouteCatalog.facts}; pi-ai's model type has no input-only
+   * field, so this never becomes a request cap or changes the combined window.
+   */
+  maxInputTokens?: number
   /**
    * Maximum output tokens. Configuring one also makes it this model's
    * per-request default; a value inherited from the installed catalog, or the
@@ -482,6 +630,14 @@ export interface PiAiModelProfile {
    * endpoint refuses is refused by the provider instead, mid-turn.
    */
   input?: PiAiModality[]
+  /** Whether reasoning is supported; a true flag alone discloses no selectable effort levels. */
+  reasoning?: boolean
+  /**
+   * Whether the model accepts tool declarations. `false` strips tool schemas,
+   * tool history, and tool-call transcripts at the shared dispatch chokepoint;
+   * absent means no source stated tool support.
+   */
+  tools?: boolean
   /**
    * Selectable reasoning efforts. Absent inherits the installed catalog
    * entry's capability (a hand-declared model has none and does not reason);
@@ -492,6 +648,13 @@ export interface PiAiModelProfile {
   reasoningEfforts?: false | PiAiReasoningEfforts
   /** pi-ai wire-compatibility switches for this model, winning over the route's per field; one its protocol does not declare is refused. */
   compat?: PiAiCompatProfile
+  /**
+   * Explicit native-file admission for this exact model. Absent keeps every
+   * file as handle text; no model name, endpoint, protocol, or advertised
+   * modality implies it. The encoder must match the model's resolved api, and
+   * the MIME list must be one that encoder can carry.
+   */
+  nativeFileInputs?: PiAiNativeFileInputs
 }
 
 /**
@@ -513,6 +676,18 @@ export interface RouteCatalogRequest {
   baseURL?: string
   /** Configured catalog; absent means the whole installed catalog for this route. */
   models?: readonly PiAiModelProfile[]
+  /**
+   * Which source may fill the served catalog when configuration lists no
+   * models. `catalog` (the default when omitted) keeps the installed catalog
+   * first and reads the discovered cache only when the installed catalog does
+   * not describe the route. `endpoint` treats configuration and the discovered
+   * listing as the whole authority: the installed catalog never refills it, a
+   * discovered row never inherits an installed entry of the same id, and a
+   * discovered route record with an empty `models` array serves an empty
+   * catalog instead of failing. An absent discovered record is an absence of
+   * evidence, never a known-empty listing.
+   */
+  catalogAuthority?: 'catalog' | 'endpoint'
   /** Installed-catalog customizations by model id; only meaningful while `models` is absent. */
   modelOverrides?: Readonly<Record<string, PiAiModelOverride>>
   /**
@@ -520,7 +695,11 @@ export interface RouteCatalogRequest {
    * does not describe, when configuration lists none. The profile-side sync
    * writes these to the discovered-model cache; they materialize through the
    * same path as configured entries, with the route's defaults standing in
-   * for capacities and modalities nothing disclosed.
+   * for capacities and modalities nothing disclosed. A disclosed `maxTokens`
+   * sizes the model capability and never becomes the per-request cap a
+   * deployment chose to send. An empty array is a retained successful empty
+   * listing, not an absence; `undefined` means the cache says nothing about
+   * the route.
    */
   discoveredModels?: readonly DiscoveredModelRecord[]
   /** Route-level wire-compatibility switches, landing on each model whose protocol declares them; entries override per field. */
@@ -593,7 +772,11 @@ function resolveModelReasoning(
   base: Model<Api> | undefined,
 ): ModelReasoning {
   const efforts = entry.reasoningEfforts
+  if (entry.reasoning === false) return { reasoning: false }
   if (efforts === undefined) {
+    if (entry.reasoning === true) {
+      return { reasoning: true, thinkingLevelMap: Object.fromEntries(THINKING_LEVELS.map(level => [level, null])) }
+    }
     // Reasoning rides the installed entry or is absent: a bare capability flag
     // would make pi-ai advertise effort levels with no `thinkingLevelMap` to
     // spell them, and no listing endpoint reports a model's reasoning
@@ -699,27 +882,84 @@ function resolveModelCompat(
 
 /**
  * The reasoning ladder a discovered record may declare. The cache stores level
- * → wire tokens verbatim, including levels pi-ai does not model; only a ladder
- * with at least one known thinking level (beyond `off`) is a declaration
- * {@link resolveModelReasoning} can serve, so anything else is treated as
- * "nothing disclosed" instead of making a cache-backed route unserviceable.
+ * → wire tokens verbatim; this re-establishes the canonical
+ * {@link THINKING_LEVELS} gate for callers that construct records without the
+ * cache parser. Unsupported names are dropped, never renamed to a canonical
+ * level, and the exact wire strings of supported levels survive. An explicit
+ * ladder with no usable level (including `{}`) becomes `false`: it disables
+ * reasoning instead of becoming `undefined`, which would let the installed
+ * entry's capability answer again. `reasoning: true` alone never synthesizes a
+ * ladder.
  * @param record - one discovered record.
- * @returns the ladder to materialize, or `undefined` when it offers no known level.
+ * @returns the ladder to materialize, `false` for an explicit empty ladder, or `undefined` when absent.
  */
-function discoveredReasoningEfforts(record: DiscoveredModelRecord): PiAiReasoningEfforts | undefined {
+function discoveredReasoningEfforts(record: DiscoveredModelRecord): PiAiReasoningEfforts | false | undefined {
   const ladder = record.reasoningEfforts
   if (ladder === undefined) return undefined
-  const usable = THINKING_LEVELS.some(level => level !== 'off'
-    && typeof ladder[level] === 'string' && ladder[level].length > 0)
-  return usable ? { ...ladder } : undefined
+  const canonical: Record<string, string> = {}
+  for (const level of THINKING_LEVELS) {
+    const wire = ladder[level]
+    if (typeof wire === 'string' && wire.length > 0) canonical[level] = wire
+  }
+  // A ladder offering only `off` is not a thinking declaration a configured
+  // profile accepts; it disables inference just like an empty ladder.
+  return THINKING_LEVELS.some(level => level !== 'off' && canonical[level] !== undefined)
+    ? canonical
+    : false
+}
+
+/** Where one materialized catalog value came from. */
+export type PiAiModelFactSource = 'configured' | 'discovered' | 'installed' | 'default'
+
+/**
+ * Catalog facts pi-ai's materialized {@link Model} cannot carry. Sources let a
+ * consumer tell a verified declaration or disclosure from a route-default
+ * assumption without changing any execution budget; the return is pure.
+ */
+export interface PiAiModelCatalogFacts {
+  /** Source of the materialized combined context window. */
+  contextWindow: PiAiModelFactSource
+  /** Source of the materialized output-token capability. */
+  maxTokens: PiAiModelFactSource
+  /** Source of the materialized request modalities before wire narrowing. */
+  input: PiAiModelFactSource
+  /** Request modalities before wire narrowing; the materialized model keeps only the wire subset. */
+  inputModalities: readonly ModelModality[]
+  /** Input-only token cap when configuration or discovery stated one; never derived from `contextWindow`. */
+  maxInputTokens?: number
+  /** Source of {@link maxInputTokens}, when present. */
+  maxInputTokensSource?: 'configured' | 'discovered'
+  /** Whether a configured or discovered source stated tool-call support; absent means undisclosed. */
+  tools?: boolean
+  /**
+   * Effort identifiers discovery advertised that no configured level accepts,
+   * preserved for diagnostics. They never reach a materialized ladder.
+   */
+  unsupportedReasoningEfforts?: readonly string[]
+  /**
+   * Native-file descriptor this exact model declared and this build validated.
+   * Absent means the route projects every file to handle text.
+   */
+  nativeFileInputs?: LlmNativeFileInputs
 }
 
 /** One route's materialized catalog, plus the request caps its profile chose. */
 export interface RouteCatalog {
-  /** The materialized models in configuration order. */
+  /**
+   * The materialized models in configuration order; empty only when
+   * {@link knownEmpty} is true or stored diagnostics withheld every model.
+   */
   models: readonly Model<Api>[]
   /** Models that cannot be resolved, retained as diagnostics during stored-config reads. */
   modelErrors: ReadonlyMap<string, string>
+  /**
+   * True when endpoint authority retained a successful empty listing (or every
+   * record was deprecated), so `models` is intentionally empty rather than
+   * unavailable. A missing discovered record is never reported as known-empty.
+   */
+  knownEmpty: boolean
+  /** Per-model sources and the input-only cap, keyed by model id; pure return, no execution default reads it yet. */
+  facts: ReadonlyMap<string, PiAiModelCatalogFacts>
   /**
    * Per-request output caps this profile explicitly configured, by model id.
    *
@@ -731,6 +971,35 @@ export interface RouteCatalog {
    * picked, so only an explicit configuration lands here.
    */
   configuredMaxTokens: ReadonlyMap<string, number>
+}
+
+/** One catalog entry plus the fields it states itself and where it came from. */
+interface RouteEntry {
+  /** The profile to materialize. */
+  readonly profile: PiAiModelProfile
+  /** Source of the fields this entry states; installed entries state only their overrides. */
+  readonly source: 'configured' | 'installed' | 'discovered'
+  /** Fields stated here; anything else falls through to the installed base, then the route defaults. */
+  readonly stated: ReadonlySet<'contextWindow' | 'maxTokens' | 'maxInputTokens' | 'input'>
+  /** Tool-call support a source stated; a configured entry, an installed override, or a discovered record. */
+  readonly tools?: boolean
+  /** Effort identifiers discovery advertised that no configured level accepts. */
+  readonly unsupportedReasoningEfforts?: readonly string[]
+}
+
+/** The fields a profile states itself, ignoring empty lists that mean "no answer". */
+function statedModelFields(profile: PiAiModelProfile): RouteEntry['stated'] {
+  const stated = new Set<'contextWindow' | 'maxTokens' | 'maxInputTokens' | 'input'>()
+  if (profile.contextWindow !== undefined) stated.add('contextWindow')
+  if (profile.maxInputTokens !== undefined) stated.add('maxInputTokens')
+  if (profile.maxTokens !== undefined) stated.add('maxTokens')
+  if (profile.input !== undefined && profile.input.length > 0) stated.add('input')
+  return stated
+}
+
+/** The fact source for a field an entry states itself. */
+function statedSource(entry: RouteEntry): PiAiModelFactSource {
+  return entry.source === 'installed' ? 'configured' : entry.source
 }
 
 /**
@@ -750,11 +1019,16 @@ export function resolveRouteModels(
   const defaults = catalogModels(provider)
   const providerBaseUrl = catalogProvider(provider)?.baseUrl
   // An absent `models` key and an empty one are the same request: the config
-  // schema materializes `[]` for the absent case, and an empty catalog could
-  // serve no request anyway, so both mean "serve the installed catalog".
+  // schema materializes `[]` for the absent case, so the sentinel is what
+  // distinguishes "serve the installed catalog" from an authoritative empty.
   const configured = request.models ?? []
   const overrides = request.modelOverrides ?? {}
+  const endpointAuthority = request.catalogAuthority === 'endpoint'
   const modelErrors = new Map<string, string>()
+  if (endpointAuthority && Object.keys(overrides).length > 0) {
+    invalid(provider, 'sets modelOverrides under catalogAuthority "endpoint", which never consults the installed'
+      + ' catalog; declare the fields on its models list')
+  }
   // Writes reject missing referents. Stored overrides retain a diagnostic
   // after catalog removal rather than silently disappearing.
   for (const [id, override] of Object.entries(overrides)) {
@@ -779,109 +1053,190 @@ export function resolveRouteModels(
       invalid(provider, `modelOverrides entry "${id}" sets "id", which is the dict key`)
     }
   }
+  // Vocabulary before protocols: a withheld or undeclared switch is refused
+  // wherever it is written, so it cannot look applied on a route whose models
+  // never reach the protocol that would have taken it. This stays ahead of the
+  // known-empty return so an empty route still rejects an unnameable switch.
+  assertOfferedCompatFields(provider, 'route', request.compat)
   // An override becomes the catalog entry's configuration, so everything a
   // models entry may declare — capacities, efforts, compat — resolves through
   // the same path with the same diagnostics and request-default semantics.
-  // Three sources answer "which models does this route serve?", in order:
-  // configuration, the installed catalog, and — only when neither says
-  // anything — the discovered cache. A discovered record contributes only what
-  // it disclosed; capacities and modalities nothing reported fall through to
-  // the route's defaults below, so an unverified model is never credited with
-  // a vision or reasoning capability it merely might have.
-  const entries: readonly PiAiModelProfile[] = configured.length > 0
-    ? configured
-    : defaults.size > 0
-      ? [...defaults.values()].map(model => ({ id: model.id, ...overrides[model.id] }))
-      : (request.discoveredModels ?? []).map((record) => {
-        // The cache carries the ladder a configured entry would carry; a
-        // record without one (an older cache, or an endpoint that disclosed
-        // nothing) keeps the route's conservative no-reasoning answer.
-        const efforts = discoveredReasoningEfforts(record)
+  // Two sources answer "which models does this route serve?": configuration,
+  // then the installed catalog, then the discovered cache. Endpoint authority
+  // removes the installed middle step, so a retained empty listing is served
+  // as an empty catalog rather than refilled or refused.
+  const entries: readonly RouteEntry[] = configured.length > 0
+    ? configured.map((profile): RouteEntry => ({
+      profile,
+      source: 'configured',
+      stated: statedModelFields(profile),
+      ...profile.tools === undefined ? {} : { tools: profile.tools },
+    }))
+    : !endpointAuthority && defaults.size > 0
+      ? [...defaults.values()].map((model): RouteEntry => {
+        const override = overrides[model.id]
+        const profile = { id: model.id, ...override }
         return {
-          id: record.id,
-          ...record.name === undefined ? {} : { name: record.name },
-          ...record.contextWindow === undefined ? {} : { contextWindow: record.contextWindow },
-          ...record.maxTokens === undefined ? {} : { maxTokens: record.maxTokens },
-          ...record.input === undefined ? {} : { input: [...record.input] },
-          ...efforts === undefined ? {} : { reasoningEfforts: efforts },
+          profile,
+          source: 'installed',
+          stated: statedModelFields(profile),
+          ...profile.tools === undefined ? {} : { tools: profile.tools },
         }
       })
+      : (request.discoveredModels ?? [])
+        .filter(record => !endpointAuthority || record.deprecated !== true)
+        .map((record): RouteEntry => {
+          // The cache carries the ladder a configured entry would carry; a
+          // record without one (an older cache, or an endpoint that disclosed
+          // nothing) keeps the route's conservative no-reasoning answer.
+          const efforts = discoveredReasoningEfforts(record)
+          const profile: PiAiModelProfile = {
+            id: record.id,
+            ...record.name === undefined ? {} : { name: record.name },
+            ...record.contextWindow === undefined ? {} : { contextWindow: record.contextWindow },
+            ...record.maxInputTokens === undefined ? {} : { maxInputTokens: record.maxInputTokens },
+            ...record.maxTokens === undefined ? {} : { maxTokens: record.maxTokens },
+            ...record.input === undefined ? {} : { input: [...record.input] },
+            ...record.reasoning === undefined ? {} : { reasoning: record.reasoning },
+            ...efforts === undefined ? {} : { reasoningEfforts: efforts },
+          }
+          return {
+            profile,
+            source: 'discovered',
+            stated: statedModelFields(profile),
+            ...record.tools === undefined ? {} : { tools: record.tools },
+            ...record.unsupportedReasoningEfforts === undefined
+              ? {}
+              : { unsupportedReasoningEfforts: record.unsupportedReasoningEfforts },
+          }
+        })
   if (entries.length === 0) {
+    // Only endpoint authority with a discovered route record proves the
+    // endpoint answered and advertised nothing. `undefined` is no evidence, so
+    // a failed or never-attempted fetch keeps the loud no-models diagnostic.
+    if (endpointAuthority && request.discoveredModels !== undefined) {
+      return {
+        models: [],
+        modelErrors,
+        knownEmpty: true,
+        facts: new Map(),
+        configuredMaxTokens: new Map(),
+      }
+    }
     invalid(provider, `${NO_MODELS_MARKER}; the installed catalog does not describe this route, so its models`
       + ' must be listed in configuration, fetched from its endpoint\'s /models listing, or added manually on the'
       + ' Models page')
   }
   const routeApi = sharedCatalogApi(defaults)
-  // Vocabulary before protocols: a withheld or undeclared switch is refused
-  // wherever it is written, so it cannot look applied on a route whose models
-  // never reach the protocol that would have taken it.
-  assertOfferedCompatFields(provider, 'route', request.compat)
   const seen = new Set<string>()
   const configuredMaxTokens = new Map<string, number>()
-  const resolveEntry = (entry: PiAiModelProfile): Model<Api> => {
-    assertOfferedCompatFields(provider, `model "${entry.id}"`, entry.compat)
-    if (entry.id.length === 0) invalid(provider, 'has a model with an empty id')
-    if (seen.has(entry.id)) invalid(provider, `lists model "${entry.id}" more than once`)
-    seen.add(entry.id)
-    const base = defaults.get(entry.id)
+  const resolveEntry = (entry: RouteEntry): { model: Model<Api>; facts: PiAiModelCatalogFacts } => {
+    const profile = entry.profile
+    assertOfferedCompatFields(provider, `model "${profile.id}"`, profile.compat)
+    if (profile.id.length === 0) invalid(provider, 'has a model with an empty id')
+    if (seen.has(profile.id)) invalid(provider, `lists model "${profile.id}" more than once`)
+    seen.add(profile.id)
+    // Endpoint authority serves exactly what configuration and the listing
+    // state. A discovered row that happens to share an id with an installed
+    // model takes the route's labeled defaults, never that catalog entry's
+    // endpoint facts, capacities, modalities, or reasoning. A configured entry
+    // stays authoritative and may still inherit the catalog entry of the id it
+    // names deliberately.
+    const base = endpointAuthority && entry.source === 'discovered' ? undefined : defaults.get(profile.id)
     const api = request.api ?? base?.api ?? routeApi
     if (api === undefined) {
-      invalid(provider, `model "${entry.id}" needs an api; the installed catalog does not describe it, so set the`
+      invalid(provider, `model "${profile.id}" needs an api; the installed catalog does not describe it, so set the`
         + ' route\'s api to the wire protocol its endpoint speaks')
     }
     const baseUrl = request.baseURL ?? base?.baseUrl ?? providerBaseUrl
     if (baseUrl === undefined) {
-      invalid(provider, `model "${entry.id}" needs a baseURL; the installed catalog does not describe this route`)
+      invalid(provider, `model "${profile.id}" needs a baseURL; the installed catalog does not describe this route`)
     }
     // Capacities fall back to the route's own defaults, so a model listing that
     // discloses nothing but ids still yields a serviceable route. The fallback
     // is a guess by construction, which is why it is a configurable route field
     // rather than a constant buried here.
-    const contextWindow = entry.contextWindow ?? base?.contextWindow ?? request.defaultContextWindow
+    const contextWindow = profile.contextWindow ?? base?.contextWindow ?? request.defaultContextWindow
     if (!Number.isInteger(contextWindow) || contextWindow <= 0) {
-      invalid(provider, `model "${entry.id}" contextWindow must be a positive integer`)
+      invalid(provider, `model "${profile.id}" contextWindow must be a positive integer`)
     }
-    const maxTokens = entry.maxTokens ?? base?.maxTokens ?? request.defaultMaxTokens
+    const maxTokens = profile.maxTokens ?? base?.maxTokens ?? request.defaultMaxTokens
     if (!Number.isInteger(maxTokens) || maxTokens <= 0) {
-      invalid(provider, `model "${entry.id}" maxTokens must be a positive integer`)
+      invalid(provider, `model "${profile.id}" maxTokens must be a positive integer`)
     }
-    // Only a value the profile named is a deployment choice; the catalog's is
-    // the model's capability and stays out of request defaults.
-    if (entry.maxTokens !== undefined) configuredMaxTokens.set(entry.id, entry.maxTokens)
+    if (profile.maxInputTokens !== undefined
+      && (!Number.isInteger(profile.maxInputTokens) || profile.maxInputTokens <= 0)) {
+      invalid(provider, `model "${profile.id}" maxInputTokens must be a positive integer`)
+    }
+    // Only an explicit entry or override chooses a request cap. A discovered
+    // listing's output capability sizes the model and stops there, exactly as
+    // an installed catalog value does.
+    if (profile.maxTokens !== undefined && entry.source !== 'discovered') {
+      configuredMaxTokens.set(profile.id, profile.maxTokens)
+    }
+    const resolvedInput = declaredInput(profile.input) ?? base?.input ?? request.defaultInput
+    const nativeFileInputs = resolveNativeFileInputs(provider, profile, api)
+    const facts: PiAiModelCatalogFacts = {
+      contextWindow: entry.stated.has('contextWindow')
+        ? statedSource(entry)
+        : base?.contextWindow === undefined ? 'default' : 'installed',
+      maxTokens: entry.stated.has('maxTokens')
+        ? statedSource(entry)
+        : base?.maxTokens === undefined ? 'default' : 'installed',
+      input: entry.stated.has('input')
+        ? statedSource(entry)
+        : base?.input === undefined ? 'default' : 'installed',
+      inputModalities: [...resolvedInput],
+      ...profile.maxInputTokens === undefined ? {} : {
+        maxInputTokens: profile.maxInputTokens,
+        maxInputTokensSource: entry.source === 'discovered' ? 'discovered' as const : 'configured' as const,
+      },
+      ...entry.tools === undefined ? {} : { tools: entry.tools },
+      ...entry.unsupportedReasoningEfforts === undefined
+        ? {}
+        : { unsupportedReasoningEfforts: [...entry.unsupportedReasoningEfforts] },
+      ...nativeFileInputs === undefined ? {} : { nativeFileInputs },
+    }
     return {
-      // The installed entry lays the floor, and the fields below override it.
-      // Enumerating instead would silently drop every `Model` field this
-      // package does not model — reasoning-level spellings, compatibility
-      // quirks, model headers, and whatever a pi-ai upgrade adds next. Spread,
-      // never enumerate.
-      ...base,
-      id: entry.id,
-      name: entry.name ?? base?.name ?? entry.id,
-      api,
-      provider,
-      baseUrl,
-      input: wireInput(declaredInput(entry.input) ?? base?.input ?? request.defaultInput),
-      cost: base?.cost ?? NO_COST,
-      contextWindow,
-      maxTokens,
-      ...resolveModelReasoning(provider, entry, base),
-      ...resolveModelCompat(provider, entry, request.compat, base, api),
+      model: {
+        // The installed entry lays the floor, and the fields below override it.
+        // Enumerating instead would silently drop every `Model` field this
+        // package does not model — reasoning-level spellings, compatibility
+        // quirks, model headers, and whatever a pi-ai upgrade adds next. Spread,
+        // never enumerate.
+        ...base,
+        id: profile.id,
+        name: profile.name ?? base?.name ?? profile.id,
+        api,
+        provider,
+        baseUrl,
+        input: wireInput(resolvedInput),
+        cost: base?.cost ?? NO_COST,
+        contextWindow,
+        maxTokens,
+        ...resolveModelReasoning(provider, profile, base),
+        ...resolveModelCompat(provider, profile, request.compat, base, api),
+      },
+      facts,
     }
   }
   const models: Model<Api>[] = []
+  const facts = new Map<string, PiAiModelCatalogFacts>()
   for (const entry of entries) {
-    let model: Model<Api>
+    let resolved: { model: Model<Api>; facts: PiAiModelCatalogFacts }
     try {
-      model = resolveEntry(entry)
+      resolved = resolveEntry(entry)
     } catch (error) {
       if (validation === 'strict' || !(error instanceof PiAiCatalogError)) throw error
-      modelErrors.set(entry.id, error.message)
+      modelErrors.set(entry.profile.id, error.message)
       continue
     }
-    models.push(model)
+    models.push(resolved.model)
+    facts.set(entry.profile.id, resolved.facts)
   }
   // A later duplicate invalidates the id, including an earlier resolved entry.
   const serviceableModels = models.filter(model => !modelErrors.has(model.id))
+  for (const id of modelErrors.keys()) facts.delete(id)
   // Per field, not per block: a route may default a switch its completions
   // models take beside one only its anthropic models do, and neither should
   // fail for the other's sake. What is refused is a route default no model on
@@ -892,5 +1247,5 @@ export function resolveRouteModels(
     invalid(provider, `sets compat "${field}", but no model on the route speaks a protocol that takes it;`
       + ` it exists on ${takers.join(', ')}`)
   }
-  return { models: serviceableModels, configuredMaxTokens, modelErrors }
+  return { models: serviceableModels, configuredMaxTokens, modelErrors, knownEmpty: false, facts }
 }

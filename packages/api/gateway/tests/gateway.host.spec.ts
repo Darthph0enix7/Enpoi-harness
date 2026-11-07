@@ -1240,6 +1240,53 @@ describe('TypertGatewayService', () => {
     await ctx.fiber.dispose()
   })
 
+  it('drops the oldest emit when the forwarded event queue overflows by frame count', async () => {
+    const ctx = new Context()
+    await ctx.plugin(TypertRegistry)
+    await ctx.plugin(TypertGatewayService, { remoteEventQueueMaxFrames: 1 })
+    const dispatches: Array<{ event: string; args: readonly unknown[] }> = []
+    let wake: (() => void) | undefined
+    const source = (signal: AbortSignal): AsyncIterable<{ event: string; args: readonly unknown[] }> =>
+      (async function *() {
+        const aborted = (): void => {
+          wake?.()
+          wake = undefined
+        }
+        signal.addEventListener('abort', aborted, { once: true })
+        try {
+          while (!signal.aborted) {
+            while (dispatches.length > 0) yield dispatches.shift() as { event: string; args: readonly unknown[] }
+            if (signal.aborted) return
+            await new Promise<void>((resolve) => { wake = resolve })
+            wake = undefined
+          }
+        } finally {
+          signal.removeEventListener('abort', aborted)
+        }
+      })()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source, { home: '/home/fixture' })
+    const carrier = new AbortController()
+    const events = rawGatewayEventHarness(ctx).openRemoteEvents({ args: {} }, carrier.signal)
+    const opening = await events.next()
+    expect(opening).toMatchObject({ done: false, value: { type: 'ready' } })
+
+    for (const count of [1, 2, 3, 4]) {
+      dispatches.push({ event: 'fixture/idle', args: [count] })
+      wake?.()
+      wake = undefined
+    }
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+    const delivered = await events.next()
+    expect(delivered).toMatchObject({
+      done: false,
+      value: { type: 'emit', event: 'fixture/idle', args: [4] },
+    })
+
+    await events.return(undefined)
+    await unregister()
+    await ctx.fiber.dispose()
+  })
+
   it('preserves a lookup policy rejection through the Connection RPC result', async () => {
     const ctx = new Context()
     await ctx.plugin(TypertRegistry)

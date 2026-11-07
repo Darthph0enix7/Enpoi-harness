@@ -405,7 +405,7 @@ export class ConversationNodeAssembler implements ConversationViewSnapshotStore 
   }
 
   /**
-   * Add one target to the monotonic active set and materialize its current snapshot.
+   * Add one target to the active set and materialize its current snapshot.
    * Pending Context work is flushed before the first complete replacement.
    * @param target - registered or subsequently registered view target.
    * @returns whether any active target snapshot changed.
@@ -418,6 +418,25 @@ export class ConversationNodeAssembler implements ConversationViewSnapshotStore 
     if (view === undefined) return published
     this.replaceView(view)
     this.publishViews([view])
+    return true
+  }
+
+  /**
+   * Remove one target from the active set once its last observer unmounts.
+   * Its builder and snapshot are dropped so a closed view stops both streamed
+   * applies and retained snapshot memory; re-activation rebuilds from the
+   * current window exactly like first activation.
+   * @param target - registered Conversation target.
+   * @returns whether the target was active.
+   */
+  deactivateTarget(target: string): boolean {
+    if (!this.activeTargets.delete(target)) return false
+    this.dirtyByTarget.delete(target)
+    const view = this.views.get(target)
+    if (view !== undefined) {
+      view.builder = undefined
+      view.snapshot = undefined
+    }
     return true
   }
 

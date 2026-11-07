@@ -23,8 +23,14 @@ import { BootPage } from './boot-page.ts'
 /** Page global carrying the {@link ClientHealthGlobal} face (the renderer's recovery seam). */
 export const CLIENT_HEALTH_GLOBAL = '__DSH_CLIENT_HEALTH__'
 
-/** Milliseconds the boot may take from the entry start to application mount. */
+/** Milliseconds the boot may take from the entry start to application mount without visible progress. */
 export const BOOT_DEADLINE_MS = 45_000
+
+/**
+ * Absolute ceiling on a boot that keeps reporting progress. The deadline
+ * extends one window at a time while boot progress advances, never past this.
+ */
+export const BOOT_CEILING_MS = 180_000
 
 /** Milliseconds the mounted application gets to render its first frame before the first probe. */
 export const BOOT_SETTLE_MS = 2_000
@@ -120,8 +126,16 @@ export interface ClientHealthOptions {
   showFallback?: (reason: unknown) => void
   /** Clock; defaults to `Date.now`. */
   now?: () => number
-  /** Boot deadline override. */
+  /** Boot deadline override; one window without progress reloads. */
   bootDeadlineMs?: number
+  /** Absolute boot ceiling override; must be at least `bootDeadlineMs`. */
+  bootCeilingMs?: number
+  /**
+   * Monotone boot-progress counter. The deadline extends while this value
+   * advances between windows (plugin fetches, imports, entry activation, and
+   * mount steps); a boot whose value never moves reloads at the plain deadline.
+   */
+  bootProgress?: () => number
   /** Post-mount settle window override. */
   settleMs?: number
   /** Auto-reload cooldown override. */
@@ -134,6 +148,15 @@ export interface ClientHealthOptions {
   reportLimitPerMinute?: number
   /** Identical-message dedupe window override. */
   reportDedupeMs?: number
+}
+
+/** Resolve one positive finite timing option, failing loud on a disabling or overflowing value. */
+function positiveMs(value: number | undefined, fallback: number, name: string): number {
+  const resolved = value ?? fallback
+  if (!Number.isFinite(resolved) || resolved <= 0) {
+    throw new RangeError(`client-health: ${name} must be a positive finite number`)
+  }
+  return resolved
 }
 
 /** Describe one thrown value for a breadcrumb or the failure card. */
@@ -259,6 +282,8 @@ class ClientHealthMonitor implements ClientHealth {
   private readonly postReport: (report: ClientErrorReport) => void
   private readonly reloadGuard: ReloadGuard
   private readonly bootDeadlineMs: number
+  private readonly bootCeilingMs: number
+  private readonly bootProgress: (() => number) | undefined
   private readonly settleMs: number
   private readonly reportLimitPerMinute: number
   private readonly reportDedupeMs: number
@@ -269,6 +294,9 @@ class ClientHealthMonitor implements ClientHealth {
   private bootFailed = false
   private bootCompletedAt: number | undefined
   private startedAt: number
+  private bootElapsedMs = 0
+  private pendingBootWindowMs: number
+  private lastBootProgress: number | undefined
   private deadlineTimer: ReturnType<typeof setTimeout> | undefined
   private settleTimer: ReturnType<typeof setTimeout> | undefined
   private fallbackShown = false
@@ -302,8 +330,15 @@ class ClientHealthMonitor implements ClientHealth {
       options.maxReloadsPerWindow ?? MAX_RELOADS_PER_WINDOW,
       options.reloadWindowMs ?? RELOAD_WINDOW_MS,
     )
-    this.bootDeadlineMs = options.bootDeadlineMs ?? BOOT_DEADLINE_MS
-    this.settleMs = options.settleMs ?? BOOT_SETTLE_MS
+    this.bootDeadlineMs = positiveMs(options.bootDeadlineMs, BOOT_DEADLINE_MS, 'bootDeadlineMs')
+    this.bootCeilingMs = positiveMs(options.bootCeilingMs, BOOT_CEILING_MS, 'bootCeilingMs')
+    if (this.bootCeilingMs < this.bootDeadlineMs) {
+      throw new RangeError('client-health: bootCeilingMs must be at least bootDeadlineMs')
+    }
+    this.bootProgress = options.bootProgress
+    this.lastBootProgress = this.readBootProgress()
+    this.pendingBootWindowMs = Math.min(this.bootDeadlineMs, this.bootCeilingMs)
+    this.settleMs = positiveMs(options.settleMs, BOOT_SETTLE_MS, 'settleMs')
     this.reportLimitPerMinute = options.reportLimitPerMinute ?? REPORT_LIMIT_PER_MINUTE
     this.reportDedupeMs = options.reportDedupeMs ?? REPORT_DEDUPE_MS
     this.postReport = options.postReport ?? ((report) => { void postDiagnosticsReport(report) })
@@ -317,19 +352,14 @@ class ClientHealthMonitor implements ClientHealth {
     this.win.addEventListener('unhandledrejection', this.onRejection as EventListener)
     this.doc.addEventListener('visibilitychange', this.onVisibility)
     ;(globalThis as Record<string, unknown>)[CLIENT_HEALTH_GLOBAL] = this.face
-    this.deadlineTimer = setTimeout(() => {
-      this.deadlineTimer = undefined
-      if (this.disposed || this.bootComplete || this.bootFailed) return
-      this.fatal(new Error('web boot: the workspace did not become ready before the boot deadline'), 'watchdog')
-    }, this.bootDeadlineMs)
+    this.armBootDeadline()
   }
 
   markBootComplete(): void {
     if (this.disposed || this.bootComplete) return
     this.bootComplete = true
     this.bootCompletedAt = this.now()
-    clearTimeout(this.deadlineTimer)
-    this.deadlineTimer = undefined
+    this.clearBootDeadline()
     this.settleTimer = setTimeout(() => {
       this.settleTimer = undefined
       this.checkNow()
@@ -339,21 +369,72 @@ class ClientHealthMonitor implements ClientHealth {
   markBootFailed(): void {
     if (this.disposed) return
     this.bootFailed = true
-    clearTimeout(this.deadlineTimer)
-    this.deadlineTimer = undefined
+    this.clearBootDeadline()
   }
 
   checkNow(): boolean {
     if (this.disposed || this.bootFailed) return false
     const now = this.now()
     if (!this.bootComplete) {
-      if (now - this.startedAt < this.bootDeadlineMs) return false
-      return this.fatal(new Error('web boot: the workspace did not become ready before the boot deadline'), 'watchdog') !== 'ignored'
+      if (now - this.startedAt < this.bootElapsedMs + this.pendingBootWindowMs) return false
+      const outcome = this.evaluateBootDeadline()
+      return outcome === 'reload' || outcome === 'fallback'
     }
     if (this.bootCompletedAt !== undefined && now - this.bootCompletedAt < this.settleMs) return false
     const blank = probeBlankness(this.container)
     if (blank === undefined) return false
     return this.fatal(new Error(blank), 'watchdog') !== 'ignored'
+  }
+
+  /** Schedule the next boot window; the ceiling shortens the last one. */
+  private armBootDeadline(): void {
+    const windowMs = Math.min(this.bootDeadlineMs, this.bootCeilingMs - this.bootElapsedMs)
+    if (windowMs <= 0) {
+      this.pendingBootWindowMs = 0
+      this.deadlineTimer = undefined
+      return
+    }
+    this.pendingBootWindowMs = windowMs
+    this.deadlineTimer = setTimeout(() => {
+      this.deadlineTimer = undefined
+      if (this.disposed || this.bootComplete || this.bootFailed) return
+      this.evaluateBootDeadline()
+    }, windowMs)
+  }
+
+  private clearBootDeadline(): void {
+    clearTimeout(this.deadlineTimer)
+    this.deadlineTimer = undefined
+  }
+
+  private readBootProgress(): number | undefined {
+    return this.bootProgress?.()
+  }
+
+  /**
+   * Close one boot window. Advancing progress extends the deadline by another
+   * window until the absolute ceiling; a window without progress reloads. The
+   * ceiling always reloads once, even for a boot that keeps reporting progress.
+   */
+  private evaluateBootDeadline(): 'extended' | 'reload' | 'fallback' | 'ignored' {
+    if (this.disposed) return 'ignored'
+    this.clearBootDeadline()
+    // Wall time can exceed the scheduled windows when a background timer is
+    // throttled; the ceiling is absolute, so consume whichever is larger.
+    this.bootElapsedMs = Math.max(
+      this.bootElapsedMs + this.pendingBootWindowMs,
+      this.now() - this.startedAt,
+    )
+    this.pendingBootWindowMs = 0
+    if (this.bootComplete || this.bootFailed) return 'ignored'
+    const progress = this.readBootProgress()
+    const advancing = progress !== undefined && progress !== this.lastBootProgress
+    if (progress !== undefined) this.lastBootProgress = progress
+    if (advancing && this.bootElapsedMs < this.bootCeilingMs) {
+      this.armBootDeadline()
+      return 'extended'
+    }
+    return this.fatal(new Error('web boot: the workspace did not become ready before the boot deadline'), 'watchdog')
   }
 
   fatal(reason: unknown, kind = 'renderer.fatal'): 'reload' | 'fallback' | 'ignored' {
@@ -373,8 +454,7 @@ class ClientHealthMonitor implements ClientHealth {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
-    clearTimeout(this.deadlineTimer)
-    this.deadlineTimer = undefined
+    this.clearBootDeadline()
     clearTimeout(this.settleTimer)
     this.settleTimer = undefined
     this.win.removeEventListener('error', this.onError)

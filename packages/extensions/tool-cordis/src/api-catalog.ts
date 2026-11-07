@@ -1510,6 +1510,18 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the owning adapter\'s image pricing for the route, when declared.',
       },
       {
+        signature: 'nativeFileInputs(provider: string, model: string): LlmNativeFileInputs | undefined',
+        description: 'Resolve the exact route\'s explicit native-file policy, or `undefined` when the provider is unregistered or does not enable native media. Unknown providers degrade to `undefined`, mirroring image pricing for durable history whose route may no longer be mounted.',
+        parameters: [{ name: 'provider', description: 'provider route named by a request header.' }, { name: 'model', description: 'exact model id named by the same header.' }],
+        returns: 'the owning adapter\'s descriptor, when declared.',
+      },
+      {
+        signature: 'nativeFileRequestPricing(provider: string, model: string): LlmNativeFileInputs | undefined',
+        description: 'Resolve the exact route\'s synchronous native-file request pricing.',
+        parameters: [{ name: 'provider', description: 'provider route named by a request header.' }, { name: 'model', description: 'exact model id named by the same header.' }],
+        returns: 'the owning adapter\'s descriptor, when declared.',
+      },
+      {
         signature: 'fileRequestText(ref: FileAttachmentRef): string',
         description: 'Resolve the exact text one durable file occurrence contributes to every provider request in the current execution environment.',
         parameters: [{ name: 'ref', description: 'durable verbatim file reference from model history.' }],
@@ -5872,7 +5884,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmAdapter',
-    declaration: 'export abstract class LlmAdapter {\n    providerInfo(provider: string): LlmProviderInfo;\n    providerRetryPolicy(_provider: string): ResolvedRetryPolicy | undefined;\n    imageRequestPricing(_provider: string, _model: string): LlmImageRequestPricing | undefined;\n    listModels(_provider: string): Promise<readonly LlmModelInfo[]>;\n    resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall>;\n    abstract stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
+    declaration: 'export abstract class LlmAdapter {\n    providerInfo(provider: string): LlmProviderInfo;\n    providerRetryPolicy(_provider: string): ResolvedRetryPolicy | undefined;\n    imageRequestPricing(_provider: string, _model: string): LlmImageRequestPricing | undefined;\n    nativeFileInputs(_provider: string, _model: string): LlmNativeFileInputs | undefined;\n    nativeFileRequestPricing(provider: string, model: string): LlmNativeFileInputs | undefined;\n    listModels(_provider: string): Promise<readonly LlmModelInfo[]>;\n    resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall>;\n    abstract stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
   },
   {
     name: 'LlmAttemptId',
@@ -5892,7 +5904,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmDiscoveredModel',
-    declaration: 'export interface LlmDiscoveredModel {\n    id: string;\n    name?: string;\n    contextWindow?: number;\n    maxTokens?: number;\n    inputModalities?: readonly ModelModality[];\n    reasoningEfforts?: Readonly<Record<string, string>>;\n}',
+    declaration: 'export interface LlmDiscoveredModel {\n    id: string;\n    name?: string;\n    contextWindow?: number;\n    maxTokens?: number;\n    inputModalities?: readonly ModelModality[];\n    maxInputTokens?: number;\n    tools?: boolean;\n    reasoning?: boolean;\n    reasoningEfforts?: Readonly<Record<string, string>>;\n    unsupportedReasoningEfforts?: readonly string[];\n    source?: \'endpoint\' | \'catalog\';\n    fallbackReason?: string;\n}',
   },
   {
     name: 'LlmFailure',
@@ -5907,8 +5919,12 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface LlmImageRequestPricing {\n    priceImages(images: readonly ImageBlock[]): readonly LlmImageRequestPrice[];\n}',
   },
   {
+    name: 'LlmModelCapacitySource',
+    declaration: 'export type LlmModelCapacitySource = \'configured\' | \'discovered\' | \'installed\' | \'default\';',
+  },
+  {
     name: 'LlmModelContext',
-    declaration: 'export interface LlmModelContext {\n    contextWindow: number;\n}',
+    declaration: 'export interface LlmModelContext {\n    contextWindow: number;\n    maxInputTokens?: number;\n    source?: LlmModelCapacitySource;\n    maxInputTokensSource?: LlmModelCapacitySource;\n}',
   },
   {
     name: 'LlmModelDiscoveryRequest',
@@ -5916,11 +5932,27 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmModelInfo',
-    declaration: 'export interface LlmModelInfo {\n    provider: string;\n    id: string;\n    name: string;\n    description?: string;\n    inputModalities?: readonly ModelModality[];\n}',
+    declaration: 'export interface LlmModelInfo {\n    provider: string;\n    id: string;\n    name: string;\n    description?: string;\n    inputModalities?: readonly ModelModality[];\n    advertisedInputModalities?: readonly ModelModality[];\n    tools?: boolean;\n    unsupportedReasoningEfforts?: readonly string[];\n}',
   },
   {
     name: 'LlmModelReasoningInfo',
     declaration: 'export interface LlmModelReasoningInfo {\n    efforts: readonly LlmReasoningEffortInfo[];\n    defaultEffort?: ReasoningEffortId;\n}',
+  },
+  {
+    name: 'LlmNativeFileEncoder',
+    declaration: 'export type LlmNativeFileEncoder = \'anthropic-document\' | \'openai-chat-file\' | \'openai-chat-input-audio\' | \'openai-chat-video-url\';',
+  },
+  {
+    name: 'LlmNativeFileInputs',
+    declaration: 'export interface LlmNativeFileInputs {\n    readonly version: 1;\n    readonly encoders: Readonly<Partial<Record<LlmNativeFileMimeType, LlmNativeFileEncoder>>>;\n    readonly perFileBytes: number;\n    readonly totalBytes: number;\n    readonly maxPayloadBytes: number;\n    readonly tokenReserve: LlmNativeFileTokenReserve;\n}',
+  },
+  {
+    name: 'LlmNativeFileMimeType',
+    declaration: 'export type LlmNativeFileMimeType = \'application/pdf\' | \'audio/wav\' | \'audio/mpeg\' | \'audio/ogg\' | \'audio/flac\' | \'video/mp4\' | \'video/webm\';',
+  },
+  {
+    name: 'LlmNativeFileTokenReserve',
+    declaration: 'export interface LlmNativeFileTokenReserve {\n    readonly perFile: number;\n    readonly perByte: number;\n}',
   },
   {
     name: 'LlmPoolIdentityStatus',
@@ -5940,7 +5972,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'LlmResolvedModelInfo',
-    declaration: 'export interface LlmResolvedModelInfo extends LlmModelInfo {\n    context?: LlmModelContext;\n    defaultMaxTokens?: number;\n    reasoning?: LlmModelReasoningInfo;\n    systemPromptUpdate?: SystemPromptUpdate;\n    toolUpdate?: ToolUpdate;\n}',
+    declaration: 'export interface LlmResolvedModelInfo extends LlmModelInfo {\n    context?: LlmModelContext;\n    maxOutputTokens?: number;\n    maxOutputTokensSource?: LlmModelCapacitySource;\n    defaultMaxTokens?: number;\n    reasoning?: LlmModelReasoningInfo;\n    systemPromptUpdate?: SystemPromptUpdate;\n    toolUpdate?: ToolUpdate;\n    nativeFileInputs?: LlmNativeFileInputs;\n}',
   },
   {
     name: 'LlmRuntime',
@@ -6111,12 +6143,16 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ModelCatalog {\n    readonly default: ModelSelection;\n    readonly routableProviders: readonly string[];\n    readonly groups: readonly ModelProviderGroup[];\n    readonly failures: readonly ModelCatalogFailure[];\n}',
   },
   {
+    name: 'ModelCatalogCapacitySource',
+    declaration: 'export type ModelCatalogCapacitySource = \'configured\' | \'discovered\' | \'installed\' | \'default\';',
+  },
+  {
     name: 'ModelCatalogFailure',
     declaration: 'export interface ModelCatalogFailure {\n    readonly id: string;\n    readonly name: string;\n    readonly message: string;\n}',
   },
   {
     name: 'ModelCatalogModel',
-    declaration: 'export interface ModelCatalogModel {\n    readonly id: string;\n    readonly name: string;\n    readonly description?: string;\n    readonly contextWindow?: number;\n    readonly maxTokens?: number;\n    readonly reasoning?: ModelReasoning;\n}',
+    declaration: 'export interface ModelCatalogModel {\n    readonly id: string;\n    readonly name: string;\n    readonly description?: string;\n    readonly contextWindow?: number;\n    readonly contextWindowSource?: ModelCatalogCapacitySource;\n    readonly maxInputTokens?: number;\n    readonly maxInputTokensSource?: ModelCatalogCapacitySource;\n    readonly maxTokens?: number;\n    readonly maxTokensSource?: ModelCatalogCapacitySource;\n    readonly defaultMaxTokens?: number;\n    readonly inputModalities?: readonly ModelModality[];\n    readonly advertisedInputModalities?: readonly ModelModality[];\n    readonly tools?: boolean;\n    readonly unverified?: boolean;\n    readonly unsupportedReasoningEfforts?: readonly string[];\n    readonly reasoning?: ModelReasoning;\n}',
   },
   {
     name: 'ModelMessageSource',
@@ -6508,7 +6544,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PreparedLlmCall',
-    declaration: 'export interface PreparedLlmCall {\n    readonly config: LlmCallConfig;\n    readonly retryPolicy: ResolvedRetryPolicy;\n    readonly context?: LlmModelContext;\n    readonly inputModalities?: readonly ModelModality[];\n    readonly systemPromptUpdate?: SystemPromptUpdate;\n    readonly toolUpdate?: ToolUpdate;\n    readonly adapterDefaults: LlmCallConfigAdapterDefaults;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
+    declaration: 'export interface PreparedLlmCall {\n    readonly config: LlmCallConfig;\n    readonly retryPolicy: ResolvedRetryPolicy;\n    readonly context?: LlmModelContext;\n    readonly inputModalities?: readonly ModelModality[];\n    readonly advertisedInputModalities?: readonly ModelModality[];\n    readonly maxOutputTokens?: number;\n    readonly tools?: boolean;\n    readonly unsupportedReasoningEfforts?: readonly string[];\n    readonly systemPromptUpdate?: SystemPromptUpdate;\n    readonly toolUpdate?: ToolUpdate;\n    readonly nativeFileInputs?: LlmNativeFileInputs;\n    readonly adapterDefaults: LlmCallConfigAdapterDefaults;\n    stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
   },
   {
     name: 'PreparedReferencedMessage',
@@ -6712,7 +6748,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'RequestContext',
-    declaration: 'export interface RequestContext {\n    provider: string;\n    model: string;\n    contextWindow?: number;\n    systemPromptUpdate?: SystemPromptUpdate;\n}',
+    declaration: 'export interface RequestContext {\n    provider: string;\n    model: string;\n    contextWindow?: number;\n    systemPromptUpdate?: SystemPromptUpdate;\n    nativeFileInputs?: LlmNativeFileInputs;\n}',
   },
   {
     name: 'RequestErrorAction',
@@ -7156,11 +7192,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionFollowFrame',
-    declaration: 'export type SessionFollowFrame = {\n    readonly type: \'snapshot\';\n    readonly header: SessionWireHeader;\n    readonly cursor: number;\n    readonly records: readonly SessionHistoryRecord[];\n    readonly hasMore: boolean;\n    readonly revert: SessionRevertFold;\n    readonly projections: SessionProjectionBaseline;\n    readonly assistantStream?: SessionAssistantStreamBaseline;\n} | SessionEventEntry | {\n    readonly type: \'assistant-stream\';\n    readonly frame: SessionAssistantStreamFrame;\n};',
+    declaration: 'export type SessionFollowFrame = {\n    readonly type: \'snapshot\';\n    readonly header: SessionWireHeader;\n    readonly cursor: number;\n    readonly records: readonly SessionHistoryRecord[];\n    readonly hasMore: boolean;\n    readonly revert: SessionRevertFold;\n    readonly projections: SessionProjectionBaseline;\n    readonly assistantStream?: SessionAssistantStreamBaseline;\n    readonly resumedFromSeq?: SessionSeqCursor;\n} | SessionEventEntry | {\n    readonly type: \'assistant-stream\';\n    readonly frame: SessionAssistantStreamFrame;\n};',
   },
   {
     name: 'SessionFollowRequest',
-    declaration: 'export interface SessionFollowRequest extends Pick<SessionPageRequest, \'maxMessages\' | \'turnWindow\'> {\n    readonly address: SessionAddress;\n    readonly assistantStream?: true;\n}',
+    declaration: 'export interface SessionFollowRequest extends Pick<SessionPageRequest, \'maxMessages\' | \'turnWindow\'> {\n    readonly address: SessionAddress;\n    readonly assistantStream?: true;\n    readonly afterSeq?: SessionSeqCursor;\n}',
   },
   {
     name: 'SessionForkRequest',

@@ -64,6 +64,24 @@ describe('Chat Node keyed sources', () => {
     expect(builder.groupInput().order).toBe(next.order)
   })
 
+  it('drops an unobserved keyed source on release and keeps one a seat still observes', () => {
+    const builder = new ChatSnapshotBuilder()
+    const snapshot = builder.replace({ nodes: [userNode(1), userNode(2)], timeline })
+    const first = snapshot.nodes.source('user:1')
+    const second = snapshot.nodes.source('user:2')
+    const unsubscribe = second.subscribe(vi.fn())
+
+    snapshot.nodes.release?.('user:1')
+    snapshot.nodes.release?.('user:2')
+
+    expect(snapshot.nodes.source('user:1')).not.toBe(first)
+    expect(snapshot.nodes.source('user:2')).toBe(second)
+
+    unsubscribe()
+    snapshot.nodes.release?.('user:2')
+    expect(snapshot.nodes.source('user:2')).not.toBe(second)
+  })
+
   it('notifies only the updated key among 4,000 mounted sources', () => {
     const builder = new ChatSnapshotBuilder()
     const nodes = Array.from({ length: 4_000 }, (_, index) => userNode(index + 1))

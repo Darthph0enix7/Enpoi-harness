@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type {
   SessionEventLikeEntry, SessionLiveEventEntry,
 } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -17,7 +17,7 @@ import type { TrajectorySnapshot } from '../src/client/trajectory-contract.ts'
 import { registerTrajectoryMessageDefinitions } from '../src/client/trajectory-message-definitions.ts'
 import { registerTrajectoryRequestHeaderDefinition } from '../src/client/trajectory-request-header-definition.ts'
 import { registerTrajectoryRevertDefinition } from '../src/client/trajectory-revert-definition.ts'
-import { trajectoryViewDefinition } from '../src/client/trajectory-snapshot-builder.ts'
+import { trajectoryViewDefinition, TrajectorySnapshotBuilder } from '../src/client/trajectory-snapshot-builder.ts'
 import { registerTrajectoryToolDefinition } from '../src/client/trajectory-tool-definition.ts'
 
 const DEFINITIONS: ConversationNodeDefinition[] = []
@@ -201,6 +201,47 @@ describe('Trajectory conversation Definitions', () => {
       content: [{ type: 'tool-removal', toolName: 'old_search' }],
     } }, { surfaceOp: 'append' })], true)
     expect(snapshot(value).eventNodes.find(node => node.kind === 'context')).toMatchObject({ content: [{ type: 'tool-removal', toolName: 'old_search' }] })
+  })
+
+  it('stops trajectory builder applies after the target is deactivated and rebuilds on re-activation', () => {
+    const apply = vi.spyOn(TrajectorySnapshotBuilder.prototype, 'apply')
+    try {
+      const value = assembler([
+        at(1, 'turn/start', { turn: 1 }),
+        at(2, 'step/start', { turn: 1, step: 1 }),
+        at(3, 'assistant/live-chunk', {
+          turn: 1,
+          step: 1,
+          chunk: { type: 'text-delta', index: 0, text: 'first' },
+        }),
+      ])
+      value.append(at(4, 'assistant/live-chunk', {
+        turn: 1,
+        step: 1,
+        chunk: { type: 'text-delta', index: 0, text: ' second' },
+      }))
+      value.flush()
+      expect(apply.mock.calls.length).toBeGreaterThan(0)
+      expect(snapshot(value).partial?.blocks).toEqual([{ kind: 'text', text: 'first second' }])
+
+      expect(value.deactivateTarget('trajectory')).toBe(true)
+      expect(value.snapshot('trajectory')).toBeUndefined()
+      const appliedBeforeClose = apply.mock.calls.length
+      value.append(at(5, 'assistant/live-chunk', {
+        turn: 1,
+        step: 1,
+        chunk: { type: 'text-delta', index: 0, text: ' after-close' },
+      }))
+      value.flush()
+      expect(apply.mock.calls.length).toBe(appliedBeforeClose)
+
+      expect(value.activateTarget('trajectory')).toBe(true)
+      const rebuilt = snapshot(value)
+      expect(rebuilt.partial?.blocks).toEqual([{ kind: 'text', text: 'first second after-close' }])
+      expect(rebuilt.requests).toMatchObject([{ purpose: 'assistant', status: 'running' }])
+    } finally {
+      apply.mockRestore()
+    }
   })
 
   it('assembles streaming usage, preserves retry facts, and materializes interruption', () => {

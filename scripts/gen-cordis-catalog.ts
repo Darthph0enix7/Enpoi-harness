@@ -340,6 +340,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   LlmResolvedModelInfo: 'llm-streaming.md',
   LlmFailure: 'llm-streaming.md',
   LlmImageRequestPricing: 'llm-streaming.md',
+  LlmNativeFileInputs: 'llm-streaming.md',
   LlmModelInfo: 'llm-streaming.md',
   LlmProviderInfo: 'llm-streaming.md',
   LlmPoolIdentityStatus: 'llm-streaming.md',

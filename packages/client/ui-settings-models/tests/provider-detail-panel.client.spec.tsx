@@ -46,11 +46,22 @@ type TestModel = {
   contextWindow?: number
   maxTokens?: number
   reasoning?: boolean | Record<string, string>
-  reasoningEfforts?: Record<string, string | null>
+  reasoningEfforts?: false | Record<string, string | null>
   supported_parameters?: string[]
   tools?: boolean
   cost?: Record<string, number>
   input?: string[]
+  inputModalities?: string[]
+  advertisedInputModalities?: string[]
+  nativeFileInputs?: {
+    version?: number
+    encoder?: string
+    mime?: string[]
+    perFileBytes?: number
+    totalBytes?: number
+    maxPayloadBytes?: number
+    tokenReserve?: { perFile?: number; perByte?: number }
+  }
   isFree?: boolean
   gated?: boolean
   gateReason?: string
@@ -497,7 +508,7 @@ it('Refresh merges the answer into settings without deleting or stripping config
   ])
 })
 
-it('Refresh sizes a newly advertised id from the route profile capacity defaults', async () => {
+it('Refresh never writes route capacity defaults into a newly advertised row', async () => {
   const discoverModels = vi.fn(async () => ({
     ok: true as const,
     value: [{ id: 'fresh' }],
@@ -527,50 +538,40 @@ it('Refresh sizes a newly advertised id from the route profile capacity defaults
   fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
   await waitFor(() => { expect(mutate).toHaveBeenCalled() })
   const [, ops] = mutate.mock.calls[0] as unknown as [string, Array<{ path: string[]; value: TestModel[] }>]
-  // The panel never invents 131072/8192: an undisclosed capacity takes the
-  // route's configured default, and nothing else.
-  expect(ops[0]?.value).toEqual([{ id: 'fresh', name: 'fresh', contextWindow: 1_000_000, maxTokens: 16_384 }])
+  // Route defaults are execution fallbacks, not per-model facts: an
+  // undisclosed capacity stays absent from the stored row.
+  expect(ops[0]?.value).toEqual([{ id: 'fresh', name: 'fresh' }])
 })
 
-it('recognizes the current audio, video, and reasoning families by id when no structured data exists', () => {
+it('renders no capability badges from id heuristics alone', () => {
   render(panel('gateway', [
     { id: 'xiaomi/mimo-v2.6-pro' },
-    { id: 'xiaomi/mimo-v2.5' },
-    { id: 'meta/muse-spark-1.2-contributor' },
-    { id: 'meta/muse-spark-1.3-contributor' },
     { id: 'space-bunny-preview' },
-    { id: 'openai/gpt-6-astra' },
-    { id: 'moonshotai/kimi-k2.6' },
-    { id: 'x-ai/grok-4.6' },
-    { id: 'qwen/qwen3.8-max' },
-    { id: 'z-ai/glm-4.7' },
-    { id: 'tencent/hy3-preview' },
-    { id: 'tencent/hy4-preview' },
-    { id: 'meituan/longcat-2.0' },
-    { id: 'minimax-m2.7' },
-    { id: 'omen-alpha' },
+    { id: 'openai/gpt-5-mini' },
+    { id: 'claude-sonnet-4-6' },
+    { id: 'zzz-mystery-model' },
   ]))
 
-  // Audio: the mimo v2.6/v2.5 and muse-spark contributor families, plus the
-  // already-covered minimax-m2.7.
-  expect(screen.getAllByTitle('Audio Processing')).toHaveLength(5)
-  // Video: the space-bunny family, plus the already-covered minimax-m2.7.
-  expect(screen.getAllByTitle('Video Processing')).toHaveLength(2)
-  // Reasoning: every listed family but space-bunny (14 of 15 rows).
-  expect(screen.getAllByTitle('Reasoning / Thinking')).toHaveLength(14)
+  // An id alone states nothing: no tools default, no reasoning, no modality.
+  expect(screen.queryByTitle('Tool Calling')).toBeNull()
+  expect(screen.queryByTitle('Reasoning / Thinking')).toBeNull()
+  expect(screen.queryByTitle('Vision / Image')).toBeNull()
+  expect(screen.queryByTitle('Audio Processing')).toBeNull()
+  expect(screen.queryByTitle('Video Processing')).toBeNull()
+  expect(screen.queryByTitle('Documents & Files')).toBeNull()
 })
 
-it('renders disclosed capability badges as facts and id-hinted badges distinctly', () => {
+it('renders disclosed capability badges as facts and stored hints as unverified', () => {
   // The model cards render both a name and an id tag; name the rows so the id
   // tag is a unique anchor for scoping assertions to one card.
   const { container } = render(panel('gateway', [
     // Disclosed: structured modalities and explicit flags are facts.
     { id: 'vendor/solid-model', name: 'Solid', input: ['text', 'image'], reasoning: true, tools: true },
-    // Nothing disclosed: every badge is a hint from the shared table.
-    { id: 'openai/gpt-5-mini', name: 'Hinted Mini' },
+    // Nothing disclosed: no badge comes from the id table.
+    { id: 'openai/gpt-5-mini', name: 'Unstated' },
     // The sync's labeled, override-applied hints suppress the shipped claims.
     { id: 'claude-sonnet-owner', name: 'Owner Hidden', capabilityHints: { input: [], source: 'owner-override' } },
-    // A persisted owner pin renders even where the shipped table matches nothing.
+    // A persisted owner pin renders, but only as an unverified hint.
     { id: 'zzz-pinned-model', name: 'Pinned', capabilityHints: { input: ['audio'], reasoning: true, source: 'owner-override' } },
     // The sync's own row shape: floor input/reasoning plus the labeled hints
     // (the floor is not a disclosure of absence).
@@ -590,6 +591,10 @@ it('renders disclosed capability badges as facts and id-hinted badges distinctly
     return card as Element
   }
   const badge = (id: string, title: string): HTMLElement | null => within(cardFor(id) as HTMLElement).queryByTitle(title)
+  const hintBadge = (id: string, capability: string): HTMLElement => {
+    const found = within(cardFor(id) as HTMLElement).getByTitle(`${capability} — ${en.capHintUnverified}`)
+    return found
+  }
   expect(container.querySelectorAll(`.${styles['modelCard']}`)).toHaveLength(5)
 
   // Disclosed facts render without the hint marker.
@@ -597,42 +602,116 @@ it('renders disclosed capability badges as facts and id-hinted badges distinctly
   expect(badge('vendor/solid-model', 'Reasoning / Thinking')?.getAttribute('data-hint')).toBeNull()
   expect(badge('vendor/solid-model', 'Tool Calling')?.getAttribute('data-hint')).toBeNull()
 
-  // Nothing-disclosed badges carry the hint marker (gpt-5 and its pdf operand).
-  expect(badge('openai/gpt-5-mini', 'Vision / Image')?.getAttribute('data-hint')).toBe('vision')
-  expect(badge('openai/gpt-5-mini', 'Reasoning / Thinking')?.getAttribute('data-hint')).toBe('reasoning')
-  expect(badge('openai/gpt-5-mini', 'Documents & Files')?.getAttribute('data-hint')).toBe('files')
-  expect(badge('openai/gpt-5-mini', 'Audio Processing')).toBeNull()
+  // Nothing disclosed: the id table no longer manufactures a badge.
+  expect(badge('openai/gpt-5-mini', 'Vision / Image')).toBeNull()
+  expect(badge('openai/gpt-5-mini', 'Reasoning / Thinking')).toBeNull()
+  expect(badge('openai/gpt-5-mini', 'Documents & Files')).toBeNull()
+  expect(badge('openai/gpt-5-mini', 'Tool Calling')).toBeNull()
 
-  // The persisted hint set is authoritative: the shipped `claude` claims do
-  // not leak back in, and an owner pin renders without a shipped match.
+  // A stored hint set is shown, but every hinted badge names its uncertainty.
   expect(badge('claude-sonnet-owner', 'Vision / Image')).toBeNull()
   expect(badge('claude-sonnet-owner', 'Documents & Files')).toBeNull()
   expect(badge('claude-sonnet-owner', 'Reasoning / Thinking')).toBeNull()
-  expect(badge('zzz-pinned-model', 'Audio Processing')?.getAttribute('data-hint')).toBe('audio')
-  expect(badge('zzz-pinned-model', 'Reasoning / Thinking')?.getAttribute('data-hint')).toBe('reasoning')
+  expect(hintBadge('zzz-pinned-model', 'Audio Processing').getAttribute('data-hint')).toBe('audio')
+  expect(hintBadge('zzz-pinned-model', 'Audio Processing').getAttribute('data-unverified')).toBe('true')
+  expect(hintBadge('zzz-pinned-model', 'Reasoning / Thinking').getAttribute('data-hint')).toBe('reasoning')
 
-  // The sync's floor values yield to its own labeled hints.
-  expect(badge('zzz-synced-hinted', 'Vision / Image')?.getAttribute('data-hint')).toBe('vision')
-  expect(badge('zzz-synced-hinted', 'Documents & Files')?.getAttribute('data-hint')).toBe('files')
-  expect(badge('zzz-synced-hinted', 'Reasoning / Thinking')?.getAttribute('data-hint')).toBe('reasoning')
+  // The sync's floor values yield to its own labeled hints, and its row-level
+  // unverified marker renders as a badge.
+  expect(hintBadge('zzz-synced-hinted', 'Vision / Image').getAttribute('data-hint')).toBe('vision')
+  expect(hintBadge('zzz-synced-hinted', 'Documents & Files').getAttribute('data-hint')).toBe('files')
+  expect(hintBadge('zzz-synced-hinted', 'Reasoning / Thinking').getAttribute('data-hint')).toBe('reasoning')
+  expect(within(cardFor('zzz-synced-hinted') as HTMLElement).getByTitle(en.capUnverifiedHint).textContent)
+    .toBe(en.capUnverifiedBadge)
+  expect(within(cardFor('zzz-synced-hinted') as HTMLElement).getByText(en.capHintUnverified)).toBeTruthy()
 })
 
-it('treats an explicit reasoning:false as a fact that blocks the reasoning hint', () => {
+it('treats an explicit reasoning:false as a fact and leaves undisclosed capabilities empty', () => {
   render(panel('gateway', [{ id: 'openai/gpt-5-api', name: 'No Think', reasoning: false }]))
   expect(screen.queryByTitle('Reasoning / Thinking')).toBeNull()
-  // The undisclosed modality is still a labeled hint.
-  expect(screen.getByTitle('Vision / Image').getAttribute('data-hint')).toBe('vision')
+  expect(screen.queryByTitle('Vision / Image')).toBeNull()
+  expect(screen.queryByTitle('Tool Calling')).toBeNull()
+})
+
+it('marks advertised audio/video/pdf as declared but not sent natively', () => {
+  render(panel('gateway', [
+    {
+      id: 'declared-only',
+      name: 'Declared Only',
+      input: ['text', 'image', 'audio', 'video', 'pdf'],
+      advertisedInputModalities: ['text', 'image', 'audio', 'video', 'pdf'],
+    },
+    {
+      id: 'native',
+      name: 'Native',
+      input: ['text', 'image'],
+      advertisedInputModalities: ['text', 'image'],
+    },
+  ]))
+
+  const cardFor = (id: string): HTMLElement => {
+    const tag = screen.getByText(id)
+    const card = tag.closest(`.${styles['modelCard']}`)
+    expect(card).not.toBeNull()
+    return card as HTMLElement
+  }
+  expect(within(cardFor('declared-only')).getByTitle('Vision / Image')).toBeTruthy()
+  expect(within(cardFor('declared-only')).queryByTitle('Audio Processing')).toBeNull()
+  expect(within(cardFor('declared-only')).getByTitle(en.capDeclaredNotNativeTitle.replace('{capability}', en.capAudio))).toBeTruthy()
+  expect(cardFor('declared-only').querySelector('[data-advertised-only="audio"]')).toBeTruthy()
+  expect(cardFor('declared-only').querySelector('[data-advertised-only="video"]')).toBeTruthy()
+  expect(cardFor('declared-only').querySelector('[data-advertised-only="pdf"]')).toBeTruthy()
+  expect(within(cardFor('declared-only')).getByText(en.capDeclaredNotNative)).toBeTruthy()
+  expect(cardFor('native').querySelector('[data-advertised-only]')).toBeNull()
+})
+
+it('treats a declared native-file descriptor as native support instead of declared-only', () => {
+  const descriptor = (mime: string[]) => ({
+    version: 1,
+    encoder: 'openai-chat-file',
+    mime,
+    perFileBytes: 1_000,
+    totalBytes: 2_000,
+    maxPayloadBytes: 4_000,
+    tokenReserve: { perFile: 10, perByte: 0.5 },
+  })
+  render(panel('gateway', [
+    {
+      id: 'native-pdf',
+      name: 'Native PDF',
+      input: ['text', 'pdf'],
+      advertisedInputModalities: ['text', 'pdf'],
+      nativeFileInputs: descriptor(['application/pdf']),
+    },
+    {
+      id: 'native-audio-declared-pdf',
+      name: 'Native Audio',
+      input: ['text', 'audio', 'pdf'],
+      advertisedInputModalities: ['text', 'audio', 'pdf'],
+      nativeFileInputs: descriptor(['audio/mpeg']),
+    },
+  ]))
+
+  const findCard = (modelId: string): HTMLElement => {
+    const el = screen.getByText(modelId).closest(`.${styles['modelCard']}`)
+    if (el === null) throw new Error(`card for ${modelId} not found`)
+    return el as HTMLElement
+  }
+  expect(within(findCard('native-pdf')).getByTitle('Documents & Files')).toBeTruthy()
+  expect(findCard('native-pdf').querySelector('[data-advertised-only="pdf"]')).toBeNull()
+  expect(within(findCard('native-pdf')).queryByText(en.capDeclaredNotNative)).toBeNull()
+  // Only the kind the encoder carries becomes native; the declared PDF stays
+  // disclosure-side while native audio gains its badge.
+  expect(within(findCard('native-audio-declared-pdf')).getByTitle('Audio Processing')).toBeTruthy()
+  expect(findCard('native-audio-declared-pdf').querySelector('[data-advertised-only="audio"]')).toBeNull()
+  expect(findCard('native-audio-declared-pdf').querySelector('[data-advertised-only="pdf"]')).toBeTruthy()
 })
 
 describe('mergeRefreshedModels', () => {
-  it('accepts only positive integer capacity defaults', () => {
+  it('merges only disclosed values and never invents capacities', () => {
     const configured: TestModel[] = [{ id: 'm' }]
-    const discovered = [{ id: 'm' }]
-    expect(mergeRefreshedModels(configured, discovered, { contextWindow: 0, maxTokens: 'none' })[0])
-      .toEqual({ id: 'm', name: 'm' })
-    expect(mergeRefreshedModels(configured, discovered, { contextWindow: 1.5 })[0])
-      .toEqual({ id: 'm', name: 'm' })
-    expect(mergeRefreshedModels(configured, discovered, { contextWindow: 1_000, maxTokens: 2_000 })[0])
+    expect(mergeRefreshedModels(configured, [{ id: 'm' }])[0]).toEqual({ id: 'm', name: 'm' })
+    expect(mergeRefreshedModels(configured, [{ id: 'm', contextWindow: 1_000, maxTokens: 2_000 }])[0])
       .toEqual({ id: 'm', name: 'm', contextWindow: 1_000, maxTokens: 2_000 })
   })
 
@@ -708,6 +787,40 @@ describe('mergeRefreshedModels', () => {
     ])
   })
 
+  it('drops a stale configured ladder when the endpoint explicitly reports an empty one', () => {
+    const configured: TestModel[] = [
+      { id: 'm', name: 'Hand', reasoning: true, reasoningEfforts: { high: 'high', off: null } },
+      // Nothing disclosed keeps the stored ladder: absence is not a retraction.
+      { id: 'n', reasoning: true, reasoningEfforts: { low: 'low' } },
+    ]
+    expect(mergeRefreshedModels(configured, [
+      // The endpoint states no selectable level; the disclosed reasoning flag
+      // stays, and the stale effort mapping does not.
+      { id: 'm', reasoning: true, reasoningEfforts: {} },
+      { id: 'n', reasoning: true },
+    ])).toEqual([
+      { id: 'm', name: 'Hand', reasoning: true },
+      { id: 'n', name: 'n', reasoning: true, reasoningEfforts: { low: 'low' } },
+    ])
+  })
+
+  it('preserves a disclosed false and a populated ladder, including its off meaning', () => {
+    const merged = mergeRefreshedModels([], [
+      // An explicit false is an answer and survives as one.
+      { id: 'plain', reasoning: false, reasoningEfforts: false },
+      // A usable ladder keeps the canonical spelling; discovery's empty
+      // `off` wire becomes the schema's `null`.
+      { id: 'ladder', reasoning: true, reasoningEfforts: { low: 'low', high: 'high', off: '' } },
+      // A stated but unusable ladder is omitted rather than persisted.
+      { id: 'empty', reasoning: true, reasoningEfforts: {} },
+    ])
+    expect(merged).toEqual([
+      { id: 'plain', name: 'plain', reasoning: false, reasoningEfforts: false },
+      { id: 'ladder', name: 'ladder', reasoning: true, reasoningEfforts: { off: null, low: 'low', high: 'high' } },
+      { id: 'empty', name: 'empty', reasoning: true },
+    ])
+  })
+
   it('appends an advertised id the configuration does not name, carrying what it disclosed', () => {
     const merged = mergeRefreshedModels(
       [{ id: 'kept' }],
@@ -728,7 +841,6 @@ describe('mergeRefreshedModels', () => {
         // Nothing but an id: no capacities and no capabilities are invented.
         { id: 'i' },
       ],
-      { contextWindow: 9_000, maxTokens: 900 },
     )
 
     expect(merged).toEqual([
@@ -743,9 +855,9 @@ describe('mergeRefreshedModels', () => {
         gated: true,
         gateReason: 'sign-in required',
       },
-      // The route defaults size the rows the answer left unsized.
-      { id: 'h', name: 'h', contextWindow: 9_000, maxTokens: 900 },
-      { id: 'i', name: 'i', contextWindow: 9_000, maxTokens: 900 },
+      // The answer left these rows unsized: no route default fills them.
+      { id: 'h', name: 'h' },
+      { id: 'i', name: 'i' },
     ])
   })
 })
@@ -843,6 +955,85 @@ it('manual Refresh falls back to the non-deleting discovery merge when the RPC i
   const [, ops] = mutate.mock.calls[0] as unknown as [string, Array<{ path: string[]; value: Array<{ id: string }> }>]
   // The fallback merges and never deletes.
   expect(ops[0]?.value.map(model => model.id)).toEqual(['configured', 'advertised'])
+})
+
+it('manual Refresh drops a stale ladder when the discovery fallback reports an empty one', async () => {
+  // provider-sync is unavailable, so the plain discovery merge owns the write.
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) } as unknown as Response)))
+  const discoverModels = vi.fn(async () => ({
+    ok: true as const,
+    value: [{ id: 'configured', reasoning: true, reasoningEfforts: {} }],
+  }))
+  const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const ns = namespace('gateway', [{ id: 'configured', reasoning: true, reasoningEfforts: { high: 'high' } }])
+  const base = wire(ns)
+  const wireFace = {
+    ...base,
+    settings: { ...base.settings, mutate },
+    llm: { ...base.llm, discoverModels },
+  } as unknown as ModelsWire
+  render(
+    <ProviderDetailPanel
+      row={row('gateway')}
+      namespace={ns}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+  fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
+  await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+  const [, ops] = mutate.mock.calls[0] as unknown as [string, Array<{ path: string[]; value: Array<Record<string, unknown>> }>]
+  // The endpoint's explicit empty ladder clears the stale mapping; the
+  // disclosed reasoning flag stays, and no ladder is invented.
+  expect(ops[0]?.value).toEqual([{ id: 'configured', name: 'configured', reasoning: true }])
+})
+
+it('manual Refresh keeps a degraded host answer\'s empty ladder out of the persisted route', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({
+    ok: true,
+    json: async () => ({
+      result: {
+        ok: true,
+        value: {
+          route: 'gateway',
+          models: [{ id: 'kept-server', reasoning: true, reasoningEfforts: {} }],
+          removed: [],
+          deprecated: [],
+          degraded: true,
+          degradedReason: 'shrink guard',
+          source: 'live',
+          authority: 'catalog',
+          fetchedAt: 5,
+        },
+      },
+    }),
+  } as unknown as Response)))
+  const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const ns = namespace('gateway', [{ id: 'kept-server' }])
+  const base = wire(ns)
+  const api = { ...base, settings: { ...base.settings, mutate } } as unknown as ModelsWire
+  render(
+    <ProviderDetailPanel
+      row={row('gateway')}
+      namespace={ns}
+      schema={settingsSchema}
+      api={api}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+  fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
+  await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+  const [, ops] = mutate.mock.calls[0] as unknown as [string, Array<{ path: string[]; value: Array<Record<string, unknown>> }>]
+  // A degraded answer still replaces membership, but an invalid empty ladder
+  // never reaches the settings write.
+  expect(ops[0]?.value).toEqual([{ id: 'kept-server', reasoning: true }])
 })
 
 describe('applyRefreshedModels', () => {
@@ -1239,4 +1430,131 @@ it('clears the armed refresh-toast timer when the panel unmounts', async () => {
   view.unmount()
   expect(clearSpy.mock.calls.length).toBeGreaterThan(before)
   clearSpy.mockRestore()
+})
+
+it('automatic heavy population prefers the host refreshRoute answer when mounted', async () => {
+  const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: { body?: string }) => {
+    const body = JSON.parse(init?.body ?? '{}') as { method?: string }
+    if (body.method === 'enpoiHeavy.status') {
+      return { ok: true, status: 200, json: async () => ({ result: { ok: true, value: heavyStatus() } }) } as unknown as Response
+    }
+    if (body.method === 'providerSync.refreshRoute') {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          result: {
+            ok: true,
+            value: {
+              route: 'antigravity', models: [{ id: 'server-fresh', name: 'Server Fresh' }],
+              removed: [], deprecated: [], degraded: false, source: 'live', authority: 'catalog', fetchedAt: 5,
+            },
+          },
+        }),
+      } as unknown as Response
+    }
+    return { ok: false, status: 404, json: async () => ({}) } as unknown as Response
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  const discoverModels = vi.fn()
+  const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const ns = namespace('antigravity', [])
+  const base = wire(ns)
+  const wireFace = {
+    ...base,
+    settings: { ...base.settings, mutate },
+    llm: { ...base.llm, discoverModels },
+  } as unknown as ModelsWire
+
+  render(
+    <ProviderDetailPanel
+      row={row('antigravity')} namespace={ns} schema={settingsSchema} api={wireFace} t={t}
+      readOnly={false} onDelete={vi.fn()} onSaved={vi.fn()}
+    />,
+  )
+
+  await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+  const [, ops] = mutate.mock.calls[0] as unknown as [string, Array<{ path: string[]; value: Array<{ id: string }> }>]
+  expect(ops[0]?.value.map(model => model.id)).toEqual(['server-fresh'])
+  expect(discoverModels).not.toHaveBeenCalled()
+})
+
+it('automatic heavy population writes no route default capacities without the host RPC', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: { body?: string }) => {
+    const body = JSON.parse(init?.body ?? '{}') as { method?: string }
+    if (body.method === 'enpoiHeavy.status') {
+      return { ok: true, status: 200, json: async () => ({ result: { ok: true, value: heavyStatus() } }) } as unknown as Response
+    }
+    return { ok: false, status: 404, json: async () => ({}) } as unknown as Response
+  }))
+  const discoverModels = vi.fn(async () => ({ ok: true as const, value: [{ id: 'fresh' }] }))
+  const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const ns = namespace('antigravity', [], undefined, { defaultContextWindow: 262_144, defaultMaxTokens: 32_768 })
+  const base = wire(ns)
+  const wireFace = {
+    ...base,
+    settings: { ...base.settings, mutate },
+    llm: { ...base.llm, discoverModels },
+  } as unknown as ModelsWire
+
+  render(
+    <ProviderDetailPanel
+      row={row('antigravity')} namespace={ns} schema={settingsSchema} api={wireFace} t={t}
+      readOnly={false} onDelete={vi.fn()} onSaved={vi.fn()}
+    />,
+  )
+
+  await waitFor(() => { expect(discoverModels).toHaveBeenCalled() })
+  await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+  const [, ops] = mutate.mock.calls[0] as unknown as [string, Array<{ path: string[]; value: Array<{ id: string }> }>]
+  expect(ops[0]?.value).toEqual([{ id: 'fresh', name: 'fresh' }])
+})
+
+it('Test Connection reports an installed-catalog fallback instead of a silent success', async () => {
+  const discoverModels = vi.fn(async () => ({
+    ok: true as const,
+    value: [{ id: 'masked', source: 'catalog', fallbackReason: 'HTTP 401 unauthorized' }],
+  }))
+  const ns = namespace('gateway', [{ id: 'configured' }])
+  const base = wire(ns)
+  const wireFace = { ...base, llm: { ...base.llm, discoverModels } } as unknown as ModelsWire
+  render(
+    <ProviderDetailPanel
+      row={row('gateway')} namespace={ns} schema={settingsSchema} api={wireFace} t={t}
+      readOnly={false} onDelete={vi.fn()} onSaved={vi.fn()}
+    />,
+  )
+
+  fireEvent.click(screen.getByRole('button', { name: en.test }))
+  await waitFor(() => {
+    expect(screen.getByText(new RegExp(en.discoveryCatalogFallback.replace('{reason}', 'HTTP 401 unauthorized').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))).toBeTruthy()
+  })
+})
+
+it('Refresh reports an installed-catalog fallback and still merges its rows', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) } as unknown as Response)))
+  const discoverModels = vi.fn(async () => ({
+    ok: true as const,
+    value: [{ id: 'masked', name: 'Masked', source: 'catalog', fallbackReason: 'HTTP 401 unauthorized' }],
+  }))
+  const mutate = vi.fn(async () => ({ ok: true as const, value: undefined }))
+  const ns = namespace('gateway', [{ id: 'configured' }])
+  const base = wire(ns)
+  const wireFace = {
+    ...base,
+    settings: { ...base.settings, mutate },
+    llm: { ...base.llm, discoverModels },
+  } as unknown as ModelsWire
+  render(
+    <ProviderDetailPanel
+      row={row('gateway')} namespace={ns} schema={settingsSchema} api={wireFace} t={t}
+      readOnly={false} onDelete={vi.fn()} onSaved={vi.fn()}
+    />,
+  )
+
+  fireEvent.click(screen.getByTitle('Refresh catalog from provider'))
+  await waitFor(() => {
+    expect(screen.getByText(/HTTP 401 unauthorized/)).toBeTruthy()
+  })
+  await waitFor(() => { expect(mutate).toHaveBeenCalled() })
 })

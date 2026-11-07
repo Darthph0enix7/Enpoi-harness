@@ -136,7 +136,11 @@ type ConnectionRpcResult = Awaited<ReturnType<ConnectionRpcHandler>>
 type ConnectionRpcError = Extract<ConnectionRpcResult, { readonly ok: false }>['error']
 const NEVER_ABORTED_SIGNAL = new AbortController().signal
 const DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS = 2_000
+const DEFAULT_WEBSOCKET_MISSED_HEARTBEAT_TIMEOUT_MS = 30_000
+const DEFAULT_WEBSOCKET_MAX_BUFFERED_BYTES = 16 * 1024 * 1024
 const DEFAULT_STREAM_INBOX_BYTES = 262_144
+const DEFAULT_REMOTE_EVENT_QUEUE_MAX_FRAMES = 4_096
+const DEFAULT_REMOTE_EVENT_QUEUE_MAX_BYTES = 8 * 1024 * 1024
 /**
  * Default bound on replaying a pending forwarded invocation to a Client that
  * connects after the event was dispatched. A pending ask is answerable only
@@ -153,10 +157,37 @@ const SRC_JSON_CODEC: TypertCodec = { mode: 'src-json' }
 
 /** Gateway transport configuration. */
 export interface Config {
-  /** WebSocket Ping interval from 1 through 2,147,483,647 milliseconds. @default 2000 */
+  /**
+   * WebSocket Ping and application-heartbeat interval from 0 through
+   * 2,147,483,647 milliseconds; `0` disables both for an emergency mixed-
+   * version window. @default 2000
+   */
   readonly websocketHeartbeatIntervalMs?: number
+  /**
+   * Milliseconds since the last Pong or inbound message after which the Host
+   * terminates a socket. Decoupled from the Ping cadence so a bursty or
+   * high-RTT link is not killed for answering late. @default 30000
+   */
+  readonly websocketMissedHeartbeatTimeoutMs?: number
+  /**
+   * Per-socket `bufferedAmount` ceiling in bytes. Above it the carrier closes
+   * with 1011 instead of growing Host memory. @default 16777216
+   */
+  readonly websocketMaxBufferedBytes?: number
   /** Buffered uplink frame bytes one logical stream may hold before it fails with `gateway/uplink-overflow`. @default 262144 */
   readonly streamInboxBytes?: number
+  /**
+   * Frames retained in one Client's forwarded-event queue before the oldest
+   * plain `emit` frames are dropped; waterfall and cancellation frames are
+   * never dropped. @default 4096
+   */
+  readonly remoteEventQueueMaxFrames?: number
+  /**
+   * Approximate JSON bytes retained in one Client's forwarded-event queue
+   * before the oldest plain `emit` frames are dropped; waterfall and
+   * cancellation frames are never dropped. @default 8388608
+   */
+  readonly remoteEventQueueMaxBytes?: number
   /**
    * Milliseconds a pending forwarded invocation may wait before a Client
    * connecting later receives a replay of it; older entries are cancelled and
@@ -168,7 +199,11 @@ export interface Config {
 
 interface ResolvedConfig extends Config {
   readonly websocketHeartbeatIntervalMs: number
+  readonly websocketMissedHeartbeatTimeoutMs: number
+  readonly websocketMaxBufferedBytes: number
   readonly streamInboxBytes: number
+  readonly remoteEventQueueMaxFrames: number
+  readonly remoteEventQueueMaxBytes: number
   readonly remoteEventReplayMaxAgeMs: number
 }
 
@@ -216,9 +251,14 @@ export class TypertGatewayError extends RemoteError<TypertGatewayErrorCode> {
 export class TypertGatewayService extends Service implements TypertGateway {
   static inject = ['typert']
   static Config: z<Config> = z.object({
-    websocketHeartbeatIntervalMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS)
+    websocketHeartbeatIntervalMs: z.number().step(1).min(0).max(MAX_TIMER_DELAY_MS)
       .default(DEFAULT_WEBSOCKET_HEARTBEAT_INTERVAL_MS),
+    websocketMissedHeartbeatTimeoutMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS)
+      .default(DEFAULT_WEBSOCKET_MISSED_HEARTBEAT_TIMEOUT_MS),
+    websocketMaxBufferedBytes: z.number().step(1).min(1).default(DEFAULT_WEBSOCKET_MAX_BUFFERED_BYTES),
     streamInboxBytes: z.number().step(1).min(1).default(DEFAULT_STREAM_INBOX_BYTES),
+    remoteEventQueueMaxFrames: z.number().step(1).min(1).default(DEFAULT_REMOTE_EVENT_QUEUE_MAX_FRAMES),
+    remoteEventQueueMaxBytes: z.number().step(1).min(1).default(DEFAULT_REMOTE_EVENT_QUEUE_MAX_BYTES),
     remoteEventReplayMaxAgeMs: z.number().step(1).min(0).default(DEFAULT_REMOTE_EVENT_REPLAY_MAX_AGE_MS),
   })
 
@@ -235,6 +275,8 @@ export class TypertGatewayService extends Service implements TypertGateway {
   private readonly remoteEventClients = new Map<RemoteEventClientId, RemoteEventClient>()
   private readonly pendingRemoteEvents = new Map<RemoteEventId, PendingRemoteEvent>()
   private readonly remoteEventReplayMaxAgeMs: number
+  private readonly remoteEventQueueMaxFrames: number
+  private readonly remoteEventQueueMaxBytes: number
 
   /**
    * Register the Gateway against the active Typert registry.
@@ -247,6 +289,8 @@ export class TypertGatewayService extends Service implements TypertGateway {
     super(ctx, 'typertGateway')
     const resolved = config as ResolvedConfig
     this.remoteEventReplayMaxAgeMs = resolved.remoteEventReplayMaxAgeMs
+    this.remoteEventQueueMaxFrames = resolved.remoteEventQueueMaxFrames
+    this.remoteEventQueueMaxBytes = resolved.remoteEventQueueMaxBytes
     ctx.on('internal/service', () => {
       this.srcClaims = undefined
     })
@@ -265,6 +309,8 @@ export class TypertGatewayService extends Service implements TypertGateway {
           this.wireStream.failure,
           resolved.websocketHeartbeatIntervalMs,
           resolved.streamInboxBytes,
+          resolved.websocketMissedHeartbeatTimeoutMs,
+          resolved.websocketMaxBufferedBytes,
         )
         webCtx.effect(function* () {
           yield () => mux.close()
@@ -515,7 +561,7 @@ export class TypertGatewayService extends Service implements TypertGateway {
     while (this.remoteEventClients.has(clientId)) clientId = randomUUID() as RemoteEventClientId
     const client: RemoteEventClient = {
       id: clientId,
-      queue: new RemoteEventQueue(),
+      queue: new RemoteEventQueue(this.remoteEventQueueMaxFrames, this.remoteEventQueueMaxBytes),
       deliveries: new Map(),
     }
     this.remoteEventClients.set(clientId, client)
@@ -1089,16 +1135,60 @@ type RemoteEventWireFrame =
   | RemoteEventInvocationFrame
   | RemoteEventCancellationFrame
 
-/** Pull-driven queue owned by one connected Client event generation. */
+interface RemoteEventQueueEntry {
+  readonly frame: RemoteEventWireFrame
+  readonly bytes: number
+}
+
+/**
+ * Pull-driven queue owned by one connected Client event generation. A slow
+ * Client cannot grow it without bound: overflow drops the oldest plain `emit`
+ * frames (invalidations that self-heal on the next reset) while waterfall and
+ * cancellation frames are always retained.
+ */
 class RemoteEventQueue {
-  private readonly frames = new Deque<RemoteEventWireFrame>()
+  private readonly frames = new Deque<RemoteEventQueueEntry>()
+  private bytes = 0
   private waiter: (() => void) | undefined
   private closed = false
 
+  /**
+   * @param maxFrames - retained frame ceiling before emits are dropped.
+   * @param maxBytes - retained JSON byte ceiling before emits are dropped.
+   */
+  constructor(
+    private readonly maxFrames: number,
+    private readonly maxBytes: number,
+  ) {}
+
   push(frame: RemoteEventWireFrame): void {
     if (this.closed) return
-    this.frames.pushBack(frame)
+    const bytes = Buffer.byteLength(JSON.stringify(frame), 'utf8')
+    this.frames.pushBack({ frame, bytes })
+    this.bytes += bytes
+    this.trim()
     this.waiter?.()
+  }
+
+  /** Drop oldest plain emits until the queue fits, retaining every waterfall and cancel. */
+  private trim(): void {
+    while (this.frames.size > this.maxFrames || this.bytes > this.maxBytes) {
+      const kept: RemoteEventQueueEntry[] = []
+      let dropped = false
+      while (this.frames.size > 0) {
+        const entry = this.frames.popFront() as RemoteEventQueueEntry
+        if (!dropped && entry.frame.type === 'emit') {
+          this.bytes -= entry.bytes
+          dropped = true
+          continue
+        }
+        kept.push(entry)
+      }
+      for (let index = kept.length - 1; index >= 0; index -= 1) {
+        this.frames.pushFront(kept[index] as RemoteEventQueueEntry)
+      }
+      if (!dropped) return
+    }
   }
 
   end(): void {
@@ -1112,7 +1202,11 @@ class RemoteEventQueue {
     signal.addEventListener('abort', abort, { once: true })
     try {
       while (true) {
-        while (this.frames.size > 0) yield this.frames.popFront() as RemoteEventWireFrame
+        while (this.frames.size > 0) {
+          const entry = this.frames.popFront() as RemoteEventQueueEntry
+          this.bytes -= entry.bytes
+          yield entry.frame
+        }
         if (this.closed || signal.aborted) return
         await new Promise<void>((resolve) => { this.waiter = resolve })
         this.waiter = undefined

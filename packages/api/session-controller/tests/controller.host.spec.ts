@@ -8,6 +8,7 @@ import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { describe, expect, it, vi } from 'vitest'
 import SessionController from '../src/index.ts'
 import type { ApiSessionAgentController } from '../src/agent.ts'
+import type { SessionFollowBufferLimits, SessionFollowResumeOptions } from '../src/history.ts'
 import { createSessionTestController, testSessionPersistence } from './test-remote.ts'
 
 const defaults = {
@@ -18,6 +19,45 @@ const defaults = {
 describe('SessionController facade', () => {
   it('does not require the Tools service', () => {
     expect(SessionController.inject).not.toContain('tools')
+  })
+
+  it('passes configured follow buffer and resume limits into the history controller', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(AgentRegistry)
+    ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
+      list: () => Promise.resolve([]),
+    }) as never)
+    const config = SessionController.Config({
+      sessionFollowBufferMaxItems: 3,
+      sessionFollowBufferMaxBytes: 4096,
+      sessionFollowResumeMaxEvents: 7,
+    })
+    const maxItems = config.sessionFollowBufferMaxItems
+    const maxBytes = config.sessionFollowBufferMaxBytes
+    const maxEvents = config.sessionFollowResumeMaxEvents
+    if (maxItems === undefined || maxBytes === undefined || maxEvents === undefined) {
+      throw new Error('config defaults are missing')
+    }
+    const controller = createSessionTestController(ctx, {
+      ...defaults,
+      sessionFollowBufferMaxItems: maxItems,
+      sessionFollowBufferMaxBytes: maxBytes,
+      sessionFollowResumeMaxEvents: maxEvents,
+    })
+    const history = (controller as unknown as {
+      history: { limits: SessionFollowBufferLimits; resume: SessionFollowResumeOptions }
+    }).history
+    expect(history.limits).toEqual({ maxItems: 3, maxBytes: 4096 })
+    expect(history.resume).toEqual({ enabled: true, maxEvents: 7 })
+    expect(SessionController.Config({}).sessionFollowResume).toBe(true)
+    expect(SessionController.Config({}).sessionFollowResumeMaxEvents).toBe(2048)
+    expect(SessionController.Config({ sessionFollowResume: false }).sessionFollowResume).toBe(false)
+    expect(() => SessionController.Config({ sessionFollowBufferMaxItems: 0 })).toThrow()
+    expect(() => SessionController.Config({ sessionFollowBufferMaxBytes: 1.5 })).toThrow()
+    expect(() => SessionController.Config({ sessionFollowResumeMaxEvents: 0 })).toThrow()
+    expect(() => SessionController.Config({ sessionFollowResumeMaxEvents: 1.5 })).toThrow()
+    await ctx.fiber.dispose()
   })
 
   it('owns Host service methods and publishes Agent lifecycle projections', async () => {

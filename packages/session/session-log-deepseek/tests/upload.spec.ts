@@ -155,8 +155,9 @@ describe('incremental DeepSeek session-log upload', () => {
 
   it.each(['turn/start', 'assistant/attempt', 'request/context', 'tool/ptc-dispatch'])('rejects known log-only %s metadata before uploading', async (type) => {
     for (const metadata of [{ surfaceOp: 'append' }, { sourceEventSeqs: [0] }]) {
+      const data = type === 'request/context' ? { provider: 'mock', model: 'mock' } : { turn: 1, step: 1, stream: [] }
       const event = {
-        type, seq: SessionSeq(0), time: 1, data: { turn: 1, step: 1, stream: [] }, ignorable: true, ...metadata,
+        type, seq: SessionSeq(0), time: 1, data, ignorable: true, ...metadata,
       } as unknown as SessionEvent
       await expect(harness('wire-invalid', [event])).rejects.toThrow(/not surface-eligible/)
     }

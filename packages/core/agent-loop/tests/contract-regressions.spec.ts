@@ -125,7 +125,10 @@ describe('abort during tool execution ends the turn', () => {
       .map(event => event.type))
       .toEqual(['tool/result', 'step/end', 'turn/end'])
     expect(agent.inbox.nextStep.map(inboxText))
-      .toEqual(['accepted result context after abort'])
+      .toEqual([
+        'accepted before abort',
+        'accepted result context after abort',
+      ])
 
     const idle = waitForIdle(ctx, agent)
     send(agent, 'wake')
@@ -136,6 +139,7 @@ describe('abort during tool execution ends the turn', () => {
         ? [event.data.content]
         : []))
       .toEqual([
+        [{ type: 'text', text: 'accepted before abort' }],
         [{ type: 'text', text: 'accepted result context after abort' }],
       ])
   })

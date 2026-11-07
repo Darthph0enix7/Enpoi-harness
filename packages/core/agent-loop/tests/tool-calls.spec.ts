@@ -788,7 +788,13 @@ describe('tool-call scheduler: registry module duplication', () => {
     await waitForIdle(ctx, agent)
 
     expect(events(agent).find(e => e.type === 'tool/result')?.data)
-      .toMatchObject({ message: { content: [{ isError: false }] } })
+      .toMatchObject({
+        message: {
+          role: 'tool',
+          content: [{ type: 'text', text: 'done-1' }],
+          isError: false,
+        },
+      })
   })
 
   it('fails the turn loud when no module copy exposes a scheduler key', async () => {

@@ -29,6 +29,7 @@ import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import type { HostObservable, InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { registryRoleLabel, type RoleRegistryMap } from './role-registry.ts'
+import { SubagentSessionsIcon } from './sidebar-icons.tsx'
 import type { BrandT } from './locales.ts'
 import css from './SubagentSessionsBody.module.css'
 
@@ -305,25 +306,7 @@ function MicroIcon({ d, size = 11 }: { d: string; size?: number }): ReactNode {
   )
 }
 
-/** Props of the Subagent Sessions tab glyph. */
-interface SubagentSessionsIconProps {
-  size?: number | undefined
-  active?: boolean | undefined
-  className?: string | undefined
-}
-
-/** Monochrome tab glyph for Subagent Sessions (thin stroke, currentColor), also the guide capsule icon. */
-export function SubagentSessionsIcon({ size = 16, className }: SubagentSessionsIconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
-      <circle cx="8" cy="3.6" r="1.9" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="3.6" cy="12.4" r="1.9" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="12.4" cy="12.4" r="1.9" stroke="currentColor" strokeWidth="1.3" />
-      <path d="M8 5.6v2.2M8 7.8 4.6 10.7M8 7.8l3.4 2.9" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
-    </svg>
-  )
-}
-
+/** The dispatched-subagent session list for the right-sidebar tab. */
 export function SubagentSessionsBody({
   sessionId, useSessions, useRoleRegistry, openSession, openChild, refreshSessions, t,
 }: SubagentSessionsBodyProps) {

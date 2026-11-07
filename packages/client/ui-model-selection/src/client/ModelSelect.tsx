@@ -36,7 +36,7 @@ import type { ModelSelectInjected } from './slots.ts'
 import {
   isModelFavorite, toggleModelFavorite, getFavoriteModels, setFavoriteModels,
   getRecentModels, recordRecentModel, getProviderOrder, setProviderOrder,
-  toggleGroupCollapsed, formatCompactContext, resolveContextTokens,
+  toggleGroupCollapsed, formatCompactContext, resolveContextTokens, advertisedOnlyModalities,
   type ModelContextTarget,
 } from './model-picker-store.ts'
 import {
@@ -72,10 +72,40 @@ function readShownMap(): Record<string, string[]> {
   } catch { return {} }
 }
 
-/** Format the model context window compactly (guaranteed display). */
-function resolveModelContext(model: ModelContextTarget): string {
+/**
+ * Format the disclosed model context window, marking a route-default fallback
+ * as assumed rather than printing it as a disclosed capacity.
+ * @param model - catalog row whose context capacity is displayed.
+ * @param t - the package dictionary translate.
+ * @returns the compact capacity tag, or an empty string when none is disclosed.
+ */
+function resolveModelContext(model: ModelContextTarget, t: PropsLocale<'model'>['t']): string {
   const tokens = resolveContextTokens(model)
-  return formatCompactContext(tokens)
+  if (tokens <= 0) return ''
+  const size = formatCompactContext(tokens)
+  return model.contextWindowSource === 'default' ? t('context.assumed', { tokens: size }) : size
+}
+
+/**
+ * Catalog-derived row markers. The picker makes no supported-modality claim:
+ * only an advertised token the adapter does not send natively carries the
+ * "declared, not sent" tag, and an unverified row says so.
+ * @param model - catalog row whose provenance markers are rendered.
+ * @param t - the package dictionary translate.
+ * @returns the row's context, provenance, and disclosure tags.
+ */
+function ModelCapabilityTags(
+  { model, t }: { model: ModelContextTarget; t: PropsLocale<'model'>['t'] },
+): React.ReactNode {
+  const context = resolveModelContext(model, t)
+  const declaredOnly = advertisedOnlyModalities(model)
+  return (
+    <>
+      {context !== '' && <span className={css.contextTag}>{context}</span>}
+      {model.unverified === true && <span className={css.ruleTag}>{t('capability.unverified')}</span>}
+      {declaredOnly.length > 0 && <span className={css.ruleTag}>{t('capability.declaredNotSent')}</span>}
+    </>
+  )
 }
 
 /** One dynamic effort choice row. */
@@ -342,17 +372,29 @@ export function ModelSelect(
   const currentChoice = choices[selectedIndex]
   const reasoning = currentChoice?.model.reasoning
   const effectiveEffort = activeSel?.reasoningEffort ?? reasoning?.defaultEffort
+  // A saved effort the selected model does not offer is stale: an older
+  // catalog entry, or a resume onto a provider that discloses no ladder. It
+  // stays visible so the user can clear it with the provider-default action
+  // instead of being trapped by a request the Host refuses. An unavailable
+  // model has no effort control: choosing any routable model replaces the
+  // whole selection, including the stale effort.
+  const staleEffort = currentChoice !== undefined && activeSel?.reasoningEffort !== undefined
+    && (reasoning === undefined || !reasoning.efforts.some(level => level.id === activeSel.reasoningEffort))
+    ? activeSel.reasoningEffort
+    : undefined
   const defaultEffortLabel = t('effort.providerDefault')
   const effortLabel = reasoning === undefined
-    ? undefined
+    ? staleEffort
     : effectiveEffort === undefined
       ? defaultEffortLabel
       : reasoning.efforts.find(level => level.id === effectiveEffort)?.name ?? effectiveEffort
 
   const effortChoices = useMemo<readonly EffortChoice[]>(() => reasoning === undefined
-    ? []
+    ? staleEffort === undefined
+      ? []
+      : [{ key: 'provider-default', effort: undefined, label: defaultEffortLabel }]
     : [
-      ...reasoning.defaultEffort === undefined
+      ...reasoning.defaultEffort === undefined || staleEffort !== undefined
         ? [{ key: 'provider-default', effort: undefined, label: defaultEffortLabel }]
         : [],
       ...reasoning.efforts.map((effort: ModelReasoningEffort) => ({
@@ -361,7 +403,7 @@ export function ModelSelect(
         label: effort.name,
         ...effort.description === undefined ? {} : { description: effort.description },
       })),
-    ], [reasoning, defaultEffortLabel])
+    ], [reasoning, defaultEffortLabel, staleEffort])
 
   if (!available) return null
 
@@ -735,7 +777,6 @@ export function ModelSelect(
               <div className={css.groupBody}>
                 {filteredFavorites.map((fav, fIdx) => {
                   const isSelected = activeSel?.provider === fav.provider && activeSel.model === fav.model.id
-                  const contextStr = resolveModelContext(fav.model)
 
                   return (
                     <div
@@ -757,7 +798,7 @@ export function ModelSelect(
                         <span className={css.modelNameText}>{fav.model.name}</span>
                       </div>
                       <div className={css.modelRowRight}>
-                        {contextStr && <span className={css.contextTag}>{contextStr}</span>}
+                        <ModelCapabilityTags model={fav.model} t={t} />
                         <button
                           type="button"
                           className={clsx(css.starBtn, css.starBtnActive)}
@@ -807,7 +848,6 @@ export function ModelSelect(
                 {recentItems.map((rec) => {
                   const isSelected = activeSel?.provider === rec.provider && activeSel.model === rec.model.id
                   const isFav = isModelFavorite(rec.provider, rec.model.id)
-                  const contextStr = resolveModelContext(rec.model)
 
                   return (
                     <div
@@ -820,7 +860,7 @@ export function ModelSelect(
                         <span className={css.modelNameText}>{rec.model.name}</span>
                       </div>
                       <div className={css.modelRowRight}>
-                        {contextStr && <span className={css.contextTag}>{contextStr}</span>}
+                        <ModelCapabilityTags model={rec.model} t={t} />
                         <button
                           type="button"
                           className={clsx(css.starBtn, isFav && css.starBtnActive)}
@@ -900,7 +940,6 @@ export function ModelSelect(
                   {visibleModels.map((model) => {
                     const isSelected = activeSel?.provider === group.id && activeSel.model === model.id
                     const isFav = isModelFavorite(group.id, model.id)
-                    const contextStr = resolveModelContext(model)
                     // A manual shown pin that had to override something carries
                     // the engine's reason; a plain pin stays unbadged.
                     const decision = decisionFor(group.id, model.id)
@@ -919,7 +958,7 @@ export function ModelSelect(
                           <span className={css.modelNameText}>{model.name}</span>
                         </div>
                         <div className={css.modelRowRight}>
-                          {contextStr && <span className={css.contextTag}>{contextStr}</span>}
+                          <ModelCapabilityTags model={model} t={t} />
                           {pinnedReason !== undefined && pinnedReason !== null && (
                             <span className={css.ruleTag}>{pinnedReason}</span>
                           )}
@@ -945,7 +984,6 @@ export function ModelSelect(
                       stays visible instead of a silent disappearance. */}
                   {hiddenMatches.map((model) => {
                     const reason = decisionFor(group.id, model.id)?.reason
-                    const contextStr = resolveModelContext(model)
                     return (
                       <div
                         key={`rule-hidden-${model.id}`}
@@ -958,7 +996,7 @@ export function ModelSelect(
                           <span className={css.modelNameText}>{model.name}</span>
                         </div>
                         <div className={css.modelRowRight}>
-                          {contextStr && <span className={css.contextTag}>{contextStr}</span>}
+                          <ModelCapabilityTags model={model} t={t} />
                           {reason !== null && reason !== undefined && <span className={css.ruleTag}>{reason}</span>}
                         </div>
                       </div>
@@ -1024,8 +1062,9 @@ export function ModelSelect(
         </span>
       </button>
 
-      {/* 2. Conditional Reasoning Effort Pill (Only rendered if model supports reasoning!) */}
-      {reasoning !== undefined && effortChoices.length > 0 && (
+      {/* 2. Conditional Reasoning Effort Pill (rendered when the model offers
+          levels, or when a saved effort needs the provider-default action). */}
+      {effortChoices.length > 0 && (
         <button
           type="button"
           className={clsx(css.effortTrigger, effortOpen && css.effortTriggerActive)}
@@ -1080,7 +1119,7 @@ export function ModelSelect(
 
       {/* 4. Compact Effort Level Popover: anchored on desktop, a sheet at
           phone widths. */}
-      {effortOpen && reasoning !== undefined && (sheetMode
+      {effortOpen && effortChoices.length > 0 && (sheetMode
         ? (
           <Sheet
             open

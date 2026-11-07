@@ -66,6 +66,10 @@ describe('ModelsSection theme styles', () => {
     expect(block('.rowCard')).toContain('background: var(--dsw-alias-settings-card-fill)')
   })
 
+  it('paints the heavy provider auth state instead of falling back to the default dot', () => {
+    expect(css).toMatch(/\.heavyOnlineDot\[data-state='auth'\]\s*\{[^}]*background:/)
+  })
+
   it('gives every dropdown the shared chevron instead of the OS arrow', () => {
     // `select.input` caps the control at 240px, and the OS arrow is painted
     // flush inside that shrunk right edge — visibly tighter than every other

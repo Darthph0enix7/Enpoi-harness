@@ -205,7 +205,7 @@ export class TerminalRegistry {
         cols,
         rows,
         cwd,
-        env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' } as Record<string, string>,
+        env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
       })
     } catch (error) {
       throw new TerminalHostError('spawn-failed', error instanceof Error ? error.message : String(error), 500)
@@ -267,7 +267,7 @@ export class TerminalRegistry {
     }
     if (entry.sockets.size === 0 && entry.closeTimer === undefined) {
       entry.closeTimer = setTimeout(() => { this.close(key, 'disconnected') }, this.graceMs)
-      entry.closeTimer.unref?.()
+      entry.closeTimer.unref()
     }
   }
 
@@ -289,6 +289,9 @@ export class TerminalRegistry {
         return true
       case 'kill':
         this.close(key, 'client-kill')
+        return true
+      case 'ping':
+        // Answered by the socket upgrade handler; the PTY has nothing to do.
         return true
     }
   }
@@ -372,7 +375,7 @@ export class TerminalRegistry {
     entry.reapTimer = setTimeout(() => {
       if (entry.sockets.size === 0) this.close(entry.key, 'exited')
     }, this.graceMs)
-    entry.reapTimer.unref?.()
+    entry.reapTimer.unref()
   }
 
   /** Kill and forget one entry, cancelling its timers. */

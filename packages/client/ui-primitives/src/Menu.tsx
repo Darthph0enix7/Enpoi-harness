@@ -115,6 +115,9 @@ function isLabel(entry: MenuEntry): entry is MenuLabel {
 /** Unplaced portal list: hidden but laid out at a fixed origin so offsetWidth/offsetHeight are real. */
 const MEASURE_STYLE: CSSProperties = { visibility: 'hidden', left: 0, top: 0 }
 
+/** Post-open placement samples; covers layout-effect and transform settling without a permanent loop. */
+const MENU_SETTLE_FRAMES = 4
+
 /**
  * Render an anchored dropdown menu. While the list is open its keys mirror the
  * composer's: Tab settles the focused row — from the trigger, Tab enters the
@@ -135,7 +138,7 @@ const MEASURE_STYLE: CSSProperties = { visibility: 'hidden', left: 0, top: 0 }
  * @param props.align - list alignment against the anchor (default 'start').
  * @param props.side - open below (`bottom`, default) or above (`top`) the anchor.
  * @param props.portal - render the list into document.body, fixed-positioned
- * from the anchor rect (follows movement and resizing while open). Use when an
+ * from the anchor rect (follows scroll and resizing while open). Use when an
  * ancestor's overflow clipping would crop the in-place list; default false
  * keeps the pure-CSS in-place behavior.
  * @param props.closeOnPointerLeave - close the list once the pointer has left
@@ -148,8 +151,9 @@ const MEASURE_STYLE: CSSProperties = { visibility: 'hidden', left: 0, top: 0 }
  * directly (e.g. from a host-owned trigger button) instead of measuring the
  * Menu's own wrapper span. Required when the wrapper isn't itself laid out at
  * the trigger (render-prop anchors, effect-positioned proxies — measuring the
- * wrapper there races the host's layout effects). Called on open, each animation
- * frame, and scroll/resize; return null to skip placement for that frame.
+ * wrapper there races the host's layout effects). Called on open, during a
+ * short settling burst, and on scroll/resize/anchor-or-panel resize; return
+ * null to skip placement for that call.
  * @param props.footer - rows pinned below the scrolling items area, separated
  * by a hairline; they stay visible while the items above scroll.
  * @param props.children - component rows rendered after `items` in the same
@@ -284,16 +288,31 @@ export function Menu({ open, anchor, items = [], children, selectedId, selectedI
     // end/top alignment and clamping use real dimensions before anything
     // paints — no visible jump from a zero-size first guess.
     place()
-    // Dragging or transforming an ancestor moves the anchor without a scroll or resize event.
-    const track = () => {
+    // A short burst catches anchor movement that settles through layout
+    // effects or an opening transform. After it, resize/scroll are the only
+    // ongoing movement signals: an open menu must not keep measuring every
+    // frame for as long as it stays open.
+    let frame: number | undefined
+    let remaining = MENU_SETTLE_FRAMES
+    const settle = (): void => {
+      frame = undefined
       place()
-      frame = requestAnimationFrame(track)
+      remaining -= 1
+      if (remaining > 0) frame = requestAnimationFrame(settle)
     }
-    let frame = requestAnimationFrame(track)
+    frame = requestAnimationFrame(settle)
+    const resizeObserver = typeof ResizeObserver === 'function'
+      ? new ResizeObserver(() => { place() })
+      : undefined
+    if (resizeObserver !== undefined) {
+      if (getAnchorRect === undefined && rootRef.current !== null) resizeObserver.observe(rootRef.current)
+      if (listRef.current !== null) resizeObserver.observe(listRef.current)
+    }
     window.addEventListener('scroll', place, true)
     window.addEventListener('resize', place)
     return () => {
-      cancelAnimationFrame(frame)
+      if (frame !== undefined) cancelAnimationFrame(frame)
+      resizeObserver?.disconnect()
       window.removeEventListener('scroll', place, true)
       window.removeEventListener('resize', place)
     }

@@ -22,6 +22,83 @@ describe('connection lifecycle', () => {
     }
   })
 
+  it('tracks inbound heartbeats per generation and clears the mark on replacement', async () => {
+    vi.useFakeTimers()
+    const source = new FakeGenerationSource()
+    const controller = new ConnectionController(source.source, {}, FAST, () => 0)
+    controller.start()
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(source.activeCount).toBe(1)
+      expect(controller.hasObservedInboundHeartbeat()).toBe(false)
+
+      source.heartbeat()
+      expect(controller.hasObservedInboundHeartbeat()).toBe(true)
+
+      source.end()
+      await vi.advanceTimersByTimeAsync(10)
+      expect(source.activeCount).toBe(1)
+      expect(controller.hasObservedInboundHeartbeat()).toBe(false)
+    } finally {
+      controller.stop()
+      vi.useRealTimers()
+    }
+  })
+
+  it('adds the injected per-tab stagger to a retry after a connected loss', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    let calls = 0
+    const source: ConnectionGenerationSource = (signal, ready) => {
+      calls++
+      ready({ home: '/h' })
+      if (calls === 1) return new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+      return new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => { resolve() }, { once: true })
+      })
+    }
+    // First draw is this tab's stagger (50), the second the retry jitter (2.5).
+    const controller = new ConnectionController(source, {}, { ...FAST, reconnectStaggerMs: 100 }, () => 0.5)
+    controller.start()
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(calls).toBe(1)
+      expect(controller.wakeJitterMs()).toBe(50)
+
+      await vi.advanceTimersByTimeAsync(56)
+      expect(calls).toBe(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(calls).toBe(2)
+    } finally {
+      controller.stop()
+      warnSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps a never-ready first handshake on the plain retry jitter', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    let calls = 0
+    const source: ConnectionGenerationSource = () => {
+      calls++
+      return Promise.reject(new Error('handshake failed'))
+    }
+    const controller = new ConnectionController(source, {}, { ...FAST, reconnectStaggerMs: 100 }, () => 0.5)
+    controller.start()
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(calls).toBe(1)
+      // 50% of the 10 ms cap plus half of that again: no tab stagger.
+      await vi.advanceTimersByTimeAsync(7)
+      expect(calls).toBe(2)
+    } finally {
+      controller.stop()
+      warnSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
   it('reconnects with a fresh generation when its source fails, and stop() ends the loop', async () => {
     const source = new FakeGenerationSource()
     let connected = 0
@@ -92,6 +169,119 @@ describe('connection lifecycle', () => {
     }
   })
 
+  it('keeps climbing the jittered retry ladder when a ready generation dies before the stability window', async () => {
+    vi.useFakeTimers()
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    let calls = 0
+    const source: ConnectionGenerationSource = (signal, ready) => {
+      calls++
+      ready({ home: '/h' })
+      return new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 1)
+        signal.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+      })
+    }
+    const controller = new ConnectionController(source, {}, {
+      ...FAST,
+      stableConnectionMs: 30_000,
+    })
+    controller.start()
+    try {
+      await vi.advanceTimersByTimeAsync(200)
+      expect(calls).toBeGreaterThan(3)
+      const warnings = warnSpy.mock.calls.map(([message]) => String(message))
+      expect(warnings.slice(0, 3)).toEqual([
+        '[connection] connection lost, retry #1',
+        '[connection] connection lost, retry #2',
+        '[connection] connection lost, retry #3',
+      ])
+    } finally {
+      controller.stop()
+      randomSpy.mockRestore()
+      warnSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('resets the retry ladder only after a generation stays ready for the stability window', async () => {
+    vi.useFakeTimers()
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    let calls = 0
+    const source: ConnectionGenerationSource = (signal, ready) => {
+      calls++
+      ready({ home: '/h' })
+      const stable = calls >= 3
+      return new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, stable ? 150 : 1)
+        signal.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
+      })
+    }
+    const controller = new ConnectionController(source, {}, {
+      ...FAST,
+      stableConnectionMs: 100,
+    })
+    controller.start()
+    try {
+      await vi.advanceTimersByTimeAsync(400)
+      const warnings = warnSpy.mock.calls.map(([message]) => String(message))
+      // Quick deaths climb #1 then #2; the third generation survives 150 ms, so
+      // its loss restarts the sequence at #1 instead of continuing at #3.
+      expect(warnings.slice(0, 3)).toEqual([
+        '[connection] connection lost, retry #1',
+        '[connection] connection lost, retry #2',
+        '[connection] connection lost, retry #1',
+      ])
+    } finally {
+      controller.stop()
+      randomSpy.mockRestore()
+      warnSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not reset the retry ladder when the browser reports online again', async () => {
+    vi.useFakeTimers()
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    let calls = 0
+    const controller = new ConnectionController(() => {
+      calls++
+      return Promise.reject(new Error('offline'))
+    }, {}, {
+      backoffBaseMs: 10,
+      backoffFactor: 2,
+      backoffMaxMs: 80,
+      generationReadyTimeoutMs: 500,
+    })
+    controller.start()
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(5)
+      expect(calls).toBe(2)
+      await vi.advanceTimersByTimeAsync(10)
+      expect(calls).toBe(3)
+
+      controller.setNetworkAvailable(false)
+      controller.setNetworkAvailable(true)
+      await vi.advanceTimersByTimeAsync(39)
+      expect(calls).toBe(3)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(calls).toBe(4)
+      expect(warnSpy.mock.calls.map(([message]) => String(message))).toEqual([
+        '[connection] connection lost, retry #1',
+        '[connection] connection lost, retry #2',
+        '[connection] connection lost, retry #4',
+      ])
+    } finally {
+      controller.stop()
+      randomSpy.mockRestore()
+      warnSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
   it('continues retrying at a fixed cap when the growth factor is one', async () => {
     vi.useFakeTimers()
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
@@ -154,7 +344,7 @@ describe('connection lifecycle', () => {
     }
   })
 
-  it('pauses retries while offline and restarts the base delay after each recovery', async () => {
+  it('pauses retries while offline and resumes the existing ladder after recovery', async () => {
     vi.useFakeTimers()
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
@@ -197,7 +387,9 @@ describe('connection lifecycle', () => {
       expect(calls).toBe(1)
 
       controller.setNetworkAvailable(true)
-      await vi.advanceTimersByTimeAsync(249)
+      // The interrupted first recovery consumed retry #1, so recovery resumes
+      // at the next ladder rung instead of restarting at 250 ms.
+      await vi.advanceTimersByTimeAsync(499)
       expect(calls).toBe(1)
       await vi.advanceTimersByTimeAsync(1)
       expect(calls).toBe(2)
@@ -212,7 +404,7 @@ describe('connection lifecycle', () => {
         'connected',
       ])
       expect(warnSpy).toHaveBeenCalledOnce()
-      expect(warnSpy).toHaveBeenCalledWith('[connection] connection lost, retry #1')
+      expect(warnSpy).toHaveBeenCalledWith('[connection] connection lost, retry #2')
     } finally {
       controller.stop()
       randomSpy.mockRestore()
@@ -682,7 +874,7 @@ describe('connection lifecycle', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const controller = new ConnectionController(source.source, { onConnected: connected }, {
       ...FAST, generationReadyWarnMs: 20, generationReadyTimeoutMs: 100,
-    })
+    }, () => 0)
     controller.start()
     try {
       await vi.advanceTimersByTimeAsync(10)

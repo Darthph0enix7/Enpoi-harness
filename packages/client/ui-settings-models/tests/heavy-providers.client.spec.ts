@@ -18,12 +18,12 @@ import { SHIPPED_PROVIDER_TEMPLATES, providerDashboardUrls } from '../src/client
 
 it('the manifest table is structurally complete', () => {
   expect(heavyProviderProblems()).toEqual([])
-  expect([...HEAVY_PRESET_IDS]).toEqual(['freellmapi', 'antigravity', 'commandcode', 'meridian'])
+  expect([...HEAVY_PRESET_IDS]).toEqual(['freellmapi', 'antigravity', 'commandcode', 'meridian', 'cliproxyapi'])
 })
 
 it('an uninstalled heavy provider is listed in Add Provider with its manifest', () => {
   const listing = new Map(SHIPPED_PROVIDER_TEMPLATES.map(template => [template.id, template]))
-  for (const manifest of [fallbackHeavyManifest('freellmapi')!, fallbackHeavyManifest('antigravity')!, fallbackHeavyManifest('commandcode')!]) {
+  for (const manifest of [fallbackHeavyManifest('freellmapi')!, fallbackHeavyManifest('antigravity')!, fallbackHeavyManifest('commandcode')!, fallbackHeavyManifest('meridian')!, fallbackHeavyManifest('cliproxyapi')!]) {
     const template = listing.get(manifest.id)
     expect(template, `${manifest.id} must be listed`).toBeDefined()
     expect(template?.heavy?.id).toBe(manifest.id)
@@ -94,7 +94,7 @@ it('the pre-connection fallback marks commandcode addable with the direct-vendor
   expect(manifest?.local.baseURL).toBe('https://api.commandcode.ai')
   const steps = manifest?.local.install.default.steps.map(step => step.command).join('\n') ?? ''
   expect(steps).toContain('enpoi-commandcode-provider/scripts/install.mjs')
-  expect(steps).toContain('{dshHome}')
+  expect(steps).toContain('$DSH_HEAVY_PROFILE_DIR')
   expect(steps).not.toContain('keypool-seed.mjs')
   // Windows is refused with the honest /bin/bash reason before any step runs,
   // naming the setup script from the package root.
@@ -288,4 +288,53 @@ it('meridian is listed as a keyless loopback Anthropic Messages service before a
   expect(template?.name).toBe(manifest.label)
   expect(template?.keyless).toBe(true)
   expect(template?.heavy?.id).toBe('meridian')
+})
+
+it('the fallback cliproxyapi row mirrors the optional gateway facts', () => {
+  const manifest = fallbackHeavyManifest('cliproxyapi')!
+  expect(manifest.label).toBe('CLIProxyAPI')
+  expect(manifest.protocol).toBe('openai-completions')
+  expect(manifest.delivery).toBe('service')
+  expect(manifest.defaultPort).toBe(8317)
+  expect(manifest.reuse.baseURL).toBe('http://127.0.0.1:8317/v1')
+  expect(manifest.reuse.health.url).toBe('http://127.0.0.1:8317/healthz')
+  expect(manifest.local.baseURL).toBe('http://127.0.0.1:8317/v1')
+  expect(manifest.local.health).toEqual(manifest.reuse.health)
+  expect(manifest.dashboardUrl).toBe('http://127.0.0.1:8317/management.html')
+  expect(manifest.docsUrl).toBe('https://help.router-for.me/')
+  expect(manifest.auth).toEqual({ kind: 'unified', apiKeyEnv: 'CLIPROXYAPI_API_KEY', keyless: true })
+  expect(manifest.sessionHeader).toBe('x-session-id')
+  expect(manifest.catalogAuthority).toBe('endpoint')
+  // No hardcoded model and no native-media capability flags in the fallback.
+  expect(manifest.fallbackModel).toBeUndefined()
+  expect(JSON.stringify(manifest)).not.toMatch(/99%|25 MB/)
+  const install = manifest.local.install.default.steps[0]!.command
+  expect(install).toBe('node "$DSH_HEAVY_HELPER" install --dsh-home "$DSH_HEAVY_DSH_HOME"')
+  expect(install).not.toContain('curl')
+  // Windows local install is refused while detected-instance reuse stays available.
+  expect(manifest.local.install.win32?.unsupported).toContain('Windows')
+  expect(resolveHeavyInstall(manifest.local, 'win32').steps).toEqual([])
+  expect(resolveHeavyInstall(manifest.local, 'linux').steps).toEqual(manifest.local.install.default.steps)
+  expect(resolveHeavyInstall(manifest.local, 'darwin').steps).toEqual(manifest.local.install.default.steps)
+})
+
+it('the fallback validates the optional session-header and endpoint-authority fields', () => {
+  const manifest = fallbackHeavyManifest('cliproxyapi')!
+  expect(heavyManifestProblems(manifest)).toEqual([])
+  expect(heavyManifestProblems({ ...manifest, sessionHeader: '' }).join('\n'))
+    .toContain('sessionHeader must be a non-empty header name')
+  expect(heavyManifestProblems({ ...manifest, catalogAuthority: 'catalog' }).join('\n'))
+    .toContain('catalogAuthority must be "endpoint"')
+  expect(heavyManifestProblems({ ...manifest, releaseSource: 'not a source' }).join('\n'))
+    .toContain('releaseSource must be an https URL or an "owner/repo" slug')
+  expect(heavyManifestProblems({
+    ...manifest,
+    local: {
+      ...manifest.local,
+      install: {
+        ...manifest.local.install,
+        linux: { ...manifest.local.install.linux!, requires: ['unknown-requirement' as 'systemd-user'] },
+      },
+    },
+  }).join('\n')).toContain('declares an unknown requirement')
 })

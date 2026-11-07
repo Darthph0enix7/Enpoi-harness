@@ -931,7 +931,7 @@ describe('Session', () => {
   it('reads a nested append-data getter once and stores its first JSON value', () => {
     const session = Session.create(SessionId('append-nested-drift'))
     let reads = 0
-    const data = Object.defineProperty({}, 'value', {
+    const data = Object.defineProperty({ provider: 'mock', model: 'mock' }, 'value', {
       enumerable: true,
       get: () => {
         reads += 1
@@ -942,7 +942,7 @@ describe('Session', () => {
     const event = session.append('request/context', data as never)
 
     expect(reads).toBe(1)
-    expect(event.data).toEqual({ value: 'accepted' })
+    expect(event.data).toEqual({ provider: 'mock', model: 'mock', value: 'accepted' })
     expect(session.snapshotEvents()).toEqual([event])
   })
 

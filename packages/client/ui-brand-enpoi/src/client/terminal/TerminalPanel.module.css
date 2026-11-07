@@ -192,6 +192,16 @@
   margin: 0;
 }
 
+/* Deferred emulator chunk: the tab strip stays visible while it arrives. */
+.lazyPending {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+}
+
 .newButton {
   padding: 5px 12px;
   color: var(--dsw-alias-label-primary);

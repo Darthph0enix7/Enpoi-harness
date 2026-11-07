@@ -6,6 +6,7 @@ import type {
 } from '@deepseek-ai/dsh-session-format'
 import {
   assertReleasedV4Header,
+  assertReleasedV4Relationships,
   restoreReleasedV4Artifact,
 } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import { assertReleasedV4Artifact as assertReleasedV4PhysicalArtifact } from '../src/testing/validation.ts'
@@ -95,6 +96,12 @@ describe('assertReleasedV4Header', () => {
     for (const [name, value, message] of malformed) {
       expect(() => { assertReleasedV4Header(value) }, name).toThrow(message)
     }
+  })
+})
+
+describe('assertReleasedV4Relationships', () => {
+  it('applies the V4 generation relationship checks to a decoded artifact', () => {
+    expect(() => { assertReleasedV4Relationships(artifact(conversation()), KNOWN) }).not.toThrow()
   })
 })
 

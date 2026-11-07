@@ -34,14 +34,16 @@ export interface ConversationBinding {
    */
   readonly openTurn: ObservableSnapshot<number | undefined>
   /**
-   * Add one selected target to the Session's monotonic active set.
+   * Add one selected target to the Session's active set before its view mounts.
+   * The target stays active until its last snapshot subscriber unmounts.
    * @param target - registered or subsequently registered Conversation target.
    */
   activate(target: string): void
   /**
    * Resolve one target-owned snapshot source.
    * The first subscriber activates the target unless shell selection already
-   * activated it; activation lasts for the remaining Session lifetime.
+   * activated it; the last unsubscribe deactivates it and drops its builder, so
+   * a closed view no longer pays streamed rebuilds for the rest of the Session.
    * @param target - registered Conversation target.
    * @returns identity-stable source following the target.
    */
@@ -55,6 +57,7 @@ class BoundConversation implements ConversationBinding {
   readonly openTurn: SnapshotStore<number | undefined>
   private readonly viewStore: ConversationViewSnapshotStore
   private readonly targetSources = new Map<string, ObservableSnapshot<unknown>>()
+  private readonly targetSubscribers = new Map<string, number>()
   private revision = -1
   private frame: number | undefined
   private disposeFeed: () => void = () => {}
@@ -82,8 +85,12 @@ class BoundConversation implements ConversationBinding {
         getSnapshot: () => views.get(target),
         subscribe: (listener) => {
           const unsubscribe = this.snapshot.subscribe(listener)
+          this.targetSubscribers.set(target, (this.targetSubscribers.get(target) ?? 0) + 1)
           this.activate(target)
-          return unsubscribe
+          return () => {
+            unsubscribe()
+            this.release(target)
+          }
         },
       }
       this.targetSources.set(target, source)
@@ -93,6 +100,24 @@ class BoundConversation implements ConversationBinding {
 
   activate(target: string): void {
     if (this.assembler.activateTarget(target)) this.snapshot.set(this.currentSnapshot())
+    this.openTurn.set(this.assembler.openTurn())
+  }
+
+  /**
+   * Drop one subscriber and deactivate the target when nothing observes it.
+   * An explicit selection may activate a target before its view mounts; the
+   * closing view is the last observer, so a target never stays resident for
+   * the rest of the Session after its view closes.
+   * @param target - registered Conversation target.
+   */
+  private release(target: string): void {
+    const remaining = (this.targetSubscribers.get(target) ?? 1) - 1
+    if (remaining > 0) {
+      this.targetSubscribers.set(target, remaining)
+      return
+    }
+    this.targetSubscribers.delete(target)
+    if (this.assembler.deactivateTarget(target)) this.snapshot.set(this.currentSnapshot())
     this.openTurn.set(this.assembler.openTurn())
   }
 

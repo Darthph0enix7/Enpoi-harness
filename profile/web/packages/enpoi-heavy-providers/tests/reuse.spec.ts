@@ -7,14 +7,19 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
 import { afterEach, expect, it, vi } from 'vitest'
+import { HeavyJobManager } from '../src/jobs.js'
 import { manifestById } from '../src/manifests.js'
+import { HeavyProvidersService } from '../src/remote.js'
 import {
   commitRoute,
+  detectInstance,
   discoverModels,
   discoverServiceModels,
   instanceBaseURLFromInput,
   modelListingUrl,
+  reachable,
   routeProfile,
   useDetectedInstance,
   type CredentialsSeam,
@@ -127,23 +132,73 @@ it('detection prefers the port recorded in settings over the default port', asyn
   expect(written.value.baseURL).toBe('http://127.0.0.1:4555/v1')
 })
 
-it('detection fails soft when nothing answers: the declared endpoint is written and reported down', async () => {
+it('detection fails soft but an implicit add writes no dead loopback route', async () => {
   const fetch: FetchLike = vi.fn(async (url) => {
     if (url.endsWith('/api/ping')) throw new Error('ECONNREFUSED')
     return { ok: false, status: 401, text: async () => 'unauthorized' }
   })
   const { deps, mutations } = depsWith({ fetch })
-  const outcome = await useDetectedInstance(deps, manifestById('freellmapi')!, undefined)
 
-  expect(outcome.health.ok).toBe(false)
-  expect(outcome.health.error).toContain('ECONNREFUSED')
-  expect(outcome.port).toBeUndefined()
-  expect(mutations).toHaveLength(1)
-  const value = (mutations[0]!.ops[0] as { value: { models: unknown; baseURL: unknown } }).value
-  expect(value.baseURL).toBe('http://127.0.0.1:3002/v1')
-  // Discovery was refused (401) → the manifest's fallback model keeps the
-  // route resolvable.
-  expect(value.models).toEqual([{ id: 'auto' }])
+  await expect(useDetectedInstance(deps, manifestById('freellmapi')!, undefined))
+    .rejects.toThrow(/no running FreeLLMAPI instance was detected/)
+  expect(mutations).toEqual([])
+})
+
+it('shares one reachable predicate: an auth challenge is listening, a connection error is not', () => {
+  expect(reachable({ ok: true, status: 200 })).toBe(true)
+  expect(reachable({ ok: false, status: 401 })).toBe(true)
+  expect(reachable({ ok: false, status: 403 })).toBe(true)
+  expect(reachable({ ok: false, status: 404 })).toBe(false)
+  expect(reachable({ ok: false, status: 500 })).toBe(false)
+  expect(reachable({ ok: false, error: 'connect ECONNREFUSED' })).toBe(false)
+})
+
+it('a 401 health challenge is a detected instance and reuse writes a keyed route with the unauthorized catalog', async () => {
+  const calls: string[] = []
+  const fetch: FetchLike = vi.fn(async (url) => {
+    calls.push(url)
+    if (url.endsWith('/api/ping')) return { ok: false, status: 401, text: async () => 'unauthorized' }
+    return { ok: false, status: 401, text: async () => 'unauthorized' }
+  })
+  const { deps, mutations } = depsWith({ fetch })
+
+  const outcome = await useDetectedInstance(deps, manifestById('freellmapi')!)
+
+  // Detection accepts the auth challenge instead of reporting no instance.
+  expect(calls[0]).toBe('http://127.0.0.1:3002/api/ping')
+  expect(outcome.health).toMatchObject({ ok: false, status: 401, reachable: true })
+  expect(outcome.catalog.state).toBe('unauthorized')
+  expect(outcome.endpoint).toBe('http://127.0.0.1:3002/v1')
+  // The route is keyed (never anonymous) and carries the honest failure, not a
+  // fallback model the unauthorized listing never answered.
+  const written = mutations[0]!.ops[0] as { value: { apiKeyEnv?: string; keyless?: boolean; models: unknown } }
+  expect(written.value.apiKeyEnv).toBe('FREELLMAPI_API_KEY')
+  expect(written.value.keyless).toBeUndefined()
+  expect(written.value.models).toEqual([])
+})
+
+it('a keyless instance that answers 401 without a key gives an authorization action, never an anonymous dead route', async () => {
+  const fetch: FetchLike = vi.fn(async (url) => (
+    url.endsWith('/health')
+      ? { ok: false, status: 401, text: async () => 'unauthorized' }
+      : { ok: false, status: 401, text: async () => 'unauthorized' }
+  ))
+  const { deps, mutations } = depsWith({ fetch })
+
+  await expect(useDetectedInstance(deps, manifestById('antigravity')!))
+    .rejects.toThrow(/requires authorization/i)
+  expect(mutations).toEqual([])
+})
+
+it('404 and 500 health replies remain undetected', async () => {
+  for (const status of [404, 500]) {
+    const fetch: FetchLike = vi.fn(async () => ({ ok: false, status, text: async () => 'nope' }))
+    const { deps } = depsWith({ fetch })
+    const detection = await detectInstance(deps, manifestById('freellmapi')!)
+    expect(detection.ok).toBe(false)
+    expect(detection.health.status).toBe(status)
+    expect(reachable(detection.health)).toBe(false)
+  }
 })
 
 it('a typed custom instance URL skips detection and writes the route there, non-loopback accepted', async () => {
@@ -194,16 +249,53 @@ it('a custom instance URL reaches the antigravity health path on the typed host'
   expect(written.value.models).toEqual([])
 })
 
-it('an unreachable antigravity proxy writes an empty model list — no fabricated fallback', async () => {
+it('an unreachable antigravity proxy refuses an implicit add instead of writing a dead route', async () => {
   const fetch: FetchLike = vi.fn(async () => { throw new Error('ECONNREFUSED') })
   const { deps, mutations } = depsWith({ fetch })
-  const outcome = await useDetectedInstance(deps, manifestById('antigravity')!)
-  expect(outcome.health.ok).toBe(false)
-  expect(outcome.health.error).toContain('ECONNREFUSED')
-  expect(outcome.models).toEqual([])
-  expect(outcome.endpoint).toBe('http://127.0.0.1:8082')
+  await expect(useDetectedInstance(deps, manifestById('antigravity')!))
+    .rejects.toThrow(/no running Antigravity Proxy instance was detected/)
+  expect(mutations).toEqual([])
+})
+
+it('writes the fallback model only for a valid empty listing, never for a failure or an unknown state', () => {
+  const manifest = manifestById('freellmapi')!
+  expect(routeProfile(manifest, 'reuse', [], { catalogState: 'failed' }).models).toEqual([])
+  expect(routeProfile(manifest, 'reuse', [], { catalogState: 'unauthorized' }).models).toEqual([])
+  expect(routeProfile(manifest, 'reuse', []).models).toEqual([])
+  expect(routeProfile(manifest, 'reuse', [], { catalogState: 'empty' }).models).toEqual([
+    { id: 'auto', name: 'auto (fallback)' },
+  ])
+})
+
+it('a failed or unauthorized discovery writes no fallback model to the route', async () => {
+  for (const failure of [
+    { ok: false, status: 500 },
+    { ok: false, status: 401 },
+  ]) {
+    const fetch: FetchLike = vi.fn(async (url) => (
+      url.endsWith('/api/ping')
+        ? { ok: true, status: 200, text: async () => '{"status":"ok"}' }
+        : { ok: failure.ok, status: failure.status, text: async () => 'down' }
+    ))
+    const { deps, mutations } = depsWith({ fetch })
+    const outcome = await useDetectedInstance(deps, manifestById('freellmapi')!)
+    expect(outcome.catalog.models).toEqual([])
+    const written = mutations[0]!.ops[0] as { value: { models: unknown } }
+    expect(written.value.models).toEqual([])
+  }
+})
+
+it('a valid empty listing writes the clearly labelled fallback model', async () => {
+  const fetch: FetchLike = vi.fn(async (url) => (
+    url.endsWith('/api/ping')
+      ? { ok: true, status: 200, text: async () => '{"status":"ok"}' }
+      : { ok: true, status: 200, text: async () => JSON.stringify({ data: [] }) }
+  ))
+  const { deps, mutations } = depsWith({ fetch })
+  const outcome = await useDetectedInstance(deps, manifestById('freellmapi')!)
+  expect(outcome.catalog.state).toBe('empty')
   const written = mutations[0]!.ops[0] as { value: { models: unknown } }
-  expect(written.value.models).toEqual([])
+  expect(written.value.models).toEqual([{ id: 'auto', name: 'auto (fallback)' }])
 })
 
 it('writes models: [] for an antigravity route with no discovery; llm-pi-ai treats it as no declared list', () => {
@@ -280,24 +372,19 @@ it('antigravity discovery presents a typed key as x-api-key, never as a bearer t
   expect(outcome.models).toEqual([{ id: 'gemini-3-flash' }])
 })
 
-it('a service route falls back to the registered namespace discovery when the endpoint listing answers nothing', async () => {
-  const fetch: FetchLike = vi.fn(async () => ({ ok: false, status: 401, text: async () => 'unauthorized' }))
+it('a service route keeps a failed native listing and never asks its namespace', async () => {
+  const fetch: FetchLike = vi.fn(async (url) => {
+    if (url.endsWith('/health')) return { ok: true, status: 200, text: async () => '{}' }
+    return { ok: false, status: 503, text: async () => 'down' }
+  })
   const { deps } = depsWith({ fetch })
-  const seen: Array<{ ns: string; request: Record<string, unknown> }> = []
-  const llm: ModelDiscoverySeam = {
-    discoverModels: async (ns, request) => {
-      seen.push({ ns, request: { ...request } })
-      return [{ id: 'glm-5.2', name: 'GLM 5.2', contextWindow: 200_000 }]
-    },
-  }
-  const outcome = await useDetectedInstance({ ...deps, llm }, manifestById('antigravity')!, undefined, {
+  const discoverModelsSpy = vi.fn(async () => [{ id: 'wrong-provider-model' }])
+  const outcome = await useDetectedInstance({ ...deps, llm: { discoverModels: discoverModelsSpy } }, manifestById('antigravity')!, undefined, {
     baseURL: 'http://10.0.0.9:9090',
   })
-  expect(outcome.models).toEqual([{ id: 'glm-5.2', name: 'GLM 5.2', contextWindow: 200_000 }])
-  expect(seen).toHaveLength(1)
-  expect(seen[0]!.ns).toBe('llm-pi-ai')
-  expect(seen[0]!.request.provider).toBe('antigravity')
-  expect(seen[0]!.request.api).toBe('anthropic-messages')
+  expect(outcome.models).toEqual([])
+  expect(outcome.catalog.state).toBe('failed')
+  expect(discoverModelsSpy).not.toHaveBeenCalled()
 })
 
 it('discovery uses the reference\'s stored credential when the add carries no key', async () => {
@@ -525,7 +612,7 @@ it('an antigravity add lists models anonymously, even when the legacy reference 
   expect(outcome).toEqual([{ id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro (High)' }])
 })
 
-it('a direct-vendor route writes at the vendor endpoint with the fallback model when no discovery is mounted', async () => {
+it('a direct-vendor route writes at the vendor endpoint and no fallback when no discovery is mounted', async () => {
   const calls: string[] = []
   const fetch: FetchLike = vi.fn(async (url) => {
     calls.push(url)
@@ -553,7 +640,9 @@ it('a direct-vendor route writes at the vendor endpoint with the fallback model 
     strategy: 'priority-sticky',
     identities: [{ id: 'key-1', credentialRef: 'COMMANDCODE_KEY_1', priority: 1 }],
   })
-  expect(written.value.models).toEqual([{ id: 'deepseek/deepseek-v4.1-flash' }])
+  // Namespace discovery failed (no discovery is mounted), so no model id is
+  // invented for the route.
+  expect(written.value.models).toEqual([])
 })
 
 it('a direct-vendor route stores a supplied key under its first pool identity', async () => {
@@ -564,14 +653,14 @@ it('a direct-vendor route stores a supplied key under its first pool identity', 
   expect(credentialSets).toEqual([{ ref: 'COMMANDCODE_KEY_1', value: 'sk-cc' }])
 })
 
-it('the commandcode route profile carries the manifest pool, auth ref, and fallback model', () => {
-  const profile = routeProfile(manifestById('commandcode')!, 'local', [])
+it('the commandcode route profile carries the manifest pool and labelled fallback for a valid empty listing', () => {
+  const profile = routeProfile(manifestById('commandcode')!, 'local', [], { catalogState: 'empty' })
   expect(profile.api).toBe('commandcode/alpha-generate')
   expect(profile.baseURL).toBe('https://api.commandcode.ai')
   expect(profile.apiKeyEnv).toBe('COMMANDCODE_KEY_1')
   expect(profile.keyless).toBeUndefined()
   expect(profile.pool?.identities).toEqual([{ id: 'key-1', credentialRef: 'COMMANDCODE_KEY_1', priority: 1 }])
-  expect(profile.models).toEqual([{ id: 'deepseek/deepseek-v4.1-flash' }])
+  expect(profile.models).toEqual([{ id: 'deepseek/deepseek-v4.1-flash', name: 'deepseek/deepseek-v4.1-flash (fallback)' }])
 })
 
 it('writes nothing (and rejects) when the settings seam is absent', async () => {
@@ -645,7 +734,7 @@ it('a direct route writes every model its route-namespace discovery answers, enr
   expect(written.value.models).toHaveLength(2)
 })
 
-it('a direct route keeps the fallback model when the discovery refuses', async () => {
+it('a direct route writes no fallback model when the discovery refuses', async () => {
   const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{"status":"ok"}' }))
   const { deps, mutations } = depsWith({ fetch })
   const outcome = await useDetectedInstance(
@@ -655,5 +744,115 @@ it('a direct route keeps the fallback model when the discovery refuses', async (
 
   expect(outcome.models).toEqual([])
   const written = mutations[0]!.ops[0] as { value: { models: unknown[] } }
-  expect(written.value.models).toEqual([{ id: 'deepseek/deepseek-v4.1-flash' }])
+  // Namespace discovery failed (no discovery is mounted), so no model id is
+  // invented for the route.
+  expect(written.value.models).toEqual([])
+})
+
+
+it('duplicate Add is refused before key storage or any probe and leaves the saved profile byte-identical', async () => {
+  const fetch = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{"data":[]}' }))
+  const base = depsWith({ fetch })
+  const saved = {
+    baseURL: 'http://127.0.0.1:9999/v1',
+    displayName: 'Saved by the operator',
+    apiKeyEnv: 'FREELLMAPI_API_KEY',
+    sessionHeader: { name: 'x-session', value: 'keep-me' },
+    retry: { attempts: 4, backoffMs: 250 },
+    keyless: false,
+    models: [{ id: 'auto' }],
+  }
+  const snapshot = JSON.stringify(saved)
+  const mutations: Array<{ ns: string; ops: readonly Record<string, unknown>[] }> = []
+  const credentialSets: Array<{ ref: string; value: string }> = []
+  const settings: SettingsSeam = {
+    describe: () => [{ ns: 'llm-pi-ai', revision: 7, value: { providers: { freellmapi: saved } } }],
+    mutate: async (ns, ops) => { mutations.push({ ns, ops }) },
+  }
+  const deps: HeavyDeps = {
+    ...base.deps,
+    settings,
+    credentials: {
+      resolve: async () => undefined,
+      set: async (ref, value) => { credentialSets.push({ ref, value }) },
+      unset: async () => {},
+    },
+  }
+  const manager = new HeavyJobManager({ dir: join(deps.dshHome, 'cache', 'heavy-jobs'), run: deps.runStep })
+  const service = new HeavyProvidersService(new Context(), { deps: () => deps, jobs: manager })
+  const result = await service.reuse({ id: 'freellmapi', key: 'sk-should-not-store' })
+  expect(result.ok).toBe(false)
+  expect(result.blocked?.reason).toContain('already has a configured route')
+  expect(mutations).toEqual([])
+  expect(credentialSets).toEqual([])
+  expect(fetch).not.toHaveBeenCalled()
+  // The saved row keeps its headers, retry policy, and key reference untouched:
+  // duplicate Add never overwrites a whole profile.
+  expect(JSON.stringify(saved)).toBe(snapshot)
+})
+
+it('duplicate Add with a baseURL is refused before retargeting a saved route that is down', async () => {
+  const fetch = vi.fn(async () => ({ ok: false, status: 503, text: async () => 'down' }))
+  const base = depsWith({ fetch })
+  const saved = { baseURL: 'http://127.0.0.1:3002/v1', displayName: 'Saved', models: [{ id: 'auto' }] }
+  const mutations: Array<{ ns: string; ops: readonly Record<string, unknown>[] }> = []
+  const deps: HeavyDeps = {
+    ...base.deps,
+    settings: {
+      describe: () => [{ ns: 'llm-pi-ai', revision: 1, value: { providers: { freellmapi: saved } } }],
+      mutate: async (ns, ops) => { mutations.push({ ns, ops }) },
+    },
+  }
+  const manager = new HeavyJobManager({ dir: join(deps.dshHome, 'cache', 'heavy-jobs'), run: deps.runStep })
+  const service = new HeavyProvidersService(new Context(), { deps: () => deps, jobs: manager })
+  const result = await service.reuse({ id: 'freellmapi', key: 'sk-new', baseURL: 'http://192.168.1.10:4000' })
+  expect(result.ok).toBe(false)
+  expect(mutations).toEqual([])
+  expect(JSON.stringify(saved)).toBe(JSON.stringify({ baseURL: 'http://127.0.0.1:3002/v1', displayName: 'Saved', models: [{ id: 'auto' }] }))
+})
+
+it('a route commit retries SETTINGS_CONFLICT with a freshly read revision', async () => {
+  const calls: Array<{ revision: number | undefined; ops: readonly Record<string, unknown>[] }> = []
+  const fetch: FetchLike = vi.fn(async (url) => (
+    url.endsWith('/api/ping')
+      ? { ok: true, status: 200, text: async () => '{"status":"ok"}' }
+      : { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: 'auto' }] }) }
+  ))
+  const base = depsWith({ fetch })
+  let revision = 1
+  const deps: HeavyDeps = {
+    ...base.deps,
+    settings: {
+      describe: () => [{ ns: 'llm-pi-ai', revision, value: { providers: {} } }],
+      mutate: async (_ns, ops, expectedRevision) => {
+        calls.push({ revision: expectedRevision, ops })
+        if (calls.length === 1) {
+          revision += 1
+          const error = new Error('settings conflict') as Error & { code?: string }
+          error.code = 'SETTINGS_CONFLICT'
+          throw error
+        }
+      },
+    },
+  }
+  const outcome = await useDetectedInstance(deps, manifestById('freellmapi')!)
+  expect(outcome.route.models).toEqual([{ id: 'auto' }])
+  expect(calls).toHaveLength(2)
+  // The retry re-reads the namespace instead of replaying a stale revision.
+  expect(calls[1]!.revision).toBe(2)
+})
+
+it('commitRoute can refuse a route that appeared before the commit', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({ ok: false, status: 503, text: async () => 'down' }))
+  const base = depsWith({ fetch })
+  const deps: HeavyDeps = {
+    ...base.deps,
+    settings: {
+      describe: () => [{ ns: 'llm-pi-ai', revision: 4, value: { providers: { freellmapi: { baseURL: 'http://foreign/v1', models: [] } } } }],
+      mutate: async () => {},
+    },
+  }
+  await expect(commitRoute(deps, manifestById('freellmapi')!, 'reuse', [], undefined, { refuseExisting: true }))
+    .rejects.toThrow(/received a route/)
+  expect(base.mutations).toEqual([])
 })

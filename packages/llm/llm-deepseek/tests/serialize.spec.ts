@@ -397,6 +397,19 @@ describe('Messages request conversion', () => {
 describe('validated configuration', () => {
   it('advertises exact model metadata and allows unlisted text models', () => {
     expect(modelInfo(connection, 'deepseek-official', MODEL)).toMatchObject({ context: { contextWindow: 1_000_000 }, defaultMaxTokens: 256_000, reasoning: { defaultEffort: 'high' } })
+    // A fallback window is labelled default, not presented as a disclosed cap.
+    expect(modelInfo(connection, 'deepseek-official', MODEL).context).toEqual({
+      contextWindow: 1_000_000,
+      source: 'default',
+    })
+    const configuredContext = resolveAdapterOptions({
+      models: [{ id: MODEL, contextWindow: 500_000, maxTokens: 321 }],
+    })
+    const configuredInfo = modelInfo(configuredContext, 'deepseek-official', MODEL)
+    expect(configuredInfo.context).toEqual({ contextWindow: 500_000, source: 'configured' })
+    // The catalog's maxTokens is the request cap, never an output capability.
+    expect(configuredInfo.defaultMaxTokens).toBe(321)
+    expect(configuredInfo).not.toHaveProperty('maxOutputTokens')
     expect(modelInfo(connection, 'deepseek-official', 'custom').inputModalities).toEqual(['text'])
     expect(modelInfo(connection, 'deepseek-official', MODEL).systemPromptUpdate).toBeUndefined()
     expect(modelInfo(connection, 'deepseek-official', 'custom').systemPromptUpdate).toBeUndefined()

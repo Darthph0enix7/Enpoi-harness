@@ -110,6 +110,10 @@ export interface TestSessionRemoteDefaults {
   readonly cwd: string
   readonly nativeOpen?: boolean
   readonly listPageSize?: number
+  readonly sessionFollowBufferMaxItems?: number
+  readonly sessionFollowBufferMaxBytes?: number
+  readonly sessionFollowResume?: boolean
+  readonly sessionFollowResumeMaxEvents?: number
   readonly saveDefaultModelSelection?: (selection: AgentModelSelection) => void | Promise<void>
   readonly openPath?: (path: string, signal: AbortSignal) => Promise<void>
   readonly fileApplications?: SessionControllerInternals['fileApplications']
@@ -311,6 +315,18 @@ function installControllers(
       {
         ...defaults.nativeOpen === undefined ? {} : { nativeOpen: defaults.nativeOpen },
         ...defaults.listPageSize === undefined ? {} : { listPageSize: defaults.listPageSize },
+        ...defaults.sessionFollowBufferMaxItems === undefined
+          ? {}
+          : { sessionFollowBufferMaxItems: defaults.sessionFollowBufferMaxItems },
+        ...defaults.sessionFollowBufferMaxBytes === undefined
+          ? {}
+          : { sessionFollowBufferMaxBytes: defaults.sessionFollowBufferMaxBytes },
+        ...defaults.sessionFollowResume === undefined
+          ? {}
+          : { sessionFollowResume: defaults.sessionFollowResume },
+        ...defaults.sessionFollowResumeMaxEvents === undefined
+          ? {}
+          : { sessionFollowResumeMaxEvents: defaults.sessionFollowResumeMaxEvents },
       },
       {
         ...defaults.openPath === undefined ? {} : { openPath: defaults.openPath },

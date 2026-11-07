@@ -160,6 +160,17 @@ export const zh = {
   'meridian.removal.1': '删除用户服务文件',
   'meridian.removal.2': '删除 macOS 代理日志',
   'meridian.removal.3': '保留全局 npm 包（不卸载 @rynfar/meridian 与 @anthropic-ai/claude-code）',
+  'summary.cliproxyapi': '可选的多账号订阅网关：在管理面板中配置的 CLI 账号前提供一个 OpenAI 兼容端点。',
+  'reuse.cliproxyapi.label': '使用检测到的实例',
+  'reuse.cliproxyapi.note': '零安装：使用本机已在运行的 CLIProxyAPI 实例。客户端 API 密钥可选，面板不会自动登录。',
+  'local.cliproxyapi.label': '本地安装（校验发布包 + 用户服务）',
+  'local.cliproxyapi.linux.label': '本地安装（校验发布包 + systemd 用户单元）',
+  'local.cliproxyapi.darwin.label': '本地安装（校验发布包 + launchd 代理）',
+  'local.cliproxyapi.win32.label': 'Windows 不支持',
+  'cliproxyapi.default.0': '安装 CLIProxyAPI（校验发布包并配置用户服务）',
+  'cliproxyapi.linux.0': '安装 CLIProxyAPI（校验发布包并配置用户服务）',
+  'cliproxyapi.darwin.0': '安装 CLIProxyAPI（校验发布包并配置用户服务）',
+  'cliproxyapi.removal.0': '移除 CLIProxyAPI 安装（停止服务并删除受回执保护的文件）',
 } satisfies Record<string, string>
 
 /** The heavy-provider text key union. */
@@ -260,6 +271,17 @@ export const en = {
   'meridian.removal.1': 'Remove the user service file',
   'meridian.removal.2': 'Remove the macOS agent logs',
   'meridian.removal.3': 'Leave the global npm packages installed (@rynfar/meridian and @anthropic-ai/claude-code are not uninstalled)',
+  'summary.cliproxyapi': 'Optional multi-account subscription gateway: one OpenAI-compatible endpoint in front of the CLI accounts you configure in its dashboard.',
+  'reuse.cliproxyapi.label': 'Use a detected instance',
+  'reuse.cliproxyapi.note': 'Zero install: uses a CLIProxyAPI instance already running on this device. The client API key is optional and the dashboard is not signed in automatically.',
+  'local.cliproxyapi.label': 'Install locally (verified release + user service)',
+  'local.cliproxyapi.linux.label': 'Install locally (verified release + systemd user unit)',
+  'local.cliproxyapi.darwin.label': 'Install locally (verified release + launchd agent)',
+  'local.cliproxyapi.win32.label': 'Not supported on Windows',
+  'cliproxyapi.default.0': 'Install CLIProxyAPI (verified release and user service)',
+  'cliproxyapi.linux.0': 'Install CLIProxyAPI (verified release and user service)',
+  'cliproxyapi.darwin.0': 'Install CLIProxyAPI (verified release and user service)',
+  'cliproxyapi.removal.0': 'Remove the CLIProxyAPI install (stop the service and remove verified files)',
 } satisfies Record<HeavyTextKey, string>
 
 /** One dictionary lookup; an absent key keeps the code fallback. */

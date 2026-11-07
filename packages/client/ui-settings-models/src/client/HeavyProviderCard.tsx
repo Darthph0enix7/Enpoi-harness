@@ -109,21 +109,34 @@ export function HeavyProviderCard({ providerId, t, modelIds = [], onAutoPopulate
   if (manifest === undefined) return null
 
   const health = status?.health
+  const isAuth = health?.status === 401 || health?.status === 403
+  const hasDashboard = Boolean(manifest.dashboardUrl || manifest.local.dashboardUrl)
   return (
     <div className={styles['settingsCard']}>
       <div className={styles['cardHead']}>
         <div className={styles['cardTitleRow']}>
           <h3 className={styles['cardTitle']}>{t('heavyBadge')}</h3>
-          <span className={styles['heavyHealthBadge']} data-ok={health?.ok === true ? 'true' : 'false'}>
-            {health === undefined ? t('heavyHealthUnknown') : health.ok ? t('heavyHealthOk') : t('heavyHealthDown')}
-            {health?.status !== undefined ? ` · ${String(health.status)}` : ''}
+          <span className={styles['heavyHealthBadge']} data-ok={isAuth ? 'auth' : health?.ok === true ? 'true' : 'false'}>
+            {health === undefined
+              ? t('heavyHealthUnknown')
+              : isAuth
+                ? `${t('heavyHealthAuth')} · ${String(health.status)}`
+                : health.ok
+                  ? t('heavyHealthOk')
+                  : t('heavyHealthDown')}
+            {health?.status !== undefined && !isAuth ? ` · ${String(health.status)}` : ''}
           </span>
           <span className={styles['heavyHealthBadge']}>
-            {t('heavyModeInUse')}: {status?.mode === 'local' ? t('heavyModeLocal') : status?.mode === 'reuse' ? t('heavyModeReuse') : '—'}
+            {t('heavyModeInUse')}: {status?.mode === 'local' ? t('heavyModeLocal') : status?.mode === 'reuse' ? t('heavyModeReuse') : status?.mode === 'unknown' ? t('heavyModeUnknown') : '—'}
           </span>
         </div>
         <div className={styles['poolHeaderActions']}>
-          <HeavyDashboardLinks providerId={providerId} mode={status?.mode} t={t} />
+          <HeavyDashboardLinks
+            providerId={providerId}
+            {...status?.mode === undefined ? {} : { mode: status.mode }}
+            {...status?.detectedEndpoint === undefined ? {} : { activeEndpoint: status.detectedEndpoint }}
+            t={t}
+          />
           {manifest.docsUrl !== undefined && (
             <a className={styles['presetMetaItem']} href={manifest.docsUrl} target="_blank" rel="noreferrer">
               {t('heavyDocs')} ↗
@@ -142,6 +155,11 @@ export function HeavyProviderCard({ providerId, t, modelIds = [], onAutoPopulate
         <p className={styles['heavySummary']}>{manifest.summary}</p>
         {/* Detection + runtime preflight: offered on mount, fail-soft. */}
         <HeavyPreflightNote status={status} t={t} />
+        {status?.configured === true && modelIds.length === 0 && (
+          <p className={styles['heavyModeNote']} data-heavy-empty-catalog>
+            {hasDashboard ? t('heavyEmptyCatalogNeutral') : t('heavyEmptyCatalogNoDashboard')}
+          </p>
+        )}
         {manifest.requiresBrowser.length > 0 && (
           <div className={styles['heavyBadges']}>
             {manifest.requiresBrowser.map(line => (

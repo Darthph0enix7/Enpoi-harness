@@ -17,9 +17,11 @@ import type {
   LlmDiscoveredModel,
   LlmFailure,
   LlmImageRequestPricing,
+  LlmModelCapacitySource,
   LlmModelContext,
   LlmModelDiscoveryRequest,
   LlmModelInfo,
+  LlmNativeFileInputs,
   LlmPoolIdentityStatus,
   LlmPoolOperations,
   LlmResolvedModelInfo,
@@ -33,6 +35,7 @@ import type {
   ToolSchema,
   ToolUpdate,
 } from './types.ts'
+import { validateLlmNativeFileInputs } from './types.ts'
 import { freezeMessage } from './message.ts'
 import { resolveRetryPolicy } from './retry-policy.ts'
 import type { ResolvedRetryPolicy } from './retry-policy.ts'
@@ -488,6 +491,11 @@ function chainFailureChunk(
   }
 }
 
+/** Whether a widened value is a capacity source this build understands. */
+function isCapacitySource(value: string): value is LlmModelCapacitySource {
+  return value === 'configured' || value === 'discovered' || value === 'installed' || value === 'default'
+}
+
 /** One ordered attempt candidate and its 1-based position in the request's link order. */
 interface ChainAttempt {
   readonly link: ModelChainLink
@@ -546,10 +554,20 @@ export interface PreparedLlmCall {
   readonly context?: LlmModelContext
   /** Exact model modalities captured with the adapter dispatch generation. */
   readonly inputModalities?: readonly ModelModality[]
+  /** Disclosure-only advertised input types captured with the adapter dispatch generation. */
+  readonly advertisedInputModalities?: readonly ModelModality[]
+  /** Exact output-token capability captured with the adapter dispatch generation. */
+  readonly maxOutputTokens?: number
+  /** Whether the exact route accepts tool declarations, when a source stated it. */
+  readonly tools?: boolean
+  /** Advertised effort identifiers outside the selectable ladder, captured for diagnostics. */
+  readonly unsupportedReasoningEfforts?: readonly string[]
   /** Exact model system prompt update mode captured with the adapter dispatch generation. */
   readonly systemPromptUpdate?: SystemPromptUpdate
   /** Exact model tool update mode captured with the adapter dispatch generation. */
   readonly toolUpdate?: ToolUpdate
+  /** Native-file policy copied from the adapter generation that will dispatch this call. */
+  readonly nativeFileInputs?: LlmNativeFileInputs
   /** Config fields materialized by the captured adapter rather than proposed by the caller. */
   readonly adapterDefaults: LlmCallConfigAdapterDefaults
   /**
@@ -606,6 +624,31 @@ export abstract class LlmAdapter {
    */
   imageRequestPricing(_provider: string, _model: string): LlmImageRequestPricing | undefined {
     return undefined
+  }
+
+  /**
+   * Resolve this route's explicit native-file policy synchronously. The default
+   * declares none, so request assembly keeps every file as handle text.
+   * Implementations must not perform I/O; the token meter resolves this per
+   * measurement.
+   * @param _provider - a route passed to `registerAdapter()` for this instance.
+   * @param _model - exact model id passed to {@link GenerateOptions.model}.
+   * @returns the route's descriptor, or `undefined` when media is not enabled.
+   */
+  nativeFileInputs(_provider: string, _model: string): LlmNativeFileInputs | undefined {
+    return undefined
+  }
+
+  /**
+   * Synchronous native-file request pricing for one exact route. The descriptor
+   * carries the explicit token reserve; routes that override only
+   * {@link nativeFileInputs} inherit this alias unchanged.
+   * @param provider - a route passed to `registerAdapter()` for this instance.
+   * @param model - exact model id passed to {@link GenerateOptions.model}.
+   * @returns the route's descriptor, or `undefined` when media is not enabled.
+   */
+  nativeFileRequestPricing(provider: string, model: string): LlmNativeFileInputs | undefined {
+    return this.nativeFileInputs(provider, model)
   }
 
   /**
@@ -707,9 +750,47 @@ export interface DirectoryRegistrationHandle {
 }
 
 /**
+ * Project tool-call history into plain text for a route that declared no tool
+ * support. No tool schemas are sent, so assistant `tool-call` blocks become
+ * text and every tool-role result becomes a user message carrying the call id,
+ * name, arguments, and result text in order; the provider never receives an
+ * undeclared tool-call grammar.
+ * @param messages - request history after content projection.
+ * @returns the original list when it carries no tool history, otherwise copies.
+ */
+function projectToolHistoryForUnsupportedRoute(
+  messages: readonly RequestMessage[],
+): readonly RequestMessage[] {
+  return messages.map((message): RequestMessage => {
+    if (message.role === 'tool') {
+      const result = message.content
+        .map(block => block.type === 'text' ? block.text : `[${block.type}]`)
+        .join('\n')
+      return {
+        role: 'user',
+        content: [{
+          type: 'text',
+          text: `Tool result for ${message.toolCallId}${message.isError === true ? ' (error)' : ''}:\n${result}`,
+        }],
+      }
+    }
+    if (message.role !== 'assistant' || !message.content.some(block => block.type === 'tool-call')) {
+      return message
+    }
+    return {
+      ...message,
+      content: message.content.map(block => block.type === 'tool-call'
+        ? { type: 'text' as const, text: `Tool call ${block.name} (${block.id}): ${block.arguments}` }
+        : block),
+    }
+  })
+}
+
+/**
  * The abstract `llm` service: an adapter registry plus a streaming model-call
  * API, interceptable via the `llm/stream` waterfall.
  */
+
 export class LlmRuntime extends TypertRemoteService {
   static Config: Schema<Config> = Config
 
@@ -1026,6 +1107,9 @@ export class LlmRuntime extends TypertRemoteService {
       models.push({
         ...model,
         ...model.inputModalities === undefined ? {} : { inputModalities: [...model.inputModalities] },
+        ...model.unsupportedReasoningEfforts === undefined
+          ? {}
+          : { unsupportedReasoningEfforts: [...model.unsupportedReasoningEfforts] },
       })
     }
     return models
@@ -1154,6 +1238,29 @@ export class LlmRuntime extends TypertRemoteService {
   }
 
   /**
+   * Resolve the exact route's explicit native-file policy, or `undefined` when
+   * the provider is unregistered or does not enable native media. Unknown
+   * providers degrade to `undefined`, mirroring image pricing for durable
+   * history whose route may no longer be mounted.
+   * @param provider - provider route named by a request header.
+   * @param model - exact model id named by the same header.
+   * @returns the owning adapter's descriptor, when declared.
+   */
+  nativeFileInputs(provider: string, model: string): LlmNativeFileInputs | undefined {
+    return this.adapters.get(provider)?.adapter.nativeFileInputs(provider, model)
+  }
+
+  /**
+   * Resolve the exact route's synchronous native-file request pricing.
+   * @param provider - provider route named by a request header.
+   * @param model - exact model id named by the same header.
+   * @returns the owning adapter's descriptor, when declared.
+   */
+  nativeFileRequestPricing(provider: string, model: string): LlmNativeFileInputs | undefined {
+    return this.adapters.get(provider)?.adapter.nativeFileRequestPricing(provider, model)
+  }
+
+  /**
    * Resolve the exact text one durable file occurrence contributes to every
    * provider request in the current execution environment.
    * @param ref - durable verbatim file reference from model history.
@@ -1166,6 +1273,11 @@ export class LlmRuntime extends TypertRemoteService {
   /** Detach typed adapter-owned modality metadata. */
   private detachedModalities(modalities: readonly ModelModality[] | undefined): ModelModality[] | undefined {
     return modalities === undefined ? undefined : [...modalities]
+  }
+
+  /** Detach an adapter-owned diagnostic list. */
+  private detachedEfforts(efforts: readonly string[] | undefined): string[] | undefined {
+    return efforts === undefined ? undefined : [...efforts]
   }
 
   /**
@@ -1194,12 +1306,17 @@ export class LlmRuntime extends TypertRemoteService {
       }
       seen.add(model.id)
       const inputModalities = this.detachedModalities(model.inputModalities)
+      const advertisedInputModalities = this.detachedModalities(model.advertisedInputModalities)
+      const unsupportedReasoningEfforts = this.detachedEfforts(model.unsupportedReasoningEfforts)
       return {
         provider: model.provider,
         id: model.id,
         name: model.name,
         ...model.description === undefined ? {} : { description: model.description },
         ...inputModalities === undefined ? {} : { inputModalities },
+        ...advertisedInputModalities === undefined ? {} : { advertisedInputModalities },
+        ...model.tools === undefined ? {} : { tools: model.tools },
+        ...unsupportedReasoningEfforts === undefined ? {} : { unsupportedReasoningEfforts },
       }
     })
   }
@@ -1258,9 +1375,33 @@ export class LlmRuntime extends TypertRemoteService {
         'INVALID_MODEL_CONTEXT',
       )
     }
+    if (context?.maxInputTokens !== undefined
+      && (!Number.isSafeInteger(context.maxInputTokens) || context.maxInputTokens <= 0)) {
+      throw new LlmError(
+        `adapter returned invalid maxInputTokens for provider "${provider}" model "${model}"`,
+        'INVALID_MODEL_CONTEXT',
+      )
+    }
+    // Widened: an adapter may supply this provenance from configuration text.
+    const contextSource: string | undefined = context?.source
+    if (contextSource !== undefined && !isCapacitySource(contextSource)) {
+      throw new LlmError(
+        `adapter returned invalid context source for provider "${provider}" model "${model}"`,
+        'INVALID_MODEL_INFO',
+      )
+    }
+    const maxInputTokensSource: string | undefined = context?.maxInputTokensSource
+    if (maxInputTokensSource !== undefined && !isCapacitySource(maxInputTokensSource)) {
+      throw new LlmError(
+        `adapter returned invalid maxInputTokens source for provider "${provider}" model "${model}"`,
+        'INVALID_MODEL_INFO',
+      )
+    }
     // Capability metadata rides through: an explicit modality omission is
     // negative capability downstream preflights act on (image admission).
     const inputModalities = this.detachedModalities(resolved.inputModalities)
+    const advertisedInputModalities = this.detachedModalities(resolved.advertisedInputModalities)
+    const unsupportedReasoningEfforts = this.detachedEfforts(resolved.unsupportedReasoningEfforts)
     // Widened: adapters derive this mode from catalog config, so the value is checked as a string.
     const systemPromptUpdate: string | undefined = resolved.systemPromptUpdate
     if (systemPromptUpdate !== undefined && systemPromptUpdate !== 'in-history') {
@@ -1277,6 +1418,18 @@ export class LlmRuntime extends TypertRemoteService {
         'INVALID_MODEL_INFO',
       )
     }
+    let nativeFileInputs: LlmNativeFileInputs | undefined
+    if (resolved.nativeFileInputs !== undefined) {
+      try {
+        nativeFileInputs = validateLlmNativeFileInputs(resolved.nativeFileInputs)
+      } catch (error) {
+        throw new LlmError(
+          `adapter returned invalid native file inputs for provider "${provider}" model "${model}": ${(error as Error).message}`,
+          'INVALID_MODEL_INFO',
+          { cause: error },
+        )
+      }
+    }
     const defaultMaxTokens = resolved.defaultMaxTokens
     if (defaultMaxTokens !== undefined
       && (!Number.isSafeInteger(defaultMaxTokens) || defaultMaxTokens <= 0)) {
@@ -1285,16 +1438,45 @@ export class LlmRuntime extends TypertRemoteService {
         'INVALID_MODEL_MAX_TOKENS',
       )
     }
+    const maxOutputTokens = resolved.maxOutputTokens
+    if (maxOutputTokens !== undefined
+      && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens <= 0)) {
+      throw new LlmError(
+        `adapter returned invalid maxOutputTokens for provider "${provider}" model "${model}"`,
+        'INVALID_MODEL_MAX_TOKENS',
+      )
+    }
+    // Widened for the same reason as the context source.
+    const maxOutputTokensSource: string | undefined = resolved.maxOutputTokensSource
+    if (maxOutputTokensSource !== undefined && !isCapacitySource(maxOutputTokensSource)) {
+      throw new LlmError(
+        `adapter returned invalid maxOutputTokens source for provider "${provider}" model "${model}"`,
+        'INVALID_MODEL_INFO',
+      )
+    }
     const info: LlmResolvedModelInfo = {
       provider,
       id: model,
       name: resolved.name,
       ...resolved.description === undefined ? {} : { description: resolved.description },
       ...inputModalities === undefined ? {} : { inputModalities },
-      ...context === undefined ? {} : { context: { contextWindow: context.contextWindow } },
+      ...advertisedInputModalities === undefined ? {} : { advertisedInputModalities },
+      ...resolved.tools === undefined ? {} : { tools: resolved.tools },
+      ...unsupportedReasoningEfforts === undefined ? {} : { unsupportedReasoningEfforts },
+      ...context === undefined ? {} : {
+        context: {
+          contextWindow: context.contextWindow,
+          ...context.maxInputTokens === undefined ? {} : { maxInputTokens: context.maxInputTokens },
+          ...maxInputTokensSource === undefined ? {} : { maxInputTokensSource },
+          ...contextSource === undefined ? {} : { source: contextSource },
+        },
+      },
+      ...maxOutputTokens === undefined ? {} : { maxOutputTokens },
+      ...maxOutputTokensSource === undefined ? {} : { maxOutputTokensSource },
       ...defaultMaxTokens === undefined ? {} : { defaultMaxTokens },
       ...resolved.systemPromptUpdate === undefined ? {} : { systemPromptUpdate: resolved.systemPromptUpdate },
       ...resolved.toolUpdate === undefined ? {} : { toolUpdate: resolved.toolUpdate },
+      ...nativeFileInputs === undefined ? {} : { nativeFileInputs },
     }
     const reasoning = resolved.reasoning
     if (reasoning === undefined) return info
@@ -1435,8 +1617,19 @@ export class LlmRuntime extends TypertRemoteService {
       ...modelInfo.inputModalities === undefined
         ? {}
         : { inputModalities: Object.freeze([...modelInfo.inputModalities]) },
+      ...modelInfo.advertisedInputModalities === undefined
+        ? {}
+        : { advertisedInputModalities: Object.freeze([...modelInfo.advertisedInputModalities]) },
+      ...modelInfo.maxOutputTokens === undefined ? {} : { maxOutputTokens: modelInfo.maxOutputTokens },
+      ...modelInfo.tools === undefined ? {} : { tools: modelInfo.tools },
+      ...modelInfo.unsupportedReasoningEfforts === undefined
+        ? {}
+        : { unsupportedReasoningEfforts: Object.freeze([...modelInfo.unsupportedReasoningEfforts]) },
       ...modelInfo.systemPromptUpdate === undefined ? {} : { systemPromptUpdate: modelInfo.systemPromptUpdate },
       ...modelInfo.toolUpdate === undefined ? {} : { toolUpdate: modelInfo.toolUpdate },
+      ...modelInfo.nativeFileInputs === undefined
+        ? {}
+        : { nativeFileInputs: deepFreeze(structuredClone(modelInfo.nativeFileInputs)) },
       stream: (options: GenerateOptions): AsyncIterable<StreamChunk> => {
         if (dispatched) {
           throw new LlmError('a prepared LLM call can only be dispatched once', 'INVALID_PREPARED_CALL')
@@ -1510,9 +1703,6 @@ export class LlmRuntime extends TypertRemoteService {
     options: GenerateOptions,
     prepared?: PreparedDispatch,
   ): AsyncGenerator<StreamChunk> {
-    // Enpoi Harness wire capture — the ONE chokepoint every dispatch passes
-    // (both `ctx.llm.stream()` and the agent-loop's prepared-call path).
-    void captureWireRequest(options)
     let iterator: AsyncIterator<StreamChunk>
     try {
       const registration = prepared?.registration ?? this.registration(options.provider)
@@ -1541,10 +1731,16 @@ export class LlmRuntime extends TypertRemoteService {
         : Object.isFrozen(options)
           ? deepFreeze({ ...options, ...resolvedConfig })
           : { ...options, ...resolvedConfig }
-      // Files are never dispatched natively: every route receives handle text.
+      // A route with an explicit native-file policy keeps accepted user-role
+      // file blocks for its adapter; every other file stays deterministic handle
+      // text. The adapter still admits real bytes and sizes before dispatch.
       let projectedMessages: readonly RequestMessage[] = resolvedOptions.messages
       if (projectedMessages.some(message => contentHasFile(message.content))) {
-        projectedMessages = projectFilesToText(projectedMessages, ref => this.fileReadPath(ref))
+        projectedMessages = projectFilesToText(
+          projectedMessages,
+          ref => this.fileReadPath(ref),
+          modelInfo.nativeFileInputs,
+        )
       }
       if (modelInfo.inputModalities !== undefined
         && !modelInfo.inputModalities.includes('image')
@@ -1556,10 +1752,27 @@ export class LlmRuntime extends TypertRemoteService {
       // paste cannot ride megabytes of text into every request.
       projectedMessages = projectEmbeddedBase64Text(projectedMessages)
       // Tool changes are logged on every route; the route's declared mode selects what it receives.
-      const projectedTools = projectToolUpdates(projectedMessages, resolvedOptions.tools, modelInfo.toolUpdate, resolvedOptions.toolHistory)
-      projectedMessages = projectedTools.messages
+      // A route that declared no tool support receives neither schemas nor tool
+      // history, and its prior tool calls/results are projected as plain text.
+      const toolsDeclaredUnsupported = modelInfo.tools === false
+      const projectedTools = projectToolUpdates(
+        projectedMessages,
+        toolsDeclaredUnsupported ? undefined : resolvedOptions.tools,
+        toolsDeclaredUnsupported ? undefined : modelInfo.toolUpdate,
+        toolsDeclaredUnsupported ? undefined : resolvedOptions.toolHistory,
+      )
+      projectedMessages = toolsDeclaredUnsupported
+        ? projectToolHistoryForUnsupportedRoute(projectedTools.messages)
+        : projectedTools.messages
       let projectedOptions = resolvedOptions
-      if (projectedMessages !== resolvedOptions.messages || projectedTools.tools !== resolvedOptions.tools) {
+      if (toolsDeclaredUnsupported) {
+        const { tools: _tools, toolHistory: _toolHistory, ...withoutTools } = resolvedOptions
+        projectedOptions = {
+          ...withoutTools,
+          messages: projectedMessages as RequestMessage[],
+        }
+        if (Object.isFrozen(resolvedOptions)) deepFreeze(projectedOptions)
+      } else if (projectedMessages !== resolvedOptions.messages || projectedTools.tools !== resolvedOptions.tools) {
         projectedOptions = {
           ...resolvedOptions,
           messages: projectedMessages as RequestMessage[],
@@ -1567,6 +1780,10 @@ export class LlmRuntime extends TypertRemoteService {
         }
         if (Object.isFrozen(resolvedOptions)) deepFreeze(projectedOptions)
       }
+      // Enpoi Harness wire capture — the ONE chokepoint every dispatch passes
+      // (both `ctx.llm.stream()` and the agent-loop's prepared-call path), after
+      // every projection so the capture shows what the adapter actually receives.
+      void captureWireRequest(projectedOptions)
       const stream = dispatch(this.forAdapter(projectedOptions, adapter))
       iterator = stream[Symbol.asyncIterator]()
     } catch (error: unknown) {
@@ -1830,9 +2047,12 @@ export class LlmRuntime extends TypertRemoteService {
   }
 
   /**
-   * Whether one member can carry the estimated request. An unknown window, or
-   * a metadata lookup that fails, keeps the member: the prefilter is advisory
-   * and never replaces the provider's own answer.
+   * Whether one member can carry the estimated prompt. A disclosed input-only
+   * cap binds before the combined window; a `default`-source capacity is an
+   * execution fallback rather than a disclosed limit and never filters a
+   * member. An unknown capacity, or a metadata lookup that fails, keeps the
+   * member: the prefilter is advisory and never replaces the provider's own
+   * answer.
    */
   private async chainLinkFits(
     link: ModelChainLink,
@@ -1840,8 +2060,19 @@ export class LlmRuntime extends TypertRemoteService {
     signal?: AbortSignal,
   ): Promise<boolean> {
     try {
-      const contextWindow = (await this.resolveModelInfo(link.provider, link.model, signal)).context?.contextWindow
-      return contextWindow === undefined || contextWindow >= estimatedTokens
+      const context = (await this.resolveModelInfo(link.provider, link.model, signal)).context
+      const window = context === undefined || context.source === 'default'
+        ? undefined
+        : context.contextWindow
+      const input = context?.maxInputTokens !== undefined && context.maxInputTokensSource !== 'default'
+        ? context.maxInputTokens
+        : undefined
+      const promptLimit = window === undefined
+        ? input
+        : input === undefined
+          ? window
+          : Math.min(window, input)
+      return promptLimit === undefined || promptLimit >= estimatedTokens
     } catch (_unavailableModelContext) {
       return true
     }

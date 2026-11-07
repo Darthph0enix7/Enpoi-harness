@@ -17,6 +17,12 @@ This document is the authoritative reference for merging future upstream release
 | `packages/core/session/src/revert-fold.ts`<br>`packages/api/session-controller/src/history.ts` | Reverting truncates or shadows without branch-switching markers; no version navigator. | Introduces `revert/branch` event and `SessionRevertFold` tracking active surface vs inactive variants; `revertIterationRestore` swaps records by identity without re-running the agent turn. | Upstream re-runs the prompt and burns model tokens when restoring an older turn; fork swaps branches instantly and cleanly. |
 | `packages/session/session-persistence/src/retention-pins.ts` | Basic session log cleanup. | Enforces retention pins for iterations, image offloads, compaction checkpoints, and branch records (`RetentionViolationError`). | GC or compaction would destroy historical revision trees. |
 
+#### Session format V5 fork collision rule
+
+- `SESSION_FORMAT_VERSION` is one integer and the format catalog requires exactly one `v4->v5` package. Two different V5 semantics cannot coexist.
+- When the fork implemented V5, upstream `origin/master` still wrote V4 and had no `session-format-v4-to-v5` package. Before any future integration, re-check upstream and sync branches for `SESSION_FORMAT_VERSION = 5` or a V5 edge. If upstream lands a V5 first, stop and reconcile semantics with the owner; never add a second V5 package.
+- After acceptance, `docs/persistence-changes/finalized/v5.json` locks the fork's V5 semantics. A later upstream V5 must be adopted if compatible, or explicitly refused while coordinating a new number/scheme; the integer has no fork discriminator.
+
 ### 2. Client Rendering, Markdown, and Navigation
 
 | File | Upstream Behavior | Enpoi Fork Contract | Why / What Breaks if Overwritten |

@@ -40,8 +40,10 @@ class BrowserNetworkProbe extends EventTarget {
 class GenerationProbe {
   private readonly active = new Set<() => void>()
   private readonly activities = new Set<() => void>()
+  private readonly heartbeats = new Set<() => void>()
 
-  readonly source: ConnectionGenerationSource = (signal, ready, activity) => new Promise<void>((resolve) => {
+  readonly source: ConnectionGenerationSource = (signal, ready, activity, heartbeat) => new Promise<void>((resolve) => {
+    const beat: () => void = heartbeat ?? (() => {})
     let settled = false
     const finish = (): void => {
       if (settled) return
@@ -49,10 +51,12 @@ class GenerationProbe {
       signal.removeEventListener('abort', finish)
       this.active.delete(finish)
       this.activities.delete(activity)
+      this.heartbeats.delete(beat)
       resolve()
     }
     this.active.add(finish)
     this.activities.add(activity)
+    this.heartbeats.add(beat)
     signal.addEventListener('abort', finish, { once: true })
     ready({ home: '/h' })
     if (signal.aborted) finish()
@@ -65,6 +69,11 @@ class GenerationProbe {
   /** Report one inbound frame on every active generation. */
   pulse(): void {
     for (const activity of [...this.activities]) activity()
+  }
+
+  /** Report one inbound heartbeat frame on every active generation. */
+  heartbeat(): void {
+    for (const report of [...this.heartbeats]) report()
   }
 }
 
@@ -85,6 +94,7 @@ async function mount(): Promise<ConnectionHandle> {
 describe('connection client apply', () => {
   it('uses Host bootstrap timing when Gateway starts without overrides', async () => {
     vi.useFakeTimers()
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
     vi.stubGlobal('__DSH_CONNECTION_RECOVERY__', {
       backoffBaseMs: 10, backoffMaxMs: 10, generationReadyTimeoutMs: 20,
     })
@@ -105,6 +115,7 @@ describe('connection client apply', () => {
     } finally {
       loop.stop()
       await vi.advanceTimersByTimeAsync(0)
+      randomSpy.mockRestore()
       warnSpy.mockRestore()
     }
   })
@@ -309,11 +320,15 @@ describe('connection client apply', () => {
       expect(calls).toBe(1)
 
       browser.setOnline(false)
+      expect(handle.state.getSnapshot()).toBe('connected')
+      await vi.advanceTimersByTimeAsync(1_000)
       expect(handle.state.getSnapshot()).toBe('disconnected')
       await vi.advanceTimersByTimeAsync(10_000)
       expect(calls).toBe(1)
 
       browser.setOnline(true)
+      expect(handle.state.getSnapshot()).toBe('disconnected')
+      await vi.advanceTimersByTimeAsync(1_000)
       expect(handle.state.getSnapshot()).toBe('connecting')
       await vi.advanceTimersByTimeAsync(49)
       expect(calls).toBe(1)
@@ -409,6 +424,121 @@ describe('connection client apply', () => {
       page.dispatchEvent(new Event('visibilitychange'))
       browser.dispatchEvent(new Event('pageshow'))
       await vi.advanceTimersByTimeAsync(WAKE_RECONNECT_DEBOUNCE_MS)
+      expect(generations).toEqual([1])
+      expect(warnSpy).not.toHaveBeenCalledWith('[connection] connection lost, retry #1')
+    } finally {
+      stopGeneration()
+      loop.stop()
+      randomSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('does not wake a connected generation after a short frame gap on a bursty link', async () => {
+    vi.useFakeTimers()
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const browser = new BrowserNetworkProbe()
+    const page = Object.assign(new EventTarget(), { visibilityState: 'visible' })
+    vi.stubGlobal('window', browser)
+    vi.stubGlobal('document', page)
+    ;(globalThis as Win).location = { hostname: 'localhost' }
+    const handle = await mount()
+    installGeneration(handle)
+    const generations: Array<number | undefined> = []
+    const stopGeneration = handle.generation.subscribe(() => {
+      generations.push(handle.generation.getSnapshot()?.id)
+    })
+    const loop = handle.start({}, {
+      backoffBaseMs: 60_000,
+      backoffFactor: 2,
+      backoffMaxMs: 120_000,
+      generationReadyTimeoutMs: 500,
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(generations).toEqual([1])
+
+      // A single bulk frame can occupy the downlink for several seconds on a
+      // slow link. The wake window is 30 s, not the old 4 s false-positive.
+      await vi.advanceTimersByTimeAsync(5_000)
+      page.dispatchEvent(new Event('visibilitychange'))
+      browser.dispatchEvent(new Event('pageshow'))
+      await vi.advanceTimersByTimeAsync(WAKE_RECONNECT_DEBOUNCE_MS)
+      expect(generations).toEqual([1])
+      expect(warnSpy).not.toHaveBeenCalled()
+    } finally {
+      stopGeneration()
+      loop.stop()
+      randomSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('recovers a silently dead connected carrier from the autonomous watchdog', async () => {
+    vi.useFakeTimers()
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const browser = new BrowserNetworkProbe()
+    vi.stubGlobal('window', browser)
+    ;(globalThis as Win).location = { hostname: 'localhost' }
+    const handle = await mount()
+    const generation = installGeneration(handle)
+    const generations: Array<number | undefined> = []
+    const stopGeneration = handle.generation.subscribe(() => {
+      generations.push(handle.generation.getSnapshot()?.id)
+    })
+    const loop = handle.start({}, {
+      backoffBaseMs: 60_000,
+      backoffFactor: 2,
+      backoffMaxMs: 120_000,
+      generationReadyTimeoutMs: 500,
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(generations).toEqual([1])
+
+      // The Host negotiated heartbeats and sent one before falling silent: the
+      // 5 s ticker notices the 30 s silence and requests exactly one
+      // replacement generation.
+      generation.heartbeat()
+      await vi.advanceTimersByTimeAsync(35_000)
+      expect(generations).toEqual([1, undefined, 2])
+      expect(warnSpy).toHaveBeenCalledWith('[connection] connection lost, retry #1')
+    } finally {
+      stopGeneration()
+      loop.stop()
+      randomSpy.mockRestore()
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('leaves a heartbeat-less mixed-version generation alone for five minutes', async () => {
+    vi.useFakeTimers()
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const browser = new BrowserNetworkProbe()
+    vi.stubGlobal('window', browser)
+    ;(globalThis as Win).location = { hostname: 'localhost' }
+    const handle = await mount()
+    installGeneration(handle)
+    const generations: Array<number | undefined> = []
+    const stopGeneration = handle.generation.subscribe(() => {
+      generations.push(handle.generation.getSnapshot()?.id)
+    })
+    const loop = handle.start({}, {
+      backoffBaseMs: 60_000,
+      backoffFactor: 2,
+      backoffMaxMs: 120_000,
+      generationReadyTimeoutMs: 500,
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(generations).toEqual([1])
+
+      // An older Host ignores the negotiated heartbeat request. The silence
+      // watchdog stays disarmed instead of replacing the idle generation.
+      await vi.advanceTimersByTimeAsync(300_000)
       expect(generations).toEqual([1])
       expect(warnSpy).not.toHaveBeenCalledWith('[connection] connection lost, retry #1')
     } finally {
@@ -690,14 +820,23 @@ describe('connection client apply', () => {
     const handle = await mount()
     const original = globalThis.fetch
     const abort = new AbortController()
-    globalThis.fetch = vi.fn().mockResolvedValue(new Response('unavailable', { status: 503 }))
+    let transmitted: AbortSignal | null | undefined
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      transmitted = init?.signal
+      return new Response('unavailable', { status: 503 })
+    })
+    globalThis.fetch = fetchMock
     try {
       await expect(handle.rpc.call('/api', 'goals/create', {}, abort.signal))
         .rejects.toThrow('HTTP 503')
+      // The deadline wrapper still propagates the caller's cancellation.
+      expect(transmitted).toBeInstanceOf(AbortSignal)
       expect(globalThis.fetch).toHaveBeenCalledWith(
         'api/goals/create',
-        expect.objectContaining({ signal: abort.signal }),
+        expect.objectContaining({ signal: transmitted }),
       )
+      abort.abort()
+      expect(transmitted?.aborted).toBe(true)
 
       ;(globalThis as Win).location = { hostname: 'localhost', origin: 'null' }
       globalThis.fetch = vi.fn().mockResolvedValue(Response.json({
@@ -708,7 +847,7 @@ describe('connection client apply', () => {
       await expect(handle.rpc.call('/api', 'goals/create', {})).rejects.toThrow('rpcId mismatch')
       const fetch = vi.mocked(globalThis.fetch)
       expect(fetch.mock.calls[0]?.[0]).toEqual('api/goals/create')
-      expect(fetch.mock.calls[0]?.[1]).not.toHaveProperty('signal')
+      expect(fetch.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal)
 
       const respond = (result: unknown): void => {
         globalThis.fetch = async (_input: URL | RequestInfo, init?: RequestInit) => {

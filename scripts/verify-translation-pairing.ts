@@ -127,7 +127,12 @@ const metas = [...files].filter(f => f.endsWith('.i18n.yaml')).sort()
 const sources = [...files].filter(f => f.endsWith('.md') && !f.endsWith('.zh.md')).sort()
 
 if (request.scope === 'pairs') {
-  const rejected = request.anchors.filter(anchor => !isTranslationScopeFile(anchor) || isExcluded(anchor))
+  const rejected = request.anchors.filter((anchor) => {
+    if (!isTranslationScopeFile(anchor) || isExcluded(anchor)) {
+      return !indexMode || repositoryFileExists(anchor)
+    }
+    return false
+  })
   const absent = request.anchors.filter((anchor) => {
     const { source, zh, meta } = translationPairPaths(anchor)
     return ![source, zh, meta].some(repositoryFileExists)

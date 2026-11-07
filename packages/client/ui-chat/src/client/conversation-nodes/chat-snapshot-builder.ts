@@ -43,6 +43,11 @@ class MutableChatSource<Value> {
   private readonly listeners = new Set<() => void>()
   private published: Value
 
+  /** @returns how many seats currently observe this source. */
+  get listenerCount(): number {
+    return this.listeners.size
+  }
+
   constructor(
     private readonly read: () => Value,
     private readonly label: string,
@@ -123,6 +128,13 @@ class MutableChatNodeStore implements ChatNodeStore {
       () => this.get(key),
       `[ui-chat] node source ${key}`,
     ))
+  }
+
+  release(key: string): void {
+    const source = this.sources.get(key)
+    if (source !== undefined && source.listenerCount === 0) this.sources.delete(key)
+    const process = this.processSources.get(key)
+    if (process !== undefined && process.listenerCount === 0) this.processSources.delete(key)
   }
 
   turnDataSource<Kind extends ChatNodeKind>(turn: number, kind: Kind): ObservableSnapshot<readonly ChatNodeDataMap[Kind][]> {

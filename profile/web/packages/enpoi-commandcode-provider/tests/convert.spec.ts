@@ -47,6 +47,7 @@ it('detects media type in order: mediaType, mimeType, media_type, data: header',
 it('converts an image to the vendor wire shape and never inlines its base64 as text', () => {
   const envelope = buildRequest({
     model: 'm',
+    visionEnabled: true,
     messages: [user([{ type: 'text', text: 'look' }, { type: 'file', data: PNG, mediaType: 'image/png' }])],
   })
   const content = envelope.params.messages[0]!.content as Array<Record<string, unknown>>
@@ -62,6 +63,7 @@ it('converts an image to the vendor wire shape and never inlines its base64 as t
 it('hoists tool-result images into a synthetic user message right after the tool message', () => {
   const envelope = buildRequest({
     model: 'm',
+    visionEnabled: true,
     messages: [
       { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'read', arguments: '{}' }] },
       { role: 'tool', content: [{ type: 'file', data: PNG, mediaType: 'image/png' }], toolCallId: 'c1' },
@@ -96,6 +98,7 @@ function toolImage(toolCallId: string, data: string = PNG): CcInputMessage {
 it('flushes one user image message after the last result of a multi-call batch', () => {
   const envelope = buildRequest({
     model: 'm',
+    visionEnabled: true,
     messages: [assistantCalls('c1', 'c2'), toolImage('c1', PNG), toolImage('c2', PNG_B)],
   })
   const wire = envelope.params.messages
@@ -113,6 +116,7 @@ it('flushes one user image message after the last result of a multi-call batch',
 it('defers the batch flush when only the first result carried an image', () => {
   const envelope = buildRequest({
     model: 'm',
+    visionEnabled: true,
     messages: [
       assistantCalls('c1', 'c2'),
       toolImage('c1'),
@@ -143,6 +147,7 @@ it('adds no synthetic user message for an image-free batch', () => {
 it('flushes once per batch across consecutive batches', () => {
   const envelope = buildRequest({
     model: 'm',
+    visionEnabled: true,
     messages: [assistantCalls('c1'), toolImage('c1', PNG), assistantCalls('c2'), toolImage('c2', PNG_B)],
   })
   const wire = envelope.params.messages
@@ -158,6 +163,7 @@ it('flushes once per batch across consecutive batches', () => {
 it('flushes a batch that ends the message list after its last result', () => {
   const envelope = buildRequest({
     model: 'm',
+    visionEnabled: true,
     messages: [
       assistantCalls('c1', 'c2'),
       { role: 'tool', content: 'plain', toolCallId: 'c1' },
@@ -176,6 +182,7 @@ it('flushes a batch that ends the message list after its last result', () => {
 it('flushes the batch before a following user message', () => {
   const envelope = buildRequest({
     model: 'm',
+    visionEnabled: true,
     messages: [assistantCalls('c1'), toolImage('c1'), user([{ type: 'text', text: 'next' }])],
   })
   expect(envelope.params.messages.map(message => message.role)).toEqual(['assistant', 'tool', 'user', 'user'])
@@ -235,6 +242,7 @@ it('omits images as text when the catalog says the model has no vision', () => {
 it('deduplicates an identical forwarded tool image', () => {
   const envelope = buildRequest({
     model: 'm',
+    visionEnabled: true,
     messages: [
       { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'read', arguments: '{}' }] },
       { role: 'tool', content: [{ type: 'file', data: PNG, mediaType: 'image/png' }], toolCallId: 'c1' },
@@ -250,6 +258,7 @@ it('deduplicates an identical forwarded tool image', () => {
 it('treats a non-image binary as a size note, never serialized payload', () => {
   const envelope = buildRequest({
     model: 'm',
+    visionEnabled: true,
     messages: [user([{ type: 'file', data: PNG, mimeType: 'application/pdf' }])],
   })
   const text = envelope.params.messages[0]!.content as string
@@ -264,7 +273,7 @@ it('budgets user images per request: the oldest are omitted and the newest are k
     mediaType: 'image/png',
     data: `data:image/png;base64,AAAA${index}`,
   }))
-  const envelope = buildRequest({ model: 'm', messages: [user(images)] })
+  const envelope = buildRequest({ model: 'm', visionEnabled: true, messages: [user(images)] })
   const content = envelope.params.messages[0]!.content as Array<{ type: string; image?: string; text?: string }>
   expect(content).toHaveLength(14)
   expect(content.slice(0, 2).every(part => part.type === 'text' && part.text?.includes('per-request image budget reached'))).toBe(true)
@@ -284,6 +293,7 @@ it('keeps the newest user images within the request byte budget', () => {
   })
   const envelope = buildRequest({
     model: 'm',
+    visionEnabled: true,
     messages: [user([big('a')]), user([big('b')]), user([big('c')])],
   })
   // 3 x 6 MiB exceeds the 16 MiB request budget: oldest (a) is omitted.
@@ -291,9 +301,13 @@ it('keeps the newest user images within the request byte budget', () => {
   expect(oldest!.content as string).toContain('per-request image budget reached')
   expect((middle!.content as Array<{ type: string }>)[0]!.type).toBe('image')
   expect((newest!.content as Array<{ type: string }>)[0]!.type).toBe('image')
-  const keptBytes = [middle, newest]
-    .map(message => (message!.content as Array<{ image: string }>)[0]!.image.length)
-    .reduce((total, length) => total + length, 0)
+  const imageLength = (message: (typeof envelope.params.messages)[number] | undefined): number => {
+    const content = message?.content
+    if (!Array.isArray(content)) return 0
+    const image: { type: string; image?: unknown } | undefined = content.find(part => part.type === 'image')
+    return typeof image?.image === 'string' ? image.image.length : 0
+  }
+  const keptBytes = [middle, newest].map(imageLength).reduce((total, length) => total + length, 0)
   expect(keptBytes).toBeLessThanOrEqual(16 * 1024 * 1024)
 })
 
@@ -301,6 +315,7 @@ it('omits a lone user image over the per-image forward limit', () => {
   const overLimit = `data:image/png;base64,${'A'.repeat(9 * 1024 * 1024)}`
   const envelope = buildRequest({
     model: 'm',
+    visionEnabled: true,
     messages: [user([{ type: 'file', mediaType: 'image/png', data: overLimit }])],
   })
   const content = envelope.params.messages[0]!.content as string
@@ -313,6 +328,7 @@ it('scrubs embedded base64 and caps oversized tool text at conversion when the r
   const long = 'x'.repeat(MAX_INLINE_TOOL_TEXT_CHARS + 5)
   const envelope = buildRequest({
     model: 'm',
+    visionEnabled: true,
     sanitizeText: true,
     messages: [
       { role: 'assistant', content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'read', arguments: '{}' }] },
@@ -349,6 +365,7 @@ it('scrubs embedded base64 in string content at conversion when the route has no
   const uri = `data:image/png;base64,${'E'.repeat(700)}`
   const envelope = buildRequest({
     model: 'm',
+    visionEnabled: true,
     sanitizeText: true,
     messages: [
       user([{ type: 'text', text: `look ${uri}` }]),
@@ -368,6 +385,7 @@ it('leaves text untouched on the single-key legacy path, where a loopback proxy 
   const long = 'y'.repeat(MAX_INLINE_TOOL_TEXT_CHARS + 5)
   const envelope = buildRequest({
     model: 'm',
+    visionEnabled: true,
     messages: [user([{ type: 'text', text: uri }]), { role: 'tool', content: long, toolCallId: 'c1' }],
   })
   expect(envelope.params.messages[0]!.content as string).toBe(uri)

@@ -110,6 +110,14 @@ function optionsOf(directory: ModelDirectoryState, t: TranslateNS<'model'>): Sel
 /**
  * Resolve a picked row back to its model selection by matching against the loaded
  * groups (the same data the rows were built from — ids stay opaque).
+ *
+ * A saved effort belongs to the selection, not to one row: it carries over only
+ * when the destination model explicitly offers that level. Otherwise the
+ * submission omits it so the destination's provider default applies — a stale
+ * level (an older catalog entry, or a model whose provider discloses no ladder)
+ * must never be re-submitted for the Host to refuse. When the session carries
+ * no saved effort there is nothing to normalize, so the row's adapter default
+ * applies as before.
  * @param state - the session's directory snapshot.
  * @param id - the picked row id.
  * @returns the row's model selection, or undefined for failure rows / stale ids.
@@ -118,10 +126,14 @@ function selectionOf(state: ModelDirectoryState, id: string): ModelSelection | u
   for (const group of state.groups) {
     for (const model of group.models) {
       if (rowId(group.id, model.id) !== id) continue
-      const sameRoute = state.current?.provider === group.id && state.current.model === model.id
-      const reasoningEffort = sameRoute
-        ? state.current?.reasoningEffort ?? model.reasoning?.defaultEffort
-        : model.reasoning?.defaultEffort
+      const savedEffort = state.current?.reasoningEffort
+      const retained = savedEffort !== undefined
+        && model.reasoning?.efforts.some(level => level.id === savedEffort) === true
+      const reasoningEffort = savedEffort === undefined
+        ? model.reasoning?.defaultEffort
+        : retained
+          ? savedEffort
+          : undefined
       return {
         provider: group.id,
         model: model.id,

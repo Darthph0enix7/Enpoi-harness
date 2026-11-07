@@ -565,15 +565,26 @@ export function frameSummary(
   ]
 }
 
+/** Earlier omission ranges a merged mechanical marker can carry, bounded by the caller. */
+export interface MechanicalOmittedRanges {
+  /** Omitted ranges from cut mechanical markers, oldest first. */
+  readonly ranges: readonly { readonly start: SessionSeq; readonly end: SessionSeq }[]
+  /** Whether older ranges were dropped from this notice and remain only in the session log. */
+  readonly overflow: boolean
+}
+
 /**
  * Frame the deterministic, model-free omission stub that replaces the oldest
  * part of a span whose summary failed. It points at the session log and — only
  * when the compacting agent can actually call them — the recall tools, so
- * every shadowed byte stays reachable.
+ * every shadowed byte stays reachable. Ranges inherited from cut mechanical
+ * markers are carried in the notice when {@link MechanicalOmittedRanges}
+ * supplies them, keeping the live surface honest about older omissions.
  * @param start - first shadowed surface seq.
  * @param end - last shadowed surface seq.
  * @param count - number of shadowed surface nodes.
  * @param recallTools - whether `session_event_search` and `session_event_read` resolve in this scope.
+ * @param earlier - omission ranges inherited from earlier mechanical markers.
  * @returns content for the synthesized replacement user message.
  */
 export function frameMechanicalOmission(
@@ -581,11 +592,20 @@ export function frameMechanicalOmission(
   end: SessionSeq,
   count: number,
   recallTools = true,
+  earlier?: MechanicalOmittedRanges,
 ): ContentBlock[] {
   const preamble = recallTools ? `${OMISSION_PREAMBLE} ${OMISSION_RECALL_SENTENCE}` : OMISSION_PREAMBLE
+  const inherited = earlier === undefined || earlier.ranges.length === 0
+    ? ''
+    : `\nEarlier omitted surface seqs: ${earlier.ranges
+      .map(range => `${range.start}–${range.end}`)
+      .join(', ')}.`
+  const overflow = earlier?.overflow === true
+    ? '\nOlder omitted ranges remain recorded in the session log.'
+    : ''
   return [{
     type: 'text',
-    text: `${preamble}\n\n<compacted-omission>\nRemoved surface seqs ${start}–${end} (${count} messages).\n</compacted-omission>`,
+    text: `${preamble}\n\n<compacted-omission>\nRemoved surface seqs ${start}–${end} (${count} messages).${inherited}${overflow}\n</compacted-omission>`,
   }]
 }
 

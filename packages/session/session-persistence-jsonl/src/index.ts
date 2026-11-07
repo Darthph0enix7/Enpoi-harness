@@ -13,6 +13,7 @@ import {
   SessionFormatUnsupportedMigrationError,
   sessionFormatCatalog,
 } from '@deepseek-ai/dsh-session-format-catalog'
+import { assertV4RowAdmission } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import { readdirSync, type Dirent } from 'node:fs'
 import { open, mkdir, readdir, readFile, realpath, link, rename, rm, stat, truncate } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -33,7 +34,7 @@ import {
 } from '@deepseek-ai/dsh-session-persistence'
 import { JsonlBackendTracker, JsonlSessionHandle, type StorageHandleState } from './storage.ts'
 import { SessionWriteLease } from './lease.ts'
-import { SESSION_FORMAT_VERSION, SessionId as makeSessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
+import { KNOWN_SESSION_EVENT_TYPES, SESSION_FORMAT_VERSION, SessionId as makeSessionId, SessionLogOffset } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionId, SessionHeader, SessionLogOffset as SessionLogOffsetType } from '@deepseek-ai/dsh-session'
 import {
   assertNoRetiredHeaderFields, encodeSegment, eventLines, generationLogFilename, generationLogPath, logPath, logSuffix,
@@ -707,6 +708,11 @@ class JsonlSessionPersistence extends SessionPersistence {
         if (changed !== undefined) throw new JsonlGenerationSourceChangedError(changed)
         await related.validate()
       }
+      // The V4-to-V5 edge must never turn a recovered V4 tail into a selected
+      // V5 successor: strict source decoding lets the parser observe every
+      // dropped committed row, admission matches the V4 reader on suppressed
+      // rows, and publication stays refused until the source becomes clean.
+      const guardV4Recovery = selected.sourceVersion === 4
       prepared = await prepareJsonlMigration({
         sourcePath: selected.sourcePath,
         sourceVersion: selected.sourceVersion,
@@ -715,8 +721,17 @@ class JsonlSessionPersistence extends SessionPersistence {
         format: {
           ...this.generationFormat,
           createRestore: header => createSessionFormatCatalogWithChildren(related.facts).createRestore(header, {
-            recovery: 'recoverable', validation: 'transformed',
+            recovery: guardV4Recovery ? 'strict' : 'recoverable',
+            validation: 'transformed',
           }),
+          ...(guardV4Recovery
+            ? {
+              recoveryGuard: {
+                refusePublication: true,
+                assertRowAdmission: (row: unknown) => { assertV4RowAdmission(row, KNOWN_SESSION_EVENT_TYPES) },
+              },
+            }
+            : {}),
         },
         validateRelatedSources,
         verifyCurrentFile: verifyCurrentGenerationInWorker,

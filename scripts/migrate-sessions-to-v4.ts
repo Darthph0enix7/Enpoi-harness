@@ -1,4 +1,4 @@
-/** One-time contributor command to publish V4 successors through JSONL persistence. */
+/** One-time contributor command to publish current-format successors through JSONL persistence. */
 
 import { execFileSync } from 'node:child_process'
 import assert from 'node:assert/strict'
@@ -17,8 +17,8 @@ import { classifyMigrationFailure, type MigrationFailureDiagnostic } from './mig
 
 const usage = `Usage: pnpm run migrate:sessions-to-v4 [--sessions-dir PATH] [--jobs N]
 
-Publish V4 successors beside unchanged historical Session generations.
-Defaults to ~/.dsh/sessions. Already-V4 Sessions are opened read-only.
+Publish V${SESSION_FORMAT_VERSION} successors beside unchanged historical Session generations.
+Defaults to ~/.dsh/sessions. Already-current Sessions are opened read-only.
 No model or API key is used. Failures do not stop subsequent Sessions.
 The text log and final JSON summary are saved in a private OS temporary directory.
 
@@ -36,7 +36,7 @@ interface Candidate {
 
 interface OutcomeCounts {
   converted: number
-  alreadyV4: number
+  alreadyCurrent: number
   failed: number
   skipped: number
 }
@@ -54,7 +54,7 @@ interface FailureGroup extends Pick<MigrationFailureDiagnostic, 'reason' | 'erro
 }
 
 function emptyCounts(): OutcomeCounts {
-  return { converted: 0, alreadyV4: 0, failed: 0, skipped: 0 }
+  return { converted: 0, alreadyCurrent: 0, failed: 0, skipped: 0 }
 }
 
 function summarizeFailures(failures: readonly Failure[]): FailureGroup[] {
@@ -192,15 +192,19 @@ async function migrate(root: string, jobs: number): Promise<number> {
   let inputCount = 0
   let checkoutCommit: string | null = null
   try {
-    write(`Session migration to V4 started ${startedAt}`)
+    write(`Session migration to V${SESSION_FORMAT_VERSION} started ${startedAt}`)
     write(`Root: ${root}`)
     write(`Session jobs: ${jobs}`)
     write(`Node: ${process.version}; platform: ${process.platform}/${process.arch}`)
     checkoutCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: resolve(import.meta.dirname, '..'), encoding: 'utf8' }).trim()
     write(`Git HEAD: ${checkoutCommit}`)
     write(`Full log: ${logPath}`)
-    assert.equal(SESSION_FORMAT_VERSION, 4, 'this one-time command requires a V4 Session writer')
-    assert.equal(sessionFormatCatalog.currentVersion, 4, 'this one-time command requires a V4 format catalog')
+    assert.ok(SESSION_FORMAT_VERSION >= 4, 'this one-time command requires a V4-or-newer Session writer')
+    assert.equal(
+      sessionFormatCatalog.currentVersion,
+      SESSION_FORMAT_VERSION,
+      'this one-time command requires a format catalog that writes the installed Session version',
+    )
     const candidates = await discover(root)
     inputCount = candidates.length
     write(`Discovered ${candidates.length} Session directories or invalid layout entries.`)
@@ -230,10 +234,13 @@ async function migrate(root: string, jobs: number): Promise<number> {
             return false
           }
           const id = directoryId(directory)
-          const handle = await ctx.sessionPersistence.open(id, source.version === 4 ? 'read' : 'write')
+          const current = source.version === SESSION_FORMAT_VERSION
+          const handle = await ctx.sessionPersistence.open(id, current ? 'read' : 'write')
           await handle.close()
-          recordOutcome(source.version, source.version === 4 ? 'alreadyV4' : 'converted')
-          finish(`${source.version === 4 ? 'already V4 (opened successfully)' : `V${source.version} -> V4: ${generationLogFilename(4, source.compression)}`} (${((performance.now() - started) / 1000).toFixed(2)}s)`)
+          recordOutcome(source.version, current ? 'alreadyCurrent' : 'converted')
+          finish(`${current
+            ? `already V${SESSION_FORMAT_VERSION} (opened successfully)`
+            : `V${source.version} -> V${SESSION_FORMAT_VERSION}: ${generationLogFilename(SESSION_FORMAT_VERSION, source.compression)}`} (${((performance.now() - started) / 1000).toFixed(2)}s)`)
         } catch (error: unknown) {
           if (!retry && error instanceof JsonlGenerationSourceChangedError) {
             write(`${label} DEFERRED: ${error.message}; retry once after initial jobs finish`)
@@ -252,7 +259,7 @@ async function migrate(root: string, jobs: number): Promise<number> {
     fail(root, error)
   } finally {
     try {
-      write(`Summary: converted=${totals.converted}, already-V4=${totals.alreadyV4}, failed=${totals.failed}, skipped=${totals.skipped}`)
+      write(`Summary: converted=${totals.converted}, already-current=${totals.alreadyCurrent}, failed=${totals.failed}, skipped=${totals.skipped}`)
       if (failures.length > 0) {
         write('Failures (full stacks and causes are in the log):')
         for (const failure of failures) write(`- ${JSON.stringify(failure.inputPath)}: ${failure.message}`)
@@ -260,7 +267,7 @@ async function migrate(root: string, jobs: number): Promise<number> {
       write(`Full log: ${logPath}`)
       const summary = JSON.stringify({
         schemaVersion: 1,
-        targetVersion: 4,
+        targetVersion: SESSION_FORMAT_VERSION,
         sessionRoot: root,
         inputCount,
         jobs,

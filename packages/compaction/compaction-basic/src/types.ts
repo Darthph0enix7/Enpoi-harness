@@ -46,7 +46,10 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
   recallFooter?: string
   /** Tool names that must all resolve in the compacting agent's scope for `recallFooter` to be appended. */
   recallFooterTools?: string[]
-  /** Leading `user/message` surface nodes kept verbatim after the system head. Non-negative; defaults to `0`. */
+  /**
+   * Leading human `user/message` surface nodes kept verbatim after the system head; synthetic
+   * keeper/runtime-context user messages stay verbatim without consuming a slot. Non-negative; defaults to `0`.
+   */
   pinLeadingUserMessages?: number
   /** Per-message price ceiling for a pinned leading message; the first failure stops the pin run. Defaults to `4000`. */
   pinLeadingMaxTokens?: number

@@ -6,7 +6,8 @@
  */
 import { readFileSync } from 'node:fs'
 import { expect, it } from 'vitest'
-import { HEAVY_MANIFESTS } from '../src/manifests.js'
+import { HEAVY_MANIFESTS, manifestById } from '../src/manifests.js'
+import { routeProfile } from '../src/planner.js'
 
 /** The advertised endpoint keys of the provider-sync bundle patch. */
 function syncEndpointKeys(): string[] {
@@ -27,10 +28,24 @@ it('no heavy provider is seeded into the provider-sync endpoint set', () => {
   }
 })
 
-it('the two addable heavy providers carry a reuse endpoint and a local base URL', () => {
+it('every addable heavy provider carries a reuse endpoint and a local base URL', () => {
   for (const manifest of HEAVY_MANIFESTS) {
     if (manifest.unsupported !== undefined) continue
     expect(manifest.reuse.baseURL).not.toBe('')
     expect(manifest.local.baseURL).not.toBe('')
   }
+})
+
+it('a preset route writes catalog authority only when the manifest declares endpoint authority', () => {
+  const manifest = manifestById('freellmapi')!
+  expect(routeProfile(manifest, 'reuse', []).catalogAuthority).toBeUndefined()
+  expect(routeProfile(manifest, 'reuse', [], { catalogAuthority: 'endpoint' }).catalogAuthority).toBe('endpoint')
+})
+
+it('the CLIProxyAPI preset writes endpoint authority, its session header, and no fallback', () => {
+  const profile = routeProfile(manifestById('cliproxyapi')!, 'reuse', [])
+  expect(profile.catalogAuthority).toBe('endpoint')
+  expect(profile.sessionHeader).toBe('x-session-id')
+  expect(profile.models).toEqual([])
+  expect(profile.keyless).toBe(true)
 })

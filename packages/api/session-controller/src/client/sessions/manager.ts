@@ -125,6 +125,8 @@ export class SessionManager {
   private readonly addresses = new Map<SessionId, SubagentAddress>()
   private readonly projectionLoads = new Map<SessionId, ProjectionLoad>()
   private readonly projectionInflight = new Map<SessionId, ProjectionInflight>()
+  /** Parents whose previous-generation load must reconcile against the next control baseline. */
+  private pendingProjectionReconcile = new Set<SessionId>()
 
 
   private listSnapshotCache: SessionListSnapshot
@@ -217,6 +219,7 @@ export class SessionManager {
     const reads = [...this.projectionInflight.values()]
     for (const { controller } of reads) controller.abort()
     this.projectionInflight.clear()
+    this.pendingProjectionReconcile.clear()
     await Promise.all(reads.map(read => read.promise))
     const sessions = [...this.sessions.values()]
     this.sessions.clear()
@@ -835,12 +838,18 @@ export class SessionManager {
   }
 
   private replaceControlBaseline(baseline: SessionControlBaseline): void {
-
-    for (const [sessionId, block] of Object.entries(baseline.projections)) {
-      const store = this.projectionStore(sessionId as SessionId)
+    const pending = this.pendingProjectionReconcile
+    this.pendingProjectionReconcile = new Set()
+    for (const [entry, block] of Object.entries(baseline.projections)) {
+      const sessionId = entry as SessionId
+      const store = this.projectionStore(sessionId)
       const asOfSeq = sessionSeqCursor(block.asOfSeq)
       store.seed({ ...block, asOfSeq })
+      if (pending.delete(sessionId)) this.projectionLoads.set(sessionId, { state: 'ready', error: null })
     }
+    // A parent outside the control baseline is cold or not live: one
+    // conditional projection read supplies what the baseline cannot.
+    for (const sessionId of pending) void this.refreshProjections(sessionId)
     this.notifier.markDirty()
   }
 
@@ -899,6 +908,7 @@ export class SessionManager {
     this.projectionInflight.get(sessionId)?.controller.abort()
     this.projectionInflight.delete(sessionId)
     this.projectionLoads.delete(sessionId)
+    this.pendingProjectionReconcile.delete(sessionId)
     for (const [childId, address] of this.addresses) {
       if (address.parentSessionId === sessionId) {
         this.sessions.get(childId)?.handleSubagentParentAvailable(false)
@@ -938,12 +948,12 @@ export class SessionManager {
 
   /**
    * Repair one re-established Host-event generation with queryable baselines.
-   * Discard old projection cuts before new queries, including cold Sessions
-   * absent from the process-local control baseline.
+   * Retained projection values stay visible; the next control baseline
+   * reconciles covered parents without a read and only parents outside it are
+   * re-read, so a dead generation's values cannot outrank the new baseline.
    * Opened Session follow streams resume independently through API Gateway.
    */
   handleConnected(): void {
-    for (const store of this.projectionStores.values()) store.clear()
     this.listMutations = null
     this.listInflight = null
     this.loadMoreInflight = null
@@ -957,8 +967,16 @@ export class SessionManager {
     }
     for (const { controller } of this.projectionInflight.values()) controller.abort()
     this.projectionInflight.clear()
-    this.projectionLoads.clear()
-    for (const parentSessionId of parents) void this.refreshProjections(parentSessionId)
+    // Retained values stay visible through the generation switch as cached
+    // values, so the next generation's baseline, frame, history page, or list
+    // block replaces them instead of a stale watermark winning.
+    for (const store of this.projectionStores.values()) store.demote()
+    // The next control baseline marks covered parents ready again without a read.
+    for (const sessionId of parents) {
+      this.projectionLoads.set(sessionId, { state: 'idle', error: null })
+      this.pendingProjectionReconcile.add(sessionId)
+    }
+    this.notifier.markDirty()
   }
 
   private buildListSnapshot(): SessionListSnapshot {

@@ -8,7 +8,7 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { createUserMessage, LlmError, ReasoningEffortId  } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, LlmModelReasoningInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmModelReasoningInfo, LlmNativeFileInputs, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import SessionStore, { Session, SessionId, foldRequestHeader } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -957,6 +957,47 @@ describe('request/context capacity records', () => {
     expect(agent.session.snapshotEvents()
       .filter(event => event.type === 'request/context')
       .map(event => event.data.contextWindow)).toEqual([64_000, 256_000])
+  })
+
+  it('records a native-file policy once and appends when it changes', async () => {
+    const native = {
+      version: 1,
+      encoders: { 'application/pdf': 'anthropic-document' },
+      perFileBytes: 1_000,
+      totalBytes: 2_000,
+      maxPayloadBytes: 3_000,
+      tokenReserve: { perFile: 10, perByte: 0.25 },
+    } satisfies LlmNativeFileInputs
+    const changed = { ...native, encoders: { 'audio/mpeg': 'openai-chat-input-audio' } } satisfies LlmNativeFileInputs
+    const adapter = new class extends MockAdapter {
+      override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({
+          provider, id: model, name: model,
+          nativeFileInputs: model === 'native' ? native : changed,
+        })
+      }
+    }([textResponse('a'), textResponse('b'), textResponse('c')])
+    const ctx = await harness(adapter)
+    const agent = await ctx.agentLoop.create(SessionId('native-capacity'), { provider: 'mock', model: 'native' })
+    let model = 'native'
+    ctx.on('agent/request', ({ agent: subject }, next) => subject === agent
+      ? Promise.resolve({ provider: 'mock', model })
+      : next())
+
+    send(agent, 'first')
+    await waitForIdle(ctx, agent)
+    send(agent, 'second')
+    await waitForIdle(ctx, agent)
+    model = 'changed'
+    send(agent, 'third')
+    await waitForIdle(ctx, agent)
+
+    expect(agent.session.snapshotEvents()
+      .filter(event => event.type === 'request/context')
+      .map(event => event.data)).toEqual([
+      { provider: 'mock', model: 'native', nativeFileInputs: native },
+      { provider: 'mock', model: 'changed', nativeFileInputs: changed },
+    ])
   })
 
   it('records and deduplicates a route whose adapter advertises no capacity', async () => {

@@ -47,13 +47,21 @@ function turnOf(node: ChatNode | undefined): number | undefined {
  * only seats whose visibility actually changes.
  */
 export const ChatNodeSeat = memo(function ChatNodeSeat({
-  nodeKey, groupPart, useChatNode, useChatNodeProcess, usePresentation,
+  nodeKey, groupPart, nodeStore, useChatNode, useChatNodeProcess, usePresentation,
   cwd, openFile, openSkill, inspectCall, forkAt, revertAt,
   iterationGroups, loadIterationPreviews, restoreIteration,
   loadImage, renderMessageImages, fileMentions, useStore, actions, renderSlot, t,
   measureRef, dataIndex,
 }: ChatNodeSeatProps) {
   const node = useChatNode(nodeKey)
+  // A closed seat is the only owner of its keyed sources. Release them after
+  // all source hook subscriptions tear down on unmount (via microtask); the
+  // store keeps a source another mounted seat still observes.
+  useEffect(() => () => {
+    queueMicrotask(() => {
+      nodeStore.release?.(nodeKey)
+    })
+  }, [nodeStore, nodeKey])
   const routedNode = node as ChatNode | undefined
   const turn = turnOf(routedNode)
   const processPresentation = useChatNodeProcess(nodeKey)

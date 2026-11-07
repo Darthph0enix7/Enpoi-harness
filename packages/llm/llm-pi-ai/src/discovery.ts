@@ -16,12 +16,12 @@
  * thing that decides what a route serves.
  *
  * OpenAI-compatible and Anthropic Messages protocols are interrogated through
- * their native model-listing endpoints. The parser accepts the standard
- * `data` array and the enriched `models` map some compatible gateways expose.
- * A provider-neutral `capabilities` block, when present, contributes the
- * advertised reasoning efforts and input types through the shared listing
- * parser (`listing.ts`, which the heavy-provider planner reads the same body
- * with); its absence leaves the row as the listing read it. Every other protocol reports that it cannot be
+ * their native model-listing endpoints. The shared listing parser accepts a
+ * top-level array, the standard `data` array, and either `models` spelling. A
+ * provider-neutral `capabilities` block, when present, contributes the
+ * advertised reasoning efforts and input types; explicit modality and registry
+ * fields contribute the same mapping, and their absence leaves the row as the
+ * listing read it. Every other protocol reports that it cannot be
  * interrogated so the surface falls back to hand-entry rather than guessing
  * its response fields.
  *
@@ -32,8 +32,8 @@ import { INVALID_CREDENTIAL_CODE, LlmError, normalizeApiKey } from '@deepseek-ai
 import type { LlmDiscoveredModel, LlmModelDiscoveryOperation } from '@deepseek-ai/dsh-llm'
 import { attributionHeaders } from '@deepseek-ai/dsh-llm'
 import type { Api, Model } from '@earendil-works/pi-ai'
-import { catalogModels } from './catalog.ts'
-import { listingCapabilities, listingText, type ListingEntry } from './listing.ts'
+import { catalogModels, THINKING_LEVELS } from './catalog.ts'
+import { readModelListing } from './listing.ts'
 
 /**
  * Protocols whose model listing this module can read. OpenAI protocols use
@@ -149,52 +149,50 @@ async function readBounded(response: Response, url: string, maxResponseBytes: nu
 type LiveRow = LlmDiscoveredModel & { name: string }
 
 /**
- * Read one supported model-listing reply. The standard `data` array takes
- * precedence when both supported formats are present. An enriched `models`
- * map uses each property key as the endpoint-facing id; its nested `id` is
- * only a fallback for an empty key because gateways may put a canonical model
- * identity there instead of the alias they accept on requests. Only
- * object-valued map entries are models; primitive properties are ignored
- * because they may be directory metadata rather than model records.
+ * Read one supported model-listing reply through the shared listing parser.
+ * A body with no recognized listing container is refused; a recognized but
+ * empty container is a valid empty answer. Entries without a usable id are
+ * skipped rather than failing the whole interrogation, and a missing name
+ * falls back to the adopted id so the Web form receives a complete row.
  *
- * Entries without a usable id are skipped rather than failing the whole
- * interrogation: a single malformed row should not deny the user the rest of
- * a working endpoint's catalog. Missing names fall back to the adopted id so
- * the Web form receives a complete human-readable row.
+ * The parser's full disclosure rides through: the input-only capacity,
+ * explicit tool/reasoning claims, and advertised effort identifiers no
+ * configured level accepts. An explicitly undeclared capability stays absent,
+ * while a stated `false` and an explicitly empty effort map are preserved so a
+ * surface can tell "unsupported" from "undisclosed".
  */
 function readListing(body: unknown): LiveRow[] {
-  const listing = body as { data?: unknown; models?: unknown } | null
-  const data = listing?.data
-  let listed: { readonly key?: string; readonly raw: unknown }[]
-  if (Array.isArray(data)) {
-    const rows = data as readonly unknown[]
-    listed = rows.map(raw => ({ raw }))
-  } else {
-    const models = listing?.models
-    if (models === null || typeof models !== 'object' || Array.isArray(models)) {
-      throw new LlmError(
-        'the endpoint\'s model listing has neither a "data" array nor a "models" object; '
-        + 'enter this provider\'s models by hand',
-        'DISCOVERY_FAILED',
-      )
+  const parsed = readModelListing(body)
+  if (!parsed.ok) {
+    throw new LlmError(
+      'the endpoint\'s model listing has neither a top-level array nor a "data" array or "models" map; '
+      + 'enter this provider\'s models by hand',
+      'DISCOVERY_FAILED',
+    )
+  }
+  return parsed.models.map((model) => {
+    // The shared reader already keeps only configured-level identifiers, but
+    // the config schema remains the authority: an identifier that drifts out
+    // of THINKING_LEVELS must not reach a materialized profile.
+    const efforts = model.reasoningEfforts === undefined
+      ? undefined
+      : Object.fromEntries(Object.entries(model.reasoningEfforts)
+        .filter(([level]) => (THINKING_LEVELS as readonly string[]).includes(level)))
+    return {
+      id: model.id,
+      name: model.name ?? model.id,
+      ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
+      ...model.maxInputTokens === undefined ? {} : { maxInputTokens: model.maxInputTokens },
+      ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
+      ...model.inputModalities === undefined ? {} : { inputModalities: model.inputModalities },
+      ...model.tools === undefined ? {} : { tools: model.tools },
+      ...model.reasoning === undefined ? {} : { reasoning: model.reasoning },
+      ...efforts === undefined ? {} : { reasoningEfforts: efforts },
+      ...model.unsupportedReasoningEfforts === undefined
+        ? {}
+        : { unsupportedReasoningEfforts: [...model.unsupportedReasoningEfforts] },
     }
-    listed = Object.entries(models as Record<string, unknown>)
-      .filter(([, raw]) => raw !== null && typeof raw === 'object' && !Array.isArray(raw))
-      .map(([key, raw]) => ({ key, raw }))
-  }
-  const models: LiveRow[] = []
-  for (const { key, raw } of listed) {
-    const entry = raw as ListingEntry | null
-    const id = listingText(key, entry?.id)
-    if (id === undefined) continue
-    const name = listingText(entry?.name, entry?.display_name, entry?.displayName) ?? id
-    models.push({
-      id,
-      name,
-      ...listingCapabilities(entry),
-    })
-  }
-  return models
+  })
 }
 
 /**
@@ -216,6 +214,11 @@ function usableProbeKey(raw: string): string {
   )
 }
 
+/** Human-readable failure cause for a catalog fallback result. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 /** Host-owned profile inputs that a configuration draft deliberately omits. */
 export interface StoredModelDiscoveryProfile {
   /** Deployment headers configured on the named route. */
@@ -225,13 +228,18 @@ export interface StoredModelDiscoveryProfile {
 }
 
 /** The installed catalog's own answer for a route: every id with its metadata. */
-function catalogAnswer(installed: ReadonlyMap<string, Model<Api>>): LlmDiscoveredModel[] {
+function catalogAnswer(
+  installed: ReadonlyMap<string, Model<Api>>,
+  fallbackReason?: string,
+): LlmDiscoveredModel[] {
   return [...installed.values()].map(model => ({
     id: model.id,
     name: model.name,
     contextWindow: model.contextWindow,
     maxTokens: model.maxTokens,
     inputModalities: [...model.input],
+    source: 'catalog',
+    ...fallbackReason === undefined ? {} : { fallbackReason },
   }))
 }
 
@@ -311,7 +319,7 @@ export async function discoverModels(
     // Cancellation is the caller's own decision and must surface as such; a
     // deadline expiry is this probe's own failure and keeps the catalog path.
     if (request.signal?.aborted === true) throw error
-    if (installed.size > 0) return catalogAnswer(installed)
+    if (installed.size > 0) return catalogAnswer(installed, errorMessage(error))
     throw error
   }
 }
@@ -414,5 +422,5 @@ async function probeListing(
   } catch (error: unknown) {
     throw new LlmError(`${url} did not answer with JSON`, 'DISCOVERY_FAILED', { cause: error })
   }
-  return readListing(body).map(model => enrich(model, installed))
+  return readListing(body).map(model => ({ ...enrich(model, installed), source: 'endpoint' as const }))
 }

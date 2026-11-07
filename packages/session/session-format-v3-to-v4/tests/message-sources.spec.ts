@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { SessionFormatEventCollector } from '@deepseek-ai/dsh-session-format'
 import type { SessionFormatEvent, SessionFormatJsonObject } from '@deepseek-ai/dsh-session-format'
-import { createSessionFormatCatalogWithChildren, sessionFormatCatalog } from '@deepseek-ai/dsh-session-format-catalog'
+import { v4Catalog as sessionFormatCatalog, v4CatalogWithChildren as createSessionFormatCatalogWithChildren } from './catalog.ts'
 import { assertV4MessageSources, assertV4SourceRowAdmission } from '../src/message-sources.ts'
 import { releasedV4SessionFormatCodec } from '../src/codec.ts'
 

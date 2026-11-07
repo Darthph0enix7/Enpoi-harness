@@ -25,7 +25,7 @@ Fork-only host half of the browser terminals the Enpoi operator asked for: the r
 | `POST /enpoi-terminal/api/open` | `{ key, sessionId, cwd?, cols?, rows? }` | Spawns the login shell under a PTY, or reuses the live process already behind `key`. Validates `cwd` (absolute existing directory; the process cwd otherwise). Enforces the per-session cap. |
 | `POST /enpoi-terminal/api/close` | `{ key }` | Kills the process and forgets it. |
 | `POST /enpoi-terminal/api/list` | `{ sessionId? }` | Live (and recently exited) keys. |
-| `GET /enpoi-terminal/ws?key=…` (upgrade) | server `{t:'data'\|'exit'\|'error'}`; client `{t:'input'\|'resize'\|'kill'}` | Streams output, accepts input/resize/kill, replays the bounded transcript to a reattaching socket. |
+| `GET /enpoi-terminal/ws?key=…` (upgrade) | server `{t:'data'\|'exit'\|'error'\|'pong'}`; client `{t:'input'\|'resize'\|'kill'\|'ping'}` | Streams output, accepts input/resize/kill, answers the browser's keepalive `ping` with `pong` at the socket layer, and replays the bounded transcript to a reattaching socket. |
 
 Every route passes `connection.requestRejection` first — the same browser trust fence as the rest of the composition.
 
@@ -33,7 +33,7 @@ The per-session cap refusal renders in the host locale — `DSH_LOCALE`, then `L
 
 ## Process lifetime
 
-One `node-pty` process per `${sessionId}:${tabId}` key (`@deepseek-ai/dsh-client-ui-brand-enpoi` mints the tab ids). A process survives socket disconnects for the disconnect grace (default 90 s), so a page reload reattaches to the same shell; the last detach starts the grace, explicit closes kill immediately, and plugin teardown kills everything. Output is retained in a bounded in-memory transcript (default 512 KiB).
+One `node-pty` process per `${sessionId}:${tabId}` key (`@deepseek-ai/dsh-client-ui-brand-enpoi` mints the tab ids). A process survives socket disconnects for the disconnect grace (default 90 s), so a page reload reattaches to the same shell; the last detach starts the grace, explicit closes kill immediately, and plugin teardown kills everything. Output is retained in a bounded in-memory transcript (default 512 KiB). The browser sends an application `ping` on an idle socket because browser script cannot send a WebSocket control Ping; the host answers `pong`, so intermediaries see traffic without touching the PTY.
 
 ## Configuration
 

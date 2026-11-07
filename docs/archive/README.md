@@ -22,3 +22,7 @@ No pages are archived as of 2026-09-28. The audit that established this: every `
 | Archived page | Superseded by | Date |
 |---|---|---|
 | _(none yet)_ | — | — |
+
+## Retired persistence history
+
+[`retired-persistence/`](retired-persistence/README.md) holds retired persistence-change records as frozen evidence. They are complete record triplets moved out of `docs/persistence-changes/`, not documentation pages, so they keep their original bytes without the page banner. They are excluded from the loaded persistence history and from bilingual pairing. See the directory README for the retirement reasons.

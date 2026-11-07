@@ -163,11 +163,57 @@ describe('catalog overlay loading', () => {
     expect(() => loadCatalogOverlays(notAList)).toThrow(/not a list of model ids/)
   })
 
+  it('refuses an upsert whose model fields fail the shared schema', () => {
+    const wrongContext = overlayFile('{"routes":{"opencode-go":{"upsert":[{"id":"bad","contextWindow":"1M"}]}}}')
+    expect(() => loadCatalogOverlays(wrongContext)).toThrow(/contextWindow/)
+    expect(() => loadCatalogOverlays(wrongContext)).toThrow(/number/)
+    const wrongInput = overlayFile('{"routes":{"opencode-go":{"upsert":[{"id":"bad","input":"image"}]}}}')
+    expect(() => loadCatalogOverlays(wrongInput)).toThrow(/input/)
+    const wrongEffort = overlayFile('{"routes":{"opencode-go":{"upsert":[{"id":"bad","reasoningEfforts":{"high":5}}]}}}')
+    expect(() => loadCatalogOverlays(wrongEffort)).toThrow(/reasoningEfforts/)
+    // A valid upsert still loads, including fields the shared schema does not
+    // describe (gate, cost) that the settings record intentionally carries.
+    const valid = overlayFile(JSON.stringify({
+      routes: { 'opencode-go': { upsert: [{ id: 'ok', contextWindow: 1000, cost: { input: 1 }, gated: true }] } },
+    }))
+    expect(loadCatalogOverlays(valid).routes?.['opencode-go']?.upsert?.[0]).toMatchObject({ id: 'ok' })
+  })
+
   it('honors the DSH_CATALOG_OVERLAYS override and resolves the bundled path by default', () => {
     const path = overlayFile('{"routes":{}}')
     process.env.DSH_CATALOG_OVERLAYS = path
     expect(loadCatalogOverlays()).toEqual({ routes: {} })
     Reflect.deleteProperty(process.env, 'DSH_CATALOG_OVERLAYS')
     expect(catalogOverlaysPath()).toMatch(/catalog-overlays\.json$/)
+  })
+})
+
+describe('catalog overlay removal protection', () => {
+  it('keeps operator records and keeps referenced ids as deprecated, deleting only unprotected ids', () => {
+    const models: Array<Record<string, unknown>> = [
+      { id: 'manual-id', source: 'manual', name: 'Operator' },
+      { id: 'pinned-id' },
+      { id: 'referenced-id', name: 'Referenced' },
+      { id: 'gone-id' },
+    ]
+    const applied = applyCatalogOverlay(models, {
+      remove: ['manual-id', 'pinned-id', 'referenced-id', 'gone-id'],
+    }, {
+      keep: new Set(['manual-id', 'pinned-id']),
+      deprecate: new Set(['referenced-id']),
+    })
+    expect(applied.map(entry => entry.id)).toEqual(['manual-id', 'pinned-id', 'referenced-id'])
+    expect(applied[0]).toMatchObject({ id: 'manual-id', source: 'manual', name: 'Operator' })
+    expect(applied[2]).toMatchObject({
+      id: 'referenced-id',
+      name: 'Referenced',
+      source: 'pinned-in-use',
+      deprecated: true,
+    })
+  })
+
+  it('still deletes every removed id when no protection is supplied', () => {
+    const applied = applyCatalogOverlay([{ id: 'gone' }], { remove: ['gone'] })
+    expect(applied).toEqual([])
   })
 })

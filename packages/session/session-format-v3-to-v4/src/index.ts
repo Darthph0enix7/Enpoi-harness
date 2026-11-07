@@ -3,6 +3,13 @@
 export { releasedV3SessionFormatCodec } from '@deepseek-ai/dsh-session-format-v2-to-v3'
 export * from './codec.ts'
 export * from './migration.ts'
-export { assertReleasedV4Header, assertReleasedV4Relationships, restoreReleasedV4Artifact } from './validation.ts'
+export {
+  assertReleasedRelationships,
+  assertReleasedSessionHeader,
+  assertReleasedV4Header,
+  assertReleasedV4Relationships,
+  restoreReleasedArtifact,
+  restoreReleasedV4Artifact,
+} from './validation.ts'
 export { historicalChildCatalogSource } from './facts.ts'
 export { RELEASED_V3_EVENT_TYPES, OPAQUE_FORK_V3_EVENT_TYPES } from './extension-identities.ts'

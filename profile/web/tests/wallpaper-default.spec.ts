@@ -19,7 +19,7 @@
  *    install script, no `bin` entry) — the bridge only reads a local library.
  */
 import { spawnSync } from 'node:child_process'
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -84,10 +84,28 @@ describe('skin-wallpaper defaults', () => {
       if (run(['--dry-run']).status === 0) {
         const applied = run([])
         expect(applied.status, applied.stderr).toBe(0)
-      } else {
+      } else if (run(['--dry-run', '-R']).status === 0) {
         // An already-patched install (pnpm applied it) answers the reverse dry-run.
-        const reverse = run(['--dry-run', '-R'])
-        expect(reverse.status, reverse.stderr).toBe(0)
+      } else {
+        // Between installs the checkout can still carry the previous revision of
+        // this patch, which differed only by the three defaults above. Recover
+        // the published bytes so the current patch is still verified end to end.
+        for (const [patched, published] of [
+          [CLIENT_FIELD_AFTER.slice(1), CLIENT_FIELD_BEFORE.slice(1)],
+          [CLIENT_FALLBACK_AFTER.slice(1), CLIENT_FALLBACK_BEFORE.slice(1)],
+          [HOST_AFTER.slice(1), HOST_BEFORE.slice(1)],
+        ] as const) {
+          for (const rel of ['lib/client.js', 'lib/index.js']) {
+            const file = join(pkg, rel)
+            if (!existsSync(file)) continue
+            const text = readFileSync(file, 'utf8')
+            if (text.includes(patched)) writeFileSync(file, text.split(patched).join(published))
+          }
+        }
+        const dry = run(['--dry-run'])
+        expect(dry.status, dry.stderr).toBe(0)
+        const applied = run([])
+        expect(applied.status, applied.stderr).toBe(0)
       }
       expect(readFileSync(join(pkg, 'lib/index.js'), 'utf8')).toContain(HOST_AFTER.slice(1))
       expect(readFileSync(join(pkg, 'lib/client.js'), 'utf8')).toContain(CLIENT_FIELD_AFTER.slice(1))

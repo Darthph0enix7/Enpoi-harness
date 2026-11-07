@@ -10,9 +10,9 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { DEFAULT_CONTEXT_WINDOW } from '@deepseek-ai/dsh-llm-pi-ai/src/config.ts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_MODELS_DEV_URL, planRouteModels, pruneRouteReferences, referencedRouteModels } from '../src/index.ts'
+import type { Config } from '../src/index.ts'
 
 const directories: string[] = []
 const contexts: Context[] = []
@@ -62,6 +62,49 @@ async function listingServer(body: string): Promise<string> {
   const address = server.address()
   if (address === null || typeof address === 'string') throw new Error('no port')
   return `http://127.0.0.1:${String(address.port)}`
+}
+
+/** One settings descriptor the mounted harness serves. */
+type Descriptor = { ns: string; revision: number; value: unknown }
+
+/** The mounted plugin's client-facing route refresh answer. */
+interface RouteRefreshAnswer {
+  route: string
+  models: Array<Record<string, unknown>>
+  removed: string[]
+  deprecated: string[]
+  degraded: boolean
+  source: string
+  authority: string
+  fetchedAt: number
+}
+
+/** Mount the plugin over a real Context with fixed settings descriptors. */
+async function mountSync(
+  applyPlugin: (ctx: Context, config: Config) => void,
+  descriptors: readonly Descriptor[],
+  mutate: (ns: string, ops: unknown[]) => Promise<void> = async () => {},
+): Promise<Context & { providerSync: { refreshRoute(route: string): Promise<RouteRefreshAnswer> } }> {
+  const ctx = new Context()
+  contexts.push(ctx)
+  ctx.provide('remote', { registerService: () => {} })
+  ctx.provide('settings', { describe: () => descriptors, mutate })
+  applyPlugin(ctx, {
+    intervalMs: { get: () => 3_600_000 },
+    syncOnStart: { get: () => false },
+    syncDelayMs: { get: () => 0 },
+    endpoints: { get: () => ({}) },
+    capacityDefaults: { get: () => ({}) },
+    sessionHeaders: { get: () => ({}) },
+    modelsDevUrl: { get: () => DEFAULT_MODELS_DEV_URL },
+    routeProviderMap: { get: () => ({}) },
+    pinnedModels: { get: () => ({}) },
+    endpointGraceMs: { get: () => 14 * 24 * 60 * 60 * 1000 },
+    catalogFreshMs: { get: () => 48 * 60 * 60 * 1000 },
+    metadataSources: { get: () => ({}) },
+  })
+  await vi.waitFor(() => { expect((ctx as unknown as { providerSync?: unknown }).providerSync).toBeDefined() })
+  return ctx as Context & { providerSync: { refreshRoute(route: string): Promise<RouteRefreshAnswer> } }
 }
 
 describe('catalog intersection membership', () => {
@@ -264,9 +307,11 @@ describe('two-key gate and shrink guards', () => {
     expect(map.antigravity).toEqual(['google', 'anthropic'])
   })
 
-  it('filters non-standard thinking levels so reasoningEfforts keys match THINKING_LEVELS', async () => {
+  it('keeps only the catalog ladder levels a profile accepts, dropping unknown ids', async () => {
     const directory = tempDir()
-    // Model with 'default' in models.dev reasoning_options:
+    // A silent listing lets the catalogue's own ladder speak: only levels a
+    // profile accepts survive; `default` and `custom_level` are diagnostics,
+    // never settings keys.
     process.env.DSH_MODELS_DEV_PATH = writeCatalog(directory, {
       'custom-gateway': {
         models: {
@@ -281,22 +326,34 @@ describe('two-key gate and shrink guards', () => {
     const planned = plan({
       route: 'custom-gateway',
       configured: [],
-      live: [{ id: 'reasoning-model', reasoning: true }],
+      live: [{ id: 'reasoning-model' }],
+      catalogRoute: false,
+      endpointFresh: true,
+      catalogFresh: true,
+      now: 1_000_000,
+    })
+    expect(planned.models[0]?.reasoningEfforts).toEqual({ low: 'low', medium: 'medium', high: 'high' })
+  })
+
+  it('does not invent a full ladder from a bare reasoning:true', async () => {
+    const directory = tempDir()
+    process.env.DSH_MODELS_DEV_PATH = writeCatalog(directory, {
+      'custom-gateway': { models: { 'bare-reasoner': { reasoning: true } } },
+    })
+    const { planRouteModels: plan } = await freshIndex()
+    const planned = plan({
+      route: 'custom-gateway',
+      configured: [],
+      live: [{ id: 'bare-reasoner', reasoning: true }],
       catalogRoute: false,
       endpointFresh: true,
       catalogFresh: true,
       now: 1_000_000,
     })
     const model = planned.models[0]
-    expect(model).toBeDefined()
-    expect(model?.reasoningEfforts).toBeDefined()
-    const efforts = model?.reasoningEfforts as Record<string, string>
-    // Only standard THINKING_LEVELS keys allowed
-    expect(efforts).toHaveProperty('low')
-    expect(efforts).toHaveProperty('medium')
-    expect(efforts).toHaveProperty('high')
-    expect(efforts).not.toHaveProperty('default')
-    expect(efforts).not.toHaveProperty('custom_level')
+    expect(model).toMatchObject({ id: 'bare-reasoner', reasoning: true })
+    // A capability fact is not a ladder: no minimal/medium/high/xhigh/max rows.
+    expect(model?.reasoningEfforts).toBeUndefined()
   })
 })
 
@@ -344,7 +401,7 @@ describe('in-use protection and migration backfill', () => {
     expect(planned.models.find(model => model.id === 'faved')).toMatchObject({ source: 'pinned-in-use', deprecated: true })
   })
 
-  it('reads references from the default model, chain links, and favorites without inventing reasons', () => {
+  it('reads references from the default model, chains, personas, subagent routes, and favorites without inventing reasons', () => {
     const references = referencedRouteModels(
       { provider: 'verity', model: 'm1' },
       {
@@ -352,16 +409,62 @@ describe('in-use protection and migration backfill', () => {
           'c1': { links: [{ provider: 'verity', model: 'm2' }, { provider: 'other', model: 'x' }] },
           broken: { links: 'nope' },
         },
+        personas: {
+          oracle: { provider: 'verity', model: 'm4' },
+          // A chain-only seat is covered by the chain links, not a route ref.
+          keeper: { provider: 'verity', chain: 'c1' },
+          other: { provider: 'other', model: 'x' },
+          empty: null,
+        },
         uiPreferences: { favorites: [{ provider: 'verity', modelId: 'm3' }, { provider: 'other', modelId: 'y' }, null] },
       },
       'verity',
+      {
+        enabled: true,
+        allowedModels: [{ provider: 'verity', model: 'm5' }, { provider: 'other', model: 'y' }],
+      },
     )
     expect(references).toEqual([
       { id: 'm1', reason: 'agent-default-model' },
       { id: 'm2', reason: 'chain:c1' },
+      { id: 'm4', reason: 'persona:oracle' },
       { id: 'm3', reason: 'favorite' },
+      { id: 'm5', reason: 'subagent-allowed-model' },
     ])
     expect(referencedRouteModels({ provider: 'other', model: 'x' }, undefined, 'verity')).toEqual([])
+    // A different provider's persona and subagent authorization never protect
+    // a model on this route.
+    expect(referencedRouteModels(
+      undefined,
+      { personas: { oracle: { provider: 'other', model: 'x' } } },
+      'verity',
+      { enabled: true, allowedModels: [{ provider: 'other', model: 'y' }] },
+    )).toEqual([])
+  })
+
+  it('keeps persona- and subagent-referenced ids the endpoint no longer advertises, marked deprecated', async () => {
+    const { planRouteModels: plan } = await freshIndex()
+    const references = referencedRouteModels(
+      undefined,
+      { personas: { oracle: { provider: 'gateway', model: 'persona-model' } } },
+      'gateway',
+      { enabled: true, allowedModels: [{ provider: 'gateway', model: 'subagent-model' }] },
+    )
+    const planned = plan({
+      route: 'gateway',
+      configured: [{ id: 'kept' }, { id: 'persona-model' }, { id: 'subagent-model' }, { id: 'unreferenced' }],
+      live: [{ id: 'kept' }],
+      catalogRoute: false,
+      endpointFresh: true,
+      catalogFresh: true,
+      references,
+      now: 1_000_000,
+    })
+    expect(planned.report.removed).toEqual(['unreferenced'])
+    expect(planned.report.deprecated).toEqual(['persona-model', 'subagent-model'])
+    expect(planned.models.map(model => model.id)).toEqual(['kept', 'persona-model', 'subagent-model'])
+    expect(planned.models[1]).toMatchObject({ source: 'pinned-in-use', deprecated: true })
+    expect(planned.models[2]).toMatchObject({ source: 'pinned-in-use', deprecated: true })
   })
 })
 
@@ -424,6 +527,70 @@ describe('visibility cleanup', () => {
     expect(pruneRouteReferences({
       uiPreferences: { hiddenModels: { verity: ['gone'] } },
     }, 'verity', ['gone'])).toEqual({ hiddenModels: {} })
+  })
+})
+
+describe('catalog overlay removal through the client pipeline', () => {
+  it('returns an overlay removal in the client removal list so a merged row cannot resurrect it', async () => {
+    const directory = tempDir()
+    process.env.DSH_MODELS_DEV_PATH = writeCatalog(directory, { verity: { models: { kept: {}, stale: {} } } })
+    process.env.DSH_DISCOVERED_MODELS = join(directory, 'discovered-models.json')
+    const overlays = join(directory, 'catalog-overlays.json')
+    writeFileSync(overlays, JSON.stringify({ routes: { verity: { remove: ['stale'] } } }))
+    process.env.DSH_CATALOG_OVERLAYS = overlays
+    const url = await listingServer(JSON.stringify({ object: 'list', data: [{ id: 'kept' }, { id: 'stale' }] }))
+    const { apply: applyPlugin } = await freshIndex()
+    const ctx = await mountSync(applyPlugin, [{
+      ns: 'llm-pi-ai',
+      revision: 1,
+      value: {
+        providers: {
+          verity: {
+            baseURL: url,
+            api: 'openai-completions',
+            models: [{ id: 'kept' }, { id: 'stale', contextWindow: 100_000, maxTokens: 8_000 }],
+          },
+        },
+      },
+    }])
+    const outcome = await ctx.providerSync.refreshRoute('verity')
+    expect(outcome.models.map(model => model.id)).toEqual(['kept'])
+    // The membership audit alone is empty here: only the cleanup union reports
+    // the overlay removal the caller must drop.
+    expect(outcome.removed).toEqual(['stale'])
+  })
+
+  it('keeps an overlay-removed id a persona still names, marked deprecated instead of deleting it', async () => {
+    const directory = tempDir()
+    process.env.DSH_MODELS_DEV_PATH = writeCatalog(directory, { verity: { models: { kept: {}, stale: {} } } })
+    process.env.DSH_DISCOVERED_MODELS = join(directory, 'discovered-models.json')
+    const overlays = join(directory, 'catalog-overlays.json')
+    writeFileSync(overlays, JSON.stringify({ routes: { verity: { remove: ['stale'] } } }))
+    process.env.DSH_CATALOG_OVERLAYS = overlays
+    const url = await listingServer(JSON.stringify({ object: 'list', data: [{ id: 'kept' }, { id: 'stale' }] }))
+    const { apply: applyPlugin } = await freshIndex()
+    const ctx = await mountSync(applyPlugin, [
+      {
+        ns: 'llm-pi-ai',
+        revision: 1,
+        value: {
+          providers: {
+            verity: {
+              baseURL: url,
+              api: 'openai-completions',
+              models: [{ id: 'kept' }, { id: 'stale', name: 'Stale', contextWindow: 100_000 }],
+            },
+          },
+        },
+      },
+      { ns: 'enpoi-orchestration', revision: 1, value: { personas: { oracle: { provider: 'verity', model: 'stale' } } } },
+    ])
+    const outcome = await ctx.providerSync.refreshRoute('verity')
+    const stale = outcome.models.find(model => model.id === 'stale')
+    expect(stale).toMatchObject({ id: 'stale', source: 'pinned-in-use', deprecated: true })
+    // The reference keeps the record; it is not reported as pruned.
+    expect(outcome.removed).toEqual([])
+    expect(outcome.deprecated).toEqual(['stale'])
   })
 })
 
@@ -520,11 +687,13 @@ describe('manual-refresh RPC', () => {
       syncDelayMs: { get: () => 0 },
       endpoints: { get: () => ({}) },
       capacityDefaults: { get: () => ({}) },
+      sessionHeaders: { get: () => ({}) },
       modelsDevUrl: { get: () => DEFAULT_MODELS_DEV_URL },
       routeProviderMap: { get: () => ({}) },
       pinnedModels: { get: () => ({}) },
       endpointGraceMs: { get: () => 14 * 24 * 60 * 60 * 1000 },
       catalogFreshMs: { get: () => 48 * 60 * 60 * 1000 },
+      metadataSources: { get: () => ({}) },
     })
     // Allow the dynamic import effect to mount ProviderSyncService on ctx
     await vi.waitFor(() => { expect((ctx as any).providerSync).toBeDefined() })
@@ -555,7 +724,10 @@ describe('provider isolation', () => {
     // Unmapped: no provider namespace answers, so the record is the honest
     // floor — never another vendor's metadata through an id collision.
     const unmapped = plan(input)
-    expect(unmapped.models[0]).toMatchObject({ id: 'orion-9', name: 'Orion 9', contextWindow: DEFAULT_CONTEXT_WINDOW, unverified: true })
+    expect(unmapped.models[0]).toMatchObject({ id: 'orion-9', name: 'Orion 9', unverified: true })
+    // Nothing disclosed a capacity, so no adapter default is persisted as a fact.
+    expect(unmapped.models[0]).not.toHaveProperty('contextWindow')
+    expect(unmapped.models[0]).not.toHaveProperty('maxTokens')
     // Mapped: the declared provider is the only namespace consulted.
     const mapped = plan({ ...input, routeProviderMap: { 'custom-gateway': ['othervendor'] } })
     expect(mapped.models[0]).toMatchObject({ id: 'orion-9', name: 'Orion Nine Ultra', contextWindow: 333_333, maxTokens: 77_777 })

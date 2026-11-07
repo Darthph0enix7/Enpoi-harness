@@ -14,30 +14,27 @@ import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { EnpoiBrandMark, EnpoiBrandName } from './Brand.tsx'
 import { installDocumentBrand } from './document-brand.ts'
 import { en as brandEnpoiEn, zh as brandEnpoiZh, type BrandEnpoiKey } from './locales.ts'
-import { WatchtowerView } from './WatchtowerView.tsx'
-import {
-  AgentModelsBody,
-  FleetRoutingIcon,
-  type AgentModelsDirectoryFace,
-  type AgentModelsInjected,
-} from './AgentModelsBody.tsx'
+import type { AgentModelsDirectoryFace, AgentModelsInjected } from './AgentModelsBody.tsx'
 import { CapabilitiesBody, CapabilitiesIcon, ensureCouncilsFresh, getCouncilRegistry, refreshCapabilities, refreshCouncils, setOpenSettingsHandler, subscribeCouncilRegistry } from './CapabilitiesBody.tsx'
 import { setOpenSettingsSection } from './settings-nav.ts'
+import type { SubagentSessionsInjected } from './SubagentSessionsBody.tsx'
 import {
-  SubagentSessionsBody,
-  SubagentSessionsIcon,
-  type SubagentSessionsInjected,
-} from './SubagentSessionsBody.tsx'
-import { GitBody, GitIcon } from './GitBody.tsx'
+  LazyAgentModelsBody,
+  LazyDynamicSettings,
+  LazyGitBody,
+  LazyOrchestrationSettings,
+  LazyPermissionsSettings,
+  LazySubagentSessionsBody,
+  LazyWatchtowerView,
+} from './lazy-bodies.tsx'
+import { FleetRoutingIcon, GitIcon, SubagentSessionsIcon } from './sidebar-icons.tsx'
 import { TheMarkTaskCardAdapter } from './TheMarkTaskCardAdapter.tsx'
-import { OrchestrationSettings, type OrchestrationSettingsInjected } from './OrchestrationSettings.tsx'
+import type { OrchestrationSettingsInjected } from './OrchestrationSettings.tsx'
 import {
   getCompactionPolicy,
   refreshCompactionPolicy,
   subscribeCompactionPolicy,
 } from './compaction-policy.ts'
-import { PermissionsSettings } from './PermissionsSettings.tsx'
-import { DynamicSettings } from './dynamic/DynamicSettings.tsx'
 import { en as dynamicSkillsEn, zh as dynamicSkillsZh, type DynamicSkillsKey } from './dynamic/skills-locales.ts'
 import { McpMountsChip } from './McpMountsChip.tsx'
 import { en as mcpMountsEn, zh as mcpMountsZh, type McpMountsKey } from './mcp-mounts-locales.ts'
@@ -47,7 +44,7 @@ import type { TerminalRegistryState } from './terminal/registry.ts'
 import { TerminalPanel } from './terminal/TerminalPanel.tsx'
 import { BottomTerminalDock } from './terminal/BottomTerminalDock.tsx'
 import { TerminalIcon } from './terminal/icons.tsx'
-import { installTerminalStyles } from './terminal/styles.ts'
+import { installTerminalDockToggle } from './terminal/dock-listener.ts'
 import {
   AGENT_MODELS_ID,
   AGENT_MODELS_KIND,
@@ -251,7 +248,7 @@ export function apply(ctx: Context): void {
       order: 30,
       label: () => t('tabWatchtower'),
       locale: NS,
-    }, WatchtowerView)
+    }, LazyWatchtowerView)
   })
 
   // 2b. Orchestration parameters settings section (doc 38). The effective
@@ -297,7 +294,7 @@ export function apply(ctx: Context): void {
         ctx.get('modelDirectories')?.catalog.load().catch(() => { /* surfaced on the catalog store */ })
       },
     }),
-  }, OrchestrationSettings))
+  }, LazyOrchestrationSettings))
 
   // 2d. Dynamic entities settings section (doc 59): roles, councils, MCPs,
   // skills/tools, and the prompts behind them. The Skills & tools panel owns
@@ -322,7 +319,7 @@ export function apply(ctx: Context): void {
     label: () => t('tabDynamic'),
     locale: NS,
     inject: () => ({ skillsT: ctx.locale.bind('settings.dynamicSkills') }),
-  }, DynamicSettings))
+  }, LazyDynamicSettings))
 
   // 2c. Permission policy settings section (doc 55)
   ctx.slots.inject('settings.section', () => ctx.slots.register({
@@ -331,7 +328,7 @@ export function apply(ctx: Context): void {
     order: 21,
     label: () => t('tabPermissions'),
     locale: NS,
-  }, PermissionsSettings))
+  }, LazyPermissionsSettings))
 
   // 3. Global operator tabs: right-Sidebar tab types (guide-discoverable) with
   // their bodies under the same implementation id.
@@ -403,8 +400,9 @@ export function apply(ctx: Context): void {
 
   // enpoi: the browser terminal registry — one PTY per terminal, shared by the
   // right sidebar's terminal page and the bottom dock (each surface keeps its
-  // own tabs; the same registry and transport back both).
-  installTerminalStyles(ctx)
+  // own tabs; the same registry and transport back both). The registry never
+  // imports the emulator, so sessions connect before the first terminal view
+  // (and its deferred xterm chunk) is requested.
   const terminals = new TerminalRegistry()
   ctx.effect(() => () => { terminals.dispose() }, 'enpoi: terminal teardown')
   const terminalInjected = (): TerminalInjected => ({
@@ -426,11 +424,7 @@ export function apply(ctx: Context): void {
   })
 
   // enpoi: global toggle listener so the rail button and shortcuts work from anywhere on boot
-  if (typeof window !== 'undefined') {
-    window.addEventListener('enpoi-toggle-terminal-dock', () => {
-      terminals.toggleDock()
-    })
-  }
+  ctx.effect(() => installTerminalDockToggle(() => { terminals.toggleDock() }), 'enpoi: terminal dock toggle')
 
   // The drawer's Settings links resolve the shell's service lazily (the click
   // happens long after both plugins are up; either load order is fine).
@@ -481,7 +475,7 @@ export function apply(ctx: Context): void {
         // Groups title and "n models" rows resolve instead of echoing raw keys.
         modelT: ctx.locale.bind('model'),
       }),
-    }, AgentModelsBody)
+    }, LazyAgentModelsBody)
     yield ctx.slots.register({
       name: 'sidebar.right.pane.tab',
       key: SUBAGENT_SESSIONS_ID,
@@ -505,12 +499,12 @@ export function apply(ctx: Context): void {
           refreshSessions: async () => { await sessions?.refresh() },
         }
       },
-    }, SubagentSessionsBody)
+    }, LazySubagentSessionsBody)
     yield ctx.slots.register({
       name: 'sidebar.right.pane.tab',
       key: GIT_ID,
       locale: NS,
-    }, GitBody)
+    }, LazyGitBody)
     yield ctx.slots.register({
       name: 'sidebar.right.pane.tab',
       key: TERMINAL_ID,

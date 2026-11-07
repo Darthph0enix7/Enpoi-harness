@@ -37,7 +37,7 @@ description: "审阅和维护已记录的会话持久化类型变更、对应 sc
 | `YYYY-MM-DD-slug.i18n.yaml` | 生成的双语一致性记录 |
 | `YYYY-MM-DD-slug.schema.json` | 生成的完整变更后 schema，覆盖受影响且仍然存在的根 |
 
-`finalized/vN.json` 记录已接受兼容性基线的完整根分类／摘要，以及对应已接受记录的语义哈希。[定稿记录](../session-format-status.zh.md#finalization-record)要求检查点存在。当前 V4 schema 可以兼容演进；即使写入器已推进，检查点仍保护已接受的机器声明和变更后 schema，而记录哈希不包含说明文字、别名和源码位置。
+`finalized/vN.json` 记录已接受兼容性基线的完整根分类／摘要，以及对应已接受记录的语义哈希。[定稿记录](../session-format-status.zh.md#finalization-record)要求检查点存在。当前 V5 schema 可以兼容演进；即使写入器已推进，检查点仍保护已接受的机器声明和变更后 schema，而记录哈希不包含说明文字、别名和源码位置。
 
 维护者通过 [`createPersistenceFinalizationCheckpoint`](../../scripts/persistence-finalization.ts) 捕获已确认格式，写入按版本命名的新检查点而不替换旧文件，并推进双语 `latestFinalizedVersion`。该函数要求当前 schema 与完整确认历史一致。提交前运行常规验证器。
 
@@ -58,7 +58,7 @@ description: "审阅和维护已记录的会话持久化类型变更、对应 sc
 | 将可选属性改为必选、添加必选属性、更改已有类型，或删除／重命名属性或事件 | `version-bump` |
 | 更改会话头或事件封装 | `version-bump` |
 
-定稿检查点保护已接受基线，不替换这些兼容性规则。在 V4 中，可选新增、普通事件及符合条件的归属 kind 新增可以使用新的同版本记录。破坏性差异要求更高的写入器版本，以及包含自身头版本递增的确认记录。不能更新已接受 V4 记录以复用其原有 3→4 转换。
+定稿检查点保护已接受基线，不替换这些兼容性规则。在 V5 中，可选新增、普通事件及符合条件的归属 kind 新增可以使用新的同版本记录。破坏性差异要求更高的写入器版本，以及包含自身头版本递增的确认记录。不能更新已接受 V4 记录以复用其原有 3→4 转换。
 
 普通事件可增加具有必选、非负整数 `data.version` 的载荷分支，新版本必须高于所有已有载荷版本，且所有已有分支结构保持不变。读取器必须保留旧载荷支持；在已有版本中增加分支、移除旧版本，以及修改 Session header 或事件封装仍属于破坏性变更。旧读取器可能拒绝新载荷版本。[Catalog 确认记录](2026-09-20-unknown-child-catalog.zh.md) 记录了此类演进。
 

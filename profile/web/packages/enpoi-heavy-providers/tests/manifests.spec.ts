@@ -12,10 +12,11 @@ import { expect, it } from 'vitest'
 import { COMMAND_CODE_CLI_HEADERS, COMMAND_CODE_CLI_VERSION } from '../../enpoi-commandcode-provider/src/headers.js'
 import { HEAVY_MANIFESTS, manifestById, manifestProblems, platformUnsupported, resolveHeavyInstall } from '../src/manifests.js'
 import { substitute } from '../src/planner.js'
+import { parseReleaseSource, releaseSourceArguments, withReleaseSource } from '../src/manifests.js'
 
-it('declares the four heavy providers with no structural problems', () => {
+it('declares the five heavy providers with no structural problems', () => {
   expect(manifestProblems()).toEqual([])
-  expect(HEAVY_MANIFESTS.map(manifest => manifest.id)).toEqual(['freellmapi', 'antigravity', 'commandcode', 'meridian'])
+  expect(HEAVY_MANIFESTS.map(manifest => manifest.id)).toEqual(['freellmapi', 'antigravity', 'commandcode', 'meridian', 'cliproxyapi'])
 })
 
 it('declares a key pool only on routes served by their own settings namespace', () => {
@@ -300,7 +301,11 @@ it('exposes {dshHome} substitution, never a literal ~/.dsh path', () => {
   expect(substitute('{dshHome}/cache', '/users/jo')).toBe('/users/jo/.dsh/cache')
   const commands = manifestById('commandcode')!.local.install.default.steps.map(step => step.command).join('\n')
   expect(commands).not.toContain('{home}/.dsh')
-  expect(commands).toContain('{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs')
+  expect(commands).not.toContain('{dshHome}/profiles/web')
+  // The running profile root is an environment variable, never command text.
+  expect(commands).toContain('"$DSH_HEAVY_PROFILE_DIR/packages/enpoi-commandcode-provider/scripts/install.mjs"')
+  expect(commands).toContain('"$DSH_HEAVY_PROFILE_DIR"')
+  expect(commands).not.toContain('{profileDir}')
   // A direct route has no local teardown step to substitute.
   expect(manifestById('commandcode')!.removal.steps).toEqual([])
 })
@@ -848,4 +853,193 @@ it('the meridian display copy carries the same id, label, protocol, auth, and en
   expect(row?.auth.keyless).toBe(true)
   expect(row?.reuse.baseURL).toBe(manifest.reuse.baseURL)
   expect(row?.reuse.health.url).toBe(manifest.reuse.health.url)
+})
+
+it('cliproxyapi is an optional loopback openai-completions service with endpoint authority', () => {
+  const manifest = manifestById('cliproxyapi')!
+  expect(manifest.label).toBe('CLIProxyAPI')
+  expect(manifest.protocol).toBe('openai-completions')
+  expect(manifest.delivery).toBe('service')
+  expect(manifest.defaultPort).toBe(8317)
+  expect(manifest.reuse.baseURL).toBe('http://127.0.0.1:8317/v1')
+  expect(manifest.reuse.health.url).toBe('http://127.0.0.1:8317/healthz')
+  expect(manifest.local.baseURL).toBe('http://127.0.0.1:8317/v1')
+  expect(manifest.local.health).toEqual(manifest.reuse.health)
+  expect(manifest.dashboardUrl).toBe('http://127.0.0.1:8317/management.html')
+  expect(manifest.local.dashboardUrl).toBe(manifest.dashboardUrl)
+  expect(manifest.docsUrl).toBe('https://help.router-for.me/')
+  expect(manifest.settingsNs).toBeUndefined()
+  expect(manifest.pool).toBeUndefined()
+  expect(JSON.stringify(manifest)).not.toContain('"pool"')
+  // Anonymous existing instances keep working; a unified gateway key is optional.
+  expect(manifest.auth).toEqual({ kind: 'unified', apiKeyEnv: 'CLIPROXYAPI_API_KEY', keyless: true })
+  // The adapter fields the integration owner wires into the route profile.
+  expect(manifest.sessionHeader).toBe('x-session-id')
+  expect(manifest.catalogAuthority).toBe('endpoint')
+  // No hardcoded model and no native-media capability flags in the declaration.
+  expect(manifest.fallbackModel).toBeUndefined()
+  expect(manifest).not.toHaveProperty('defaultInput')
+  expect(manifest).not.toHaveProperty('inputModalities')
+  expect(JSON.stringify(manifest)).not.toMatch(/99%|25 MB/)
+})
+
+it('cliproxyapi installs through the plugin-relative helper on Linux and macOS', () => {
+  const manifest = manifestById('cliproxyapi')!
+  const expected = 'node "$DSH_HEAVY_HELPER" install --dsh-home "$DSH_HEAVY_DSH_HOME"'
+  for (const platform of ['default', 'linux', 'darwin'] as const) {
+    const steps = resolveHeavyInstall(manifest.local, platform).steps
+    expect(steps, platform).toHaveLength(1)
+    expect(steps[0]!.command, platform).toBe(expected)
+  }
+  expect(resolveHeavyInstall(manifest.local, 'linux').label).toBe('Install locally (verified release + systemd user unit)')
+  expect(resolveHeavyInstall(manifest.local, 'darwin').label).toBe('Install locally (verified release + launchd agent)')
+  // The helper owns download verification and service setup; the manifest
+  // never curls a binary, builds Go, or compiles with npm.
+  const commands = ['default', 'linux', 'darwin']
+    .flatMap(platform => resolveHeavyInstall(manifest.local, platform).steps.map(step => step.command))
+    .join('\n')
+  expect(commands).not.toContain('curl')
+  expect(commands).not.toContain('go build')
+  expect(commands).not.toMatch(/\bnpm\b/)
+  expect(commands).toContain('--dsh-home "$DSH_HEAVY_DSH_HOME"')
+  expect(commands).toContain('$DSH_HEAVY_HELPER')
+  // The helper path is resolved from the plugin's own module location, so no
+  // command embeds the web profile's `packages/` layout or a placeholder.
+  expect(commands).not.toContain('{profileDir}')
+  expect(commands).not.toContain('packages/enpoi-heavy-providers')
+  expect(commands).not.toContain('{dshHome}/profiles/web')
+  // Windows has no supported local path; reuse/custom routes still work.
+  const reason = platformUnsupported(manifest, 'win32') ?? ''
+  expect(reason).toContain('Windows')
+  expect(reason).toContain('Use a detected instance')
+  expect(resolveHeavyInstall(manifest.local, 'win32').steps).toEqual([])
+  expect(platformUnsupported(manifest, 'linux')).toBeUndefined()
+  expect(platformUnsupported(manifest, 'darwin')).toBeUndefined()
+  // The shipped dependencies name the Node floor and the Linux service manager.
+  expect(resolveHeavyInstall(manifest.local, 'linux').deps[0]).toBe('Node.js >= 22')
+})
+
+it('cliproxyapi declares structured systemd and helper-file preflight requirements', () => {
+  const manifest = manifestById('cliproxyapi')!
+  const linux = manifest.local.install.linux!
+  expect(linux.requires).toEqual(['systemd-user'])
+  for (const variant of [manifest.local.install.default, linux, manifest.local.install.darwin!]) {
+    expect(variant.requiresFiles?.map(requirement => requirement.paths)).toEqual([['{helper}']])
+  }
+  // The macOS hint no longer promises log paths the helper does not write.
+  expect(manifest.local.install.darwin!.diskHint).not.toContain('Library/Logs')
+})
+
+it('a declared releaseSource appends the helper flag only when it exists', () => {
+  const manifest = manifestById('cliproxyapi')!
+  const steps = resolveHeavyInstall(manifest.local, 'linux').steps
+  expect(withReleaseSource(steps, undefined)).toBe(steps)
+  const api = withReleaseSource(steps, 'https://api.github.com/repos/fork/CLIProxyAPI/releases/latest')
+  expect(api[0]!.command).toContain("--releases-api 'https://api.github.com/repos/fork/CLIProxyAPI/releases/latest'")
+  const repo = withReleaseSource(steps, 'fork/CLIProxyAPI')
+  expect(repo[0]!.command).toContain("--repo 'fork/CLIProxyAPI'")
+  expect(parseReleaseSource('http://insecure.example/releases')).toBeUndefined()
+  expect(parseReleaseSource('not a repo')).toBeUndefined()
+  expect(parseReleaseSource('https://user:pass@example.com/releases')).toBeUndefined()
+  expect(releaseSourceArguments(undefined)).toEqual([])
+})
+
+it('helper steps carry hostile host paths through the environment, never command text', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'heavy-env-paths-'))
+  try {
+    const bin = join(scratch, 'bin')
+    mkdirSync(bin, { recursive: true })
+    // A `node` stub prints the argv it receives, so the assertion is about
+    // what the shell actually handed the helper, not the command string.
+    writeFileSync(join(bin, 'node'), '#!/usr/bin/env bash\nprintf "%s\\n" "$@"\n', 'utf8')
+    chmodSync(join(bin, 'node'), 0o755)
+    const home = '/tmp/a$b'
+    const dshHome = '/tmp/c`d'
+    const profileDir = '/tmp/e"f'
+    const helper = join(home, 'cliproxyapi-install.mjs')
+    const env = {
+      PATH: `${bin}:/usr/bin:/bin`,
+      DSH_HEAVY_HOME: home,
+      DSH_HEAVY_DSH_HOME: dshHome,
+      DSH_HEAVY_PROFILE_DIR: profileDir,
+      DSH_HEAVY_HELPER: helper,
+    }
+    const command = manifestById('cliproxyapi')!.local.install.default.steps[0]!.command
+    const output = execFileSync('/bin/bash', ['-c', command], { env, encoding: 'utf8' })
+    expect(output.split('\n')).toEqual([helper, 'install', '--dsh-home', dshHome, ''])
+    // The literal metacharacters survived; nothing expanded or executed.
+    expect(output).toContain('/tmp/a$b/cliproxyapi-install.mjs')
+    expect(output).toContain('/tmp/c`d')
+
+    // The setup step that still needs the profile root carries it through the
+    // environment too, so a quote in the path cannot terminate the command.
+    const profileCommand = manifestById('commandcode')!.local.install.default.steps[0]!.command
+    const profileOutput = execFileSync('/bin/bash', ['-c', profileCommand], { env, encoding: 'utf8' })
+    expect(profileOutput.split('\n')).toEqual([
+      `${profileDir}/packages/enpoi-commandcode-provider/scripts/install.mjs`,
+      profileDir,
+      '',
+    ])
+  } finally {
+    rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+it('legacy placeholder expansion refuses a shell-metacharacter path instead of injecting it', () => {
+  expect(() => substitute('node {home}/x.mjs', '/tmp/a$b')).toThrow(/shell metacharacter/)
+  expect(() => substitute('node {dshHome}/x.mjs', '/home/ok', '/tmp/c`d')).toThrow(/shell metacharacter/)
+  expect(() => substitute('node {profileDir}/x.mjs', '/home/ok', '/srv/dsh', '/tmp/e"f')).toThrow(/shell metacharacter/)
+})
+
+it('cliproxyapi removal runs the helper and names the retained credentials', () => {
+  const manifest = manifestById('cliproxyapi')!
+  expect(manifest.removal.steps).toHaveLength(1)
+  expect(manifest.removal.steps[0]!.command)
+    .toBe('node "$DSH_HEAVY_HELPER" remove --dsh-home "$DSH_HEAVY_DSH_HOME"')
+  const warnings = manifest.removal.warnings.join('\n')
+  expect(warnings).toContain('config.yaml')
+  expect(warnings).toContain('0600')
+  expect(warnings).toContain('bootstrap.json')
+  expect(warnings).toContain('auths')
+  // The account credentials are retained by the helper, not silently deleted.
+  expect(warnings).toContain('deleted by hand')
+})
+
+it('cliproxyapi documents the managed-account, separate-key, and remote-management facts without overclaiming', () => {
+  const manifest = manifestById('cliproxyapi')!
+  const quirks = manifest.quirks.join('\n')
+  expect(quirks).toContain('Local install dependencies:')
+  expect(quirks).toContain('Node.js >= 22')
+  expect(quirks).toContain('/management.html')
+  expect(quirks).toContain('management key is separate')
+  expect(quirks).toContain('0600')
+  expect(quirks).toContain('never signs in')
+  expect(quirks).toContain('Remote management')
+  expect(quirks).toContain('x-session-id')
+  expect(quirks).toContain('vary by upstream account/channel')
+  expect(quirks).toContain('Windows has no supported local install')
+  expect(quirks).not.toContain('automatic credential injector')
+  expect(quirks).not.toContain('cache hit')
+  expect(quirks).not.toContain('99%')
+  expect(manifest.requiresBrowser.join('\n')).toContain('management dashboard')
+  expect(manifest.requiresBrowser.join('\n')).toContain('never performed by the installer')
+})
+
+it('validates a declared releaseSource as an https URL or owner/repo slug', () => {
+  const manifest = manifestById('cliproxyapi')!
+  expect(manifestProblems([{ ...manifest, releaseSource: 'fork/CLIProxyAPI' }])).toEqual([])
+  expect(manifestProblems([{ ...manifest, releaseSource: 'https://api.github.com/repos/fork/CLIProxyAPI/releases/latest' }])).toEqual([])
+  expect(manifestProblems([{ ...manifest, releaseSource: 'http://insecure.example/releases' }]).join('\n'))
+    .toContain('releaseSource must be an https URL or an "owner/repo" slug')
+  expect(manifestProblems([{ ...manifest, releaseSource: 'not a repo!' }]).join('\n'))
+    .toContain('releaseSource must be an https URL or an "owner/repo" slug')
+})
+
+it('validates the optional session-header and endpoint-authority declarations', () => {
+  const manifest = manifestById('cliproxyapi')!
+  expect(manifestProblems([manifest])).toEqual([])
+  const blank = { ...manifest, sessionHeader: '   ' }
+  expect(manifestProblems([blank]).join('\n')).toContain('sessionHeader must be a non-empty header name')
+  const wrongAuthority = { ...manifest, catalogAuthority: 'catalog' as unknown as 'endpoint' }
+  expect(manifestProblems([wrongAuthority]).join('\n')).toContain('catalogAuthority must be "endpoint"')
 })

@@ -4,7 +4,7 @@ import { Context } from '@deepseek-ai/cordis'
 import {
   LlmRuntime, LlmAdapter, createMessage, createToolResultMessage, createUserMessage, projectFilesToText, ToolCallId,
 } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, LlmImageRequestPricing, Message, StreamChunk, TokenUsage, UserMessage } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmImageRequestPricing, LlmNativeFileInputs, Message, StreamChunk, TokenUsage, UserMessage } from '@deepseek-ai/dsh-llm'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { FileAttachmentRef, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { Session, SessionId, canonicalHeader } from '@deepseek-ai/dsh-session'
@@ -15,12 +15,19 @@ import { estimateContent, estimateMessage } from '../src/estimate.ts'
 
 /** Adapter double declaring fixed per-occurrence image prices for one route. */
 class PricingAdapter extends LlmAdapter {
-  constructor(private readonly pricing: (model: string) => LlmImageRequestPricing | undefined) {
+  constructor(
+    private readonly pricing: (model: string) => LlmImageRequestPricing | undefined,
+    private readonly native?: (model: string) => LlmNativeFileInputs | undefined,
+  ) {
     super()
   }
 
   override imageRequestPricing(_provider: string, model: string): LlmImageRequestPricing | undefined {
     return this.pricing(model)
+  }
+
+  override nativeFileRequestPricing(_provider: string, model: string): LlmNativeFileInputs | undefined {
+    return this.native?.(model)
   }
 
   async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -74,7 +81,10 @@ interface Harness {
   session: Session
 }
 
-async function harness(pricing: (model: string) => LlmImageRequestPricing | undefined): Promise<Harness> {
+async function harness(
+  pricing: (model: string) => LlmImageRequestPricing | undefined,
+  native?: (model: string) => LlmNativeFileInputs | undefined,
+): Promise<Harness> {
   const ctx = new Context()
   new SessionProjectionRegistry(ctx)
   ctx.provide('attachments', {
@@ -84,7 +94,7 @@ async function harness(pricing: (model: string) => LlmImageRequestPricing | unde
     processPathFromHostPath: (path: string) => path.replace('/host/', '/sandbox/'),
   } as never)
   const llm = new LlmRuntime(ctx)
-  llm.registerAdapter(['mock'], new PricingAdapter(pricing))
+  llm.registerAdapter(['mock'], new PricingAdapter(pricing, native))
   const meter = new TokenMeter(ctx)
   return { ctx, meter, session: Session.create(SessionId('route-priced'), undefined, undefined, undefined, [imageOffloadProjection]) }
 }
@@ -272,6 +282,107 @@ describe('request projection pricing', () => {
     } finally {
       await ctx.fiber.dispose()
     }
+  })
+
+  const NATIVE_FILE_INPUTS: LlmNativeFileInputs = {
+    version: 1,
+    encoders: { 'application/pdf': 'anthropic-document' },
+    perFileBytes: 1_000,
+    totalBytes: 2_000,
+    maxPayloadBytes: 4_000,
+    tokenReserve: { perFile: 10, perByte: 0.5 },
+  }
+  const NATIVE_BYTES = 100
+  const NATIVE_RESERVE = Math.ceil(NATIVE_FILE_INPUTS.tokenReserve.perFile
+    + NATIVE_FILE_INPUTS.tokenReserve.perByte * NATIVE_BYTES)
+
+  function nativeFileRef(name = 'notes.pdf'): FileAttachmentRef {
+    return { attachmentId: AttachmentId(`sha256:${'ef'.repeat(32)}`), name, bytes: NATIVE_BYTES }
+  }
+
+  function fileMessage(name = 'notes.pdf'): UserMessage {
+    return createUserMessage({
+      content: [{ type: 'text', text: 'read this' }, { type: 'file', attachment: nativeFileRef(name) }],
+      source: { kind: 'user' },
+    })
+  }
+
+  function fileFreeTokens(message: UserMessage): number {
+    return estimateMessage({ ...message, content: message.content.filter(block => block.type !== 'file') })
+  }
+
+  it('prices a native user file with the descriptor reserve instead of handle text', async () => {
+    const { meter, session } = await harness(() => undefined, model => (model === 'native' ? NATIVE_FILE_INPUTS : undefined))
+    const message = fileMessage()
+    session.append('user/message', message, { surfaceOp: 'append' })
+    session.append('request/header', { header: header('native'), reason: 'initial' })
+
+    const measurement = meter.measure(session)
+    expect(measurement.nodes[0]?.tokens).toBe(fileFreeTokens(message) + NATIVE_RESERVE)
+    const projected = projectFilesToText([message], file => `/sandbox/${file.name}`)[0]
+    expect(measurement.nodes[0]?.tokens).not.toBe(estimateMessage(projected as UserMessage))
+    expect(measurement.nodes[0]?.heuristicTokens).toBe(estimateMessage(message))
+  })
+
+  it('keeps unsupported suffixes and non-user files as handle text under a native route', async () => {
+    const { meter, session } = await harness(() => undefined, () => NATIVE_FILE_INPUTS)
+    const unsupported = fileMessage('archive.zip')
+    const tool = createToolResultMessage({
+      callId: ToolCallId('call-file'),
+      content: [{ type: 'file', attachment: nativeFileRef() }],
+      isError: false,
+    })
+    session.append('user/message', unsupported, { surfaceOp: 'append' })
+    session.append('tool/result', { turn: 1, step: 1, message: tool }, { surfaceOp: 'append' })
+    session.append('request/header', { header: header('native'), reason: 'initial' })
+
+    const measurement = meter.measure(session)
+    const projectedUser = projectFilesToText([unsupported], file => `/sandbox/${file.name}`)[0]
+    const projectedTool = projectFilesToText([tool], file => `/sandbox/${file.name}`)[0]
+    expect(measurement.nodes[0]?.tokens).toBe(estimateMessage(projectedUser as UserMessage))
+    expect(measurement.nodes[1]?.tokens).toBe(estimateMessage(projectedTool as Message))
+  })
+
+  it('reprices a logged native descriptor after the live route stops declaring one', async () => {
+    const { meter, session } = await harness(() => undefined, () => undefined)
+    session.append('turn/start', { turn: 1 })
+    session.append('request/context', {
+      provider: 'mock',
+      model: 'replay',
+      nativeFileInputs: NATIVE_FILE_INPUTS,
+    })
+    const message = fileMessage()
+    session.append('user/message', message, { surfaceOp: 'append' })
+
+    expect(session.requestContext()?.nativeFileInputs).toEqual(NATIVE_FILE_INPUTS)
+    expect(meter.measure(session, header('replay')).nodes[0]?.tokens)
+      .toBe(fileFreeTokens(message) + NATIVE_RESERVE)
+  })
+
+  it('prices handle text for a log without a native descriptor', async () => {
+    const { meter, session } = await harness(() => undefined, () => undefined)
+    session.append('turn/start', { turn: 1 })
+    const message = fileMessage()
+    session.append('user/message', message, { surfaceOp: 'append' })
+
+    const projected = projectFilesToText([message], file => `/sandbox/${file.name}`)[0]
+    expect(meter.measure(session, header('replay')).nodes[0]?.tokens)
+      .toBe(estimateMessage(projected as UserMessage))
+  })
+
+  it('adds a post-anchor native file at its reserve on top of provider usage', async () => {
+    const { meter, session } = await harness(() => undefined, () => NATIVE_FILE_INPUTS)
+    const usage: TokenUsage = { inputTokens: 5000, outputTokens: 50 }
+    appendSuccessfulCall(session, header('native'), usage)
+    const before = meter.measure(session)
+    expect(before.baseline).toMatchObject({ kind: 'usage', tokens: 5050 })
+
+    const message = fileMessage()
+    session.append('user/message', message, { surfaceOp: 'append' })
+    const after = meter.measure(session)
+    expect(after.baseline).toMatchObject({ kind: 'usage', tokens: 5050 })
+    expect(after.surfaceDeltaTokens - before.surfaceDeltaTokens).toBe(fileFreeTokens(message) + NATIVE_RESERVE)
+    expect(after.totalTokens).toBe(5050 + after.surfaceDeltaTokens)
   })
 
   it('prices tool-result images through the same route pricing', async () => {

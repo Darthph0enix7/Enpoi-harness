@@ -1,6 +1,8 @@
 /** Session-specific adapters for Gateway-owned Remote stream lifecycles. */
 
 import type {} from '@deepseek-ai/dsh-api-session-controller/remote'
+import { SessionSeq } from '@deepseek-ai/dsh-session/types'
+import type { SessionSeqCursor } from '@deepseek-ai/dsh-session/types'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import {
   RemoteJournalStream,
@@ -15,6 +17,7 @@ import type {
   SessionAssistantStreamBaseline,
   SessionAssistantStreamFrame,
   SessionControlFrame,
+  SessionFollowFrame,
   SessionHistoryRecord,
   SessionPage,
   SessionPageRequest,
@@ -44,12 +47,25 @@ export type SessionRemote = ClientRemote['session']
 interface SessionJournalPage extends SessionPage {
   readonly projections?: SessionProjectionBaseline
   readonly assistantStream?: SessionAssistantStreamBaseline
+  /**
+   * Present when this opening continues the Client-held window. `records`
+   * then carries the combined window for journal continuity, while
+   * `resumeRecords` carries the durable suffix the Session appends.
+   */
+  readonly resumedFromSeq?: number
+  readonly resumeRecords?: readonly SessionHistoryRecord[]
 }
 
 /** One complete publication from the Session journal stream. */
 export type SessionJournalChange =
   | {
     readonly type: 'replace' | 'prepend'
+    readonly page: SessionJournalPage
+    readonly entries: readonly SessionEventLikeEntry[]
+    readonly hasMore: boolean
+  }
+  | {
+    readonly type: 'resume'
     readonly page: SessionJournalPage
     readonly entries: readonly SessionEventLikeEntry[]
     readonly hasMore: boolean
@@ -64,6 +80,15 @@ function toSessionJournalChange(
 ): SessionJournalChange {
   switch (change.type) {
     case 'replace':
+      if (change.page.resumedFromSeq !== undefined && change.page.resumeRecords !== undefined) {
+        return {
+          type: 'resume',
+          page: change.page,
+          entries: historyEntries(change.page.resumeRecords),
+          hasMore: change.hasMore,
+        }
+      }
+      return { ...change, entries: historyEntries(change.entries) }
     case 'prepend':
       return { ...change, entries: historyEntries(change.entries) }
     case 'append': {
@@ -75,6 +100,31 @@ function toSessionJournalChange(
     case 'notification':
       return { type: 'assistant-stream', frame: change.notification }
   }
+}
+
+/** Brand one dense cursor, preserving the empty-log cursor -1. */
+function followCursor(value: number): SessionSeqCursor {
+  return value === -1 ? -1 : SessionSeq(value)
+}
+
+/**
+ * Validate one resumed opening against the Client-held tail.
+ * @param frame - Host snapshot claiming to continue the window.
+ * @param expected - inclusive tail the Client already holds.
+ * @returns whether the suffix starts after `expected`, stays contiguous, and ends at `cursor`.
+ */
+function resumeMatches(
+  frame: Extract<SessionFollowFrame, { type: 'snapshot' }>,
+  expected: number,
+): boolean {
+  if (frame.resumedFromSeq !== expected) return false
+  if (frame.records.length === 0) return frame.cursor === expected
+  let seq = expected + 1
+  for (const record of frame.records) {
+    if (record.event.seq !== seq) return false
+    seq += 1
+  }
+  return frame.cursor === seq - 1
 }
 
 type SessionControlBaselineFrame = Extract<SessionControlFrame, { type: 'baseline' }>
@@ -100,6 +150,12 @@ export interface SessionControlStreamOptions {
 export interface SessionEventStreamOptions {
   /** Apply one complete event-window change. */
   readonly publish: (change: SessionJournalChange) => void
+  /**
+   * Current durable Client window. Present, a reconnect requests the dense
+   * suffix after its tail and a resumed opening appends to it; absent, every
+   * opening stays a full replacement.
+   */
+  readonly window?: () => { readonly records: readonly SessionHistoryRecord[]; readonly hasMore: boolean }
   /** Observe a retryable carrier loss before reconnection. */
   readonly carrierFailed?: (error: RemoteStreamCarrierError) => void
   /** Publish a terminal stream, page, or protocol failure after opening. */
@@ -133,6 +189,32 @@ export function createSessionControlStream(
   })
 }
 
+/**
+ * A full Host snapshot behind the retained Client window. The Session replaces
+ * the retained window through a fresh follow stream instead of surfacing a
+ * protocol failure.
+ */
+export class SessionSnapshotBehindError extends Error {
+  /**
+   * @param cursor - inclusive tail seq carried by the rejected full snapshot.
+   * @param heldCursor - inclusive tail seq the Client window already holds.
+   */
+  constructor(readonly cursor: number, readonly heldCursor: number) {
+    super(`session snapshot at ${String(cursor)} is behind the client cursor ${String(heldCursor)}`)
+    this.name = 'SessionSnapshotBehindError'
+  }
+}
+
+/**
+ * Test whether a terminal stream failure is {@link SessionSnapshotBehindError}
+ * wrapped by the carrier's marked Remote failure.
+ * @param error - a caught stream failure.
+ * @returns whether the Session must reopen for a full replacement window.
+ */
+export function isSessionSnapshotBehindError(error: unknown): boolean {
+  return error instanceof Error && error.cause instanceof SessionSnapshotBehindError
+}
+
 /** Gateway-owned event journal bound to one ordinary or direct-subagent Session address. */
 export class SessionEventStream extends RemoteJournalStream<
   SessionJournalPage,
@@ -141,6 +223,13 @@ export class SessionEventStream extends RemoteJournalStream<
   ClientSessionPageRequest,
   SessionAssistantStreamFrame
 > {
+  /** Opening cursor of this stream's accepted generation, including an empty window. */
+  private openedCursor: number | undefined
+  /** Whether this stream already accepted an opening; a fresh stream never resumes. */
+  private acceptedOpening = false
+  /** One-shot fallback: the next generation asks for a full snapshot. */
+  private suppressResume = false
+
   /**
    * @param remote - generated Session namespace and Gateway stream factory.
    * @param address - durable ordinary-Session or direct-subagent address.
@@ -149,7 +238,7 @@ export class SessionEventStream extends RemoteJournalStream<
   constructor(
     private readonly remote: SessionRemotes,
     private readonly address: SessionAddress,
-    options: SessionEventStreamOptions,
+    private readonly journalOptions: SessionEventStreamOptions,
   ) {
     super(remote, {
       name: 'session event stream',
@@ -160,11 +249,11 @@ export class SessionEventStream extends RemoteJournalStream<
       last: historyRecordLastSeq,
       compare: (left, right) => left - right,
       follows: (left, right) => right === left + 1,
-      publish: (change) => { options.publish(toSessionJournalChange(change)) },
-      ...(options.carrierFailed === undefined
+      publish: (change) => { journalOptions.publish(toSessionJournalChange(change)) },
+      ...(journalOptions.carrierFailed === undefined
         ? {}
-        : { carrierFailed: options.carrierFailed }),
-      failed: options.failed,
+        : { carrierFailed: journalOptions.carrierFailed }),
+      failed: journalOptions.failed,
     })
   }
 
@@ -175,49 +264,108 @@ export class SessionEventStream extends RemoteJournalStream<
   ): AsyncIterable<RemoteJournalFrame<
     SessionHistoryRecord, number, SessionJournalPage, SessionAssistantStreamFrame
   >> {
-    let assistantRevision: number | undefined
-    for await (const frame of this.remote.session.follow({
-      address: this.address,
-      assistantStream: true,
-      ...this.repairRequest(request),
-    }, signal)) {
-      if (frame.type === 'snapshot') {
-        for (const record of frame.records) assertSessionWireEvent(record.event)
-        if (frame.assistantStream === undefined) {
-          throw new RemoteError(
-            'gateway/internal',
-            'session assistant stream omitted its opted-in opening baseline',
-            {},
-          )
+    let afterSeq = this.resumeAfterSeq()
+    // A malformed resumed opening is rejected inside this generation: the
+    // suffix stream is closed and one ordinary full-snapshot opening replaces
+    // it, so the Client never receives a terminal protocol failure and the
+    // Gateway retry budget is not consumed by a correctable answer.
+    for (;;) {
+      let assistantRevision: number | undefined
+      let rejected = false
+      for await (const frame of this.remote.session.follow({
+        address: this.address,
+        assistantStream: true,
+        ...this.repairRequest(request),
+        ...(afterSeq === undefined ? {} : { afterSeq: followCursor(afterSeq) }),
+      }, signal)) {
+        if (frame.type === 'snapshot') {
+          for (const record of frame.records) assertSessionWireEvent(record.event)
+          if (frame.assistantStream === undefined) {
+            throw new RemoteError(
+              'gateway/internal',
+              'session assistant stream omitted its opted-in opening baseline',
+              {},
+            )
+          }
+          assistantRevision = frame.assistantStream.revision
+          if (frame.resumedFromSeq !== undefined) {
+            const window = this.journalOptions.window
+            const expected = this.clientTail()
+            if (window === undefined || expected === undefined || !resumeMatches(frame, expected)) {
+              this.suppressResume = true
+              rejected = true
+              break
+            }
+            const current = window()
+            this.openedCursor = frame.cursor
+            this.acceptedOpening = true
+            this.suppressResume = false
+            yield {
+              type: 'opened',
+              cursor: frame.cursor,
+              page: {
+                records: [...current.records, ...frame.records],
+                hasMore: current.hasMore,
+                revert: frame.revert,
+                projections: frame.projections,
+                assistantStream: frame.assistantStream,
+                resumedFromSeq: frame.resumedFromSeq,
+                resumeRecords: frame.records,
+              },
+            }
+            continue
+          }
+          if (this.acceptedOpening) {
+            const held = this.clientTail()
+            if (held !== undefined && frame.cursor < held) {
+              throw new SessionSnapshotBehindError(frame.cursor, held)
+            }
+          }
+          this.openedCursor = frame.cursor
+          this.acceptedOpening = true
+          this.suppressResume = false
+          yield {
+            type: 'opened',
+            cursor: frame.cursor,
+            page: {
+              records: frame.records,
+              hasMore: frame.hasMore,
+              revert: frame.revert,
+              projections: frame.projections,
+              assistantStream: frame.assistantStream,
+            },
+          }
+          continue
         }
-        assistantRevision = frame.assistantStream.revision
-        yield {
-          type: 'opened',
-          cursor: frame.cursor,
-          page: {
-            records: frame.records,
-            hasMore: frame.hasMore,
-            revert: frame.revert,
-            projections: frame.projections,
-            assistantStream: frame.assistantStream,
-          },
+        if (frame.type === 'assistant-stream') {
+          const expected = (assistantRevision ?? 0) + 1
+          if (frame.frame.revision !== expected) {
+            throw new RemoteStreamCarrierError(
+              `session assistant stream skipped revision ${String(expected)}`,
+            )
+          }
+          assistantRevision = frame.frame.revision
+          yield { type: 'notification', notification: frame.frame }
+          continue
         }
-        continue
+        assertSessionWireEvent(frame.event)
+        yield { type: 'entry', entry: frame }
       }
-      if (frame.type === 'assistant-stream') {
-        const expected = (assistantRevision ?? 0) + 1
-        if (frame.frame.revision !== expected) {
-          throw new RemoteStreamCarrierError(
-            `session assistant stream skipped revision ${String(expected)}`,
-          )
-        }
-        assistantRevision = frame.frame.revision
-        yield { type: 'notification', notification: frame.frame }
-        continue
-      }
-      assertSessionWireEvent(frame.event)
-      yield { type: 'entry', entry: frame }
+      if (!rejected) return
+      afterSeq = this.resumeAfterSeq()
     }
+  }
+
+  /** Cursor one reconnect should resume after, or undefined for a full snapshot. */
+  private resumeAfterSeq(): number | undefined {
+    if (!this.acceptedOpening || this.suppressResume || this.journalOptions.window === undefined) return undefined
+    return this.clientTail()
+  }
+
+  /** Inclusive tail the retained durable window already holds. */
+  private clientTail(): number | undefined {
+    const window = this.journalOptions.window?.()
+    return window === undefined ? undefined : window.records.at(-1)?.event.seq ?? this.openedCursor
   }
 
   /** @inheritdoc */

@@ -65,12 +65,18 @@ export interface ConnectionSinks {
  * @param activity - report one inbound frame of this generation, refreshing
  * the liveness timestamp {@link ConnectionController.isProbablyStale} reads;
  * calls after this generation ends are ignored.
+ * @param heartbeat - optional report of one inbound application heartbeat
+ * frame of this generation. It also counts as activity and arms the autonomous
+ * silence watchdog for this generation; calls after this generation ends are
+ * ignored. A carrier that cannot observe heartbeat frames omits it, and the
+ * watchdog stays disarmed for that generation.
  * @returns a promise settling only when this generation ends or fails.
  */
 export type ConnectionGenerationSource = (
   signal: AbortSignal,
   ready: (host: ConnectionHostInfo) => void,
   activity: () => void,
+  heartbeat?: () => void,
 ) => Promise<void>
 
 /**
@@ -88,14 +94,30 @@ export class ConnectionController {
   private networkAvailable = true
   private lastState: ConnectionState | undefined
   private lastActivityAt: number | undefined
+  private heartbeatObserved = false
+  private staggerNextRetry = false
+  private attemptStartedAt: number | undefined
+  private readyAt: number | undefined
+  private readonly random: () => number
+  private readonly staggerMs: number
   private readonly config: Required<ConnectionRecoveryConfig>
 
+  /**
+   * @param source - generation source owned by the physical carrier.
+   * @param sinks - connection-state callbacks.
+   * @param config - retry, readiness, and browser recovery timing.
+   * @param random - uniform [0, 1) source for retry jitter and this tab's
+   * reconnect stagger; defaults to `Math.random`.
+   */
   constructor(
     private readonly source: ConnectionGenerationSource,
     private readonly sinks: ConnectionSinks = {},
     config: ConnectionRecoveryConfig = {},
+    random: () => number = Math.random,
   ) {
     this.config = resolveConnectionConfig(config)
+    this.random = random
+    this.staggerMs = random() * this.config.reconnectStaggerMs
   }
 
   /** Idempotent: begin the connect/pump/reconnect loop. */
@@ -126,6 +148,16 @@ export class ConnectionController {
   }
 
   /**
+   * Elapsed time of the physical handshake currently in flight.
+   * @returns milliseconds since the current generation source started, or
+   * undefined while the controller is waiting in backoff or offline and no
+   * handshake is running.
+   */
+  connectingForMs(): number | undefined {
+    return this.attemptStartedAt === undefined ? undefined : Date.now() - this.attemptStartedAt
+  }
+
+  /**
    * Whether no inbound frame has been observed within `thresholdMs`. The
    * timestamp advances when a generation reports ready and each time its
    * source reports an inbound frame; a loop that has not reported ready yet
@@ -138,13 +170,34 @@ export class ConnectionController {
   }
 
   /**
+   * Whether the current generation ever received an inbound application
+   * heartbeat frame. A Host that ignores the negotiated heartbeat request
+   * never reports one, so the autonomous silence watchdog must stay disarmed
+   * for that generation; host close, wake, and online recovery still apply.
+   * @returns true after this generation reported at least one heartbeat.
+   */
+  hasObservedInboundHeartbeat(): boolean {
+    return this.heartbeatObserved
+  }
+
+  /**
+   * Bounded per-tab offset applied by the wake scheduler so several tabs do
+   * not request a wake reconnect in lockstep.
+   * @returns this tab's stagger in milliseconds, in [0, `reconnectStaggerMs`).
+   */
+  wakeJitterMs(): number {
+    return this.staggerMs
+  }
+
+  /**
    * Suspend automatic retries while offline and restart backoff when the network returns.
    * @param available - whether the browser reports network access.
    */
   setNetworkAvailable(available: boolean): void {
     if (this.networkAvailable === available) return
     this.networkAvailable = available
-    this.attempt = 0
+    // Recovery after an outage resumes the existing retry ladder. Only a
+    // generation that stayed ready for `stableConnectionMs` resets it (D1).
     this.immediateRetry = false
     if (!this.running) return
     this.emitState(available ? 'connecting' : 'disconnected')
@@ -158,9 +211,9 @@ export class ConnectionController {
     return Math.min(backoffMaxMs, backoffBaseMs * backoffFactor ** Math.max(0, attempt - 1))
   }
 
-  private backoffDelay(attempt: number): number {
+  private backoffDelay(attempt: number, stagger: boolean): number {
     const cap = this.backoffCap(attempt)
-    return cap / 2 + Math.random() * (cap / 2)
+    return cap / 2 + this.random() * (cap / 2) + (stagger ? this.staggerMs : 0)
   }
 
   /** Re-read retry inputs after a potentially reentrant state sink. */
@@ -205,7 +258,9 @@ export class ConnectionController {
         if (!immediate) {
           const retryDelay = new AbortController()
           this.retryDelay = retryDelay
-          await sleep(this.backoffDelay(attempt), retryDelay.signal)
+          const delay = this.backoffDelay(attempt, this.staggerNextRetry)
+          this.staggerNextRetry = false
+          await sleep(delay, retryDelay.signal)
           if (this.retryDelay === retryDelay) this.retryDelay = null
           if (!this.isRunning()) return
           if (retryDelay.signal.aborted) continue
@@ -218,6 +273,9 @@ export class ConnectionController {
       const gen = ++this.generation
       const ac = new AbortController()
       this.current = ac
+      this.attemptStartedAt = Date.now()
+      this.readyAt = undefined
+      this.heartbeatObserved = false
 
       let sourceReady = false
       let resolveReady!: (host: ConnectionHostInfo) => void
@@ -234,6 +292,11 @@ export class ConnectionController {
         if (gen !== this.generation || !this.isGenerationActive(ac)) return
         this.lastActivityAt = Date.now()
       }
+      const reportHeartbeat = (): void => {
+        if (gen !== this.generation || !this.isGenerationActive(ac)) return
+        this.heartbeatObserved = true
+        this.lastActivityAt = Date.now()
+      }
       const reportReady = (host: ConnectionHostInfo): void => {
         if (sourceReady || gen !== this.generation || !this.isGenerationActive(ac)) return
         sourceReady = true
@@ -247,7 +310,7 @@ export class ConnectionController {
           resolve()
         }
         void Promise.resolve()
-          .then(() => this.source(ac.signal, reportReady, reportActivity))
+          .then(() => this.source(ac.signal, reportReady, reportActivity, reportHeartbeat))
           .then(
             () => {
               const error = new Error('connection generation ended')
@@ -272,7 +335,9 @@ export class ConnectionController {
           sourceLost,
         ])
         if (ac.signal.aborted) throw new Error('generation aborted during readiness handshake')
-        this.attempt = 0
+        // Readiness alone is not stability: the retry ladder is reset after
+        // the generation proves it survived `stableConnectionMs`.
+        this.readyAt = Date.now()
         this.emitState('connected')
         // A state sink may synchronously stop this controller.
         if (this.isGenerationActive(ac)) {
@@ -283,8 +348,17 @@ export class ConnectionController {
       }
 
       await failed
+      this.attemptStartedAt = undefined
+      // Only a loss of a generation that actually reached ready staggers the
+      // next retry; a never-ready first handshake keeps the narrower jitter.
+      this.staggerNextRetry = this.readyAt !== undefined
       if (!this.isRunning()) return
       if (manualAttempt) this.attempt = 0
+      else if (this.readyAt !== undefined
+        && Date.now() - this.readyAt >= this.config.stableConnectionMs) {
+        this.attempt = 0
+      }
+      this.readyAt = undefined
       retry = true
     }
   }

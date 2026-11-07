@@ -47,6 +47,12 @@ export interface HeavyProviderHealth {
 /** What a local install path needs on the machine. */
 export type HeavyLocalRuntime = 'vendor-app' | 'docker' | 'podman' | 'node'
 
+/**
+ * A structured host prerequisite a local install variant declares, checked by
+ * the host preflight instead of inferring a tool from step commands.
+ */
+export type HeavyLocalRequirement = 'docker' | 'podman' | 'systemd-user'
+
 /** One platform's local install path. */
 export interface HeavyPlatformInstall {
   /** Human label override; defaults to the local install label. */
@@ -63,6 +69,11 @@ export interface HeavyPlatformInstall {
    * verbatim by the host's preflight and install RPC.
    */
   unsupported?: string
+  /**
+   * Structured host prerequisites the variant needs. The host preflight
+   * refuses a path whose requirement the runtime probe cannot satisfy.
+   */
+  requires?: readonly HeavyLocalRequirement[]
   /** Steps executed in order for this platform. */
   steps: readonly HeavyProviderStep[]
 }
@@ -211,6 +222,17 @@ export interface HeavyProviderManifest {
     apiKeyEnv?: string
     keyless: boolean
   }
+  /**
+   * Request header the route uses for header-based routing affinity. Mirrors
+   * the host manifest field; the host adapter writes it into the route.
+   */
+  sessionHeader?: string
+  /**
+   * Which source may fill the served catalog when the route lists no models:
+   * only `endpoint` is supported, treating the endpoint's discovered listing
+   * as authoritative instead of falling back to the installed catalog.
+   */
+  catalogAuthority?: 'endpoint'
   dashboardUrl?: string
   docsUrl?: string
   /**
@@ -220,6 +242,13 @@ export interface HeavyProviderManifest {
    * value across both tables.
    */
   releasesApi?: string
+  /**
+   * Optional release source the provider's installer/downloader reads instead
+   * of its upstream default: an `https://` releases API URL or an `owner/repo`
+   * slug. Deployment-varying; the install step appends `--releases-api` when
+   * the effective manifest declares one.
+   */
+  releaseSource?: string
   /**
    * Port the service listens on by default (detection's first candidate); a
    * `delivery: 'direct'` entry declares the vendor port (443).
@@ -284,7 +313,7 @@ const COMMANDCODE_HEALTH: HeavyProviderHealth = {
 /** The commandcode setup step: link and build the provider package (idempotent). */
 const COMMANDCODE_INSTALL_STEP: HeavyProviderStep = {
   label: 'Link and build the DSH provider package',
-  command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"',
+  command: 'node "$DSH_HEAVY_PROFILE_DIR/packages/enpoi-commandcode-provider/scripts/install.mjs" "$DSH_HEAVY_PROFILE_DIR"',
   weight: 3,
 }
 
@@ -504,7 +533,34 @@ const ANTIGRAVITY_LAUNCHD_STEPS: readonly HeavyProviderStep[] = [
   ANTIGRAVITY_WAIT_STEP,
 ]
 
-/** The three heavy providers v1 ships (the pre-connection fallback). */
+/** Port CLIProxyAPI listens on by default. */
+const CLIPROXYAPI_PORT = 8317
+
+/** The official CLIProxyAPI documentation site. */
+const CLIPROXYAPI_DOCS_URL = 'https://help.router-for.me/'
+
+/** The host-provided installer helper; it owns release verification and the user service. */
+const CLIPROXYAPI_HELPER_ENV = '$DSH_HEAVY_HELPER'
+
+/** Installation and removal run the same helper, so platform behaviour never diverges in shell. */
+const CLIPROXYAPI_INSTALL_STEP: HeavyProviderStep = {
+  label: 'Install CLIProxyAPI (verified release and user service)',
+  command: `node "${CLIPROXYAPI_HELPER_ENV}" install --dsh-home "$DSH_HEAVY_DSH_HOME"`,
+  weight: 3,
+}
+
+const CLIPROXYAPI_REMOVE_STEP: HeavyProviderStep = {
+  label: 'Remove the CLIProxyAPI install (stop the service and remove verified files)',
+  command: `node "${CLIPROXYAPI_HELPER_ENV}" remove --dsh-home "$DSH_HEAVY_DSH_HOME"`,
+  weight: 2,
+}
+
+const CLIPROXYAPI_HEALTH: HeavyProviderHealth = {
+  url: `http://127.0.0.1:${CLIPROXYAPI_PORT}/healthz`,
+  timeoutMs: 5000,
+}
+
+/** The heavy providers v1 ships (the pre-connection fallback). */
 export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[] = [
   {
     id: 'freellmapi',
@@ -951,6 +1007,85 @@ export const FALLBACK_HEAVY_PROVIDER_MANIFESTS: readonly HeavyProviderManifest[]
     // No fallbackModel: /v1/models is the catalog shipped in the release, so
     // discovery is the only model source and nothing is fabricated.
   },
+  {
+    id: 'cliproxyapi',
+    label: 'CLIProxyAPI',
+    summary: 'Optional multi-account subscription gateway: one OpenAI-compatible endpoint in front of the CLI accounts you configure in its dashboard.',
+    protocol: 'openai-completions',
+    delivery: 'service',
+    // The endpoint's listing is authoritative: the gateway's channels decide
+    // which models exist, and an empty successful listing is not backfilled
+    // from the installed catalog.
+    catalogAuthority: 'endpoint',
+    // The gateway's account-affinity route keys sessions by this header.
+    sessionHeader: 'x-session-id',
+    // Anonymous routing is the shipped default; an operator may store the
+    // optional gateway key under CLIPROXYAPI_API_KEY, but no key is required
+    // for a local instance that accepts unauthenticated clients.
+    auth: { kind: 'unified', apiKeyEnv: 'CLIPROXYAPI_API_KEY', keyless: true },
+    dashboardUrl: `http://127.0.0.1:${CLIPROXYAPI_PORT}/management.html`,
+    docsUrl: CLIPROXYAPI_DOCS_URL,
+    defaultPort: CLIPROXYAPI_PORT,
+    requiresBrowser: [
+      'Adding upstream accounts happens in the local management dashboard; provider OAuth or device-code sign-in can require a browser or a phone confirmation and is never performed by the installer',
+    ],
+    quirks: [
+      'Local install dependencies: Node.js >= 22 (the harness ships Node); Docker is never required. The profile helper downloads the verified CLIProxyAPI release and writes a systemd or launchd user service — no Go toolchain, npm compile, or curl step, and its Node built-in downloader needs no external tar',
+      'The model catalog comes from the configured inference endpoint (/v1/models); this manifest hardcodes no model, declares catalogAuthority "endpoint", and never substitutes a fabricated fallback',
+      'Model capabilities vary by upstream account/channel and by endpoint metadata; no native media capability is declared until the core native-media schema defines it',
+      'The management key is separate from the optional client API key and stays in config.yaml with mode 0600; the installer prints neither key',
+      'Upstream accounts are managed in the /management.html dashboard; the local installer never signs in or auto-authenticates an account, and opening the dashboard is a local handoff rather than an automatic login',
+      'Remote management is a policy decision: the dashboard and management API are loopback by default, and exposing them beyond loopback requires an explicit tunnel and authentication you configure',
+      'The route declaration sets the x-session-id request header for account affinity; affinity is not a cache-hit guarantee and accounts can still switch on quota or rate-limit responses',
+      'The verified binary is about 75 MB; RAM use is not measured here. Removing the local install retains config.yaml, bootstrap.json, and the auths directory under $DSH_HOME/providers/cliproxyapi',
+      'Windows has no supported local install; detected-instance reuse, a custom route, or an instance running on another machine still works',
+    ],
+    reuse: {
+      label: 'Use a detected instance',
+      baseURL: `http://127.0.0.1:${CLIPROXYAPI_PORT}/v1`,
+      note: 'Zero install: uses a CLIProxyAPI instance already running on this device. The client API key is optional and the dashboard is not signed in automatically.',
+      health: CLIPROXYAPI_HEALTH,
+    },
+    local: {
+      label: 'Install locally (verified release + user service)',
+      baseURL: `http://127.0.0.1:${CLIPROXYAPI_PORT}/v1`,
+      deps: ['Node.js >= 22', 'A reachable systemd user session (systemctl --user) on Linux'],
+      diskHint: '~75 MB binary; RAM use not measured',
+      dashboardUrl: `http://127.0.0.1:${CLIPROXYAPI_PORT}/management.html`,
+      runtime: 'node',
+      install: {
+        default: { steps: [CLIPROXYAPI_INSTALL_STEP] },
+        linux: {
+          label: 'Install locally (verified release + systemd user unit)',
+          requires: ['systemd-user'],
+          steps: [CLIPROXYAPI_INSTALL_STEP],
+        },
+        darwin: {
+          label: 'Install locally (verified release + launchd agent)',
+          deps: ['Node.js >= 22', 'macOS 11+ (launchd)'],
+          diskHint: '~75 MB binary; RAM use not measured',
+          steps: [CLIPROXYAPI_INSTALL_STEP],
+        },
+        win32: {
+          label: 'Not supported on Windows',
+          unsupported: 'CLIProxyAPI has no supported Windows local install: its installer helper manages a verified Linux/macOS release behind a POSIX user service. Run CLIProxyAPI yourself, or add an instance running on another machine with "Use a detected instance" or as a custom route.',
+          steps: [],
+        },
+      },
+      health: CLIPROXYAPI_HEALTH,
+    },
+    removal: {
+      steps: [CLIPROXYAPI_REMOVE_STEP],
+      warnings: [
+        'Removal stops the receipt-owned user service and removes the verified binary plus the receipt-owned unit; config.yaml (management key, mode 0600), bootstrap.json, and the auths directory (upstream account credentials) stay under $DSH_HOME/providers/cliproxyapi and must be deleted by hand to remove them',
+        'Any other harness or client pointed at the same CLIProxyAPI instance stops working when the service is removed',
+        'Upstream account state and quota live in CLIProxyAPI and are never touched beyond the local service and binary',
+        'A modified binary or unit makes the installer refuse removal; restore the receipt-owned file or remove it manually after confirming its origin',
+      ],
+    },
+    // No fallbackModel: the endpoint's /v1/models listing is the only model
+    // source, so an empty listing writes no fabricated id.
+  },
 ]
 
 /** Resolve one route id against the fallback table (pre-connection only). */
@@ -960,6 +1095,19 @@ export function fallbackHeavyManifest(id: string): HeavyProviderManifest | undef
 
 /** The heavy preset ids, excluded from the provider-sync endpoint set. */
 export const HEAVY_PRESET_IDS: ReadonlySet<string> = new Set(FALLBACK_HEAVY_PROVIDER_MANIFESTS.map(manifest => manifest.id))
+
+/** GitHub `owner/repo` or an https releases API URL. */
+function validReleaseSource(value: string): boolean {
+  if (/^https:\/\//.test(value)) {
+    try {
+      const parsed = new URL(value)
+      return parsed.protocol === 'https:' && parsed.hostname !== ''
+    } catch {
+      return false
+    }
+  }
+  return /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(value)
+}
 
 /** Whether a wire value is a plain JSON object. */
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -982,6 +1130,15 @@ export function heavyManifestProblems(value: unknown): string[] {
   if (id === undefined) problems.push(`${where}: id is empty`)
   for (const field of ['label', 'summary', 'protocol'] as const) {
     if (typeof value[field] !== 'string' || value[field].trim() === '') problems.push(`${where}: ${field} is empty`)
+  }
+  if (value.sessionHeader !== undefined && (typeof value.sessionHeader !== 'string' || value.sessionHeader.trim() === '')) {
+    problems.push(`${where}: sessionHeader must be a non-empty header name`)
+  }
+  if (value.catalogAuthority !== undefined && value.catalogAuthority !== 'endpoint') {
+    problems.push(`${where}: catalogAuthority must be "endpoint" when declared`)
+  }
+  if (value.releaseSource !== undefined && (typeof value.releaseSource !== 'string' || !validReleaseSource(value.releaseSource))) {
+    problems.push(`${where}: releaseSource must be an https URL or an "owner/repo" slug`)
   }
   if (!Number.isInteger(value.defaultPort) || (value.defaultPort as number) < 1 || (value.defaultPort as number) > 65_535) {
     problems.push(`${where}: defaultPort must be a TCP port`)
@@ -1011,6 +1168,10 @@ export function heavyManifestProblems(value: unknown): string[] {
     if (variant === undefined) continue
     if (variant.unsupported !== undefined && (typeof variant.unsupported !== 'string' || variant.unsupported.trim() === '')) {
       problems.push(`${where}: platform install variant ${String(index)} declares an empty unsupported reason`)
+    }
+    if (variant.requires !== undefined && (!Array.isArray(variant.requires)
+      || variant.requires.some(requirement => requirement !== 'docker' && requirement !== 'podman' && requirement !== 'systemd-user'))) {
+      problems.push(`${where}: platform install variant ${String(index)} declares an unknown requirement`)
     }
     if ((!Array.isArray(variant.steps) || variant.steps.length === 0)
       && variant.unsupported === undefined && value.unsupported === undefined) {

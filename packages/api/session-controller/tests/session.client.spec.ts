@@ -7,16 +7,18 @@
 
 import { describe, expect, onTestFinished, vi } from 'vitest'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session/types'
+import { LlmAttemptId } from '@deepseek-ai/dsh-llm'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 import { RemoteStreamCarrierError } from '@deepseek-ai/dsh-api-gateway/client'
 import { RemoteError, type RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
-import { ok, type RemoteMock } from '@deepseek-ai/dsh-remote-mock'
+import { ok, type RemoteMock, type StreamHandle, type StreamScript } from '@deepseek-ai/dsh-remote-mock'
 import { createClientTest, type TestClient, webApp } from '@deepseek-ai/dsh-client-test-runtime/src/assembly/index.ts'
 import { Session } from '../src/client/sessions/session.ts'
 import { SessionEventStream } from '../src/client/transport.ts'
 import type { SessionFollowRequest, SessionPage, SessionPageRequest } from '../src/types.ts'
 import { entries, ev, historyValue, plainTurn } from './event-script.client.ts'
+import { resumedSnapshot } from './remote/history.client.ts'
 import { sessionBench } from './remote/bench.client.ts'
 import {
   FOLLOW, PAGE, err, followScript, followSnapshot, frame, history, pageRule, pushEvent,
@@ -826,6 +828,44 @@ describe('remaining branches', () => {
     expect(notified).toBe(seen)
   })
 
+  it('keeps Session subscribers silent for transient Assistant chunks while the event feed receives each one', async ({ mock, start }) => {
+    const session = await sessionBench(mock, start, SID)
+    await session.open()
+    const attemptId = LlmAttemptId('notify-probe')
+    const notified = vi.fn()
+    const feed = vi.fn()
+    onTestFinished(session.subscribe(notified))
+    onTestFinished(session.eventSource.subscribe(feed))
+    mock.streams.push(FOLLOW, {
+      type: 'assistant-stream',
+      frame: { type: 'start', attemptId, revision: 1, startedAfterSeq: -1, turn: 1, step: 1 },
+    })
+    await mock.streams.drained(FOLLOW)
+    await new Promise(resolve => setTimeout(resolve, 0))
+    notified.mockClear()
+    feed.mockClear()
+    const before = session.getSnapshot()
+    for (let index = 0; index < 600; index++) {
+      mock.streams.push(FOLLOW, {
+        type: 'assistant-stream',
+        frame: {
+          type: 'chunk', attemptId, revision: index + 2, index, time: index,
+          chunk: { type: 'text-delta', index: 0, text: 'x' },
+        },
+      })
+      await mock.streams.drained(FOLLOW)
+    }
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(feed).toHaveBeenCalledTimes(600)
+    expect(notified).not.toHaveBeenCalled()
+    expect(session.getSnapshot()).toBe(before)
+    expect(session.eventSource.getSnapshot().entries).toHaveLength(600)
+
+    await pushEvent(mock, ev.turnStart(SessionSeq(1), 1))
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(notified).toHaveBeenCalled()
+  })
+
   it('records an opening page that does not end at the opening cursor', async ({ mock, start }) => {
     const session = await sessionBench(mock, start, SID)
     mock.stream(FOLLOW, followScript(history(plainTurn(SessionSeq(0), 0, 'a', 'b')), { cursor: 11 }))
@@ -1044,5 +1084,196 @@ describe('snapshot ownership', () => {
     expect(windowAfter).not.toBe(windowBefore)
     expect(windowAfter.entries[0]).toBe(firstEntry)
     expect(windowAfter.change).toMatchObject({ kind: 'append' })
+  })
+})
+
+/**
+ * Script follow generations in order: each generation receives its request
+ * and the stream handle that delivers its opening.
+ * @param steps - one responder per follow generation.
+ * @returns the registered stream script.
+ */
+function scriptedFollow(
+  steps: readonly ((request: SessionFollowRequest, stream: StreamHandle) => void)[],
+): StreamScript {
+  let index = 0
+  return async ([raw], stream) => {
+    const step = steps[index]
+    index += 1
+    if (step === undefined) throw new Error('unexpected follow generation')
+    step(raw as SessionFollowRequest, stream)
+  }
+}
+
+describe('follow resume', () => {
+  it('reconnects with the accepted cursor and keeps the window on an empty suffix', async ({ mock, start }) => {
+    const session = await sessionBench(mock, start, SID)
+    const initial = plainTurn(SessionSeq(0), 0, 'a', 'b')
+    const requests: SessionFollowRequest[] = []
+    mock.stream(FOLLOW, scriptedFollow([
+      (request, stream) => {
+        requests.push(request)
+        stream.push(followSnapshot(historyValue(initial, true), request))
+      },
+      (request, stream) => {
+        requests.push(request)
+        stream.push(resumedSnapshot([], request, 5))
+      },
+    ]))
+    await session.open()
+    const before = eventSeqs(session)
+    expect(before).toEqual([0, 1, 2, 3, 4, 5])
+    expect(session.getSnapshot().hasMore).toBe(true)
+    expect(requests[0]?.afterSeq).toBeUndefined()
+
+    mock.streams.fail(FOLLOW, new RemoteStreamCarrierError('drop'))
+    await mock.streams.opened(FOLLOW, 2)
+    await mock.streams.drained(FOLLOW)
+
+    expect(requests[1]).toMatchObject({
+      afterSeq: 5,
+      maxMessages: 500,
+      turnWindow: { minMessages: 50, minTurns: 2 },
+    })
+    expect(eventSeqs(session)).toEqual(before)
+    expect(session.getSnapshot()).toMatchObject({ openState: 'open', hasMore: true })
+  })
+
+  it('appends exactly the missed suffix and preserves baseSeq and hasMore', async ({ mock, start }) => {
+    const session = await sessionBench(mock, start, SID)
+    const initial = plainTurn(SessionSeq(0), 0, 'a', 'b')
+    const requests: SessionFollowRequest[] = []
+    mock.stream(FOLLOW, scriptedFollow([
+      (request, stream) => {
+        requests.push(request)
+        stream.push(followSnapshot(historyValue(initial, true), request))
+      },
+      (request, stream) => {
+        requests.push(request)
+        stream.push(resumedSnapshot([ev.user(SessionSeq(6), 'x'), ev.user(SessionSeq(7), 'y')], request, 5))
+      },
+    ]))
+    await session.open()
+
+    mock.streams.fail(FOLLOW, new RemoteStreamCarrierError('drop'))
+    await mock.streams.opened(FOLLOW, 2)
+    await mock.streams.drained(FOLLOW)
+    expect(requests[1]?.afterSeq).toBe(5)
+    expect(eventSeqs(session)).toEqual([0, 1, 2, 3, 4, 5, 6, 7])
+    expect(session.getSnapshot().hasMore).toBe(true)
+
+    // A live event during the resumed generation appends once in order, and a
+    // replayed duplicate of the suffix tail is ignored.
+    await pushEvent(mock, ev.user(SessionSeq(8), 'z'))
+    await pushEvent(mock, ev.user(SessionSeq(7), 'duplicate'))
+    expect(eventSeqs(session)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8])
+
+    // loadOlder still pages from the retained window head.
+    mock.remote.session.page.mockImplementation(pageRule(history([])))
+    await session.loadOlder()
+    expect(mock.log.requests(PAGE)[0]).toMatchObject({ throughSeq: 8, beforeSeq: 0 })
+  })
+
+  it('falls back to one full-snapshot retry when a resumed opening is malformed', async ({ mock, start }) => {
+    const session = await sessionBench(mock, start, SID)
+    const initial = plainTurn(SessionSeq(0), 0, 'a', 'b')
+    const replacement = [...initial, ...plainTurn(SessionSeq(6), 1, 'c', 'd')]
+    const requests: SessionFollowRequest[] = []
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      mock.stream(FOLLOW, scriptedFollow([
+        (request, stream) => {
+          requests.push(request)
+          stream.push(followSnapshot(historyValue(initial), request))
+        },
+        (request, stream) => {
+          requests.push(request)
+          // A suffix that skips seq 6.
+          stream.push(resumedSnapshot([ev.user(SessionSeq(7), 'gap')], request, 5))
+        },
+        (request, stream) => {
+          requests.push(request)
+          stream.push(followSnapshot(historyValue(replacement), request))
+        },
+      ]))
+      await session.open()
+      mock.streams.fail(FOLLOW, new RemoteStreamCarrierError('drop'))
+      await mock.streams.opened(FOLLOW, 3)
+      await mock.streams.drained(FOLLOW)
+
+      expect(requests).toHaveLength(3)
+      expect(requests[1]?.afterSeq).toBe(5)
+      expect(requests[2]?.afterSeq).toBeUndefined()
+      expect(eventSeqs(session)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+      expect(session.getSnapshot().openState).toBe('open')
+      expect(logged).not.toHaveBeenCalled()
+    } finally {
+      logged.mockRestore()
+    }
+  })
+
+  it('replaces the window when an older Host ignores afterSeq and sends the full snapshot', async ({ mock, start }) => {
+    const session = await sessionBench(mock, start, SID)
+    const initial = plainTurn(SessionSeq(0), 0, 'a', 'b')
+    const replacement = [...initial, ...plainTurn(SessionSeq(6), 1, 'c', 'd')]
+    const requests: SessionFollowRequest[] = []
+    mock.stream(FOLLOW, scriptedFollow([
+      (request, stream) => {
+        requests.push(request)
+        stream.push(followSnapshot(historyValue(initial), request))
+      },
+      (request, stream) => {
+        requests.push(request)
+        // The Host does not understand afterSeq: an ordinary snapshot.
+        stream.push(followSnapshot(historyValue(replacement), request))
+      },
+    ]))
+    await session.open()
+
+    mock.streams.fail(FOLLOW, new RemoteStreamCarrierError('drop'))
+    await mock.streams.opened(FOLLOW, 2)
+    await mock.streams.drained(FOLLOW)
+
+    expect(requests[1]?.afterSeq).toBe(5)
+    expect(eventSeqs(session)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+    expect(session.getSnapshot()).toMatchObject({ openState: 'open', hasMore: false })
+  })
+
+  it('reopens for a full replacement when the Host snapshot is behind the retained cursor', async ({ mock, start }) => {
+    const session = await sessionBench(mock, start, SID)
+    const initial = plainTurn(SessionSeq(10), 1, 'a', 'b')
+    const truncated = plainTurn(SessionSeq(0), 0, 'old', 'page')
+    const requests: SessionFollowRequest[] = []
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      mock.stream(FOLLOW, scriptedFollow([
+        (request, stream) => {
+          requests.push(request)
+          stream.push(followSnapshot(historyValue(initial), request))
+        },
+        (request, stream) => {
+          requests.push(request)
+          stream.push(followSnapshot(historyValue(truncated), request))
+        },
+        (request, stream) => {
+          requests.push(request)
+          stream.push(followSnapshot(historyValue(truncated), request))
+        },
+      ]))
+      await session.open()
+      expect(eventSeqs(session)).toEqual([10, 11, 12, 13, 14, 15])
+
+      mock.streams.fail(FOLLOW, new RemoteStreamCarrierError('drop'))
+      await mock.streams.opened(FOLLOW, 3)
+      await mock.streams.drained(FOLLOW)
+
+      expect(requests[1]?.afterSeq).toBe(15)
+      expect(requests[2]?.afterSeq).toBeUndefined()
+      expect(eventSeqs(session)).toEqual([0, 1, 2, 3, 4, 5])
+      expect(session.getSnapshot().openState).toBe('open')
+      expect(logged).not.toHaveBeenCalled()
+    } finally {
+      logged.mockRestore()
+    }
   })
 })

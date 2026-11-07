@@ -62,25 +62,23 @@ export function parseCatalog(raw: unknown): CatalogEntry[] {
   return entries
 }
 
-/** Find one entry by exact id, then by short (vendor-stripped) id. */
+/** Find one entry by its exact id. A short or vendor-stripped id never matches. */
 export function entryFor(entries: readonly CatalogEntry[], modelId: string): CatalogEntry | undefined {
-  const exact = entries.find(entry => entry.id === modelId)
-  if (exact !== undefined) return exact
-  const short = modelId.split('/').pop() ?? modelId
-  return entries.find(entry => entry.id === short || entry.id.split('/').pop() === short)
+  return entries.find(entry => entry.id === modelId)
 }
 
 /**
- * Whether one catalog entry accepts image input. Unknown entries are
- * permissive: forwarding an image can at worst be rejected upstream, while
- * omitting it silently loses information.
+ * Whether one catalog entry accepts image input. Only an explicit
+ * `attachment:true` or an `image` input modality states image support; an
+ * unknown entry or one whose modalities the catalog leaves silent claims
+ * nothing, so request admission omits the image instead of risking a
+ * rejection after the user message is durable.
  */
 export function visionOf(entry: CatalogEntry | undefined): boolean {
-  if (entry === undefined) return true
+  if (entry === undefined) return false
   if (entry.attachment === true) return true
   const inputs = entry.modalities?.input
-  if (Array.isArray(inputs) && inputs.length > 0) return inputs.includes('image')
-  return true
+  return Array.isArray(inputs) && inputs.includes('image')
 }
 
 /** Declared input modalities, or undefined when the catalog says nothing. */

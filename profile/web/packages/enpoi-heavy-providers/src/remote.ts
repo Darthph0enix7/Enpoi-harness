@@ -13,15 +13,17 @@ import type { Context } from '@deepseek-ai/cordis'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type { HeavyJobView } from './jobs.js'
 import { HeavyJobManager, visibleJobSnapshot } from './jobs.js'
-import { HEAVY_MANIFESTS, manifestById, manifestProblems, platformUnsupported, resolveHeavyInstall, type HeavyProviderManifest } from './manifests.js'
+import { HEAVY_MANIFESTS, manifestById, manifestProblems, platformUnsupported, resolveHeavyInstall, withReleaseSource, type HeavyProviderManifest, type HeavyStep } from './manifests.js'
 import { localizeHeavyManifest, localizeHeavyPreflight, localizeHeavySteps, settingsLocale, type HostLocale } from './locales.js'
+import { lifecycleOf, ownsLocalInstall, registerInstallOwnership } from './state.js'
 import {
+  catalogAuthorityOf,
   chooseLocalPath,
   commitRoute,
   configuredProfile,
   detectInstance,
   detectRuntimes,
-  discoverServiceModels,
+  discoverServiceCatalog,
   effectiveHeavyManifests,
   healthForBase,
   instanceBaseURLFromInput,
@@ -29,11 +31,15 @@ import {
   overlayManifest,
   pendingRestartForManifest,
   probeHealth,
+  reachable,
   readServerOverlay,
   removeProvider,
+  resolveRouteKey,
   routeSettingsNs,
   settingsNamespaceReady,
+  storeCredential,
   useDetectedInstance,
+  writeKnownEmptyDiscoveredEntry,
   type HeavyDeps,
   type LocalPathChoice,
   type PendingRestart,
@@ -72,8 +78,19 @@ export interface StatusValue {
   /** The effective host manifest (overlay applied) the client renders this row from. */
   manifest: HeavyProviderManifest
   configured: boolean
-  mode?: 'reuse' | 'local'
-  health: { ok: boolean; status?: number; error?: string; checkedAt: number }
+  /**
+   * The recorded lifecycle mode; `unknown` when the route predates the
+   * lifecycle record or the record is missing/malformed. Never inferred from
+   * the route address or display name.
+   */
+  mode?: 'reuse' | 'local' | 'unknown'
+  /** Present only when the lifecycle record says this harness owns a local install. */
+  installedByHarness?: boolean
+  /**
+   * The endpoint probe. `reachable` counts an authentication challenge (401 /
+   * 403) as an answered service even though `ok` stays false.
+   */
+  health: { ok: boolean; reachable?: boolean; status?: number; error?: string; checkedAt: number }
   /** The host platform install steps execute on (`process.platform`). */
   platform: string
   /** Settings namespace the route profile is written to (`llm-pi-ai` by default). */
@@ -84,6 +101,14 @@ export interface StatusValue {
   detectedPort?: number
   /** Address the detection found; the UI's "running at — use it" offer. */
   detectedEndpoint?: string
+  /**
+   * Secretless installer paths for the dashboard hint (owned local installs):
+   * where the generated bootstrap/management key lives on this host. The key
+   * itself is never returned.
+   */
+  bootstrapPath?: string
+  /** Alias path the helper reports for the management key (same file). */
+  managementKeyPath?: string
   /** Container runtimes the machine has (detection is fail-soft). */
   runtime: RuntimeProbe
   /** The platform's best local path for this provider (detection first). */
@@ -97,9 +122,16 @@ export interface StatusValue {
   job?: HeavyJobView
 }
 
-/** `enpoiHeavy.reuse` result. */
-export interface ReuseValue extends Partial<ReuseOutcome> {
+/**
+ * `enpoiHeavy.reuse` result. A successful reply always carries `catalog`
+ * (the typed listing outcome the route was written from), so a client can
+ * distinguish a valid empty from a failed/unauthorized discovery. Only a
+ * blocked/pending reply omits it.
+ */
+export interface ReuseValue extends Omit<Partial<ReuseOutcome>, 'catalog'> {
   ok: boolean
+  /** The typed catalog answer; present on every successful route write. */
+  catalog?: ReuseOutcome['catalog']
   blocked?: { reason: string; plannedWith: string }
   /** Route namespace absent from the running profile: the write waits for a restart. */
   pendingRestart?: PendingRestart
@@ -167,6 +199,37 @@ function optionalBaseURL(value: unknown): string | undefined {
   return normalized
 }
 
+/** The duplicate-add refusal shared by reuse and install. */
+function duplicateRouteBlock(manifest: HeavyProviderManifest): { ok: false; blocked: { reason: string; plannedWith: string } } {
+  return {
+    ok: false,
+    blocked: {
+      reason: `provider "${manifest.id}" already has a configured route; remove it before adding it again`,
+      plannedWith: 'remove the existing route first (Add never overwrites a configured profile)',
+    },
+  }
+}
+
+/** Whether one local step needs the running profile root substituted. */
+function stepNeedsProfileDir(step: HeavyStep): boolean {
+  return step.command.includes('{profileDir}')
+    || step.command.includes('$DSH_HEAVY_PROFILE_DIR')
+    || step.cwd?.includes('{profileDir}') === true
+}
+
+/** The refusal shared by install paths that cannot expand `{profileDir}`. */
+function missingProfileDirBlock(): { ok: false; blocked: { reason: string; plannedWith: string } } {
+  return {
+    ok: false,
+    blocked: {
+      reason: 'The running profile root is unknown, so the local install command containing "{profileDir}" cannot be expanded.'
+        + ' Start this profile through the dsh launcher (which supplies profileContext.dir),'
+        + ' or set the enpoi-heavy-providers profileDir config explicitly, then retry.',
+      plannedWith: 'No install step was started; the command containing "{profileDir}" was never executed.',
+    },
+  }
+}
+
 /** The service behind the `enpoiHeavy` Remote namespace. */
 export class HeavyProvidersService extends TypertRemoteService {
   /** Nothing is injected into the service fiber; the plugin passes its deps. */
@@ -232,6 +295,18 @@ export class HeavyProvidersService extends TypertRemoteService {
   }
 
   /**
+   * Secretless installer paths for the status hint. Only a verified owned
+   * local install asks the host reader; the reader never returns a key.
+   */
+  private async installPaths(id: string): Promise<{ bootstrapPath?: string; managementKeyPath?: string }> {
+    try {
+      return await this.options.deps().readInstallPaths?.(id) ?? {}
+    } catch {
+      return {}
+    }
+  }
+
+  /**
    * One provider's configured/health/job state plus the detection/preflight
    * fold the UI renders: an answering instance (`detectedEndpoint`), the
    * container runtimes found, and the platform's best local path.
@@ -247,7 +322,12 @@ export class HeavyProvidersService extends TypertRemoteService {
     const profile = configuredProfile(deps, manifest.id, settingsNs)
     const configured = profile !== undefined
     const configuredBase = typeof profile?.baseURL === 'string' ? profile.baseURL : undefined
-    const mode = configuredBase === undefined ? undefined : configuredBase === manifest.reuse.baseURL ? 'reuse' : 'local'
+    const lifecycle = lifecycleOf(deps.dshHome, manifest.id)
+    const ownedLocal = ownsLocalInstall(lifecycle)
+    // A route-less owned local install still reports its mode/ownership: the
+    // operator has a running service with a retained key and needs the row to
+    // keep offering its uninstall path.
+    const mode = configured ? lifecycle?.mode ?? 'unknown' : ownedLocal ? 'local' : undefined
     // A direct manifest has no on-device instance: detection is not applicable,
     // and the health badge comes from the declared vendor endpoint instead.
     const direct = manifest.delivery === 'direct'
@@ -258,7 +338,12 @@ export class HeavyProvidersService extends TypertRemoteService {
       process.platform,
       runtime,
       detection?.ok === true ? detection.port : undefined,
-      { home: deps.home, dshHome: deps.dshHome },
+      {
+        home: deps.home,
+        dshHome: deps.dshHome,
+        ...deps.profileDir === undefined ? {} : { profileDir: deps.profileDir },
+        ...deps.installHelperPath === undefined ? {} : { helperPath: deps.installHelperPath },
+      },
     )
     // The UI renders these two manifest projections; localize at the wire
     // boundary so the canonical table stays the English fixture the client
@@ -268,11 +353,19 @@ export class HeavyProvidersService extends TypertRemoteService {
     // A configured endpoint wins over the manifest default: an operator
     // migrating from the legacy keypool keeps a loopback baseURL, and its
     // health must reflect that endpoint, not the vendor root.
-    const health = configuredBase !== undefined
-      ? await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl)
-      : direct
-        ? await probeHealth(manifest.reuse.health, deps.fetchImpl)
+    // One configured endpoint is probed once: detection already tried it first,
+    // so a refusal there is the same answer the health badge needs. Only when
+    // detection moved on to another candidate does the configured endpoint
+    // need its own probe.
+    const configuredHealthUrl = configuredBase === undefined ? undefined : healthForBase(manifest, configuredBase).url
+    const health = direct
+      ? await probeHealth(manifest.reuse.health, deps.fetchImpl)
+      : configuredBase !== undefined
+        ? detection !== undefined && detection.url === configuredHealthUrl
+          ? detection.health
+          : await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl)
         : detection!.health
+    const isReachable = reachable(health)
     const settingsReady = settingsNamespaceReady(deps, settingsNs)
     const job = visibleJobSnapshot(this.options.jobs.snapshot(manifest.id), configured)
     return {
@@ -282,7 +375,9 @@ export class HeavyProvidersService extends TypertRemoteService {
       ...settingsReady === undefined ? {} : { settingsReady },
       configured,
       ...mode === undefined ? {} : { mode },
-      health,
+      ...lifecycle === undefined ? {} : { installedByHarness: lifecycle.installedByHarness },
+      ...ownedLocal ? await this.installPaths(manifest.id) : {},
+      health: { ...health, reachable: isReachable },
       platform: process.platform,
       runtime,
       preflight: localizedPreflight,
@@ -314,10 +409,17 @@ export class HeavyProvidersService extends TypertRemoteService {
         {},
       )
     }
+    const deps = this.options.deps()
+    // Duplicate Add is refused before any credential store, probe, or write:
+    // re-adding never overwrites a configured profile (including its headers
+    // and retry policy) and never retargets a saved route that is down.
+    if (configuredProfile(deps, manifest.id, routeSettingsNs(manifest)) !== undefined) {
+      this.options.log?.(`reuse ${manifest.id}: refused, route already configured`)
+      return duplicateRouteBlock(manifest)
+    }
     if (manifest.unsupported !== undefined) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } }
     }
-    const deps = this.options.deps()
     // The route namespace of a custom-protocol provider (commandcode) only
     // exists once its adapter plugin is part of the built profile: surface the
     // ordering fact before attempting a write that would fail at mutate.
@@ -332,17 +434,44 @@ export class HeavyProvidersService extends TypertRemoteService {
   }
 
   /**
-   * Add by local install: start the polled job; the route is written only when
-   * every required step succeeds. A route namespace the running profile has
+   * Add by local install: run the runtime preflight, then start the polled job;
+   * the route is written only when every required step succeeds. A duplicate
+   * configured route is refused before any side effect, and an unsupported
+   * platform/runtime starts no job. A route namespace the running profile has
    * not mounted yet is reported as the same pending-restart result reuse
    * returns — the install never starts a job whose finalizer would fail.
-   * @param request - `{ id, key? }`.
+   * Ownership is never accepted from this wire request: only the trusted host
+   * installer callback (`HeavyDeps.readInstallReceipt`) can record it.
+   * @param request - `{ id, key? }`; any `receipt` field is rejected.
    * @returns the initial job snapshot, the unsupported blocker, or the ordering result.
    */
   @Remote
-  install(request: { id?: unknown; key?: unknown }): InstallValue {
+  async install(request: { id?: unknown; key?: unknown }): Promise<InstallValue> {
+    if (request !== null && typeof request === 'object' && Object.hasOwn(request, 'receipt')) {
+      throw new RemoteError(
+        'gateway/bad-request',
+        'enpoiHeavy: install does not accept a client ownership receipt',
+        {},
+      )
+    }
     const manifest = this.requireEnabledManifest(request?.id)
-    const key = optionalKey(request?.key)
+    const submittedKey = optionalKey(request?.key)
+    // A self-keying local install (CLIProxyAPI) ignores a client-supplied key:
+    // the installer generates the authoritative key and the host reads it from
+    // the verified receipt. Ignoring is deliberate rather than silent — the
+    // form may still carry the legacy field, and a typed value is never stored,
+    // never sent to discovery, and never appears in the job or route.
+    const selfKeyingInstaller = manifest.id === 'cliproxyapi'
+    const key = selfKeyingInstaller ? undefined : submittedKey
+    if (selfKeyingInstaller && submittedKey !== undefined && submittedKey !== '') {
+      this.options.log?.(`install ${manifest.id}: ignoring the client-supplied key; the installer generates its own`)
+    }
+    const deps = this.options.deps()
+    // Duplicate Add commits nothing: no job, no credential, no route overwrite.
+    if (configuredProfile(deps, manifest.id, routeSettingsNs(manifest)) !== undefined) {
+      this.options.log?.(`install ${manifest.id}: refused, route already configured`)
+      return duplicateRouteBlock(manifest)
+    }
     if (manifest.unsupported !== undefined) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } }
     }
@@ -353,18 +482,54 @@ export class HeavyProvidersService extends TypertRemoteService {
       this.options.log?.(`install ${manifest.id}: refused on ${process.platform} (${platformBlocked})`)
       return { ok: false, blocked: { reason: platformBlocked, plannedWith: 'run the service manually and add it with "Use a detected instance"' } }
     }
-    const deps = this.options.deps()
+    // A step that names `{profileDir}` cannot run without a launcher-owned
+    // profile root. Refuse before the runtime probe or any job exists instead
+    // of spawning a command with the placeholder still in it.
+    const localSteps = resolveHeavyInstall(manifest.local, process.platform).steps
+    if (deps.profileDir === undefined && localSteps.some(stepNeedsProfileDir)) {
+      this.options.log?.(`install ${manifest.id}: refused, running profile root is unknown`)
+      return missingProfileDirBlock()
+    }
+    // Runtime preflight belongs to the install RPC: a missing Docker/Podman/
+    // Node (or user systemd manager) refuses before a job exists.
+    const runtime = await this.runtime()
+    const preflight = chooseLocalPath(manifest, process.platform, runtime, undefined, {
+      home: deps.home,
+      dshHome: deps.dshHome,
+      ...deps.profileDir === undefined ? {} : { profileDir: deps.profileDir },
+      ...deps.installHelperPath === undefined ? {} : { helperPath: deps.installHelperPath },
+    })
+    if (preflight.path === 'unsupported') {
+      const reason = preflight.missing.length > 0 ? preflight.missing.join('; ') : preflight.label
+      this.options.log?.(`install ${manifest.id}: runtime preflight refused (${reason})`)
+      return { ok: false, blocked: { reason, plannedWith: preflight.label } }
+    }
+    // The installer helper's own port preflight runs only when the helper
+    // exposes it; it can refuse a foreign listener before a job is created.
+    let helperRefusal: string | undefined
+    try {
+      const helperPreflight = await deps.installPreflight?.(manifest.id)
+      if (helperPreflight !== undefined && helperPreflight.ok === false) helperRefusal = helperPreflight.reason ?? 'the installer port preflight refused the install'
+    } catch (error) {
+      helperRefusal = `the installer port preflight failed (${error instanceof Error ? error.message : String(error)})`
+    }
+    if (helperRefusal !== undefined) {
+      this.options.log?.(`install ${manifest.id}: helper preflight refused (${helperRefusal})`)
+      return { ok: false, blocked: { reason: helperRefusal, plannedWith: 'No install job was started and no port was claimed.' } }
+    }
     const pendingRestart = pendingRestartForManifest(deps, manifest)
     if (pendingRestart !== undefined) {
       this.options.log?.(`install ${manifest.id}: waiting for restart (${pendingRestart.ns} is not mounted)`)
       return { ok: false, pendingRestart }
     }
     // The job view renders these labels for the operator; localize at the
-    // boundary so the manifest table itself stays canonical English.
+    // boundary so the manifest table itself stays canonical English. A
+    // declared `releaseSource` appends the helper's `--releases-api`/`--repo`
+    // flags only when the field exists.
     const steps = localizeHeavySteps(
       manifest,
       process.platform,
-      resolveHeavyInstall(manifest.local, process.platform).steps,
+      withReleaseSource(localSteps, manifest.releaseSource),
       this.locale(),
     )
     const job = this.options.jobs.start(manifest.id, 'install', steps, async () => {
@@ -373,14 +538,128 @@ export class HeavyProvidersService extends TypertRemoteService {
       // install may have been started through another surface) since the guard.
       const late = pendingRestartForManifest(current, manifest)
       if (late !== undefined) throw new Error(late.message)
+      // Re-check the duplicate guard at the commit point: another surface may
+      // have written this route while the job ran, and an install must never
+      // replace a route it did not create.
+      if (configuredProfile(current, manifest.id, routeSettingsNs(manifest)) !== undefined) {
+        throw new Error(
+          `provider "${manifest.id}" received a route while the install was running;`
+          + ' the install refused to overwrite it (remove the existing route first)',
+        )
+      }
+      // Ownership is read only from the trusted host installer after its steps
+      // succeeded. A browser-supplied string never reaches this point. The
+      // proof is an opaque receipt (never the installer's credential).
+      const receipt = await current.readInstallReceipt?.(manifest.id)
+      // CLIProxyAPI's helper seeds a client key, so its local install is only
+      // usable when both the receipt and that key are verified. Other heavy
+      // providers keep the generic optional-receipt behavior.
+      const requiresOwnedInstaller = manifest.id === 'cliproxyapi'
+      if (requiresOwnedInstaller && receipt === undefined) {
+        throw new Error(
+          'CLIProxyAPI install finished without a verified ownership receipt.'
+          + ' The service may still be installed; no route was written and existing credentials were not changed.'
+          + ' Repair the receipt, binary/unit hashes, and bootstrap owner token, then retry the install'
+          + ' or add the detected instance.',
+        )
+      }
+      if (receipt !== undefined) registerInstallOwnership(current.dshHome, manifest.id, receipt)
+      // A local installer may seed its own client credential. Read it through
+      // the trusted host seam and store it BEFORE discovery and the route
+      // commit: the seeded service accepts the same key discovery presents,
+      // and a later route failure leaves the already-installed service
+      // usable through Add's detected-instance path.
+      const installedCredential = manifest.auth.kind === 'unified'
+        ? (await current.readInstallCredential?.(manifest.id))?.trim()
+        : undefined
+      const seededKey = installedCredential === undefined || installedCredential === '' ? undefined : installedCredential
+      if (requiresOwnedInstaller && seededKey === undefined) {
+        throw new Error(
+          'CLIProxyAPI is installed but its generated inference key is unreadable.'
+          + ' No route was written and existing credentials were not overwritten.'
+          + ' Repair config.yaml access.api-keys or bootstrap.json, then retry the install'
+          + ' or add the detected instance.',
+        )
+      }
+      let seededStored = false
+      if (seededKey !== undefined) {
+        try {
+          seededStored = await storeCredential(current, manifest, seededKey)
+        } catch (error) {
+          if (!requiresOwnedInstaller) throw error
+          const cause = error instanceof Error ? error.message : String(error)
+          throw new Error(
+            `CLIProxyAPI is installed but its generated inference key could not be stored (${cause}).`
+            + ' No route was written and existing credentials were not intentionally changed;'
+            + ' repair the credentials service and retry the install or add the detected instance.',
+          )
+        }
+      }
+      if (requiresOwnedInstaller && !seededStored) {
+        throw new Error(
+          'CLIProxyAPI is installed but its generated inference key could not be stored.'
+          + ' No route was written; repair the credentials service and retry the install'
+          + ' or add the detected instance.',
+        )
+      }
+      // One effective key decides both the listing request and the route's
+      // auth: an explicit/seeded key makes the route keyed; a manifest whose
+      // stored key is read from the host does too; otherwise the manifest's
+      // anonymous default stands. Discovery never resolves a second credential
+      // behind this decision. An owned CLIProxyAPI install never falls back to
+      // an older stored key: the installer-generated key is authoritative.
+      const effectiveKey = requiresOwnedInstaller
+        ? seededKey
+        : await resolveRouteKey(current, manifest, seededStored ? seededKey : key)
       // A service route lists its own endpoint at its protocol's native
       // address; a direct route's catalog is the bundled snapshot (the vendor
       // exposes no listing), so both resolve through the same seam. The
       // fallback model applies when discovery answers nothing.
-      const models = await discoverServiceModels(current, manifest, modeBaseURL(manifest, 'local'), key)
-      // Route and credential commit atomically: a credential-store failure
-      // fails the job before any route exists.
-      await commitRoute(current, manifest, 'local', models, key)
+      const localBaseURL = modeBaseURL(manifest, 'local')
+      const catalog = await discoverServiceCatalog(current, manifest, localBaseURL, effectiveKey, {
+        resolveStoredCredential: false,
+      })
+      // An endpoint-authority route treats its listing as the whole catalog.
+      // A failed or unauthorized listing is not evidence of an empty catalog:
+      // write no route at all (the installed service survives for a retry or a
+      // detected-instance add) instead of an authoritative empty one.
+      if (catalogAuthorityOf(manifest) === 'endpoint'
+        && (catalog.state === 'failed' || catalog.state === 'unauthorized')) {
+        throw new Error(
+          `${manifest.label} is installed but its model listing was ${catalog.state}`
+          + `${catalog.error === undefined ? '' : ` (${catalog.error})`}; no route was written.`
+          + ' Check the service and its client key, then retry the install or add the detected instance.',
+        )
+      }
+      // A valid empty listing is retained as the known-empty discovered
+      // record the resolver reads; without it a first install (no upstream
+      // accounts yet) is an invalid endpoint-authority provider until sync.
+      if (catalog.state === 'empty') writeKnownEmptyDiscoveredEntry(current, manifest.id, localBaseURL)
+      // A seeded credential is already stored, so the route commit must not
+      // rewrite or roll it back. An operator-supplied key keeps the atomic
+      // store-then-route behavior.
+      const routeKey = seededStored ? undefined : key
+      const keyless = manifest.auth.kind === 'unified' && effectiveKey !== undefined ? false : undefined
+      try {
+        // Route and credential commit atomically: a credential-store failure
+        // fails the job before any route exists. The listing state decides the
+        // fallback behavior, and `refuseExisting` closes the check-then-write
+        // race with a route created during the job.
+        await commitRoute(current, manifest, 'local', catalog.models, routeKey, {
+          catalogState: catalog.state,
+          refuseExisting: true,
+          ...keyless === undefined ? {} : { keyless },
+        })
+      } catch (error) {
+        const cause = error instanceof Error ? error.message : String(error)
+        // The service and its receipt/credential survive a route failure; say
+        // so where the operator sees the job error instead of implying the
+        // whole install can be discarded.
+        if (receipt !== undefined || seededKey !== undefined) {
+          throw new Error(`${cause} — ${manifest.label} is installed; retry the install or add the detected instance`)
+        }
+        throw error
+      }
     })
     return { ok: true, job }
   }
@@ -398,8 +677,9 @@ export class HeavyProvidersService extends TypertRemoteService {
   }
 
   /**
-   * Remove one provider: optional local teardown, then route, credential,
-   * pool state, discovered-cache entry, and chain links.
+   * Remove one provider: unset the route first (a refusal aborts everything),
+   * then the owned local teardown, credentials, pool state, discovered-cache
+   * entry, host references, lifecycle record, and job snapshot.
    * @param request - `{ id, uninstall? }`.
    * @returns what was removed; individual sub-failures land in `summary.errors`.
    */
@@ -409,7 +689,14 @@ export class HeavyProvidersService extends TypertRemoteService {
     if (request?.uninstall !== undefined && typeof request.uninstall !== 'boolean') {
       throw new RemoteError('gateway/bad-request', 'enpoiHeavy: uninstall must be a boolean', {})
     }
-    const summary = await removeProvider(this.options.deps(), manifest, { uninstall: request?.uninstall === true })
+    const deps = this.options.deps()
+    // Removal works for a disabled provider and must use the operator overlay:
+    // its pool identities name the credentials actually configured. The job
+    // manager is always present for the lock even if a producer omitted it
+    // from the deps view.
+    const effective = overlayManifest(manifest, readServerOverlay(deps.dshHome)[manifest.id])
+    const lockedDeps: HeavyDeps = deps.jobs === undefined ? { ...deps, jobs: this.options.jobs } : deps
+    const summary = await removeProvider(lockedDeps, effective, { uninstall: request?.uninstall === true })
     this.options.log?.(`remove ${manifest.id}: route=${String(summary.routeRemoved)} pool=${String(summary.poolStateRemoved)} cache=${String(summary.cacheEntryRemoved)} teardown=${String(summary.teardown.ok)}`)
     return { ok: summary.errors.length === 0, summary }
   }

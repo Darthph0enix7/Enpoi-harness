@@ -8,6 +8,7 @@ import {
 import type { ClientConnectionRpc, ConnectionRpcResult } from '../rpc.ts'
 import { randomUuid } from './random-uuid.ts'
 import { installSettingsDescribe } from './settings-describe.ts'
+import { DEFAULT_RPC_TIMEOUT_MS } from '../recovery-config.ts'
 
 const CHANNEL_PATTERN = /^\/[A-Za-z0-9._~-]+$/
 const ENDPOINT_SEGMENT_PATTERN = /^[A-Za-z0-9_$.-]+$/
@@ -34,13 +35,19 @@ export type RpcStreamOpen = (
  * Create the browser-backed generic RPC caller.
  * @param doFetch - transport override; defaults to the page's global fetch.
  * @param openStream - optional worker-local Gateway stream carrier.
+ * @param timeoutMs - deadline for one HTTP exchange; a timed-out call rejects.
  * @returns caller that owns request correlation and response-envelope validation.
  */
-export function createWebConnectionRpc(doFetch?: RpcFetch, openStream?: RpcStreamOpen): ClientConnectionRpc {
+export function createWebConnectionRpc(
+  doFetch?: RpcFetch,
+  openStream?: RpcStreamOpen,
+  timeoutMs: number = DEFAULT_RPC_TIMEOUT_MS,
+): ClientConnectionRpc {
   const send: RpcFetch = doFetch ?? ((input, init) => globalThis.fetch(input, init))
+  const deadlined: RpcFetch = (input, init) => withDeadline(send, input, init, timeoutMs)
   // The served page installs one coalesced describe every settings store shares;
   // a carrier-surfaced caller (or a test mock) keeps its own transport.
-  const sharedDescribe = doFetch === undefined ? installSettingsDescribe(send) : undefined
+  const sharedDescribe = doFetch === undefined ? installSettingsDescribe(deadlined) : undefined
   const validators = new Map<string, { readonly etag: string; readonly result: ConnectionRpcResult<unknown> }>()
   return {
     async call(channel, endpoint, payload, signal) {
@@ -69,9 +76,9 @@ export function createWebConnectionRpc(doFetch?: RpcFetch, openStream?: RpcStrea
       // The channel key is absolute; a page posts the document-relative form, and
       // a carrier that resolves against the Host root accepts the same form.
       const route = `${channel}/${endpoint}`.slice(1)
-      const validatorKey = `${channel}\0${endpoint}\0${JSON.stringify(payload) ?? ''}`
+      const validatorKey = `${channel}\0${endpoint}\0${JSON.stringify(payload)}`
       const validator = validators.get(validatorKey)
-      const sendCall = (conditional: boolean): Promise<Response> => send(
+      const sendCall = (conditional: boolean): Promise<Response> => deadlined(
         route,
         {
           method: 'POST',
@@ -130,6 +137,74 @@ export function createWebConnectionRpc(doFetch?: RpcFetch, openStream?: RpcStrea
         return openStream(endpoint, payload, signal, uplink)
       },
     },
+  }
+}
+
+/**
+ * Bound one fetch exchange, including a transport that ignores its abort
+ * signal: the race rejects at the deadline and clears the timer on every
+ * outcome. The caller's signal still aborts immediately.
+ */
+async function withDeadline(
+  send: RpcFetch,
+  input: string | URL,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => {
+    controller.abort(new Error(`connection: RPC timed out after ${String(timeoutMs)}ms`))
+  }, timeoutMs)
+  const timerWithUnref: unknown = timer
+  if (typeof timerWithUnref === 'object' && timerWithUnref !== null && 'unref' in timerWithUnref) {
+    (timerWithUnref as { unref: () => void }).unref()
+  }
+  const caller = init.signal
+  const signal = caller === undefined || caller === null
+    ? controller.signal
+    : AbortSignal.any([caller, controller.signal])
+  const onAbort = (): void => {
+    const reason: unknown = signal.reason
+    reject(reason instanceof Error ? reason : new Error('connection: RPC aborted'))
+  }
+  let reject!: (error: Error) => void
+  const aborted = new Promise<never>((_resolve, rejectPromise) => {
+    reject = rejectPromise
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  })
+  let cleanedUp = false
+  const cleanup = (): void => {
+    if (cleanedUp) return
+    cleanedUp = true
+    clearTimeout(timer)
+    signal.removeEventListener('abort', onAbort)
+  }
+  try {
+    const response = await Promise.race([send(input, { ...init, signal }), aborted])
+    if (response.body === null || response.status === 304 || response.status === 204) {
+      cleanup()
+      return response
+    }
+    const wrap = <T>(promise: Promise<T>): Promise<T> =>
+      Promise.race([promise, aborted]).finally(cleanup)
+    return new Proxy(response, {
+      get(target, prop, receiver) {
+        if (prop === 'json') return () => wrap(target.json())
+        if (prop === 'text') return () => wrap(target.text())
+        if (prop === 'formData') return () => wrap(target.formData())
+        if (prop === 'blob') return () => wrap(target.blob())
+        if (prop === 'arrayBuffer') return () => wrap(target.arrayBuffer())
+        const val: unknown = Reflect.get(target, prop, receiver)
+        if (typeof val === 'function') {
+          return (val as (...args: unknown[]) => unknown).bind(target)
+        }
+        return val
+      },
+    })
+  } catch (error) {
+    cleanup()
+    throw error
   }
 }
 

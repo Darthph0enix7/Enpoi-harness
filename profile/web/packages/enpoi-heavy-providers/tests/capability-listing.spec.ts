@@ -71,7 +71,7 @@ interface CapabilityRow {
   contextWindow?: number
   maxTokens?: number
   inputModalities?: readonly string[]
-  reasoningEfforts?: Readonly<Record<string, string>>
+  reasoningEfforts?: Readonly<Record<string, string>> | false
 }
 
 /** Normalize one reader's row: the planner says `input`, llm-pi-ai says `inputModalities`. */
@@ -82,7 +82,7 @@ function capabilityRow(row: {
   maxTokens?: number
   input?: readonly string[]
   inputModalities?: readonly string[]
-  reasoningEfforts?: Readonly<Record<string, string>>
+  reasoningEfforts?: Readonly<Record<string, string>> | false
 }): CapabilityRow {
   return {
     id: row.id,
@@ -92,7 +92,9 @@ function capabilityRow(row: {
     ...row.input === undefined && row.inputModalities === undefined
       ? {}
       : { inputModalities: row.input ?? row.inputModalities },
-    ...row.reasoningEfforts === undefined ? {} : { reasoningEfforts: row.reasoningEfforts },
+    ...row.reasoningEfforts === undefined || row.reasoningEfforts === false
+      ? {}
+      : { reasoningEfforts: row.reasoningEfforts },
   }
 }
 
@@ -155,11 +157,32 @@ it('routeProfile writes the manifest compat switches and the disclosed ladder', 
     name: 'Claude Sonnet 5.5',
     contextWindow: 1_000_000,
     input: ['text', 'image', 'pdf'],
+    // The listing's thinking disclosure survives the first write; it states no
+    // tool support, so `tools` stays undisclosed rather than becoming false.
+    reasoning: true,
     reasoningEfforts: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   })
   // A listing that discloses no ladder writes none: absent, never an empty dict
   // the route schema would refuse as declared-but-empty.
   expect(profile.models[1]).toEqual({ id: 'plain-model', contextWindow: 200_000, maxTokens: 8192 })
+})
+
+it('persists disclosed tools:false and reasoning:false on an llm-pi-ai route', () => {
+  const profile = routeProfile(manifestById('meridian')!, 'reuse', [
+    { id: 'plain', tools: false, reasoning: false },
+    { id: 'mixed', tools: true, reasoning: true },
+    { id: 'silent' },
+  ])
+  expect(profile.models).toEqual([
+    { id: 'plain', tools: false, reasoning: false },
+    { id: 'mixed', tools: true, reasoning: true },
+    { id: 'silent' },
+  ])
+  // A custom-protocol namespace keeps only fields its own schema declares.
+  const commandcode = routeProfile(manifestById('commandcode')!, 'reuse', [
+    { id: 'plain', tools: false, reasoning: false },
+  ])
+  expect(commandcode.models).toEqual([{ id: 'plain' }])
 })
 
 it('an Add-created Meridian route carries the compat and the ladder immediately', async () => {
@@ -179,6 +202,7 @@ it('an Add-created Meridian route carries the compat and the ladder immediately'
       name: 'Claude Sonnet 5.5',
       contextWindow: 1_000_000,
       input: ['text', 'image', 'pdf'],
+      reasoning: true,
       reasoningEfforts: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
     },
     { id: 'plain-model', contextWindow: 200_000, maxTokens: 8192 },

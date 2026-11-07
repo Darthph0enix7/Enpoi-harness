@@ -135,20 +135,6 @@ function MicroIcon({ d, size = 11 }: { d: string; size?: number }): ReactNode {
   )
 }
 
-/** Monochrome tab glyph for Git (thin stroke, currentColor), also the guide capsule icon. */
-export function GitIcon(
-  { size = 16, className }: { size?: number | undefined; active?: boolean | undefined; className?: string | undefined },
-) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" className={className}>
-      <circle cx="4.6" cy="3.6" r="1.7" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="4.6" cy="12.4" r="1.7" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="11.4" cy="7.2" r="1.7" stroke="currentColor" strokeWidth="1.3" />
-      <path d="M4.6 5.3v5.4M4.6 8.4h3.4a1.7 1.7 0 001.7-1.7V7.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-    </svg>
-  )
-}
-
 export type GitBodyProps = PropsRuntime<'sidebar.right.pane.tab'> & PropsLocale<'brandEnpoi'>
 
 export function GitBody({ sessionId, useSessions, useTabInfo, t }: GitBodyProps) {

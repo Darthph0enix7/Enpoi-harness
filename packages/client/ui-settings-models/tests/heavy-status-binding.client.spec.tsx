@@ -16,6 +16,9 @@ import {
   HeavyPreflightNote,
   HeavyStatusDot,
   useHeavyStatus,
+  resolveDashboardUrl,
+  sanitizeDashboardUrl,
+  isBrowserRemoteFromHost,
 } from '../src/client/HeavyProviderStatus.tsx'
 import { heavyStatusCache, type HeavyStatusView } from '../src/client/heavy-rpc.ts'
 import { bindHostHeavyManifests, resetHeavyManifestSource } from '../src/client/heavy-manifest-source.ts'
@@ -155,16 +158,19 @@ it('renders the online indicator for the cached healthy, refused, and unknown pr
   stubHeavyFetch((id) => {
     if (id === 'dot-on') return envelope(status('dot-on'))
     if (id === 'dot-off') return envelope(status('dot-off', { health: { ok: false, status: 503, checkedAt: 2 } }))
+    if (id === 'dot-auth') return envelope(status('dot-auth', { health: { ok: false, status: 401, checkedAt: 3, reachable: true } }))
     return refused()
   })
   // Seeded cache snapshots render their state synchronously.
   await heavyStatusCache.read('dot-on')
   await heavyStatusCache.read('dot-off')
+  await heavyStatusCache.read('dot-auth')
 
   render(
     <div>
       <HeavyStatusDot providerId="dot-on" t={t} />
       <HeavyStatusDot providerId="dot-off" t={t} />
+      <HeavyStatusDot providerId="dot-auth" t={t} />
       <HeavyStatusDot providerId="dot-never" t={t} />
     </div>,
   )
@@ -172,6 +178,7 @@ it('renders the online indicator for the cached healthy, refused, and unknown pr
   const dot = (label: string): HTMLElement => screen.getByLabelText(`${en.heavyEndpoint}: ${label}`)
   expect(dot(en.heavyHealthOk).getAttribute('data-state')).toBe('online')
   expect(dot(en.heavyHealthDown).getAttribute('data-state')).toBe('offline')
+  expect(dot(`${en.heavyHealthAuth} (401)`).getAttribute('data-state')).toBe('auth')
   expect(dot(en.heavyHealthUnknown).getAttribute('data-state')).toBe('unknown')
 })
 
@@ -236,4 +243,88 @@ it('keeps the last snapshot when a forced refresh read fails', async () => {
 
   // Fail-soft: the refused probe stores nothing and the old snapshot stays.
   expect(screen.getByTestId('refresh-status').textContent).toBe('probe-refresh')
+})
+
+it('sanitizes dashboard URLs by rejecting non-http(s), stripping userinfo/query/hash, and safely handling relative paths', () => {
+  // Query parameters and hash stripped
+  expect(sanitizeDashboardUrl('http://100.122.163.25:8317/management.html?token=secret#hash')).toBe('http://100.122.163.25:8317/management.html')
+  expect(sanitizeDashboardUrl('http://127.0.0.1:3002?key=xyz')).toBe('http://127.0.0.1:3002')
+  expect(sanitizeDashboardUrl('http://127.0.0.1:3002/')).toBe('http://127.0.0.1:3002/')
+
+  // Userinfo stripped
+  expect(sanitizeDashboardUrl('http://admin:pass@127.0.0.1:8317/panel')).toBe('http://127.0.0.1:8317/panel')
+
+  // Non-http(s) rejected
+  expect(sanitizeDashboardUrl('javascript:alert(1)')).toBeUndefined()
+  expect(sanitizeDashboardUrl('file:///etc/passwd')).toBeUndefined()
+  expect(sanitizeDashboardUrl('data:text/html,bad')).toBeUndefined()
+  expect(sanitizeDashboardUrl('ftp://example.com')).toBeUndefined()
+
+  // Malformed input rejected
+  expect(sanitizeDashboardUrl('not a url')).toBeUndefined()
+  expect(sanitizeDashboardUrl('')).toBeUndefined()
+
+  // Relative paths: only resolve when explicit trusted activeOrigin is provided
+  expect(sanitizeDashboardUrl('/management.html', 'http://100.122.163.25:8317/v1')).toBe('http://100.122.163.25:8317/management.html')
+  expect(sanitizeDashboardUrl('/management.html')).toBeUndefined()
+  expect(sanitizeDashboardUrl('/management.html', 'javascript:alert(1)')).toBeUndefined()
+})
+
+it('retargets loopback dashboard URLs only when port matches service default port, preserving distinct ports and direct delivery', () => {
+  const serviceManifest = {
+    id: 'test-service',
+    label: 'Test Service',
+    summary: 'Test',
+    protocol: 'openai-completions',
+    delivery: 'service' as const,
+    defaultPort: 8317,
+    dashboardUrl: 'http://127.0.0.1:8317/management.html',
+    reuse: { label: 'Reuse', baseURL: 'http://127.0.0.1:8317/v1', note: '', health: { url: 'http://127.0.0.1:8317/healthz' } },
+    local: { label: 'Local', baseURL: 'http://127.0.0.1:8317/v1', deps: [], diskHint: '', install: { default: { steps: [] } }, health: { url: 'http://127.0.0.1:8317/healthz' } },
+    auth: { kind: 'none' as const, keyless: true },
+    requiresBrowser: [],
+    quirks: [],
+    removal: { steps: [], warnings: [] },
+  }
+
+  // 1. Port matches service default port (8317 === 8317) -> retargets to active remote origin
+  expect(resolveDashboardUrl('http://127.0.0.1:8317/management.html', 'http://100.122.163.25:8317/v1', serviceManifest))
+    .toBe('http://100.122.163.25:8317/management.html')
+
+  // 2. Distinct dashboard port 9000 vs service port 8317: NOT retargeted to 8317, kept distinct
+  expect(resolveDashboardUrl('http://127.0.0.1:9000/management.html', 'http://100.122.163.25:8317/v1', serviceManifest))
+    .toBe('http://127.0.0.1:9000/management.html')
+
+  // 3. Direct delivery (CommandCode): never rewritten
+  const directManifest = {
+    ...serviceManifest,
+    id: 'commandcode',
+    delivery: 'direct' as const,
+    dashboardUrl: 'https://commandcode.ai',
+  }
+  expect(resolveDashboardUrl('https://commandcode.ai', 'http://100.122.163.25:8317/v1', directManifest))
+    .toBe('https://commandcode.ai')
+
+  // 4. Explicit overlay external origin/path: preserved verbatim
+  expect(resolveDashboardUrl('http://100.122.163.25:9000/management.html', 'http://100.122.163.25:8317/v1', serviceManifest))
+    .toBe('http://100.122.163.25:9000/management.html')
+
+  // 5. Does not retarget if activeEndpoint is loopback
+  expect(resolveDashboardUrl('http://127.0.0.1:8317/management.html', 'http://127.0.0.1:8317/v1', serviceManifest))
+    .toBe('http://127.0.0.1:8317/management.html')
+})
+
+it('renders retargeted remote dashboard link with neutral dashboard label (no false Local)', () => {
+  render(<HeavyDashboardLinks providerId="freellmapi" mode="reuse" activeEndpoint="http://100.122.163.25:3002/v1" t={t} />)
+  expect(screen.getByRole('link', { name: `${en.heavyDashboard}: http://100.122.163.25:3002 ↗` })).toBeTruthy()
+  expect(screen.queryByText(/Local dashboard/)).toBeNull()
+  expect(screen.queryByText(/127\.0\.0\.1/)).toBeNull()
+})
+
+it('detects when browser location is remote relative to host loopback URL', () => {
+  expect(isBrowserRemoteFromHost('http://127.0.0.1:8317', '100.122.163.25')).toBe(true)
+  expect(isBrowserRemoteFromHost('http://localhost:8317', '100.122.163.25')).toBe(true)
+  expect(isBrowserRemoteFromHost('http://100.122.163.25:8317', '100.122.163.25')).toBe(false)
+  expect(isBrowserRemoteFromHost('http://127.0.0.1:8317', 'localhost')).toBe(false)
+  expect(isBrowserRemoteFromHost('http://127.0.0.1:8317', '127.0.0.1')).toBe(false)
 })

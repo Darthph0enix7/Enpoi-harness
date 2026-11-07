@@ -1140,6 +1140,8 @@ interface CheckpointEntry {
   via: 'llm' | 'template'
   createdAt: number
   inFlight: Promise<CheckpointResult> | null
+  /** Session seq the in-flight refresh snapshotted (0 when none). */
+  inFlightSeq: number
 }
 
 /**
@@ -1150,6 +1152,29 @@ interface CheckpointEntry {
 interface PendingCheckpointCommit {
   data: CheckpointData
   text: string
+}
+
+/**
+ * Maximum compaction ids retained per session: held summaries awaiting their
+ * end plus recently handled ids used to make repeated summary/end pairs
+ * idempotent. Bounded so compaction count cannot grow per-session state.
+ */
+export const KEEPER_COMPACTION_ID_MEMORY = 8
+
+/** Per-session compaction id bookkeeping (all rings capped at the same size). */
+interface CompactionMemory {
+  /** Summaries awaiting their matching end, oldest first. */
+  pending: string[]
+  /** Ids whose end was consumed; a replay never refreshes, oldest first. */
+  handled: string[]
+  /** Open compaction brackets (`compaction/start` without its matching end). */
+  open: string[]
+}
+
+/** One in-flight refresh's ownership token; forget/dispose marks it stale. */
+interface RefreshOwnership {
+  readonly sessionId: string
+  stale: boolean
 }
 
 /**
@@ -1170,6 +1195,22 @@ export class CheckpointService {
   /** Sessions with a flush microtask already queued (coalesces event bursts). */
   private readonly flushQueued = new Set<string>()
 
+  /**
+   * Per-session compaction id memory: summaries held for their matching end,
+   * plus ids whose end was already consumed so a replayed summary/end pair
+   * cannot refresh twice. Both rings are capped per session, so state stays
+   * bounded regardless of compaction count. LRU-bounded by session too.
+   */
+  private readonly compactionMemory = new BoundedSessionCache<CompactionMemory>()
+
+  /**
+   * Small late-completion guard: a refresh that resolves after its session was
+   * forgotten (or after plugin disposal) must not publish. The set holds only
+   * in-flight refreshes, so it is naturally bounded.
+   */
+  private readonly refreshOwnership = new Set<RefreshOwnership>()
+  private disposed = false
+
   constructor(
     private readonly ctx: Context,
     private readonly config: Config,
@@ -1187,9 +1228,111 @@ export class CheckpointService {
    * @param sessionId - the disposed session's id.
    */
   forget(sessionId: string): void {
+    for (const ownership of this.refreshOwnership) {
+      if (ownership.sessionId === sessionId) ownership.stale = true
+    }
     this.cache.delete(sessionId)
     this.pending.delete(sessionId)
+    this.compactionMemory.delete(sessionId)
     this.flushQueued.delete(sessionId)
+  }
+
+  /** Drop every per-session projection and held boundary (plugin teardown). */
+  dispose(): void {
+    this.disposed = true
+    for (const ownership of this.refreshOwnership) ownership.stale = true
+    this.cache.clear()
+    this.pending.clear()
+    this.compactionMemory.clear()
+    this.flushQueued.clear()
+  }
+
+  /**
+   * Record a `compaction/start` bracket. The keeper may log its durable
+   * `state/checkpoint` while the bracket is open, but must not commit a
+   * surface message until the matching end: the compaction backend asserts the
+   * whole surface is unchanged during summarization.
+   * @param session - the compacting session.
+   * @param compactionId - the durable compaction identity.
+   */
+  noteCompactionStart(session: Session, compactionId: string): void {
+    const memory = this.compactionMemory.get(session.id) ?? { pending: [], handled: [], open: [] }
+    if (memory.open.includes(compactionId)) return
+    memory.open.push(compactionId)
+    if (memory.open.length > KEEPER_COMPACTION_ID_MEMORY) memory.open.shift()
+    this.compactionMemory.set(session.id, memory)
+  }
+
+  /**
+   * Close a `compaction/start` bracket on its matching end, success or error.
+   * @param session - the compacting session.
+   * @param compactionId - the id the end event names.
+   * @returns whether a matching bracket was open.
+   */
+  noteCompactionEnd(session: Session, compactionId: string): boolean {
+    const memory = this.compactionMemory.get(session.id)
+    if (memory === undefined) return false
+    const index = memory.open.indexOf(compactionId)
+    if (index === -1) return false
+    memory.open.splice(index, 1)
+    this.compactionMemory.set(session.id, memory)
+    return true
+  }
+
+  /**
+   * Whether a compaction bracket is open for the session.
+   * @param session - the session to probe.
+   * @returns whether a surface commit must wait for the bracket's end.
+   */
+  compactionOpen(session: Session): boolean {
+    const memory = this.compactionMemory.get(session.id)
+    return memory !== undefined && memory.open.length > 0
+  }
+
+  /**
+   * Hold a compaction summary until its matching end. Mechanical summaries are
+   * held too: the end's `error` — not the summary's provider or
+   * `summarizationFailure` diagnostic — is the transaction outcome. Duplicate
+   * or already-handled ids are ignored.
+   * @param session - the compacting session.
+   * @param compactionId - the durable compaction identity.
+   */
+  noteCompactionSummary(session: Session, compactionId: string): void {
+    const memory = this.compactionMemory.get(session.id) ?? { pending: [], handled: [], open: [] }
+    if (memory.handled.includes(compactionId) || memory.pending.includes(compactionId)) return
+    memory.pending.push(compactionId)
+    if (memory.pending.length > KEEPER_COMPACTION_ID_MEMORY) memory.pending.shift()
+    this.compactionMemory.set(session.id, memory)
+  }
+
+  /**
+   * Consume the `compaction/end` attempt for a held summary. A matching clean
+   * end is the single refresh for that id; an errored end consumes it without
+   * refreshing. An end for an unheld id (mismatch or lost summary) drops every
+   * held id because that transaction can no longer complete. Already-handled
+   * ids are idempotent.
+   * @param session - the compacting session.
+   * @param compactionId - the id the end event names.
+   * @param failed - whether the end carried an `error`.
+   * @returns whether this clean end is the one refresh for the held id.
+   */
+  consumeCompactionEnd(session: Session, compactionId: string, failed: boolean): boolean {
+    const memory = this.compactionMemory.get(session.id)
+    if (memory === undefined) return false
+    if (memory.handled.includes(compactionId)) return false
+    const index = memory.pending.indexOf(compactionId)
+    if (index === -1) {
+      if (memory.pending.length > 0) {
+        memory.pending = []
+        this.compactionMemory.set(session.id, memory)
+      }
+      return false
+    }
+    memory.pending.splice(index, 1)
+    memory.handled.push(compactionId)
+    if (memory.handled.length > KEEPER_COMPACTION_ID_MEMORY) memory.handled.shift()
+    this.compactionMemory.set(session.id, memory)
+    return !failed
   }
 
   /**
@@ -1197,8 +1340,9 @@ export class CheckpointService {
    *
    * Safe to call from any wake (the on-demand path, a lifecycle listener, a
    * queued microtask):
-   * - a still-open batch leaves the text pending (commit is never allowed
-   *   between a call and its result);
+   * - a still-open tool batch or compaction bracket leaves the text pending
+   *   (a surface message is never allowed between a call and its result, nor
+   *   while the compaction's whole-surface summary is being prepared);
    * - a newer `state/checkpoint` already committed wins — the pending record is
    *   dropped instead of resurrecting stale text through `surfaceOp: replace`;
    * - a re-entered append (a session-event publication is still open) restores
@@ -1210,6 +1354,7 @@ export class CheckpointService {
     const pending = this.pending.get(session.id)
     if (pending === undefined) return false
     if (openToolBatch(session)) return false
+    if (this.compactionOpen(session)) return false
     const latest = latestCheckpoint(session)
     // A newer committed checkpoint wins. The version alone misses a concurrent
     // writer that derived the same version from the same base (two mounted
@@ -1234,6 +1379,7 @@ export class CheckpointService {
           via: latest.via,
           createdAt: latest.createdAt,
           inFlight: current.inFlight,
+          inFlightSeq: current.inFlightSeq,
         })
       }
       diag(`flushPendingCheckpoint: session=${session.id} — dropping v${pending.data.version} (v${latest.version} already committed)`)
@@ -1282,8 +1428,11 @@ export class CheckpointService {
    *
    * `force` (a segment cut) refreshes even inside the freshness window: the
    * boundary busts the prompt cache anyway, and the keeper's brief is a
-   * point-in-time snapshot by contract. Never throws for provider failures —
-   * the deterministic template always yields a valid checkpoint.
+   * point-in-time snapshot by contract. When this call flushes a deferred
+   * surface commit, that commit IS the segment's single surface write: paying a
+   * second pass would append another checkpoint for the same boundary. Never
+   * throws for provider failures — the deterministic template always yields a
+   * valid checkpoint.
    * @param session - the session to checkpoint.
    * @param opts - `force` for a segment-cut refresh.
    * @returns whether the checkpoint is present and how it was produced.
@@ -1293,14 +1442,22 @@ export class CheckpointService {
     // Never lose a deferred refresh: a session that produced no further event
     // after its batch closed still commits the newest text on this wake. A
     // still-open batch keeps it pending; the event hook flushes when it closes.
+    let flushed = false
     try {
-      this.flushPendingCheckpoint(session)
+      flushed = this.flushPendingCheckpoint(session)
     } catch (error) {
       diag(`ensureCheckpoint: session=${session.id} — deferred flush failed (${String(error)})`)
     }
     const cfg = resolveKeeperParams(this.ctx, this.config)
     const key = session.id
     const now = Date.now()
+    if (flushed && opts.force === true) {
+      // The bracket just released the refresh that finished inside it. Its
+      // surface commit is the one write the boundary gets; do not pay again.
+      const latest = latestCheckpoint(session)
+      /* v8 ignore next -- a committed flush always leaves its checkpoint in the log. */
+      if (latest !== null) return { ok: true, text: latest.text, model: latest.model, reason: 'refreshed' }
+    }
     let entry = this.cache.get(key)
     if (entry === undefined) {
       const logged = latestCheckpoint(session)
@@ -1314,6 +1471,7 @@ export class CheckpointService {
           via: logged.via,
           createdAt: logged.createdAt,
           inFlight: null,
+          inFlightSeq: 0,
         }
         this.cache.set(key, entry)
       }
@@ -1327,19 +1485,51 @@ export class CheckpointService {
       }
     }
     if (entry?.inFlight != null) {
-      try {
-        return await entry.inFlight
-      } catch {
-        return { ok: false, text: null, reason: 'refreshed' }
+      // A forced refresh triggered by a compaction boundary must COVER that
+      // boundary. An in-flight pass snapshotted before the boundary cannot be
+      // returned as its result: await it, then let exactly one newer pass run.
+      const targetSeq = session.seq
+      if (opts.force !== true || entry.inFlightSeq >= targetSeq) {
+        try {
+          return await entry.inFlight
+        } catch {
+          return { ok: false, text: null, reason: 'refreshed' }
+        }
       }
+      const prior = await entry.inFlight.then(
+        (result) => result,
+        () => null,
+      )
+      const current = this.cache.get(key)
+      // A pass registered while we waited may already cover the boundary.
+      if (current?.inFlight != null && current.inFlightSeq >= targetSeq) {
+        try {
+          return await current.inFlight
+        } catch {
+          return { ok: false, text: null, reason: 'refreshed' }
+        }
+      }
+      // The awaited pass (or a concurrent one) already snapshotted at/after the
+      // boundary: never mark an older checkpoint fresh over it.
+      if (current !== undefined && current.basedOnSeq >= targetSeq) {
+        return { ok: true, text: current.text, model: current.model, reason: 'refreshed' }
+      }
+      // A failed/rejected pass must not trigger a paid duplicate; the natural
+      // staleness floor (or the next cut) retries later.
+      if (prior === null || prior.ok !== true) {
+        return prior ?? { ok: false, text: null, reason: 'refreshed' }
+      }
+      // Fall through to exactly one refresh covering the boundary.
+      entry = current ?? entry
     }
     const snapshotSeq = session.seq
-    const promise = this.refresh(session, snapshotSeq, cfg, structural)
+    const promise = this.refresh(session, snapshotSeq, cfg, structuralTotal(session))
     this.cache.set(key, {
       ...(entry ?? {
         version: 0, basedOnSeq: 0, basedOnStructuralCount: 0, text: '', model: '', via: 'template', createdAt: 0,
       }),
       inFlight: promise,
+      inFlightSeq: snapshotSeq,
     })
     try {
       return await promise
@@ -1356,81 +1546,101 @@ export class CheckpointService {
     cfg: Config,
     structural: number,
   ): Promise<CheckpointResult> {
-    let text = ''
-    let model = 'template'
-    let via: 'llm' | 'template' = 'template'
-    const lease = new AbortController()
-    const leaseTimer = setTimeout(() => lease.abort(), cfg.leaseMs ?? 45_000)
+    const ownership: RefreshOwnership = { sessionId: session.id, stale: false }
+    this.refreshOwnership.add(ownership)
     try {
-      const input = frameInput(session, cfg.maxInputEvents ?? 80)
-      if (input.length > 0) {
-        const route = resolveKeeperRoute(this.ctx, cfg)
-        diag(`ensureCheckpoint: session=${session.id} — calling LLM (input ${input.length} chars, route ${route.provider}/${route.model}, basedOnSeq ${snapshotSeq})`)
-        const result = await summarize(this.ctx, cfg, session, input, lease.signal, route, PROSE_PROMPT, false)
-        const prose = cleanKeeperProse(result.text)
-        if (prose.length > 0) {
-          text = prose
-          model = result.route
-          via = 'llm'
+      let text = ''
+      let model = 'template'
+      let via: 'llm' | 'template' = 'template'
+      const lease = new AbortController()
+      const leaseTimer = setTimeout(() => lease.abort(), cfg.leaseMs ?? 45_000)
+      try {
+        const input = frameInput(session, cfg.maxInputEvents ?? 80)
+        if (input.length > 0) {
+          const route = resolveKeeperRoute(this.ctx, cfg)
+          diag(`ensureCheckpoint: session=${session.id} — calling LLM (input ${input.length} chars, route ${route.provider}/${route.model}, basedOnSeq ${snapshotSeq})`)
+          const result = await summarize(this.ctx, cfg, session, input, lease.signal, route, PROSE_PROMPT, false)
+          const prose = cleanKeeperProse(result.text)
+          if (prose.length > 0) {
+            text = prose
+            model = result.route
+            via = 'llm'
+          }
         }
+      } catch (error) {
+        diag(`ensureCheckpoint: session=${session.id} — model path failed, using template (${String(error)})`)
+      } finally {
+        clearTimeout(leaseTimer)
       }
-    } catch (error) {
-      diag(`ensureCheckpoint: session=${session.id} — model path failed, using template (${String(error)})`)
+      if (via === 'template') {
+        text = buildTemplateCheckpoint(session)
+        model = 'template'
+      }
+      const current = this.cache.get(session.id)
+      const version = (latestCheckpoint(session)?.version ?? current?.version ?? 0) + 1
+      const data: CheckpointData = {
+        version,
+        basedOnSeq: snapshotSeq,
+        basedOnStructuralCount: structural,
+        model,
+        via,
+        text,
+        telemetry: checkpointTelemetry(session, { seq: snapshotSeq, model, via }),
+        createdAt: Date.now(),
+      }
+      const rendered = renderCheckpointBlock(data)
+      // Late completion: a disposed service or a forgotten session must never
+      // publish into a session it no longer owns.
+      if (this.disposed || ownership.stale) {
+        diag(`ensureCheckpoint: session=${session.id} — refresh abandoned (session forgotten or keeper disposed)`)
+        return { ok: false, text: null, reason: 'refreshed' }
+      }
+      try {
+        // The durable `state/checkpoint` event is log-only (ignorable, no
+        // message projection), so it is safe mid-batch and mid-compaction; it
+        // also carries the newest version so a later refresh is stamped above
+        // this one.
+        appendCheckpoint(session, data)
+        const batchOpen = openToolBatch(session)
+        const compactionHeld = this.compactionOpen(session)
+        if (batchOpen || compactionHeld) {
+          // Never commit the checkpoint `user/message` between a `tool/call`
+          // and its `tool/result` (a strict provider rejects every later turn
+          // with "Tool result is missing for tool call …"), nor while a
+          // compaction bracket is open: the backend asserts the whole surface
+          // is unchanged until the matching end, and a message inserted there
+          // invalidates the paid summary. Keep the newest rendered block and
+          // let the event hook commit it once BOTH holds close (or the next
+          // ensureCheckpoint, if no event ever comes).
+          this.pending.set(session.id, { data, text: rendered })
+          const hold = compactionHeld ? 'open compaction' : 'open tool batch'
+          diag(`ensureCheckpoint: session=${session.id} — checkpoint v${version} deferred (${hold})`)
+        } else {
+          // A directly committable checkpoint supersedes any older deferred one.
+          this.pending.delete(session.id)
+          commitCheckpointMessage(session, rendered)
+        }
+      } catch (error) {
+        diag(`ensureCheckpoint: session=${session.id} — commit failed (${String(error)})`)
+        return { ok: false, text: null, reason: 'refreshed' }
+      }
+      checkpointCursors.set(session, { seq: session.seq, data })
+      this.cache.set(session.id, {
+        version,
+        basedOnSeq: snapshotSeq,
+        basedOnStructuralCount: structural,
+        text,
+        model,
+        via,
+        createdAt: data.createdAt,
+        inFlight: current?.inFlight ?? null,
+        inFlightSeq: current?.inFlight != null ? current.inFlightSeq : 0,
+      })
+      diag(`ensureCheckpoint: session=${session.id} — appended state/checkpoint v${version} via ${via} (${text.length} chars)`)
+      return { ok: true, text, model, reason: 'refreshed' }
     } finally {
-      clearTimeout(leaseTimer)
+      this.refreshOwnership.delete(ownership)
     }
-    if (via === 'template') {
-      text = buildTemplateCheckpoint(session)
-      model = 'template'
-    }
-    const current = this.cache.get(session.id)
-    const version = (latestCheckpoint(session)?.version ?? current?.version ?? 0) + 1
-    const data: CheckpointData = {
-      version,
-      basedOnSeq: snapshotSeq,
-      basedOnStructuralCount: structural,
-      model,
-      via,
-      text,
-      telemetry: checkpointTelemetry(session, { seq: snapshotSeq, model, via }),
-      createdAt: Date.now(),
-    }
-    const rendered = renderCheckpointBlock(data)
-    try {
-      // The durable `state/checkpoint` event is log-only (ignorable, no message
-      // projection), so it is safe mid-batch; it also carries the newest
-      // version so a later refresh is stamped above this one.
-      appendCheckpoint(session, data)
-      if (openToolBatch(session)) {
-        // Producer fix: never commit the checkpoint `user/message` between a
-        // `tool/call` and its `tool/result` — a strict provider rejects every
-        // later turn with "Tool result is missing for tool call …". Keep the
-        // newest rendered block and let the event hook commit it once the
-        // batch closes (or the next ensureCheckpoint, if no event ever comes).
-        this.pending.set(session.id, { data, text: rendered })
-        diag(`ensureCheckpoint: session=${session.id} — checkpoint v${version} deferred (open tool batch)`)
-      } else {
-        // A directly committable checkpoint supersedes any older deferred one.
-        this.pending.delete(session.id)
-        commitCheckpointMessage(session, rendered)
-      }
-    } catch (error) {
-      diag(`ensureCheckpoint: session=${session.id} — commit failed (${String(error)})`)
-      return { ok: false, text: null, reason: 'refreshed' }
-    }
-    checkpointCursors.set(session, { seq: session.seq, data })
-    this.cache.set(session.id, {
-      version,
-      basedOnSeq: snapshotSeq,
-      basedOnStructuralCount: structural,
-      text,
-      model,
-      via,
-      createdAt: data.createdAt,
-      inFlight: current?.inFlight ?? null,
-    })
-    diag(`ensureCheckpoint: session=${session.id} — appended state/checkpoint v${version} via ${via} (${text.length} chars)`)
-    return { ok: true, text, model, reason: 'refreshed' }
   }
 }
 
@@ -1599,13 +1809,39 @@ export function apply(ctx: Context, config: Config): void {
     // `Session.append`'s publication boundary, where a nested append is
     // rejected; entry is O(1) when nothing is pending.
     ownedCheckpoint.schedulePendingFlush(session)
-    // Trigger 1 — segment cut: the compaction engine commits a boundary
-    // (compaction/end | compaction/summary); refresh the state checkpoint now,
-    // because the boundary already busts the prompt cache.
-    if ((event.type === 'compaction/end' || event.type === 'compaction/summary') && keeperEnabled(ctx)) {
-      void ownedCheckpoint.ensureCheckpoint(session, { force: true }).catch(() => {
-        // the ladder never blocks a turn; the next trigger retries
-      })
+    // Trigger 1 — segment cut: the compaction engine commits
+    // `compaction/summary` and then exactly one `compaction/end` attempt for
+    // the same id. Hold the summary until its MATCHING end, then refresh ONCE
+    // for that id when the end carries no `error` (the boundary already busts
+    // the prompt cache). The end decides the transaction: a model-written,
+    // mechanical, or summarizer-failure summary all refresh on a clean end.
+    // A summary alone, a mismatched id, an errored end, and a duplicate end
+    // never refresh. Held and handled ids are consumed per session, capped,
+    // and cleared on disposal.
+    if (event.type === 'compaction/start') {
+      const data = event.data as { compactionId?: unknown }
+      if (typeof data.compactionId === 'string' && data.compactionId.length > 0) {
+        ownedCheckpoint.noteCompactionStart(session, data.compactionId)
+      }
+    } else if (event.type === 'compaction/summary') {
+      if (keeperEnabled(ctx)) {
+        const data = event.data as { compactionId?: unknown }
+        if (typeof data.compactionId === 'string' && data.compactionId.length > 0) {
+          ownedCheckpoint.noteCompactionSummary(session, data.compactionId)
+        }
+      }
+    } else if (event.type === 'compaction/end') {
+      const data = event.data as { compactionId?: unknown; error?: unknown }
+      if (typeof data.compactionId === 'string' && data.compactionId.length > 0) {
+        ownedCheckpoint.noteCompactionEnd(session, data.compactionId)
+      }
+      if (typeof data.compactionId === 'string' && data.compactionId.length > 0
+        && ownedCheckpoint.consumeCompactionEnd(session, data.compactionId, data.error !== undefined)
+        && keeperEnabled(ctx)) {
+        void ownedCheckpoint.ensureCheckpoint(session, { force: true }).catch(() => {
+          // the ladder never blocks a turn; the next trigger retries
+        })
+      }
     }
     if (event.type !== 'turn/end') return
     if (!keeperEnabled(ctx)) return // Capabilities toggle: keeper disabled
@@ -1648,6 +1884,7 @@ export function apply(ctx: Context, config: Config): void {
     for (const timer of prefetchTimers.values()) clearTimeout(timer)
     prefetchTimers.clear()
     prefetchRunning.clear()
+    ownedCheckpoint.dispose()
     // Oracle Q4 nit: only null the singleton if WE own it — a second mounted
     // instance (tests + runtime) must not kill the first's service.
     if (briefService === ownedService) briefService = null

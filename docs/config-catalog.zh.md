@@ -205,15 +205,42 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-gateway`
 
 - `inject`: `typert`
-- `source`: [`packages/api/gateway/src/index.ts:155`](../packages/api/gateway/src/index.ts)
+- `source`: [`packages/api/gateway/src/index.ts:159`](../packages/api/gateway/src/index.ts)
 
 ```ts config-catalog
 /** Gateway transport configuration. */
 export interface Config {
-  /** WebSocket Ping interval from 1 through 2,147,483,647 milliseconds. @default 2000 */
+  /**
+   * WebSocket Ping and application-heartbeat interval from 0 through
+   * 2,147,483,647 milliseconds; `0` disables both for an emergency mixed-
+   * version window. @default 2000
+   */
   readonly websocketHeartbeatIntervalMs?: number
+  /**
+   * Milliseconds since the last Pong or inbound message after which the Host
+   * terminates a socket. Decoupled from the Ping cadence so a bursty or
+   * high-RTT link is not killed for answering late. @default 30000
+   */
+  readonly websocketMissedHeartbeatTimeoutMs?: number
+  /**
+   * Per-socket `bufferedAmount` ceiling in bytes. Above it the carrier closes
+   * with 1011 instead of growing Host memory. @default 16777216
+   */
+  readonly websocketMaxBufferedBytes?: number
   /** Buffered uplink frame bytes one logical stream may hold before it fails with `gateway/uplink-overflow`. @default 262144 */
   readonly streamInboxBytes?: number
+  /**
+   * Frames retained in one Client's forwarded-event queue before the oldest
+   * plain `emit` frames are dropped; waterfall and cancellation frames are
+   * never dropped. @default 4096
+   */
+  readonly remoteEventQueueMaxFrames?: number
+  /**
+   * Approximate JSON bytes retained in one Client's forwarded-event queue
+   * before the oldest plain `emit` frames are dropped; waterfall and
+   * cancellation frames are never dropped. @default 8388608
+   */
+  readonly remoteEventQueueMaxBytes?: number
   /**
    * Milliseconds a pending forwarded invocation may wait before a Client
    * connecting later receives a replay of it; older entries are cancelled and
@@ -250,7 +277,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-session-controller`
 
 - `inject`: `agentDefaultModel` · `agents` · `attachments` · `fileUploads` · `fs` · `llm` · `sessions` · `sessionProjections` · `sessionQuery` · `typert` · `workspaceRegistry`
-- `source`: [`packages/api/session-controller/src/index.ts:130`](../packages/api/session-controller/src/index.ts)
+- `source`: [`packages/api/session-controller/src/index.ts:134`](../packages/api/session-controller/src/index.ts)
 
 ```ts config-catalog
 /** Session Controller deployment policy. */
@@ -259,6 +286,14 @@ export interface Config {
   readonly nativeOpen?: boolean
   /** Default rows in one `session.list` page (the client loads further pages on demand). */
   readonly listPageSize?: number
+  /** Live items one follow generation retains while the client is not pulling; default 16384. */
+  readonly sessionFollowBufferMaxItems?: number
+  /** Estimated retained bytes one follow generation accepts before a resync; default 8 MiB. */
+  readonly sessionFollowBufferMaxBytes?: number
+  /** Whether a Client-held follow cursor may be answered with a durable suffix; default true. */
+  readonly sessionFollowResume?: boolean
+  /** Dense durable events one resumed follow opening may carry before a full snapshot; default 2048. */
+  readonly sessionFollowResumeMaxEvents?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-session-controller -->
@@ -487,7 +522,7 @@ export interface ConnectionConfig {
   maxRequestBodyBytes?: number
 }
 
-/** Timing for generation readiness and automatic reconnection. */
+/** Timing for generation readiness, retry progression, and browser recovery. */
 export interface ConnectionRecoveryConfig {
   /** First-retry delay cap in ms; actual delay is 50–100% of the cap. Default: 500. */
   backoffBaseMs?: number
@@ -502,6 +537,45 @@ export interface ConnectionRecoveryConfig {
   generationReadyWarnMs?: number
   /** Deadline in ms for readiness, including physical connection setup. Default: 15000. */
   generationReadyTimeoutMs?: number
+  /**
+   * Continuous readiness in ms before a lost generation resets the retry
+   * ladder. A generation that becomes ready and then dies sooner keeps
+   * climbing the jittered backoff; an explicit reconnect still restarts at 1.
+   * Default: 30000.
+   */
+  stableConnectionMs?: number
+  /** Debounce in ms merging one wake burst into one recovery request. Default: 100. */
+  wakeReconnectDebounceMs?: number
+  /**
+   * Silence in ms after which a connected generation is treated as probably
+   * dead on a wake event. Default: 30000, chosen above a plausible single
+   * frame transit; never the old 4 s copy of two heartbeat intervals.
+   */
+  wakeStaleThresholdMs?: number
+  /**
+   * Grace in ms before a wake event may replace an attempt whose physical
+   * handshake recently started. Default: 3000.
+   */
+  wakeConnectingGraceMs?: number
+  /** Interval in ms of the autonomous client liveness watchdog. Default: 5000. */
+  watchdogIntervalMs?: number
+  /**
+   * Silence in ms tolerated by the autonomous watchdog before one coalesced
+   * reconnect. Default: 30000.
+   */
+  watchdogStaleMs?: number
+  /** Debounce in ms coalescing browser `online`/`offline` bursts. Default: 1000. */
+  networkDebounceMs?: number
+  /**
+   * Upper bound in ms of the random per-tab offset added to each wake
+   * reconnect and to a retry after a generation that had reached ready, so
+   * many tabs do not reconnect in lockstep. A first handshake that never
+   * becomes ready keeps the plain 50%–100% retry jitter. Default: 100;
+   * 0 disables the offset.
+   */
+  reconnectStaggerMs?: number
+  /** Deadline in ms for one unary RPC HTTP exchange. Default: 45000. */
+  rpcTimeoutMs?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-client-connection -->
@@ -706,7 +780,10 @@ export interface BasicCompactionConfig extends CompactionPolicyConfig {
   recallFooter?: string
   /** Tool names that must all resolve in the compacting agent's scope for `recallFooter` to be appended. */
   recallFooterTools?: string[]
-  /** Leading `user/message` surface nodes kept verbatim after the system head. Non-negative; defaults to `0`. */
+  /**
+   * Leading human `user/message` surface nodes kept verbatim after the system head; synthetic
+   * keeper/runtime-context user messages stay verbatim without consuming a slot. Non-negative; defaults to `0`.
+   */
   pinLeadingUserMessages?: number
   /** Per-message price ceiling for a pinned leading message; the first failure stops the pin run. Defaults to `4000`. */
   pinLeadingMaxTokens?: number
@@ -1541,7 +1618,7 @@ export interface Config {
 
 - `inject`: `settings`
 - `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/host/first-run/src/index.ts:41`](../packages/host/first-run/src/index.ts)
+- `source`: [`packages/host/first-run/src/index.ts:67`](../packages/host/first-run/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config: the seeded route, and the marker read back on later boots. */
@@ -1552,6 +1629,8 @@ export interface Config {
   provider: string
   /** Model the route serves and the session default points at. */
   model: string
+  /** Model group id seeded as the session default's fallback. */
+  chain: string
   /** Display name written into the route profile. */
   displayName: string
   /** llm-pi-ai wire protocol the route profile declares. */
@@ -1726,6 +1805,35 @@ export interface Config {
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-jobs-local -->
 
+<!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-llm -->
+<a id="deepseek-aidsh-llm"></a>
+
+## `@deepseek-ai/dsh-llm`
+
+- `source`: [`packages/llm/llm/src/index.ts:221`](../packages/llm/llm/src/index.ts)
+
+```ts config-catalog
+/**
+ * Plugin config: how long a route stays demoted after one failure class.
+ *
+ * These are deployment choices, not protocol values, so a composition states
+ * them through `cordis.yml` and the shipped defaults below. Cooldowns live in
+ * process memory only: no settings document and no session log carries them,
+ * and a restart clears every one.
+ */
+export interface Config {
+  /** Cooldown after a completed response that carried no answer (`EMPTY_RESPONSE`), default ~10 min. */
+  emptyResponseCooldownMs: number
+  /** Cooldown after an auth/sign-in gate (`AUTH`), default ~6 h. */
+  authCooldownMs: number
+  /** Fallback cooldown after a rate limit with no provider reset hint, default ~60 s. */
+  rateLimitCooldownMs: number
+  /** Cooldown after a server failure or timeout (`SERVER`/`TIMEOUT`), default ~3 min. */
+  serverCooldownMs: number
+}
+```
+<!-- END GENERATED config-catalog:@deepseek-ai/dsh-llm -->
+
 <!-- BEGIN GENERATED config-catalog:@deepseek-ai/dsh-llm-deepseek-account -->
 <a id="deepseek-aidsh-llm-deepseek-account"></a>
 
@@ -1774,8 +1882,8 @@ export interface Config extends ProtocolConfig {
 ## `@deepseek-ai/dsh-llm-pi-ai`
 
 - `inject`: `llm`
-- `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · `Model` (`@earendil-works/pi-ai`) · [`ModelModality`](../packages/llm/llm/src/index.ts) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/llm/llm-pi-ai/src/config.ts:284`](../packages/llm/llm-pi-ai/src/config.ts)
+- `refs`: `Api` (`@earendil-works/pi-ai`) · `CacheRetention` (`@earendil-works/pi-ai`) · [`LlmNativeFileEncoder`](../packages/llm/llm/src/index.ts) · [`LlmNativeFileMimeType`](../packages/llm/llm/src/index.ts) · [`LlmNativeFileTokenReserve`](../packages/llm/llm/src/index.ts) · `Model` (`@earendil-works/pi-ai`) · [`ModelModality`](../packages/llm/llm/src/index.ts) · `ModelThinkingLevel` (`@earendil-works/pi-ai`) · `OpenAICompletionsCompat` (`@earendil-works/pi-ai`) · [`RetryPolicyConfig`](../packages/llm/llm/src/index.ts) · `ThinkingBudgets` (`@earendil-works/pi-ai`) · `Transport` (`@earendil-works/pi-ai`) · `Volatile` (`@deepseek-ai/cordis`)
+- `source`: [`packages/llm/llm-pi-ai/src/config.ts:321`](../packages/llm/llm-pi-ai/src/config.ts)
 
 ```ts config-catalog
 /** Plugin configuration: the provider routes this instance owns. */
@@ -1806,6 +1914,20 @@ export interface PiAiProviderProfile {
    */
   keyless?: boolean
   /**
+   * Whether this route gates its zero-priced models to the provider's own
+   * clients. The provider's model listing is rewritten by discovery, so a
+   * per-model `gated` marking cannot survive a refresh; this route-level flag
+   * is the durable declaration, and the provider sync stamps `gated: true`
+   * plus {@link freeTierGateReason} on every zero-priced model it writes.
+   * Paid models and models with no disclosed price are untouched.
+   */
+  freeTierGated?: boolean
+  /**
+   * Picker-facing reason stamped beside the gate when {@link freeTierGated} is
+   * set; the sync's own neutral default applies when it is omitted.
+   */
+  freeTierGateReason?: string
+  /**
    * Multi-credential pool for this route. When present, requests rotate
    * across the listed identities (priority-sticky) with per-identity ×
    * per-model cooldowns; a single `apiKeyEnv` remains valid as an implicit
@@ -1823,11 +1945,25 @@ export interface PiAiProviderProfile {
   /** Endpoint for this route's models; defaults to the installed catalog's endpoint. */
   baseURL?: string
   /**
-   * This route's model catalog. Omission serves the installed catalog for the
-   * route unchanged; an explicit list replaces it, each entry defaulting its
-   * unset fields from the installed model of the same id.
+   * This route's model catalog. Omission — and an empty list, which the schema
+   * materializes for it — serves the installed catalog for the route unchanged
+   * unless {@link catalogAuthority} is `endpoint`; a non-empty list replaces
+   * it, each entry defaulting its unset fields from the installed model of the
+   * same id.
    */
   models?: PiAiModelProfile[]
+  /**
+   * Which source may fill the served catalog when {@link models} lists none.
+   * `catalog` (the behavior when omitted) keeps the installed catalog first
+   * and reads the discovered cache only when the installed catalog does not
+   * describe the route. `endpoint` treats configuration and the endpoint's
+   * discovered listing as the whole authority: the installed catalog never
+   * refills the route, a discovered row never inherits an installed entry of
+   * the same id, and a retained successful empty listing serves an empty
+   * catalog instead of failing. A missing discovered record stays an absence,
+   * never a known-empty listing.
+   */
+  catalogAuthority?: 'catalog' | 'endpoint'
   /**
    * Installed-catalog customizations by model id: each entry reshapes that
    * one model with the same fields a {@link models} entry takes, while the
@@ -1925,6 +2061,13 @@ export interface PiAiModelProfile {
   /** Maximum combined request and response context in tokens. */
   contextWindow?: number
   /**
+   * Maximum input tokens (the prompt-side budget), when a source states it
+   * separately from {@link contextWindow}. Stored as a capability and returned
+   * through {@link RouteCatalog.facts}; pi-ai's model type has no input-only
+   * field, so this never becomes a request cap or changes the combined window.
+   */
+  maxInputTokens?: number
+  /**
    * Maximum output tokens. Configuring one also makes it this model's
    * per-request default; a value inherited from the installed catalog, or the
    * route's fallback, is the model's capability and never becomes a request
@@ -1946,6 +2089,14 @@ export interface PiAiModelProfile {
    * endpoint refuses is refused by the provider instead, mid-turn.
    */
   input?: PiAiModality[]
+  /** Whether reasoning is supported; a true flag alone discloses no selectable effort levels. */
+  reasoning?: boolean
+  /**
+   * Whether the model accepts tool declarations. `false` strips tool schemas,
+   * tool history, and tool-call transcripts at the shared dispatch chokepoint;
+   * absent means no source stated tool support.
+   */
+  tools?: boolean
   /**
    * Selectable reasoning efforts. Absent inherits the installed catalog
    * entry's capability (a hand-declared model has none and does not reason);
@@ -1956,6 +2107,13 @@ export interface PiAiModelProfile {
   reasoningEfforts?: false | PiAiReasoningEfforts
   /** pi-ai wire-compatibility switches for this model, winning over the route's per field; one its protocol does not declare is refused. */
   compat?: PiAiCompatProfile
+  /**
+   * Explicit native-file admission for this exact model. Absent keeps every
+   * file as handle text; no model name, endpoint, protocol, or advertised
+   * modality implies it. The encoder must match the model's resolved api, and
+   * the MIME list must be one that encoder can carry.
+   */
+  nativeFileInputs?: PiAiNativeFileInputs
 }
 
 /**
@@ -2096,6 +2254,28 @@ export interface PiAiPoolIdentity {
  */
 export type PiAiReasoningEfforts = Partial<Record<ModelThinkingLevel, string | null>>
 
+/**
+ * Explicit native-file admission for one exact pi-ai model. The declaration is
+ * per model, never inferred from the model name, endpoint, protocol, or an
+ * advertised modality. Omission keeps every file as deterministic handle text.
+ */
+export interface PiAiNativeFileInputs {
+  /** Declaration version this build accepts. */
+  version: 1
+  /** Wire encoder the route's gateway translates; must match the model's api. */
+  encoder: LlmNativeFileEncoder
+  /** MIME types admitted natively; each must be one the encoder can carry. */
+  mime: LlmNativeFileMimeType[]
+  /** Largest raw source file the route admits. */
+  perFileBytes: number
+  /** Largest raw source bytes across all native files in one request. */
+  totalBytes: number
+  /** Largest serialized provider payload the route admits. */
+  maxPayloadBytes: number
+  /** Tokens reserved per native occurrence instead of the handle text. */
+  tokenReserve: LlmNativeFileTokenReserve
+}
+
 /** One reasoning-dispatch wire format a profile may name. */
 export type PiAiThinkingFormat = NonNullable<OpenAICompletionsCompat['thinkingFormat']>
 
@@ -2191,7 +2371,7 @@ export interface ReplayModelConfig {
 ## `@deepseek-ai/dsh-llm-retry`
 
 - `inject`: `agents` · `sessionProjections`
-- `source`: [`packages/llm/llm-retry/src/index.ts:25`](../packages/llm/llm-retry/src/index.ts)
+- `source`: [`packages/llm/llm-retry/src/index.ts:26`](../packages/llm/llm-retry/src/index.ts)
 
 ```ts config-catalog
 /** This policy executor has no config; providers own `retryPolicy`. */
@@ -2836,7 +3016,7 @@ export type SessionLogCompressionLevel = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
 
 ## `@deepseek-ai/dsh-session-persistence-jsonl`
 
-- `source`: [`packages/session/session-persistence-jsonl/src/index.ts:97`](../packages/session/session-persistence-jsonl/src/index.ts)
+- `source`: [`packages/session/session-persistence-jsonl/src/index.ts:98`](../packages/session/session-persistence-jsonl/src/index.ts)
 
 ```ts config-catalog
 /** Plugin config for the JSONL backend's root and physical encoding. */
@@ -4808,7 +4988,6 @@ export interface Config {
 | `@deepseek-ai/dsh-host-directory-picker-auto` | `webServer` · `loader` | [`packages/host/directory-picker-auto/src/index.ts`](../packages/host/directory-picker-auto/src/index.ts) |
 | `@deepseek-ai/dsh-host-directory-picker-native` | — | [`packages/host/directory-picker-native/src/index.ts`](../packages/host/directory-picker-native/src/index.ts) |
 | `@deepseek-ai/dsh-host-plugin-inventory` | `loader` | [`packages/host/plugin-inventory/src/index.ts`](../packages/host/plugin-inventory/src/index.ts) |
-| `@deepseek-ai/dsh-llm` | — | [`packages/llm/llm/src/index.ts`](../packages/llm/llm/src/index.ts) |
 | `@deepseek-ai/dsh-lsp` | — | [`packages/lsp/lsp/src/index.ts`](../packages/lsp/lsp/src/index.ts) |
 | `@deepseek-ai/dsh-mcp-resources` | `tools` | [`packages/mcp/mcp-resources/src/index.ts`](../packages/mcp/mcp-resources/src/index.ts) |
 | `@deepseek-ai/dsh-sandbox-ssh` | `ssh` | [`packages/ssh/sandbox-ssh/src/index.ts`](../packages/ssh/sandbox-ssh/src/index.ts) |
@@ -4911,6 +5090,7 @@ export interface Config {
 | `@deepseek-ai/dsh-session-format-v1-to-v2` | — | [`packages/session/session-format-v1-to-v2/src/index.ts`](../packages/session/session-format-v1-to-v2/src/index.ts) |
 | `@deepseek-ai/dsh-session-format-v2-to-v3` | — | [`packages/session/session-format-v2-to-v3/src/index.ts`](../packages/session/session-format-v2-to-v3/src/index.ts) |
 | `@deepseek-ai/dsh-session-format-v3-to-v4` | — | [`packages/session/session-format-v3-to-v4/src/index.ts`](../packages/session/session-format-v3-to-v4/src/index.ts) |
+| `@deepseek-ai/dsh-session-format-v4-to-v5` | — | [`packages/session/session-format-v4-to-v5/src/index.ts`](../packages/session/session-format-v4-to-v5/src/index.ts) |
 | `@deepseek-ai/dsh-session-snapshot` | — | [`packages/test-support/session-snapshot/src/index.ts`](../packages/test-support/session-snapshot/src/index.ts) |
 | `@deepseek-ai/dsh-session-telemetry` | — | [`packages/session/session-telemetry/src/index.ts`](../packages/session/session-telemetry/src/index.ts) |
 | `@deepseek-ai/dsh-session-title-llm` | — | [`packages/session/session-title-llm/src/index.ts`](../packages/session/session-title-llm/src/index.ts) |

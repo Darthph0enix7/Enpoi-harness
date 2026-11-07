@@ -4,8 +4,11 @@
  * The compaction backend writes a `## Durable Facts` section inside the model
  * summary. This subscriber reads that section back from the durable
  * `compaction/summary` event, waits for the MATCHING `compaction/end` (C2), and
- * only then writes the facts into cross-session memory. A failed compaction or
- * a mechanical stub (no model, or the summarizer-failure ladder) never writes.
+ * only then writes the facts into cross-session memory. A failed compaction
+ * never writes. The mechanical omission is the only empty-route summary that is
+ * skipped: it carries a `summarizationFailure`. A custom summarizer that
+ * reports no route but no failure still persists, because a clean end proves
+ * its checkpoint committed.
  *
  * Claims land with `origin: 'compaction'` and `trust: 'verified_execution'`
  * (C3): a checkpoint that committed is executed evidence, but it is not
@@ -138,10 +141,10 @@ export function registerCompactionFacts(
   const onSummary = (session: Session, event: SessionEvent<'compaction/summary'>): void => {
     if (!config.compactionFacts) return
     const data = event.data
-    // Mechanical stub: no model wrote this summary.
-    if (data.provider === '') return
-    // The summarizer failed and the deterministic fallback replaced it.
-    if (data.summarizationFailure !== undefined) return
+    // The mechanical stub is the only empty-route summary with a recorded
+    // failure. A custom summarizer may report no route at all while still
+    // writing real facts; the clean matching end decides whether they persist.
+    if (data.summarizationFailure !== undefined && data.provider === '' && data.model === '') return
     // Subagent children are scratch work unless the operator opts in.
     if (session.header.parentSession !== undefined && !config.compactionFactsIncludeChildSessions) return
     const facts = parseDurableFacts(summaryText(data.summary)).slice(0, config.compactionFactsMax)

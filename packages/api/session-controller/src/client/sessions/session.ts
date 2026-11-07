@@ -8,13 +8,14 @@ import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import type { MessageId } from '@deepseek-ai/dsh-llm/brand'
 import type { UserMessage } from '@deepseek-ai/dsh-llm/types'
 import { SessionLogOffset, SessionSeq, type SessionId } from '@deepseek-ai/dsh-session/types'
-import { SessionEventStream } from '../transport.ts'
+import { SessionEventStream, isSessionSnapshotBehindError } from '../transport.ts'
 import type { SessionJournalChange } from '../transport.ts'
 import type {
   PromptContentPart,
   QueueAction,
   SessionAddress,
   SessionAssistantStreamBaseline,
+  SessionHistoryRecord,
   SessionProjectionBaseline,
   SessionRequestId,
   SessionRevertFold,
@@ -36,6 +37,7 @@ import {
   type RevertFoldState,
 } from '../../revert-fold.ts'
 import { iterationEdges } from '../../iteration-fold.ts'
+import { durableHistoryRecords } from './history-records.ts'
 import { Notifier } from './notifier.ts'
 import { isRemoteFailure } from '@deepseek-ai/dsh-api-gateway/client'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
@@ -650,6 +652,7 @@ export class Session implements SessionFace {
       failed: (error) => {
         this.failEventStream(events, generation, error)
       },
+      window: () => this.windowState(),
     })
     this.events = events
     try {
@@ -682,6 +685,9 @@ export class Session implements SessionFace {
         return
       case 'prepend':
         this.prependWindow(change.entries, change.hasMore, change.page.revert)
+        return
+      case 'resume':
+        this.resumeWindow(change.entries, change.page)
         return
       case 'append':
         this.publishAssistantEntry(this.assistantStream.acceptDurable(change.entry))
@@ -740,6 +746,40 @@ export class Session implements SessionFace {
     this.notifier.markDirty()
   }
 
+  /**
+   * Append one dense resume suffix to the retained window. The window head,
+   * `baseSeq`, `hasMore`, and any in-flight jump pages stay untouched; the
+   * Host baseline reseeds projections, rebuilds Assistant transients, and
+   * covers the suffix in the durable revert fold.
+   * @param entries - durable suffix records after the retained window tail.
+   * @param page - resumed opening metadata (projections, revert fold, baseline).
+   */
+  private resumeWindow(
+    entries: readonly SessionEventLikeEntry[],
+    page: Extract<SessionJournalChange, { type: 'resume' }>['page'],
+  ): void {
+    const durable = this.eventSource.getSnapshot().entries.filter(entry => entry.type === 'event')
+    const tail = durable.at(-1)?.event.seq ?? -1
+    const appended = entries.filter(entry => entry.event.seq > tail)
+    const visible = this.assistantStream.replace([...durable, ...appended], page.assistantStream)
+    if (appended.some(entry => entry.event.type === 'turn/start')) this.firstPromptPendingTurn = false
+    const projections = page.projections === undefined ? undefined : projectionsBaseline(page.projections)
+    if (projections !== undefined) this.projections.seed(projections)
+    this.eventSource.replace(visible, this.hasMore)
+    if (projections !== undefined) {
+      for (const [requestId, { receipt }] of this.submissionSettlements) {
+        if (receipt !== undefined && receipt.seq <= projections.asOfSeq) {
+          this.scheduleObservedRetirement(requestId, receipt.attachments)
+        }
+      }
+    }
+    for (const entry of appended) this.observeSubmissionEvent(entry.event)
+    // The Host fold is taken at the resume cursor, so it covers the suffix
+    // and the Session folds none of it again.
+    this.adoptRevertSource(page.revert, appended)
+    this.notifier.markDirty()
+  }
+
   private publishAssistantEntry(result: ClientAssistantStreamResult): void {
     if (result?.type === 'rebaseline') {
       const events = this.events
@@ -764,8 +804,10 @@ export class Session implements SessionFace {
       if (result.retireAttemptId !== undefined) this.eventSource.settleAssistant(result.retireAttemptId)
       if (changed || result.retireAttemptId !== undefined) this.notifier.markDirty()
     } else if (result?.type === 'transient') {
+      // A streamed chunk only advances the Conversation event feed; no field
+      // of this Session snapshot derives from it. Publishing here re-rendered
+      // every whole-snapshot subscriber once per chunk for no state change.
       this.eventSource.append(result.entry)
-      this.notifier.markDirty()
     }
   }
 
@@ -966,6 +1008,10 @@ export class Session implements SessionFace {
   /** Publish a terminal background failure only while this stream still owns the Session. */
   private failEventStream(events: SessionEventStream, generation: number, error: unknown): void {
     if (generation !== this.openGeneration || this.events !== events) return
+    if (isSessionSnapshotBehindError(error)) {
+      this.reopenFullWindow(events)
+      return
+    }
     if (!isRemoteFailure(error)) throw error
     this.openGeneration++
     this.events = undefined
@@ -974,6 +1020,53 @@ export class Session implements SessionFace {
     this.openError = error
     void events.dispose()
     this.notifier.markDirty()
+  }
+
+  /**
+   * Replace a retained window whose Host log no longer reaches the Client
+   * cursor. A fresh stream asks for an ordinary full snapshot, so the Host
+   * truncation becomes a window replacement rather than a terminal failure.
+   * @param failed - stream whose opening was rejected behind the window.
+   */
+  private reopenFullWindow(failed: SessionEventStream): void {
+    this.openGeneration++
+    if (this.events === failed) this.events = undefined
+    this.openPromise = null
+    void failed.dispose()
+    const generation = this.openGeneration
+    const events = new SessionEventStream(this.remote, this.sessionAddress(), {
+      publish: (change) => {
+        if (generation !== this.openGeneration || this.events !== events) return
+        this.acceptEventChange(change)
+      },
+      failed: (error) => {
+        this.failEventStream(events, generation, error)
+      },
+      window: () => this.windowState(),
+    })
+    this.events = events
+    void (async () => {
+      try {
+        await events.open(HISTORY_PAGE_OPTIONS)
+      } catch (error: unknown) {
+        if (generation !== this.openGeneration || this.events !== events) return
+        this.events = undefined
+        this.openState = 'error'
+        this.openError = isRemoteFailure(error)
+          ? error
+          : new RemoteError('gateway/internal', error instanceof Error ? error.message : String(error), {}, { cause: error })
+      } finally {
+        if (generation === this.openGeneration) this.notifier.markDirty()
+      }
+    })()
+  }
+
+  /** Durable window and paging bit read by the follow transport at each generation. */
+  private windowState(): { readonly records: readonly SessionHistoryRecord[]; readonly hasMore: boolean } {
+    return {
+      records: durableHistoryRecords(this.eventSource.getSnapshot().entries),
+      hasMore: this.hasMore,
+    }
   }
 
   private buildSnapshot(): SessionSnapshot {

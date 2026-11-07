@@ -52,31 +52,6 @@
         sessionHeaders:
           opencode-go: x-opencode-session
           opencode: x-opencode-session
-        # Capacity fallbacks for models the live /models endpoint does not
-        # describe (most OpenAI-style listings carry only ids). Per-model
-        # truth wins first: models.dev, the installed catalog, and the
-        # catalog overlays (catalog-overlays.json) all size a known id before
-        # these defaults apply. The opencode-go maxTokens ceiling is 131072
-        # because every model that route serves outputs at least 65536 and
-        # most cap at 128k–131k; the old 16384 silently under-capped every id
-        # nothing else described. `prefixes` matches by model-id prefix;
-        # `default` covers everything else on the route.
-        capacityDefaults:
-          opencode-go:
-            default: { contextWindow: 1000000, maxTokens: 131072 }
-          opencode:
-            default: { contextWindow: 1000000, maxTokens: 64000 }
-          minimax:
-            default: { contextWindow: 1000000, maxTokens: 16384 }
-          deepseek:
-            default: { contextWindow: 1000000, maxTokens: 8192 }
-          huggingface:
-            default: { contextWindow: 262144, maxTokens: 8192 }
-          antigravity:
-            prefixes:
-              gemini: { contextWindow: 1048576, maxTokens: 65536 }
-              claude: { contextWindow: 1000000, maxTokens: 64000 }
-            default: { contextWindow: 1048576, maxTokens: 65536 }
         # Route-level ids this deployment pins against catalog-driven removal:
         # a pinned id survives every refresh even when neither the endpoint
         # nor models.dev advertises it (a hand-added model is protected by its

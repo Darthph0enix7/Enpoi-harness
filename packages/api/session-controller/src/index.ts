@@ -20,7 +20,11 @@ import {
 } from './agent.ts'
 import { SessionCommandController } from './commands.ts'
 import { SessionControlController } from './control.ts'
-import { SessionHistoryController } from './history.ts'
+import {
+  DEFAULT_SESSION_FOLLOW_BUFFER_LIMITS,
+  DEFAULT_SESSION_FOLLOW_RESUME_MAX_EVENTS,
+  SessionHistoryController,
+} from './history.ts'
 import { SessionFileReferences } from './file-references.ts'
 import { ApiSessionList } from './list.ts'
 import { buildModelCatalog, hasProviderApiKey } from './catalog.ts'
@@ -132,6 +136,14 @@ export interface Config {
   readonly nativeOpen?: boolean
   /** Default rows in one `session.list` page (the client loads further pages on demand). */
   readonly listPageSize?: number
+  /** Live items one follow generation retains while the client is not pulling; default 16384. */
+  readonly sessionFollowBufferMaxItems?: number
+  /** Estimated retained bytes one follow generation accepts before a resync; default 8 MiB. */
+  readonly sessionFollowBufferMaxBytes?: number
+  /** Whether a Client-held follow cursor may be answered with a durable suffix; default true. */
+  readonly sessionFollowResume?: boolean
+  /** Dense durable events one resumed follow opening may carry before a full snapshot; default 2048. */
+  readonly sessionFollowResumeMaxEvents?: number
 }
 
 /** Host integrations replaceable by direct unit tests. */
@@ -169,6 +181,10 @@ export class SessionController extends TypertRemoteService {
   static Config: z<Config> = z.object({
     nativeOpen: z.boolean(),
     listPageSize: z.number().step(1).min(1).max(500).default(50),
+    sessionFollowBufferMaxItems: z.number().step(1).min(1).default(DEFAULT_SESSION_FOLLOW_BUFFER_LIMITS.maxItems),
+    sessionFollowBufferMaxBytes: z.number().step(1).min(1).default(DEFAULT_SESSION_FOLLOW_BUFFER_LIMITS.maxBytes),
+    sessionFollowResume: z.boolean().default(true),
+    sessionFollowResumeMaxEvents: z.number().step(1).min(1).default(DEFAULT_SESSION_FOLLOW_RESUME_MAX_EVENTS),
   })
 
   private readonly agents: ApiSessionAgentController
@@ -208,7 +224,13 @@ export class SessionController extends TypertRemoteService {
     ctx.effect(() => async () => {
       await Promise.allSettled([...this.promotions])
     }, 'session-controller.promotions')
-    this.history = new SessionHistoryController(ctx, (observation) => { this.promote(observation) })
+    this.history = new SessionHistoryController(ctx, (observation) => { this.promote(observation) }, {
+      maxItems: config.sessionFollowBufferMaxItems ?? DEFAULT_SESSION_FOLLOW_BUFFER_LIMITS.maxItems,
+      maxBytes: config.sessionFollowBufferMaxBytes ?? DEFAULT_SESSION_FOLLOW_BUFFER_LIMITS.maxBytes,
+    }, {
+      enabled: config.sessionFollowResume ?? true,
+      maxEvents: config.sessionFollowResumeMaxEvents ?? DEFAULT_SESSION_FOLLOW_RESUME_MAX_EVENTS,
+    })
     this.listState = new ApiSessionList(ctx, config.listPageSize ?? 50)
     this.fileApplications = internals.fileApplications ?? nativeFileApplications
     this.openFileApplication = internals.openFileApplication ?? openNativeFileApplication

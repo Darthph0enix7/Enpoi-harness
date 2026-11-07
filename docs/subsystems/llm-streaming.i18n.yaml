@@ -6,8 +6,8 @@
   en: 989057ec9786a505
   zh: 03e20367da473086
 /llm-streaming/content-blocks-and-messages:
-  en: 365ecc228f756098
-  zh: 396e68661a789854
+  en: eba8b78599c2fc0b
+  zh: bec2e10a8cf1a6e8
 /llm-streaming/streamchunk-the-raw-protocol:
   en: a18fe401763efde4
   zh: ef59a76d9c694654
@@ -20,6 +20,9 @@
 /llm-streaming/request-image-pricing:
   en: 10598e1a98262415
   zh: 7fb85b22174a1497
+/llm-streaming/request-file-policy:
+  en: b739cda263cfcc07
+  zh: 35c49fc9751baf6f
 /llm-streaming/the-adapter-contract:
   en: f9dacddf34a48d66
   zh: 1a426c55909c081f
@@ -36,8 +39,8 @@
   en: 58dec2259b0b1c6f
   zh: fc99fe965acaabf3
 /llm-streaming/the-model-request:
-  en: ddca84b082554567
-  zh: 804ffb1cb0c94bfa
+  en: 41c6a3d9bfa526a1
+  zh: 4810fd2ff5ffb4e6
 /llm-streaming/the-model-request/the-request-envelope-llmcallconfig-and-the-logged-header:
   en: 8b6e6b65ccea943f
   zh: bce1edd6386e37b1
@@ -45,5 +48,5 @@
   en: b19f291f094157ed
   zh: 682f13a833e8bb52
 /llm-streaming/service-and-provider-contracts:
-  en: 8dc79d4cc82824c2
-  zh: 3ebabd3a117ad717
+  en: b291551f9a83bb4c
+  zh: 5fd44f9c86798802

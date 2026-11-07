@@ -146,24 +146,28 @@ describe('compaction facts subscriber — C2 trigger matrix', () => {
     expect(pipeline.list().map(row => row.fact)).toEqual(['alpha beta gamma'])
   })
 
-  it('skips the mechanical stub (provider === "")', async () => {
-    register()
-    emit('session/event', session(), summaryEvent('c1', FACTS, { provider: '' }))
-    emit('session/event', session(), endEvent())
-    await settle()
-
-    expect(pipeline.list()).toHaveLength(0)
-  })
-
-  it('skips a summary carrying summarizationFailure', async () => {
+  it('skips the mechanical stub (empty route plus summarizationFailure)', async () => {
     register()
     emit('session/event', session(), summaryEvent('c1', FACTS, {
+      provider: '',
+      model: '',
       summarizationFailure: { code: 'LLM_ERROR', message: 'provider exploded' },
     }))
     emit('session/event', session(), endEvent())
     await settle()
 
     expect(pipeline.list()).toHaveLength(0)
+  })
+
+  it('persists facts from a custom summary with an empty route but no failure', async () => {
+    register()
+    emit('session/event', session(), summaryEvent('c1', FACTS, { provider: '', model: '' }))
+    emit('session/event', session(), endEvent())
+    await settle()
+
+    expect(pipeline.list().map(row => row.fact)).toHaveLength(3)
+    const provenance = JSON.parse(pipeline.list()[0]!.provenance)
+    expect(provenance.summaryRoute).toBe('/')
   })
 
   it('skips child sessions by default and captures them when enabled', async () => {

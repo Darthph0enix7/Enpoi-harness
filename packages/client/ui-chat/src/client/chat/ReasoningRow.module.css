@@ -26,21 +26,25 @@
   content: '';
   position: absolute;
   inset-block: 0;
-  left: 0;
-  width: 300px;
+  left: -100%;
+  width: 100%;
   background: linear-gradient(
     90deg,
     transparent 0%,
     color-mix(in srgb, var(--dsw-alias-bg-base) 60%, transparent) 55%,
     transparent 100%
-  );
+  ) no-repeat;
+  background-size: 300px 100%;
   animation: dsh-reasoning-row-sweep 2.6s ease-out infinite;
   pointer-events: none;
 }
 
+/* The sweep moves on the compositor: `left` would relayout the row every
+   frame. The 300px gradient band rides a full-row track from off-left to
+   off-right, so the visible start/end match the old layout animation. */
 @keyframes dsh-reasoning-row-sweep {
-  0% { left: -300px; }
-  90%, 100% { left: 100%; }
+  0% { transform: translateX(0); }
+  90%, 100% { transform: translateX(200%); }
 }
 
 .leading {
@@ -106,6 +110,10 @@
 @media (prefers-reduced-motion: reduce) {
   .root[data-state='running'] .row::after {
     animation: none;
+    /* Keep the static running band the old layout animation left at its origin. */
+    left: 0;
+    width: 300px;
+    transform: none;
   }
 }
 

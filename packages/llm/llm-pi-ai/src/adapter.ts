@@ -48,6 +48,7 @@ import {
   FREE_TIER_GATED_EXPLANATION,
   LlmAdapter,
   LlmError,
+  llmNativeFileEncoderFor,
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import type {
@@ -55,16 +56,31 @@ import type {
   GenerateOptions,
   ImageAttachmentAccess,
   LlmModelInfo,
+  LlmNativeFileEncoder,
+  LlmNativeFileInputs,
   LlmProviderInfo,
   LlmResolvedModelInfo,
   LlmErrorOptions,
   LlmFailure,
+  ModelModality,
   PreparedAdapterCall,
   ReasoningEffortId as ReasoningEffortIdType,
+  RequestMessage,
   ResolvedRetryPolicy,
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type {
+  NativeMediaMimeType,
+  NativeMediaOccurrence,
+  NativeMediaPlan,
+  NativeMediaProtocol,
+} from './native-media.ts'
+import {
+  buildNativeMediaPlan,
+  createNativeMediaPayloadPatcher,
+  insertNativeMediaSentinels,
+} from './native-media.ts'
 import {
   CAPACITY_BACKOFF_TIERS_MS,
   classifyFailure,
@@ -74,6 +90,7 @@ import {
 } from './pool.ts'
 import type { PoolFailureClass } from './pool.ts'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
+import type { PiAiModelCatalogFacts } from './catalog.ts'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { toPiContext } from './context.ts'
 import { createModels, getSupportedThinkingLevels } from './models.ts'
@@ -280,6 +297,9 @@ function reasoningInfo(
 ): Pick<LlmResolvedModelInfo, 'reasoning'> | Record<string, never> {
   if (!model.reasoning) return {}
   const levels = getSupportedThinkingLevels(model)
+  // Reasoning support with no disclosed level offers no selectable control; the
+  // provider default applies and an explicit effort is refused at request time.
+  if (levels.length === 0) return {}
   return {
     reasoning: {
       efforts: levels.map(level => ({
@@ -291,6 +311,29 @@ function reasoningInfo(
   }
 }
 
+/**
+ * Catalog facts for a profile that retained none. Resolution always stores
+ * facts for every serviceable model, so this answers only a caller-built
+ * profile; it reports the same route-assumption provenance resolution would.
+ */
+function defaultFacts(input: readonly ModelModality[]): PiAiModelCatalogFacts {
+  return { contextWindow: 'default', maxTokens: 'default', input: 'default', inputModalities: input }
+}
+
+/**
+ * The advertised input list when it carries something the effective list does
+ * not. A source that names exactly the wire subset adds nothing, so it is left
+ * out instead of duplicating {@link LlmModelInfo.inputModalities}.
+ */
+function advertisedInput(
+  advertised: readonly ModelModality[],
+  effective: readonly ModelModality[],
+): ModelModality[] | undefined {
+  if (advertised.length === effective.length
+    && advertised.every((modality, index) => modality === effective[index])) return undefined
+  return [...advertised]
+}
+
 /** Merge deployment headers while removing case-insensitive attribution collisions. */
 function requestHeaders(headers: Readonly<Record<string, string>> | undefined): Record<string, string> {
   const attribution = attributionHeaders()
@@ -299,6 +342,60 @@ function requestHeaders(headers: Readonly<Record<string, string>> | undefined): 
     ...Object.fromEntries(Object.entries(headers ?? {}).filter(([name]) => !reserved.has(name.toLowerCase()))),
     ...attribution,
   }
+}
+
+/**
+ * pi-ai protocol each native encoder writes. Configuration rejects an encoder
+ * whose protocol its model does not speak, so this table and the catalog
+ * validator stay the only two places the pairing exists.
+ */
+const NATIVE_ENCODER_PROTOCOL: Readonly<Record<LlmNativeFileEncoder, NativeMediaProtocol>> = {
+  'anthropic-document': 'anthropic-messages',
+  'openai-chat-file': 'openai-completions',
+  'openai-chat-input-audio': 'openai-completions',
+  'openai-chat-video-url': 'openai-completions',
+}
+
+/**
+ * Every user-role file occurrence this descriptor admits, in request order.
+ * Non-user roles and suffixes outside the descriptor stay handle text and are
+ * never planned.
+ * @param messages - request history already projected by the runtime.
+ * @param inputs - the exact route's native-file descriptor.
+ * @returns occurrences ready for {@link buildNativeMediaPlan}.
+ */
+function nativeOccurrencesOf(
+  messages: readonly RequestMessage[],
+  inputs: LlmNativeFileInputs,
+): NativeMediaOccurrence[] {
+  const occurrences: NativeMediaOccurrence[] = []
+  for (const [messageIndex, message] of messages.entries()) {
+    if (message.role !== 'user') continue
+    for (const [blockIndex, block] of message.content.entries()) {
+      if (block.type !== 'file') continue
+      if (llmNativeFileEncoderFor(inputs, block.attachment) === undefined) continue
+      occurrences.push({ attachment: block.attachment, messageIndex, blockIndex })
+    }
+  }
+  return occurrences
+}
+
+/**
+ * The one protocol every declared encoder writes, rejecting a descriptor that
+ * mixes protocols. Config resolution prevents such a descriptor; this check
+ * keeps a hand-built adapter profile from dispatching an unverified part.
+ * @param inputs - the exact route's native-file descriptor.
+ * @returns the pi-ai protocol its parts are encoded for.
+ */
+function nativeMediaProtocol(inputs: LlmNativeFileInputs): NativeMediaProtocol {
+  const protocols = new Set<NativeMediaProtocol>()
+  for (const encoder of Object.values(inputs.encoders)) {
+    protocols.add(NATIVE_ENCODER_PROTOCOL[encoder])
+  }
+  if (protocols.size !== 1) {
+    throw new LlmError('native file inputs mix wire protocols', 'INVALID_CONFIG')
+  }
+  return [...protocols][0] as NativeMediaProtocol
 }
 
 /**
@@ -366,16 +463,29 @@ export class PiAiAdapter extends LlmAdapter {
     return this.current().profiles.get(provider)?.retryPolicy
   }
 
+  override nativeFileInputs(provider: string, model: string): LlmNativeFileInputs | undefined {
+    return this.current().profiles.get(provider)?.catalogFacts.get(model)?.nativeFileInputs
+  }
+
   override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     return Promise.resolve().then(() => {
       const snapshot = this.current()
-      this.profileOf(snapshot, provider)
-      return snapshot.models.getModels(provider).map(model => ({
-        provider,
-        id: model.id,
-        name: model.name,
-        inputModalities: [...model.input],
-      }))
+      const profile = this.profileOf(snapshot, provider)
+      return snapshot.models.getModels(provider).map((model) => {
+        const facts = profile.catalogFacts.get(model.id) ?? defaultFacts([...model.input])
+        const advertised = advertisedInput(facts.inputModalities, model.input)
+        return {
+          provider,
+          id: model.id,
+          name: model.name,
+          inputModalities: [...model.input],
+          ...advertised === undefined ? {} : { advertisedInputModalities: advertised },
+          ...facts.tools === undefined ? {} : { tools: facts.tools },
+          ...facts.unsupportedReasoningEfforts === undefined
+            ? {}
+            : { unsupportedReasoningEfforts: [...facts.unsupportedReasoningEfforts] },
+        }
+      })
     })
   }
 
@@ -394,16 +504,34 @@ export class PiAiAdapter extends LlmAdapter {
     const profile = this.profileOf(snapshot, provider)
     const resolvedModel = this.modelOf(snapshot, provider, model)
     const defaultLevel = describableReasoningLevel(resolvedModel, profile.reasoning)
+    const facts = profile.catalogFacts.get(model) ?? defaultFacts([...resolvedModel.input])
     // Only a cap the deployment configured is a request default; the
-    // catalog's `maxTokens` sizes the model and stops there.
+    // catalog's `maxTokens` sizes the model and stops there. pi-ai requires
+    // that output cap on every Model, so `maxOutputTokens` is always present
+    // here and its source says whether a source stated it or the route default
+    // stood in.
     const configuredMaxTokens = profile.configuredMaxTokens.get(model)
+    const advertised = advertisedInput(facts.inputModalities, resolvedModel.input)
     return {
       provider,
       id: model,
       name: resolvedModel.name,
       inputModalities: [...resolvedModel.input],
-      context: { contextWindow: resolvedModel.contextWindow },
+      ...advertised === undefined ? {} : { advertisedInputModalities: advertised },
+      ...facts.tools === undefined ? {} : { tools: facts.tools },
+      ...facts.unsupportedReasoningEfforts === undefined
+        ? {}
+        : { unsupportedReasoningEfforts: [...facts.unsupportedReasoningEfforts] },
+      context: {
+        contextWindow: resolvedModel.contextWindow,
+        ...facts.maxInputTokens === undefined ? {} : { maxInputTokens: facts.maxInputTokens },
+        ...facts.maxInputTokensSource === undefined ? {} : { maxInputTokensSource: facts.maxInputTokensSource },
+        source: facts.contextWindow,
+      },
+      maxOutputTokens: resolvedModel.maxTokens,
+      maxOutputTokensSource: facts.maxTokens,
       ...configuredMaxTokens === undefined ? {} : { defaultMaxTokens: configuredMaxTokens },
+      ...facts.nativeFileInputs === undefined ? {} : { nativeFileInputs: facts.nativeFileInputs },
       ...reasoningInfo(resolvedModel, defaultLevel),
     }
   }
@@ -452,16 +580,54 @@ export class PiAiAdapter extends LlmAdapter {
       if (containsImage && !model.input.includes('image')) {
         throw new LlmError(`pi-ai model "${model.id}" does not support image input`, 'UNSUPPORTED_CONTENT')
       }
-      const attachments = containsImage ? this.config.resolveAttachments?.() : undefined
-      if (containsImage && attachments === undefined) {
-        throw new LlmError('pi-ai image input requires the durable attachment service', 'UNSUPPORTED_CONTENT')
+      const nativeInputs = profile.catalogFacts.get(options.model)?.nativeFileInputs
+      const occurrences = nativeInputs === undefined
+        ? []
+        : nativeOccurrencesOf(options.messages, nativeInputs)
+      const needsAttachments = containsImage || occurrences.length > 0
+      const attachments = needsAttachments ? this.config.resolveAttachments?.() : undefined
+      if (needsAttachments && attachments === undefined) {
+        throw new LlmError('pi-ai native media requires the durable attachment service', 'UNSUPPORTED_CONTENT')
       }
+      // Real bytes are admitted here, before any provider stream exists: every
+      // size, MIME, signature, and sentinel check fails closed inside the
+      // adapter, so an unsupported file never reaches the network.
+      let plan: NativeMediaPlan | undefined
+      let onPayload: ((payload: unknown) => unknown) | undefined
+      if (nativeInputs !== undefined && occurrences.length > 0) {
+        const protocol = nativeMediaProtocol(nativeInputs)
+        plan = await buildNativeMediaPlan({
+          capability: {
+            protocol,
+            mimeTypes: Object.keys(nativeInputs.encoders) as NativeMediaMimeType[],
+          },
+          occurrences,
+          readFile: (ref, signal) => {
+            if (attachments === undefined) {
+              throw new LlmError('pi-ai native media requires the durable attachment service', 'UNSUPPORTED_CONTENT')
+            }
+            return attachments.readFileStream(ref, signal)
+          },
+          limits: {
+            maxFileBytes: nativeInputs.perFileBytes,
+            maxTotalBytes: nativeInputs.totalBytes,
+            maxEncodedFileBytes: nativeInputs.maxPayloadBytes,
+            maxEncodedTotalBytes: nativeInputs.maxPayloadBytes,
+          },
+          signal: watchdog.signal,
+        })
+        onPayload = createNativeMediaPayloadPatcher(plan, { maxPayloadBytes: nativeInputs.maxPayloadBytes })
+      }
+      const history = plan === undefined
+        ? options.messages
+        : insertNativeMediaSentinels(options.messages, plan) as RequestMessage[]
+      const routedOptions = history === options.messages ? options : { ...options, messages: history }
       const onReplayDegrade = (reason: string): void => {
         this.config.onReplayDegrade?.({ provider: options.provider, model: options.model, reason })
       }
       const context = attachments === undefined
-        ? toPiContext(options, undefined, onReplayDegrade)
-        : await toPiContext({ ...options, signal: watchdog.signal }, {
+        ? toPiContext(routedOptions, undefined, onReplayDegrade)
+        : await toPiContext({ ...routedOptions, signal: watchdog.signal }, {
           attachments,
           resolveImageAccess: ref => this.config.resolveImageAccess?.(attachments, ref),
           maxRequestImageBytes: profile.maxRequestImageBytes,
@@ -469,6 +635,9 @@ export class PiAiAdapter extends LlmAdapter {
             maxPixels: profile.requestImagePixelBudget,
             maxBytes: profile.requestImageMaxBytes,
           },
+          ...plan === undefined
+            ? {}
+            : { nativeMediaTokens: new Set(plan.files.map(file => file.token)) },
         }, onReplayDegrade)
       // Routing-affinity routes (opencode Zen Go) require the conversation's
       // session identity on a dedicated header; static deployment headers stay
@@ -521,6 +690,7 @@ export class PiAiAdapter extends LlmAdapter {
           ...profileOptions(profile, reasoning, keyless ? KEYLESS_REQUEST_KEY : apiKeyOverride),
           ...commonOptions,
           ...fetch === undefined ? {} : { fetch },
+          ...onPayload === undefined ? {} : { onPayload },
           // Pooled attempts attribute the response's rate-limit headers to the
           // identity that served them, so the Keys card can show live quota for
           // upstreams that expose it. Responses without those headers record

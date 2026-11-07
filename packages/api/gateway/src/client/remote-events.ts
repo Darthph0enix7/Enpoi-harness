@@ -65,6 +65,7 @@ export class ClientRemoteEvents {
   private readonly unregisterGeneration: () => void
   private activeGeneration: Promise<void> | undefined
   private generationActivity: (() => void) | undefined
+  private generationHeartbeat: (() => void) | undefined
 
   /**
    * @param ownerCtx - Client Gateway root used for Agent Context resolution.
@@ -112,13 +113,24 @@ export class ClientRemoteEvents {
     this.generationActivity?.()
   }
 
+  /**
+   * Report one inbound application heartbeat frame on any logical stream of
+   * the current physical carrier to the active generation. It also counts as
+   * activity and arms that generation's silence watchdog.
+   */
+  reportHeartbeat(): void {
+    this.generationHeartbeat?.()
+  }
+
   /** Track the current generation so plugin disposal waits for listener work to stop. */
-  private readonly runGeneration: ConnectionGenerationSource = (signal, ready, activity) => {
+  private readonly runGeneration: ConnectionGenerationSource = (signal, ready, activity, heartbeat) => {
     this.generationActivity = activity
+    this.generationHeartbeat = heartbeat
     const tracked = this.pumpEvents(signal, ready, activity).finally(() => {
       if (this.activeGeneration !== tracked) return
       this.activeGeneration = undefined
       this.generationActivity = undefined
+      this.generationHeartbeat = undefined
     })
     this.activeGeneration = tracked
     return tracked

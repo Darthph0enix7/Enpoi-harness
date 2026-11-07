@@ -14,7 +14,7 @@ import { clampDockHeight } from './registry.ts'
 import type { TerminalTabState } from './registry.ts'
 import { TerminalIcon } from './icons.tsx'
 import { TerminalStatusBanner, TerminalTabStrip } from './TerminalPanel.tsx'
-import { TerminalView } from './TerminalView.tsx'
+import { LazyTerminalView } from './lazy-terminal-view.tsx'
 import css from './TerminalPanel.module.css'
 
 /** Empty selection kept reference-stable so a selector never re-renders the dock. */
@@ -205,10 +205,11 @@ export function BottomTerminalDock({
           ) : (
             <>
               <TerminalStatusBanner tab={active} t={t} />
-              <TerminalView
+              <LazyTerminalView
                 sessionId={sessionId}
                 tab={active}
                 active
+                t={t}
                 write={writeTerminal}
                 resize={resizeTerminal}
                 subscribe={subscribeTerminal}

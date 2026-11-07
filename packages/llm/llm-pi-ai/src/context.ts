@@ -5,7 +5,7 @@
  */
 
 import { brandString } from '@deepseek-ai/dsh-brand'
-import { contentHasImage, IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, offloadedImageText, projectOffloadedImages, requestImageHandleText, requiredImageOffload } from '@deepseek-ai/dsh-llm'
+import { contentHasFile, contentHasImage, IMAGE_OFFLOAD_REQUIRED_CODE, LlmError, offloadedImageText, projectOffloadedImages, requestImageHandleText, requiredImageOffload } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, ImageAttachmentAccessResolver, Message, RequestMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import type {
   AttachmentId,
@@ -46,7 +46,7 @@ function toolResultOf(
   }
 }
 
-/** Reject unsupported roles, tool-change blocks, and image roles before replay or image offloading. */
+/** Reject unsupported roles, tool-change blocks, and attachment roles before replay or image offloading. */
 function assertSupportedHistory(messages: readonly RequestMessage[]): void {
   for (const message of messages) {
     // Developer history is persisted for V4; provider serialization is intentionally deferred.
@@ -60,20 +60,41 @@ function assertSupportedHistory(messages: readonly RequestMessage[]): void {
         'UNSUPPORTED_CONTENT',
       )
     }
+    // A FileBlock is valid only in user content, and only a planned occurrence
+    // survives runtime projection there; reaching this converter in any other
+    // role means a caller bypassed request assembly and would lose the file.
+    if (message.role !== 'user' && contentHasFile(message.content)) {
+      throw new LlmError(
+        `pi-ai cannot represent a file in an in-history ${message.role} message`,
+        'UNSUPPORTED_CONTENT',
+      )
+    }
   }
 }
+
+/** Placeholder set for messages without planned native-media sentinels. */
+const NO_NATIVE_TOKENS: ReadonlySet<string> = new Set()
 
 function userContent(
   blocks: readonly ContentBlock[],
   requestImages: ReadonlyMap<AttachmentId, RequestImageAttachment>,
   resolveImageAccess: ImageAttachmentAccessResolver,
+  nativeTokens: ReadonlySet<string> = NO_NATIVE_TOKENS,
 ): string | (TextContent | ImageContent)[] {
   const content: (TextContent | ImageContent)[] = []
+  let nativeSentinel = false
   for (const block of blocks) {
     switch (block.type) {
       case 'text':
-        if (block.text.length > 0) content.push({ type: 'text', text: block.text })
+        if (block.text.length > 0) {
+          content.push({ type: 'text', text: block.text })
+          if (nativeTokens.has(block.text)) nativeSentinel = true
+        }
         break
+      case 'file':
+        // Runtime projection keeps only planned user files; one that reaches
+        // here was never planned, so fail instead of silently dropping it.
+        throw new LlmError('pi-ai received a file block without a native-media plan', 'UNSUPPORTED_CONTENT')
       case 'image': {
         const version = requestImages.get(block.attachment.attachmentId) as RequestImageAttachment
         content.push({
@@ -92,7 +113,11 @@ function userContent(
         break
     }
   }
-  if (content.every(block => block.type === 'text')) return content.map(block => block.text).join('')
+  // A native sentinel must stay its own block: joining it with adjacent text
+  // would make the exact-token replacement impossible to locate.
+  if (!nativeSentinel && content.every(block => block.type === 'text')) {
+    return content.map(block => block.text).join('')
+  }
   return content
 }
 
@@ -283,6 +308,9 @@ function textOnlyContext(options: GenerateOptions, onReplayDegrade?: (reason: st
     if (contentHasImage(message.content)) {
       throw new LlmError('pi-ai image conversion requires the durable attachment service', 'UNSUPPORTED_CONTENT')
     }
+    if (contentHasFile(message.content)) {
+      throw new LlmError('pi-ai file conversion requires the durable attachment service', 'UNSUPPORTED_CONTENT')
+    }
     if (appendSystemOrAssistant(message, messages, toolNames, onReplayDegrade)) continue
     if (message.role === 'tool') {
       messages.push(toolResultOf(message, toolNames, flattenText(message)))
@@ -303,6 +331,8 @@ export interface PiImageRequestContext {
   maxRequestImageBytes?: number
   /** Route pixel and raw encoded-byte budgets. */
   requestImagePolicy?: PiImageRequestBudget
+  /** Planned native-media sentinels that must remain standalone text blocks. */
+  nativeMediaTokens?: ReadonlySet<string>
 }
 
 /** Per-route budgets from which each request image's target is derived. */
@@ -365,6 +395,7 @@ async function toPiContextWithImages(
   onReplayDegrade?: (reason: string) => void,
 ): Promise<PiContext> {
   const { attachments, resolveImageAccess, maxRequestImageBytes } = images
+  const nativeTokens = images.nativeMediaTokens ?? NO_NATIVE_TOKENS
   const requestImagePolicy = images.requestImagePolicy ?? {
     maxPixels: DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET,
     maxBytes: DEFAULT_REQUEST_IMAGE_MAX_BYTES,
@@ -397,10 +428,10 @@ async function toPiContextWithImages(
   for (const message of exactMessages) {
     if (appendSystemOrAssistant(message, messages, toolNames, onReplayDegrade)) continue
     if (message.role === 'tool') {
-      messages.push(toolResultOf(message, toolNames, userContent(message.content, requestImages, resolveImageAccess)))
+      messages.push(toolResultOf(message, toolNames, userContent(message.content, requestImages, resolveImageAccess, nativeTokens)))
       continue
     }
-    const content = userContent(message.content, requestImages, resolveImageAccess)
+    const content = userContent(message.content, requestImages, resolveImageAccess, nativeTokens)
     messages.push({ role: 'user', content, timestamp: 0 })
   }
 

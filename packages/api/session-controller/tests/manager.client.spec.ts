@@ -653,7 +653,7 @@ describe('list lifecycle', () => {
     expect(items.find(item => item.sessionId === S2)?.title).toBe('Pushed')
   })
 
-  it('discards the previous generation title before accepting its lower-seq replay', async ({ mock, remote }) => {
+  it('retains the previous title until the reconnected baseline replaces it at any seq', async ({ mock, remote }) => {
     remote.session.list.mockResolvedValue(ok({ items: [summary(S1)] as never[] }))
     const manager = makeManager(mock, remote)
     try {
@@ -662,7 +662,10 @@ describe('list lifecycle', () => {
 
       manager.handleConnected()
       await manager.refreshList()
-      expect(manager.getListSnapshot().items[0]?.title).toBeUndefined()
+      // No blank flash: the retained value stays comparable across generations.
+      expect(manager.getListSnapshot().items[0]?.title).toBe('Unflushed')
+      // A demoted value is no longer seq-comparable: the new generation's
+      // baseline is authoritative even when its watermark is lower.
       manager.handleControlFrame({
         type: 'baseline',
         value: {
@@ -670,6 +673,13 @@ describe('list lifecycle', () => {
         },
       })
       expect(manager.getListSnapshot().items[0]?.title).toBe('Durable')
+      manager.handleControlFrame({
+        type: 'baseline',
+        value: {
+          projections: { [S1]: { asOfSeq: 5, values: { title: 'Newer durable' } } },
+        },
+      })
+      expect(manager.getListSnapshot().items[0]?.title).toBe('Newer durable')
     } finally {
       await manager.dispose()
     }
@@ -839,9 +849,12 @@ describe('subagent catalogs', () => {
       summary(S1),
       summary(S2, { parentSessionId: S1, origin: 'subagent' }),
     ] as never[] })))
-    remote.session.projections.mockImplementation(() => Promise.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1, seq: SessionSeq(0),
-      id: S2, mode: 'continuable', label: 'worker',
-    }] } })))
+    remote.session.projections.mockImplementation(() => Promise.resolve(ok({
+      asOfSeq: 0,
+      values: {
+        subagentCatalog: [{ createdAt: 1, seq: SessionSeq(0), id: S2, mode: 'continuable', label: 'worker' }],
+      },
+    })))
     mock.load(sessionWorld)
     const client = await start()
     const manager = new SessionManager(client.ctx.remote)
@@ -1418,6 +1431,7 @@ describe('connected generation', () => {
       const reads = remote.session.projections.mock.calls.map(([request]) => request).length
       hostRunning = running
       manager.handleConnected()
+      manager.handleControlFrame({ type: 'baseline', value: { projections: {} } })
       await manager.refreshList()
       await vi.waitFor(() => {
         expect(manager.getListSnapshot().items.find(item => item.sessionId === S2)?.running)
@@ -1439,6 +1453,9 @@ describe('connected generation', () => {
     try {
       const read = manager.refreshProjections(S1)
       manager.handleConnected()
+      // The reconnect keeps the old value and starts no read by itself.
+      expect(remote.session.projections.mock.calls.map(([request]) => request)).toHaveLength(1)
+      manager.handleControlFrame({ type: 'baseline', value: { projections: {} } })
       expect(remote.session.projections.mock.calls.map(([request]) => request)).toHaveLength(2)
       previous.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1, id: S2, seq: SessionSeq(0), mode: 'continuable', label: 'worker' }] } }))
       await read
@@ -1488,6 +1505,8 @@ describe('connected generation', () => {
 
     manager.handleConnected()
     expect(manager.get(S2).getSnapshot().subagent).toEqual({ address })
+    // The control baseline omits the cold parent, so one conditional read follows.
+    manager.handleControlFrame({ type: 'baseline', value: { projections: {} } })
     parent.resolve(ok({ asOfSeq: 0, values: { subagentCatalog: [{ createdAt: 1, seq: SessionSeq(0),
       id: S2, mode: 'continuable', label: 'worker',
     }] } }))
@@ -1505,6 +1524,51 @@ describe('connected generation', () => {
       parentAvailable: true,
     })
     expect(manager.subagentAddress(S2)).toEqual(address)
+  })
+  it('keeps projection values and skips per-parent reads the control baseline covers', async ({ mock, remote }) => {
+    remote.session.projections.mockResolvedValue(ok({ asOfSeq: 3, values: { subagentCatalog: [] } }))
+    const manager = makeManager(mock, remote)
+    try {
+      manager.handleControlFrame({ type: 'projection', sessionId: S1, key: 'title', seq: 4, value: 'Kept title' })
+      await manager.refreshProjections(S1)
+      const reads = remote.session.projections.mock.calls.length
+      const face = manager.get(S1).projections.faceOf('title')
+      expect(face.getSnapshot()).toBe('Kept title')
+
+      manager.handleConnected()
+      // No blank flash: the retained value survives the generation switch.
+      expect(face.getSnapshot()).toBe('Kept title')
+      expect(manager.getListSnapshot().projectionsBySession[S1]?.state).toBe('idle')
+
+      manager.handleControlFrame({
+        type: 'baseline',
+        value: { projections: { [S1]: { asOfSeq: 5, values: { title: 'Baseline title' } } } },
+      })
+      expect(remote.session.projections.mock.calls).toHaveLength(reads)
+      expect(face.getSnapshot()).toBe('Baseline title')
+      expect(manager.getListSnapshot().projectionsBySession[S1]?.state).toBe('ready')
+    } finally {
+      await manager.dispose()
+    }
+  })
+
+  it('reads a parent only when the control baseline omits it', async ({ mock, remote }) => {
+    remote.session.projections.mockResolvedValue(ok({ asOfSeq: 1, values: { subagentCatalog: [] } }))
+    const manager = makeManager(mock, remote)
+    try {
+      await manager.refreshProjections(S1)
+      const reads = remote.session.projections.mock.calls.length
+      manager.handleConnected()
+      expect(remote.session.projections.mock.calls).toHaveLength(reads)
+
+      manager.handleControlFrame({ type: 'baseline', value: { projections: {} } })
+      await vi.waitFor(() => {
+        expect(remote.session.projections.mock.calls).toHaveLength(reads + 1)
+      })
+      expect(manager.getListSnapshot().projectionsBySession[S1]?.state).toBe('ready')
+    } finally {
+      await manager.dispose()
+    }
   })
 })
 

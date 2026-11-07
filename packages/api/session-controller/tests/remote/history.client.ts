@@ -1,10 +1,11 @@
 /** Pure history response builders for assembled Session tests. */
-import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session/types'
+import { SESSION_FORMAT_VERSION, SessionSeq } from '@deepseek-ai/dsh-session/types'
 import type {
   SessionAssistantStreamBaseline, SessionFollowFrame, SessionFollowRequest, SessionHistoryRecord, SessionPage,
   SessionProjectionBaseline, SessionRevertFold,
 } from '../../src/types.ts'
 import { historyRecordLastSeq } from '../../src/client/sessions/history-records.ts'
+import { historyValue } from '../event-script.client.ts'
 import { emptyRevertFoldState, foldRevertEvent, foldRevertEvents, revertFoldValue } from '../../src/revert-fold.ts'
 
 /** A scripted page may omit the durable revert block; the builders default it. */
@@ -91,5 +92,36 @@ export function followSnapshot(
     revert: page.revert ?? hostRevertRecordsFold(pageThrough(page, cursor).records, cursor),
     projections: page.projections ?? { asOfSeq: cursor, values: {} },
     ...(request.assistantStream === true ? { assistantStream } : {}),
+  }
+}
+
+/**
+ * Build the resumed opening that continues a Client window at `afterSeq`.
+ * @param events - dense suffix events strictly after `afterSeq`.
+ * @param request - addressed follow request opting into Assistant frames.
+ * @param afterSeq - inclusive durable seq the Client already holds.
+ * @param overrides - cursor, paging, projection, revert, or Assistant baseline overrides.
+ * @returns the resumed snapshot frame.
+ */
+export function resumedSnapshot(
+  events: readonly import('@deepseek-ai/dsh-session/types').SessionEvent[],
+  request: SessionFollowRequest,
+  afterSeq: number,
+  overrides: {
+    readonly cursor?: number
+    readonly hasMore?: boolean
+    readonly assistantStream?: SessionAssistantStreamBaseline
+    readonly projections?: SessionProjectionBaseline
+    readonly revert?: SessionRevertFold
+  } = {},
+): Extract<SessionFollowFrame, { type: 'snapshot' }> {
+  const cursor = overrides.cursor ?? (events.length === 0 ? afterSeq : Number(events.at(-1)?.seq))
+  return {
+    ...followSnapshot({
+      ...historyValue([...events], overrides.hasMore ?? false),
+      ...(overrides.projections === undefined ? {} : { projections: overrides.projections }),
+      ...(overrides.revert === undefined ? {} : { revert: overrides.revert }),
+    }, request, cursor, overrides.assistantStream ?? { revision: 0 }),
+    resumedFromSeq: SessionSeq(afterSeq),
   }
 }

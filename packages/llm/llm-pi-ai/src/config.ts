@@ -19,7 +19,7 @@ import z from '@deepseek-ai/schemastery'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
-import { resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
+import { LLM_NATIVE_FILE_ENCODERS, LLM_NATIVE_FILE_MIME_TYPES, resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
 import type { ResolvedRetryPolicy, RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { deepEqualJson } from '@deepseek-ai/dsh-util-values'
 import {
@@ -37,8 +37,10 @@ import {
 import type {
   PiAiCompatProfile,
   PiAiModality,
+  PiAiModelCatalogFacts,
   PiAiModelOverride,
   PiAiModelProfile,
+  PiAiNativeFileInputs,
   PiAiReasoningEfforts,
   RouteCatalog,
 } from './catalog.ts'
@@ -97,6 +99,7 @@ export type {
   PiAiModality,
   PiAiModelOverride,
   PiAiModelProfile,
+  PiAiNativeFileInputs,
   PiAiReasoningEfforts,
   PiAiThinkingFormat,
 } from './catalog.ts'
@@ -146,11 +149,25 @@ export interface PiAiProviderProfile {
   /** Endpoint for this route's models; defaults to the installed catalog's endpoint. */
   baseURL?: string
   /**
-   * This route's model catalog. Omission serves the installed catalog for the
-   * route unchanged; an explicit list replaces it, each entry defaulting its
-   * unset fields from the installed model of the same id.
+   * This route's model catalog. Omission — and an empty list, which the schema
+   * materializes for it — serves the installed catalog for the route unchanged
+   * unless {@link catalogAuthority} is `endpoint`; a non-empty list replaces
+   * it, each entry defaulting its unset fields from the installed model of the
+   * same id.
    */
   models?: PiAiModelProfile[]
+  /**
+   * Which source may fill the served catalog when {@link models} lists none.
+   * `catalog` (the behavior when omitted) keeps the installed catalog first
+   * and reads the discovered cache only when the installed catalog does not
+   * describe the route. `endpoint` treats configuration and the endpoint's
+   * discovered listing as the whole authority: the installed catalog never
+   * refills the route, a discovered row never inherits an installed entry of
+   * the same id, and a retained successful empty listing serves an empty
+   * catalog instead of failing. A missing discovered record stays an absence,
+   * never a known-empty listing.
+   */
+  catalogAuthority?: 'catalog' | 'endpoint'
   /**
    * Installed-catalog customizations by model id: each entry reshapes that
    * one model with the same fields a {@link models} entry takes, while the
@@ -287,6 +304,12 @@ export interface ResolvedPiAiProviderProfile
   /** Per-model failures reported before attempting a request. */
   modelErrors: ReadonlyMap<string, string>
   /**
+   * Per-model catalog facts retained from resolution: where each materialized
+   * capacity and input list came from, plus disclosures pi-ai's `Model` cannot
+   * carry (input-only cap, tool support, unsupported effort names).
+   */
+  catalogFacts: ReadonlyMap<string, PiAiModelCatalogFacts>
+  /**
    * Per-request output caps this profile explicitly configured, by model id.
    * The seam materializes one only into a request that names no cap of its
    * own, so a catalog capability must not appear here.
@@ -379,11 +402,32 @@ const reasoningEfforts = z.dict(
   z.union(THINKING_LEVELS),
 ) as unknown as z<PiAiReasoningEfforts>
 
+/**
+ * One explicit native-file declaration. Absent keys stay absent; a declaration
+ * with any stated field is validated as a whole by `resolveNativeFileInputs`,
+ * so a partial edit fails loud instead of silently disabling media.
+ */
+const nativeFileInputs: z<PiAiNativeFileInputs> = z.object({
+  version: z.const(1),
+  encoder: z.union(LLM_NATIVE_FILE_ENCODERS),
+  mime: z.array(z.union(LLM_NATIVE_FILE_MIME_TYPES)),
+  perFileBytes: z.number().step(1).min(1),
+  totalBytes: z.number().step(1).min(1),
+  maxPayloadBytes: z.number().step(1).min(1),
+  tokenReserve: z.object({
+    perFile: z.number().min(0),
+    perByte: z.number().min(0),
+  }),
+})
+
 /** The fields a `models` entry and a `modelOverrides` value share; only the id's home differs. */
 const modelFields = {
   name: z.string(),
   contextWindow: z.number().step(1).min(1),
+  maxInputTokens: z.number().step(1).min(1),
   maxTokens: z.number().step(1).min(1),
+  reasoning: z.boolean(),
+  tools: z.boolean(),
   // No explicit default, unlike the route's `defaultInput`: schemastery
   // materializes `[]` for an absent array, and resolution reads that as "no
   // answer here" so the catalog entry below still applies.
@@ -393,6 +437,10 @@ const modelFields = {
   // installed catalog's capability", while `false` disables reasoning.
   reasoningEfforts: z.union([z.const(false), reasoningEfforts]),
   compat: compatProfile,
+  // Omission is native media off. Every shipped route and discovered model
+  // keeps it unset; an exact model opts in by declaring the encoder it knows
+  // its gateway translates.
+  nativeFileInputs,
 }
 
 const modelProfile: z<PiAiModelProfile> = z.object({
@@ -425,6 +473,7 @@ const profile = z.object({
   api: z.union(supportedProtocols()),
   baseURL: z.string(),
   models: z.array(modelProfile),
+  catalogAuthority: z.union(['catalog', 'endpoint']),
   modelOverrides: z.dict(modelOverride),
   compat: compatProfile,
   defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW),
@@ -621,6 +670,7 @@ export function resolveProfiles(
         ...source.api === undefined ? {} : { api: source.api },
         ...source.baseURL === undefined ? {} : { baseURL: source.baseURL },
         ...source.models === undefined ? {} : { models: source.models },
+        ...source.catalogAuthority === undefined ? {} : { catalogAuthority: source.catalogAuthority },
         ...source.modelOverrides === undefined ? {} : { modelOverrides: source.modelOverrides },
         ...source.compat === undefined ? {} : { compat: source.compat },
         // Only a route no configured or installed model describes is answered
@@ -659,6 +709,7 @@ export function resolveProfiles(
       ...rest.headers === undefined ? {} : { headers: { ...rest.headers } },
       ...rest.thinkingBudgets === undefined ? {} : { thinkingBudgets: { ...rest.thinkingBudgets } },
       configuredMaxTokens: catalog?.configuredMaxTokens ?? new Map(),
+      catalogFacts: catalog?.facts ?? new Map(),
       modelErrors: catalog?.modelErrors ?? new Map(),
       ...piProvider === undefined ? {} : { piProvider },
       ...catalogError === undefined ? {} : { catalogError }    })

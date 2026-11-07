@@ -1,5 +1,6 @@
 /** Cold Session history pagination and live-event source. */
 
+import { Buffer } from 'node:buffer'
 import type { Context } from '@deepseek-ai/cordis'
 import { Deque } from '@deepseek-ai/dsh-deque'
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
@@ -46,11 +47,57 @@ const DEFAULT_MAX_MESSAGES = 50
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
 /** Bound on cached per-Session revert folds (cold readers never notify disposal). */
 const REVERT_FOLD_CACHE_MAX = 32
+/** Durable events one suffix read materializes while a slow consumer drains. */
+const REPLAY_BATCH_EVENTS = 256
+/** Retained reference, wrapper, and queue-slot overhead one buffered item adds. */
+const BACKLOG_ITEM_OVERHEAD = 128
+
+/**
+ * Per-follow cap on live items retained while the Client is not pulling.
+ * Events appended before listener installation replay from the log and never
+ * consume this budget.
+ */
+export interface SessionFollowBufferLimits {
+  /** Maximum retained live items before the follow ends for a clean resync. */
+  readonly maxItems: number
+  /** Maximum estimated retained bytes before the follow ends for a clean resync. */
+  readonly maxBytes: number
+}
+
+/** Default residual live-item cap: 16384 items or 8 MiB, whichever comes first. */
+export const DEFAULT_SESSION_FOLLOW_BUFFER_LIMITS: SessionFollowBufferLimits = Object.freeze({
+  maxItems: 16384,
+  maxBytes: 8 * 1024 * 1024,
+})
+
+/** Default dense-event bound on one resumed follow opening. */
+export const DEFAULT_SESSION_FOLLOW_RESUME_MAX_EVENTS = 2048
+
+/**
+ * Cursor-resume policy for follow openings. A resumed opening reads the dense
+ * suffix from the durable log, so disabled or oversized resumes fall back to
+ * the ordinary message-aligned snapshot.
+ */
+export interface SessionFollowResumeOptions {
+  /** Whether a Client-held cursor may be answered with a suffix instead of a full snapshot. */
+  readonly enabled: boolean
+  /** Maximum dense durable events one resumed opening may carry. */
+  readonly maxEvents: number
+}
+
+/** Enabled resume bounded by {@link DEFAULT_SESSION_FOLLOW_RESUME_MAX_EVENTS}. */
+export const DEFAULT_SESSION_FOLLOW_RESUME_OPTIONS: SessionFollowResumeOptions = Object.freeze({
+  enabled: true,
+  maxEvents: DEFAULT_SESSION_FOLLOW_RESUME_MAX_EVENTS,
+})
 
 /** Implements cold-safe history operations delegated by the Session Controller. */
 export class SessionHistoryController {
   private readonly closeFollowers = new Set<() => void>()
   private readonly assistantStreams = new Map<SessionId, SessionAssistantStreamAccumulator>()
+  private readonly backlogs = new Set<FollowBacklog>()
+  private readonly limits: SessionFollowBufferLimits
+  private readonly resume: SessionFollowResumeOptions
   /**
    * Incremental per-Session revert folds. Each entry covers every event
    * through `throughSeq`; later requests fold only the appended suffix.
@@ -60,11 +107,17 @@ export class SessionHistoryController {
   /**
    * @param ctx - Host context carrying Session query and projection services.
    * @param promote - starts ordinary Session activation after snapshot delivery.
+   * @param limits - residual live-frame cap for one follow generation.
+   * @param resume - cursor-resume policy for follow openings.
    */
   constructor(
     private readonly ctx: Context,
     private readonly promote: (observation: SessionObservation) => void,
+    limits: SessionFollowBufferLimits = DEFAULT_SESSION_FOLLOW_BUFFER_LIMITS,
+    resume: SessionFollowResumeOptions = DEFAULT_SESSION_FOLLOW_RESUME_OPTIONS,
   ) {
+    this.limits = validateFollowBufferLimits(limits)
+    this.resume = validateFollowResumeOptions(resume)
     ctx.on('agent/assistant-stream', ({ agent, frame }) => {
       let stream = this.assistantStreams.get(agent.session.id)
       if (stream === undefined) {
@@ -135,17 +188,11 @@ export class SessionHistoryController {
    */
   async *follow(request: SessionFollowRequest, signal: AbortSignal): AsyncIterable<SessionFollowFrame> {
     validateHistoryWindow(request)
+    validateFollowAfterSeq(request.afterSeq)
     const { address } = request
     const target = addressId(address)
-    const buffered = new Deque<
-      | { readonly type: 'event'; readonly event: SessionEvent }
-      | {
-        readonly type: 'assistant-stream'
-        readonly frame: SessionAssistantStreamFrame
-        readonly ordinal: number
-      }
-    >()
-    let snapshotCursor: SessionSeqCursor | undefined
+    const backlog = new FollowBacklog(this.limits)
+    this.backlogs.add(backlog)
     let assistantStreamOrdinal = 0
     let wake: (() => void) | undefined
     const notify = (): void => {
@@ -159,32 +206,19 @@ export class SessionHistoryController {
       notify()
     }
     this.closeFollowers.add(close)
-    const disposeEvent = this.ctx.on('session/event', (session, event) => {
-      if (session.id !== target) return
-      buffered.pushBack({ type: 'event', event })
-      notify()
-    }, { global: true })
-    const disposeCreated = this.ctx.on('session/created', (session) => {
-      if (session.id !== target) return
-      // Constructor seed events have no session/event notification. Normally
-      // only the end-seed suffix is new; if persistence advanced after the
-      // opening observation, replay everything beyond that snapshot cursor.
-      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-      const suffix = session.snapshotEvents(snapshotCursor === undefined
-        ? session.firstLiveSeq
-        : SessionLogOffset(snapshotCursor + 1))
-      for (let index = suffix.length - 1; index >= 0; index -= 1) {
-        buffered.pushFront({ type: 'event', event: suffix[index] as SessionEvent })
-      }
-      notify()
-    }, { global: true })
+    let disposeEvent: (() => void) | undefined
+    let disposeCreated: (() => void) | undefined
     const disposeAssistantStream = request.assistantStream !== true
       ? undefined
       : this.ctx.on('agent/assistant-stream', ({ agent, frame }) => {
         if (agent.session.id !== target) return
-        buffered.pushBack({
-          type: 'assistant-stream',
-          frame: wireAssistantStreamFrame(frame, cursorBeforeNext(agent.session.seq)),
+        // Frames are transient and cannot be replayed from the log, so they
+        // are the only live items retained while the opening snapshot is in
+        // flight. Their durable watermark merges them back into event order.
+        const durableCursor = cursorBeforeNext(agent.session.seq)
+        backlog.pushFrame({
+          frame: wireAssistantStreamFrame(frame, durableCursor),
+          cursor: durableCursor,
           ordinal: ++assistantStreamOrdinal,
         })
         notify()
@@ -196,8 +230,17 @@ export class SessionHistoryController {
       const events = source.events
       signal.throwIfAborted()
       const cursor = source.cursor
-      snapshotCursor = cursor
-      const page = paginate(events, undefined, request.maxMessages ?? DEFAULT_MAX_MESSAGES, cursor, request.turnWindow)
+      const resumedFromSeq = this.resumeFrom(request, events, cursor)
+      let records: SessionHistoryRecord[]
+      let hasMore: boolean
+      if (resumedFromSeq === undefined) {
+        const page = paginate(events, undefined, request.maxMessages ?? DEFAULT_MAX_MESSAGES, cursor, request.turnWindow)
+        records = pageRecords(page.events)
+        hasMore = page.hasMore
+      } else {
+        records = pageRecords(events.slice(resumedFromSeq + 1))
+        hasMore = false
+      }
       const assistantStream = request.assistantStream === true
         ? this.assistantStreams.get(target)?.snapshot() ?? { revision: 0 }
         : undefined
@@ -206,18 +249,54 @@ export class SessionHistoryController {
       // including larger revisions from a retired Agent; later revision
       // resets reach Client continuity validation.
       const assistantStreamOrdinalCut = assistantStreamOrdinal
+      if (request.assistantStream === true) {
+        // The baseline supersedes every frame at or before the cut, including
+        // one that overflowed before this cut existed, so discard them and
+        // start the post-cut budget clean.
+        backlog.prune(assistantStreamOrdinalCut)
+        backlog.resetOverflow()
+      }
       yield {
         type: 'snapshot',
         header: wireHeader(source.header),
         cursor,
-        records: pageRecords(page.events),
-        hasMore: page.hasMore,
+        records,
+        hasMore,
         revert: this.revertFoldAt(target, events, cursor),
         projections: source.projections === undefined
           ? { asOfSeq: cursor, values: {} }
           : projectionBlock(source.projections),
         ...assistantStream === undefined ? {} : { assistantStream },
+        ...resumedFromSeq === undefined ? {} : { resumedFromSeq },
       }
+      // Frames emitted while the Client received the snapshot were dropped
+      // once the cap was reached. End this generation; the Client treats an
+      // accepted generation that ends as a retryable carrier loss and opens a
+      // fresh snapshot instead of the follow silently skipping frames.
+      if (backlog.hasOverflowed()) {
+        this.warnBacklogOverflow(target)
+        return
+      }
+      // Register durable listeners BEFORE capturing the replay cut, then read
+      // everything between the snapshot cursor and that cut from the log. The
+      // listener and the cut are captured in the same synchronous turn, so
+      // every earlier event is in the replay and every later event is queued:
+      // the snapshot-to-live boundary can neither lose nor duplicate a seq.
+      let durableSession = this.ctx.sessions.get(target)
+      let replayEnd = durableSession?.seq ?? SessionLogOffset(cursor + 1)
+      disposeEvent = this.ctx.on('session/event', (session, event) => {
+        if (session.id !== target) return
+        backlog.pushEvent(event)
+        notify()
+      }, { global: true })
+      disposeCreated = this.ctx.on('session/created', (session) => {
+        if (session.id !== target) return
+        // Constructor seed events have no session/event notification. Extend
+        // the log replay to the new end instead of retaining the seed suffix.
+        durableSession = session
+        replayEnd = SessionLogOffset(Math.max(replayEnd, session.seq))
+        notify()
+      }, { global: true })
       if (address.kind === 'session' && source.source === 'prepared') {
         const promotion = source.retain()
         try {
@@ -228,33 +307,117 @@ export class SessionHistoryController {
         }
       }
       let nextOffset = SessionLogOffset(cursor + 1)
+      let replayBatch: readonly SessionEvent[] = []
+      let replayIndex = 0
+      let heldFrame: BufferedAssistantFrame | undefined
       while (!follower.closed && !signal.aborted) {
-        const item = buffered.popFront()
-        if (item === undefined) {
-          await new Promise<void>((resolve) => { wake = resolve })
-          continue
+        if (backlog.hasOverflowed()) {
+          this.warnBacklogOverflow(target)
+          return
         }
-        if (item.type === 'assistant-stream') {
-          if (item.ordinal > assistantStreamOrdinalCut) {
-            yield { type: 'assistant-stream', frame: item.frame }
+        const frame = heldFrame ?? backlog.popFrame()
+        heldFrame = undefined
+        if (frame !== undefined) {
+          if (frame.ordinal <= assistantStreamOrdinalCut) continue
+          if (frame.cursor < nextOffset) {
+            yield { type: 'assistant-stream', frame: frame.frame }
+            continue
           }
+          // The frame was emitted after a durable event this follow has not
+          // delivered yet; hold it until that event advances nextOffset.
+          heldFrame = frame
+        }
+        if (replayIndex >= replayBatch.length && nextOffset < replayEnd) {
+          // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+          const batch = durableSession?.snapshotEvents(
+            nextOffset,
+            SessionLogOffset(Math.min(nextOffset + REPLAY_BATCH_EVENTS, replayEnd)),
+          ) ?? []
+          if (batch.length === 0) {
+            throw new RemoteError('gateway/internal', `session event stream skipped seq ${String(nextOffset)}`, {})
+          }
+          replayBatch = batch
+          replayIndex = 0
+        }
+        if (replayIndex < replayBatch.length) {
+          const event = replayBatch[replayIndex] as SessionEvent
+          replayIndex += 1
+          const expectedSeq = SessionSeq(nextOffset)
+          if (event.seq !== expectedSeq) {
+            throw new RemoteError('gateway/internal', `session event stream skipped seq ${String(expectedSeq)}`, {})
+          }
+          nextOffset = SessionLogOffset(nextOffset + 1)
+          yield entryFor(event)
           continue
         }
-        const expectedSeq = SessionSeq(nextOffset)
-        if (item.event.seq < expectedSeq) continue
-        if (item.event.seq !== expectedSeq) {
-          throw new RemoteError('gateway/internal', `session event stream skipped seq ${String(expectedSeq)}`, {})
+        const live = backlog.popEvent()
+        if (live !== undefined) {
+          const expectedSeq = SessionSeq(nextOffset)
+          if (live.seq < expectedSeq) continue
+          if (live.seq !== expectedSeq) {
+            throw new RemoteError('gateway/internal', `session event stream skipped seq ${String(expectedSeq)}`, {})
+          }
+          nextOffset = SessionLogOffset(nextOffset + 1)
+          yield entryFor(live)
+          continue
         }
-        nextOffset = SessionLogOffset(nextOffset + 1)
-        yield entryFor(item.event)
+        await new Promise<void>((resolve) => { wake = resolve })
       }
     } finally {
       this.closeFollowers.delete(close)
       signal.removeEventListener('abort', onAbort)
-      disposeCreated()
-      disposeEvent()
+      disposeCreated?.()
+      disposeEvent?.()
       disposeAssistantStream?.()
+      this.backlogs.delete(backlog)
+      backlog.clear()
     }
+  }
+
+  /**
+   * Decide whether one opening may continue the Client's dense window.
+   * Absent or disabled cursors, a cursor beyond the observed tail, a broken
+   * dense index, and an oversized suffix all select the full snapshot.
+   * @param request - follow request carrying the Client-held cursor.
+   * @param events - dense zero-based logical events of the observed log.
+   * @param tail - inclusive final seq of the observation.
+   * @returns the echoed resume cursor, or undefined for a full snapshot.
+   */
+  private resumeFrom(
+    request: SessionFollowRequest,
+    events: readonly SessionEvent[],
+    tail: SessionSeqCursor,
+  ): SessionSeqCursor | undefined {
+    const { afterSeq } = request
+    if (!this.resume.enabled || afterSeq === undefined) return undefined
+    if (afterSeq > tail) return undefined
+    if (afterSeq >= 0 && events[afterSeq]?.seq !== afterSeq) return undefined
+    if (tail - afterSeq > this.resume.maxEvents) return undefined
+    return afterSeq
+  }
+
+  /**
+   * Report the residual live backlog across active follows. Events appended
+   * before listener installation replay from the log and are never retained.
+   * @returns aggregate retained items and estimated bytes.
+   */
+  followBacklog(): { readonly items: number; readonly bytes: number } {
+    let items = 0
+    let bytes = 0
+    for (const backlog of this.backlogs) {
+      items += backlog.items
+      bytes += backlog.bytes
+    }
+    return { items, bytes }
+  }
+
+  private warnBacklogOverflow(sessionId: SessionId): void {
+    this.ctx.logger.warn(
+      'session-controller: ending follow for "%s" after its live Assistant backlog exceeded the %d-item or %d-byte cap',
+      sessionId,
+      this.limits.maxItems,
+      this.limits.maxBytes,
+    )
   }
 
   /**
@@ -331,6 +494,162 @@ export class SessionHistoryController {
 
 }
 
+/** One transient Assistant frame retained while its opening snapshot is in flight. */
+interface BufferedAssistantFrame {
+  readonly frame: SessionAssistantStreamFrame
+  readonly ordinal: number
+  /** Last durable Session seq observed when the frame was emitted. */
+  readonly cursor: SessionSeqCursor
+}
+
+/**
+ * Bounded FIFO of live items for one follow generation.
+ *
+ * Events appended between the snapshot cut and listener installation replay
+ * from the Session log and never enter this queue. Only events appended while
+ * the Client is not pulling, plus transient Assistant frames, are retained. A
+ * push that would exceed either limit clears the queue and marks the generation
+ * overflowed, which ends it for a clean Client resync.
+ */
+class FollowBacklog {
+  private readonly events = new Deque<{ readonly value: SessionEvent; readonly bytes: number }>()
+  private readonly frames = new Deque<{ readonly value: BufferedAssistantFrame; readonly bytes: number }>()
+  private bufferedItems = 0
+  private bufferedBytes = 0
+  private overflow = false
+
+  /** @param limits - positive item and byte caps. */
+  constructor(private readonly limits: SessionFollowBufferLimits) {}
+
+  /**
+   * Whether a push exceeded the cap and discarded every retained item.
+   * @returns true while the generation must end for a Client resync.
+   */
+  hasOverflowed(): boolean {
+    return this.overflow
+  }
+
+  /** Retained events and frames. */
+  get items(): number {
+    return this.bufferedItems
+  }
+
+  /** Estimated retained bytes. */
+  get bytes(): number {
+    return this.bufferedBytes
+  }
+
+  /**
+   * Retain one live durable event. The Session log already owns the payload,
+   * so only the queue reference and wrapper count against the budget.
+   * @param event - appended event.
+   */
+  pushEvent(event: SessionEvent): void {
+    this.push(this.events, event, BACKLOG_ITEM_OVERHEAD)
+  }
+
+  /**
+   * Retain one transient Assistant frame, including its serialized bytes.
+   * @param entry - frame and its durable watermark.
+   */
+  pushFrame(entry: BufferedAssistantFrame): void {
+    this.push(this.frames, entry, BACKLOG_ITEM_OVERHEAD + jsonBytes(entry.frame))
+  }
+
+  /**
+   * Remove the oldest durable event.
+   * @returns the event, or undefined when the queue is empty.
+   */
+  popEvent(): SessionEvent | undefined {
+    return this.pop(this.events)
+  }
+
+  /**
+   * Remove the oldest Assistant frame.
+   * @returns the frame, or undefined when the queue is empty.
+   */
+  popFrame(): BufferedAssistantFrame | undefined {
+    return this.pop(this.frames)
+  }
+
+  /**
+   * Discard frames at or before one ordinal because a snapshot baseline
+   * represents them.
+   * @param throughOrdinal - inclusive snapshot cutoff.
+   */
+  prune(throughOrdinal: number): void {
+    for (;;) {
+      const head = this.frames.popFront()
+      if (head === undefined) return
+      if (head.value.ordinal > throughOrdinal) {
+        this.frames.pushFront(head)
+        return
+      }
+      this.bufferedItems -= 1
+      this.bufferedBytes -= head.bytes
+    }
+  }
+
+  /** Clear a pre-cut overflow now that the snapshot baseline supersedes it. */
+  resetOverflow(): void {
+    this.overflow = false
+  }
+
+  /** Drop every retained item and release its memory. */
+  clear(): void {
+    this.events.clear()
+    this.frames.clear()
+    this.bufferedItems = 0
+    this.bufferedBytes = 0
+  }
+
+  private push<T>(
+    queue: Deque<{ readonly value: T; readonly bytes: number }>,
+    value: T,
+    bytes: number,
+  ): void {
+    if (this.overflow) return
+    if (this.bufferedItems + 1 > this.limits.maxItems
+      || this.bufferedBytes + bytes > this.limits.maxBytes) {
+      this.overflow = true
+      this.clear()
+      return
+    }
+    queue.pushBack({ value, bytes })
+    this.bufferedItems += 1
+    this.bufferedBytes += bytes
+  }
+
+  private pop<T>(queue: Deque<{ readonly value: T; readonly bytes: number }>): T | undefined {
+    const head = queue.popFront()
+    if (head === undefined) return undefined
+    this.bufferedItems -= 1
+    this.bufferedBytes -= head.bytes
+    return head.value
+  }
+}
+
+function validateFollowResumeOptions(options: SessionFollowResumeOptions): SessionFollowResumeOptions {
+  if (!Number.isSafeInteger(options.maxEvents) || options.maxEvents <= 0) {
+    throw new RangeError('session follow resume maxEvents must be a positive safe integer')
+  }
+  return options
+}
+
+function validateFollowBufferLimits(limits: SessionFollowBufferLimits): SessionFollowBufferLimits {
+  if (!Number.isSafeInteger(limits.maxItems) || limits.maxItems <= 0) {
+    throw new RangeError('session follow buffer maxItems must be a positive safe integer')
+  }
+  if (!Number.isSafeInteger(limits.maxBytes) || limits.maxBytes <= 0) {
+    throw new RangeError('session follow buffer maxBytes must be a positive safe integer')
+  }
+  return limits
+}
+
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8')
+}
+
 function cursorBeforeNext(nextSeq: SessionLogOffsetType): SessionSeqCursor {
   return nextSeq === 0 ? -1 : SessionSeq(nextSeq - 1)
 }
@@ -370,6 +689,12 @@ function validatePageRequest(request: SessionPageRequest): void {
     throw new RemoteError('gateway/bad-request', 'beforeSeq must be a non-negative safe integer', {})
   }
   validateHistoryWindow(request)
+}
+
+function validateFollowAfterSeq(afterSeq: SessionSeqCursor | undefined): void {
+  if (afterSeq !== undefined && (!Number.isSafeInteger(afterSeq) || afterSeq < -1)) {
+    throw new RemoteError('gateway/bad-request', 'afterSeq must be an integer greater than or equal to -1', {})
+  }
 }
 
 function validateHistoryWindow(request: Pick<SessionPageRequest, 'maxMessages' | 'turnWindow'>): void {

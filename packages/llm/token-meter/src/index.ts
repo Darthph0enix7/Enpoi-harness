@@ -8,7 +8,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-compaction-image-offload/projection'
 import z from '@deepseek-ai/schemastery'
 import { assembleAssistantStream } from '@deepseek-ai/dsh-llm'
-import type { LlmImageRequestPricing, LlmRuntime, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { LlmImageRequestPricing, LlmNativeFileInputs, LlmRuntime, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type {
   EpochHeader,
@@ -152,8 +152,9 @@ export class TokenMeter extends Service {
       ? state.header
       : canonicalHeader(requestHeader)
     const pricing = this._routeImagePricing(header)
+    const nativeInputs = this._routeNativeFileInputs(session, header)
     const fileText = this._fileRequestText()
-    const surface = priceSurface(state.surface, pricing, fileText)
+    const surface = priceSurface(state.surface, pricing, fileText, nativeInputs)
     const anchor = state.anchor
 
     let baseline: TokenMeasurementBaseline
@@ -162,7 +163,7 @@ export class TokenMeter extends Service {
       // Matching headers share one route, so the anchored snapshot reprices
       // under the same pricing as the current surface and the signed delta
       // compares like with like.
-      const anchorSurfaceTokens = priceSurface(anchor.nodes, pricing, fileText).surfaceTokens
+      const anchorSurfaceTokens = priceSurface(anchor.nodes, pricing, fileText, nativeInputs).surfaceTokens
         + anchor.assistantTokens
       const estimatedAnchorTokens = estimateToolsTokens(header) + anchorSurfaceTokens
       const usage = anchor.usage
@@ -198,6 +199,33 @@ export class TokenMeter extends Service {
     const config = header?.config
     if (config === undefined) return undefined
     return this.ctx.get('llm')?.imageRequestPricing(config.provider, config.model)
+  }
+
+  /**
+   * Resolve the routed model's native-file policy.
+   *
+   * The live route answers first, so a newly enabled route is priced before
+   * its first request/context record exists. When the route declares none —
+   * unmounted history, or a route that stopped enabling media — the latest
+   * durable `request/context` descriptor for the same provider/model answers
+   * instead, so replaying a logged native request keeps its reserve. A session
+   * that never logged a descriptor prices handle text.
+   */
+  private _routeNativeFileInputs(
+    session: Session,
+    header: EpochHeader | undefined,
+  ): LlmNativeFileInputs | undefined {
+    const config = header?.config
+    if (config !== undefined) {
+      const route = this.ctx.get('llm')?.nativeFileRequestPricing(config.provider, config.model)
+      if (route !== undefined) return route
+    }
+    const logged = session.requestContext()
+    if (logged?.nativeFileInputs === undefined) return undefined
+    if (config !== undefined && (logged.provider !== config.provider || logged.model !== config.model)) {
+      return undefined
+    }
+    return logged.nativeFileInputs
   }
 
   /** Resolve request-time file projection when an LLM service is mounted. */

@@ -31,7 +31,7 @@ interface ContentBlockMap {
 }
 ```
 
-The block interfaces (full fields in source): `TextBlock` (`text`), `ReasoningBlock` (thinking, distinct from visible text), `ImageBlock` (a durable [image attachment](attachment.md)), `FileBlock` (a durable verbatim [file attachment](attachment.md) that request assembly projects to handle text for every route), and `ToolCallBlock` (`id: ToolCallId`, `name`, raw-JSON `arguments`). Tool results are first-class `ToolResultMessage` values with `toolCallId`, result `content`, and optional `isError`; they are not content blocks. `ContentBlock = ContentBlockMap[ContentBlockType]`. A new modality belongs in the merge-extensible map only when its adapter, UI, compaction, and durable replay paths honor it. Developer tool-change blocks are projected according to the resolved route capability.
+The block interfaces (full fields in source): `TextBlock` (`text`), `ReasoningBlock` (thinking, distinct from visible text), `ImageBlock` (a durable [image attachment](attachment.md)), `FileBlock` (a durable verbatim [file attachment](attachment.md) that request assembly projects to handle text unless the exact route declares a native-file descriptor admitting its suffix), and `ToolCallBlock` (`id: ToolCallId`, `name`, raw-JSON `arguments`). Tool results are first-class `ToolResultMessage` values with `toolCallId`, result `content`, and optional `isError`; they are not content blocks. `ContentBlock = ContentBlockMap[ContentBlockType]`. A new modality belongs in the merge-extensible map only when its adapter, UI, compaction, and durable replay paths honor it. Developer tool-change blocks are projected according to the resolved route capability.
 
 Image access belongs to request serialization rather than the durable attachment or deterministic request-image version. `resolveImageAttachmentAccess()` combines the attachment provider's optional host object path with a mapping supplied by the consumer for the current tool execution filesystem. The result is available only for that request and does not participate in `variantId`.
 
@@ -291,6 +291,10 @@ interface LlmImageRequestPricing {
 }
 ```
 
+## Request-file policy
+
+Request assembly keeps a user-role `FileBlock` structured only when the exact route declares `nativeFileInputs` and the filename suffix maps to one of its encoders; every other occurrence becomes the same deterministic handle text a non-native route receives. A preserved block reaches only that adapter, which verifies the durable byte count, filename MIME, magic signature, exact serialized native part, aggregate encoded size, and standalone sentinel placement before the provider stream exists. A file is never silently dropped: without an admitting descriptor it is handle text, and a structured block the adapter cannot plan rejects the request with `UNSUPPORTED_CONTENT`. The descriptor is policy and fixed token reserve only — no filenames, bytes, or sentinels enter `request/context`. `openai-responses` has no verified native part and is rejected during configuration resolution, before any file is read.
+
 ## The adapter contract
 
 Every adapter MUST obey these, and every consumer may rely on them:
@@ -516,16 +520,40 @@ interface LlmModelInfo {
   description?: string
   /** Accepted request modalities; absent means unknown, while an explicit omission is negative capability. */
   inputModalities?: readonly ModelModality[]
+  /**
+   * Input types a catalog, configuration, or listing advertised, including
+   * tokens (`audio`, `video`, `pdf`) no native request encoding carries yet.
+   * {@link inputModalities} stays the effective set the adapter sends.
+   */
+  advertisedInputModalities?: readonly ModelModality[]
+  /** Whether a source stated tool-call support; absent means undisclosed. */
+  tools?: boolean
+  /**
+   * Effort identifiers a source advertised that no selectable level accepts,
+   * preserved for diagnostics. They never appear in a materialized ladder.
+   */
+  unsupportedReasoningEfforts?: readonly string[]
 }
 ```
 
-Correctness-sensitive metadata is resolved separately from the advisory catalog and is owned by the adapter serving the exact route. Context capacity, adapter call defaults, reasoning choices, and the system prompt update mode share one exact-model result so consumers do not repeat authoritative model resolution. `SystemPromptUpdate` has the single value `'in-history'`: the model reads the latest `system` message at any position of `messages` as the complete effective system prompt, so the agent loop can append a changed prompt after the cached history instead of rewriting message 0 ([decision rule](../../packages/core/agent-loop/README.md#understand-the-implementation)); an absent mode means only a leading system message is read, and `normalizeModelInfo` rejects any other value with `INVALID_MODEL_INFO`.
+Correctness-sensitive metadata is resolved separately from the advisory catalog and is owned by the adapter serving the exact route. Context capacity (including an input-only cap), output capability, adapter call defaults, reasoning choices, and the system prompt update mode share one exact-model result so consumers do not repeat authoritative model resolution. `context.source` and `maxOutputTokensSource` distinguish a stated capacity from the route fallback an adapter assumed for execution; `defaultMaxTokens` is only a request default the deployment configured, never the model's capability. The effective `inputModalities` list is what the adapter can encode now, while `advertisedInputModalities` keeps disclosure-only input types. `SystemPromptUpdate` has the single value `'in-history'`: the model reads the latest `system` message at any position of `messages` as the complete effective system prompt, so the agent loop can append a changed prompt after the cached history instead of rewriting message 0 ([decision rule](../../packages/core/agent-loop/README.md#understand-the-implementation)); an absent mode means only a leading system message is read, and `normalizeModelInfo` rejects any other value with `INVALID_MODEL_INFO`.
 
 ```ts type-equiv
 /** Provider-owned context capacity for one exact provider/model route. */
 interface LlmModelContext {
   /** Maximum combined request and response context in tokens. */
   contextWindow: number
+  /**
+   * Maximum input (prompt-side) tokens when configuration or discovery stated
+   * it separately; never derived from {@link contextWindow} and never
+   * defaulted beside it. Absent means no source stated an input-only cap.
+   */
+  maxInputTokens?: number
+  /**
+   * Provenance of {@link contextWindow}; `default` means no source stated this
+   * capacity and the route fallback stands in for execution.
+   */
+  source?: LlmModelCapacitySource
 }
 ```
 
@@ -566,7 +594,19 @@ interface LlmModelReasoningInfo {
 interface LlmResolvedModelInfo extends LlmModelInfo {
   /** Provider-owned context capacity when known. */
   context?: LlmModelContext
-  /** Adapter-configured per-request output cap materialized when callers omit one. */
+  /**
+   * Output-token capability the route resolved for the model. An adapter that
+   * requires such a field (pi-ai's `Model.maxTokens`) always reports one, so a
+   * value labelled `default` by {@link maxOutputTokensSource} is the execution
+   * fallback rather than a disclosed cap.
+   */
+  maxOutputTokens?: number
+  /** Provenance of {@link maxOutputTokens}; same vocabulary as {@link LlmModelContext.source}. */
+  maxOutputTokensSource?: LlmModelCapacitySource
+  /**
+   * Adapter-configured per-request output cap materialized when callers omit
+   * one; distinct from {@link maxOutputTokens}, which is the model capability.
+   */
   defaultMaxTokens?: number
   /** Adapter-owned selectable reasoning levels when exposed. */
   reasoning?: LlmModelReasoningInfo
@@ -574,6 +614,8 @@ interface LlmResolvedModelInfo extends LlmModelInfo {
   systemPromptUpdate?: SystemPromptUpdate
   /** Declared mid-conversation tool declaration handling; absent means every request declares the complete tool list. */
   toolUpdate?: ToolUpdate
+  /** Explicit native-file admission and pricing policy for this exact route; absent keeps every file as handle text. */
+  nativeFileInputs?: LlmNativeFileInputs
 }
 ```
 
@@ -685,7 +727,7 @@ interface ToolSchema {
 
 The model-facing `ToolSchema` is the wire type; the registered `ToolDefinition` that produces it (schema + `execute`) is on [tools.md](tools.md).
 
-A provider a surface is still drafting has no route and no catalog, so interrogation is described separately: the request carries the draft the user is editing, and the reply is candidates a surface may adopt rather than a catalog it must serve.
+A provider a surface is still drafting has no route and no catalog, so interrogation is described separately: the request carries the draft the user is editing, and the reply is candidates a surface may adopt rather than a catalog it must serve. Each candidate carries only what the listing stated: capacities, a separate input-only cap, input modalities, tool and reasoning claims, the advertised effort ladder, and effort identifiers no configured level accepts. An undisclosed field stays absent, while a stated `false` and an explicitly empty effort ladder are preserved as answers.
 
 ```ts type-equiv
 /**
@@ -731,6 +773,26 @@ interface LlmDiscoveredModel {
   maxTokens?: number
   /** Accepted input types when disclosed by the catalog or endpoint; absent means unknown. */
   inputModalities?: readonly ModelModality[]
+  /**
+   * Maximum input (prompt-side) tokens when the endpoint discloses one
+   * separately from {@link contextWindow}; never derived from it.
+   */
+  maxInputTokens?: number
+  /** Whether the endpoint stated tool-call support; absent means undisclosed. */
+  tools?: boolean
+  /** Whether the endpoint stated reasoning support; absent means undisclosed. */
+  reasoning?: boolean
+  /**
+   * Selectable reasoning levels (picker id → wire value) when the endpoint
+   * advertises them; absent means undisclosed, never "does not reason".
+   */
+  reasoningEfforts?: Readonly<Record<string, string>>
+  /**
+   * Effort identifiers the endpoint advertised that no configured level
+   * accepts, preserved for diagnostics. They are never selectable and never
+   * renamed to a canonical level.
+   */
+  unsupportedReasoningEfforts?: readonly string[]
 }
 ```
 
@@ -780,7 +842,7 @@ The [wire reference](../deepseek-llm-api-wire-extensions.md) defines the exact r
 
 ## Service and provider contracts
 
-`LlmAdapter` is the provider contract: subclass, implement `stream()`, and register one adapter instance with `ctx.llm.registerAdapter(providers, adapter)`. `GenerateOptions.provider` selects the registered adapter; `GenerateOptions.model` is passed to that adapter and need not be registered at lifecycle start. Duplicate provider routes fail atomically. Optional `providerRetryPolicy()` is captured per route with normal defaults, while `providerInfo()` and asynchronous `listModels()` feed `LlmRuntime.listProviders()` / `listModels()` with detached selector metadata. That catalog is advisory rather than a request whitelist: the adapter remains authoritative and may accept unlisted model ids. One asynchronous `resolveModel()` query returns exact model identity plus optional correctness-sensitive context capacity, an adapter-configured `defaultMaxTokens`, and ordered model-owned reasoning ids with an optional deployment default; absent fields mean unavailable metadata or provider-owned behavior, not invalid catalog membership. The resolver receives optional cancellation and must settle promptly after abort. `LlmRuntime.resolveModelInfo()` validates and detaches the aggregate. At the final adapter boundary, `resolveCallConfig()` materializes the output default only when `maxTokens` is absent and validates and materializes reasoning, so direct calls cannot bypass either configured behavior; direct dispatch captures one registration before awaiting that resolution. The agent loop instead uses `prepareCall()` to keep the same registration across model resolution, durable header logging, and dispatch, retain detached context metadata from that exact lookup, and report which config fields the adapter defaulted. Adapter lookup happens at the terminal continuation of the `llm/stream` waterfall, so a listener may short-circuit the call or route a mutable one-shot request before lookup. AgentLoop observes a request attempt once the outer waterfall returns a stream handle; that limited boundary does not prove a lazy terminal adapter was constructed or began provider I/O. The `block-start` / `block-end` `index` correlation and the assembler together mean an adapter only has to emit well-formed chunks — block reassembly is not each adapter's problem. [architecture.md](../architecture.md#turn-flow) shows where `ctx.llm.stream()` and the `llm/stream` waterfall sit in one turn.
+`LlmAdapter` is the provider contract: subclass, implement `stream()`, and register one adapter instance with `ctx.llm.registerAdapter(providers, adapter)`. `GenerateOptions.provider` selects the registered adapter; `GenerateOptions.model` is passed to that adapter and need not be registered at lifecycle start. Duplicate provider routes fail atomically. Optional `providerRetryPolicy()` is captured per route with normal defaults, while `providerInfo()` and asynchronous `listModels()` feed `LlmRuntime.listProviders()` / `listModels()` with detached selector metadata. That catalog is advisory rather than a request whitelist: the adapter remains authoritative and may accept unlisted model ids. One asynchronous `resolveModel()` query returns exact model identity plus optional correctness-sensitive context capacity (combined window, separate input-only cap, and its provenance), output capability with its provenance, an adapter-configured `defaultMaxTokens`, effective and advertised input types, tool and unsupported-effort disclosures, and ordered model-owned reasoning ids with an optional deployment default; absent fields mean unavailable metadata or provider-owned behavior, not invalid catalog membership. The resolver receives optional cancellation and must settle promptly after abort. `LlmRuntime.resolveModelInfo()` validates and detaches the aggregate. At the final adapter boundary, `resolveCallConfig()` materializes the output default only when `maxTokens` is absent and validates and materializes reasoning, so direct calls cannot bypass either configured behavior; direct dispatch captures one registration before awaiting that resolution. The agent loop instead uses `prepareCall()` to keep the same registration across model resolution, durable header logging, and dispatch, retain detached context metadata from that exact lookup, and report which config fields the adapter defaulted. Adapter lookup happens at the terminal continuation of the `llm/stream` waterfall, so a listener may short-circuit the call or route a mutable one-shot request before lookup. AgentLoop observes a request attempt once the outer waterfall returns a stream handle; that limited boundary does not prove a lazy terminal adapter was constructed or began provider I/O. The `block-start` / `block-end` `index` correlation and the assembler together mean an adapter only has to emit well-formed chunks — block reassembly is not each adapter's problem. [architecture.md](../architecture.md#turn-flow) shows where `ctx.llm.stream()` and the `llm/stream` waterfall sit in one turn.
 
 ```ts type-equiv
 /** One model call whose config and adapter registration were resolved together. */
@@ -793,10 +855,20 @@ interface PreparedLlmCall {
   readonly context?: LlmModelContext
   /** Exact model modalities captured with the adapter dispatch generation. */
   readonly inputModalities?: readonly ModelModality[]
+  /** Disclosure-only advertised input types captured with the adapter dispatch generation. */
+  readonly advertisedInputModalities?: readonly ModelModality[]
+  /** Exact output-token capability captured with the adapter dispatch generation. */
+  readonly maxOutputTokens?: number
+  /** Whether the exact route accepts tool declarations, when a source stated it. */
+  readonly tools?: boolean
+  /** Advertised effort identifiers outside the selectable ladder, captured for diagnostics. */
+  readonly unsupportedReasoningEfforts?: readonly string[]
   /** Exact model system prompt update mode captured with the adapter dispatch generation. */
   readonly systemPromptUpdate?: SystemPromptUpdate
   /** Exact model tool update mode captured with the adapter dispatch generation. */
   readonly toolUpdate?: ToolUpdate
+  /** Native-file policy copied from the adapter generation that will dispatch this call. */
+  readonly nativeFileInputs?: LlmNativeFileInputs
   /** Config fields materialized by the captured adapter rather than proposed by the caller. */
   readonly adapterDefaults: LlmCallConfigAdapterDefaults
   /**
@@ -840,6 +912,25 @@ declare abstract class LlmAdapter {
    * @returns route-owned image pricing, or `undefined` when the route declares none.
    */
   imageRequestPricing(_provider: string, _model: string): LlmImageRequestPricing | undefined;
+  /**
+   * Resolve this route's explicit native-file policy synchronously. The default
+   * declares none, so request assembly keeps every file as handle text.
+   * Implementations must not perform I/O; the token meter resolves this per
+   * measurement.
+   * @param _provider - a route passed to `registerAdapter()` for this instance.
+   * @param _model - exact model id passed to {@link GenerateOptions.model}.
+   * @returns the route's descriptor, or `undefined` when media is not enabled.
+   */
+  nativeFileInputs(_provider: string, _model: string): LlmNativeFileInputs | undefined;
+  /**
+   * Synchronous native-file request pricing for one exact route. The descriptor
+   * carries the explicit token reserve; routes that override only
+   * {@link nativeFileInputs} inherit this alias unchanged.
+   * @param provider - a route passed to `registerAdapter()` for this instance.
+   * @param model - exact model id passed to {@link GenerateOptions.model}.
+   * @returns the route's descriptor, or `undefined` when media is not enabled.
+   */
+  nativeFileRequestPricing(provider: string, model: string): LlmNativeFileInputs | undefined;
   /**
    * List models this adapter can currently advertise for one owned provider.
    * Core routing accepts unlisted model ids; catalog-driven entry points such
@@ -1052,6 +1143,25 @@ providerRetryPolicy(provider: string): ResolvedRetryPolicy
  * @returns the owning adapter's image pricing for the route, when declared.
  */
 imageRequestPricing(provider: string, model: string): LlmImageRequestPricing | undefined
+
+/**
+ * Resolve the exact route's explicit native-file policy, or `undefined` when
+ * the provider is unregistered or does not enable native media. Unknown
+ * providers degrade to `undefined`, mirroring image pricing for durable
+ * history whose route may no longer be mounted.
+ * @param provider - provider route named by a request header.
+ * @param model - exact model id named by the same header.
+ * @returns the owning adapter's descriptor, when declared.
+ */
+nativeFileInputs(provider: string, model: string): LlmNativeFileInputs | undefined
+
+/**
+ * Resolve the exact route's synchronous native-file request pricing.
+ * @param provider - provider route named by a request header.
+ * @param model - exact model id named by the same header.
+ * @returns the owning adapter's descriptor, when declared.
+ */
+nativeFileRequestPricing(provider: string, model: string): LlmNativeFileInputs | undefined
 
 /**
  * Resolve the exact text one durable file occurrence contributes to every

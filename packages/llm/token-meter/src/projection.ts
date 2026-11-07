@@ -78,7 +78,7 @@ export interface ContextBreakdownProjection {
 export interface ContextCompactionsProjection {
   /** Committed summarizing compactions. */
   readonly count: number
-  /** Of `count`, compactions whose summary was the model-free stub (`provider === ''`). */
+  /** Of `count`, compactions whose summary was the model-free failure stub (empty route plus a recorded `summarizationFailure`). */
   readonly mechanicalCount: number
   /** Compaction lifecycles that ended with an error. */
   readonly failedCount: number

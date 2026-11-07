@@ -20,7 +20,7 @@ This repository is the Enpoi fork of `deepseek-ai/deepseek-harness`. The `docs/`
 | `docs/creator/**` | ours (fork) | current — live | Creator agent knowledge base; fork truth lives here, not in upstream pages |
 | `docs/README.md`, `docs/archive/**` | ours (fork) | current | this map; frozen pages with banners |
 | `docs/subsystems/**` | upstream (+ fork pages `peer.md`, `settings.md`) | current | page prose is hand-maintained; the `cordis-surface` regions are generated — never edit between the markers |
-| `docs/persistence-changes/**` | upstream + four fork records (`2026-09-23-*`) | current | historical acknowledgements; `.schema.json` snapshots are tool-generated |
+| `docs/persistence-changes/**` | upstream + fork records (`2026-09-23-file-revert-events`, `2026-09-23-subagent-descriptor-quiet`, `2026-11-07-session-format-v5`) | current | historical acknowledgements; `.schema.json` snapshots are tool-generated; two retired unaccepted records are frozen under [`archive/retired-persistence/`](archive/retired-persistence/README.md) |
 | `docs/postmortem/**` | upstream | current — frozen history | incident records are evidence, never rewritten |
 | `docs/cookbook/**`, `docs/cordis-api/**`, `docs/cordis-tutorial/**`, `docs/user/**` | upstream | current | published by `website/docs.ts`; see "Upstream pages that are not the fork's path" below |
 | `docs/i18n/**` | upstream | current | translation contract and pipeline assets |

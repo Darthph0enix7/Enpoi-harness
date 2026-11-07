@@ -18,6 +18,12 @@ import type {
   TerminalOpenValue,
   TerminalServerFrame,
 } from '@deepseek-ai/dsh-host-enpoi-terminal/shared'
+import {
+  resolveTerminalSocketTiming,
+  terminalReconnectDelay,
+  type TerminalSocketTiming,
+  type TerminalSocketTimingOptions,
+} from './backoff.ts'
 
 /** Which surface a terminal belongs to. */
 export type TerminalPlace = 'panel' | 'bottom'
@@ -68,9 +74,6 @@ export const DOCK_HEIGHT_MAX_RATIO = 0.7
 /** Bounded client-side replay transcript per terminal. */
 const TRANSCRIPT_LIMIT = 512 * 1024
 
-/** Reconnect attempts after a socket drops on a live terminal. */
-const MAX_RECONNECTS = 3
-
 /**
  * Clamp a dock height into its range.
  * @param px - requested height.
@@ -89,7 +92,7 @@ async function call<T>(method: string, payload: unknown): Promise<T> {
     body: JSON.stringify(payload),
   })
   const body = await response.json() as TerminalApiResponse<T>
-  if (body.ok !== true) throw new Error(body.error.message)
+  if (!body.ok) throw new Error(body.error.message)
   return body.value
 }
 
@@ -107,25 +110,30 @@ interface ConnectionUpdate {
 }
 
 /** One terminal's transport: the host process, its socket, and its transcript. */
-class TerminalConnection {
+export class TerminalConnection {
   private socket: WebSocket | undefined
   private transcript = ''
   private readonly listeners = new Set<(data: string) => void>()
   private exited = false
   private closed = false
   private reconnects = 0
+  private openedAt: number | undefined
+  private retryTimer: ReturnType<typeof setTimeout> | undefined
+  private keepaliveTimer: ReturnType<typeof setInterval> | undefined
 
   /**
    * @param key - `${sessionId}:${id}` host key.
    * @param sessionId - owning conversation.
    * @param cwd - the session's working directory when known.
    * @param onUpdate - status sink.
+   * @param timing - retry and keepalive timing; defaults resolve at construction.
    */
   constructor(
     private readonly key: string,
     private readonly sessionId: string,
     private readonly cwd: string | undefined,
     private readonly onUpdate: (update: ConnectionUpdate) => void,
+    private readonly timing: TerminalSocketTiming = resolveTerminalSocketTiming(),
   ) {}
 
   /** Open the host process (reusing a live one) and attach the socket. */
@@ -156,8 +164,9 @@ class TerminalConnection {
     }
     this.socket = socket
     socket.onopen = () => {
-      this.reconnects = 0
+      this.openedAt = Date.now()
       this.onUpdate({ status: 'running' })
+      this.startKeepalive()
       // The view's first fit may have run before the socket opened.
       this.send({ t: 'resize', cols: this.cols, rows: this.rows })
     }
@@ -168,8 +177,12 @@ class TerminalConnection {
         case 'data':
           this.emit(frame.data)
           break
+        case 'pong':
+          // Keepalive answer: its only effect is the traffic itself.
+          break
         case 'exit':
           this.exited = true
+          this.stopKeepalive()
           this.onUpdate({ status: 'exited', exitCode: frame.exitCode })
           break
         case 'error':
@@ -179,21 +192,47 @@ class TerminalConnection {
     }
     socket.onclose = (event: CloseEvent) => {
       this.socket = undefined
+      this.stopKeepalive()
       if (this.closed || this.exited) return
       if (event.code === TERMINAL_WS_UNKNOWN_KEY) {
         this.onUpdate({ status: 'error', error: 'the host no longer knows this terminal' })
         return
       }
-      if (this.reconnects >= MAX_RECONNECTS) {
-        this.onUpdate({ status: 'error', error: 'the terminal connection dropped' })
-        return
+      // Only an open long enough to prove the link healthy resets the ladder;
+      // a socket that dies immediately keeps climbing the same backoff.
+      if (this.openedAt !== undefined && Date.now() - this.openedAt >= this.timing.stableConnectionMs) {
+        this.reconnects = 0
       }
+      this.openedAt = undefined
       this.reconnects += 1
-      setTimeout(() => { this.connect() }, 600 * this.reconnects)
+      this.onUpdate({ status: 'connecting' })
+      this.retryTimer = setTimeout(() => {
+        this.retryTimer = undefined
+        this.connect()
+      }, terminalReconnectDelay(this.reconnects, this.timing))
     }
     socket.onerror = () => {
       // The close handler owns the outcome.
     }
+  }
+
+  /** Keep an idle terminal socket alive; the host answers each ping with a pong. */
+  private startKeepalive(): void {
+    this.stopKeepalive()
+    if (this.timing.keepaliveIntervalMs === 0) return
+    this.keepaliveTimer = setInterval(() => { this.send({ t: 'ping' }) }, this.timing.keepaliveIntervalMs)
+  }
+
+  private stopKeepalive(): void {
+    if (this.keepaliveTimer === undefined) return
+    clearInterval(this.keepaliveTimer)
+    this.keepaliveTimer = undefined
+  }
+
+  private clearRetry(): void {
+    if (this.retryTimer === undefined) return
+    clearTimeout(this.retryTimer)
+    this.retryTimer = undefined
   }
 
   private cols = 80
@@ -202,8 +241,10 @@ class TerminalConnection {
   /** Parse one server frame; malformed frames are dropped. */
   private parse(raw: string): TerminalServerFrame | undefined {
     try {
-      const value = JSON.parse(raw) as TerminalServerFrame
-      return typeof value === 'object' && value !== null && typeof value.t === 'string' ? value : undefined
+      const value: unknown = JSON.parse(raw)
+      if (typeof value !== 'object' || value === null) return undefined
+      const frame = value as { t?: unknown }
+      return typeof frame.t === 'string' ? value as TerminalServerFrame : undefined
     } catch {
       return undefined
     }
@@ -260,6 +301,8 @@ class TerminalConnection {
   /** Kill the process and detach for good. */
   kill(): void {
     this.closed = true
+    this.clearRetry()
+    this.stopKeepalive()
     this.send({ t: 'kill' })
     const socket = this.socket
     if (socket !== undefined) {
@@ -270,26 +313,43 @@ class TerminalConnection {
   }
 }
 
+/** Registry tunables: retry ladder, stability window, and keepalive cadence. */
+export type TerminalRegistryOptions = TerminalSocketTimingOptions
+
 /** The registry the plugin's registers share. */
 export class TerminalRegistry {
   /** The observable state; components read it through the inject hook. */
   readonly state: SnapshotStore<TerminalRegistryState>
   private readonly connections = new Map<string, TerminalConnection>()
+  private readonly timing: TerminalSocketTiming
   private counter = 0
 
-  constructor() {
+  /**
+   * @param options - socket timing overrides; omitted fields use defaults.
+   */
+  constructor(options: TerminalRegistryOptions = {}) {
+    this.timing = resolveTerminalSocketTiming(options)
     this.state = createSnapshotStore<TerminalRegistryState>(
       { bySession: {}, dock: { open: false, height: DOCK_HEIGHT_DEFAULT } },
       { persist: { name: STORAGE_KEY } },
     )
-    const stored = this.state.getSnapshot()
+    // Persisted layout is a durable boundary: an older or hand-edited record
+    // may miss the dock fields, so read them structurally rather than trusting
+    // the store's declared snapshot type.
+    const stored: unknown = this.state.getSnapshot()
+    const dock = typeof stored === 'object' && stored !== null
+      ? (stored as { dock?: unknown }).dock
+      : undefined
+    const record = typeof dock === 'object' && dock !== null
+      ? dock as { open?: unknown; height?: unknown }
+      : undefined
     // A reload has no live PTYs: keep the dock's presentation and drop stale tabs.
     this.state.set({
       bySession: {},
       dock: {
-        open: stored.dock?.open === true,
-        height: typeof stored.dock?.height === 'number' && Number.isFinite(stored.dock.height)
-          ? clampDockHeight(stored.dock.height, window.innerHeight)
+        open: record?.open === true,
+        height: typeof record?.height === 'number' && Number.isFinite(record.height)
+          ? clampDockHeight(record.height, window.innerHeight)
           : DOCK_HEIGHT_DEFAULT,
       },
     })
@@ -320,7 +380,7 @@ export class TerminalRegistry {
     })
     const connection = new TerminalConnection(key, sessionId, cwd, (update) => {
       this.patchTab(sessionId, id, update)
-    })
+    }, this.timing)
     this.connections.set(key, connection)
     void connection.start()
   }

@@ -4,14 +4,16 @@
  * Refreshes each `llm-pi-ai` provider route's model list from the provider's
  * listing endpoint at the route's own wire protocol (`GET {baseURL}/models`
  * for the OpenAI protocols, `GET {root}/v1/models` for Anthropic Messages) and
- * enriches each entry using the authoritative `models.dev` catalog (the exact
- * single source of truth used by OpenCode and OpenChamber). The Command Code
+ * enriches each entry from a route's declared exact registry metadata, the
+ * `models.dev` catalog, and the installed pi-ai catalog. The Command Code
  * namespace is covered from the provider package's bundled catalog snapshot:
  * its vendor serves no model listing, so the sync merges the snapshot instead
  * of probing a nonexistent endpoint.
  *
  * Features:
  * - 100% Dynamic Discovery from live provider endpoints.
+ * - Exact registry metadata for declared routes, owner/channel-scoped from the
+ *   sanitized proxy registry; routes without a declaration never read it.
  * - Authoritative metadata from models.dev (193+ providers, 10,000+ models).
  * - Exact context windows (e.g. 1M for GLM-5.2, 1M for MiniMax-M3, 1.05M for Luna).
  * - Exact max output token limits.
@@ -33,7 +35,11 @@
  *   (`source: 'manual'`), pinned (`pinnedModels`), overlay-`upsert`, recently
  *   first-seen endpoint-only, and referenced models survive; the shrink guards
  *   protect the unattended pass, and a manual refresh forces past the >half
- *   guard.
+ *   guard. A route profile that explicitly declares
+ *   `catalogAuthority: 'endpoint'` may record a successful empty listing as
+ *   `models: []`, which the catalog layer reports as `knownEmpty` instead of
+ *   refilling from the installed catalog. Registry metadata never grants that
+ *   authority.
  * - Provider isolation: a route's models.dev metadata resolves only within its
  *   own mapped provider keys, and its installed-catalog metadata only from its
  *   own pi-ai provider keys — an id collision can never inherit another
@@ -53,14 +59,29 @@ import type { SettingsConflictError, SettingsNamespace, SettingsPathOp } from '@
 import { readSettingsDocument, ORCHESTRATION_NAMESPACE } from 'dsh-enpoi-contracts'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import type { Model, Api } from '@earendil-works/pi-ai'
-// The schema floor is llm-pi-ai's own resolution default: the sync writes it
-// explicitly so a discovered record is complete, but the one authoritative
-// value stays in the adapter's config module.
-import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from '@deepseek-ai/dsh-llm-pi-ai/src/config.ts'
-// A listing's capability block (effort ladder, image/pdf input) is read by the
-// one parser llm-pi-ai's own discovery uses, so a refresh can never answer
-// differently from the Add that created the route.
-import { listingCapabilities } from '@deepseek-ai/dsh-llm-pi-ai/src/listing.ts'
+// Public listing reader: sync, Add, and discovery share one capability parser.
+import {
+  Config as PiAiConfig,
+  listingCapabilities,
+  listingText,
+  readModelListing,
+} from '@deepseek-ai/dsh-llm-pi-ai'
+import type { ListingModel } from '@deepseek-ai/dsh-llm-pi-ai'
+import * as piAiRoot from '@deepseek-ai/dsh-llm-pi-ai'
+// The one authority for which reasoning levels a profile may declare. A
+// ladder is only copied from what a source supplied; the sync never extends
+// it, and unknown identifiers are dropped before they can reach settings.
+import {
+  CANONICAL_EFFORT_KEYS,
+  OWNER_CHANNEL_ALIASES,
+  createRegistryMetadataSource,
+  loadBundledRegistryMetadataIndex,
+  resolveRegistryModel,
+  type RegistryMetadataIndex,
+  type RegistryMetadataSource,
+  type RegistryMetadataSourceState,
+  type RegistryResolvedModel,
+} from './registry-metadata.ts'
 import {
   claimCapabilityHints,
   loadCapabilityHints,
@@ -69,6 +90,17 @@ import {
   type CapabilityHints,
   type CapabilityHintsOverrideDocument,
 } from './capability-hints.ts'
+
+/**
+ * The package-root `THINKING_LEVELS` export exists in source but is not yet in
+ * the shipped `llm-pi-ai` build/types this profile links. Read it from the
+ * root module at runtime and use the hardened registry canonical list as the
+ * temporary same-vocabulary fallback; the named root import is the target.
+ */
+const rootThinkingLevels: unknown = Reflect.get(piAiRoot, 'THINKING_LEVELS')
+const THINKING_LEVELS: readonly string[] = Array.isArray(rootThinkingLevels)
+  ? rootThinkingLevels.filter((level): level is string => typeof level === 'string')
+  : CANONICAL_EFFORT_KEYS
 
 export const name = 'enpoi-provider-sync'
 
@@ -87,6 +119,15 @@ function value<T>(field: T | Volatile<T>): T {
     : field as T
 }
 
+/**
+ * Legacy route-level capacity assumption. The shipped profile declares none:
+ * an operator who sets `capacityDefaults` is stating an explicit assumption
+ * for routes whose endpoint discloses nothing, not a per-model fact. The sync
+ * accepts the key for backward compatibility but never writes these values
+ * into settings or the discovered cache; the route's own
+ * `defaultContextWindow` / `defaultMaxTokens` resolves them at request time
+ * with `source: 'default'`.
+ */
 export interface RouteCapacity {
   prefixes?: Record<string, { contextWindow?: number; maxTokens?: number }>
   default?: { contextWindow?: number; maxTokens?: number }
@@ -101,6 +142,43 @@ export const ENDPOINT_ONLY_GRACE_MS = 14 * 24 * 60 * 60 * 1000
 /** Freshness window for the on-disk models.dev cache when the online refresh fails; the `catalogFreshMs` config overrides it. */
 export const CATALOG_FRESH_MS = 48 * 60 * 60 * 1000
 
+/**
+ * One route's declaration that its model metadata comes from a registry
+ * source in addition to the endpoint listing. The declaration is enrichment
+ * only: it never changes membership, empty-listing authority, or
+ * `catalogAuthority`. The route profile owns endpoint authority explicitly.
+ */
+export interface RouteMetadataSourceConfig {
+  /** Registry family. `cliproxyapi` reads the sanitized proxy registry schema. */
+  source: 'cliproxyapi'
+  /** Exact registry channel, when the route knows it; otherwise owner aliases resolve it. */
+  channel?: string
+  /** Exact registry owner namespace; overrides the listing's `owned_by` for lookup. */
+  owner?: string
+  /** Extra owner → channel aliases, merged over the shipped explicit table. */
+  ownerChannels?: Record<string, string[]>
+  /**
+   * Raw registry document URL for background metadata refresh. Declaring it
+   * opts this route in; omission keeps the pinned bundled baseline and performs
+   * no network read. `sourceVersion` is required alongside it.
+   */
+  refreshUrl?: string
+  /** Actual source label/version for the refreshed document; required with `refreshUrl`. */
+  sourceVersion?: string
+  /** Set false to keep the configured URL for provenance but skip refreshing it. */
+  refresh?: boolean
+}
+
+/**
+ * The shipped route declarations. Keying by route id is data, not inference:
+ * an operator who renames the route adds the same declaration under the new
+ * key. The baseline snapshot is always available; an explicit `refreshUrl` is
+ * the opt-in for a live upstream refresh.
+ */
+export const DEFAULT_ROUTE_METADATA_SOURCES: Readonly<Record<string, RouteMetadataSourceConfig>> = {
+  cliproxyapi: { source: 'cliproxyapi' },
+}
+
 /** Live-editable sync schedule and enrichment configuration. */
 export interface Config {
   /** Refresh cadence in milliseconds; hourly by default, matching the shipped profile. */
@@ -111,7 +189,11 @@ export interface Config {
   syncDelayMs: Volatile<number>
   /** Known endpoints for routes whose profile leaves baseURL to the catalog default. */
   endpoints: Volatile<Record<string, string>>
-  /** Capacity fallbacks for models the live endpoint does not describe. */
+  /**
+   * Legacy route-level capacity assumption, accepted for backward
+   * compatibility. Non-empty values are never persisted as per-model
+   * disclosures; the route resolves its own labeled defaults instead.
+   */
   capacityDefaults: Volatile<Record<string, RouteCapacity>>
   /**
    * Route → routing-affinity header name a configured route requires (for
@@ -145,6 +227,12 @@ export interface Config {
    * fails; live Config, shipped default {@link CATALOG_FRESH_MS}.
    */
   catalogFreshMs: Volatile<number>
+  /**
+   * Route → registry metadata declaration. A declared route resolves exact
+   * capability metadata from the sanitized registry after the endpoint's own
+   * disclosure; routes absent here never read registry metadata.
+   */
+  metadataSources: Volatile<Record<string, RouteMetadataSourceConfig>>
 }
 
 export const Config = Schema.object({
@@ -159,6 +247,15 @@ export const Config = Schema.object({
   pinnedModels: live(Schema.dict(Schema.array(String)).default({})),
   endpointGraceMs: live(Schema.number().default(ENDPOINT_ONLY_GRACE_MS)),
   catalogFreshMs: live(Schema.number().default(CATALOG_FRESH_MS)),
+  metadataSources: live(Schema.dict(Schema.object({
+    source: Schema.union(['cliproxyapi']).required(),
+    channel: Schema.string(),
+    owner: Schema.string(),
+    ownerChannels: Schema.dict(Schema.array(String)),
+    refreshUrl: Schema.string(),
+    sourceVersion: Schema.string(),
+    refresh: Schema.boolean(),
+  })).default(DEFAULT_ROUTE_METADATA_SOURCES)),
 })
 
 /** One request-modality token a listing or catalog may disclose. */
@@ -179,7 +276,14 @@ interface LiveModel {
   id: string
   name?: string
   contextWindow?: number
+  /** Input-only token cap the endpoint stated separately from the combined window. */
+  maxInputTokens?: number
   maxTokens?: number
+  /**
+   * Endpoint `owned_by` namespace, used only to scope a registry metadata
+   * lookup. It is membership provenance, never a model-id prefix rule.
+   */
+  owner?: string
   /**
    * Modalities the listing itself disclosed — its modality fields or the
    * capability block's image/pdf support; `undefined` means it said nothing.
@@ -191,10 +295,12 @@ interface LiveModel {
   reasoning?: boolean
   /**
    * Selectable reasoning levels (picker id → wire value) the listing's
-   * capability block advertised. Absent means the endpoint said nothing, so
-   * catalog inference answers as before.
+   * capability block advertised. Absent means the endpoint said nothing; an
+   * empty object is an explicit empty ladder, which blocks inference.
    */
   reasoningEfforts?: Readonly<Record<string, string>>
+  /** Advertised effort names no configured profile accepts; diagnostics only. */
+  unsupportedReasoningEfforts?: readonly string[]
   /** The listing's own price fields, verbatim. */
   pricing?: Record<string, string>
   /** Whether the listing's directory marked the model free. */
@@ -208,6 +314,18 @@ interface LiveModel {
   gated?: boolean
   /** Why the model is gated, when it is; absent otherwise. */
   gateReason?: string
+}
+
+/** One route's registry metadata lookup context; absent means the route declared none. */
+export interface RegistryMetadataContext {
+  /** Parsed registry snapshot or refreshed document index. */
+  index: RegistryMetadataIndex
+  /** Exact registry channel, when the route declaration names one. */
+  channel?: string
+  /** Exact owner namespace that overrides the endpoint listing's `owned_by`. */
+  owner?: string
+  /** Route-specific owner → channel aliases, merged over the shipped table. */
+  ownerChannels?: Readonly<Record<string, readonly string[]>>
 }
 
 /** The gate reason the listing's own `isFree: false` verdict earns. */
@@ -280,6 +398,12 @@ const LLM_NS = 'llm-pi-ai'
 /** The default-model selection's Config namespace (the `agent-default-model` profile entry). */
 const AGENT_DEFAULT_MODEL_NS = 'agent-default-model'
 
+/** The Host setting that authorizes exact subagent routes (its profile entry id). */
+const SUBAGENT_MODEL_SELECTION_NS = 'subagent-model-selection-settings'
+
+/** Both readable spellings of the subagent route list; the Host entry id is authoritative. */
+const SUBAGENT_MODEL_SELECTION_NAMESPACES: readonly string[] = [SUBAGENT_MODEL_SELECTION_NS, 'subagent-model-selection']
+
 interface CredentialsSeam {
   resolve(ref: string): Promise<{ value?: string } | undefined>
 }
@@ -308,6 +432,10 @@ interface ProviderProfile {
   freeTierGated?: boolean
   /** Picker-facing reason stamped beside the gate; the sync default fills an omitted one. */
   freeTierGateReason?: string
+  /** Which source may fill an unconfigured/empty model list; registry routes set `endpoint`. */
+  catalogAuthority?: 'catalog' | 'endpoint'
+  /** Installed-catalog overrides; incompatible with endpoint catalog authority. */
+  modelOverrides?: Record<string, unknown>
   models?: Array<Record<string, unknown>>
   pool?: {
     strategy?: string
@@ -604,43 +732,15 @@ function resolveFromModelsDev(
   routeProviderMap: RouteProviderMap = DEFAULT_ROUTE_PROVIDER_MAP,
 ): ModelsDevModel | undefined {
   const db = loadModelsDev()
-  const cleanId = modelId.toLowerCase().trim()
-
-  // Progressive suffix stripping: -thinking → -tiered → -preview → -exp →
-  // -high/-low/-medium → -agent → -latest → -image. Each round re-checks the
-  // exact id, so gemini-2.5-flash-thinking → gemini-2.5-flash resolves.
-  // The ORIGINAL case is checked first: models.dev keys preserve case
-  // (e.g. 'MiniMax-M3', 'zai-org/GLM-5.3-Flash'), so lowercasing alone would
-  // miss them.
-  const SUFFIXES = ['-thinking', '-tiered', '-preview', '-exp', '-high', '-low', '-medium', '-agent', '-latest', '-image']
-  const candidates: string[] = [modelId, cleanId]
-  let base = cleanId
-  for (const suffix of SUFFIXES) {
-    if (base.endsWith(suffix)) {
-      base = base.slice(0, -suffix.length)
-      candidates.push(base)
-    }
-  }
-
   const candidateProviders = routeProviderMap[route] ?? [route]
 
+  // Exact key only: a suffix, family prefix, or case-folded spelling is a
+  // different id, and borrowing another row's facts is a guess. A deployment
+  // that needs an alias declares it as exact data (an overlay upsert).
   const find = (pModels: Record<string, unknown> | undefined): ModelsDevModel | undefined => {
     if (!pModels) return undefined
-    for (const c of candidates) {
-      const hit = pModels[c] as ModelsDevModel | undefined
-      if (hit) return hit
-    }
-    // Prefix match: alias ids like gemini-3.1-pro-high → gemini-3.1-pro →
-    // models.dev gemini-3.1-pro-preview. Pick the shortest matching id.
-    const prefix = base
-    if (prefix.length >= 8) {
-      const matches = Object.keys(pModels).filter(k => k.startsWith(`${prefix}-`))
-      if (matches.length > 0) {
-        matches.sort((a, b) => a.length - b.length)
-        return pModels[matches[0]] as ModelsDevModel | undefined
-      }
-    }
-    return undefined
+    const hit = pModels[modelId] as ModelsDevModel | undefined
+    return hit
   }
 
   // The route's declared providers are the only namespace consulted; there is
@@ -665,7 +765,7 @@ const routeCatalogIndexes = new Map<string, Map<string, Model<Api>>>()
  * map names no pi-ai provider has no catalog answer at all.
  * @param route - the provider route key.
  * @param routeProviderMap - the effective route → models.dev provider keys.
- * @returns the id-and-short-id index of the route's own providers.
+ * @returns the exact-id index of the route's own providers.
  */
 function catalogIndexForRoute(route: string, routeProviderMap: RouteProviderMap): Map<string, Model<Api>> {
   const providerKeys = [...new Set([route, ...(routeProviderMap[route] ?? [])])]
@@ -682,9 +782,8 @@ function catalogIndexForRoute(route: string, routeProviderMap: RouteProviderMap)
       continue
     }
     for (const m of models) {
+      // Exact ids only: a vendor-stripped short id names a different model.
       if (!index.has(m.id)) index.set(m.id, m)
-      const short = m.id.includes('/') ? m.id.split('/').pop()! : m.id
-      if (!index.has(short)) index.set(short, m)
     }
   }
   routeCatalogIndexes.set(cacheKey, index)
@@ -736,14 +835,6 @@ function beautifyId(id: string): string {
     .replace(/Free\b/i, '(Free)')
 }
 
-/** A positive integer field of a listing entry, or `undefined`. */
-function listingCapacity(...candidates: readonly unknown[]): number | undefined {
-  for (const candidate of candidates) {
-    if (typeof candidate === 'number' && Number.isInteger(candidate) && candidate > 0) return candidate
-  }
-  return undefined
-}
-
 /** A non-empty string field of a listing entry, or `undefined`. */
 function listingString(...candidates: readonly unknown[]): string | undefined {
   for (const candidate of candidates) {
@@ -772,70 +863,6 @@ function liveModalities(raw: readonly unknown[]): LiveModality[] {
   return inputs
 }
 
-/** The modalities one listing entry disclosed, or `undefined` when it stayed silent. */
-function listingModalities(entry: Record<string, unknown>): LiveModality[] | undefined {
-  const architecture = entry.architecture as { input_modalities?: unknown } | undefined
-  const raw = Array.isArray(entry.input_modalities)
-    ? entry.input_modalities
-    : Array.isArray(entry.modalities)
-      ? entry.modalities
-      : Array.isArray(architecture?.input_modalities)
-        ? architecture.input_modalities
-        : undefined
-  if (raw === undefined) return undefined
-  const inputs = liveModalities(raw)
-  return inputs.length === 0 ? undefined : inputs
-}
-
-/**
- * Union the modalities an entry's own fields disclosed with the ones its
- * capability block disclosed. Both are the same disclosure from one endpoint,
- * so neither overrides the other; the vocabulary is deduplicated in order.
- * @param listed - tokens read from the entry's modality fields, when present.
- * @param capabilities - tokens the shared listing parser derived, when present.
- * @returns the merged tokens, or `undefined` when neither disclosure exists.
- */
-function mergeModalities(
-  listed: readonly LiveModality[] | undefined,
-  capabilities: readonly LiveModality[] | undefined,
-): LiveModality[] | undefined {
-  if (listed === undefined && capabilities === undefined) return undefined
-  const modalities: LiveModality[] = []
-  for (const modality of [...listed ?? [], ...capabilities ?? []]) {
-    if (!modalities.includes(modality)) modalities.push(modality)
-  }
-  return modalities.length === 0 ? undefined : modalities
-}
-
-/**
- * A ladder normalizes to "the entry advertised levels" or "it advertised
- * none": an absent or empty dict says nothing, and every non-empty ladder is
- * carried verbatim.
- * @param ladder - the advertised levels, when any.
- * @returns the non-empty ladder, or `undefined` when nothing was advertised.
- */
-function liveEfforts(
-  ladder: Readonly<Record<string, string>> | undefined,
-): Readonly<Record<string, string>> | undefined {
-  return ladder === undefined || Object.keys(ladder).length === 0 ? undefined : ladder
-}
-
-/**
- * The `supported_parameters` vocabulary OpenRouter-style gateways publish.
- * Absent means undisclosed; present means the endpoint enumerated what it
- * takes, so an omission is a disclosure of absence for the two flags read
- * here — never an assumption in the other direction.
- */
-function listingSupported(entry: Record<string, unknown>): { tools?: boolean; reasoning?: boolean } {
-  const raw = entry.supported_parameters
-  if (!Array.isArray(raw)) return {}
-  const strings = raw.filter((value): value is string => typeof value === 'string')
-  return {
-    tools: strings.includes('tools') || strings.includes('tool_choice'),
-    reasoning: strings.includes('reasoning'),
-  }
-}
-
 /** The listing's price fields as strings, or `undefined` when it priced nothing. */
 function listingPricing(entry: Record<string, unknown>): Record<string, string> | undefined {
   const raw = entry.pricing
@@ -849,60 +876,83 @@ function listingPricing(entry: Record<string, unknown>): Record<string, string> 
 }
 
 /**
- * Normalize one raw listing row into the fields this sync understands. Every
- * capability field stays absent when the listing did not disclose it, so the
- * caller can tell "the endpoint said no" from "the endpoint said nothing".
+ * Normalize one parsed listing row into the sync's model record. Capabilities
+ * come from the shared `llm-pi-ai` parser, so a refresh and the Add flow see
+ * the same context window, separate input cap, modalities, booleans, and
+ * exact effort ladder. Only gateway-specific extras (`pricing`, `isFree`)
+ * remain local.
+ * @param listing - one row as the shared parser read it.
+ * @param raw - the raw row, for the gateway-specific extras.
+ * @returns the normalized model.
+ */
+function normalizeListingModel(listing: ListingModel, raw: unknown): LiveModel {
+  const row = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : {}
+  const pricing = listingPricing(row)
+  const isFree = typeof row.isFree === 'boolean' ? row.isFree : undefined
+  return {
+    id: listing.id,
+    ...listing.name === undefined ? {} : { name: listing.name },
+    ...listing.contextWindow === undefined ? {} : { contextWindow: listing.contextWindow },
+    ...listing.maxInputTokens === undefined ? {} : { maxInputTokens: listing.maxInputTokens },
+    ...listing.maxTokens === undefined ? {} : { maxTokens: listing.maxTokens },
+    ...listing.inputModalities === undefined ? {} : { input: [...listing.inputModalities] },
+    ...listing.tools === undefined ? {} : { tools: listing.tools },
+    ...listing.reasoning === undefined ? {} : { reasoning: listing.reasoning },
+    ...listing.reasoningEfforts === undefined ? {} : { reasoningEfforts: { ...listing.reasoningEfforts } },
+    ...listing.unsupportedReasoningEfforts === undefined
+      ? {}
+      : { unsupportedReasoningEfforts: [...listing.unsupportedReasoningEfforts] },
+    ...listing.owner === undefined ? {} : { owner: listing.owner },
+    ...pricing === undefined ? {} : { pricing },
+    ...isFree === undefined ? {} : { isFree },
+    ...isFree === false ? { gated: true, gateReason: SIGN_IN_REQUIRED } : {},
+  }
+}
+
+/**
+ * Normalize one raw listing row into the fields this sync understands. The
+ * row is read by the shared listing parser, so an explicit id wins over a map
+ * label or `slug`, and a malformed capability block stays undisclosed instead
+ * of becoming a guess.
  * @param entry - one raw row of the endpoint's listing.
  * @returns the normalized model, or `undefined` when it names no usable id.
  */
 export function normalizeListingEntry(entry: unknown): LiveModel | undefined {
-  if (entry === null || typeof entry !== 'object') return undefined
-  const row = entry as Record<string, unknown>
-  const id = listingString(row.id)
-  if (id === undefined) return undefined
-  const displayName = listingString(row.name, row.display_name, row.displayName, row.description)
-  const topProvider = row.top_provider as { context_length?: unknown; max_completion_tokens?: unknown } | undefined
-  const limit = row.limit as { context?: unknown; output?: unknown } | undefined
-  const contextWindow = listingCapacity(
-    row.context_length,
-    row.contextWindow,
-    row.context_window,
-    row.max_input_tokens,
-    topProvider?.context_length,
-    limit?.context,
-  )
-  const maxTokens = listingCapacity(
-    row.maxOutputTokens,
-    row.max_output_tokens,
-    row.maxTokens,
-    row.max_tokens,
-    topProvider?.max_completion_tokens,
-    limit?.output,
-  )
-  const supported = listingSupported(row)
-  const isFree = typeof row.isFree === 'boolean' ? row.isFree : undefined
-  // The capability block — the advertised effort ladder and the image/pdf
-  // input support — is read by the shared listing parser, the same reader the
-  // Add flow and llm-pi-ai discovery use, so a refresh cannot drop a claim
-  // those paths wrote. Capacities keep this probe's own field order above:
-  // the sync reads more spellings than that parser does.
-  const capabilities = listingCapabilities(row)
-  const modalities = mergeModalities(listingModalities(row), capabilities.inputModalities)
-  const efforts = liveEfforts(capabilities.reasoningEfforts)
-  return {
-    id,
-    ...displayName === undefined || displayName.length > 120 ? {} : { name: displayName },
-    ...contextWindow === undefined ? {} : { contextWindow },
-    ...maxTokens === undefined ? {} : { maxTokens },
-    ...modalities === undefined ? {} : { input: modalities },
-    ...supported.tools === undefined ? {} : { tools: supported.tools },
-    ...supported.reasoning === undefined ? {} : { reasoning: supported.reasoning },
-    ...listingPricing(row) === undefined ? {} : { pricing: listingPricing(row) },
-    ...isFree === undefined ? {} : { isFree },
-    ...efforts === undefined ? {} : { reasoningEfforts: { ...efforts } },
-    ...isFree === false ? { gated: true, gateReason: SIGN_IN_REQUIRED } : {},
-  }
+  const parsed = readModelListing([entry])
+  if (!parsed.ok) return undefined
+  const listing = parsed.models[0]
+  return listing === undefined ? undefined : normalizeListingModel(listing, entry)
 }
+
+/** One raw listing row plus the map key an enriched `models` object supplies. */
+interface RawListingRow {
+  key?: string
+  raw: unknown
+}
+
+/**
+ * The raw rows of one listing body, keeping the map keys the shared parser
+ * would read as ids. This only recovers gateway extras the parser does not
+ * return; ids and capabilities always come from {@link readModelListing}.
+ * @param body - parsed listing body.
+ * @returns the raw rows, or an empty list for an unsupported container.
+ */
+function rawListingRows(body: unknown): RawListingRow[] {
+  if (Array.isArray(body)) return body.map(raw => ({ raw }))
+  if (body === null || typeof body !== 'object') return []
+  const listing = body as { data?: unknown, models?: unknown }
+  if (Array.isArray(listing.data)) return listing.data.map(raw => ({ raw }))
+  if (Array.isArray(listing.models)) return listing.models.map(raw => ({ raw }))
+  if (listing.models !== null && typeof listing.models === 'object') {
+    return Object.entries(listing.models as Record<string, unknown>).map(([key, raw]) => ({ key, raw }))
+  }
+  return []
+}
+
+/** Largest model-listing reply accepted, matching the discovery reader's bound. */
+export const MAX_MODEL_LISTING_BYTES = 4 * 1024 * 1024
 
 /** Stable API version required by Anthropic's native model-listing endpoint. */
 const ANTHROPIC_VERSION = '2023-06-01'
@@ -940,6 +990,49 @@ export function modelListingRequest(
 }
 
 /**
+ * Read a listing reply body, refusing one larger than
+ * {@link MAX_MODEL_LISTING_BYTES}. A declared length is checked before the
+ * transfer; the accumulated stream total is what actually enforces the bound.
+ * @param response - the listing response.
+ * @param url - the request URL, for the diagnostic.
+ * @returns the decoded body text.
+ * @throws when the reply exceeds the bound.
+ */
+async function readBoundedListingText(response: Response, url: string): Promise<string> {
+  const oversized = (): Error =>
+    new Error(`GET ${url} answered with more than ${String(MAX_MODEL_LISTING_BYTES)} bytes`)
+  const declared = Number(response.headers.get('content-length') ?? Number.NaN)
+  if (Number.isFinite(declared) && declared > MAX_MODEL_LISTING_BYTES) {
+    await response.body?.cancel()
+    throw oversized()
+  }
+  if (response.body === null) return ''
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > MAX_MODEL_LISTING_BYTES) throw oversized()
+      chunks.push(value)
+    }
+  } finally {
+    await reader.cancel().catch(() => {
+      // Cleanup after a drained or abandoned read; the reply is already decided.
+    })
+  }
+  const body = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return new TextDecoder().decode(body)
+}
+
+/**
  * GET one provider's model listing. Fails loudly for the caller to log; the
  * caller is also the only one that knows whether the route already has a
  * usable catalogue to fall back on.
@@ -955,16 +1048,32 @@ export async function fetchModels(baseURL: string, key: string | undefined, api?
   const request = modelListingRequest(baseURL, api, key)
   const response = await fetch(request.url, { headers: request.headers, signal: AbortSignal.timeout(15_000) })
   if (!response.ok) throw new Error(`GET ${request.url} -> HTTP ${String(response.status)}`)
-  const body = (await response.json()) as { data?: unknown[] } | unknown[]
-  const data = Array.isArray(body) ? body : body.data
-  if (!Array.isArray(data)) throw new Error(`GET ${request.url} -> unexpected shape`)
+  const text = await readBoundedListingText(response, request.url)
+  let body: unknown
+  try {
+    body = JSON.parse(text) as unknown
+  } catch (error) {
+    throw new Error(`GET ${request.url} -> invalid JSON — ${error instanceof Error ? error.message : String(error)}`)
+  }
+  const parsed = readModelListing(body)
+  if (!parsed.ok) throw new Error(`GET ${request.url} -> unexpected shape`)
+  const rawById = new Map<string, unknown>()
+  for (const row of rawListingRows(body)) {
+    const raw = row.raw
+    const entry = raw !== null && typeof raw === 'object' && !Array.isArray(raw)
+      ? raw as Record<string, unknown>
+      : {}
+    // Same id precedence as the shared reader: a named map key is the request
+    // id, then the row's `id`, then `slug` when neither exists.
+    const id = listingText(row.key) ?? listingText(entry.id) ?? listingText(entry.slug)
+    if (id !== undefined && !rawById.has(id)) rawById.set(id, raw)
+  }
   const seen = new Set<string>()
   const models: LiveModel[] = []
-  for (const raw of data) {
-    const model = normalizeListingEntry(raw)
-    if (model === undefined || seen.has(model.id)) continue
-    seen.add(model.id)
-    models.push(model)
+  for (const listing of parsed.models) {
+    if (seen.has(listing.id)) continue
+    seen.add(listing.id)
+    models.push(normalizeListingModel(listing, rawById.get(listing.id)))
   }
   return models
 }
@@ -1109,24 +1218,57 @@ export function loadCatalogOverlays(path: string = catalogOverlaysPath()): Catal
       if (entry === null || typeof entry !== 'object' || Array.isArray(entry) || listingString((entry as { id?: unknown }).id) === undefined) {
         throw new Error(`catalog overlays ${path}: route "${route}" has an upsert entry without a model id`)
       }
+      const id = listingString((entry as { id?: unknown }).id) ?? ''
+      try {
+        // Validate the capability fields through the shared pi-ai model schema
+        // so a string `contextWindow` (or any other wrong type) refuses the
+        // file instead of persisting a route llm-pi-ai later rejects.
+        PiAiConfig({ providers: { [route]: { models: [entry] } } })
+      } catch (error) {
+        throw new Error(
+          `catalog overlays ${path}: route "${route}" upsert "${id}" is not a valid model record —`
+          + ` ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
     }
   }
   return raw as CatalogOverlayDocument
 }
 
+/** The route-local protection an overlay removal must respect. */
+export interface CatalogOverlayProtection {
+  /**
+   * Ids the overlay's `remove` keeps as the operator's own record: a
+   * `source: 'manual'` entry or a `pinnedModels` id. Precedence: operator
+   * record over overlay removal.
+   */
+  keep?: ReadonlySet<string>
+  /**
+   * Ids the overlay's `remove` keeps but marks `deprecated: true` because a
+   * route-local reference still names them (main default, chain link, persona
+   * seat, subagent allowed route, favorite). Precedence: reference over
+   * overlay removal; the model stays visible as deprecated, never as a
+   * current member.
+   */
+  deprecate?: ReadonlySet<string>
+}
+
 /**
  * Apply one route's overlay to its merged settings-model list: removal wins
  * over the listing, an upsert replaces the entry's named fields, and an id
- * neither the listing nor the configuration carries is appended. The input is
- * returned unchanged when the route has no overlay, so routes the file does
- * not name are untouched.
+ * neither the listing nor the configuration carries is appended. A
+ * `source: 'manual'` entry keeps its operator-declared name, input, limits,
+ * and ladder over an upsert too. The input is returned unchanged when the
+ * route has no overlay, so routes the file does not name are untouched.
  * @param models - the merged settings records, in endpoint/configuration order.
  * @param overlay - the route's overlay, `undefined` when the file names none.
+ * @param protection - ids an overlay removal keeps (operator records) or keeps deprecated (references).
  * @returns the corrected list.
  */
 export function applyCatalogOverlay(
   models: Array<Record<string, unknown>>,
   overlay: RouteCatalogOverlay | undefined,
+  protection?: CatalogOverlayProtection,
 ): Array<Record<string, unknown>> {
   if (overlay === undefined) return models
   const removed = new Set(overlay.remove ?? [])
@@ -1140,7 +1282,30 @@ export function applyCatalogOverlay(
   const seen = new Set<string>()
   for (const entry of models) {
     const id = listingString(entry.id)
-    if (id !== undefined && removed.has(id)) continue
+    if (id !== undefined && removed.has(id)) {
+      const upsert = upserts.get(id)
+      if (protection?.keep?.has(id) === true) {
+        applied.push({
+          ...entry,
+          ...(upsert === undefined ? {} : { ...upsert, unverified: undefined, capabilityHints: undefined }),
+          ...preservedManualFields(entry),
+        })
+        seen.add(id)
+        continue
+      }
+      if (protection?.deprecate?.has(id) === true) {
+        applied.push({
+          ...entry,
+          ...(upsert === undefined ? {} : { ...upsert, unverified: undefined, capabilityHints: undefined }),
+          ...preservedManualFields(entry),
+          source: 'pinned-in-use',
+          deprecated: true,
+        })
+        seen.add(id)
+        continue
+      }
+      continue
+    }
     const upsert = id === undefined ? undefined : upserts.get(id)
     if (upsert === undefined) {
       applied.push(entry)
@@ -1148,12 +1313,13 @@ export function applyCatalogOverlay(
       // The overlay record is maintained truth: its fields win, and the
       // "nothing described this model" marker and the id-hint claim the merge
       // may have stamped are cleared because the overlay does describe it.
-      applied.push({ ...entry, ...upsert, unverified: undefined, capabilityHints: undefined })
+      applied.push({ ...entry, ...upsert, ...preservedManualFields(entry), unverified: undefined, capabilityHints: undefined })
     }
     if (id !== undefined) seen.add(id)
   }
   for (const [id, entry] of upserts) {
     if (seen.has(id)) continue
+    if (removed.has(id) && protection?.keep?.has(id) !== true) continue
     applied.push({ ...entry })
   }
   return applied
@@ -1169,6 +1335,8 @@ export interface DiscoveredFileModel {
   id: string
   name?: string
   contextWindow?: number
+  /** Input-only token cap, separate from the combined context window. */
+  maxInputTokens?: number
   maxTokens?: number
   input?: Array<LiveModality>
   tools?: boolean
@@ -1179,6 +1347,8 @@ export interface DiscoveredFileModel {
    * configured entry carries; absent means nothing disclosed one.
    */
   reasoningEfforts?: Readonly<Record<string, string>>
+  /** Advertised effort names no configured profile accepts; diagnostics only, never materialized. */
+  unsupportedReasoningEfforts?: readonly string[]
   pricing?: Record<string, string>
   isFree?: boolean
   /** Whether the listing marked the model sign-in/paid-only, mirroring the rules engine's `gated` entry flag. */
@@ -1449,23 +1619,6 @@ export function describeSyncFailure(route: string, error: unknown, ns: string = 
 }
 
 
-/** Capacity fallback for one model id on one route. */
-interface CapacityFallback {
-  contextWindow?: number
-  maxTokens?: number
-  matched: 'prefix' | 'default'
-}
-
-function fallbackFor(capacities: Record<string, RouteCapacity> | undefined, route: string, modelId: string): CapacityFallback | undefined {
-  const routeCaps: RouteCapacity | undefined = capacities?.[route]
-  if (routeCaps === undefined) return undefined
-  if (routeCaps.prefixes !== undefined) {
-    const hit = Object.entries(routeCaps.prefixes).find(([prefix]) => modelId.startsWith(prefix))
-    if (hit !== undefined) return { ...hit[1], matched: 'prefix' }
-  }
-  return routeCaps.default === undefined ? undefined : { ...routeCaps.default, matched: 'default' }
-}
-
 /**
  * models.dev's `release_date`, when it carries the `YYYY-MM-DD` spelling the
  * catalogue publishes and parses as an ISO date. Anything else is the absence
@@ -1522,12 +1675,128 @@ export function modelsDevCostTiers(value: unknown): LiveCostTier[] | undefined {
   return tiers.length === 0 ? undefined : tiers.sort((left, right) => left.inputTokensAbove - right.inputTokensAbove)
 }
 
+/**
+ * Copy a disclosed effort ladder without extending it. Unknown level ids are
+ * dropped, a non-`off` level needs a usable wire string, and an explicit
+ * `off` is kept as the valueless key (`null`) when the source spelled it with
+ * an empty wire. The ladder is returned only when at least one thinking level
+ * remains, because settings refuse an `off`-only declaration.
+ * @param ladder - the level-to-wire map a source supplied.
+ * @returns the exact usable ladder, or `undefined` when nothing usable was supplied.
+ */
+function disclosedLadder(
+  ladder: Readonly<Record<string, unknown>> | undefined,
+): Record<string, string | null> | undefined {
+  if (ladder === undefined) return undefined
+  const copied: Record<string, string | null> = {}
+  let thinking = false
+  for (const level of THINKING_LEVELS) {
+    if (!Object.hasOwn(ladder, level)) continue
+    const wire = ladder[level]
+    if (level === 'off') {
+      if (wire === null || wire === '') copied.off = null
+      else if (typeof wire === 'string') copied.off = wire
+      continue
+    }
+    if (typeof wire !== 'string' || wire.length === 0) continue
+    copied[level] = wire
+    thinking = true
+  }
+  return thinking ? copied : undefined
+}
+
+/**
+ * The ladder models.dev and the installed catalog supply, without inference.
+ * models.dev's `reasoning_options` names levels directly; the installed
+ * catalog's `thinkingLevelMap` carries each level's wire spelling and `null`
+ * for an unsupported one. The catalog entry wins per level. An id neither
+ * source sizes yields no ladder, which is how `reasoning: true` with no
+ * disclosed levels stays absent instead of becoming an invented full ladder.
+ * @param mDev - the route's models.dev entry, when one exists.
+ * @param catalogModel - the installed catalog entry, when one exists.
+ * @returns the exact supplied ladder, or `undefined` when neither supplied usable levels.
+ */
+function catalogReasoningLadder(
+  mDev: ModelsDevModel | undefined,
+  catalogModel: Model<Api> | undefined,
+): Record<string, string | null> | undefined {
+  const merged = new Map<string, string | null>()
+  if (Array.isArray(mDev?.reasoning_options)) {
+    for (const option of mDev.reasoning_options) {
+      for (const value of option.values ?? []) {
+        if (typeof value === 'string' && value.length > 0) merged.set(value, value)
+      }
+    }
+  }
+  if (catalogModel?.thinkingLevelMap !== undefined) {
+    for (const [level, wire] of Object.entries(catalogModel.thinkingLevelMap)) merged.set(level, wire)
+  }
+  // Object.fromEntries creates own data properties, so an external `__proto__`
+  // identifier cannot rewrite the prototype before the canonical filter runs.
+  return disclosedLadder(Object.fromEntries(merged))
+}
+
+/**
+ * Resolve one model's exact registry metadata. The endpoint's `owned_by` value
+ * scopes the lookup; a route declaration may override it with an exact owner
+ * or channel for a renamed user-created instance. An unknown id or an
+ * ambiguous cross-channel record answers `undefined` instead of guessing.
+ * @param context - the route's registry lookup context, when it declares one.
+ * @param model - the endpoint row being enriched.
+ * @returns the exact sanitized record, or `undefined` when the registry does not resolve it.
+ */
+function registryMetadataFor(
+  context: RegistryMetadataContext | undefined,
+  model: LiveModel,
+): RegistryResolvedModel | undefined {
+  if (context === undefined) return undefined
+  const owner = context.owner !== undefined && context.owner.length > 0 ? context.owner : model.owner
+  const channel = context.channel !== undefined && context.channel.length > 0 ? context.channel : undefined
+  // Exact scope is required: an id-only lookup could attach one channel's
+  // metadata to a different provider's model, so a missing owner/channel is
+  // an unknown record rather than a fallback.
+  if ((owner === undefined || owner.length === 0) && channel === undefined) return undefined
+  const lookup = resolveRegistryModel(context.index, model.id, {
+    ...channel === undefined ? {} : { channel },
+    ...owner === undefined || owner.length === 0 ? {} : { owner },
+    ...context.ownerChannels === undefined
+      ? {}
+      : { ownerChannels: { ...OWNER_CHANNEL_ALIASES, ...context.ownerChannels } },
+  })
+  return lookup.status === 'resolved' ? lookup.metadata : undefined
+}
+
+/**
+ * The selectable ladder a resolved registry record discloses, without
+ * converting budgets into named levels. A budget-only or explicitly empty
+ * disclosure yields `undefined`, which blocks lower sources from inventing a
+ * full ladder; the reasoning flag remains whatever the registry stated.
+ * @param effort - the resolved record's non-null effort disclosure.
+ * @returns the canonical ladder, or `undefined` when no named level is offered.
+ */
+function registryReasoningLadder(effort: NonNullable<RegistryResolvedModel['effort']>): Record<string, string | null> | undefined {
+  const supported: ReadonlySet<string> = new Set(effort.supportedKeys)
+  const ladder: Record<string, string | null> = {}
+  let thinking = false
+  for (const level of THINKING_LEVELS) {
+    if (level === 'off') {
+      if (supported.has('off')) ladder.off = null
+      continue
+    }
+    if (!supported.has(level)) continue
+    ladder[level] = level
+    thinking = true
+  }
+  return thinking ? ladder : undefined
+}
+
 /** One model's two renderings: what settings stores and what the discovery cache keeps. */
 interface AnalyzedModel {
   /**
-   * The settings-model record. Capabilities are disclosed facts or the schema
-   * floor; a guess from the shared id table rides only in the labeled
-   * `capabilityHints` field, and `unverified: true` marks a floor that no
+   * The settings-model record. Capabilities are disclosed facts; an
+   * undisclosed capacity stays absent so runtime route defaults resolve it, a
+   * guess from the shared id table rides only in the labeled
+   * `capabilityHints` field, and `unverified: true` marks a record no
    * disclosure justified.
    */
   settings: Record<string, unknown>
@@ -1539,87 +1808,101 @@ interface AnalyzedModel {
  * Analyze a live model with canonical naming, reasoning efforts, capacity
  * metadata, and honest capability provenance.
  *
- * Capabilities are persisted only when a source disclosed them: models.dev,
- * the installed catalog, or the listing itself. The shared id table's
- * operands never become facts — a capability nothing disclosed keeps the
- * schema floor (`text` input, no reasoning) and is marked `unverified`, with
- * the id guess kept only in the labeled `capabilityHints` field. The rules
- * engine and the panel therefore read vectors, not guesses.
+ * Capabilities are persisted only when a source disclosed them: the listing,
+ * a declared route's exact registry record, models.dev, or the installed
+ * catalog. The shared id table's operands never become facts — a capability
+ * nothing disclosed keeps the schema floor (`text` input, no reasoning) and is
+ * marked `unverified`, with the id guess kept only in the labeled
+ * `capabilityHints` field. The rules engine and the panel therefore read
+ * vectors, not guesses.
  * @param route - the provider route key, for models.dev scoping.
  * @param model - the normalized listing entry.
- * @param fallback - the route's capacity fallback for ids nothing sizes.
  * @param hints - the shipped hint table plus the owner override.
  * @param routeProviderMap - the effective route → models.dev provider keys.
+ * @param registryContext - the route's exact registry lookup, when declared.
  * @returns the settings record and the cache record.
  */
 function analyzeModel(
   route: string,
   model: LiveModel,
-  fallback: CapacityFallback | undefined,
   hints: CapabilityHintContext,
   routeProviderMap: RouteProviderMap = DEFAULT_ROUTE_PROVIDER_MAP,
+  registryContext: RegistryMetadataContext | undefined = undefined,
 ): AnalyzedModel {
   const mDev = resolveFromModelsDev(route, model.id, routeProviderMap)
   const catalog = catalogIndexForRoute(route, routeProviderMap)
-  const shortId = model.id.includes('/') ? model.id.split('/').pop()! : model.id
-  const cat = catalog.get(model.id) ?? catalog.get(shortId)
+  const cat = catalog.get(model.id)
+  const registry = registryMetadataFor(registryContext, model)
 
-  // 1. Resolve Name — models.dev is AUTHORITATIVE; the live proxy's
-  // description is often mislabeled (e.g. gemini-2.5-flash-thinking described
-  // as "Gemini 3.1 Flash Lite"), so it is only a fallback.
-  let name = mDev?.name
-  if (name === undefined || name.length === 0) {
-    const liveName = model.name
-    if (liveName !== undefined && liveName !== model.id && liveName.length <= 60) {
-      name = liveName
-    } else {
-      name = cat?.name ?? beautifyId(model.id)
-    }
-  }
+  // 1. Resolve Name — the endpoint's own label wins; the registry's raw name
+  // is next, then models.dev, then the installed catalog, then the id. A live
+  // proxy description is often mislabeled ("Gemini 3.1 Flash Lite"), so only a
+  // plausible short label is accepted.
+  const liveName = model.name
+  const name = liveName !== undefined && liveName !== model.id && liveName.length <= 60
+    ? liveName
+    : registry?.name ?? mDev?.name ?? cat?.name ?? beautifyId(model.id)
 
-  // 2. Resolve Context Window & Max Output Tokens — models.dev is
-  // AUTHORITATIVE; the route prefix fallback is a guess for unknown ids and
-  // must come LAST (it was winning over real models.dev limits, e.g.
-  // gemini-3.1-flash-image got 1M instead of its true 65K).
-  const devContext = mDev?.limit?.context ?? mDev?.limit?.input ?? mDev?.contextWindow
+  // 2. Resolve Context Window, Input Cap & Max Output Tokens — the endpoint's
+  // own disclosure wins, then an exact registry record, then models.dev, then
+  // the installed catalog. No adapter default or route-level capacity guess is
+  // materialized here: an undisclosed capacity stays absent so the route's own
+  // `defaultContextWindow` / `defaultMaxTokens` resolves it at runtime instead
+  // of being persisted as if a source had disclosed it. models.dev's
+  // `limit.input` is a prompt-side cap, never a substitute for the combined
+  // window and never derived from one.
+  const devContext = mDev?.limit?.context ?? mDev?.contextWindow
+  const devMaxInputTokens = mDev?.limit?.input
   const devMax = mDev?.limit?.output ?? mDev?.maxTokens
-  const prefixContext = fallback?.matched === 'prefix' ? fallback.contextWindow : undefined
-  const prefixMax = fallback?.matched === 'prefix' ? fallback.maxTokens : undefined
 
-  const contextWindow = model.contextWindow ?? devContext ?? cat?.contextWindow ?? prefixContext ?? fallback?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
-  const maxTokens = model.maxTokens ?? devMax ?? cat?.maxTokens ?? prefixMax ?? fallback?.maxTokens ?? DEFAULT_MAX_TOKENS
+  const contextWindow = model.contextWindow ?? registry?.contextWindow ?? devContext ?? cat?.contextWindow
+  const maxInputTokens = model.maxInputTokens ?? registry?.maxInputTokens ?? devMaxInputTokens
+  const maxTokens = model.maxTokens ?? registry?.maxTokens ?? devMax ?? cat?.maxTokens
 
   // 3. Resolve Modalities, Reasoning, and their provenance. The endpoint's own
   // listing speaks for the route it serves, so a disclosure it makes wins over
-  // enrichment: `input` and `reasoning` are facts when the listing stated them,
-  // and an explicit `reasoning: false` from the listing blocks the enrichment
-  // and heuristics that used to override it. models.dev and the installed
-  // catalog fill only what the listing left undisclosed; the shared id table's
-  // operands are hints, kept labeled in `capabilityHints`.
-  const disclosed = [model.input, mDev?.modalities?.input, cat?.input]
+  // every enrichment. A declared route's raw registry record is next, then
+  // models.dev and the installed catalog; the shared id table's operands stay
+  // hints in `capabilityHints`. The registry is exact metadata, never
+  // membership, and an explicit `reasoning: false` or a budget-only record
+  // blocks lower sources from inventing a ladder.
+  const registryInput = registry?.inputModalities !== null && registry?.inputModalities !== undefined
+    && registry.inputModalities.length > 0
+    ? registry.inputModalities
+    : undefined
+  const disclosed = [model.input, registryInput, mDev?.modalities?.input, cat?.input]
     .find(value => Array.isArray(value) && liveModalities(value).length > 0)
   const modalityDisclosed = disclosed !== undefined
   const inputModalities: LiveModality[] = modalityDisclosed
     ? ['text', ...liveModalities(disclosed).filter(modality => modality !== 'text')]
     : ['text']
-  // An explicit boolean the listing stated is the route's own answer; only a
-  // listing that stayed silent lets models.dev and the catalog speak. An
-  // advertised effort ladder is the most specific reasoning claim the endpoint
-  // can make, so it decides both the boolean and the levels ahead of every
-  // inference — and an empty ladder states nothing, leaving today's path.
-  const listingReasoning = typeof model.reasoning === 'boolean' ? model.reasoning : undefined
-  const endpointEfforts = liveEfforts(model.reasoningEfforts)
-  const catalogMaySpeak = endpointEfforts === undefined && listingReasoning === undefined
+  const endpointReasoning = typeof model.reasoning === 'boolean' ? model.reasoning : undefined
+  const endpointLadderDeclared = model.reasoningEfforts !== undefined
+  const endpointLadder = endpointLadderDeclared ? disclosedLadder(model.reasoningEfforts) : undefined
+  const registryReasoning = registry?.reasoning ?? undefined
+  const registryEffort = registry?.effort ?? undefined
+  const registryLadder = registryEffort === undefined ? undefined : registryReasoningLadder(registryEffort)
+  // `null` registry reasoning means upstream omitted the field, so it is not a
+  // disclosure and lower sources may fill it. Any explicit flag or effort
+  // object is a registry claim and blocks catalog inference, including the
+  // budget-only case whose named ladder is intentionally absent.
+  const registryBlocksReasoning = registryReasoning !== undefined || registryEffort !== undefined
+  const catalogMaySpeak = !endpointLadderDeclared && endpointReasoning !== false && !registryBlocksReasoning
   const enrichedReasoning = [mDev?.reasoning, cat?.reasoning]
     .filter((value): value is boolean => typeof value === 'boolean')
-  const reasoningOptions = catalogMaySpeak
-    && Array.isArray(mDev?.reasoning_options) && mDev.reasoning_options.length > 0
-  const thinkingLevels = catalogMaySpeak
-    && cat?.thinkingLevelMap !== undefined && Object.keys(cat.thinkingLevelMap).some(key => key !== 'off')
-  const reasoningDisclosed = endpointEfforts !== undefined || listingReasoning !== undefined || enrichedReasoning.length > 0 || reasoningOptions || thinkingLevels
-  const isReasoning = endpointEfforts !== undefined
-    ? true
-    : listingReasoning ?? (enrichedReasoning.some(value => value === true) || reasoningOptions || thinkingLevels)
+  const catalogEfforts = catalogMaySpeak ? catalogReasoningLadder(mDev, cat) : undefined
+  const reasoningKnown = endpointLadderDeclared || endpointReasoning !== undefined || registryBlocksReasoning
+    || enrichedReasoning.length > 0 || catalogEfforts !== undefined
+  const reasoningDisclosed = reasoningKnown
+  const isReasoning = endpointReasoning !== undefined
+    ? endpointReasoning
+    : endpointLadderDeclared
+      ? true
+      : registryReasoning !== undefined
+        ? registryReasoning
+        : registryEffort !== undefined
+          ? true
+          : enrichedReasoning.some(value => value === true) || catalogEfforts !== undefined
 
   // The shared table's guess (and any owner override) never becomes a fact:
   // it is kept only under `capabilityHints`, and a claim for a capability
@@ -1627,9 +1910,9 @@ function analyzeModel(
   const claim: CapabilityHintClaim | undefined = claimCapabilityHints(route, model.id, hints.table, hints.override)
   const hintedInput = !modalityDisclosed && claim !== undefined && claim.input.length > 0
   const hintedReasoning = !reasoningDisclosed && claim?.reasoning === true
-  const nothingDescribed = mDev === undefined && cat === undefined
+  const nothingDescribed = registry === undefined && mDev === undefined && cat === undefined
     && model.input === undefined && model.reasoning === undefined && model.tools === undefined
-    && endpointEfforts === undefined
+    && !endpointLadderDeclared
   const unverified = nothingDescribed || hintedInput || hintedReasoning
   // A disclosed capability keeps its fact; the labeled hint field carries only
   // the claims a disclosure did not cover.
@@ -1639,57 +1922,18 @@ function analyzeModel(
     source: claim.source,
   }
 
-  // 4. Resolve Reasoning Efforts
-  // NOTE: the `off` level is deliberately NOT written as a key — `off` is a
-  // YAML 1.1 boolean alias, so a YAML 1.1 parser (PyYAML, js-yaml 1.1 schema)
-  // would read `off: null` as `false: null` and corrupt the dict. The harness
-  // itself uses YAML 1.2 (reads `off` as a string), but the sync output must
-  // stay unambiguous for every consumer. Omitting `off` is equivalent: the
-  // catalog materializer maps absent levels to `null` (off included), and
-  // "not thinking" is the parameter's absence on the wire anyway.
-  let reasoningEfforts: Record<string, string | null> | undefined
-  if (endpointEfforts !== undefined) {
-    // The endpoint's own ladder travels verbatim: its keys are the levels the
-    // route's picker offers and its values the wire spellings. Inference
-    // neither overrides nor extends what the endpoint advertises.
-    reasoningEfforts = { ...endpointEfforts }
-  } else if (isReasoning) {
-    const levels: Record<string, string | null> = {}
-    const VALID_THINKING_KEYS = new Set(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
-
-    if (Array.isArray(mDev?.reasoning_options)) {
-      for (const opt of mDev.reasoning_options) {
-        if (Array.isArray(opt.values)) {
-          for (const val of opt.values) {
-            if (typeof val === 'string' && VALID_THINKING_KEYS.has(val)) {
-              levels[val] = val
-            }
-          }
-        }
-      }
-    }
-
-    if (cat?.thinkingLevelMap !== undefined) {
-      for (const [k, v] of Object.entries(cat.thinkingLevelMap)) {
-        if (VALID_THINKING_KEYS.has(k) && typeof v === 'string' && v.length > 0) {
-          levels[k] = v
-        }
-      }
-    }
-
-    if (Object.keys(levels).length === 0) {
-      levels.minimal = 'minimal'
-      levels.low = 'low'
-      levels.medium = 'medium'
-      levels.high = 'high'
-      levels.xhigh = 'xhigh'
-      levels.max = 'max'
-    }
-
-    if (Object.keys(levels).length > 0) {
-      reasoningEfforts = levels
-    }
-  }
+  // 4. Resolve Reasoning Efforts. The endpoint's ladder wins and travels
+  // verbatim; otherwise the registry's exact named levels are next, and only a
+  // route with no registry declaration accepts the catalog's own ladder. No
+  // branch invents levels: an explicit false or a budget-only record leaves
+  // the ladder absent, and `off` is kept only when a source supplied it.
+  const reasoningEfforts: Record<string, string | null> | undefined = endpointReasoning === false
+    ? undefined
+    : endpointLadderDeclared
+      ? endpointLadder
+      : registryBlocksReasoning
+        ? registryLadder
+        : catalogEfforts
 
   // 5. Tool-calling and price metadata. Both feed the dynamic catalogue rules
   // (dsh-enpoi-catalog-rules): the `tools` and `zeroPrice`/`maxPrice`
@@ -1730,15 +1974,23 @@ function analyzeModel(
   const discoveredEffortsValue = discoveredEfforts !== undefined && Object.keys(discoveredEfforts).length > 0
     ? discoveredEfforts
     : undefined
+  const discoveredReasoning = model.reasoning ?? registry?.reasoning ?? undefined
+  const unsupportedEfforts = [...new Set([
+    ...model.unsupportedReasoningEfforts ?? [],
+    ...registryEffort?.unsupportedLevels ?? [],
+  ])]
 
   return {
     settings: {
       id: model.id,
       name,
-      contextWindow,
-      maxTokens,
+      ...(contextWindow === undefined ? {} : { contextWindow }),
+      ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
+      ...(maxTokens === undefined ? {} : { maxTokens }),
       input: inputModalities,
-      reasoning: isReasoning,
+      // A registry lookup with omitted thinking is UNKNOWN: omit the field
+      // instead of asserting false. Generic unknown records keep the floor.
+      ...(!reasoningKnown && registry !== undefined ? {} : { reasoning: isReasoning }),
       ...(tools !== undefined ? { tools } : {}),
       ...(cost !== undefined ? { cost } : {}),
       ...(releaseDate === undefined ? {} : { releaseDate }),
@@ -1751,12 +2003,14 @@ function analyzeModel(
     discovered: {
       id: model.id,
       name,
-      contextWindow,
-      maxTokens,
+      ...(contextWindow === undefined ? {} : { contextWindow }),
+      ...(maxInputTokens === undefined ? {} : { maxInputTokens }),
+      ...(maxTokens === undefined ? {} : { maxTokens }),
       ...(modalityDisclosed ? { input: inputModalities } : {}),
       ...(tools === undefined ? {} : { tools }),
-      ...(model.reasoning === undefined ? {} : { reasoning: model.reasoning }),
+      ...(discoveredReasoning === undefined ? {} : { reasoning: discoveredReasoning }),
       ...(discoveredEffortsValue === undefined ? {} : { reasoningEfforts: discoveredEffortsValue }),
+      ...(unsupportedEfforts.length === 0 ? {} : { unsupportedReasoningEfforts: unsupportedEfforts }),
       ...(model.pricing === undefined ? {} : { pricing: model.pricing }),
       ...(model.isFree === undefined ? {} : { isFree: model.isFree }),
       ...(releaseDate === undefined ? {} : { releaseDate }),
@@ -1769,18 +2023,70 @@ function analyzeModel(
 
 /**
  * The fields one configured entry keeps through a refresh because they are the
- * operator's own claim: a `source: 'manual'` model's reasoning ladder. Every
- * other field still refreshes from the listing. The settings record is stored
- * JSON, so the value is narrowed here.
+ * operator's own claim: a `source: 'manual'` model's name, input modalities,
+ * capacities, reasoning flag, and reasoning ladder. Every field the operator
+ * left unfilled still refreshes from the listing or the overlay. The settings
+ * record is stored JSON, so each value is narrowed here.
  * @param entry - the configured model record.
- * @returns the fields the refresh must not overwrite; `{}` for a non-manual entry.
+ * @returns the fields a refresh must not overwrite; `{}` for a non-manual entry.
  */
 function preservedManualFields(entry: Record<string, unknown>): Record<string, unknown> {
   if (entry.source !== 'manual') return {}
+  const preserved: Record<string, unknown> = {
+    ...preservedOperatorFields(entry),
+  }
+  if (typeof entry.name === 'string') preserved.name = entry.name
+  if (typeof entry.contextWindow === 'number' && Number.isFinite(entry.contextWindow)) {
+    preserved.contextWindow = entry.contextWindow
+  }
+  if (typeof entry.maxInputTokens === 'number' && Number.isFinite(entry.maxInputTokens)) {
+    preserved.maxInputTokens = entry.maxInputTokens
+  }
+  if (typeof entry.maxTokens === 'number' && Number.isFinite(entry.maxTokens)) {
+    preserved.maxTokens = entry.maxTokens
+  }
+  if (Array.isArray(entry.input)) preserved.input = [...entry.input]
+  if (typeof entry.reasoning === 'boolean') preserved.reasoning = entry.reasoning
   const ladder = entry.reasoningEfforts
-  return ladder !== null && typeof ladder === 'object' && !Array.isArray(ladder) && Object.keys(ladder).length > 0
-    ? { reasoningEfforts: { ...ladder as Record<string, unknown> } }
-    : {}
+  if (ladder !== null && typeof ladder === 'object' && !Array.isArray(ladder) && Object.keys(ladder).length > 0) {
+    preserved.reasoningEfforts = { ...ladder as Record<string, unknown> }
+  }
+  return preserved
+}
+
+/**
+ * The per-model fields only operator configuration can declare: a native-file
+ * policy (`nativeFileInputs`) and wire-compatibility switches (`compat`) are
+ * statements about the deployment's gateway, never facts a listing, the
+ * registry, models.dev, or the installed catalog can disclose. A refresh
+ * therefore carries them over from the configured entry (or the overlay
+ * upsert that wrote it) for the same model id, and never invents them: a model
+ * that never declared one keeps none.
+ * @param entry - the configured (or overlay-upsert) model record.
+ * @returns the operator-declared fields to keep; `{}` when the entry declares none.
+ */
+function preservedOperatorFields(entry: Record<string, unknown>): Record<string, unknown> {
+  const preserved: Record<string, unknown> = {}
+  const nativeFileInputs = entry.nativeFileInputs
+  if (nativeFileInputs !== null && typeof nativeFileInputs === 'object' && !Array.isArray(nativeFileInputs)) {
+    preserved.nativeFileInputs = { ...nativeFileInputs as Record<string, unknown> }
+  }
+  const compat = entry.compat
+  if (compat !== null && typeof compat === 'object' && !Array.isArray(compat)) {
+    preserved.compat = { ...compat as Record<string, unknown> }
+  }
+  return preserved
+}
+
+/**
+ * Every configured field one merge keeps: the operator-only declarations on
+ * any entry, plus the manual entry's own capability claims (which already
+ * include the operator-only declarations, so the spread order is harmless).
+ * @param entry - the configured model record.
+ * @returns the fields a refresh must not overwrite.
+ */
+function preservedConfiguredFields(entry: Record<string, unknown>): Record<string, unknown> {
+  return { ...preservedManualFields(entry), ...preservedOperatorFields(entry) }
 }
 
 /** One route's merged model list plus the configured ids the listing omitted. */
@@ -1805,25 +2111,25 @@ export interface ConfiguredMerge {
  * @param route - provider route key, for models.dev scoping.
  * @param configured - the route's current `models` array, when any.
  * @param live - normalized live listing entries.
- * @param capacities - the route's capacity fallbacks.
  * @param hints - the shipped hint table plus the owner override; defaults to
  *   the shipped table with no override.
  * @param routeProviderMap - the effective route → models.dev provider keys;
  *   defaults to the shipped table.
+ * @param registryContext - the route's exact registry metadata lookup, when declared.
  * @returns the merged list and the configured ids nothing advertised.
  */
 export function mergeConfiguredModels(
   route: string,
   configured: Array<Record<string, unknown>> | undefined,
   live: LiveModel[],
-  capacities: Record<string, RouteCapacity> | undefined,
   hints: CapabilityHintContext = { table: loadCapabilityHints(), override: {} },
   routeProviderMap: RouteProviderMap = DEFAULT_ROUTE_PROVIDER_MAP,
+  registryContext: RegistryMetadataContext | undefined = undefined,
 ): ConfiguredMerge {
   const advertised = new Map<string, Record<string, unknown>>()
   for (const model of live) {
     if (advertised.has(model.id)) continue
-    advertised.set(model.id, analyzeModel(route, model, fallbackFor(capacities, route, model.id), hints, routeProviderMap).settings)
+    advertised.set(model.id, analyzeModel(route, model, hints, routeProviderMap, registryContext).settings)
   }
   const models: Array<Record<string, unknown>> = []
   const unadvertised: string[] = []
@@ -1839,10 +2145,14 @@ export function mergeConfiguredModels(
     const fresh = advertised.get(id)
     if (fresh !== undefined) {
       // A manual entry is the operator's own claim: the listing refreshes the
-      // rest of the record, and a ladder they declared stays theirs.
+      // rest of the record, and a ladder they declared stays theirs. Every
+      // entry keeps its operator-only per-model declarations
+      // (`nativeFileInputs`, `compat`): no disclosure can restate them, so a
+      // merge that dropped them would silently disable media or wire
+      // behavior the operator configured.
       models.push(entry.source === 'manual'
-        ? { ...fresh, ...preservedManualFields(entry), source: 'manual' }
-        : fresh)
+        ? { ...fresh, ...preservedConfiguredFields(entry), source: 'manual' }
+        : { ...fresh, ...preservedOperatorFields(entry) })
       continue
     }
     const keptSource = entry.source === 'manual' || entry.source === 'pinned-in-use' ? entry.source : 'configured'
@@ -1864,82 +2174,90 @@ function firstSeenAtOf(entry: Record<string, unknown>): number | undefined {
 }
 
 /**
- * The model ids one models.dev provider carries, as an exact set (the
- * published key and its lowercase spelling). `undefined` when the fresh
- * snapshot does not carry the provider at all — membership then has no
- * catalog authority for the route.
+ * The model ids one models.dev provider carries, as the exact published key
+ * set. A case-folded spelling is a different id and never confirms membership.
+ * `undefined` when the fresh snapshot does not carry the provider at all —
+ * membership then has no catalog authority for the route.
  * @param providerKey - the exact models.dev provider key.
  * @returns the id set, or undefined when the provider is absent.
  */
 function modelsDevProviderModelIds(providerKey: string): Set<string> | undefined {
   const provider = loadModelsDev()[providerKey]
   if (provider?.models === undefined) return undefined
-  const ids = new Set<string>()
-  for (const key of Object.keys(provider.models)) {
-    ids.add(key)
-    ids.add(key.toLowerCase())
-  }
-  return ids
+  return new Set(Object.keys(provider.models))
 }
 
 /** One route-local model reference that must never be pruned silently. */
 export interface RouteModelReference {
   /** The referenced model id on this route. */
   id: string
-  /** Why it is referenced (`agent-default-model`, `chain:<id>`, `favorite`). */
+  /**
+   * Why it is referenced (`agent-default-model`, `chain:<id>`, `persona:<seat>`,
+   * `subagent-allowed-model`, `favorite`).
+   */
   reason: string
 }
 
 /**
  * Collect every model of `route` referenced by the default model selection,
- * the `enpoi-orchestration.chains` links, and the picker favorites. Malformed
- * entries are ignored: a reference nothing can express is no reference.
+ * the `enpoi-orchestration.chains` links and `personas` seats, the subagent
+ * allowed-model routes, and the picker favorites. Malformed entries are
+ * ignored: a reference nothing can express is no reference.
  * @param defaultModel - the `agent-default-model` settings document, when read.
  * @param orchestration - the `enpoi-orchestration` settings document, when read.
  * @param route - the provider route key whose models are collected.
+ * @param subagentSelections - one subagent model-selection document, or an
+ *   array of them when both namespace spellings are readable.
  * @returns the route-local references with their reasons.
  */
 export function referencedRouteModels(
   defaultModel: unknown,
   orchestration: unknown,
   route: string,
+  subagentSelections: unknown = undefined,
 ): RouteModelReference[] {
   const found: RouteModelReference[] = []
-  if (defaultModel !== null && typeof defaultModel === 'object' && !Array.isArray(defaultModel)) {
-    const selection = defaultModel as { provider?: unknown, model?: unknown }
-    if (selection.provider === route && typeof selection.model === 'string' && selection.model !== '') {
-      found.push({ id: selection.model, reason: 'agent-default-model' })
+  const pushRoute = (entry: unknown, providerKey: 'provider', modelKey: 'model' | 'modelId', reason: string): void => {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return
+    const candidate = entry as Record<string, unknown>
+    const model = candidate[modelKey]
+    if (candidate[providerKey] === route && typeof model === 'string' && model !== '') {
+      found.push({ id: model, reason })
     }
   }
-  if (orchestration === null || typeof orchestration !== 'object' || Array.isArray(orchestration)) return found
-  const document = orchestration as { chains?: unknown, uiPreferences?: unknown }
-  const chains = document.chains
-  if (chains !== null && typeof chains === 'object' && !Array.isArray(chains)) {
-    for (const [chainId, raw] of Object.entries(chains as Record<string, unknown>)) {
-      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue
-      const links = (raw as { links?: unknown }).links
-      if (!Array.isArray(links)) continue
-      for (const link of links) {
-        if (link === null || typeof link !== 'object' || Array.isArray(link)) continue
-        const entry = link as { provider?: unknown, model?: unknown }
-        if (entry.provider === route && typeof entry.model === 'string' && entry.model !== '') {
-          found.push({ id: entry.model, reason: `chain:${chainId}` })
-        }
+  pushRoute(defaultModel, 'provider', 'model', 'agent-default-model')
+  if (orchestration !== null && typeof orchestration === 'object' && !Array.isArray(orchestration)) {
+    const document = orchestration as { chains?: unknown, personas?: unknown, uiPreferences?: unknown }
+    const chains = document.chains
+    if (chains !== null && typeof chains === 'object' && !Array.isArray(chains)) {
+      for (const [chainId, raw] of Object.entries(chains as Record<string, unknown>)) {
+        if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue
+        const links = (raw as { links?: unknown }).links
+        if (!Array.isArray(links)) continue
+        for (const link of links) pushRoute(link, 'provider', 'model', `chain:${chainId}`)
+      }
+    }
+    // A seat's direct provider/model route is the same operator claim a chain
+    // link is; a seat that names only a chain is covered by that chain's links.
+    const personas = document.personas
+    if (personas !== null && typeof personas === 'object' && !Array.isArray(personas)) {
+      for (const [seat, raw] of Object.entries(personas as Record<string, unknown>)) {
+        pushRoute(raw, 'provider', 'model', `persona:${seat}`)
+      }
+    }
+    const preferences = document.uiPreferences
+    if (preferences !== null && typeof preferences === 'object' && !Array.isArray(preferences)) {
+      const favorites = (preferences as { favorites?: unknown }).favorites
+      if (Array.isArray(favorites)) {
+        for (const favorite of favorites) pushRoute(favorite, 'provider', 'modelId', 'favorite')
       }
     }
   }
-  const preferences = document.uiPreferences
-  if (preferences !== null && typeof preferences === 'object' && !Array.isArray(preferences)) {
-    const favorites = (preferences as { favorites?: unknown }).favorites
-    if (Array.isArray(favorites)) {
-      for (const favorite of favorites) {
-        if (favorite === null || typeof favorite !== 'object' || Array.isArray(favorite)) continue
-        const entry = favorite as { provider?: unknown, modelId?: unknown }
-        if (entry.provider === route && typeof entry.modelId === 'string' && entry.modelId !== '') {
-          found.push({ id: entry.modelId, reason: 'favorite' })
-        }
-      }
-    }
+  for (const selection of Array.isArray(subagentSelections) ? subagentSelections : [subagentSelections]) {
+    if (selection === null || typeof selection !== 'object' || Array.isArray(selection)) continue
+    const allowed = (selection as { allowedModels?: unknown }).allowedModels
+    if (!Array.isArray(allowed)) continue
+    for (const entry of allowed) pushRoute(entry, 'provider', 'model', 'subagent-allowed-model')
   }
   return found
 }
@@ -1948,24 +2266,21 @@ export function referencedRouteModels(
  * Merge a live listing into the discovered-cache records, without provenance stamps.
  * @param route - provider route key, for models.dev scoping.
  * @param live - normalized live listing entries.
- * @param capacities - the route's capacity fallbacks.
  * @param hints - the shipped hint table plus the owner override; defaults to
  *   the shipped table with no override.
  * @param routeProviderMap - the effective route → models.dev provider keys;
  *   defaults to the shipped table.
+ * @param registryContext - the route's exact registry metadata lookup, when declared.
  * @returns the discovered records, minus the provenance stamps the writer adds.
  */
 export function mergeDiscoveredModels(
   route: string,
   live: LiveModel[],
-  capacities: Record<string, RouteCapacity> | undefined,
   hints: CapabilityHintContext = { table: loadCapabilityHints(), override: {} },
   routeProviderMap: RouteProviderMap = DEFAULT_ROUTE_PROVIDER_MAP,
+  registryContext: RegistryMetadataContext | undefined = undefined,
 ): Array<Omit<DiscoveredFileModel, 'source' | 'discoveredAt'>> {
-  return live.map((model) => {
-    const fallback = fallbackFor(capacities, route, model.id)
-    return analyzeModel(route, model, fallback, hints, routeProviderMap).discovered
-  })
+  return live.map(model => analyzeModel(route, model, hints, routeProviderMap, registryContext).discovered)
 }
 
 /** The `uiPreferences` fields one prune cleaned; a field nothing changed in is absent. */
@@ -2029,9 +2344,9 @@ export type RouteAuthority = 'catalog' | 'endpoint' | 'none'
 
 /** The audit of one route's membership decision. */
 export interface RouteRefreshReport {
-  /** Ids dropped from the route this pass. */
+  /** Ids the membership decision dropped this pass; overlay removals are not membership decisions. */
   removed: string[]
-  /** Ids kept only because they are referenced and no longer a member. */
+  /** Ids kept only because they are referenced and no longer a member (or overlay-removed). */
   deprecated: string[]
   /** Whether removals were withheld (gate, guard, or no authority). */
   degraded: boolean
@@ -2059,6 +2374,8 @@ export interface PlanRouteInput {
   live: LiveModel[] | undefined
   /** Whether the installed pi-ai catalog describes the route. */
   catalogRoute: boolean
+  /** Whether the live route profile explicitly declares endpoint catalog authority. */
+  endpointAuthority?: boolean | undefined
   /** The exact primary models.dev provider key this route declares, when one does. */
   catalogProviderKey?: string | undefined
   /** Whether the endpoint listing fetch succeeded this pass. */
@@ -2078,12 +2395,18 @@ export interface PlanRouteInput {
   references?: readonly RouteModelReference[] | undefined
   /** The pass clock; injected by tests. */
   now: number
-  /** Capacity fallbacks for models the live endpoint does not describe. */
-  capacities?: Record<string, RouteCapacity> | undefined
   /** The shipped hint table plus the owner override. */
   hints?: CapabilityHintContext | undefined
   /** The effective route → models.dev provider keys. */
   routeProviderMap?: RouteProviderMap | undefined
+  /** The route's exact registry metadata lookup, when its declaration names one. */
+  metadata?: RegistryMetadataContext | undefined
+  /**
+   * Whether this route may authoritatively advertise zero models. Set from the
+   * configured route profile's explicit `catalogAuthority: 'endpoint'`; a
+   * registry-metadata declaration never supplies it.
+   */
+  allowEmpty?: boolean | undefined
   /** The durable free-tier gate the route's profile declares, when any. */
   freeTierGate?: FreeTierGate | undefined
   /** Which listing answered the endpoint authority question. */
@@ -2107,8 +2430,11 @@ export interface PlanRouteInput {
  * pass, would drop more than half of the route's stored models; `force`
  * (the operator's manual refresh) bypasses the shrink guard. A referenced
  * model that would be pruned is kept, stamped `deprecated: true` and
- * `source: 'pinned-in-use'`, and named in the report. A degraded pass is the
- * legacy merge: nothing is removed.
+ * `source: 'pinned-in-use'`, and named in the report. An overlay `remove` id
+ * follows the same protections: a `source: 'manual'` entry or a `pinnedModels`
+ * id stays as the operator's record, and a referenced id stays marked
+ * `deprecated: true`. A degraded pass is the legacy merge: nothing is
+ * removed, though an overlay removal still applies to unprotected ids.
  * @param input - the route, its stored records, the listing, and the gate facts.
  * @returns the records to persist and the removal audit.
  */
@@ -2121,17 +2447,18 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
   const advertised = new Map<string, Record<string, unknown>>()
   for (const model of live ?? []) {
     if (advertised.has(model.id)) continue
-    advertised.set(model.id, analyzeModel(input.route, model, fallbackFor(input.capacities, input.route, model.id), hints, routeProviderMap).settings)
+    advertised.set(model.id, analyzeModel(input.route, model, hints, routeProviderMap, input.metadata).settings)
   }
 
-  const catalogIds = input.catalogRoute && input.catalogProviderKey !== undefined
+  const endpointAuthority = input.endpointAuthority === true
+  const catalogIds = !endpointAuthority && input.catalogRoute && input.catalogProviderKey !== undefined
     ? modelsDevProviderModelIds(input.catalogProviderKey)
     : undefined
   const authority: RouteAuthority = live === undefined
     ? 'none'
     : catalogIds !== undefined
       ? 'catalog'
-      : input.catalogRoute ? 'none' : 'endpoint'
+      : input.catalogRoute && !endpointAuthority ? 'none' : 'endpoint'
   const report: RouteRefreshReport = {
     removed: [],
     deprecated: [],
@@ -2152,7 +2479,7 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
   const grace = new Set<string>()
   if (authority === 'catalog' && catalogIds !== undefined) {
     for (const id of advertised.keys()) {
-      if (catalogIds.has(id) || catalogIds.has(id.toLowerCase())) continue
+      if (catalogIds.has(id)) continue
       const prior = configuredById.get(id)
       const firstSeen = prior === undefined ? input.now : firstSeenAtOf(prior)
       if (firstSeen !== undefined && input.now - firstSeen < endpointGraceMs) grace.add(id)
@@ -2166,7 +2493,11 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
     if (id !== undefined) overlayUpserts.add(id)
   }
   const protectedIds = new Set<string>()
+  // Operator records outrank an overlay removal; an overlay upsert does not,
+  // so an id the same overlay both removes and upserts is still removable.
+  const overlayKeepIds = new Set<string>(pinned)
   for (const [id, entry] of configuredById) {
+    if (entry.source === 'manual' || pinned.has(id)) overlayKeepIds.add(id)
     if (entry.source === 'manual' || pinned.has(id) || overlayUpserts.has(id)) protectedIds.add(id)
   }
   // A pinned or upsert id that the endpoint advertises but the configuration
@@ -2185,7 +2516,7 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
   const memberBase = new Set<string>()
   if (authority === 'catalog' && catalogIds !== undefined) {
     for (const id of advertised.keys()) {
-      if (catalogIds.has(id) || catalogIds.has(id.toLowerCase())) memberBase.add(id)
+      if (catalogIds.has(id)) memberBase.add(id)
     }
   } else if (authority === 'endpoint') {
     for (const id of advertised.keys()) memberBase.add(id)
@@ -2216,11 +2547,15 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
     const currentIds = [...configuredById.keys()]
     const wouldRemove = currentIds.filter(id => !isMember(id) && !references.has(id))
     const skipWithholdGuard = input.force === true
-    if (memberBase.size === 0 && protectedIds.size === 0 && grace.size === 0) {
+    const emptySet = memberBase.size === 0 && protectedIds.size === 0 && grace.size === 0
+    const emptyAllowed = input.allowEmpty === true && authority === 'endpoint'
+    if (emptySet && !emptyAllowed) {
       keepAll = true
       report.degraded = true
       report.degradedReason = 'the effective model set would be empty'
-    } else if (!skipWithholdGuard && currentIds.length > 0 && wouldRemove.length * 2 > currentIds.length) {
+    } else if (!skipWithholdGuard
+      && !(emptyAllowed && wouldRemove.length === currentIds.length)
+      && currentIds.length > 0 && wouldRemove.length * 2 > currentIds.length) {
       keepAll = true
       report.degraded = true
       report.degradedReason = `removals would drop ${String(wouldRemove.length)} of ${String(currentIds.length)} stored models (more than half)`
@@ -2229,7 +2564,7 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
 
   const models: Array<Record<string, unknown>> = []
   if (keepAll) {
-    models.push(...(live === undefined ? configured : mergeConfiguredModels(input.route, configured, live, input.capacities, hints, routeProviderMap).models))
+    models.push(...(live === undefined ? configured : mergeConfiguredModels(input.route, configured, live, hints, routeProviderMap, input.metadata).models))
   } else {
     const seen = new Set<string>()
     for (const entry of configured) {
@@ -2256,8 +2591,10 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
         models.push({
           ...fresh,
           // The healthy pass refreshes the record too; a manual entry's own
-          // ladder is the operator's claim and survives it.
-          ...preservedManualFields(entry),
+          // ladder is the operator's claim and survives it, and every entry
+          // keeps the operator-only declarations (`nativeFileInputs`,
+          // `compat`) no disclosure can restate.
+          ...preservedConfiguredFields(entry),
           ...entry.source === 'manual' ? { source: 'manual' } : {},
           ...isGrace ? { firstSeenAt: firstSeenAtOf(entry) ?? input.now } : {},
         })
@@ -2274,7 +2611,20 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
       models.push(grace.has(id) ? { ...fresh, firstSeenAt: input.now } : fresh)
     }
   }
-  return { models: applyFreeTierGate(applyCatalogOverlay(models, input.overlay), input.freeTierGate), report }
+  // An overlay removal never deletes an operator record or a live reference.
+  // A referenced id stays as a deprecated record so a default/chain/persona/
+  // subagent/favorite keeps resolving the last facts it had; it never becomes
+  // a current member again until the endpoint advertises it.
+  const overlaid = applyCatalogOverlay(models, input.overlay, {
+    keep: overlayKeepIds,
+    deprecate: new Set(references.keys()),
+  })
+  for (const id of input.overlay?.remove ?? []) {
+    if (!references.has(id) || overlayKeepIds.has(id)) continue
+    if (!models.some(model => model.id === id)) continue
+    if (!report.deprecated.includes(id)) report.deprecated.push(id)
+  }
+  return { models: applyFreeTierGate(overlaid, input.freeTierGate), report }
 }
 
 /** The value `providerSync.refreshRoute` returns to the client. */
@@ -2282,7 +2632,11 @@ export interface ProviderSyncRouteRefreshValue {
   route: string
   /** The route's planned settings records; the caller persists them. */
   models: Array<Record<string, unknown>>
-  /** Ids the plan removed (the caller's replace must drop them). */
+  /**
+   * Every id the route no longer carries — membership removals and overlay
+   * removals alike. A client that merges stored rows into this list must drop
+   * these or an overlay removal would come back on its next read.
+   */
   removed: string[]
   /** Ids kept only for a reference (deprecated upstream). */
   deprecated: string[]
@@ -2322,7 +2676,7 @@ export interface ProviderSyncRouteStatus {
   advertised?: number
   /** The route's planned model count (settings records for a configured route). */
   modelCount: number
-  /** Ids the plan removed. */
+  /** Every id the route no longer carries (membership plus overlay removals). */
   removed: string[]
   /** Ids kept only for a reference (deprecated upstream). */
   deprecated: string[]
@@ -2352,6 +2706,7 @@ function stringifyComparable(models: Array<Record<string, unknown>> | undefined)
       id: m.id,
       name: m.name,
       contextWindow: m.contextWindow,
+      maxInputTokens: m.maxInputTokens,
       maxTokens: m.maxTokens,
       input: m.input ?? null,
       reasoning: m.reasoning ?? null,
@@ -2362,7 +2717,12 @@ function stringifyComparable(models: Array<Record<string, unknown>> | undefined)
         && !Array.isArray(m.reasoningEfforts)
         ? Object.entries(m.reasoningEfforts as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))
         : null,
+      unsupportedReasoningEfforts: m.unsupportedReasoningEfforts ?? null,
       tools: m.tools ?? null,
+      // Operator-only declarations are part of the record: a change (or a
+      // refresh that would drop them) must be written, not treated as equal.
+      nativeFileInputs: m.nativeFileInputs ?? null,
+      compat: m.compat ?? null,
       cost: m.cost ?? null,
       releaseDate: m.releaseDate ?? null,
       costTiers: m.costTiers ?? null,
@@ -2381,11 +2741,186 @@ export function apply(ctx: Context, config: Config): void {
   const logger = ctx.logger('enpoi-provider-sync')
   const endpoints = value(config.endpoints) ?? {}
   const sessionHeaders = value(config.sessionHeaders) ?? {}
-  const capacities = (value(config.capacityDefaults) ?? {}) as Record<string, RouteCapacity>
   const modelsDevUrl = value(config.modelsDevUrl) ?? DEFAULT_MODELS_DEV_URL
+  const legacyCapacityDefaults = value(config.capacityDefaults) ?? {}
+  if (Object.keys(legacyCapacityDefaults).length > 0) {
+    // Accepted for compatibility, never persisted: a route-level prefix or
+    // default is the operator's assumption, not a disclosure about each model.
+    reportSyncDiagnostic(
+      'provider-sync/capacity-defaults',
+      'capacityDefaults is an explicit operator assumption and is no longer written into model records;'
+      + ' declare exact per-model capacities or a catalog-overlay upsert when a value must reach the catalog',
+    )
+  }
   // The configured route map extends the shipped table key by key: a route the
   // deployment newly serves is mapped from configuration alone.
   const routeProviderMap: RouteProviderMap = { ...DEFAULT_ROUTE_PROVIDER_MAP, ...value(config.routeProviderMap) }
+  // Route declarations are data: a renamed user-created instance adds its
+  // route key and the same declaration; no model-id prefix is ever consulted.
+  const metadataSources: Record<string, RouteMetadataSourceConfig> = {
+    ...DEFAULT_ROUTE_METADATA_SOURCES,
+    ...value(config.metadataSources),
+  }
+  /** Per-route opt-in refresh clients; only a declared URL + version creates one. */
+  const registrySources = new Map<string, RegistryMetadataSource>()
+  const registryAbort = new AbortController()
+  ctx.effect(() => () => { registryAbort.abort() }, 'enpoi-provider-sync registry metadata')
+  for (const [route, declaration] of Object.entries(metadataSources)) {
+    if (declaration.refreshUrl === undefined || declaration.refresh === false) continue
+    if (declaration.sourceVersion === undefined || declaration.sourceVersion.length === 0) {
+      // A URL alone cannot produce honest provenance: the bundled label must
+      // never be applied to an operator's branch/master document.
+      reportSyncDiagnostic(
+        'provider-sync/registry-metadata',
+        `route ${route}: refreshUrl declared without sourceVersion; using the bundled baseline until the actual source version is configured`,
+      )
+      continue
+    }
+    registrySources.set(route, createRegistryMetadataSource({
+      url: declaration.refreshUrl,
+      sourceVersion: declaration.sourceVersion,
+      signal: registryAbort.signal,
+    }))
+  }
+  /** Baseline snapshot index, loaded once and reused for every declared route. */
+  let registryBaseline: RegistryMetadataIndex | null | undefined
+  /** One in-flight metadata refresh shared by overlapping passes. */
+  let registryRefresh: Promise<void> | undefined
+
+  /**
+   * Load the pinned registry baseline once. Failure disables registry metadata
+   * for declared routes and reports the reason instead of failing a sync pass.
+   * @returns the parsed index, or undefined when the bundled snapshot is unusable.
+   */
+  function registryBaselineIndex(): RegistryMetadataIndex | undefined {
+    if (registryBaseline !== undefined) return registryBaseline ?? undefined
+    const started = Date.now()
+    try {
+      const index = loadBundledRegistryMetadataIndex()
+      registryBaseline = index
+      const models = [...index.channels.values()].reduce((count, entries) => count + entries.length, 0)
+      logger.info(`registry metadata baseline ${index.source.sourceVersion}: ${String(models)} model(s) in ${String(Date.now() - started)} ms`)
+      return index
+    } catch (error) {
+      registryBaseline = null
+      reportSyncDiagnostic(
+        'provider-sync/registry-metadata',
+        `registry metadata baseline could not be loaded — ${error instanceof Error ? error.message : String(error)}`,
+      )
+      return undefined
+    }
+  }
+
+  /**
+   * Refresh every declared route's configured registry URL, bounded by the
+   * helper's timeout/byte limits and reusing one in-flight promise. A failed
+   * refresh keeps the last good state and falls back to the bundled baseline.
+   * @returns fulfillment after every declared source settled.
+   */
+  function refreshRegistrySources(): Promise<void> {
+    if (registryRefresh !== undefined) return registryRefresh
+    if (registryAbort.signal.aborted || registrySources.size === 0) return Promise.resolve()
+    const started = Date.now()
+    registryRefresh = (async () => {
+      // One bounded task per declared source; they run concurrently and share
+      // the single in-flight promise so startup/hourly/manual callers never
+      // serialize 15-second fetches or stack duplicate refreshes.
+      await Promise.allSettled([...registrySources].map(async ([route, source]) => {
+        const before = Date.now()
+        let state: RegistryMetadataSourceState
+        try {
+          state = await source.refresh()
+        } catch (error) {
+          if (registryAbort.signal.aborted) return
+          reportSyncDiagnostic(
+            'provider-sync/registry-metadata',
+            `route ${route}: registry refresh failed — ${error instanceof Error ? error.message : String(error)}`,
+          )
+          return
+        }
+        if (registryAbort.signal.aborted) return
+        const models = state.index === null
+          ? 0
+          : [...state.index.channels.values()].reduce((count, entries) => count + entries.length, 0)
+        logger.info(
+          `route ${route}: registry metadata ${state.stale ? 'kept last-good' : 'refreshed'}`
+          + ` (${String(models)} model(s), ${String(Date.now() - before)} ms)`,
+        )
+        if (state.diagnostics.length > 0) {
+          reportSyncDiagnostic(
+            'provider-sync/registry-metadata',
+            `route ${route}: registry refresh diagnostics — ${state.diagnostics.slice(0, 3).map(diagnostic => diagnostic.message).join('; ')}`,
+          )
+        }
+      }))
+      if (!registryAbort.signal.aborted) {
+        logger.debug(`registry metadata refresh finished in ${String(Date.now() - started)} ms`)
+      }
+    })().finally(() => { registryRefresh = undefined })
+    return registryRefresh
+  }
+
+  /**
+   * The lookup context for one declared route. A refreshed index wins over the
+   * pinned baseline; an undeclared route never reads registry metadata.
+   * @param route - configured provider route id.
+   * @returns the context, or undefined when the route declares none or no index is available.
+   */
+  function metadataContextFor(route: string): RegistryMetadataContext | undefined {
+    const declaration = metadataSources[route]
+    if (declaration === undefined) return undefined
+    const index = registrySources.get(route)?.current()?.index ?? registryBaselineIndex()
+    if (index === undefined) return undefined
+    return {
+      index,
+      ...declaration.channel === undefined ? {} : { channel: declaration.channel },
+      ...declaration.owner === undefined ? {} : { owner: declaration.owner },
+      ...declaration.ownerChannels === undefined ? {} : { ownerChannels: declaration.ownerChannels },
+    }
+  }
+
+  /**
+   * Whether the live llm-pi-ai profile explicitly declares endpoint catalog
+   * authority. Registry metadata declarations never supply this: only the
+   * configured route profile may make an empty listing authoritative.
+   * @param settings - the settings seam.
+   * @param route - the configured provider route id.
+   * @returns true only for an explicit `catalogAuthority: 'endpoint'`.
+   */
+  function configuredEndpointAuthority(settings: SettingsSeam, route: string): boolean {
+    return sectionOf(settings, LLM_NS)?.providers?.[route]?.catalogAuthority === 'endpoint'
+  }
+
+  /**
+   * Report how many advertised ids the declared registry resolved exactly.
+   * Provenance fields are not persisted: the settings/discovered schemas have
+   * no source/version field, so this diagnostic is the only visible authority.
+   * @param route - provider route id.
+   * @param live - the normalized listing, when fetched.
+   * @param metadata - the route's lookup context, when declared.
+   */
+  function reportRegistryUsage(
+    route: string,
+    live: LiveModel[] | undefined,
+    metadata: RegistryMetadataContext | undefined,
+  ): void {
+    if (live === undefined || live.length === 0 || metadata === undefined) return
+    let resolved = 0
+    const unsupported = new Set<string>()
+    for (const model of live) {
+      const record = registryMetadataFor(metadata, model)
+      if (record === undefined) continue
+      resolved += 1
+      for (const level of record.effort?.unsupportedLevels ?? []) unsupported.add(level)
+    }
+    reportSyncDiagnostic(
+      'provider-sync/registry-metadata',
+      `route ${route}: registry metadata ${metadata.index.source.sourceVersion} resolved ${String(resolved)}/${String(live.length)} model(s)`
+      + ` (${String(live.length - resolved)} unknown fall through to models.dev/catalog)`
+      + (unsupported.size === 0 ? '' : `; unsupported raw effort names (diagnostic only): ${[...unsupported].join(', ')}`)
+      + '; provenance is diagnostic-only',
+    )
+  }
 
   /**
    * Record one coded incident (kind `provider-sync/...`) and log it. The
@@ -2407,14 +2942,25 @@ export function apply(ctx: Context, config: Config): void {
   // Load models.dev database on startup and refresh online in background
   loadModelsDev()
   void refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl)
+  void refreshRegistrySources()
 
-  /** Read the maintained overlays once per pass; a malformed file is reported and yields none. */
+  /** Last successfully loaded overlay document; a malformed edit must not discard it. */
+  let lastGoodOverlays: CatalogOverlayDocument | undefined
+
+  /**
+   * Read the maintained overlays once per pass. A malformed file is refused
+   * whole (never half-applied) and reported; later passes keep the last good
+   * document until the file parses again.
+   * @returns the current overlay document, or the last good one when this read failed.
+   */
   function loadOverlays(): CatalogOverlayDocument {
     try {
-      return loadCatalogOverlays()
+      const document = loadCatalogOverlays()
+      lastGoodOverlays = document
+      return document
     } catch (error) {
       reportSyncDiagnostic('provider-sync/catalog-overlays', error instanceof Error ? error.message : String(error))
-      return {}
+      return lastGoodOverlays ?? {}
     }
   }
 
@@ -2465,6 +3011,26 @@ export function apply(ctx: Context, config: Config): void {
     return settings.describe().find(entry => entry.ns === ns)?.revision
   }
 
+  /**
+   * Read every route-local reference from the live settings documents. The
+   * caller runs this on the initial plan and on every conflict retry, so a
+   * persona, chain, favorite, default, or subagent authorization written while
+   * a write was in flight protects its model in the re-plan.
+   * @param settings - the settings seam.
+   * @param route - the provider route key.
+   * @returns the route-local references with their reasons.
+   */
+  function routeReferences(settings: SettingsSeam, route: string): RouteModelReference[] {
+    return referencedRouteModels(
+      readSettingsDocument(settings, AGENT_DEFAULT_MODEL_NS),
+      readSettingsDocument(settings, ORCHESTRATION_NAMESPACE),
+      route,
+      SUBAGENT_MODEL_SELECTION_NAMESPACES
+        .map(ns => readSettingsDocument(settings, ns))
+        .filter((document): document is Record<string, unknown> => document !== undefined),
+    )
+  }
+
     interface RouteComputeOutcome {
       route: string
       /** The settings namespace that owns the route. */
@@ -2473,6 +3039,8 @@ export function apply(ctx: Context, config: Config): void {
       hasProfile: boolean
       /** The route's stored records, when it has a profile. */
       configured: Array<Record<string, unknown>>
+      /** Whether the live profile explicitly declares endpoint catalog authority. */
+      endpointAuthority: boolean
       overlay: RouteCatalogOverlay | undefined
       live: LiveModel[] | undefined
       baseURL: string
@@ -2491,6 +3059,8 @@ export function apply(ctx: Context, config: Config): void {
       fetchError?: string
       /** Route-local references (default model, chain links, favorites) this pass read. */
       references: RouteModelReference[]
+      /** The route's exact registry metadata lookup, when its declaration names one. */
+      metadata?: RegistryMetadataContext | undefined
       /** The fetched facts a settings-conflict retry re-plans against. */
       plan: PlanRecipe
     }
@@ -2507,6 +3077,8 @@ export function apply(ctx: Context, config: Config): void {
       overlay: RouteCatalogOverlay | undefined
       hints: CapabilityHintContext
       source: 'live' | 'catalog'
+      /** The registry metadata lookup resolved when the pass started. */
+      metadata?: RegistryMetadataContext | undefined
       /** The durable free-tier gate the route profile declares, when any. */
       freeTierGate?: FreeTierGate | undefined
       force?: boolean | undefined
@@ -2537,26 +3109,25 @@ export function apply(ctx: Context, config: Config): void {
       recipe: PlanRecipe,
       settings: SettingsSeam,
     ): PlannedRouteModels {
+      const endpointAuthority = configuredEndpointAuthority(settings, route)
       return planRouteModels({
         route,
         configured,
         live: recipe.live,
         catalogRoute: recipe.catalogRoute,
         catalogProviderKey: recipe.catalogProviderKey,
+        endpointAuthority,
+        allowEmpty: endpointAuthority,
         endpointFresh: recipe.live !== undefined,
         catalogFresh: recipe.catalogOnlineOk
           || (catalogCacheAgeMs(Date.now()) ?? Number.POSITIVE_INFINITY) < (value(config.catalogFreshMs) ?? CATALOG_FRESH_MS),
         pinnedModels: (value(config.pinnedModels) ?? {})[route],
         overlay: recipe.overlay,
-        references: referencedRouteModels(
-          readSettingsDocument(settings, AGENT_DEFAULT_MODEL_NS),
-          readSettingsDocument(settings, ORCHESTRATION_NAMESPACE),
-          route,
-        ),
+        references: routeReferences(settings, route),
         now: Date.now(),
-        capacities,
         hints: recipe.hints,
         routeProviderMap,
+        ...recipe.metadata === undefined ? {} : { metadata: recipe.metadata },
         ...recipe.freeTierGate === undefined ? {} : { freeTierGate: recipe.freeTierGate },
         source: recipe.source,
         endpointGraceMs: value(config.endpointGraceMs) ?? ENDPOINT_ONLY_GRACE_MS,
@@ -2614,7 +3185,10 @@ export function apply(ctx: Context, config: Config): void {
       // has its answer; the discovered cache would only shadow a better one.
       const catalogRoute = isCatalogRoute(route)
       if (profile === undefined && catalogRoute) return undefined
-      const baseURL = knownEndpoint ?? profile?.baseURL
+      // A configured baseURL is the operator's own endpoint and outranks the
+      // shipped route endpoint table, which only serves routes the profile
+      // does not address itself.
+      const baseURL = profile?.baseURL ?? knownEndpoint
       if (baseURL === undefined) {
         logger.debug(`route ${route}: no baseURL and no known endpoint — skipped`)
         return undefined
@@ -2631,6 +3205,7 @@ export function apply(ctx: Context, config: Config): void {
         logger.warn(describeSyncFailure(route, error, ns))
       }
       const gate = freeTierGateOf(profile)
+      const metadata = metadataContextFor(route)
       const recipe: PlanRecipe = {
         live,
         catalogRoute,
@@ -2638,17 +3213,16 @@ export function apply(ctx: Context, config: Config): void {
         catalogOnlineOk: options.catalogOnlineOk,
         overlay,
         hints: options.hints,
+        ...metadata === undefined ? {} : { metadata },
         ...gate === undefined ? {} : { freeTierGate: gate },
         source: ns === COMMANDCODE_NS ? 'catalog' : 'live',
         force: options.force,
       }
       const planned = planWith(route, profile?.models, recipe, options.settings)
-      const references = referencedRouteModels(
-        readSettingsDocument(options.settings, AGENT_DEFAULT_MODEL_NS),
-        readSettingsDocument(options.settings, ORCHESTRATION_NAMESPACE),
-        route,
-      )
-      const unadvertised = unadvertisedIds(profile?.models ?? [], live)
+      const references = routeReferences(options.settings, route)
+      reportRegistryUsage(route, live, metadata)
+      const plannedIds = new Set(planned.models.map(model => (typeof model.id === 'string' ? model.id : '')))
+      const unadvertised = unadvertisedIds(profile?.models ?? [], live).filter(id => plannedIds.has(id))
       // Every configured id the plan no longer carries (membership removals
       // and overlay removals alike) is a dangling visibility reference.
       const cleanup = danglingIds(profile?.models ?? [], planned.models)
@@ -2656,6 +3230,15 @@ export function apply(ctx: Context, config: Config): void {
         reportSyncDiagnostic(
           'provider-sync/model-pruned',
           `route ${route}: pruned ${String(planned.report.removed.length)} outdated model(s) (source: ${authorityLabel(planned.report)}): ${planned.report.removed.join(', ')}`,
+        )
+      }
+      // Cleanup also carries ids the maintained overlay removed: those are not
+      // membership decisions, but the client must drop them all the same.
+      const overlayRemoved = cleanup.filter(id => !planned.report.removed.includes(id))
+      if (overlayRemoved.length > 0) {
+        reportSyncDiagnostic(
+          'provider-sync/overlay-model-removed',
+          `route ${route}: overlay removed ${String(overlayRemoved.length)} model(s): ${overlayRemoved.join(', ')}`,
         )
       }
       for (const id of planned.report.deprecated) {
@@ -2676,6 +3259,7 @@ export function apply(ctx: Context, config: Config): void {
         ns,
         hasProfile: profile !== undefined,
         configured: profile?.models ?? [],
+        endpointAuthority: profile?.catalogAuthority === 'endpoint',
         overlay,
         live,
         baseURL,
@@ -2686,6 +3270,7 @@ export function apply(ctx: Context, config: Config): void {
         ...live === undefined ? {} : { advertisedCount: live.length },
         ...fetchError === undefined ? {} : { fetchError },
         references,
+        ...metadata === undefined ? {} : { metadata },
         plan: recipe,
       }
     }
@@ -2704,18 +3289,19 @@ export function apply(ctx: Context, config: Config): void {
      */
     async function persistRouteModels(settings: SettingsSeam, outcome: RouteComputeOutcome): Promise<RouteComputeOutcome> {
       let current = outcome
-      if (stringifyComparable(current.configured) === stringifyComparable(current.models)) {
-        logger.debug(`route ${current.route}: ${current.live === undefined ? 'overlay' : `${String(current.advertisedCount ?? 0)} ${current.report.source} models`}, no change`)
-        return current
-      }
       for (let attempt = 0; ; attempt++) {
+        const modelsChanged = stringifyComparable(current.configured) !== stringifyComparable(current.models)
+        if (!modelsChanged) {
+          logger.debug(`route ${current.route}: ${current.live === undefined ? 'overlay' : `${String(current.advertisedCount ?? 0)} ${current.report.source} models`}, no change`)
+          return current
+        }
         try {
           await settings.mutate(
             current.ns as SettingsNamespace,
             [{ op: 'set', path: ['providers', current.route, 'models'], value: current.models }],
             revisionOf(settings, current.ns),
           )
-          const removed = current.report.removed.length
+          const removed = current.cleanup.length
           logger.info(removed > 0
             ? `route ${current.route}: catalog refresh — ${String(current.models.length)} models (${String(removed)} outdated pruned)`
             : current.live === undefined
@@ -2734,14 +3320,36 @@ export function apply(ctx: Context, config: Config): void {
             return current
           }
           const configured = profile.models ?? []
+          const previous = current
           const planned = planWith(current.route, configured, current.plan, settings)
+          const rePlannedReferences = routeReferences(settings, current.route)
           current = {
             ...current,
             configured,
             models: planned.models,
             report: planned.report,
             cleanup: danglingIds(configured, planned.models),
-            unadvertised: unadvertisedIds(configured, current.live),
+            unadvertised: unadvertisedIds(configured, current.live)
+              .filter(id => planned.models.some(model => model.id === id)),
+            references: rePlannedReferences,
+          }
+          // A reference added while the first write was in flight changes the
+          // re-plan's decision; report the newly retained/pruned ids here, or
+          // the concurrency window would make that decision silent.
+          for (const id of planned.report.deprecated) {
+            if (previous.report.deprecated.includes(id)) continue
+            const reasons = rePlannedReferences.filter(reference => reference.id === id).map(reference => reference.reason)
+            reportSyncDiagnostic(
+              'provider-sync/active-model-deprecated',
+              `route ${current.route}: model "${id}" is no longer a member but is referenced by ${reasons.join(', ')}; kept as deprecated (source: pinned-in-use)`,
+            )
+          }
+          for (const id of planned.report.removed) {
+            if (previous.report.removed.includes(id)) continue
+            reportSyncDiagnostic(
+              'provider-sync/model-pruned',
+              `route ${current.route}: pruned model "${id}" after a concurrent edit (source: ${authorityLabel(planned.report)})`,
+            )
           }
           if (stringifyComparable(current.configured) === stringifyComparable(current.models)) {
             logger.debug(`route ${current.route}: concurrent edit already converged — no second write`)
@@ -2800,17 +3408,22 @@ export function apply(ctx: Context, config: Config): void {
      * Write one discovery route's endpoint listing to the shared discovered
      * cache, which is the llm-pi-ai resolution layer's source while the route
      * has no configured models. Idempotent: an unchanged listing leaves the
-     * file (and every `discoveredAt`) exactly as it was. An empty listing is
-     * never written, so a route that answers nothing keeps its last good
-     * cache instead of silently falling back to the installed catalog.
+     * file (and every `discoveredAt`) exactly as it was. A successful empty
+     * listing is written as `models: []` with a fresh fetch stamp: endpoint
+     * authority treats that as known-empty, not as "no answer", and the
+     * installed catalog must not refill a route the endpoint emptied. An
+     * invalid body or failed fetch never reaches this function.
      * @param outcome - the computed route refresh (its live listing is the cache source).
      * @param hints - the pass's capability hints.
      * @returns whether the cache now holds this pass's listing.
      */
     async function writeDiscoveredCache(outcome: RouteComputeOutcome, hints: CapabilityHintContext): Promise<boolean> {
       if (outcome.live === undefined) return false
-      if (outcome.live.length === 0) {
-        logger.warn(`route ${outcome.route}: endpoint advertised no models — discovered cache kept`)
+      // Only an explicitly endpoint-authoritative route may record a known
+      // empty cache. A metadata declaration or a catalog route with an empty
+      // listing is not proof that the installed catalog should be suppressed.
+      if (outcome.live.length === 0 && !outcome.endpointAuthority) {
+        logger.info(`route ${outcome.route}: empty listing not cached — route is not endpoint-authoritative`)
         return false
       }
       try {
@@ -2821,19 +3434,25 @@ export function apply(ctx: Context, config: Config): void {
         // of vanishing and breaking that reference.
         const previous = readDiscoveredFile(discoveredCachePath()).routes[outcome.route]
         const pinned = (value(config.pinnedModels) ?? {})[outcome.route] ?? []
+        const now = Date.now()
         const record = mergeDiscoveredRoute(
           previous,
           outcome.baseURL,
-          mergeDiscoveredModels(outcome.route, outcome.live, capacities, hints, routeProviderMap),
-          Date.now(),
+          mergeDiscoveredModels(outcome.route, outcome.live, hints, routeProviderMap, outcome.metadata),
+          now,
           [...outcome.references.map(reference => reference.id), ...pinned],
         )
+        // A successful probe is the freshness fact even when it advertises the
+        // same empty set: do not leave the cache's lastSuccess timestamp old.
+        if (outcome.live.length === 0) record.fetchedAt = now
         if (previous !== undefined && JSON.stringify(previous) === JSON.stringify(record)) {
           logger.debug(`route ${outcome.route}: ${String(outcome.live.length)} discovered models, no change`)
         } else {
           try {
             await writeDiscoveredRoute(outcome.route, record)
-            logger.info(`route ${outcome.route}: discovered ${String(outcome.live.length)} models from ${outcome.baseURL} (source: discovered)`)
+            logger.info(outcome.live.length === 0
+              ? `route ${outcome.route}: endpoint advertised no models — discovered cache records the empty listing`
+              : `route ${outcome.route}: discovered ${String(outcome.live.length)} models from ${outcome.baseURL} (source: discovered)`)
           } catch (error) {
             logger.warn(`route ${outcome.route}: discovered models could not be cached — ${error instanceof Error ? error.message : String(error)}`)
             return false
@@ -2841,7 +3460,7 @@ export function apply(ctx: Context, config: Config): void {
         }
         return true
       } catch (error) {
-        logger.warn(describeSyncFailure(outcome.route))
+        logger.warn(describeSyncFailure(outcome.route, error))
         return false
       }
     }
@@ -2871,6 +3490,9 @@ export function apply(ctx: Context, config: Config): void {
     // models and corrected limits appear within one interval; the pass cadence
     // itself is the configured interval (hourly in the shipped profile).
     const onlineOk = await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl)
+    // Metadata refresh is background work: this pass uses the last-good
+    // snapshot or bundled baseline immediately instead of adding N×timeout.
+    void refreshRegistrySources()
     const overlays = loadOverlays()
     const hints = loadHints()
     const settings = ctx.get('settings') as SettingsSeam | undefined
@@ -2931,12 +3553,12 @@ export function apply(ctx: Context, config: Config): void {
       // The persisted plan is what the pass reports: a conflict retry may have
       // re-planned against a concurrent edit, and its removals are the ones
       // the visibility cleanup above was given.
-      stats.pruned += final.report.removed.length
+      stats.pruned += final.cleanup.length
       unadvertised.push(...final.unadvertised.map(id => `${route}/${id}`))
       // The discovered cache is llm-pi-ai's resolution source; Command Code
       // resolves its own adapter catalog, and a catalog route's answer is the
       // installed catalog itself.
-      if (outcome.ns === LLM_NS && !isCatalogRoute(route)) await writeDiscoveredCache(outcome, hints)
+      if (final.ns === LLM_NS && !isCatalogRoute(route)) await writeDiscoveredCache(final, hints)
     }
 
     if (stats.pruned > 0 || stats.deprecated > 0 || stats.degraded > 0) {
@@ -2970,6 +3592,7 @@ export function apply(ctx: Context, config: Config): void {
     const settings = ctx.get('settings') as SettingsSeam | undefined
     if (settings === undefined) throw new Error('settings seam absent — cannot refresh a route')
     const onlineOk = await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl)
+    void refreshRegistrySources()
     const overlays = loadOverlays()
     const hints = loadHints()
     const outcome = await computeRouteRefresh(route, { catalogOnlineOk: onlineOk, overlays, hints, settings, force: true })
@@ -2981,7 +3604,9 @@ export function apply(ctx: Context, config: Config): void {
     return {
       route,
       models: outcome.models,
-      removed: outcome.report.removed,
+      // The cleanup union, not the membership audit alone: the caller merges
+      // stored rows into this list and must drop overlay removals too.
+      removed: outcome.cleanup,
       deprecated: outcome.report.deprecated,
       degraded: outcome.report.degraded,
       ...outcome.report.degradedReason === undefined ? {} : { degradedReason: outcome.report.degradedReason },
@@ -3014,6 +3639,7 @@ export function apply(ctx: Context, config: Config): void {
     const settings = ctx.get('settings') as SettingsSeam | undefined
     if (settings === undefined) throw new Error('settings seam absent — cannot refresh routes')
     const onlineOk = await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl)
+    void refreshRegistrySources()
     const overlays = loadOverlays()
     const hints = loadHints()
     const llmProviders = sectionOf(settings, LLM_NS)?.providers
@@ -3031,7 +3657,9 @@ export function apply(ctx: Context, config: Config): void {
       // caller saw a moment ago may already be gone by the time its turn runs.
       const profile: ProviderProfile | undefined = llmProviders?.[route] ?? commandCode?.[route]
       const catalogRoute = isCatalogRoute(route)
-      const baseURL = endpoints[route] ?? profile?.baseURL
+      // The profile's own baseURL is authoritative when present; the shipped
+      // endpoint table is the fallback for routes the profile does not address.
+      const baseURL = profile?.baseURL ?? endpoints[route]
       const outcome = await computeRouteRefresh(route, { catalogOnlineOk: onlineOk, overlays, hints, settings, force: true })
       if (outcome === undefined) {
         const staticCatalog = profile === undefined && catalogRoute && baseURL !== undefined
@@ -3064,8 +3692,8 @@ export function apply(ctx: Context, config: Config): void {
       // Same cache side effect as the hourly pass: a non-catalog llm-pi-ai
       // route's listing is what the resolution layer reads while the route has
       // no configured models. Command Code resolves its own adapter catalog.
-      const cached = outcome.ns === LLM_NS && !catalogRoute
-        ? await writeDiscoveredCache(outcome, hints)
+      const cached = final.ns === LLM_NS && !catalogRoute
+        ? await writeDiscoveredCache(final, hints)
         : false
       statuses.push({
         route,
@@ -3074,7 +3702,7 @@ export function apply(ctx: Context, config: Config): void {
         authority: outcome.report.authority,
         ...outcome.advertisedCount === undefined ? {} : { advertised: outcome.advertisedCount },
         modelCount: final.models.length,
-        removed: final.report.removed,
+        removed: final.cleanup,
         deprecated: final.report.deprecated,
         degraded: final.report.degraded,
         ...final.report.degradedReason === undefined ? {} : { degradedReason: final.report.degradedReason },

@@ -106,7 +106,7 @@ describe('catalog-route model discovery', () => {
     const installed = new Map(getBuiltinModels('deepseek').map(model => [model.id, model]))
     const flash = installed.get('deepseek-v4-flash')
     const pro = installed.get('deepseek-v4-pro')
-    expect(models).toEqual([
+    expect(models).toMatchObject([
       {
         id: 'deepseek-v4-flash',
         name: flash?.name,
@@ -134,8 +134,33 @@ describe('catalog-route model discovery', () => {
     // to the OpenAI default, and an id the catalog does not describe is
     // returned exactly as the listing read it.
     await expect(ctx.llm.discoverModels('llm-pi-ai', { provider: 'opencode-go', baseURL: server.url }))
-      .resolves.toEqual([{ id: 'zen-1', name: 'zen-1' }])
+      .resolves.toMatchObject([{ id: 'zen-1', name: 'zen-1', source: 'endpoint' }])
     expect(server.paths).toEqual(['/models'])
+  })
+
+  it('tags every live row as an endpoint answer', async () => {
+    const server = await listingServer({ body: JSON.stringify({ data: [{ id: 'live-1' }] }) })
+    const ctx = await harness()
+    const models = await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })
+    expect(models).toEqual([{ id: 'live-1', name: 'live-1', source: 'endpoint' }])
+  })
+
+  it('tags a catalog fallback with its source and the probe failure reason', async () => {
+    const server = await listingServer({ status: 401, body: '{"error":"unauthorized"}' })
+    const ctx = await harness()
+    const models = await ctx.llm.discoverModels('llm-pi-ai', {
+      provider: 'deepseek',
+      baseURL: server.url,
+    })
+    expect(models.length).toBeGreaterThan(0)
+    expect(models.every(model => model.source === 'catalog')).toBe(true)
+    expect(models[0]?.fallbackReason).toContain('401')
+  })
+
+  it('leaves the no-probe catalog answer untagged by a failure reason', async () => {
+    const ctx = await harness()
+    const models = await ctx.llm.discoverModels('llm-pi-ai', { provider: 'deepseek' })
+    expect(models.every(model => model.source === 'catalog' && model.fallbackReason === undefined)).toBe(true)
   })
 
   it('falls back to the installed registry when a catalog route\'s endpoint cannot be reached', async () => {
@@ -214,7 +239,7 @@ describe('draft-provider model discovery', () => {
 
     const models = await ctx.llm.discoverModels('llm-pi-ai', { baseURL: `${server.url}/v1`, apiKey: 'probe-key' })
 
-    expect(models).toEqual([
+    expect(models).toMatchObject([
       { id: 'acme-large', name: 'Acme Large', contextWindow: 65_536, maxTokens: 4096 },
       { id: 'acme-camel', name: 'Acme Camel', contextWindow: 131_072, maxTokens: 8192 },
       { id: 'acme-mixed', name: 'Acme Mixed', contextWindow: 32_768, maxTokens: 2048 },
@@ -244,7 +269,7 @@ describe('draft-provider model discovery', () => {
     })
     const ctx = await harness()
 
-    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })).toEqual([
+    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })).toMatchObject([
       {
         id: 'lobechat-deepseek-chat',
         name: 'DeepSeek V4 Flash',
@@ -286,8 +311,8 @@ describe('draft-provider model discovery', () => {
       api: 'anthropic-messages',
     })
 
-    expect(rootModels).toEqual([
-      { id: 'claude-sonnet', name: 'Claude Sonnet', contextWindow: 200_000, maxTokens: 64_000 },
+    expect(rootModels).toMatchObject([
+      { id: 'claude-sonnet', name: 'Claude Sonnet', maxInputTokens: 200_000, maxTokens: 64_000 },
     ])
     expect(versionedModels).toEqual(rootModels)
     expect(server.paths).toEqual([
@@ -331,7 +356,7 @@ describe('draft-provider model discovery', () => {
     })
     const ctx = await harness()
 
-    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url, api: 'anthropic-messages' })).toEqual([
+    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url, api: 'anthropic-messages' })).toMatchObject([
       {
         id: 'claude-sonnet-5-5',
         name: 'claude-sonnet-5-5',
@@ -349,6 +374,66 @@ describe('draft-provider model discovery', () => {
     expect(server.paths).toEqual(['/v1/models?limit=1000'])
   })
 
+  it('maps explicit modalities and drops effort identifiers the profile schema cannot accept', async () => {
+    const server = await listingServer({
+      body: JSON.stringify({
+        data: [
+          { id: 'text-only', input_modalities: ['text'] },
+          {
+            id: 'raw-registry',
+            supported_reasoning_levels: [{ effort: 'low' }, { effort: 'ultra' }],
+            thinking: { zero_allowed: true },
+          },
+        ],
+      }),
+    })
+    const ctx = await harness()
+
+    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })).toMatchObject([
+      { id: 'text-only', name: 'text-only', inputModalities: ['text'] },
+      {
+        id: 'raw-registry',
+        name: 'raw-registry',
+        // `ultra` is an advertised identifier, not a configured level; the
+        // ladder carries only levels the profile schema accepts, and the
+        // identifier itself survives as a diagnostic.
+        reasoningEfforts: { low: 'low', off: '' },
+        unsupportedReasoningEfforts: ['ultra'],
+      },
+    ])
+  })
+
+  it('forwards a stated input cap, capability flags, and an explicitly empty ladder', async () => {
+    const server = await listingServer({
+      body: JSON.stringify({
+        data: [
+          {
+            id: 'capped',
+            max_input_tokens: 900_000,
+            tools: false,
+            reasoning: true,
+            supported_reasoning_levels: [],
+          },
+        ],
+      }),
+    })
+    const ctx = await harness()
+
+    // A stated negative and an explicitly empty effort ladder are answers, not
+    // absence: the surface must be able to show "no tools" and "reasoning with
+    // no selectable level" instead of treating both as undisclosed.
+    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })).toMatchObject([
+      {
+        id: 'capped',
+        name: 'capped',
+        maxInputTokens: 900_000,
+        tools: false,
+        reasoning: true,
+        reasoningEfforts: {},
+      },
+    ])
+  })
+
   it('leaves a listing with no capabilities exactly as read', async () => {
     const server = await listingServer({
       body: JSON.stringify({
@@ -360,7 +445,7 @@ describe('draft-provider model discovery', () => {
     })
     const ctx = await harness()
 
-    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })).toEqual([
+    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })).toMatchObject([
       { id: 'plain-large', name: 'plain-large', contextWindow: 65_536, maxTokens: 4096 },
       { id: 'plain-small', name: 'plain-small' },
     ])
@@ -396,11 +481,11 @@ describe('draft-provider model discovery', () => {
     })
     const ctx = await harness()
 
-    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })).toEqual([
+    expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url })).toMatchObject([
       { id: 'not-an-object', name: 'not-an-object' },
       { id: 'an-array', name: 'an-array' },
       { id: 'bad-fields', name: 'bad-fields', contextWindow: 32_768 },
-      { id: 'bad-levels', name: 'bad-levels' },
+      { id: 'bad-levels', name: 'bad-levels', reasoningEfforts: {} },
     ])
   })
 
@@ -414,7 +499,7 @@ describe('draft-provider model discovery', () => {
     const ctx = await harness()
 
     await expect(ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url }))
-      .resolves.toEqual([{ id: 'standard', name: 'standard' }])
+      .resolves.toMatchObject([{ id: 'standard', name: 'standard', source: 'endpoint' }])
   })
 
   it('keeps a deployment path instead of resolving it away', async () => {
@@ -509,7 +594,10 @@ describe('draft-provider model discovery', () => {
     const ctx = await harness()
 
     expect(await ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url }))
-      .toEqual([{ id: 'good', name: 'good' }, { id: 'zero-capacity', name: 'zero-capacity' }])
+      .toEqual([
+        { id: 'good', name: 'good', source: 'endpoint' },
+        { id: 'zero-capacity', name: 'zero-capacity', source: 'endpoint' },
+      ])
   })
 
   it('points at the credential for a rejected one, and only then', async () => {
@@ -529,11 +617,16 @@ describe('draft-provider model discovery', () => {
   })
 
   it('reports a reply that is not a model listing', async () => {
-    const server = await listingServer({ body: '{"models":[]}' })
+    const server = await listingServer({ body: '{"not":"a listing"}' })
     const ctx = await harness()
 
     await expect(ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url }))
-      .rejects.toThrow(/neither a "data" array nor a "models" object/)
+      .rejects.toThrow(/neither a top-level array nor a "data" array or "models" map/)
+
+    // A recognized but empty container is a valid empty answer, not a
+    // malformed body: the endpoint did list models, it listed none.
+    const empty = await listingServer({ body: '{"models":[]}' })
+    await expect(ctx.llm.discoverModels('llm-pi-ai', { baseURL: empty.url })).resolves.toEqual([])
 
     const broken = await listingServer({ body: 'not json at all' })
     await expect(ctx.llm.discoverModels('llm-pi-ai', { baseURL: broken.url }))
@@ -730,10 +823,33 @@ const RECORDED_LISTINGS = [
     file: 'openrouter-2026-09-02.json',
     api: 'openai-completions',
     models: [
-      { id: 'anthropic/claude-fable-5.1', name: 'Anthropic: Claude Fable 5.1', contextWindow: 1_000_000, maxTokens: 128_000 },
+      {
+        id: 'anthropic/claude-fable-5.1',
+        name: 'Anthropic: Claude Fable 5.1',
+        contextWindow: 1_000_000,
+        maxTokens: 128_000,
+        inputModalities: ['text', 'image'],
+        tools: true,
+        reasoning: true,
+      },
       // The router's own aggregate route reports no completion cap.
-      { id: 'openrouter/auto-beta', name: 'Auto Router (Beta)', contextWindow: 2_000_000 },
-      { id: 'deepseek/deepseek-v4-flash', name: 'DeepSeek: DeepSeek V4 Flash 0423', contextWindow: 1_048_576, maxTokens: 384_000 },
+      {
+        id: 'openrouter/auto-beta',
+        name: 'Auto Router (Beta)',
+        contextWindow: 2_000_000,
+        inputModalities: ['text', 'image', 'audio', 'video'],
+        tools: true,
+        reasoning: true,
+      },
+      {
+        id: 'deepseek/deepseek-v4-flash',
+        name: 'DeepSeek: DeepSeek V4 Flash 0423',
+        contextWindow: 1_048_576,
+        maxTokens: 384_000,
+        inputModalities: ['text'],
+        tools: true,
+        reasoning: true,
+      },
     ],
   },
   {
@@ -741,9 +857,33 @@ const RECORDED_LISTINGS = [
     file: 'models-dev-anthropic-2026-09-02.json',
     api: 'openai-completions',
     models: [
-      { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', contextWindow: 1_000_000, maxTokens: 128_000 },
-      { id: 'claude-fable-5-1', name: 'Claude Fable 5.1', contextWindow: 1_000_000, maxTokens: 128_000 },
-      { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5 (latest)', contextWindow: 200_000, maxTokens: 64_000 },
+      {
+        id: 'claude-opus-4-7',
+        name: 'Claude Opus 4.7',
+        contextWindow: 1_000_000,
+        maxTokens: 128_000,
+        inputModalities: ['text', 'image', 'pdf'],
+        tools: true,
+        reasoning: true,
+      },
+      {
+        id: 'claude-fable-5-1',
+        name: 'Claude Fable 5.1',
+        contextWindow: 1_000_000,
+        maxTokens: 128_000,
+        inputModalities: ['text', 'image', 'pdf'],
+        tools: true,
+        reasoning: true,
+      },
+      {
+        id: 'claude-haiku-4-5',
+        name: 'Claude Haiku 4.5 (latest)',
+        contextWindow: 200_000,
+        maxTokens: 64_000,
+        inputModalities: ['text', 'image', 'pdf'],
+        tools: true,
+        reasoning: true,
+      },
     ],
   },
   {
@@ -767,6 +907,7 @@ const RECORDED_LISTINGS = [
       id: 'claude-opus-5',
       name: 'Claude Opus 5',
       inputModalities: ['text', 'image', 'pdf'],
+      reasoning: true,
       reasoningEfforts: { high: 'high', low: 'low', max: 'max', medium: 'medium', xhigh: 'xhigh' },
     }],
   },
@@ -778,6 +919,6 @@ describe('recorded provider listings', () => {
     const server = await listingServer({ body })
     const ctx = await harness()
 
-    await expect(ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url, api })).resolves.toEqual(models)
+    await expect(ctx.llm.discoverModels('llm-pi-ai', { baseURL: server.url, api })).resolves.toMatchObject(models)
   })
 })

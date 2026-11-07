@@ -460,10 +460,10 @@ describe('Conversation registries', () => {
     rebuild.mockRestore()
   })
 
-  it('activates each target on explicit selection or first use and never deactivates it', async () => {
+  it('activates each target on explicit selection or first use and releases it with its last subscriber', async () => {
     const { uiConversation, binding, views } = await bootRegistries()
-    const chat = viewDefinition('chat')
-    const trajectory = viewDefinition('trajectory')
+    const chat = { ...viewDefinition('chat'), isActive: () => true }
+    const trajectory = { ...viewDefinition('trajectory'), isActive: () => true }
     const createChat = vi.spyOn(chat, 'create')
     const createTrajectory = vi.spyOn(trajectory, 'create')
     views.register(chat)
@@ -480,19 +480,76 @@ describe('Conversation registries', () => {
     expect(createChat).toHaveBeenCalledOnce()
 
     const unsubscribeChat = chatSource.subscribe(vi.fn())
+    expect(conversation.snapshot.getSnapshot().activeTargets.has('chat')).toBe(true)
+    unsubscribeChat()
+    expect(conversation.snapshot.getSnapshot().activeTargets.has('chat')).toBe(false)
+    expect(chatSource.getSnapshot()).toBeUndefined()
+
     const trajectoryListener = vi.fn()
     const unsubscribeTrajectory = trajectorySource.subscribe(trajectoryListener)
-    unsubscribeChat()
-    const unsubscribeTrajectoryAgain = trajectorySource.subscribe(vi.fn())
-    unsubscribeTrajectoryAgain()
-    expect(createChat).toHaveBeenCalledOnce()
     expect(createTrajectory).toHaveBeenCalledOnce()
-    expect(trajectoryListener).toHaveBeenCalledOnce()
+    expect(conversation.snapshot.getSnapshot().activeTargets.has('trajectory')).toBe(true)
+    unsubscribeTrajectory()
+    expect(conversation.snapshot.getSnapshot().activeTargets.has('trajectory')).toBe(false)
+    expect(trajectorySource.getSnapshot()).toBeUndefined()
+
+    // Re-subscription re-activates through a fresh builder, exactly like first use.
+    const unsubscribeAgain = trajectorySource.subscribe(trajectoryListener)
+    expect(createTrajectory).toHaveBeenCalledTimes(2)
+    expect(conversation.snapshot.getSnapshot().activeTargets.has('trajectory')).toBe(true)
+    unsubscribeAgain()
 
     disposeTrajectory()
     await Promise.resolve()
     expect(trajectorySource.getSnapshot()).toBeUndefined()
     expect(trajectoryListener).toHaveBeenCalledTimes(2)
-    unsubscribeTrajectory()
+  })
+
+  it('stops applying a target builder once its last observer unmounts', async () => {
+    const { uiConversation, binding, events, views } = await bootRegistries()
+    const definition: ConversationNodeDefinition<number> = {
+      kind: 'release-probe',
+      target: 'trajectory',
+      match: event => event.type === 'turn/start'
+        ? { id: '1', role: 'start' }
+        : event.type === 'user/message' ? { id: '1', role: 'update' } : null,
+      start: () => 0,
+      update: context => context.state + 1,
+      publication: () => 'immediate',
+      buildViewNode: context => ({
+        key: context.key,
+        kind: 'release-probe',
+        id: context.id,
+        target: 'trajectory',
+        data: context.state,
+      }),
+    }
+    events.register(definition)
+    const applies = vi.fn(() => null)
+    views.register({
+      target: 'trajectory',
+      create: () => ({ empty: null, replace: () => null, apply: applies }),
+    })
+    await Promise.resolve()
+    const source = binding.eventSource as MutableSessionEventSource
+    const conversation = uiConversation.binding(binding)
+    const listener = vi.fn()
+    const unsubscribe = conversation.target('trajectory').subscribe(listener)
+    source.append({ type: 'event', event: {
+      type: 'turn/start', seq: SessionSeq(1), time: 1, data: { turn: 1 },
+    } })
+    source.append({ type: 'event', event: {
+      type: 'user/message', seq: SessionSeq(2), time: 2,
+      data: { content: [], source: { kind: 'user' } },
+    } } as never)
+    expect(applies.mock.calls.length).toBeGreaterThan(0)
+    unsubscribe()
+    expect(conversation.snapshot.getSnapshot().activeTargets.has('trajectory')).toBe(false)
+    applies.mockClear()
+    source.append({ type: 'event', event: {
+      type: 'user/message', seq: SessionSeq(3), time: 3,
+      data: { content: [], source: { kind: 'user' } },
+    } } as never)
+    expect(applies).not.toHaveBeenCalled()
   })
 })

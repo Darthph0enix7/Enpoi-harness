@@ -139,7 +139,7 @@ describe('llm-pi-ai real dormant composition', () => {
       provider: 'acme-gateway',
       baseURL: server.url,
       api: 'openai-completions',
-    })).resolves.toEqual([{ id: 'acme-private', name: 'acme-private' }])
+    })).resolves.toMatchObject([{ id: 'acme-private', name: 'acme-private', source: 'endpoint' }])
     expect(server.paths).toEqual(['/models'])
     expect(server.headers[0]?.['x-company-code']).toBe('private-tenant')
     expect(server.headers[0]?.authorization).toBe('Bearer key-from-store')

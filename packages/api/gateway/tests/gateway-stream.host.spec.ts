@@ -366,16 +366,36 @@ describe('Typert Remote streams', () => {
   it('validates the WebSocket heartbeat timer range and the stream inbox bound', () => {
     expect(TypertGatewayService.Config({})).toEqual({
       websocketHeartbeatIntervalMs: 2_000,
+      websocketMissedHeartbeatTimeoutMs: 30_000,
+      websocketMaxBufferedBytes: 16 * 1024 * 1024,
       streamInboxBytes: 262_144,
+      remoteEventQueueMaxFrames: 4_096,
+      remoteEventQueueMaxBytes: 8 * 1024 * 1024,
       remoteEventReplayMaxAgeMs: 900_000,
     })
-    const maxDelayConfig = { websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS, streamInboxBytes: 1, remoteEventReplayMaxAgeMs: 0 }
+    const maxDelayConfig = {
+      websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS,
+      websocketMissedHeartbeatTimeoutMs: 1,
+      websocketMaxBufferedBytes: 1,
+      streamInboxBytes: 1,
+      remoteEventQueueMaxFrames: 1,
+      remoteEventQueueMaxBytes: 1,
+      remoteEventReplayMaxAgeMs: 0,
+    }
     expect(TypertGatewayService.Config(maxDelayConfig)).toEqual(maxDelayConfig)
-    for (const websocketHeartbeatIntervalMs of [0, 1.5, MAX_TIMER_DELAY_MS + 1]) {
+    // Zero is the emergency application-heartbeat disable, not a busy timer.
+    expect(TypertGatewayService.Config({ websocketHeartbeatIntervalMs: 0 }).websocketHeartbeatIntervalMs).toBe(0)
+    for (const websocketHeartbeatIntervalMs of [1.5, MAX_TIMER_DELAY_MS + 1]) {
       expect(() => TypertGatewayService.Config({ websocketHeartbeatIntervalMs })).toThrow()
+    }
+    for (const websocketMissedHeartbeatTimeoutMs of [0, 1.5]) {
+      expect(() => TypertGatewayService.Config({ websocketMissedHeartbeatTimeoutMs })).toThrow()
     }
     for (const streamInboxBytes of [0, 1.5]) {
       expect(() => TypertGatewayService.Config({ streamInboxBytes })).toThrow()
+    }
+    for (const remoteEventQueueMaxFrames of [0, 1.5]) {
+      expect(() => TypertGatewayService.Config({ remoteEventQueueMaxFrames })).toThrow()
     }
     for (const remoteEventReplayMaxAgeMs of [-1, 1.5]) {
       expect(() => TypertGatewayService.Config({ remoteEventReplayMaxAgeMs })).toThrow()
@@ -1021,6 +1041,34 @@ describe('Typert Remote streams', () => {
       .toThrow('forwarded Remote event source is already registered')
     await unregisterReplacement()
     socket.close()
+  })
+
+  it('bounds the forwarded event queue and never drops a waterfall frame', async () => {
+    const { ctx } = await setup(true, { remoteEventQueueMaxBytes: 1_024 })
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const pending = pendingInvocation(ctx.extend())
+    const rejected = expect(pending.outcome).rejects.toThrow()
+    const client = await openEventClient(ctx, 'events-bounded')
+
+    // Every broadcast alone exceeds the byte cap, so each is dropped in
+    // `push()` before a slow consumer could see it. The small waterfall frame
+    // is retained even though the queue is still over budget.
+    for (const label of ['first', 'second', 'third', 'fourth']) {
+      source.push({ event: 'fixture/changed', args: [label, 'x'.repeat(4_096)] })
+    }
+    source.push(pending.dispatch)
+
+    await vi.waitFor(() => { expect(deliveredInvocation(client)).toBeDefined() })
+    const values = client.frames
+      .filter(frame => frame.type === 'item' && frame.streamId === client.streamId)
+      .map(frame => frame.value as { readonly type?: string })
+    expect(values.some(value => value.type === 'emit')).toBe(false)
+    expect(values.some(value => value.type === 'waterfall')).toBe(true)
+
+    await unregister()
+    await rejected
+    client.socket.close()
   })
 
   it('rejects a scoped dispatch yielded after its Remote event source is withdrawn', async () => {

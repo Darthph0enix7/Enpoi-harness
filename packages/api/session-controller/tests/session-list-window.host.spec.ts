@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import SessionStore, { SessionSeq } from '@deepseek-ai/dsh-session'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionSeq } from '@deepseek-ai/dsh-session'
 import { testSessionPersistence } from './test-remote.ts'
 import { createSessionTestRemote, type TestSessionRemote } from './test-remote.ts'
 
@@ -101,7 +101,7 @@ describe('session.list windowing', () => {
     const { ctx, remote } = await harness()
     const coldId = 'w-cold' as never
     ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
-      list: async () => [{ version: 4, id: coldId, createdAt: 5, isSeeded: false, cwd: '/tmp' }],
+      list: async () => [{ version: SESSION_FORMAT_VERSION, id: coldId, createdAt: 5, isSeeded: false, cwd: '/tmp' }],
     }) as never)
     ctx.provide('sessionProjectionCache', {
       cachedSnapshot: () => ({
@@ -133,7 +133,7 @@ describe('session.list windowing', () => {
     const { ctx, remote } = await harness()
     const coldId = 'w-heavy' as never
     ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
-      list: async () => [{ version: 4, id: coldId, createdAt: 5, isSeeded: false, cwd: '/tmp' }],
+      list: async () => [{ version: SESSION_FORMAT_VERSION, id: coldId, createdAt: 5, isSeeded: false, cwd: '/tmp' }],
     }) as never)
     ctx.provide('sessionProjectionCache', {
       cachedSnapshot: () => ({

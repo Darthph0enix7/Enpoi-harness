@@ -206,6 +206,7 @@ jobs:
       - name: Ensure profile plugin bundles
         env:
           HARNESS_ROOT: ${{ github.workspace }}
+          FORCE_BUILD: "1"
         run: bash profile/web/build-plugins.sh profile/web
 
       # The packaging gate: refuses operator state in the fresh-install

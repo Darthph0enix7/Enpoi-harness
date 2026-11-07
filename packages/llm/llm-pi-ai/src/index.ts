@@ -85,20 +85,40 @@ import { PoolEngine } from './pool.ts'
 
 export { PiAiAdapter } from './adapter.ts'
 export type { PiAiAdapterOptions } from './adapter.ts'
-export { Config } from './config.ts'
+export { Config, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './config.ts'
+export type { PiAiModelCatalogFacts, PiAiModelFactSource, RouteCatalog } from './catalog.ts'
+export { THINKING_LEVELS } from './catalog.ts'
 export type {
   Options,
   PiAiCompatProfile,
   PiAiModality,
   PiAiModelOverride,
   PiAiModelProfile,
+  PiAiNativeFileInputs,
   PiAiProviderProfile,
   PiAiReasoningEfforts,
   PiAiThinkingFormat,
   ResolvedPiAiProviderProfile,
 } from './config.ts'
 export { recordKeyFor } from './auth.ts'
+export { offeredCompatFields } from './compat.ts'
 export { supportedProtocols } from './provider.ts'
+// The provider-neutral listing reader and its field helpers are published from
+// the package root so profile plugins read listings from built exports instead
+// of reaching into `@deepseek-ai/dsh-llm-pi-ai/src/*`.
+export {
+  listingCapacity,
+  listingCapabilities,
+  listingText,
+  readModelListing,
+} from './listing.ts'
+export type {
+  ListingCapabilities,
+  ListingEntry,
+  ListingModel,
+  ListingReadFailure,
+  ListingReadResult,
+} from './listing.ts'
 // The pool surface is published for adapters that speak a bespoke protocol but
 // reuse this engine for multi-credential routing (dsh-enpoi-commandcode-provider).
 export { parseQuotaHeaders, PoolEngine, ROTATING_CLASSES } from './pool.ts'

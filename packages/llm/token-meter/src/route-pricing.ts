@@ -5,7 +5,8 @@
  * @module @deepseek-ai/dsh-token-meter/route-pricing
  */
 
-import type { ContentBlock, LlmImageRequestPricing } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, LlmImageRequestPricing, LlmNativeFileInputs } from '@deepseek-ai/dsh-llm'
+import { llmNativeFileEncoderFor, llmNativeFileReserveTokens } from '@deepseek-ai/dsh-llm'
 import { estimateContent } from './estimate.ts'
 import type { MeterSurfaceNode } from './surface-fold.ts'
 import type { TokenSurfaceNode } from './types.ts'
@@ -25,6 +26,7 @@ export interface PricedSurface {
  * @param nodes - the fold's current or snapshotted surface, in model-visible order.
  * @param pricing - the routed model's image pricing, or undefined to keep the fixed heuristic.
  * @param fileText - exact file handle projection used by the mounted LLM service.
+ * @param nativeInputs - exact route native-file policy; absent prices every file as handle text.
  * @returns detached public nodes and their route-priced total.
  * @throws when the pricing answers a different occurrence count than it was
  *   asked — misalignment would silently misprice nodes, so it must fail loud.
@@ -33,6 +35,7 @@ export function priceSurface(
   nodes: readonly MeterSurfaceNode[],
   pricing: LlmImageRequestPricing | undefined,
   fileText?: (ref: FileAttachmentRef) => string,
+  nativeInputs?: LlmNativeFileInputs,
 ): PricedSurface {
   const images = pricing === undefined ? [] : nodes.flatMap(node => node.images)
   const hasFiles = fileText !== undefined && nodes.some(node => node.files.length > 0)
@@ -57,7 +60,13 @@ export function priceSurface(
     if (fileText !== undefined && node.files.length > 0) {
       tokens -= node.fileStructuralTokens
       for (const file of node.files) {
-        tokens += estimateContent([{ type: 'text', text: fileText(file) }])
+        if (node.fileRole === 'user'
+          && nativeInputs !== undefined
+          && llmNativeFileEncoderFor(nativeInputs, file) !== undefined) {
+          tokens += llmNativeFileReserveTokens(nativeInputs, file)
+        } else {
+          tokens += estimateContent([{ type: 'text', text: fileText(file) }])
+        }
       }
     }
     if (pricing !== undefined && node.images.length > 0) {

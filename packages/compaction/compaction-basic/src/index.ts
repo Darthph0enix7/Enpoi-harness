@@ -11,7 +11,7 @@ import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compa
 import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { CONTEXT_WINDOW_EXCEEDED_CODE, HarnessError, LlmError } from '@deepseek-ai/dsh-llm'
-import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import type { LlmCallConfig, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
@@ -88,9 +88,41 @@ interface SummarizerRouteState {
   lastCode: string
 }
 
+/**
+ * One pressure selection already proven unable to bring the surface below the
+ * threshold by removing it entirely. The recorded target, policy budgets, range
+ * identity, and relief estimate make the suppression apply only while the cheap
+ * measure/select pass reproduces the same proof; any progress, new range,
+ * policy change, or below-threshold measurement stops matching.
+ */
+interface NonReliefSelectionState {
+  readonly targetKey: string
+  readonly thresholdTokens: number
+  readonly retainTokens: number
+  readonly start: SessionSeq
+  readonly end: SessionSeq
+  readonly rangeTokens: number
+  readonly projectedTokens: number
+}
+
 /** Stable map key for one resolved summariser route. */
 function routeKey(route: { readonly provider: string; readonly model: string }): string {
   return `${route.provider}/${route.model}`
+}
+
+/** Whether the fresh cheap selection reproduces one recorded non-relief proof. */
+function sameNonReliefSelection(
+  prior: NonReliefSelectionState | undefined,
+  current: NonReliefSelectionState,
+): boolean {
+  return prior !== undefined
+    && prior.targetKey === current.targetKey
+    && prior.thresholdTokens === current.thresholdTokens
+    && prior.retainTokens === current.retainTokens
+    && prior.start === current.start
+    && prior.end === current.end
+    && prior.rangeTokens === current.rangeTokens
+    && prior.projectedTokens === current.projectedTokens
 }
 
 /** The synthetic failure that keeps a circuit-open route from being paid again. */
@@ -118,11 +150,54 @@ function routedTarget(
  * Output tokens the routed request reserves, which the provider charges to the
  * same window as the prompt. The effective envelope's own cap wins; otherwise
  * the adapter's per-request default, which the adapter materializes when that
- * envelope omits one. No declared cap means no reservation.
+ * envelope omits one. The model's declared `maxOutputTokens` is a capability,
+ * not a requested budget, so it reserves nothing here; the separate
+ * `headroomTokens` covers the output the request may still generate.
+ * @param agent - agent whose latest durable request envelope supplies the cap.
+ * @param info - resolved model capacity for the routed target.
+ * @returns the output tokens one request reserves in the same window.
  */
-function reservedCompletionTokens(agent: Agent, defaultMaxTokens: number | undefined): number {
+function reservedCompletionTokens(
+  agent: Agent,
+  info: Pick<LlmResolvedModelInfo, 'defaultMaxTokens'>,
+): number {
   const configured = agent.session.requestHeader()?.config.maxTokens
-  return configured ?? defaultMaxTokens ?? 0
+  return configured ?? info.defaultMaxTokens ?? 0
+}
+
+/**
+ * Prompt-side token budget one resolved route actually declared. A missing
+ * context is unknown capacity; a declared input-only cap binds before the
+ * combined window and stays usable even when the combined window is a route
+ * default. Never treats a default-source value as a hard limit on its own.
+ * @param info - resolved model capacity for the routed target.
+ * @returns the declared prompt budget, or `undefined` when no source stated one.
+ */
+function declaredPromptBudget(info: LlmResolvedModelInfo): number | undefined {
+  const context = info.context
+  if (context === undefined) return undefined
+  const input = context.maxInputTokens !== undefined && context.maxInputTokensSource !== 'default'
+    ? context.maxInputTokens
+    : undefined
+  if (context.source === 'default') return input
+  return input === undefined ? context.contextWindow : Math.min(context.contextWindow, input)
+}
+
+/**
+ * Output capacity one summary route declares, when it is a real cap rather than
+ * the adapter's execution fallback. `default` names a route default that stands
+ * in when no source sized the model, so it is never used to shrink a request.
+ * @param info - resolved capacity for the summary route.
+ * @returns the declared positive output cap, or `undefined` when untrusted.
+ */
+function declaredSummaryOutputTokens(
+  info: Pick<LlmResolvedModelInfo, 'maxOutputTokens' | 'maxOutputTokensSource'>,
+): number | undefined {
+  const capacity = info.maxOutputTokens
+  if (capacity === undefined || !Number.isSafeInteger(capacity) || capacity <= 0) {
+    return undefined
+  }
+  return info.maxOutputTokensSource === 'default' ? undefined : capacity
 }
 
 /** One priced surface node from the conversation meter. */
@@ -266,6 +341,12 @@ export class BasicCompactionEngine extends CompactionEngine {
   private readonly overflowAgents = new WeakMap<Session, Agent>()
   /** Consecutive summariser failures per session route, and whether its circuit is open. */
   private readonly summarizerRoutes = new WeakMap<Session, Map<string, SummarizerRouteState>>()
+  /**
+   * The last pressure selection proven unable to relieve on its own. Kept
+   * separate from the summariser-route circuit: this state suppresses a paid
+   * summary only while measure/select reproduces the same non-relief proof.
+   */
+  private readonly nonReliefSelections = new WeakMap<Session, NonReliefSelectionState>()
 
   constructor(ctx: Context, config: BasicCompactionConfig = {}) {
     super(ctx)
@@ -320,6 +401,7 @@ export class BasicCompactionEngine extends CompactionEngine {
       if (event.type === 'request/header'
         && (event.data.reason === 'resume' || event.data.reason === 'change')) {
         this.summarizerRoutes.delete(session)
+        this.nonReliefSelections.delete(session)
         return
       }
       if (event.type !== 'assistant/message') return
@@ -448,13 +530,20 @@ export class BasicCompactionEngine extends CompactionEngine {
     const activeState = this.summarizerRouteState(agent.session, activeKey)
     if (activeState.open) throw circuitOpenError(activeKey, activeState)
     try {
-      const framing = await this.summarizerFraming(
+      const invocation = await this.summarizerInvocation(
         active,
         agent,
         settings.summarizerUnknownWindowTokens,
         signal,
       )
-      const result = await summarizeWithLlm(this.ctx, active, input, agent, signal, framing)
+      const result = await summarizeWithLlm(
+        this.ctx,
+        invocation.config,
+        input,
+        agent,
+        signal,
+        invocation.framing,
+      )
       activeState.failures = 0
       activeState.open = false
       activeState.lastCode = ''
@@ -482,13 +571,23 @@ export class BasicCompactionEngine extends CompactionEngine {
     }
   }
 
-  /** Resolve the summariser's usable input budget from its own context window. */
-  private async summarizerFraming(
+  /**
+   * Resolve one summary route's effective generation cap and usable input
+   * budget together, so a route that declares a smaller output capacity keeps
+   * the frame headroom that capacity frees. The clip is recomputed for each
+   * attempted route, including the escalated session route.
+   * @param config - requested summary route and configured generation cap.
+   * @param agent - supplies routed-model history, fallback model, and session id.
+   * @param unknownWindowTokens - conservative replay budget for an unresolved window.
+   * @param signal - optional cancellation forwarded to the adapter.
+   * @returns the route's effective config and its replay framing.
+   */
+  private async summarizerInvocation(
     config: SummaryConfig,
     agent: Agent,
     unknownWindowTokens: number,
     signal?: AbortSignal,
-  ): Promise<SummarizationFraming> {
+  ): Promise<{ config: SummaryConfig; framing: SummarizationFraming }> {
     // An unresolved window never sends the whole region: the conservative cap
     // is marked so the checkpoint explains the real reason for the clip.
     const conservative: SummarizationFraming = {
@@ -496,20 +595,34 @@ export class BasicCompactionEngine extends CompactionEngine {
       unknownWindow: true,
     }
     const target = resolveSummarizationTarget(config, agent)
-    if (target === undefined) return conservative
+    if (target === undefined) return { config, framing: conservative }
     try {
       const info = await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal)
-      const contextWindow = info.context?.contextWindow
-      if (contextWindow === undefined) return conservative
-      // The summariser's own completion is capped by the resolved generation
-      // cap; never reserve more than half the window so the replay keeps room.
-      const outputReserve = Math.min(config.maxTokens, Math.floor(contextWindow / 2))
-      const inputBudgetTokens = contextWindow - outputReserve
-      return inputBudgetTokens > 0 ? { inputBudgetTokens } : conservative
+      const declaredOutput = declaredSummaryOutputTokens(info)
+      if (info.maxOutputTokens !== undefined && declaredOutput === undefined) {
+        this.ctx.logger.debug(
+          `compaction: summariser route ${target.provider}/${target.model} reports only `
+          + `an untrusted output capacity (${info.maxOutputTokensSource ?? 'unknown'}); `
+          + `keeping the configured ${config.maxTokens}-token summary cap`,
+        )
+      }
+      const effective = declaredOutput !== undefined && declaredOutput < config.maxTokens
+        ? { ...config, maxTokens: declaredOutput }
+        : config
+      const promptBudget = declaredPromptBudget(info)
+      if (promptBudget === undefined) return { config: effective, framing: conservative }
+      // Never reserve more than half the route's prompt budget, and reserve the
+      // effective cap actually sent rather than the larger configured one.
+      const outputReserve = Math.min(effective.maxTokens, Math.floor(promptBudget / 2))
+      const inputBudgetTokens = promptBudget - outputReserve
+      return {
+        config: effective,
+        framing: inputBudgetTokens > 0 ? { inputBudgetTokens } : conservative,
+      }
     } catch {
       // No window metadata or a metadata fault: the conservative cap keeps the
       // request bounded; the size-class retry ladder still applies on refusal.
-      return conservative
+      return { config, framing: conservative }
     }
   }
 
@@ -620,34 +733,58 @@ export class BasicCompactionEngine extends CompactionEngine {
         0,
         this.pinLeading(agent.session),
       )
-      if (range === null) return null
+      if (range === null) {
+        // Overflow ignores the pressure non-relief circuit and always attempts
+        // the one balanced reduction it can. When no safe range exists, say so
+        // and let the original provider overflow error stand rather than
+        // reporting a silent success.
+        this.ctx.logger.warn(
+          'context-overflow compaction: no safe replacement range for '
+          + `${target.provider}/${target.model}; the original request error stands`,
+        )
+        return null
+      }
       return this.compactRegion(range.start, range.end, agent, signal)
     }
 
     const info = await this.ctx.llm.resolveModelInfo(target.provider, target.model, signal)
     assertNoActiveCompaction(agent.session, 'automatic pressure compaction')
     const targetKey = `${target.provider}/${target.model}`
-    if (info.context === undefined) {
+    const promptBudget = declaredPromptBudget(info)
+    if (promptBudget === undefined) {
       throw new TargetPressureConfigError(
         targetKey,
         `compaction-basic: no context capacity for ${targetKey}; `
-        + 'configure contextWindow on that adapter model',
+        + 'configure contextWindow on that adapter model (a route default is not a disclosed capacity)',
       )
     }
     const spec = resolveCompactSpec(
       policy,
-      info.context.contextWindow,
-      reservedCompletionTokens(agent, info.defaultMaxTokens),
+      promptBudget,
+      reservedCompletionTokens(agent, info),
     )
-    if (measurement.totalTokens < spec.thresholdTokens) return null
+    if (measurement.totalTokens < spec.thresholdTokens) {
+      this.nonReliefSelections.delete(agent.session)
+      return null
+    }
 
     // Once pressure qualifies, land the model-free pass before choosing a
     // summary range, then remeasure through the singleton replay fold.
     if (prune !== undefined) {
+      const beforePruneTokens = measurement.totalTokens
       prune.pruneSession(agent.session)
       measurement = meter.measure(agent.session)
+      // Successful prune progress invalidates the previous range's proof even
+      // when pressure remains above threshold.
+      /* v8 ignore else -- an unchanged prune leaves the prior non-relief proof valid. */
+      if (measurement.totalTokens < beforePruneTokens) {
+        this.nonReliefSelections.delete(agent.session)
+      }
     }
-    if (measurement.totalTokens < spec.thresholdTokens) return null
+    if (measurement.totalTokens < spec.thresholdTokens) {
+      this.nonReliefSelections.delete(agent.session)
+      return null
+    }
 
     let result: CompactionResult | null = null
     for (let attempt = 0; attempt <= spec.compactionRetries; attempt += 1) {
@@ -658,6 +795,7 @@ export class BasicCompactionEngine extends CompactionEngine {
         this.pinLeading(agent.session),
       )
       if (range === null) {
+        this.nonReliefSelections.delete(agent.session)
         /* v8 ignore else -- concrete replacement preserves a compactable checkpoint; subclass hooks cannot mutate it. */
         if (result === null) return null
         /* v8 ignore next -- paired with the defensive post-success branch above. */
@@ -665,11 +803,43 @@ export class BasicCompactionEngine extends CompactionEngine {
       }
       // A checkpoint-only range re-summarises derived content (loss compounds)
       // and a range whose removal still leaves the surface above threshold
-      // cannot relieve pressure: the retained tail alone dominates. Warn once
-      // per target and fall through instead of retrying every step.
+      // cannot relieve pressure: the retained tail and envelope alone dominate.
+      // The cheap measure/select pass runs every time; the recorded proof only
+      // suppresses a paid retry while that pass reproduces the same range and
+      // relief estimate.
       const rangeTokens = pricedRangeTokens(measurement.nodes, range.start, range.end)
+      const projectedTokens = measurement.totalTokens - rangeTokens
       const checkpointOnly = isCheckpointOnlyRange(agent.session, measurement.nodes, range.start, range.end)
-      if (checkpointOnly || (attempt > 0 && measurement.totalTokens - rangeTokens >= spec.thresholdTokens)) {
+      const nonRelieving = checkpointOnly || projectedTokens >= spec.thresholdTokens
+      const proof: NonReliefSelectionState = {
+        targetKey,
+        thresholdTokens: spec.thresholdTokens,
+        retainTokens: spec.retainTokens,
+        start: range.start,
+        end: range.end,
+        rangeTokens,
+        projectedTokens,
+      }
+      if (!nonRelieving) {
+        this.nonReliefSelections.delete(agent.session)
+      } else if (sameNonReliefSelection(this.nonReliefSelections.get(agent.session), proof)) {
+        this.warnCannotRelieve(targetKey, {
+          totalTokens: measurement.totalTokens,
+          thresholdTokens: spec.thresholdTokens,
+          rangeTokens,
+          retainTokens: spec.retainTokens,
+          checkpointOnly,
+        })
+        this.ctx.logger.debug(
+          'compaction-basic: suppressed the paid summary for unchanged non-relieving range '
+          + `${range.start}-${range.end} (${rangeTokens} removable of ${measurement.totalTokens} tokens;`
+          + ` projected ${projectedTokens} >= threshold ${spec.thresholdTokens})`,
+        )
+        return result
+      } else {
+        this.nonReliefSelections.set(agent.session, proof)
+      }
+      if (checkpointOnly || (attempt > 0 && nonRelieving)) {
         this.warnCannotRelieve(targetKey, {
           totalTokens: measurement.totalTokens,
           thresholdTokens: spec.thresholdTokens,
@@ -680,6 +850,9 @@ export class BasicCompactionEngine extends CompactionEngine {
         return result
       }
       result = await this.compactRegion(range.start, range.end, agent, signal)
+      // A successful compaction is progress: the next cheap pass must re-prove
+      // any non-relief instead of inheriting the previous range's suppression.
+      this.nonReliefSelections.delete(agent.session)
       measurement = meter.measure(agent.session)
       if (measurement.totalTokens < spec.thresholdTokens) return result
     }
@@ -751,8 +924,10 @@ export class BasicCompactionEngine extends CompactionEngine {
     sourceCommandId?: CommandId,
   ): Promise<CompactionResult | null> {
     signal.throwIfAborted()
-    // An explicit /compact is the operator's request to try the route again.
+    // An explicit /compact is the operator's request to try the route and the
+    // selected range again, even if the last pressure pass proved them useless.
     this.summarizerRoutes.delete(agent.session)
+    this.nonReliefSelections.delete(agent.session)
     try {
       return agent.runMaintenance(async (agentSignal) => {
         const operationSignal = AbortSignal.any([agentSignal, signal])

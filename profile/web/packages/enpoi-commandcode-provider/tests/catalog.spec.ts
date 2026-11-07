@@ -40,13 +40,17 @@ it('parses arrays and id-keyed objects, dropping malformed rows', () => {
   expect(parseCatalog(null)).toEqual([])
 })
 
-it('answers capabilities from the catalog, permissive only when unknown', () => {
+it('answers capabilities from the exact catalog entry and leaves unknown ids unknown', () => {
   const pro = entryFor(FIXTURE, 'deepseek/deepseek-v4-pro')
   const vision = entryFor(FIXTURE, 'vision/model')
   expect(visionOf(pro)).toBe(false)
   expect(visionOf(vision)).toBe(true)
-  expect(visionOf(entryFor(FIXTURE, 'not-in-catalog'))).toBe(true)
+  // An id the catalog does not describe claims no image support: admitting an
+  // image the endpoint may reject is worse than omitting it.
+  expect(visionOf(entryFor(FIXTURE, 'not-in-catalog'))).toBe(false)
+  expect(visionOf(undefined)).toBe(false)
   expect(modalitiesOf(vision)).toEqual(['text', 'image'])
+  expect(modalitiesOf(undefined)).toBeUndefined()
   expect(effortsOf(pro)).toEqual(['high', 'max'])
   expect(effortsOf(vision)).toEqual([])
   expect(contextWindowOf(pro)).toBe(1_000_000)
@@ -54,13 +58,15 @@ it('answers capabilities from the catalog, permissive only when unknown', () => 
   expect(planBadgeOf(vision)).toBe('[Max]')
 })
 
-it('matches vendor-prefixed and short model ids', () => {
-  expect(entryFor(FIXTURE, 'deepseek-v4-pro')?.id).toBe('deepseek/deepseek-v4-pro')
+it('looks up exact ids only: a short or vendor-prefixed id never borrows another entry', () => {
+  expect(entryFor(FIXTURE, 'deepseek-v4-pro')).toBeUndefined()
+  expect(entryFor(FIXTURE, 'model')).toBeUndefined()
+  expect(entryFor(FIXTURE, 'deepseek/deepseek-v4-pro')?.id).toBe('deepseek/deepseek-v4-pro')
   expect(entryFor(FIXTURE, 'vision/model')?.name).toContain('Vision Model')
 })
 
 it('fetches the live catalog at startup and reports its source', async () => {
-  const fetchImpl = vi.fn(async () => new Response(JSON.stringify([{ id: 'live/model', name: 'Live [Pro+]' }])))
+  const fetchImpl = vi.fn(async (_url: string) => new Response(JSON.stringify([{ id: 'live/model', name: 'Live [Pro+]' }])))
   const store = new CatalogStore({
     baseURL: 'http://127.0.0.1:8899/commandcode/',
     snapshot: FIXTURE,
@@ -131,7 +137,7 @@ it('the bundled snapshot carries a version/fetchedAt stamp in its sidecar', asyn
 })
 
 it('pins the bundled snapshot without fetching under the pin policy', async () => {
-  const fetchImpl = vi.fn(async () => new Response(JSON.stringify([{ id: 'live/model', name: 'Live [Pro+]' }])))
+  const fetchImpl = vi.fn(async (_url: string) => new Response(JSON.stringify([{ id: 'live/model', name: 'Live [Pro+]' }])))
   const store = new CatalogStore({
     baseURL: 'http://127.0.0.1:8899/commandcode',
     snapshot: FIXTURE,
@@ -160,7 +166,7 @@ it('refuses the fallback under the off policy when no live catalog answers', asy
 })
 
 it('serves the live catalog under the off policy when the keypool answers', async () => {
-  const fetchImpl = vi.fn(async () => new Response(JSON.stringify([{ id: 'live/model', name: 'Live [Pro+]' }])))
+  const fetchImpl = vi.fn(async (_url: string) => new Response(JSON.stringify([{ id: 'live/model', name: 'Live [Pro+]' }])))
   const store = new CatalogStore({
     baseURL: 'http://127.0.0.1:8899/commandcode',
     snapshot: FIXTURE,

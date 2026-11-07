@@ -22,17 +22,20 @@
  * @module dsh-enpoi-heavy-providers/manifests
  */
 
-import { offeredCompatFields } from '@deepseek-ai/dsh-llm-pi-ai/src/compat.ts'
+import { offeredCompatFields } from '@deepseek-ai/dsh-llm-pi-ai'
 
 /** One shell step of an install or teardown run. */
 export interface HeavyStep {
   /** Human stage label shown in the progress UI. */
   label: string
   /**
-   * Shell command executed with `bash -lc`. `{home}`, `{config}` (=
-   * `$HOME/.config`), and `{dshHome}` (the real `$DSH_HOME`) are substituted
-   * by the runner. Paths under the DSH home must use `{dshHome}`, never a
-   * literal `~/.dsh` layout.
+   * Shell command executed with `bash -lc`. Steps that need host paths read
+   * them from the runner's environment instead of embedding them:
+   * `$DSH_HEAVY_HOME`, `$DSH_HEAVY_DSH_HOME`, `$DSH_HEAVY_PROFILE_DIR`, and
+   * `$DSH_HEAVY_HELPER`. Older manifests may still use the `{home}`,
+   * `{config}` (= `$HOME/.config`), `{dshHome}`, and `{profileDir}`
+   * placeholders; the runner refuses to expand those when the value carries a
+   * shell metacharacter rather than interpolating it into the command text.
    */
   command: string
   /** Working directory override (placeholders allowed); defaults to `$HOME`. */
@@ -58,6 +61,12 @@ export interface HeavyHealth {
 /** What a local install path needs on the machine. */
 export type HeavyLocalRuntime = 'vendor-app' | 'docker' | 'podman' | 'node'
 
+/**
+ * A structured host prerequisite a local install variant declares, checked by
+ * preflight instead of sniffing the step commands for a tool name.
+ */
+export type HeavyLocalRequirement = 'docker' | 'podman' | 'systemd-user'
+
 /** One file a local install needs before its steps can succeed. */
 export interface HeavyFileRequirement {
   /** Candidate paths (`{home}`/`{config}`/`{dshHome}` placeholders allowed); any existing one satisfies the requirement. */
@@ -82,6 +91,13 @@ export interface HeavyPlatformInstall {
    * verbatim by preflight and the install RPC.
    */
   unsupported?: string
+  /**
+   * Structured host prerequisites the variant needs. Preflight refuses a path
+   * whose declared requirement the runtime probe does not satisfy, so a
+   * helper that provisions a user unit is never approved on a shell without
+   * a reachable user manager.
+   */
+  requires?: readonly HeavyLocalRequirement[]
   /**
    * Files the variant needs (any candidate of each requirement). Preflight
    * reports the first unsatisfied requirement's hint instead of offering a
@@ -167,6 +183,91 @@ export function resolveHeavyInstall(local: HeavyLocalInstall, platform: string):
   }
 }
 
+/**
+ * Runner environment variables that carry the host path bases and the
+ * installer helper to every step. Commands reference these as `"$VAR"`;
+ * their values are never interpolated into the command text, so a path with
+ * `$`, a backtick, a quote, or a backslash cannot expand or execute.
+ */
+export const HEAVY_ENV = {
+  /** User home directory. */
+  home: 'DSH_HEAVY_HOME',
+  /** DSH home directory. */
+  dshHome: 'DSH_HEAVY_DSH_HOME',
+  /** Running profile root; empty when no launcher supplied one. */
+  profileDir: 'DSH_HEAVY_PROFILE_DIR',
+  /** Absolute path of this package's installer helper. */
+  helper: 'DSH_HEAVY_HELPER',
+} as const
+
+/** A validated release source: a releases API URL or a GitHub `owner/repo` slug. */
+export type HeavyReleaseSource =
+  | { readonly kind: 'api'; readonly value: string }
+  | { readonly kind: 'repo'; readonly value: string }
+
+/** GitHub `owner/repo` slug (both segments non-empty, no whitespace). */
+const RELEASE_REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
+
+/**
+ * Validate an operator-declared release source. The value is used as a
+ * command argument only (shell-quoted), never as command text.
+ * @param value - an https URL or an `owner/repo` slug.
+ * @returns the parsed source, or undefined when the value is not one of them.
+ */
+export function parseReleaseSource(value: string): HeavyReleaseSource | undefined {
+  const trimmed = value.trim()
+  if (trimmed === '' || /\s|\u0000/u.test(trimmed)) return undefined
+  if (RELEASE_REPO_RE.test(trimmed)) return { kind: 'repo', value: trimmed }
+  let url: URL
+  try {
+    url = new URL(trimmed)
+  } catch {
+    return undefined
+  }
+  if (url.protocol !== 'https:') return undefined
+  if (url.username !== '' || url.password !== '') return undefined
+  if (url.hash !== '') return undefined
+  return { kind: 'api', value: url.href }
+}
+
+/**
+ * The helper flags for one validated release source. Omission returns no
+ * arguments, so a manifest without `releaseSource` keeps the helper's
+ * upstream default instead of sending an empty flag.
+ * @param source - the effective manifest's declared release source, when any.
+ * @returns `--releases-api <url>` or `--repo <owner/repo>`, or nothing.
+ */
+export function releaseSourceArguments(source: string | undefined): readonly string[] {
+  if (source === undefined) return []
+  const parsed = parseReleaseSource(source)
+  if (parsed === undefined) return []
+  return parsed.kind === 'api' ? ['--releases-api', parsed.value] : ['--repo', parsed.value]
+}
+
+/** Single-quote one argument for POSIX shell so a validated value stays one word. */
+function shellQuoteArgument(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`
+}
+
+/**
+ * Append the release-source flags to the helper step only when the effective
+ * manifest declares one. Other steps and steps that do not run the helper are
+ * returned untouched.
+ * @param steps - the resolved install steps.
+ * @param source - the effective manifest's `releaseSource`, when any.
+ * @returns the steps, with the helper invocation carrying the flags.
+ */
+export function withReleaseSource(steps: readonly HeavyStep[], source: string | undefined): readonly HeavyStep[] {
+  const args = releaseSourceArguments(source)
+  if (args.length === 0) return steps
+  // Flags stay bare; only each value is shell-quoted, so the helper sees one
+  // argument even when the validated URL carries shell-special characters.
+  const suffix = args.map((arg, index) => index % 2 === 0 ? arg : shellQuoteArgument(arg)).join(' ')
+  return steps.map(step => step.command.includes('$DSH_HEAVY_HELPER')
+    ? { ...step, command: `${step.command} ${suffix}` }
+    : step)
+}
+
 /** One credential identity a manifest's native pool declares. */
 export interface HeavyManifestPoolIdentity {
   /** Stable identity key (pool state file, logs, Keys card). */
@@ -237,6 +338,19 @@ export interface HeavyProviderManifest {
     apiKeyEnv?: string
     keyless: boolean
   }
+  /**
+   * Request header the adapter sends with the stable session id, when the
+   * provider uses header-based routing affinity. The llm-pi-ai route profile
+   * carries the same field; omitting it sends no session header.
+   */
+  sessionHeader?: string
+  /**
+   * Treat the endpoint's discovered listing as the whole model catalog. Only
+   * `endpoint` is supported: the installed llm-pi-ai catalog never refills a
+   * route that declares it, so a retained empty listing serves empty instead
+   * of fabricating models from another source.
+   */
+  catalogAuthority?: 'endpoint'
   dashboardUrl?: string
   docsUrl?: string
   /**
@@ -247,6 +361,14 @@ export interface HeavyProviderManifest {
    * the rendered commands always name one feed.
    */
   releasesApi?: string
+  /**
+   * Optional release source the provider's installer/downloader reads instead
+   * of its upstream default: an `https://` releases API URL or an
+   * `owner/repo` slug. Deployment-varying (fork or mirror); a private overlay
+   * sets it, and the install step only appends `--releases-api` / `--repo`
+   * when the effective manifest declares one. Omission keeps upstream.
+   */
+  releaseSource?: string
   /** Loopback port the service listens on by default (detection's first candidate). */
   defaultPort: number
   /** Account flows that need a browser; rendered as badges. */
@@ -420,7 +542,7 @@ const COMMANDCODE_HEALTH: HeavyHealth = {
 /** The commandcode setup step: link and build the provider package (idempotent). */
 const COMMANDCODE_INSTALL_STEP: HeavyStep = {
   label: 'Link and build the DSH provider package',
-  command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"',
+  command: 'node "$DSH_HEAVY_PROFILE_DIR/packages/enpoi-commandcode-provider/scripts/install.mjs" "$DSH_HEAVY_PROFILE_DIR"',
   weight: 3,
 }
 
@@ -608,7 +730,48 @@ const MERIDIAN_LAUNCHD_STEPS: readonly HeavyStep[] = [
   MERIDIAN_WAIT_STEP,
 ]
 
-/** The three heavy providers v1 ships. */
+/** Port CLIProxyAPI listens on by default. */
+const CLIPROXYAPI_PORT = 8317
+
+/** The official CLIProxyAPI documentation site. */
+const CLIPROXYAPI_DOCS_URL = 'https://help.router-for.me/'
+
+/**
+ * The installer helper is resolved from this plugin's own module location and
+ * handed to the step through the environment, so the command text never
+ * carries a path and the web profile's `packages/` layout is not assumed.
+ */
+const CLIPROXYAPI_HELPER_ENV = '$DSH_HEAVY_HELPER'
+
+/**
+ * The helper must exist before the install job starts. `{helper}` is the
+ * plugin-relative absolute path the host injects; the requirement keeps a
+ * stripped or moved package from starting a job whose step would die ENOENT.
+ */
+const CLIPROXYAPI_HELPER_FILE: HeavyFileRequirement = {
+  paths: ['{helper}'],
+  hint: 'The CLIProxyAPI installer helper (scripts/cliproxyapi-install.mjs) is missing from this plugin package — reinstall the profile plugin or use a detected instance',
+}
+
+/** Installation and removal run the same helper, so platform behaviour never diverges in shell. */
+const CLIPROXYAPI_INSTALL_STEP: HeavyStep = {
+  label: 'Install CLIProxyAPI (verified release and user service)',
+  command: `node "${CLIPROXYAPI_HELPER_ENV}" install --dsh-home "$DSH_HEAVY_DSH_HOME"`,
+  weight: 3,
+}
+
+const CLIPROXYAPI_REMOVE_STEP: HeavyStep = {
+  label: 'Remove the CLIProxyAPI install (stop the service and remove verified files)',
+  command: `node "${CLIPROXYAPI_HELPER_ENV}" remove --dsh-home "$DSH_HEAVY_DSH_HOME"`,
+  weight: 2,
+}
+
+const CLIPROXYAPI_HEALTH: HeavyHealth = {
+  url: `http://127.0.0.1:${CLIPROXYAPI_PORT}/healthz`,
+  timeoutMs: 5000,
+}
+
+/** The heavy providers v1 ships. */
 export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
   {
     id: 'freellmapi',
@@ -1089,6 +1252,90 @@ export const HEAVY_MANIFESTS: readonly HeavyProviderManifest[] = [
     // No fallbackModel: /v1/models is the catalog shipped in the release, so
     // discovery is the only model source and nothing is fabricated.
   },
+  {
+    id: 'cliproxyapi',
+    label: 'CLIProxyAPI',
+    summary: 'Optional multi-account subscription gateway: one OpenAI-compatible endpoint in front of the CLI accounts you configure in its dashboard.',
+    protocol: 'openai-completions',
+    delivery: 'service',
+    // The endpoint's listing is authoritative: the gateway's channels decide
+    // which models exist, and an empty successful listing is not backfilled
+    // from the installed catalog.
+    catalogAuthority: 'endpoint',
+    // The gateway's account-affinity route keys sessions by this header.
+    sessionHeader: 'x-session-id',
+    // Anonymous routing is the shipped default; an operator may store the
+    // optional gateway key under CLIPROXYAPI_API_KEY, but no key is required
+    // for a local instance that accepts unauthenticated clients.
+    auth: { kind: 'unified', apiKeyEnv: 'CLIPROXYAPI_API_KEY', keyless: true },
+    dashboardUrl: `http://127.0.0.1:${CLIPROXYAPI_PORT}/management.html`,
+    docsUrl: CLIPROXYAPI_DOCS_URL,
+    defaultPort: CLIPROXYAPI_PORT,
+    requiresBrowser: [
+      'Adding upstream accounts happens in the local management dashboard; provider OAuth or device-code sign-in can require a browser or a phone confirmation and is never performed by the installer',
+    ],
+    quirks: [
+      'Local install dependencies: Node.js >= 22 (the harness ships Node); Docker is never required. The profile helper downloads the verified CLIProxyAPI release and writes a systemd or launchd user service — no Go toolchain, npm compile, or curl step, and its Node built-in downloader needs no external tar',
+      'The model catalog comes from the configured inference endpoint (/v1/models); this manifest hardcodes no model, declares catalogAuthority "endpoint", and never substitutes a fabricated fallback',
+      'Model capabilities vary by upstream account/channel and by endpoint metadata; no native media capability is declared until the core native-media schema defines it',
+      'The management key is separate from the optional client API key and stays in config.yaml with mode 0600; the installer prints neither key',
+      'Upstream accounts are managed in the /management.html dashboard; the local installer never signs in or auto-authenticates an account, and opening the dashboard is a local handoff rather than an automatic login',
+      'Remote management is a policy decision: the dashboard and management API are loopback by default, and exposing them beyond loopback requires an explicit tunnel and authentication you configure',
+      'The route declaration sets the x-session-id request header for account affinity; affinity is not a cache-hit guarantee and accounts can still switch on quota or rate-limit responses',
+      'The verified binary is about 75 MB; RAM use is not measured here. Removing the local install retains config.yaml, bootstrap.json, and the auths directory under $DSH_HOME/providers/cliproxyapi',
+      'Windows has no supported local install; detected-instance reuse, a custom route, or an instance running on another machine still works',
+    ],
+    reuse: {
+      label: 'Use a detected instance',
+      baseURL: `http://127.0.0.1:${CLIPROXYAPI_PORT}/v1`,
+      note: 'Zero install: uses a CLIProxyAPI instance already running on this device. The client API key is optional and the dashboard is not signed in automatically.',
+      health: CLIPROXYAPI_HEALTH,
+    },
+    local: {
+      label: 'Install locally (verified release + user service)',
+      baseURL: `http://127.0.0.1:${CLIPROXYAPI_PORT}/v1`,
+      deps: ['Node.js >= 22', 'A reachable systemd user session (systemctl --user) on Linux'],
+      diskHint: '~75 MB binary; RAM use not measured',
+      dashboardUrl: `http://127.0.0.1:${CLIPROXYAPI_PORT}/management.html`,
+      runtime: 'node',
+      install: {
+        default: {
+          steps: [CLIPROXYAPI_INSTALL_STEP],
+          requiresFiles: [CLIPROXYAPI_HELPER_FILE],
+        },
+        linux: {
+          label: 'Install locally (verified release + systemd user unit)',
+          requires: ['systemd-user'],
+          steps: [CLIPROXYAPI_INSTALL_STEP],
+          requiresFiles: [CLIPROXYAPI_HELPER_FILE],
+        },
+        darwin: {
+          label: 'Install locally (verified release + launchd agent)',
+          deps: ['Node.js >= 22', 'macOS 11+ (launchd)'],
+          diskHint: '~75 MB binary; RAM use not measured',
+          steps: [CLIPROXYAPI_INSTALL_STEP],
+          requiresFiles: [CLIPROXYAPI_HELPER_FILE],
+        },
+        win32: {
+          label: 'Not supported on Windows',
+          unsupported: 'CLIProxyAPI has no supported Windows local install: its installer helper manages a verified Linux/macOS release behind a POSIX user service. Run CLIProxyAPI yourself, or add an instance running on another machine with "Use a detected instance" or as a custom route.',
+          steps: [],
+        },
+      },
+      health: CLIPROXYAPI_HEALTH,
+    },
+    removal: {
+      steps: [CLIPROXYAPI_REMOVE_STEP],
+      warnings: [
+        'Removal stops the receipt-owned user service and removes the verified binary plus the receipt-owned unit; config.yaml (management key, mode 0600), bootstrap.json, and the auths directory (upstream account credentials) stay under $DSH_HOME/providers/cliproxyapi and must be deleted by hand to remove them',
+        'Any other harness or client pointed at the same CLIProxyAPI instance stops working when the service is removed',
+        'Upstream account state and quota live in CLIProxyAPI and are never touched beyond the local service and binary',
+        'A modified binary or unit makes the installer refuse removal; restore the receipt-owned file or remove it manually after confirming its origin',
+      ],
+    },
+    // No fallbackModel: the endpoint's /v1/models listing is the only model
+    // source, so an empty listing writes no fabricated id.
+  },
 ]
 
 /** Resolve one manifest by route id. */
@@ -1159,6 +1406,15 @@ export function manifestProblems(manifests: readonly HeavyProviderManifest[] = H
     }
     if (manifest.unsupported === undefined && !LLM_PI_AI_PROTOCOLS.includes(manifest.protocol) && manifest.settingsNs === undefined) {
       problems.push(`${where}: protocol "${manifest.protocol}" is not served by llm-pi-ai and needs an explicit settingsNs`)
+    }
+    if (manifest.sessionHeader !== undefined && (typeof manifest.sessionHeader !== 'string' || manifest.sessionHeader.trim() === '')) {
+      problems.push(`${where}: sessionHeader must be a non-empty header name`)
+    }
+    if (manifest.catalogAuthority !== undefined && manifest.catalogAuthority !== 'endpoint') {
+      problems.push(`${where}: catalogAuthority must be "endpoint" when declared`)
+    }
+    if (manifest.releaseSource !== undefined && parseReleaseSource(manifest.releaseSource) === undefined) {
+      problems.push(`${where}: releaseSource must be an https URL or an "owner/repo" slug`)
     }
     // The vocabulary is llm-pi-ai's own offered set for the declared protocol:
     // a withheld field or a misspelling is refused here instead of reaching a

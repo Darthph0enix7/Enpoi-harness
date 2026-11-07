@@ -12,7 +12,7 @@ import type { BrandT } from '../locales.ts'
 import type { TerminalInjected } from './contract.ts'
 import type { TerminalPlace, TerminalTabState } from './registry.ts'
 import { TerminalIcon } from './icons.tsx'
-import { TerminalView } from './TerminalView.tsx'
+import { LazyTerminalView } from './lazy-terminal-view.tsx'
 import css from './TerminalPanel.module.css'
 
 /** One surface's tab strip: the terminals of that surface and their controls. */
@@ -162,10 +162,11 @@ export function TerminalPanel({
         ) : (
           <>
             <TerminalStatusBanner tab={active} t={t} />
-            <TerminalView
+            <LazyTerminalView
               sessionId={sessionId}
               tab={active}
               active
+              t={t}
               write={writeTerminal}
               resize={resizeTerminal}
               subscribe={subscribeTerminal}

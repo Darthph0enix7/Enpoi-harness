@@ -1,6 +1,7 @@
 /** Content-block structure helpers. @module @deepseek-ai/dsh-llm/content */
 
-import type { ContentBlock, ImageBlock, LlmImageRequestBudget, ToolSchema, ToolUpdate, ToolHistory } from './types.ts'
+import type { ContentBlock, ImageBlock, LlmImageRequestBudget, LlmNativeFileInputs, ToolSchema, ToolUpdate, ToolHistory } from './types.ts'
+import { llmNativeFileEncoderFor } from './types.ts'
 import type { RequestMessage } from './types.ts'
 import type { Message } from './message.ts'
 import type {
@@ -157,14 +158,19 @@ export function fileHandleText(ref: FileAttachmentRef, readonlyPath: string | un
   return `[${identity}: verbatim read-only copy saved at ${quoted(readonlyPath)}. Read that path with your file tools when its contents are needed; copy it to a writable location before modifying it. When delegating file work, include this saved path in the delegation prompt; only subagents sharing this execution environment can read it.]`
 }
 
-/** Replace every file occurrence with handle text. */
+/** Replace file occurrences with handle text unless the route accepts them natively. */
 function replaceFilesWithHandles(
   blocks: readonly ContentBlock[],
   resolvePath: (ref: FileAttachmentRef) => string | undefined,
+  nativeInputs: LlmNativeFileInputs | undefined,
 ): ContentBlock[] {
   let next: ContentBlock[] | undefined
   for (const [index, block] of blocks.entries()) {
     if (block.type === 'file') {
+      if (nativeInputs !== undefined && llmNativeFileEncoderFor(nativeInputs, block.attachment) !== undefined) {
+        next?.push(block)
+        continue
+      }
       next ??= blocks.slice(0, index)
       next.push({ type: 'text', text: fileHandleText(block.attachment, resolvePath(block.attachment)) })
       continue
@@ -175,34 +181,45 @@ function replaceFilesWithHandles(
 }
 
 /**
- * Project request file content into deterministic handle text for every model
- * route. Unlike images, no provider receives file blocks natively, so this
- * projection is unconditional in request assembly.
+ * Project request file content into deterministic handle text. A route that
+ * declares an exact native-file policy keeps only user-role file blocks whose
+ * filename suffix and descriptor map select an encoder; every other occurrence
+ * becomes the same handle text as a route without native media. A file is
+ * never silently dropped.
  * @param messages - complete request history.
  * @param resolvePath - resolve one reference's current execution-world read path.
- * @returns the original list without files, otherwise shallow message copies with handle text.
+ * @param nativeInputs - exact route policy; absent keeps every file as handle text.
+ * @returns the original list without changed files, otherwise shallow message copies.
  */
 export function projectFilesToText(
   messages: readonly Message[],
   resolvePath: (ref: FileAttachmentRef) => string | undefined,
+  nativeInputs?: LlmNativeFileInputs,
 ): readonly Message[]
 /**
  * Project file content in mixed durable and request-only inputs.
  * @param messages - complete request inputs.
  * @param resolvePath - resolve a reference's execution-world read path.
- * @returns original inputs without files, otherwise copies with handle text.
+ * @param nativeInputs - exact route policy; absent keeps every file as handle text.
+ * @returns original inputs without changed files, otherwise copies.
  */
 export function projectFilesToText(
   messages: readonly RequestMessage[],
   resolvePath: (ref: FileAttachmentRef) => string | undefined,
+  nativeInputs?: LlmNativeFileInputs,
 ): readonly RequestMessage[]
 export function projectFilesToText(
   messages: readonly RequestMessage[],
   resolvePath: (ref: FileAttachmentRef) => string | undefined,
+  nativeInputs?: LlmNativeFileInputs,
 ): readonly RequestMessage[] {
   if (!messages.some(message => contentHasFile(message.content))) return messages
   return messages.map((message) => {
-    const content = replaceFilesWithHandles(message.content, resolvePath)
+    const content = replaceFilesWithHandles(
+      message.content,
+      resolvePath,
+      message.role === 'user' ? nativeInputs : undefined,
+    )
     return content === message.content ? message : { ...message, content }
   })
 }

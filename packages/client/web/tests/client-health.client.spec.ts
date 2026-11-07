@@ -446,6 +446,77 @@ describe('watchdog', () => {
     expect(reload).not.toHaveBeenCalled()
   })
 
+  it('extends the boot deadline while boot progress advances, up to the ceiling', () => {
+    const progress = { value: 0 }
+    const { reload, health } = bench({ bootDeadlineMs: 100, bootCeilingMs: 300, bootProgress: () => progress.value })
+
+    progress.value += 1
+    vi.advanceTimersByTime(100)
+    expect(reload).not.toHaveBeenCalled()
+    progress.value += 1
+    vi.advanceTimersByTime(100)
+    expect(reload).not.toHaveBeenCalled()
+
+    // Progress at the ceiling cannot extend the boot any further.
+    progress.value += 1
+    vi.advanceTimersByTime(100)
+    expect(reload).toHaveBeenCalledOnce()
+    expect(health.checkNow()).toBe(false)
+  })
+
+  it('reloads at the plain deadline when boot progress never advances', () => {
+    const progress = { value: 7 }
+    const { reload } = bench({ bootDeadlineMs: 100, bootCeilingMs: 300, bootProgress: () => progress.value })
+    vi.advanceTimersByTime(99)
+    expect(reload).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+    expect(reload).toHaveBeenCalledOnce()
+  })
+
+  it('reloads one full window after progress stops', () => {
+    const progress = { value: 0 }
+    const { reload } = bench({ bootDeadlineMs: 100, bootCeilingMs: 300, bootProgress: () => progress.value })
+
+    progress.value += 1
+    vi.advanceTimersByTime(100)
+    expect(reload).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(100)
+    expect(reload).toHaveBeenCalledOnce()
+  })
+
+  it('extends an overdue boot on a direct probe only while progress advanced', () => {
+    const progress = { value: 0 }
+    const { reload, health, clock } = bench({ bootDeadlineMs: 100, bootCeilingMs: 300, bootProgress: () => progress.value })
+
+    clock.value += 100
+    progress.value += 1
+    expect(health.checkNow()).toBe(false)
+    expect(reload).not.toHaveBeenCalled()
+
+    clock.value += 100
+    expect(health.checkNow()).toBe(true)
+    expect(reload).toHaveBeenCalledOnce()
+  })
+
+  it('never extends past the ceiling after a throttled background timer', () => {
+    const progress = { value: 0 }
+    const { reload, health, clock } = bench({ bootDeadlineMs: 100, bootCeilingMs: 300, bootProgress: () => progress.value })
+
+    progress.value += 1
+    clock.value += 400
+    expect(health.checkNow()).toBe(true)
+    expect(reload).toHaveBeenCalledOnce()
+  })
+
+  it('rejects timing that could disable the boot watchdog or invert its bounds', () => {
+    expect(() => installClientHealth({ container: document.createElement('div'), bootDeadlineMs: 0 }))
+      .toThrow(/bootDeadlineMs/)
+    expect(() => installClientHealth({ container: document.createElement('div'), bootCeilingMs: Number.NaN }))
+      .toThrow(/bootCeilingMs/)
+    expect(() => installClientHealth({ container: document.createElement('div'), bootDeadlineMs: 100, bootCeilingMs: 50 }))
+      .toThrow(/bootCeilingMs/)
+  })
+
   it('removes listeners, timers, and the global on disposal', () => {
     const { reload, reports, health } = bench({ bootDeadlineMs: 100 })
     expect(healthGlobal()).toBeDefined()

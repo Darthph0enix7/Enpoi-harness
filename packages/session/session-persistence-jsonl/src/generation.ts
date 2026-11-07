@@ -54,6 +54,21 @@ const ZSTD_CHECKSUM_OPTIONS = {
   params: { [constants.ZSTD_c_checksumFlag]: 1 },
 }
 
+/**
+ * Source-row recovery policy for a historical edge whose successor must never
+ * contain less than the source reader presents.
+ */
+export interface JsonlGenerationRecoveryGuard {
+  /**
+   * Refuse successor publication when strict source decoding dropped any
+   * committed row. Requires `createRestore` to use `recovery: 'strict'`, so a
+   * decoder failure reaches this parser instead of being silently suppressed.
+   */
+  readonly refusePublication: boolean
+  /** Validate one parsed source row before an earlier recovery issue suppresses it. */
+  readonly assertRowAdmission: (row: unknown) => void
+}
+
 /** Pure adapter between backend-owned JSONL framing and the format catalog. */
 export interface JsonlGenerationFormatAdapter {
   readonly currentVersion: number
@@ -65,6 +80,8 @@ export interface JsonlGenerationFormatAdapter {
   encodeEvent(event: SessionFormatArtifact['events'][number]): SessionFormatJsonValue
   /** Classify a supported-version artifact that policy refuses to migrate. */
   isUnsupportedMigrationError?(error: unknown): error is Error
+  /** Refuse a truncated successor for an edge that owns recovery suppression. */
+  readonly recoveryGuard?: JsonlGenerationRecoveryGuard
 }
 
 /** Inputs for preparing one historical generation and publishing its current successor later. */
@@ -307,8 +324,12 @@ class MigratingJsonlRows {
   private fragmentBytes = 0
   private rowIndex = 0
   private issue: Error | undefined
+  private recovered: Error | undefined
 
-  constructor(private readonly restore: SessionFormatRestore) {}
+  constructor(
+    private readonly restore: SessionFormatRestore,
+    private readonly guard?: JsonlGenerationRecoveryGuard,
+  ) {}
 
   /** Consume plaintext bytes following the independently decoded header. */
   write(chunk: Buffer): void {
@@ -349,6 +370,11 @@ class MigratingJsonlRows {
     return this.restore.finish()
   }
 
+  /** First committed source row dropped after a guarded recovery, if any. */
+  get recoveredSource(): Error | undefined {
+    return this.recovered
+  }
+
   private consume(line: Buffer): void {
     const index = this.rowIndex
     this.rowIndex += 1
@@ -357,15 +383,37 @@ class MigratingJsonlRows {
       row = parseJson(line.toString('utf8'), `row ${index + 1}`)
     } catch (error: unknown) {
       this.issue ??= asError(error)
+      this.recovered = this.issue
       return
     }
+    // Admission stays independent of an earlier recovery issue: a retired
+    // structural form refuses the whole log before its tail is suppressed.
+    this.guard?.assertRowAdmission(row)
     if (this.issue !== undefined) {
-      if (typeof row === 'object' && row !== null
-        && (row as { type?: unknown }).type === 'turn/end') throw this.issue
+      if (isTurnEnd(row)) throw this.issue
       return
     }
-    this.restore.decodeRow(row)
+    if (this.guard === undefined) {
+      this.restore.decodeRow(row)
+      return
+    }
+    try {
+      this.restore.decodeRow(row)
+    } catch (error: unknown) {
+      /* v8 ignore next -- every Session format decoder rejects with Error. */
+      const detail = error instanceof Error ? error.message : String(error)
+      const issue = new Error(`corrupt session log: invalid committed event at row ${index + 1}: ${detail}`, {
+        cause: error,
+      })
+      this.issue = issue
+      this.recovered = issue
+      if (isTurnEnd(row)) throw issue
+    }
   }
+}
+
+function isTurnEnd(row: unknown): boolean {
+  return typeof row === 'object' && row !== null && (row as { type?: unknown }).type === 'turn/end'
 }
 
 interface StartedMigrationStream {
@@ -375,7 +423,7 @@ interface StartedMigrationStream {
 async function startMigrationStream(
   headerRecord: Buffer,
   sourceVersion: number,
-  format: Pick<JsonlGenerationFormatAdapter, 'createRestore'>,
+  format: Pick<JsonlGenerationFormatAdapter, 'createRestore' | 'recoveryGuard'>,
   validateHistoricalHeader?: PrepareJsonlMigrationOptions['validateHistoricalHeader'],
 ): Promise<StartedMigrationStream> {
   const value = parseJson(headerRecord.subarray(0, -1).toString('utf8'), 'header line')
@@ -387,7 +435,7 @@ async function startMigrationStream(
   const validation = validateHistoricalHeader?.(header)
   if (validation !== undefined) await validation
   const stream = format.createRestore(header)
-  return { parser: new MigratingJsonlRows(stream) }
+  return { parser: new MigratingJsonlRows(stream, format.recoveryGuard) }
 }
 
 async function consumeMigrationBytes(
@@ -408,14 +456,19 @@ async function consumeMigrationBytes(
   }
 }
 
+interface DecodedMigration {
+  readonly artifact: SessionFormatArtifact
+  readonly recoveredSource: Error | undefined
+}
+
 async function decodeStreamingMigration(
   bytes: Buffer,
   compression: JsonlCompression,
   sourceVersion: number,
-  format: Pick<JsonlGenerationFormatAdapter, 'createRestore'>,
+  format: Pick<JsonlGenerationFormatAdapter, 'createRestore' | 'recoveryGuard'>,
   validateHistoricalHeader: PrepareJsonlMigrationOptions['validateHistoricalHeader'],
   signal?: AbortSignal,
-): Promise<SessionFormatArtifact> {
+): Promise<DecodedMigration> {
   signal?.throwIfAborted()
   if (compression === 'none') {
     const headerEnd = bytes.indexOf(0x0A)
@@ -435,7 +488,7 @@ async function decodeStreamingMigration(
         signal,
       )
     }
-    return stream.parser.finish()
+    return { artifact: stream.parser.finish(), recoveredSource: stream.parser.recoveredSource }
   }
 
   const { frames, tornStart } = scanZstdFrames(bytes)
@@ -474,7 +527,7 @@ async function decodeStreamingMigration(
         )
       }
     }
-    return stream.parser.finish()
+    return { artifact: stream.parser.finish(), recoveredSource: stream.parser.recoveredSource }
   } finally {
     decoder.close()
   }
@@ -959,9 +1012,9 @@ async function prepareMigration(
     throw new Error(`migration preparation requires a historical source, got v${sourceVersion}`)
   }
   const source = await readStableSnapshot(sourcePath, signal, internals.fs)
-  let artifact: SessionFormatArtifact
+  let decoded: DecodedMigration
   try {
-    artifact = await decodeStreamingMigration(
+    decoded = await decodeStreamingMigration(
       source.bytes,
       compression,
       sourceVersion,
@@ -975,16 +1028,27 @@ async function prepareMigration(
     }
     throw error
   }
+  const { artifact } = decoded
   if (artifact.header.version !== format.currentVersion) {
     throw new Error(`format migration returned v${artifact.header.version}, expected v${format.currentVersion}`)
   }
   await options.validateRelatedSources?.()
   const sourceIdentity = source.identity
+  const recoveredSource = format.recoveryGuard?.refusePublication === true
+    ? decoded.recoveredSource
+    : undefined
   let publication: Promise<JsonlPhysicalIdentity> | undefined
   return {
     sourceIdentity,
     artifact,
     publish() {
+      if (recoveredSource !== undefined) {
+        return Promise.reject(new Error(
+          `refusing to publish a v${format.currentVersion} successor from a v${sourceVersion} source `
+          + `that needed recovery; the source generation remains selected: ${recoveredSource.message}`,
+          { cause: recoveredSource },
+        ))
+      }
       if (publication === undefined) {
         publication = publishPreparedMigration(
           options,
@@ -1050,7 +1114,7 @@ export async function readDecodedJsonlSource(
   const source = await readStableJsonlFile(path, signal)
   let artifact: SessionFormatArtifact
   try {
-    artifact = await decodeStreamingMigration(source.bytes, compression, version, format, undefined, signal)
+    artifact = (await decodeStreamingMigration(source.bytes, compression, version, format, undefined, signal)).artifact
   } catch (error: unknown) {
     if (signal?.aborted || error instanceof SessionFormatError) throw error
     throw new SessionFormatError(String(error), { cause: error })

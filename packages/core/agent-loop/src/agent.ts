@@ -27,6 +27,7 @@ import {
   createAssistantMessage,
   createDeveloperMessage,
   errorChain,
+  llmNativeFileInputsEqual,
   markAgentLoopRequest,
   type LlmFailure,
 } from '@deepseek-ai/dsh-llm'
@@ -958,17 +959,20 @@ export class ReactLoopAgent implements Agent {
 
     const contextWindow = preparedCall?.context?.contextWindow
     const systemPromptUpdate = preparedCall?.systemPromptUpdate
+    const nativeFileInputs = preparedCall?.nativeFileInputs
     const requestContext: RequestContext = {
       provider: config.provider,
       model: config.model,
       ...contextWindow === undefined ? {} : { contextWindow },
       ...systemPromptUpdate === undefined ? {} : { systemPromptUpdate },
+      ...nativeFileInputs === undefined ? {} : { nativeFileInputs },
     }
     const previousContext = session.requestContext()
     if (previousContext?.provider !== requestContext.provider
       || previousContext.model !== requestContext.model
       || previousContext.contextWindow !== requestContext.contextWindow
-      || previousContext.systemPromptUpdate !== requestContext.systemPromptUpdate) {
+      || previousContext.systemPromptUpdate !== requestContext.systemPromptUpdate
+      || !llmNativeFileInputsEqual(previousContext.nativeFileInputs, requestContext.nativeFileInputs)) {
       session.append('request/context', requestContext)
     }
     signal.throwIfAborted()

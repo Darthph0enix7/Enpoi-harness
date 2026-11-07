@@ -124,7 +124,10 @@ export interface BuildRequestInput {
   temperature?: number
   /** Exact, catalog-selected reasoning effort (never invented here). */
   reasoningEffort?: string
-  /** Whether the target model accepts image input; comes from the catalog. */
+  /**
+   * Whether the target model accepts image input; only `true` admits images.
+   * Absent means the capability was not stated, so images degrade to text.
+   */
   visionEnabled?: boolean
   /**
    * Run the keypool text sanitizer over message text (embedded-base64 scrub,
@@ -496,7 +499,7 @@ function toolNamesById(messages: readonly CcInputMessage[]): Map<string, string>
  */
 export function buildRequest(input: BuildRequestInput): CcEnvelope {
   const scrub = input.sanitizeText === true ? sanitizeText : KEEP_TEXT
-  const forwarder = createImageForwarder(input.visionEnabled !== false)
+  const forwarder = createImageForwarder(input.visionEnabled === true)
   const userImagePlan = forwarder.enabled
     ? planUserImages(input.messages, input.resolveImage)
     : new Map<CcInputPart, string | null>()

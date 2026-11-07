@@ -6,6 +6,7 @@ import { dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import { execa } from 'execa'
+import { SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import type { SessionFormatJsonObject } from '@deepseek-ai/dsh-session-format'
 import { encodeSegment, generationLogFilename, type JsonlCompression } from '../packages/session/session-persistence-jsonl/src/format.ts'
 import { compressZstdFrame, decompressZstdFrame, scanZstdFrames } from '../packages/session/session-persistence-jsonl/src/zstd.ts'
@@ -84,7 +85,7 @@ async function fixture(
   return { path, bytes, directory }
 }
 
-describe('one-time V4 migration command', () => {
+describe('one-time current-format migration command', () => {
   it('bounds active jobs and retries changed-source inputs only after the initial pass drains', async () => {
     const entered = Array.from({ length: 4 }, () => Promise.withResolvers<undefined>())
     const release = Array.from({ length: 4 }, () => Promise.withResolvers<undefined>())
@@ -163,19 +164,19 @@ describe('one-time V4 migration command', () => {
     const old = await fixture(root, 'old', 0, compression)
     const older = await fixture(root, 'tool/session~名', 0, compression)
     const source = await fixture(root, 'tool/session~名', 3, compression, toolTurn)
-    const current = await fixture(root, 'current', 4, compression)
+    const current = await fixture(root, 'current', SESSION_FORMAT_VERSION, compression)
     await mkdir(join(root, '_no-cwd', 'empty'))
     const first = await run('--sessions-dir', root)
     expect(first.status, first.stdout + first.stderr).toBe(0)
     expect(first.stdout).toContain(`Session jobs: ${Math.min(availableParallelism(), 16)}`)
-    expect(first.stdout).toContain('converted=2, already-V4=1, failed=0, skipped=1')
+    expect(first.stdout).toContain('converted=2, already-current=1, failed=0, skipped=1')
     expect(first.stdout).toContain('START session.v3.jsonl')
-    expect(first.stdout).toContain('V3 -> V4: session.v4.jsonl')
+    expect(first.stdout).toContain(`V3 -> V${SESSION_FORMAT_VERSION}: session.v${SESSION_FORMAT_VERSION}.jsonl`)
     const checkoutCommit = /^Git HEAD: ([0-9a-f]{40})$/mu.exec(first.stdout)?.[1]
     expect(checkoutCommit).toBeDefined()
     expect(first.summary).toMatchObject({
       schemaVersion: 1,
-      targetVersion: 4,
+      targetVersion: SESSION_FORMAT_VERSION,
       sessionRoot: root,
       inputCount: 4,
       jobs: Math.min(availableParallelism(), 16),
@@ -183,16 +184,16 @@ describe('one-time V4 migration command', () => {
       runtime: { node: process.version, platform: process.platform, arch: process.arch },
       textLogPath: first.logPath,
       summaryPath: first.summaryPath,
-      totals: { converted: 2, alreadyV4: 1, failed: 0, skipped: 1 },
+      totals: { converted: 2, alreadyCurrent: 1, failed: 0, skipped: 1 },
       bySourceVersion: {
-        '0': { converted: 1, alreadyV4: 0, failed: 0, skipped: 0 },
-        '3': { converted: 1, alreadyV4: 0, failed: 0, skipped: 0 },
-        '4': { converted: 0, alreadyV4: 1, failed: 0, skipped: 0 },
-        unknown: { converted: 0, alreadyV4: 0, failed: 0, skipped: 1 },
+        '0': { converted: 1, alreadyCurrent: 0, failed: 0, skipped: 0 },
+        '3': { converted: 1, alreadyCurrent: 0, failed: 0, skipped: 0 },
+        [SESSION_FORMAT_VERSION]: { converted: 0, alreadyCurrent: 1, failed: 0, skipped: 0 },
+        unknown: { converted: 0, alreadyCurrent: 0, failed: 0, skipped: 1 },
       },
       failureGroups: [],
     })
-    const target = join(source.directory, generationLogFilename(4, compression))
+    const target = join(source.directory, generationLogFilename(SESSION_FORMAT_VERSION, compression))
     const targetBytes = await readFile(target)
     const decoded = compression === 'none' ? targetBytes : Buffer.concat(await Promise.all(
       scanZstdFrames(targetBytes).frames.map(frame => decompressZstdFrame(targetBytes.subarray(frame.start, frame.end))),
@@ -202,10 +203,10 @@ describe('one-time V4 migration command', () => {
     expect(decoded.toString()).not.toContain('"type":"tool-result"')
     const second = await run('--sessions-dir', root)
     expect(second.status, second.stdout + second.stderr).toBe(0)
-    expect(second.stdout).toContain('converted=0, already-V4=3, failed=0, skipped=1')
+    expect(second.stdout).toContain('converted=0, already-current=3, failed=0, skipped=1')
     expect(second.summary).toMatchObject({
-      totals: { converted: 0, alreadyV4: 3, failed: 0, skipped: 1 },
-      bySourceVersion: { '4': { converted: 0, alreadyV4: 3, failed: 0, skipped: 0 } },
+      totals: { converted: 0, alreadyCurrent: 3, failed: 0, skipped: 1 },
+      bySourceVersion: { [SESSION_FORMAT_VERSION]: { converted: 0, alreadyCurrent: 3, failed: 0, skipped: 0 } },
       failureGroups: [],
     })
     expect(await readFile(target)).toEqual(targetBytes)
@@ -235,12 +236,12 @@ describe('one-time V4 migration command', () => {
       ], { origin: 'subagent', parentSession: 'a-parent', createdAt: 2, delegationDepth: 1 })
       const result = await run('--sessions-dir', root, '--jobs', String(jobs))
       expect(result.status, result.stdout + result.stderr).toBe(0)
-      expect(result.stdout).toContain('converted=2, already-V4=0, failed=0, skipped=0')
+      expect(result.stdout).toContain('converted=2, already-current=0, failed=0, skipped=0')
       expect(result.stdout).toContain('completed=2/2')
       const current: Buffer[] = []
       for (const original of [parent, child]) {
         expect(await readFile(original.path)).toEqual(original.bytes)
-        const bytes = await readFile(join(original.directory, generationLogFilename(4, compression)))
+        const bytes = await readFile(join(original.directory, generationLogFilename(SESSION_FORMAT_VERSION, compression)))
         const decoded = compression === 'none' ? bytes : Buffer.concat(await Promise.all(
           scanZstdFrames(bytes).frames.map(frame => decompressZstdFrame(bytes.subarray(frame.start, frame.end))),
         ))
@@ -260,17 +261,17 @@ describe('one-time V4 migration command', () => {
     const good = await fixture(root, 'z-good', 3, 'none', toolTurn)
     const result = await run('--sessions-dir', root)
     expect(result.status, result.stdout + result.stderr).toBe(1)
-    expect(result.stdout, readFileSync(result.logPath!, 'utf8')).toContain('converted=1, already-V4=0, failed=1, skipped=0')
+    expect(result.stdout, readFileSync(result.logPath!, 'utf8')).toContain('converted=1, already-current=0, failed=1, skipped=0')
     expect(result.stdout).toMatch(/\[1\/2\].*FAILED/u)
-    expect(result.stdout).toMatch(/\[2\/2\].*V3 -> V4/u)
+    expect(result.stdout).toMatch(new RegExp(`\\[2/2\\].*V3 -> V${SESSION_FORMAT_VERSION}`, 'u'))
     expect(result.stdout).not.toContain('DEFERRED')
     expect(result.stdout).not.toContain('RETRY')
     expect(result.stdout).toContain('Failures (full stacks and causes are in the log):')
     expect(result.stdout).toContain(bad.path)
     expect(readFileSync(result.logPath!, 'utf8')).toContain('unrecognized/required')
     expect(await readFile(bad.path)).toEqual(bad.bytes)
-    expect(existsSync(join(bad.directory, 'session.v4.jsonl'))).toBe(false)
-    expect(existsSync(join(good.directory, 'session.v4.jsonl'))).toBe(true)
+    expect(existsSync(join(bad.directory, `session.v${SESSION_FORMAT_VERSION}.jsonl`))).toBe(false)
+    expect(existsSync(join(good.directory, `session.v${SESSION_FORMAT_VERSION}.jsonl`))).toBe(true)
   })
 
   it('groups matching failures by source version while retaining each input diagnostic', async () => {
@@ -284,10 +285,10 @@ describe('one-time V4 migration command', () => {
     const anyString: unknown = expect.any(String)
     expect(result.summary).toMatchObject({
       inputCount: 3,
-      totals: { converted: 0, alreadyV4: 0, failed: 3, skipped: 0 },
+      totals: { converted: 0, alreadyCurrent: 0, failed: 3, skipped: 0 },
       bySourceVersion: {
-        '0': { converted: 0, alreadyV4: 0, failed: 1, skipped: 0 },
-        '3': { converted: 0, alreadyV4: 0, failed: 2, skipped: 0 },
+        '0': { converted: 0, alreadyCurrent: 0, failed: 1, skipped: 0 },
+        '3': { converted: 0, alreadyCurrent: 0, failed: 2, skipped: 0 },
       },
       failureGroups: [
         { sourceVersion: 0, reason: 'unknown_event', eventType: 'unrecognized/required', count: 1,
@@ -318,8 +319,8 @@ describe('one-time V4 migration command', () => {
     expect(result.status, result.stdout + result.stderr).toBe(1)
     expect(result.summary).toMatchObject({
       inputCount: 2,
-      totals: { converted: 0, alreadyV4: 0, failed: 2, skipped: 0 },
-      bySourceVersion: { '2': { converted: 0, alreadyV4: 0, failed: 2, skipped: 0 } },
+      totals: { converted: 0, alreadyCurrent: 0, failed: 2, skipped: 0 },
+      bySourceVersion: { '2': { converted: 0, alreadyCurrent: 0, failed: 2, skipped: 0 } },
       failureGroups: [{ sourceVersion: 2, reason: 'sequence_gap', count: 2, items }],
     })
   })
@@ -358,20 +359,20 @@ describe('one-time V4 migration command', () => {
     expect(childDone).toBeGreaterThan(deferred)
     expect(retry).toBeGreaterThan(childDone)
     expect(lines.filter(line => line.includes('RETRY'))).toHaveLength(1)
-    expect(result.summary).toMatchObject({ totals: { converted: 2, alreadyV4: 0, failed: 0, skipped: 0 }, failureGroups: [] })
-    const target = await readFile(join(parent.directory, 'session.v4.jsonl'), 'utf8')
+    expect(result.summary).toMatchObject({ totals: { converted: 2, alreadyCurrent: 0, failed: 0, skipped: 0 }, failureGroups: [] })
+    const target = await readFile(join(parent.directory, `session.v${SESSION_FORMAT_VERSION}.jsonl`), 'utf8')
     expect(target).toContain('"type":"subagent/catalog"')
     for (const source of [parent, child]) expect(await readFile(source.path)).toEqual(source.bytes)
   })
 
-  it('opens an existing V4 torn tail without repairing its bytes', async () => {
+  it('opens an existing current torn tail without repairing its bytes', async () => {
     const root = temporaryRoot()
-    const current = await fixture(root, 'current', 4, 'none')
+    const current = await fixture(root, 'current', SESSION_FORMAT_VERSION, 'none')
     const torn = Buffer.concat([current.bytes, Buffer.from('{"unfinished"')])
     await writeFile(current.path, torn)
     const result = await run('--sessions-dir', root)
     expect(result.status, result.stdout + result.stderr).toBe(0)
-    expect(result.stdout).toContain('already V4 (opened successfully)')
+    expect(result.stdout).toContain(`already V${SESSION_FORMAT_VERSION} (opened successfully)`)
     expect(await readFile(current.path)).toEqual(torn)
   })
 
@@ -385,7 +386,7 @@ describe('one-time V4 migration command', () => {
     expect(result.status).toBe(1)
     expect(result.stdout).toContain('unsupported flat-file layout')
     expect(result.stdout).toContain('project symbolic links are not traversed')
-    expect(existsSync(join(original.directory, 'session.v4.jsonl'))).toBe(false)
+    expect(existsSync(join(original.directory, `session.v${SESSION_FORMAT_VERSION}.jsonl`))).toBe(false)
   })
 
   it('shows help, rejects unknown arguments, and logs a missing root failure', async () => {
@@ -396,12 +397,12 @@ describe('one-time V4 migration command', () => {
     const missing = join(temporaryRoot(), 'missing')
     const result = await run('--sessions-dir', missing)
     expect(result.status).toBe(1)
-    expect(result.stdout).toContain('converted=0, already-V4=0, failed=1, skipped=0')
+    expect(result.stdout).toContain('converted=0, already-current=0, failed=1, skipped=0')
     expect(result.logPath).toBeDefined()
     expect(result.summary).toMatchObject({
       inputCount: 0,
-      totals: { converted: 0, alreadyV4: 0, failed: 1, skipped: 0 },
-      bySourceVersion: { unknown: { converted: 0, alreadyV4: 0, failed: 1, skipped: 0 } },
+      totals: { converted: 0, alreadyCurrent: 0, failed: 1, skipped: 0 },
+      bySourceVersion: { unknown: { converted: 0, alreadyCurrent: 0, failed: 1, skipped: 0 } },
       failureGroups: [{ sourceVersion: 'unknown', count: 1, items: [{ inputPath: missing }] }],
     })
   })
@@ -410,10 +411,10 @@ describe('one-time V4 migration command', () => {
     const result = await run('--sessions-dir', temporaryRoot(), '--jobs', jobs)
     expect(result.status, result.stdout + result.stderr).toBe(0)
     expect(result.stdout).toContain(`Session jobs: ${Number(jobs)}`)
-    expect(result.stdout).toContain('converted=0, already-V4=0, failed=0, skipped=0')
+    expect(result.stdout).toContain('converted=0, already-current=0, failed=0, skipped=0')
     expect(result.summary).toMatchObject({
       inputCount: 0,
-      totals: { converted: 0, alreadyV4: 0, failed: 0, skipped: 0 },
+      totals: { converted: 0, alreadyCurrent: 0, failed: 0, skipped: 0 },
       bySourceVersion: {},
       failureGroups: [],
     })

@@ -69,12 +69,20 @@ export type TerminalServerFrame =
   | { readonly t: 'exit'; readonly exitCode: number | null; readonly signal: number | null }
   /** The key is unknown or the process could not start. */
   | { readonly t: 'error'; readonly message: string }
+  /** Answer to {@link TerminalClientFrame}'s `ping`; carries no state. */
+  | { readonly t: 'pong' }
 
 /** Frames the browser sends to the socket. */
 export type TerminalClientFrame =
   | { readonly t: 'input'; readonly data: string }
   | { readonly t: 'resize'; readonly cols: number; readonly rows: number }
   | { readonly t: 'kill' }
+  /**
+   * Application keepalive: the browser cannot send a WebSocket control Ping,
+   * so an idle terminal asks the host to answer with `pong`. Answered at the
+   * socket layer, never by the PTY registry.
+   */
+  | { readonly t: 'ping' }
 
 /** Socket close code for an unknown key. Protocol constant: never configurable. */
 export const TERMINAL_WS_UNKNOWN_KEY = 4404

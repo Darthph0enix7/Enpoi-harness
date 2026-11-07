@@ -37,7 +37,7 @@ Each dated record has four sibling files:
 | `YYYY-MM-DD-slug.i18n.yaml` | Generated bilingual consistency record |
 | `YYYY-MM-DD-slug.schema.json` | Generated complete after schemas for the affected roots that remain present |
 
-`finalized/vN.json` records the complete root classifications/digests of an accepted compatibility baseline and semantic hashes of its accepted records. The [finalization record](../session-format-status.md#finalization-record) requires its checkpoint. Current V4 schemas may evolve compatibly; the checkpoint protects accepted machine declarations and after schemas even after the writer advances, while excluding prose, aliases, and source locations from record hashes.
+`finalized/vN.json` records the complete root classifications/digests of an accepted compatibility baseline and semantic hashes of its accepted records. The [finalization record](../session-format-status.md#finalization-record) requires its checkpoint. Current V5 schemas may evolve compatibly; the checkpoint protects accepted machine declarations and after schemas even after the writer advances, while excluding prose, aliases, and source locations from record hashes.
 
 A maintainer captures an agreed format with [`createPersistenceFinalizationCheckpoint`](../../scripts/persistence-finalization.ts), writes a new version-named checkpoint without replacing an earlier one, and advances the paired `latestFinalizedVersion`. The helper requires current schemas to match complete acknowledged history. Run the ordinary verifier before committing.
 
@@ -58,7 +58,7 @@ Every detected structural change requires an acknowledgement. Record creation an
 | Make an optional property required, add a required property, change an existing type, or remove/rename a property or event | `version-bump` |
 | Change the Session header or event envelope | `version-bump` |
 
-A finalized checkpoint protects the accepted baseline without replacing these compatibility rules. At V4, optional additions, ordinary events, and qualified attribution additions can receive new same-version records. Breaking differences require a higher writer version and an acknowledgement containing its own header increase. The accepted V4 record cannot be updated to reuse its original 3→4 transition.
+A finalized checkpoint protects the accepted baseline without replacing these compatibility rules. At V5, optional additions, ordinary events, and qualified attribution additions can receive new same-version records. Breaking differences require a higher writer version and an acknowledgement containing its own header increase. The accepted V4 record cannot be updated to reuse its original 3→4 transition.
 
 An ordinary event may add payload alternatives with a required, nonnegative integer `data.version` greater than every existing payload version, provided all existing alternatives remain structurally unchanged. The reader must retain support for the old payloads; adding variants at an existing version, dropping old versions, and changing the Session header or envelope remain breaking. Older readers may reject the new payload version. The [catalog acknowledgement](2026-09-20-unknown-child-catalog.md) records one such transition.
 

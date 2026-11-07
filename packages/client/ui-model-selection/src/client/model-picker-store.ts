@@ -71,7 +71,7 @@ if (typeof window !== 'undefined') {
     })
     if (!res.ok) return undefined
     const json: unknown = await res.json()
-    return (json as { result?: { value?: { namespaces?: unknown } } })?.result?.value?.namespaces
+    return (json as { result?: { value?: { namespaces?: unknown } } } | null)?.result?.value?.namespaces
   }
   void readNamespaces()
     .then((namespaces) => {
@@ -163,14 +163,28 @@ export function toggleGroupCollapsed(groupId: string): boolean {
   return isNowCollapsed
 }
 
+/** Catalog facts a picker row renders as capability tags. */
 export interface ModelContextTarget {
   id: string
   contextWindow?: number | undefined
+  /** Provenance of `contextWindow`; `default` names a route fallback, not a disclosed capacity. */
+  contextWindowSource?: 'configured' | 'discovered' | 'installed' | 'default' | undefined
   context?: { contextWindow?: number | undefined } | undefined
   maxTokens?: number | undefined
+  /** Whether the catalog could not verify this row's facts. */
+  unverified?: boolean | undefined
+  /** Effective request input modalities; absent means unknown. */
+  inputModalities?: readonly string[] | undefined
+  /** Advertised input modalities, including tokens no native request encoding sends. */
+  advertisedInputModalities?: readonly string[] | undefined
 }
 
-/** Resolve context window size in tokens, checking model properties and canonical fallbacks. */
+/**
+ * Resolve context window size in tokens from disclosed catalog fields only;
+ * an undisclosed window returns 0 so the picker renders no capacity.
+ * @param model - catalog row whose context capacity is displayed.
+ * @returns the disclosed window size, or 0 when no field states one.
+ */
 export function resolveContextTokens(model: ModelContextTarget): number {
   if (typeof model.contextWindow === 'number' && model.contextWindow > 0) {
     return model.contextWindow
@@ -179,18 +193,25 @@ export function resolveContextTokens(model: ModelContextTarget): number {
   if (typeof rawContext === 'number' && rawContext > 0) {
     return rawContext
   }
-  // Canonical family fallbacks
-  const id = (model.id || '').toLowerCase()
-  if (id.includes('gemini') || id.includes('claude') || id.includes('gpt-5.6') || id.includes('luna') || id.includes('kimi-k3') || id.includes('glm-5') || id.includes('minimax-m3') || id.includes('deepseek-v4')) {
-    if (id.includes('gemini') || id.includes('kimi-k3') || id.includes('luna') || id.includes('gpt-5.6')) {
-      return 1_048_576
-    }
-    return 1_000_000
-  }
-  if (id.includes('qwen') || id.includes('deepseek') || id.includes('gpt-4') || id.includes('mistral') || id.includes('llama')) {
-    return 128_000
-  }
   return 0
+}
+
+/** Modalities an advertised catalog never encodes in a native request. */
+const DISCLOSURE_ONLY_MODALITIES: ReadonlySet<string> = new Set(['audio', 'video', 'pdf'])
+
+/**
+ * Disclosure-side modalities the adapter does not send in a native request.
+ * Text and image stay out of this set: an absent effective list means unknown,
+ * not that the adapter refuses them.
+ * @param model - catalog row carrying effective and advertised modality lists.
+ * @returns advertised audio/video/pdf tokens absent from the effective list.
+ */
+export function advertisedOnlyModalities(
+  model: Pick<ModelContextTarget, 'inputModalities' | 'advertisedInputModalities'>,
+): readonly string[] {
+  const effective = new Set(model.inputModalities ?? [])
+  return (model.advertisedInputModalities ?? [])
+    .filter(modality => DISCLOSURE_ONLY_MODALITIES.has(modality) && !effective.has(modality))
 }
 
 /** Format context tokens compactly (e.g. 1M, 128K, 1.05M). */
@@ -201,7 +222,8 @@ export function formatCompactContext(tokens?: number): string {
     return val % 1 === 0 ? `${val}M` : `${val.toFixed(2).replace(/\.?0+$/, '')}M`
   }
   if (tokens >= 1000) {
-    const val = Math.round(tokens / 1000)
+    // Never round a disclosed capacity upward: 65,536 is 65K, not 66K.
+    const val = Math.floor(tokens / 1000)
     return `${val}K`
   }
   return `${tokens}`

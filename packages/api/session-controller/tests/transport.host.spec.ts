@@ -338,12 +338,15 @@ describe('SessionHistoryController', () => {
       address: { kind: 'session', sessionId: session.id },
     }, signal())[Symbol.asyncIterator]()
     await expect(followed.next()).resolves.toMatchObject({ done: false, value: { type: 'snapshot', cursor: 0 } })
-    const skipped = event('fixture/skipped', SessionSeq(1))
-    const gap = event('fixture/gap', SessionSeq(2))
-    live.ctx.emit('session/event', eventSession(
-      session.header,
-      [event('fixture/start', SessionSeq(0)), skipped, gap],
-    ), gap)
+    // Live listeners install after the snapshot, so deliver one real append
+    // first so the replay cut is exhausted before injecting the gap.
+    const liveEvent = append(session, 'fixture/live', {})
+    await expect(followed.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: 'event', event: { type: 'fixture/live', seq: liveEvent.seq } },
+    })
+    const gap = event('fixture/gap', SessionSeq(liveEvent.seq + 2))
+    live.ctx.emit('session/event', eventSession(session.header, [liveEvent, gap]), gap)
     await expect(followed.next()).rejects.toMatchObject({ code: 'gateway/internal' })
   })
 

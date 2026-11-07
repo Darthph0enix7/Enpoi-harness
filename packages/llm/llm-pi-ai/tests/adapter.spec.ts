@@ -671,6 +671,94 @@ describe('provider profile lifecycle', () => {
     expect(typeof info.context?.contextWindow).toBe('number')
   })
 
+  it('projects retained catalog facts into list and exact model metadata', async () => {
+    const profiles = resolveProfiles({
+      'acme-gateway': {
+        apiKeyEnv: 'PI_TEST_KEY',
+        api: 'openai-completions',
+        baseURL: 'https://acme.test/v1',
+        models: [
+          {
+            id: 'sized',
+            contextWindow: 200_000,
+            maxInputTokens: 128_000,
+            maxTokens: 8192,
+            input: ['text', 'image', 'audio'],
+            reasoningEfforts: { low: 'low' },
+          },
+          { id: 'bare' },
+        ],
+      },
+      openai: {},
+    })
+    // Tool support and unsupported effort names arrive from discovery; the
+    // profile carries them through the same facts map.
+    const gateway = profiles.get('acme-gateway')
+    if (gateway === undefined) throw new Error('missing configured route')
+    const sizedFacts = gateway.catalogFacts.get('sized')
+    if (sizedFacts === undefined) throw new Error('missing catalog facts')
+    const facts = new Map(gateway.catalogFacts)
+    facts.set('sized', { ...sizedFacts, tools: false, unsupportedReasoningEfforts: ['ultra'] })
+    profiles.set('acme-gateway', { ...gateway, catalogFacts: facts })
+    const adapter = new PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: () => Promise.resolve('test-key'),
+      auth: memoryAuth(),
+    })
+
+    expect((await adapter.listModels('acme-gateway')).find(model => model.id === 'sized')).toEqual({
+      provider: 'acme-gateway',
+      id: 'sized',
+      name: 'sized',
+      inputModalities: ['text', 'image'],
+      advertisedInputModalities: ['text', 'image', 'audio'],
+      tools: false,
+      unsupportedReasoningEfforts: ['ultra'],
+    })
+
+    await expect(adapter.resolveModel('acme-gateway', 'sized')).resolves.toMatchObject({
+      inputModalities: ['text', 'image'],
+      advertisedInputModalities: ['text', 'image', 'audio'],
+      tools: false,
+      unsupportedReasoningEfforts: ['ultra'],
+      context: {
+        contextWindow: 200_000,
+        maxInputTokens: 128_000,
+        maxInputTokensSource: 'configured',
+        source: 'configured',
+      },
+      maxOutputTokens: 8192,
+      maxOutputTokensSource: 'configured',
+      defaultMaxTokens: 8192,
+    })
+    // A route fallback is labelled as an assumption instead of being presented
+    // as a disclosed capacity, and it never becomes a request default.
+    const bare = await adapter.resolveModel('acme-gateway', 'bare')
+    expect(bare.context).toEqual({ contextWindow: 262_144, source: 'default' })
+    expect(bare.maxOutputTokens).toBe(32_768)
+    expect(bare.maxOutputTokensSource).toBe('default')
+    expect(bare.defaultMaxTokens).toBeUndefined()
+    // The installed catalog keeps its own provenance.
+    const installed = await adapter.resolveModel('openai', 'gpt-4.1')
+    expect(installed.context?.source).toBe('installed')
+    expect(installed.maxOutputTokensSource).toBe('installed')
+    expect(installed.maxOutputTokens)
+      .toBe(getBuiltinModels('openai').find(model => model.id === 'gpt-4.1')?.maxTokens)
+
+    // A caller-built profile that retained no facts still reports the route
+    // assumption instead of presenting a default as a stated capacity.
+    profiles.set('acme-gateway', { ...gateway, catalogFacts: new Map() })
+    const unfacted = await adapter.resolveModel('acme-gateway', 'bare')
+    expect(unfacted.context).toEqual({ contextWindow: 262_144, source: 'default' })
+    expect(unfacted.maxOutputTokensSource).toBe('default')
+    expect((await adapter.listModels('acme-gateway')).find(model => model.id === 'bare')).toEqual({
+      provider: 'acme-gateway',
+      id: 'bare',
+      name: 'bare',
+      inputModalities: ['text'],
+    })
+  })
+
   it('exposes pi-ai model thinking levels verbatim without inventing a provider default', async () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
@@ -689,6 +777,14 @@ describe('provider profile lifecycle', () => {
           ],
         },
       })
+    // Each installed map is reported from its own disclosed levels, not a
+    // library-wide default ladder.
+    expect((await ctx.llm.resolveModelInfo('deepseek', 'deepseek-v4-pro')).reasoning?.efforts
+      .map(effort => effort.id)).toEqual([
+      ReasoningEffortId('off'),
+      ReasoningEffortId('high'),
+      ReasoningEffortId('max'),
+    ])
     const extended = await ctx.llm.resolveModelInfo('openai', 'gpt-5.6-sol')
     expect(extended.reasoning?.efforts.map(effort => effort.id)).toEqual([
       ReasoningEffortId('off'),
@@ -740,6 +836,100 @@ describe('provider profile lifecycle', () => {
     })
     await expect(disabled.llm.resolveModelInfo('deepseek', 'deepseek-v4-flash'))
       .resolves.toMatchObject({ reasoning: { defaultEffort: ReasoningEffortId('off') } })
+  })
+
+  it('reports undisclosed effort levels and sends only the provider default', async () => {
+    vi.stubEnv('PI_TEST_KEY', 'test-key')
+    const server = await mockServer([{ events: textEvents }])
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: {
+        'acme-gateway': {
+          apiKeyEnv: 'PI_TEST_KEY', api: 'openai-completions', baseURL: `${server.url}/v1`,
+          models: [{ id: 'budget-only', reasoning: true }],
+        },
+      },
+    })
+    try {
+      const info = await ctx.llm.resolveModelInfo('acme-gateway', 'budget-only')
+      expect(info.reasoning).toBeUndefined()
+      await assemble(ctx, {
+        provider: 'acme-gateway', model: 'budget-only',
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'test' } })],
+      })
+      expect(server.requests[0]).not.toHaveProperty('reasoning_effort')
+      await expect(assemble(ctx, {
+        provider: 'acme-gateway', model: 'budget-only', reasoningEffort: ReasoningEffortId('high'),
+        messages: [createUserMessage({ content: [{ type: 'text', text: 'hi' }], source: { kind: 'test' } })],
+      })).resolves.toMatchObject({
+        finish: { kind: 'error', failure: { code: 'UNSUPPORTED_REASONING_EFFORT' } },
+      })
+      expect(server.requests).toHaveLength(1)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('round-trips a configured tools:false disclosure through list and prepared metadata', async () => {
+    const profiles = resolveProfiles({
+      'acme-gateway': {
+        api: 'openai-completions',
+        baseURL: 'https://acme.test/v1',
+        models: [{ id: 'no-tools', tools: false, contextWindow: 65_536, maxTokens: 4096 }],
+      },
+    })
+    const adapter = new PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: () => Promise.resolve('test-key'),
+      auth: memoryAuth(),
+    })
+
+    expect((await adapter.listModels('acme-gateway'))[0]).toMatchObject({ id: 'no-tools', tools: false })
+    const prepared = await adapter.prepareCall('acme-gateway', 'no-tools')
+    expect(prepared.model.tools).toBe(false)
+  })
+
+  it('round-trips an installed modelOverrides tools:false through list and prepared metadata', async () => {
+    const target = getBuiltinModels('deepseek')[0]
+    if (target === undefined) throw new Error('the installed catalog ships no deepseek model')
+    const profiles = resolveProfiles({
+      deepseek: { modelOverrides: { [target.id]: { tools: false } } },
+    })
+    const adapter = new PiAiAdapter({
+      profiles: () => profiles,
+      resolveApiKey: () => Promise.resolve('test-key'),
+      auth: memoryAuth(),
+    })
+
+    expect((await adapter.listModels('deepseek')).find(model => model.id === target.id))
+      .toMatchObject({ id: target.id, tools: false })
+    const prepared = await adapter.prepareCall('deepseek', target.id)
+    expect(prepared.model.tools).toBe(false)
+  })
+
+  it('offers no installed-catalog ladder for a bare reasoning flag or an off-only map', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(LlmPiAi, {
+      providers: { 'amazon-bedrock': {}, 'azure-openai-responses': {} },
+    })
+    try {
+      expect((await ctx.llm.resolveModelInfo('amazon-bedrock', 'amazon.nova-2-lite-v1:0')).reasoning)
+        .toBeUndefined()
+      expect((await ctx.llm.resolveModelInfo('azure-openai-responses', 'gpt-5')).reasoning)
+        .toBeUndefined()
+      await expect(assemble(ctx, {
+        provider: 'amazon-bedrock',
+        model: 'amazon.nova-2-lite-v1:0',
+        reasoningEffort: ReasoningEffortId('high'),
+        messages: [],
+      })).resolves.toMatchObject({
+        finish: { kind: 'error', failure: { code: 'UNSUPPORTED_REASONING_EFFORT' } },
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 
   it('serves declared reasoning efforts to selectors and honours the profile default', async () => {

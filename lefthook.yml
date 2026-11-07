@@ -8,6 +8,7 @@ pre-commit:
       glob: '*.i18n.yaml'
       exclude:
         - '.agents/notes/archived/**'
+        - 'docs/archive/**'
       run: node_modules/.bin/tsx scripts/verify-translation-pairing.ts --cached {staged_files}
 
     - name: archived agent notes

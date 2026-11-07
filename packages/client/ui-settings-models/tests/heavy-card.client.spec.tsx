@@ -339,6 +339,37 @@ it('keeps a failed automatic pass from repeating on the same cached snapshot', a
   expect(onAutoPopulate).toHaveBeenCalledTimes(1)
 })
 
+it('displays neutral empty-catalog notice when configured heavy provider has 0 models', async () => {
+  stubFetch({ status: {
+    ...running,
+    id: 'antigravity',
+    configured: true,
+    health: { ok: true, status: 200, checkedAt: 14 },
+  } })
+  render(<HeavyProviderCard providerId="antigravity" t={t} modelIds={[]} />)
+
+  await waitFor(() => {
+    expect(screen.getByText(en.heavyEmptyCatalogNeutral)).toBeTruthy()
+  })
+  expect(document.querySelector('[data-heavy-empty-catalog]')).toBeTruthy()
+})
+
+it('omits open dashboard advice in empty catalog notice when manifest declares no dashboard URL', async () => {
+  stubFetch({ status: {
+    ...running,
+    id: 'commandcode',
+    configured: true,
+    health: { ok: true, status: 200, checkedAt: 15 },
+  } })
+  render(<HeavyProviderCard providerId="commandcode" t={t} modelIds={[]} />)
+
+  await waitFor(() => {
+    // Renders the neutral notice without dashboard advice
+    expect(screen.getByText(en.heavyEmptyCatalogNoDashboard)).toBeTruthy()
+  })
+  expect(screen.queryByText(en.heavyEmptyCatalogNeutral)).toBeNull()
+})
+
 it('pins the scrollbar rebind and token discipline contract in HeavyProviderCard.module.css', () => {
   const sheet = readFileSync(resolve(import.meta.dirname, '../src/client/HeavyProviderCard.module.css'), 'utf8')
   const themeTokensDir = resolve(import.meta.dirname, '../../ui-theme/src/styles')

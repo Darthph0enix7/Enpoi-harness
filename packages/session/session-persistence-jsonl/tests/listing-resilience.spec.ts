@@ -3,7 +3,7 @@
  * rest of the root, and every hidden artifact is reported through the logger.
  */
 import { Context } from '@deepseek-ai/cordis'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionHeader } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -38,7 +38,7 @@ describe('JsonlSessionPersistence: listing resilience', () => {
     const current = meta('listing-current', '/work')
     const historicalV3 = meta('listing-v3', '/work')
     const historicalV0 = meta('listing-v0', '/work')
-    await writeCompressed(generationLogPath(root, current.cwd, current.id, 4, 'zstd'), `${JSON.stringify(currentHeader(current))}\n`)
+    await writeCompressed(generationLogPath(root, current.cwd, current.id, SESSION_FORMAT_VERSION, 'zstd'), `${JSON.stringify(currentHeader(current))}\n`)
     await writeCompressed(generationLogPath(root, historicalV3.cwd, historicalV3.id, 3, 'zstd'), `${JSON.stringify(v3Header(historicalV3))}\n`)
     await writeCompressed(generationLogPath(root, historicalV0.cwd, historicalV0.id, 0, 'zstd'), `${JSON.stringify(v0Header(historicalV0))}\n`)
 
@@ -48,14 +48,14 @@ describe('JsonlSessionPersistence: listing resilience', () => {
   })
 
   it.each([
-    ['an unsupported future version', (id: string) => JSON.stringify({ ...currentHeader(meta(id, '/work')), version: 5 }) + '\n', 5, 'stays hidden from the session list'],
-    ['a header that is not JSON', () => 'not-json\n', 4, 'has no readable header and stays hidden'],
-    ['a malformed compressed header frame', () => Buffer.from('not a Zstandard frame'), 4, 'stays hidden from the session list'],
+    ['an unsupported future version', (id: string) => JSON.stringify({ ...currentHeader(meta(id, '/work')), version: SESSION_FORMAT_VERSION + 1 }) + '\n', SESSION_FORMAT_VERSION + 1, 'stays hidden from the session list'],
+    ['a header that is not JSON', () => 'not-json\n', SESSION_FORMAT_VERSION, 'has no readable header and stays hidden'],
+    ['a malformed compressed header frame', () => Buffer.from('not a Zstandard frame'), SESSION_FORMAT_VERSION, 'stays hidden from the session list'],
   ])('keeps listing valid sessions when another artifact has %s', async (_name, broken, version, expectedReport) => {
     const healthy = meta('listing-healthy', '/work')
     const brokenId = SessionId('listing-broken')
     const brokenPath = generationLogPath(root, '/work', brokenId, version, 'zstd')
-    await writeCompressed(generationLogPath(root, healthy.cwd, healthy.id, 4, 'zstd'), `${JSON.stringify(currentHeader(healthy))}\n`)
+    await writeCompressed(generationLogPath(root, healthy.cwd, healthy.id, SESSION_FORMAT_VERSION, 'zstd'), `${JSON.stringify(currentHeader(healthy))}\n`)
     const payload = broken(String(brokenId))
     await writeBytes(brokenPath, typeof payload === 'string' ? await compressZstdFrame(Buffer.from(payload)) : payload)
 
@@ -68,7 +68,7 @@ describe('JsonlSessionPersistence: listing resilience', () => {
   it('lists one artifact per duplicated id and reports the ignored duplicate', async () => {
     const id = SessionId('listing-duplicate')
     const oldPath = generationLogPath(root, '/project-a', id, 3, 'zstd')
-    const newPath = generationLogPath(root, '/project-b', id, 4, 'zstd')
+    const newPath = generationLogPath(root, '/project-b', id, SESSION_FORMAT_VERSION, 'zstd')
     await writeCompressed(oldPath, `${JSON.stringify(v3Header(meta(id, '/project-a')))}\n`)
     await writeCompressed(newPath, `${JSON.stringify(currentHeader(meta(id, '/project-b')))}\n`)
 
@@ -80,8 +80,8 @@ describe('JsonlSessionPersistence: listing resilience', () => {
 
   it('breaks an equal-version duplicate tie by path so listings stay deterministic', async () => {
     const id = SessionId('listing-tie')
-    const firstPath = generationLogPath(root, '/project-a', id, 4, 'zstd')
-    const secondPath = generationLogPath(root, '/project-b', id, 4, 'zstd')
+    const firstPath = generationLogPath(root, '/project-a', id, SESSION_FORMAT_VERSION, 'zstd')
+    const secondPath = generationLogPath(root, '/project-b', id, SESSION_FORMAT_VERSION, 'zstd')
     await writeCompressed(secondPath, `${JSON.stringify(currentHeader(meta(id, '/project-b')))}\n`)
     await writeCompressed(firstPath, `${JSON.stringify(currentHeader(meta(id, '/project-a')))}\n`)
 
@@ -95,7 +95,7 @@ describe('JsonlSessionPersistence: listing resilience', () => {
 function currentHeader(header: SessionHeader): Record<string, unknown> {
   return {
     type: 'session',
-    version: 4,
+    version: SESSION_FORMAT_VERSION,
     id: header.id,
     createdAt: header.createdAt,
     ...(header.cwd === undefined ? {} : { cwd: header.cwd }),

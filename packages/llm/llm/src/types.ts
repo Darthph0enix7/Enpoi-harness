@@ -108,11 +108,13 @@ export interface ImageBlock {
 }
 
 /**
- * A durable verbatim file reference, valid in user content. Files never reach
- * a provider natively: request assembly projects every occurrence to
- * deterministic handle text (name, byte size, and the read-only saved path),
- * so adapters and providers see text in its place while the durable log keeps
- * the structured reference for presentation and authorization.
+ * A durable verbatim file reference, valid in user content. Request assembly
+ * projects every occurrence to deterministic handle text (name, byte size, and
+ * the read-only saved path) unless the exact route declares
+ * {@link LlmResolvedModelInfo.nativeFileInputs} and the filename suffix maps to
+ * an accepted encoder; such a block reaches only that adapter as the same
+ * typed reference. The durable log keeps the structured reference for
+ * presentation and authorization either way.
  */
 export interface FileBlock {
   type: 'file'
@@ -238,6 +240,262 @@ export interface LlmImageRequestPricing {
   priceImages(images: readonly ImageBlock[]): readonly LlmImageRequestPrice[]
 }
 
+/**
+ * File MIME types a native-file transport may carry. The vocabulary is closed
+ * so an adapter cannot accept a filename suffix no encoder mapping describes.
+ */
+export type LlmNativeFileMimeType =
+  | 'application/pdf'
+  | 'audio/wav'
+  | 'audio/mpeg'
+  | 'audio/ogg'
+  | 'audio/flac'
+  | 'video/mp4'
+  | 'video/webm'
+
+/** Closed set of native-file wire encoders; selection is explicit per MIME. */
+export type LlmNativeFileEncoder =
+  | 'anthropic-document'
+  | 'openai-chat-file'
+  | 'openai-chat-input-audio'
+  | 'openai-chat-video-url'
+
+/** Accepted MIME types in declaration order. */
+export const LLM_NATIVE_FILE_MIME_TYPES: readonly LlmNativeFileMimeType[] = [
+  'application/pdf',
+  'audio/wav',
+  'audio/mpeg',
+  'audio/ogg',
+  'audio/flac',
+  'video/mp4',
+  'video/webm',
+]
+
+/** Known encoders in declaration order. */
+export const LLM_NATIVE_FILE_ENCODERS: readonly LlmNativeFileEncoder[] = [
+  'anthropic-document',
+  'openai-chat-file',
+  'openai-chat-input-audio',
+  'openai-chat-video-url',
+]
+
+/** MIME types each encoder can carry; incompatible pairs fail admission. */
+const LLM_NATIVE_FILE_ENCODER_MIME_TYPES: Readonly<Record<LlmNativeFileEncoder, readonly LlmNativeFileMimeType[]>> = {
+  'anthropic-document': ['application/pdf'],
+  'openai-chat-file': ['application/pdf'],
+  'openai-chat-input-audio': ['audio/wav', 'audio/mpeg', 'audio/ogg', 'audio/flac'],
+  'openai-chat-video-url': ['video/mp4', 'video/webm'],
+}
+
+/** Reserved prompt tokens for one natively sent file. */
+export interface LlmNativeFileTokenReserve {
+  /** Fixed tokens reserved per native file occurrence. */
+  readonly perFile: number
+  /** Tokens reserved per raw source byte. */
+  readonly perByte: number
+}
+
+/**
+ * Explicit native-file admission and pricing policy for one exact model route.
+ *
+ * Policy only: filenames, bytes, sentinels, and attachment ids stay in their
+ * durable attachment and message records. A descriptor is never implied by a
+ * model name, provider protocol, or advertised modality. Its presence enables
+ * filename-based admission for the listed MIME types; absence keeps every file
+ * as deterministic handle text. Byte limits are admission facts for the adapter
+ * that serializes the request, while {@link LlmNativeFileTokenReserve} is the
+ * synchronous meter budget reserved before that adapter reads real bytes.
+ */
+export interface LlmNativeFileInputs {
+  /** Descriptor schema version; this build accepts only `1`. */
+  readonly version: 1
+  /** Accepted MIME type to wire encoder; an unmapped MIME stays a file handle. */
+  readonly encoders: Readonly<Partial<Record<LlmNativeFileMimeType, LlmNativeFileEncoder>>>
+  /** Largest raw source file the route admits. */
+  readonly perFileBytes: number
+  /** Largest raw source bytes across all native files in one request. */
+  readonly totalBytes: number
+  /** Largest serialized native payload the route admits. */
+  readonly maxPayloadBytes: number
+  /** Tokens reserved per native occurrence instead of the deterministic handle text. */
+  readonly tokenReserve: LlmNativeFileTokenReserve
+}
+
+/**
+ * Deep equality for two optional native-file policy descriptors.
+ * @param left - one descriptor or undefined.
+ * @param right - the other descriptor or undefined.
+ * @returns whether both name the same version, encoders, limits, and reserve.
+ */
+export function llmNativeFileInputsEqual(
+  left: LlmNativeFileInputs | undefined,
+  right: LlmNativeFileInputs | undefined,
+): boolean {
+  if (left === right) return true
+  if (left === undefined || right === undefined) return false
+  if (left.perFileBytes !== right.perFileBytes
+    || left.totalBytes !== right.totalBytes
+    || left.maxPayloadBytes !== right.maxPayloadBytes
+    || left.tokenReserve.perFile !== right.tokenReserve.perFile
+    || left.tokenReserve.perByte !== right.tokenReserve.perByte) return false
+  return LLM_NATIVE_FILE_MIME_TYPES.every(mime => left.encoders[mime] === right.encoders[mime])
+}
+
+/**
+ * Whether a widened value is one closed native-file MIME type.
+ * @param value - untrusted value from a descriptor or adapter.
+ * @returns true for an accepted MIME type.
+ */
+export function isLlmNativeFileMimeType(value: unknown): value is LlmNativeFileMimeType {
+  return LLM_NATIVE_FILE_MIME_TYPES.some(mime => mime === value)
+}
+
+/**
+ * Whether a widened value is one closed native-file encoder.
+ * @param value - untrusted value from a descriptor or adapter.
+ * @returns true for a known encoder.
+ */
+export function isLlmNativeFileEncoder(value: unknown): value is LlmNativeFileEncoder {
+  return LLM_NATIVE_FILE_ENCODERS.some(encoder => encoder === value)
+}
+
+/**
+ * Whether one encoder can carry one MIME type. Pairs outside this table can
+ * never become a plan, so configuration rejects them before any file is read.
+ * @param encoder - closed encoder name.
+ * @param mime - closed native-file MIME type.
+ * @returns whether the encoder's wire part can carry that MIME type.
+ */
+export function isLlmNativeFileEncoderCompatible(
+  encoder: LlmNativeFileEncoder,
+  mime: LlmNativeFileMimeType,
+): boolean {
+  return LLM_NATIVE_FILE_ENCODER_MIME_TYPES[encoder].some(candidate => candidate === mime)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function positiveSafeInteger(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`native file inputs ${field} must be a positive safe integer`)
+  }
+  return value
+}
+
+function nonNegativeFinite(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error(`native file inputs ${field} must be a non-negative finite number`)
+  }
+  return value
+}
+
+/**
+ * Validate, detach, and freeze one native-file descriptor.
+ *
+ * Persisted and adapter-supplied descriptors enter through this function. An
+ * absent descriptor stays absent (native media off); a present descriptor with
+ * an unknown version or an incompatible MIME/encoder pair fails loud.
+ * @param value - untrusted descriptor value from an adapter, config, or log.
+ * @returns a detached frozen descriptor accepted by this build.
+ * @throws when the version is unknown, a limit is invalid, or a MIME/encoder pair is incompatible.
+ */
+export function validateLlmNativeFileInputs(value: unknown): LlmNativeFileInputs {
+  if (!isRecord(value)) throw new Error('native file inputs must be an object')
+  if (value['version'] !== 1) {
+    throw new Error(`native file inputs version must be 1, got ${String(value['version'])}`)
+  }
+  const rawEncoders = value['encoders']
+  if (!isRecord(rawEncoders)) throw new Error('native file inputs encoders must be an object')
+  const encoders: Partial<Record<LlmNativeFileMimeType, LlmNativeFileEncoder>> = {}
+  for (const key of Object.keys(rawEncoders)) {
+    if (!isLlmNativeFileMimeType(key)) {
+      throw new Error(`native file inputs has unknown MIME type "${key}"`)
+    }
+    const encoder = rawEncoders[key]
+    if (!isLlmNativeFileEncoder(encoder)) {
+      throw new Error(`native file inputs has unknown encoder for "${key}"`)
+    }
+    if (!isLlmNativeFileEncoderCompatible(encoder, key)) {
+      throw new Error(`native file inputs maps "${key}" to incompatible encoder "${encoder}"`)
+    }
+    encoders[key] = encoder
+  }
+  const perFileBytes = positiveSafeInteger(value['perFileBytes'], 'perFileBytes')
+  const totalBytes = positiveSafeInteger(value['totalBytes'], 'totalBytes')
+  if (totalBytes < perFileBytes) {
+    throw new Error('native file inputs totalBytes must be at least perFileBytes')
+  }
+  const maxPayloadBytes = positiveSafeInteger(value['maxPayloadBytes'], 'maxPayloadBytes')
+  const rawReserve = value['tokenReserve']
+  if (!isRecord(rawReserve)) throw new Error('native file inputs tokenReserve must be an object')
+  const tokenReserve: LlmNativeFileTokenReserve = {
+    perFile: nonNegativeFinite(rawReserve['perFile'], 'tokenReserve.perFile'),
+    perByte: nonNegativeFinite(rawReserve['perByte'], 'tokenReserve.perByte'),
+  }
+  return Object.freeze({
+    version: 1,
+    encoders: Object.freeze(encoders),
+    perFileBytes,
+    totalBytes,
+    maxPayloadBytes,
+    tokenReserve: Object.freeze(tokenReserve),
+  })
+}
+
+/** File suffixes mapped to the closed native-file MIME vocabulary, longest first. */
+const LLM_NATIVE_FILE_SUFFIXES: readonly (readonly [string, LlmNativeFileMimeType])[] = [
+  ['.pdf', 'application/pdf'],
+  ['.wav', 'audio/wav'],
+  ['.mp3', 'audio/mpeg'],
+  ['.ogg', 'audio/ogg'],
+  ['.flac', 'audio/flac'],
+  ['.mp4', 'video/mp4'],
+  ['.webm', 'video/webm'],
+]
+
+/**
+ * Map a display filename suffix to the closed MIME vocabulary. Bytes are never
+ * sniffed here; the adapter verifies magic separately before any payload exists.
+ * @param name - attachment display name from the durable reference.
+ * @returns the claimed MIME type, or undefined when no native encoder matches the suffix.
+ */
+export function llmNativeFileMimeType(name: string): LlmNativeFileMimeType | undefined {
+  const lower = name.toLowerCase()
+  for (const [suffix, mime] of LLM_NATIVE_FILE_SUFFIXES) {
+    if (lower.endsWith(suffix)) return mime
+  }
+  return undefined
+}
+
+/**
+ * Resolve the encoder one descriptor accepts for a filename, or undefined for
+ * handle text. This predicate is shared by request projection, the adapter
+ * plan, and token pricing, so they cannot disagree about which files go native.
+ * @param inputs - exact route descriptor, or undefined when native media is off.
+ * @param ref - durable file reference from model history.
+ * @returns the encoder selected for this filename, or undefined.
+ */
+export function llmNativeFileEncoderFor(
+  inputs: LlmNativeFileInputs | undefined,
+  ref: FileAttachmentRef,
+): LlmNativeFileEncoder | undefined {
+  if (inputs === undefined) return undefined
+  const mime = llmNativeFileMimeType(ref.name)
+  return mime === undefined ? undefined : inputs.encoders[mime]
+}
+
+/**
+ * Reserved prompt tokens for one natively sent occurrence.
+ * @param inputs - exact route descriptor.
+ * @param ref - durable file reference priced by the call.
+ * @returns the ceiling of the descriptor's fixed plus per-byte reserve.
+ */
+export function llmNativeFileReserveTokens(inputs: LlmNativeFileInputs, ref: FileAttachmentRef): number {
+  return Math.ceil(inputs.tokenReserve.perFile + inputs.tokenReserve.perByte * ref.bytes)
+}
+
 /** Display metadata for one registered provider route. */
 export interface LlmProviderInfo {
   /** Provider route key used by {@link GenerateOptions.provider}. */
@@ -355,10 +613,37 @@ export interface LlmDiscoveredModel {
   /** Accepted input types when disclosed by the catalog or endpoint; absent means unknown. */
   inputModalities?: readonly ModelModality[]
   /**
+   * Maximum input (prompt-side) tokens when the endpoint discloses one
+   * separately from {@link contextWindow}; never derived from it.
+   */
+  maxInputTokens?: number
+  /** Whether the endpoint stated tool-call support; absent means undisclosed. */
+  tools?: boolean
+  /** Whether the endpoint stated reasoning support; absent means undisclosed. */
+  reasoning?: boolean
+  /**
    * Selectable reasoning levels (picker id → wire value) when the endpoint
    * advertises them; absent means undisclosed, never "does not reason".
    */
   reasoningEfforts?: Readonly<Record<string, string>>
+  /**
+   * Effort identifiers the endpoint advertised that no configured level
+   * accepts, preserved for diagnostics. They are never selectable and never
+   * renamed to a canonical level.
+   */
+  unsupportedReasoningEfforts?: readonly string[]
+  /**
+   * Where this row's metadata came from. `catalog` means the endpoint probe
+   * failed or was not attempted and the installed catalog answered; `endpoint`
+   * means the live listing answered. Absent on rows from adapters that do not
+   * distinguish the two.
+   */
+  source?: 'endpoint' | 'catalog'
+  /**
+   * Why the installed catalog answered instead of the endpoint, when
+   * {@link source} is `catalog` and a probe was attempted and failed.
+   */
+  fallbackReason?: string
 }
 
 /** Status view for one credential identity inside a provider pool. */
@@ -401,12 +686,52 @@ export interface LlmModelInfo {
   description?: string
   /** Accepted request modalities; absent means unknown, while an explicit omission is negative capability. */
   inputModalities?: readonly ModelModality[]
+  /**
+   * Input types a catalog, configuration, or listing advertised, including
+   * tokens (`audio`, `video`, `pdf`) no native request encoding carries yet.
+   * {@link inputModalities} stays the effective set the adapter sends.
+   */
+  advertisedInputModalities?: readonly ModelModality[]
+  /** Whether a source stated tool-call support; absent means undisclosed. */
+  tools?: boolean
+  /**
+   * Effort identifiers a source advertised that no selectable level accepts,
+   * preserved for diagnostics. They never appear in a materialized ladder.
+   */
+  unsupportedReasoningEfforts?: readonly string[]
 }
+
+/** Provenance of one exact model's resolved capacity. */
+export type LlmModelCapacitySource =
+  /** A deployment's configuration stated it. */
+  | 'configured'
+  /** A retained endpoint discovery stated it. */
+  | 'discovered'
+  /** The adapter's installed catalog stated it. */
+  | 'installed'
+  /** No source sized the model; a route default stands in for execution. */
+  | 'default'
 
 /** Provider-owned context capacity for one exact provider/model route. */
 export interface LlmModelContext {
   /** Maximum combined request and response context in tokens. */
   contextWindow: number
+  /**
+   * Maximum input (prompt-side) tokens when configuration or discovery stated
+   * it separately; never derived from {@link contextWindow} and never
+   * defaulted beside it. Absent means no source stated an input-only cap.
+   */
+  maxInputTokens?: number
+  /**
+   * Provenance of {@link contextWindow}; `default` means no source stated this
+   * capacity and the route fallback stands in for execution.
+   */
+  source?: LlmModelCapacitySource
+  /**
+   * Provenance of {@link maxInputTokens}; `default` means no source stated the
+   * input-only cap and no prompt-side budget may bind on it.
+   */
+  maxInputTokensSource?: LlmModelCapacitySource
 }
 
 /**
@@ -473,7 +798,19 @@ export type ToolUpdate = 'in-history' | 'addition-only'
 export interface LlmResolvedModelInfo extends LlmModelInfo {
   /** Provider-owned context capacity when known. */
   context?: LlmModelContext
-  /** Adapter-configured per-request output cap materialized when callers omit one. */
+  /**
+   * Output-token capability the route resolved for the model. An adapter that
+   * requires such a field (pi-ai's `Model.maxTokens`) always reports one, so a
+   * value labelled `default` by {@link maxOutputTokensSource} is the execution
+   * fallback rather than a disclosed cap.
+   */
+  maxOutputTokens?: number
+  /** Provenance of {@link maxOutputTokens}; same vocabulary as {@link LlmModelContext.source}. */
+  maxOutputTokensSource?: LlmModelCapacitySource
+  /**
+   * Adapter-configured per-request output cap materialized when callers omit
+   * one; distinct from {@link maxOutputTokens}, which is the model capability.
+   */
   defaultMaxTokens?: number
   /** Adapter-owned selectable reasoning levels when exposed. */
   reasoning?: LlmModelReasoningInfo
@@ -481,6 +818,8 @@ export interface LlmResolvedModelInfo extends LlmModelInfo {
   systemPromptUpdate?: SystemPromptUpdate
   /** Declared mid-conversation tool declaration handling; absent means every request declares the complete tool list. */
   toolUpdate?: ToolUpdate
+  /** Explicit native-file admission and pricing policy for this exact route; absent keeps every file as handle text. */
+  nativeFileInputs?: LlmNativeFileInputs
 }
 
 /**

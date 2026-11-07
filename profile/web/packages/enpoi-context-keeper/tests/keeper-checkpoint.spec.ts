@@ -3,6 +3,8 @@ import {
   buildTemplateCheckpoint,
   checkpointTelemetry,
   createCheckpointService,
+  getCheckpointService,
+  KEEPER_COMPACTION_ID_MEMORY,
   latestCheckpoint,
   renderCheckpointBlock,
   resetKeeperRouteHealth,
@@ -272,13 +274,113 @@ describe('enpoi-context-keeper CheckpointService', () => {
 })
 
 describe('enpoi-context-keeper triggers (apply listener)', () => {
-  it('refreshes on compaction/end and reads the newest checkpoint back', async () => {
+  /** Append one compaction event and dispatch it in real log order. */
+  function dispatchCompaction(
+    handler: (...args: unknown[]) => unknown,
+    session: ReturnType<typeof makeSession>,
+    type: 'compaction/start' | 'compaction/summary' | 'compaction/end',
+    data: Record<string, unknown>,
+  ) {
+    const event = session.append(type, data)
+    handler(session, event)
+    return event
+  }
+
+  function compactionSummary(
+    handler: (...args: unknown[]) => unknown,
+    session: ReturnType<typeof makeSession>,
+    compactionId: string,
+    overrides: Record<string, unknown> = {},
+  ) {
+    return dispatchCompaction(handler, session, 'compaction/summary', {
+      compactionId,
+      provider: 'freellmapi',
+      model: 'auto',
+      summary: [],
+      shadowedRange: { start: 0, end: 0 },
+      shadowedSeqs: [],
+      shadowedTokenCount: 0,
+      ...overrides,
+    })
+  }
+
+  function compactionEnd(
+    handler: (...args: unknown[]) => unknown,
+    session: ReturnType<typeof makeSession>,
+    compactionId: string,
+    overrides: Record<string, unknown> = {},
+  ) {
+    return dispatchCompaction(handler, session, 'compaction/end', { compactionId, turn: 1, ...overrides })
+  }
+
+  const settle = (ms = 25) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+  it.each([{}, { error: 'summary rejected' }])('holds an in-flight checkpoint surface commit until compaction ends: %j', async (endData) => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { ctx, handlers } = makeCtx({ stream: async function* () {
+      await gate
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: '🎯 ACTIVE GOAL: preserve context\n- Preserve the current implementation decision.' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '🎯 ACTIVE GOAL: preserve context\n- Preserve the current implementation decision.' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } })
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const session = sessionWithTurns(1)
+    const service = getCheckpointService()!
+    const refresh = service.ensureCheckpoint(session as never, { force: true })
+    await vi.waitFor(() => expect(ctx.llm.stream).toHaveBeenCalledTimes(1))
+    dispatchCompaction(handler, session, 'compaction/start', { compactionId: 'open-cut', turn: 1 })
+    release()
+    await refresh
+    const surfaceCommits = () => session.append.mock.calls.filter(call => call[0] === 'user/message')
+    expect(checkpointCalls(session)).toHaveLength(1)
+    expect(surfaceCommits()).toHaveLength(0)
+    expect(service.flushPendingCheckpoint(session as never)).toBe(false)
+    compactionEnd(handler, session, 'open-cut', endData)
+    // The matching end releases the one parked surface commit; the forced call
+    // must not pay a second pass for the same boundary.
+    await settle()
+    expect(surfaceCommits()).toHaveLength(1)
+    expect(checkpointCalls(session)).toHaveLength(1)
+    expect(ctx.llm.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not publish a refresh that completes after plugin disposal', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const { ctx, handlers } = makeCtx({ stream: async function* () {
+      await gate
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: '🎯 ACTIVE GOAL: late result\n- must never publish' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '🎯 ACTIVE GOAL: late result\n- must never publish' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } })
+    applyKeeper(ctx as never, baseConfig)
+    const session = sessionWithTurns(1)
+    const service = getCheckpointService()!
+    const refresh = service.ensureCheckpoint(session as never, { force: true })
+    await vi.waitFor(() => expect(ctx.llm.stream).toHaveBeenCalledTimes(1))
+
+    handlers.get('dispose')!()
+    release()
+    const result = await refresh
+    await settle()
+
+    expect(result.ok).toBe(false)
+    expect(checkpointCalls(session)).toHaveLength(0)
+    expect(session.append.mock.calls.filter(call => call[0] === 'user/message')).toHaveLength(0)
+  })
+
+  it('refreshes once on the summary\'s matching clean end and reads the checkpoint back', async () => {
     const { ctx, handlers } = makeCtx()
     applyKeeper(ctx as never, baseConfig)
     const handler = handlers.get('session/event')!
     const session = sessionWithTurns(2)
 
-    handler(session, { type: 'compaction/end', seq: 0, data: { compactionId: 'c1', turn: 1 } })
+    compactionSummary(handler, session, 'c1')
+    compactionEnd(handler, session, 'c1')
     await vi.waitFor(() => expect(checkpointCalls(session)).toHaveLength(1))
 
     const latest = latestCheckpoint(session as never)
@@ -286,11 +388,257 @@ describe('enpoi-context-keeper triggers (apply listener)', () => {
     expect(latest!.version).toBe(1)
     expect(renderCheckpointBlock(latest!)).toContain('### State checkpoint')
 
-    // A second cut inside the same window refreshes again, never duplicating at
-    // the same version.
-    handler(session, { type: 'compaction/end', seq: 1, data: { compactionId: 'c2', turn: 1 } })
+    // A second compaction inside the same window refreshes again, never
+    // duplicating at the same version.
+    compactionSummary(handler, session, 'c2')
+    compactionEnd(handler, session, 'c2')
     await vi.waitFor(() => expect(checkpointCalls(session)).toHaveLength(2))
     expect(checkpointCalls(session).map((call) => call[1].version)).toEqual([1, 2])
+  })
+
+  it('does not refresh on a summary alone', async () => {
+    const { ctx, handlers } = makeCtx()
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const session = sessionWithTurns(2)
+
+    compactionSummary(handler, session, 'c1')
+    await settle()
+    expect(checkpointCalls(session)).toHaveLength(0)
+    expect(ctx.llm.stream).not.toHaveBeenCalled()
+  })
+
+  it('does not refresh when the matching end carries an error', async () => {
+    const { ctx, handlers } = makeCtx()
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const session = sessionWithTurns(2)
+
+    compactionSummary(handler, session, 'c1')
+    compactionEnd(handler, session, 'c1', { error: 'summarizer failed' })
+    await settle()
+    expect(checkpointCalls(session)).toHaveLength(0)
+    expect(ctx.llm.stream).not.toHaveBeenCalled()
+  })
+
+  it('does not refresh on an end without a held summary', async () => {
+    const { ctx, handlers } = makeCtx()
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const session = sessionWithTurns(2)
+
+    compactionEnd(handler, session, 'c-no-summary')
+    await settle()
+    expect(checkpointCalls(session)).toHaveLength(0)
+    expect(ctx.llm.stream).not.toHaveBeenCalled()
+  })
+
+  it('drops a held summary when a mismatched id ends first', async () => {
+    const { ctx, handlers } = makeCtx()
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const session = sessionWithTurns(2)
+
+    compactionSummary(handler, session, 'c1')
+    compactionEnd(handler, session, 'c-other')
+    await settle()
+    expect(checkpointCalls(session)).toHaveLength(0)
+
+    // The held transaction cannot complete — its late end never refreshes.
+    compactionEnd(handler, session, 'c1')
+    await settle()
+    expect(checkpointCalls(session)).toHaveLength(0)
+
+    // A fresh compaction still works after the dropped hold.
+    compactionSummary(handler, session, 'c2')
+    compactionEnd(handler, session, 'c2')
+    await vi.waitFor(() => expect(checkpointCalls(session)).toHaveLength(1))
+  })
+
+  it('collapses duplicate summaries and duplicate ends into one refresh', async () => {
+    const { ctx, handlers } = makeCtx()
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const session = sessionWithTurns(2)
+
+    compactionSummary(handler, session, 'c1')
+    compactionSummary(handler, session, 'c1')
+    compactionEnd(handler, session, 'c1')
+    compactionEnd(handler, session, 'c1')
+    await vi.waitFor(() => expect(checkpointCalls(session)).toHaveLength(1))
+    await settle()
+    expect(ctx.llm.stream).toHaveBeenCalledTimes(1)
+    expect(checkpointCalls(session)).toHaveLength(1)
+  })
+
+  it('does not refresh again when a completed summary/end pair replays', async () => {
+    const { ctx, handlers } = makeCtx()
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const session = sessionWithTurns(2)
+
+    compactionSummary(handler, session, 'c1')
+    compactionEnd(handler, session, 'c1')
+    await vi.waitFor(() => expect(checkpointCalls(session)).toHaveLength(1))
+
+    // The same id's summary and end replayed AFTER the first refresh landed
+    // must stay consumed.
+    compactionSummary(handler, session, 'c1')
+    compactionEnd(handler, session, 'c1')
+    await settle()
+    expect(ctx.llm.stream).toHaveBeenCalledTimes(1)
+    expect(checkpointCalls(session)).toHaveLength(1)
+  })
+
+  it('refreshes once for a clean mechanical or summarizer-failure summary end', async () => {
+    const { ctx, handlers } = makeCtx()
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const session = sessionWithTurns(2)
+
+    // Mechanical stub: no model wrote the summary, but the clean end still
+    // changes the live context and warrants one checkpoint.
+    compactionSummary(handler, session, 'c-stub', { provider: '', model: '' })
+    compactionEnd(handler, session, 'c-stub')
+    await vi.waitFor(() => expect(checkpointCalls(session)).toHaveLength(1))
+
+    // summarizationFailure is a diagnostic, not a failed transaction.
+    compactionSummary(handler, session, 'c-failed', {
+      provider: '',
+      model: '',
+      summarizationFailure: { code: 'UNKNOWN', message: 'upstream down' },
+    })
+    compactionEnd(handler, session, 'c-failed')
+    await vi.waitFor(() => expect(checkpointCalls(session)).toHaveLength(2))
+    expect(ctx.llm.stream).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not refresh for an errored mechanical summary end', async () => {
+    const { ctx, handlers } = makeCtx()
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const session = sessionWithTurns(2)
+
+    compactionSummary(handler, session, 'c-stub', { provider: '', model: '' })
+    compactionEnd(handler, session, 'c-stub', { error: 'compaction failed' })
+    await settle()
+    expect(checkpointCalls(session)).toHaveLength(0)
+    expect(ctx.llm.stream).not.toHaveBeenCalled()
+  })
+
+  it('keeps per-session compaction id memory bounded', () => {
+    const { ctx } = makeCtx()
+    const service = createCheckpointService(ctx as never, baseConfig)
+    const session = sessionWithTurns(1)
+
+    for (let i = 0; i < KEEPER_COMPACTION_ID_MEMORY * 3; i++) {
+      service.noteCompactionSummary(session as never, `c-${i}`)
+      service.consumeCompactionEnd(session as never, `c-${i}`, false)
+    }
+    const memory = (service as unknown as {
+      compactionMemory: { get(key: string): { pending: string[]; handled: string[] } | undefined }
+    }).compactionMemory.get(session.id)!
+    expect(memory.pending).toHaveLength(0)
+    expect(memory.handled.length).toBeLessThanOrEqual(KEEPER_COMPACTION_ID_MEMORY)
+  })
+
+  it('awaits an in-flight refresh that predates the end and runs exactly one covering pass', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let calls = 0
+    const brief = '🎯 ACTIVE GOAL: covering pass\n- bullet after the compaction boundary'
+    const stream = async function* () {
+      calls += 1
+      if (calls === 1) await gate
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: brief }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: brief } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const { ctx, handlers } = makeCtx({ stream })
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const service = getCheckpointService()!
+    const session = sessionWithTurns(1)
+
+    // Pass A snapshots BEFORE the compaction boundary and stays in flight.
+    const first = service.ensureCheckpoint(session as never, { force: true })
+    await vi.waitFor(() => expect(calls).toBe(1))
+
+    // The real order appends the summary and its matching end, then dispatches
+    // each event; the end-triggered force lands while A is still running.
+    compactionSummary(handler, session, 'c1')
+    compactionEnd(handler, session, 'c1')
+
+    release()
+    await first
+    await vi.waitFor(() => expect(checkpointCalls(session)).toHaveLength(2))
+    await settle()
+    expect(calls).toBe(2)
+
+    const checkpoints = checkpointCalls(session).map((call) => call[1])
+    expect(checkpoints.map((checkpoint) => checkpoint.version)).toEqual([1, 2])
+    // The follow-up covers the ended compaction; the joined pass did not.
+    expect(checkpoints[1]!.basedOnSeq).toBeGreaterThan(checkpoints[0]!.basedOnSeq)
+  })
+
+  it('does not pay for a covering pass when the existing in-flight refresh fails', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const brief = '🎯 ACTIVE GOAL: failing pass\n- bullet that never commits'
+    const stream = async function* () {
+      await gate
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: brief }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: brief } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const { ctx, handlers } = makeCtx({ stream })
+    applyKeeper(ctx as never, baseConfig)
+    const handler = handlers.get('session/event')!
+    const service = getCheckpointService()!
+    const session = sessionWithTurns(1)
+    const appendImplementation = session.append.getMockImplementation()!
+    let failCheckpointWrites = false
+    session.append.mockImplementation((...args: unknown[]) => {
+      if (failCheckpointWrites && args[0] === 'state/checkpoint') throw new Error('checkpoint write failed')
+      return appendImplementation(...args)
+    })
+
+    const first = service.ensureCheckpoint(session as never, { force: true })
+    compactionSummary(handler, session, 'c1')
+    compactionEnd(handler, session, 'c1')
+    failCheckpointWrites = true
+    release()
+
+    const failed = await first
+    expect(failed.ok).toBe(false)
+    await settle()
+    // Exactly one paid pass: the failed in-flight refresh is not duplicated; the
+    // natural staleness floor owns the retry.
+    expect(ctx.llm.stream).toHaveBeenCalledTimes(1)
+    expect(session.events.filter((event) => event.type === 'state/checkpoint')).toHaveLength(0)
+  })
+
+  it('clears held summaries on session/disposed and plugin dispose', async () => {
+    const disposed = makeCtx()
+    applyKeeper(disposed.ctx as never, baseConfig)
+    const disposedSession = sessionWithTurns(2)
+    compactionSummary(disposed.handlers.get('session/event')!, disposedSession, 'c1')
+    disposed.handlers.get('session/disposed')!(disposedSession)
+    compactionEnd(disposed.handlers.get('session/event')!, disposedSession, 'c1')
+    await settle()
+    expect(checkpointCalls(disposedSession)).toHaveLength(0)
+
+    const torn = makeCtx()
+    applyKeeper(torn.ctx as never, baseConfig)
+    const tornSession = sessionWithTurns(2)
+    compactionSummary(torn.handlers.get('session/event')!, tornSession, 'c2')
+    torn.handlers.get('dispose')!()
+    compactionEnd(torn.handlers.get('session/event')!, tornSession, 'c2')
+    await settle()
+    expect(checkpointCalls(tornSession)).toHaveLength(0)
+    expect(getCheckpointService()).toBeNull()
   })
 
   it('refreshes on the staleness floor at turn/end', async () => {

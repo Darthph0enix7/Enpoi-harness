@@ -15,6 +15,8 @@ export interface HeavyHealthView {
   status?: number
   error?: string
   checkedAt: number
+  /** Whether the host could reach the endpoint (e.g. true even on 401/403). */
+  reachable?: boolean
 }
 
 /** One install/teardown job snapshot. */
@@ -59,7 +61,13 @@ export interface HeavyStatusView {
   /** The effective host manifest; the row renders from this, never a page copy. */
   manifest?: HeavyProviderManifest
   configured: boolean
-  mode?: 'reuse' | 'local'
+  mode?: 'reuse' | 'local' | 'unknown'
+  /**
+   * Whether this service instance was provisioned and is owned by this harness
+   * (host lifecycle guard). When false or absent, the route is external or
+   * reused and teardown steps must never be offered or executed.
+   */
+  installedByHarness?: boolean
   health: HeavyHealthView
   /** The host platform installs execute on (`process.platform`). */
   platform?: string
@@ -71,12 +79,33 @@ export interface HeavyStatusView {
   detectedPort?: number
   /** Address detection found; drives the "running at — use it" offer. */
   detectedEndpoint?: string
+  /**
+   * Secretless installer paths for an owned local install: where the generated
+   * bootstrap/management key lives on the host. The key itself never reaches
+   * the client.
+   */
+  bootstrapPath?: string
+  /** Alias path the helper reports for the management key (same file). */
+  managementKeyPath?: string
   /** Container runtimes the machine has (fail-soft detection). */
   runtime?: { docker: boolean; podman: boolean }
   /** The platform's best local path, detection first. */
   preflight?: HeavyPreflightView
   unsupported?: { reason: string; plannedWith: string; reuseUrl: string }
   job?: HeavyJobView
+}
+
+/** One service-route model-listing outcome returned by `enpoiHeavy.reuse`. */
+export interface HeavyCatalogView {
+  /** `fresh` carries models, `empty` is a valid empty listing, the others failed. */
+  state: 'fresh' | 'empty' | 'unauthorized' | 'failed'
+  models: Array<{ id: string; name?: string }>
+  /** HTTP status when the listing replied. */
+  status?: number
+  /** Sanitized diagnostic; never carries a key or endpoint URL. */
+  error?: string
+  /** Where the listing came from. */
+  source: 'endpoint' | 'namespace'
 }
 
 /** `enpoiHeavy.reuse` result. */
@@ -88,6 +117,12 @@ export interface HeavyReuseView {
   route?: HeavyRouteView
   health?: HeavyHealthView
   models?: Array<{ id: string; name?: string }>
+  /**
+   * The typed listing outcome the route was written from. Present on every
+   * successful route write; a client can distinguish a valid empty from a
+   * failed/unauthorized discovery instead of treating every reply as live.
+   */
+  catalog?: HeavyCatalogView
   credentialStored?: boolean
 }
 

@@ -1,0 +1,43 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write profile/web/packages/enpoi-heavy-providers/README.md
+/dsh-enpoi-heavy-providers:
+  en: a9d7ee7c8e6edc9c
+  zh: 4337bc3dd993e96e
+/dsh-enpoi-heavy-providers/providers-and-platforms:
+  en: 7a35d39f1ad5fdd1
+  zh: 29a2708bcc8a94e7
+/dsh-enpoi-heavy-providers/install-lifecycle:
+  en: 7516fdbfa5e0fa7b
+  zh: d996db3e362740b3
+/dsh-enpoi-heavy-providers/key-semantics:
+  en: f4d5f0bb85296212
+  zh: c651bd628e0f9af7
+/dsh-enpoi-heavy-providers/wire-surface:
+  en: 64b6e5800bd5876a
+  zh: 45261162eb07bab3
+/dsh-enpoi-heavy-providers/release-source:
+  en: f8cf3d14740cc673
+  zh: 807cad57a4416722
+/dsh-enpoi-heavy-providers/configuration:
+  en: e656fe7f59cb8bf7
+  zh: 3fd3531a4effb75f
+/dsh-enpoi-heavy-providers/model-experience:
+  en: 215e7ba838619b7b
+  zh: 215e7ba838619b7b
+/dsh-enpoi-heavy-providers/model-experience/route-registration-indirect:
+  en: 0f4a873efb5e2dbd
+  zh: 03eda748ef5229e8
+/dsh-enpoi-heavy-providers/model-experience/route-registration-indirect/what-the-model-sees:
+  en: a2442269612a8011
+  zh: c6f922479a4ff7e1
+/dsh-enpoi-heavy-providers/model-experience/route-registration-indirect/token-effect:
+  en: 0db51e8355ac3395
+  zh: 3e8d6ddc7474ec35
+/dsh-enpoi-heavy-providers/model-experience/route-registration-indirect/kv-cache-effect:
+  en: a79805b353628745
+  zh: 96758a5636daec04
+/dsh-enpoi-heavy-providers/known-limitations-and-deferred-work:
+  en: 40c09c814a6ee720
+  zh: ab30331780c47d85

@@ -227,6 +227,121 @@ it('keeps the discovered list when the provider-sync pass degraded', async () =>
   }], undefined)
 })
 
+it('omits a stated-but-empty reasoning ladder the provider-sync fallback adopts', async () => {
+  const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({
+    ok: true as const,
+    value: [{ id: 'empty-ladder', name: 'Empty Ladder', reasoning: true, reasoningEfforts: {} }] as unknown as LlmDiscoveredModel[],
+  }))
+  // provider-sync is not mounted: the discovery list is the persisted answer.
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) })))
+  const onClose = vi.fn()
+  render(<AddProviderModal
+    open
+    taken={[]}
+    protocols={['openai-completions']}
+    api={wire(discoverModels, mutate)}
+    t={translateEn}
+    readOnly={false}
+    onClose={onClose}
+  />)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Empty Provider' }))
+  fireEvent.change(screen.getByPlaceholderText('https://api.openai.com/v1'), { target: { value: 'https://api.example/v1' } })
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
+  expect(mutate).toHaveBeenCalledTimes(2)
+  // The settings schema refuses an empty ladder, so it is omitted; the
+  // endpoint's disclosed reasoning flag is not rewritten to false.
+  expect(mutate).toHaveBeenLastCalledWith('llm-pi-ai', [{
+    op: 'set',
+    path: ['providers', 'provider', 'models'],
+    value: [{ id: 'empty-ladder', name: 'Empty Ladder', reasoning: true }],
+  }], undefined)
+})
+
+it('preserves a disclosed false ladder and a populated ladder with its off meaning', async () => {
+  const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({
+    ok: true as const,
+    value: [
+      { id: 'plain', reasoning: false, reasoningEfforts: false },
+      { id: 'ladder', reasoning: true, reasoningEfforts: { low: 'low', high: 'high', off: '' } },
+    ] as unknown as LlmDiscoveredModel[],
+  }))
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) })))
+  const onClose = vi.fn()
+  render(<AddProviderModal
+    open
+    taken={[]}
+    protocols={['openai-completions']}
+    api={wire(discoverModels, mutate)}
+    t={translateEn}
+    readOnly={false}
+    onClose={onClose}
+  />)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Empty Provider' }))
+  fireEvent.change(screen.getByPlaceholderText('https://api.openai.com/v1'), { target: { value: 'https://api.example/v1' } })
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
+  expect(mutate).toHaveBeenCalledTimes(2)
+  // `false` is an explicit disable; `off` carries no dispatch value, so the
+  // discovery spelling of an empty string becomes the schema's `null`.
+  expect(mutate).toHaveBeenLastCalledWith('llm-pi-ai', [{
+    op: 'set',
+    path: ['providers', 'provider', 'models'],
+    value: [
+      { id: 'plain', reasoning: false, reasoningEfforts: false },
+      { id: 'ladder', reasoning: true, reasoningEfforts: { off: null, low: 'low', high: 'high' } },
+    ],
+  }], undefined)
+})
+
+it('keeps an empty ladder out of the route when the provider-sync pass degraded', async () => {
+  const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({
+    ok: true as const,
+    value: [{ id: 'raw-1', reasoning: true, reasoningEfforts: {} }] as unknown as LlmDiscoveredModel[],
+  }))
+  vi.stubGlobal('fetch', vi.fn(async () => syncAnswer({
+    models: [{ id: 'raw-1', reasoning: true, reasoningEfforts: {} }],
+    removed: [],
+    deprecated: [],
+    degraded: true,
+    degradedReason: 'the models.dev catalogue is stale',
+    source: 'none',
+    authority: 'catalog',
+    fetchedAt: 7,
+  })))
+  const onClose = vi.fn()
+  render(<AddProviderModal
+    open
+    taken={[]}
+    protocols={['openai-completions']}
+    api={wire(discoverModels, mutate)}
+    t={translateEn}
+    readOnly={false}
+    onClose={onClose}
+  />)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Empty Provider' }))
+  fireEvent.change(screen.getByPlaceholderText('https://api.openai.com/v1'), { target: { value: 'https://api.example/v1' } })
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  await waitFor(() => { expect(onClose).toHaveBeenCalledWith(true) })
+  // A degraded answer withholds convergence, leaving the normalized discovery
+  // list; the invalid empty dictionary never reaches the settings write.
+  expect(mutate).toHaveBeenCalledTimes(2)
+  expect(mutate).toHaveBeenLastCalledWith('llm-pi-ai', [{
+    op: 'set',
+    path: ['providers', 'provider', 'models'],
+    value: [{ id: 'raw-1', reasoning: true }],
+  }], undefined)
+})
+
 it('closes with the discovered list when the convergence write rejects', async () => {
   const mutate = vi.fn()
     .mockResolvedValueOnce({ ok: true as const, value: {} })
@@ -731,4 +846,34 @@ it('re-applies the create draft after a conflict and writes the fresh revision',
       models: [{ id: 'auto' }],
     },
   }])
+})
+
+it('keeps the add dialog open with the installed-catalog fallback warning', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) } as unknown as Response)))
+  const mutate = vi.fn(async () => ({ ok: true as const, value: {} }))
+  const discoverModels = vi.fn<ModelsLlm['discoverModels']>(async () => ({
+    ok: true as const,
+    value: [
+      { id: 'masked', name: 'Masked', source: 'catalog', fallbackReason: 'HTTP 401 unauthorized' },
+    ],
+  }))
+  const onClose = vi.fn()
+  render(<AddProviderModal
+    open
+    taken={[]}
+    protocols={['openai-completions']}
+    api={wire(discoverModels, mutate)}
+    t={translateEn}
+    readOnly={false}
+    onClose={onClose}
+  />)
+
+  fireEvent.click(screen.getByRole('button', { name: 'Empty Provider' }))
+  fireEvent.change(screen.getByPlaceholderText('https://api.openai.com/v1'), { target: { value: 'https://api.example/v1' } })
+  fireEvent.click(screen.getByRole('button', { name: en.create }))
+
+  await waitFor(() => {
+    expect(screen.getByText(en.discoveryCatalogFallback.replace('{reason}', 'HTTP 401 unauthorized'))).toBeTruthy()
+  })
+  expect(onClose).not.toHaveBeenCalled()
 })

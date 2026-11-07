@@ -1,0 +1,31 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write profile/web/packages/enpoi-provider-sync/README.md
+/dsh-enpoi-provider-sync:
+  en: 1f016e9d18c4bb9a
+  zh: 17313af9d67e87f4
+/dsh-enpoi-provider-sync/refresh-and-membership:
+  en: e13bcdd7e59ddf36
+  zh: 9006168711b162ef
+/dsh-enpoi-provider-sync/precedence:
+  en: 43d9e709f4b0fd91
+  zh: f56a06bfeab075e2
+/dsh-enpoi-provider-sync/registry-metadata:
+  en: 14347ac967c2a921
+  zh: dd03a7c75fec7011
+/dsh-enpoi-provider-sync/references:
+  en: 3857c5add048da1e
+  zh: efcd91d4a391c294
+/dsh-enpoi-provider-sync/capability-honesty:
+  en: c40988b4efc2c645
+  zh: f4797ffea9b88358
+/dsh-enpoi-provider-sync/capacity-and-enrichment-sources:
+  en: db43c2c317d7fa39
+  zh: 0c53c2c67f8ece7f
+/dsh-enpoi-provider-sync/tests:
+  en: 8b1a2bca483ccee0
+  zh: 7b9fc215b23c8d37
+/dsh-enpoi-provider-sync/known-gaps:
+  en: 06da9b8cfaa9e584
+  zh: 98cdde4d0d4f481c

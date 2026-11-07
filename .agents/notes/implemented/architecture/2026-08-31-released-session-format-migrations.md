@@ -60,6 +60,7 @@ JSONL record
   → v1-to-v2 stage
   → v2-to-v3 stage
   → v3-to-v4 stage
+  → v4-to-v5 stage
   → current event collector
 ```
 
@@ -68,6 +69,8 @@ The chain contains no `flatMap`, spread expansion, intermediate event array, or 
 ### Adjacent version ownership
 
 The [V3-to-V4 specification](../../../../packages/session/session-format-v3-to-v4/README.md#v3-to-v4-specification) specifies parent catalog completion: it advances the header version, preserves admitted events and inherited cuts, and appends missing own catalog entries from child evidence. It reuses the frozen V3 codec from V2→V3. Generation-aware delivery validation prevents a historical acknowledgement from acquiring a current watermark meaning solely through the header change; earlier edges retain their own source-admission policies.
+
+The [V4-to-V5 specification](../../../../packages/session/session-format-v4-to-v5/README.md#v4-to-v5-specification) specifies an identity-body edge: it advances the header version, preserves every event, compact run, coordinate, timestamp, reference, and payload verbatim, re-derives the inherited cut from the source marker, and applies released V4 row admission before framing. It reuses the frozen V4 codec from V3→V4. The one V5 record also acknowledges the expanded approval outcome vocabulary, the added `max-tokens-continuation` source kind, the removal of the `user-approval` and `model-selection` source variants, and the optional `request/context.nativeFileInputs` policy descriptor. Two terminal, unaccepted V4 records were retired to `docs/archive/retired-persistence/` because their V1-shaped snapshots and predecessor edges forked accepted V4 history; the V5 record re-acknowledges the six forked roots and the surviving `event:model/selection` edge directly from the accepted V4 tip.
 
 The [V2-to-V3 delivery guards](../../../../packages/session/session-format-v2-to-v3/README.md#delivery-guards) prevent a marker ignored in the source generation from becoming an active upload watermark merely because the header changes. Python release smoke checks generated logs against the source `SESSION_FORMAT_VERSION` independently of generation-neutral golden comparison, so coherent filenames and headers cannot conceal an outdated writer.
 

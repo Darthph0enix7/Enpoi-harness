@@ -10,9 +10,10 @@ import { deriveKeyRef, messageOf, type ModelsWire } from './store.ts'
 import { applyFenced, fencedFailureText } from './fenced-mutate.ts'
 import { refreshRouteViaPlugin } from './provider-sync-rpc.ts'
 import { applyRefreshedModels, type RefreshedCurrentRow } from './provider-sync-apply.ts'
+import { normalizeReasoningEfforts, withAdoptedReasoningEfforts } from './reasoning-efforts.ts'
 import { OPENAI_BASE_URL_EXAMPLE } from './endpoint-defaults.ts'
 import { heavyApi, pollHeavyJob, type HeavyJobView, type HeavyStatusView } from './heavy-rpc.ts'
-import { HeavyPreflightNote } from './HeavyProviderStatus.tsx'
+import { HeavyPreflightNote, resolveDashboardUrl, isBrowserRemoteFromHost } from './HeavyProviderStatus.tsx'
 import { HeavyProviderDocs } from './HeavyProviderDocs.tsx'
 import { IconSearch, IconServer } from './capability-icons.tsx'
 import type { en } from './locales.ts'
@@ -64,6 +65,18 @@ function originOf(url: string): string {
   }
 }
 
+/**
+ * Whether this provider's official installer generates and stores the route
+ * key itself. The host install RPC ignores a client-supplied key for exactly
+ * this provider; the form mirrors that verdict instead of collecting a value
+ * the installer will never use.
+ * @param manifest - the selected heavy manifest.
+ * @returns whether the local install is self-keying.
+ */
+function isSelfKeyingInstaller(manifest: HeavyProviderManifest | undefined): boolean {
+  return manifest?.id === 'cliproxyapi'
+}
+
 /** Parse the manual model list: one id per line or comma, blanks dropped. */
 function parseModelIds(text: string): string[] {
   return text.split(/[\n,]/).map(entry => entry.trim()).filter(entry => entry !== '')
@@ -85,24 +98,51 @@ type DiscoveredModel = {
   maxTokens?: number
   inputModalities?: readonly string[]
   reasoning?: boolean | object
-  reasoningEfforts?: Record<string, unknown>
+  /** An explicit `false` disables reasoning; `{}` states no selectable level. */
+  reasoningEfforts?: false | Record<string, unknown>
   supported_parameters?: string[]
   tools?: boolean
   cost?: unknown
   gated?: boolean
   gateReason?: string
   isFree?: boolean
+  /** Where the row came from: a live endpoint listing or the installed catalog. */
+  source?: 'endpoint' | 'catalog'
+  /** Why the installed catalog answered instead of the endpoint. */
+  fallbackReason?: string
+}
+
+/**
+ * The warning text for a discovery answer the installed catalog answered.
+ * A 401 on a catalog-backed route otherwise reads as a successful discovery.
+ * @param models - one discovery answer.
+ * @param t - the add form translate.
+ * @returns the warning text, or undefined for a live endpoint answer.
+ */
+function catalogFallbackNotice(
+  models: readonly DiscoveredModel[],
+  t: (key: keyof typeof en, params?: Record<string, unknown>) => string,
+): string | undefined {
+  const fallback = models.find(model => model.source === 'catalog')
+  if (fallback === undefined) return undefined
+  return fallback.fallbackReason === undefined || fallback.fallbackReason.trim() === ''
+    ? t('discoveryCatalogFallbackNoReason')
+    : t('discoveryCatalogFallback', { reason: fallback.fallbackReason })
 }
 
 /**
  * One discovered model as the stored profile carries it. A field the discovery
- * did not disclose stays out; a gate reason rides its gate. The settings
- * schema tolerates the capability keys the profile type does not enumerate —
- * the provider sync writes the same ones.
+ * did not disclose stays out; a gate reason rides its gate. The reasoning
+ * ladder adopts through the shared normalization: an explicit empty ladder is
+ * omitted because the settings schema refuses it, while a disclosed `false`
+ * and a valid ladder (including its `off` meaning) are preserved. The
+ * settings schema tolerates the capability keys the profile type does not
+ * enumerate — the provider sync writes the same ones.
  * @param model - one row of a discovery answer.
  * @returns the settings `models` entry for that row.
  */
 function adoptedModel(model: DiscoveredModel): RefreshedCurrentRow & Record<string, unknown> {
+  const ladder = normalizeReasoningEfforts(model.reasoningEfforts)
   return {
     id: model.id,
     ...model.name !== undefined && model.name !== model.id ? { name: model.name } : {},
@@ -111,7 +151,7 @@ function adoptedModel(model: DiscoveredModel): RefreshedCurrentRow & Record<stri
     ...model.inputModalities === undefined || model.inputModalities.length === 0
       ? {} : { input: [...model.inputModalities] },
     ...model.reasoning === undefined ? {} : { reasoning: model.reasoning },
-    ...model.reasoningEfforts === undefined ? {} : { reasoningEfforts: model.reasoningEfforts },
+    ...ladder.value === undefined ? {} : { reasoningEfforts: ladder.value },
     ...model.supported_parameters === undefined ? {} : { supported_parameters: model.supported_parameters },
     ...model.tools === undefined ? {} : { tools: model.tools },
     ...model.cost === undefined ? {} : { cost: model.cost },
@@ -153,11 +193,17 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   // it explicitly). Empty keeps detection / the declared endpoint.
   const [heavyCustomBase, setHeavyCustomBase] = useState('')
   const [heavyStatus, setHeavyStatus] = useState<HeavyStatusView | null>(null)
+  const [heavyWarning, setHeavyWarning] = useState<string | null>(null)
   const [heavyChecking, setHeavyChecking] = useState(false)
   const [heavyJob, setHeavyJob] = useState<HeavyJobView | null>(null)
   // The running install poll's abort handle: closing the modal stops the
   // polled job cleanly instead of leaving the request loop running.
   const heavyPollAbort = useRef<AbortController | null>(null)
+  const statusGeneration = useRef(0)
+  const currentManifestId = useRef<string | null>(null)
+  // Whether this add already wrote a route. A warning reply keeps the dialog
+  // open, and closing it then must still refresh the page behind it.
+  const routeCreated = useRef(false)
 
   // The listing is rebuilt from the current manifest table: the host reply
   // replaces the labelled fallback heavy rows without a page copy. Operator
@@ -212,7 +258,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     void api.credentials.describe([presetEnvRef]).then((response) => {
       if (!response.ok) return
       const described = response.value[presetEnvRef]
-      if (described !== undefined) setEnvRefAnswer({ ref: presetEnvRef, configured: described.configured === true })
+      if (described !== undefined) setEnvRefAnswer({ ref: presetEnvRef, configured: described.configured })
     }).catch(() => {
       // A refused describe leaves the field with no configured claim.
     })
@@ -240,9 +286,13 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     setHeavyKey('')
     setHeavyCustomBase('')
     setHeavyStatus(null)
+    setHeavyWarning(null)
     setHeavyChecking(false)
     setHeavyJob(null)
     heavyModeTouched.current = false
+    currentManifestId.current = null
+    statusGeneration.current += 1
+    routeCreated.current = false
   }, [open])
 
   if (!open) return null
@@ -255,14 +305,34 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const heavy: HeavyProviderManifest | undefined = selected !== 'empty' && selected !== null ? selected.heavy : undefined
   const heavyUnsupported = heavy?.unsupported
 
-  const refreshHeavyStatus = (manifest: HeavyProviderManifest) => {
+  const refreshHeavyStatus = (manifest: HeavyProviderManifest, gen: number) => {
     setHeavyChecking(true)
     void heavyApi.status(manifest.id).then((result) => {
+      // Discard if the selected provider changed or a newer status check started
+      if (currentManifestId.current !== manifest.id || statusGeneration.current !== gen) {
+        return
+      }
       if (result.ok) {
         setHeavyStatus(result.value)
-        // Nothing answers → offer the install paths first; a manual mode
-        // choice always wins over this default.
-        if (result.value.detectedEndpoint === undefined && !heavyModeTouched.current) setHeavyMode('local')
+        const isService = (manifest.delivery ?? 'service') === 'service'
+        const isConfigured = result.value.configured
+        const isHealthy = result.value.health.ok
+        const hasDetected = result.value.detectedEndpoint !== undefined
+        const healthStatus = result.value.health.status
+        const isAuthRequired = healthStatus === 401 || healthStatus === 403
+
+        // Auto-local only service && !configured && health.ok!==true && no detectedEndpoint && not401/403.
+        // Direct CommandCode MUST stay reuse even no detection; healthy custom endpoints stay reuse; win32 Create allowed reuse.
+        if (
+          isService &&
+          !isConfigured &&
+          !isHealthy &&
+          !hasDetected &&
+          !isAuthRequired &&
+          !heavyModeTouched.current
+        ) {
+          setHeavyMode('local')
+        }
       }
       setHeavyChecking(false)
     })
@@ -274,11 +344,15 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     setManualModels('')
     setRecovery(null)
     setHeavyStatus(null)
+    setHeavyWarning(null)
     setHeavyJob(null)
     setHeavyKey('')
     setHeavyCustomBase('')
     setHeavyMode('reuse')
     heavyModeTouched.current = false
+    const manifestId = tpl !== 'empty' && tpl.heavy !== undefined ? tpl.heavy.id : null
+    currentManifestId.current = manifestId
+    const gen = ++statusGeneration.current
     if (tpl === 'empty') {
       setProviderId(uniqueId('provider', taken))
       setDisplayName(t('emptyProviderName'))
@@ -296,10 +370,12 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     // every request; the preset carries it so a picker-added route works.
     setSessionHeader(tpl.sessionHeader ?? '')
     setApiKey('')
-    if (tpl.heavy !== undefined && tpl.heavy.unsupported === undefined) refreshHeavyStatus(tpl.heavy)
+    if (tpl.heavy !== undefined && tpl.heavy.unsupported === undefined) refreshHeavyStatus(tpl.heavy, gen)
   }
 
   const handleBack = () => {
+    currentManifestId.current = null
+    statusGeneration.current += 1
     setSelected(null)
     setError(null)
   }
@@ -331,10 +407,19 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         setError(`${result.value.blocked.reason} (${result.value.blocked.plannedWith})`)
         return
       }
+      routeCreated.current = true
+      const catalog = result.value.catalog
+      if (catalog !== undefined && (catalog.state === 'failed' || catalog.state === 'unauthorized')) {
+        setHeavyWarning(t('heavyReuseCatalogFailed', {
+          state: catalog.state,
+          detail: catalog.error === undefined ? '' : ` (${catalog.error})`,
+        }))
+        return
+      }
       await onClose(true)
       return
     }
-    const started = await heavyApi.install(manifest.id, heavyKey)
+    const started = await heavyApi.install(manifest.id, isSelfKeyingInstaller(manifest) ? undefined : heavyKey)
     if (!started.ok) {
       setError(started.message)
       return
@@ -358,6 +443,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     const final = await pollHeavyJob(manifest.id, setHeavyJob, { signal: controller.signal })
     if (controller.signal.aborted) return
     if (final?.state === 'succeeded') {
+      routeCreated.current = true
       await onClose(true)
       return
     }
@@ -456,7 +542,14 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
   const convergeStoredRoute = async (id: string, discovered: readonly RefreshedCurrentRow[]): Promise<void> => {
     const answer = await refreshRouteViaPlugin(id)
     if (!answer.ok || answer.value.degraded) return
-    const merged = applyRefreshedModels(discovered, answer.value.models, answer.value.removed)
+    // The host answer is the canonical membership, but a degraded or older
+    // sync may still hand back an empty ladder the settings schema refuses;
+    // the shared normalization keeps the persisted route valid either way.
+    const merged = applyRefreshedModels(
+      discovered,
+      answer.value.models.map(withAdoptedReasoningEfforts),
+      answer.value.removed,
+    )
     try {
       await applyFenced(api, 'llm-pi-ai', () => ({
         ops: [{ op: 'set', path: ['providers', id, 'models'], value: merged as unknown as JsonValue }],
@@ -505,6 +598,12 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         // so a models-only write would store a partial profile.
         if (await storeProfile(id, [], answer.models)) {
           await convergeStoredRoute(id, answer.models.map(adoptedModel))
+          const fallback = catalogFallbackNotice(answer.models, t)
+          if (fallback !== undefined) {
+            routeCreated.current = true
+            enterRecovery(fallback)
+            return
+          }
           await onClose(true)
         }
         return
@@ -609,6 +708,12 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
         // refresh that cannot resolve them.
         if (!await storeDiscovered(id, answer.models)) return
         await convergeStoredRoute(id, answer.models.map(adoptedModel))
+        const fallback = catalogFallbackNotice(answer.models, t)
+        if (fallback !== undefined) {
+          routeCreated.current = true
+          enterRecovery(fallback)
+          return
+        }
         await onClose(true)
         return
       }
@@ -629,10 +734,15 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
     }
   }
 
+  const heavyLocalInstall = heavy !== undefined ? resolveHeavyInstall(heavy.local, heavyStatus?.platform ?? '') : undefined
+  const heavyLocalUnsupported = heavy !== undefined && heavyMode === 'local' && (
+    heavyLocalInstall?.unsupported !== undefined || heavyStatus?.preflight?.path === 'unsupported'
+  )
+
   return (
     <Modal
       open={open}
-      onClose={() => { void onClose(false) }}
+      onClose={() => { if (!busy || heavyJob?.state !== 'running') void onClose(routeCreated.current) }}
       title={selected === null ? t('add') : t('addProviderTitle', { provider: displayName || t('provider') })}
       closeLabel={t('close')}
       className={`${styles['addProviderDialog'] ?? ''} ${modalStyles.dialog ?? ''}`}
@@ -649,8 +759,8 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
             </Button>
             <Button
               variant="primary"
-              disabled={busy || readOnly || heavyUnsupported !== undefined}
-              onClick={handleCreate}
+              disabled={busy || readOnly || heavyUnsupported !== undefined || heavyLocalUnsupported}
+              onClick={() => { void handleCreate() }}
             >
               {heavy !== undefined && busy && heavyJob?.state === 'running'
                 ? t('heavyInstalling')
@@ -711,6 +821,9 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
       ) : (
         <div className={styles['addForm']}>
           {error && <div className={styles['formError']}>{error}</div>}
+          {heavyWarning !== null && (
+            <div className={styles['formError']} data-heavy-catalog-warning role="alert">{heavyWarning}</div>
+          )}
 
           {recovery !== null && (
             <div className={styles['recoveryPanel']} data-add-recovery role="alert">
@@ -830,6 +943,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
             <HeavyProviderForm
               manifest={heavy}
               mode={heavyMode}
+              selfKeyingLocal={isSelfKeyingInstaller(heavy)}
               onMode={(mode) => { heavyModeTouched.current = true; setHeavyMode(mode) }}
               keyValue={heavyKey}
               onKey={setHeavyKey}
@@ -841,7 +955,7 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
               readOnly={readOnly}
               busy={busy}
               t={t}
-              onCheck={() => refreshHeavyStatus(heavy)}
+              onCheck={() => refreshHeavyStatus(heavy, ++statusGeneration.current)}
             />
           )}
 
@@ -870,6 +984,8 @@ export function AddProviderModal(props: AddProviderModalProps): ReactNode {
 function HeavyProviderForm(props: {
   manifest: HeavyProviderManifest
   mode: 'reuse' | 'local'
+  /** The local installer owns (generates and stores) the route key. */
+  selfKeyingLocal: boolean
   onMode: (mode: 'reuse' | 'local') => void
   keyValue: string
   onKey: (value: string) => void
@@ -883,21 +999,40 @@ function HeavyProviderForm(props: {
   t: (key: keyof typeof en, params?: Record<string, unknown>) => string
   onCheck: () => void
 }): ReactNode {
-  const { manifest, mode, onMode, keyValue, onKey, customBase, onCustomBase, status, checking, job, readOnly, busy, t, onCheck } = props
+  const {
+    manifest, mode, selfKeyingLocal, onMode, keyValue, onKey, customBase, onCustomBase,
+    status, checking, job, readOnly, busy, t, onCheck,
+  } = props
   const disabled = busy || readOnly
   const platform = status?.platform
   const health = status?.health ?? null
-  const dashboardUrl = mode === 'local' ? manifest.local.dashboardUrl ?? manifest.dashboardUrl : manifest.dashboardUrl
+  const activeEndpoint = mode === 'reuse'
+    ? (customBase.trim() || status?.detectedEndpoint || manifest.reuse.baseURL)
+    : (status?.detectedEndpoint || manifest.local.baseURL)
+  const rawDashboardUrl = mode === 'local' ? (manifest.local.dashboardUrl ?? manifest.dashboardUrl) : manifest.dashboardUrl
+  const dashboardUrl = resolveDashboardUrl(rawDashboardUrl, activeEndpoint, manifest)
+  const dashboardRemoteHost = dashboardUrl ? isBrowserRemoteFromHost(dashboardUrl) : false
   const [docsOpen, setDocsOpen] = useState(false)
   const install = resolveHeavyInstall(manifest.local, platform ?? '')
+  const isAuth = health?.status === 401 || health?.status === 403
+  // Local mode of a self-keying installer: the generated key lives on the
+  // host, so a client key field would collect a value the host never stores.
+  const keyGeneratedByInstaller = selfKeyingLocal && mode === 'local'
+  const installerKeyPath = status?.managementKeyPath ?? status?.bootstrapPath
   return (
     <div className={styles['heavyPanel']}>
       <p className={styles['heavySummary']}>{manifest.summary}</p>
 
       <div className={styles['heavyMetaRow']}>
         {dashboardUrl !== undefined && (
-          <a className={styles['presetMetaItem']} href={dashboardUrl} target="_blank" rel="noreferrer">
-            {t('heavyDashboard')} ↗
+          <a
+            className={styles['presetMetaItem']}
+            href={dashboardUrl}
+            target="_blank"
+            rel="noreferrer"
+            title={dashboardRemoteHost ? t('heavyDashboardHostLoopbackTitle') : undefined}
+          >
+            {t('heavyDashboard')} ↗{dashboardRemoteHost ? ` (${t('heavyHostLoopback')})` : ''}
           </a>
         )}
         {manifest.docsUrl !== undefined && (
@@ -905,9 +1040,15 @@ function HeavyProviderForm(props: {
             {t('heavyDocs')} ↗
           </a>
         )}
-        <span className={styles['heavyHealthBadge']} data-ok={health?.ok === true ? 'true' : 'false'}>
-          {health === null ? t('heavyHealthUnknown') : health.ok ? t('heavyHealthOk') : t('heavyHealthDown')}
-          {health?.status !== undefined ? ` · ${String(health.status)}` : ''}
+        <span className={styles['heavyHealthBadge']} data-ok={isAuth ? 'auth' : health?.ok === true ? 'true' : 'false'}>
+          {health === null
+            ? t('heavyHealthUnknown')
+            : isAuth
+              ? `${t('heavyHealthAuth')} · ${String(health.status)}`
+              : health.ok
+                ? t('heavyHealthOk')
+                : t('heavyHealthDown')}
+          {health?.status !== undefined && !isAuth ? ` · ${String(health.status)}` : ''}
         </span>
         <button type="button" className={styles['heavyLinkBtn']} onClick={onCheck} disabled={checking}>
           {checking ? t('heavyChecking') : t('heavyCheckNow')}
@@ -971,7 +1112,7 @@ function HeavyProviderForm(props: {
               <span>
                 <strong>{t('heavyLocal')}</strong>
                 <span className={styles['heavyModeNote']}>
-                  {t('heavyDeps')}: {manifest.local.deps.join(', ')} · {t('heavyDisk')}: {manifest.local.diskHint}
+                  {t('heavyDeps')}: {install.deps.join(', ')} · {t('heavyDisk')}: {install.diskHint}
                 </span>
                 <span className={styles['heavyModeNote']}>{manifest.local.baseURL}</span>
               </span>
@@ -1041,19 +1182,31 @@ function HeavyProviderForm(props: {
           {docsOpen && <HeavyProviderDocs manifest={manifest} platform={platform} t={t} />}
 
           {manifest.auth.kind === 'unified' ? (
-            <div className={styles['field']}>
-              <label className={styles['fieldLabel']}>{t('heavyKeyLabel')}</label>
-              <input
-                className={styles['input']}
-                type="password"
-                value={keyValue}
-                placeholder={t('heavyKeyPlaceholder')}
-                onChange={e => onKey(e.target.value)}
-                disabled={disabled}
-              />
-            </div>
+            keyGeneratedByInstaller ? (
+              <p className={styles['heavyModeNote']} data-heavy-self-keyed>
+                {t('heavySelfKeyedKeyNotice')}
+              </p>
+            ) : (
+              <div className={styles['field']}>
+                <label className={styles['fieldLabel']}>{t('heavyKeyLabel')}</label>
+                <input
+                  className={styles['input']}
+                  type="password"
+                  value={keyValue}
+                  placeholder={t('heavyKeyPlaceholder')}
+                  onChange={e => onKey(e.target.value)}
+                  disabled={disabled}
+                />
+              </div>
+            )
           ) : (
             <p className={styles['heavyModeNote']}>{t('heavyAuthNone')}</p>
+          )}
+
+          {installerKeyPath !== undefined && status?.installedByHarness === true && status.mode === 'local' && (
+            <p className={styles['heavyModeNote']} data-heavy-key-path title={installerKeyPath}>
+              {t('heavyInstallKeyPath', { path: installerKeyPath })}
+            </p>
           )}
 
           {/* A succeeded run is never rendered as progress: the modal closes on

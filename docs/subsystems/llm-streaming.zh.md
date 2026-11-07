@@ -31,7 +31,7 @@ interface ContentBlockMap {
 }
 ```
 
-各块接口（完整字段见源码）：`TextBlock`（`text`）、`ReasoningBlock`（thinking，区别于可见文本）、`ImageBlock`（一个持久的[图片附件](attachment.zh.md)）、`FileBlock`（一个持久的原样[文件附件](attachment.zh.md)，请求组装对每条路由都把它投影为 handle 文本）和 `ToolCallBlock`（`id: ToolCallId`、`name`、原始 JSON `arguments`）。工具结果是一等 `ToolResultMessage`，含有 `toolCallId`、结果 `content` 与可选的 `isError`；它不是内容块。`ContentBlock = ContentBlockMap[ContentBlockType]`。仅当适配器、UI、压缩（compaction）和持久回放路径均支持某种新模态时，才将其纳入可合并扩展的 map。 Developer 工具变更块按已解析路由的能力投影。
+各块接口（完整字段见源码）：`TextBlock`（`text`）、`ReasoningBlock`（thinking，区别于可见文本）、`ImageBlock`（一个持久的[图片附件](attachment.zh.md)）、`FileBlock`（一个持久的原样[文件附件](attachment.zh.md)，除非精确路由声明接受其后缀的原生文件描述符，否则请求组装把它投影为 handle 文本）和 `ToolCallBlock`（`id: ToolCallId`、`name`、原始 JSON `arguments`）。工具结果是一等 `ToolResultMessage`，含有 `toolCallId`、结果 `content` 与可选的 `isError`；它不是内容块。`ContentBlock = ContentBlockMap[ContentBlockType]`。仅当适配器、UI、压缩（compaction）和持久回放路径均支持某种新模态时，才将其纳入可合并扩展的 map。 Developer 工具变更块按已解析路由的能力投影。
 
 图片访问方式属于请求序列化，不属于持久附件或确定性请求图片版本。`resolveImageAttachmentAccess()` 把附件提供方可选的宿主对象路径，与消费方为当前工具执行文件系统提供的映射组合起来。结果只适用于本次请求，不参与 `variantId`。
 
@@ -257,6 +257,10 @@ interface LlmFailure {
 ## 请求图片定价
 
 提供方对请求图片收取视觉 token 的适配器通过覆写 `LlmAdapter.imageRequestPricing` 声明按路由的定价，消费方经 `ctx.llm.imageRequestPricing(provider, model)` 同步解析。token 计量服务在每次计量时解析路由模型的定价，使 compaction 的压力、保留与选段都按路由请求实际发送的形式为图片历史计价；DeepSeek 适配器按模型的请求目标用官方公布的视觉计量为每个保留的出现位置定价，并把日志中的图片省略决策选中的出现位置按其占位文本定价，已完成请求仍以 provider usage 为权威锚点。
+
+## 请求文件策略
+
+只有当精确路由声明 `nativeFileInputs` 且文件名后缀映射到其某个编码器时，请求组装才保留 user-role `FileBlock` 的结构；其他所有出现位置都会变成非原生路由收到的同一确定性句柄文本。被保留的块只到达该适配器，它会在提供方流存在之前校验持久字节数、文件名 MIME、magic 签名、精确序列化原生部件、聚合编码大小以及独立哨兵放置。文件绝不会被静默丢弃：没有准入描述符时它是句柄文本，而适配器无法规划的结构化块会以 `UNSUPPORTED_CONTENT` 拒绝请求。描述符只承载策略与固定 token 预算——文件名、字节或哨兵都不会进入 `request/context`。`openai-responses` 没有经过验证的原生部件，会在配置解析阶段、读取任何文件之前被拒绝。
 
 ```ts type-equiv
 /**
@@ -522,16 +526,40 @@ interface LlmModelInfo {
   description?: string
   /** Accepted request modalities; absent means unknown, while an explicit omission is negative capability. */
   inputModalities?: readonly ModelModality[]
+  /**
+   * Input types a catalog, configuration, or listing advertised, including
+   * tokens (`audio`, `video`, `pdf`) no native request encoding carries yet.
+   * {@link inputModalities} stays the effective set the adapter sends.
+   */
+  advertisedInputModalities?: readonly ModelModality[]
+  /** Whether a source stated tool-call support; absent means undisclosed. */
+  tools?: boolean
+  /**
+   * Effort identifiers a source advertised that no selectable level accepts,
+   * preserved for diagnostics. They never appear in a materialized ladder.
+   */
+  unsupportedReasoningEfforts?: readonly string[]
 }
 ```
 
-对正确性敏感的元数据与参考目录分开解析，并归服务该确切路由的适配器所有。上下文容量、适配器调用默认值、推理选项和系统提示词更新模式共用同一个确切模型结果，消费方因而无需重复执行权威模型解析。`SystemPromptUpdate` 只有一个值 `'in-history'`：模型把 `messages` 中任意位置最新的 `system` 消息读作完整的有效系统提示词，因此 agent loop 可以把变化后的提示词追加到已缓存历史之后，而不是改写第 0 条消息（[决策规则](../../packages/core/agent-loop/README.zh.md#understand-the-implementation)）；模式缺失表示只读取开头的 system 消息，`normalizeModelInfo` 以 `INVALID_MODEL_INFO` 拒绝任何其他值。
+对正确性敏感的元数据与参考目录分开解析，并归服务该确切路由的适配器所有。上下文容量（包括仅输入上限）、输出能力、适配器调用默认值、推理选项和系统提示词更新模式共用同一个确切模型结果，消费方因而无需重复执行权威模型解析。`context.source` 与 `maxOutputTokensSource` 区分已声明容量与适配器为执行假定的路由回退值；`defaultMaxTokens` 只是部署配置的请求默认值，从不是模型能力。生效的 `inputModalities` 是适配器当前能编码的集合，`advertisedInputModalities` 则保留仅用于披露的输入类型。`SystemPromptUpdate` 只有一个值 `'in-history'`：模型把 `messages` 中任意位置最新的 `system` 消息读作完整的有效系统提示词，因此 agent loop 可以把变化后的提示词追加到已缓存历史之后，而不是改写第 0 条消息（[决策规则](../../packages/core/agent-loop/README.zh.md#understand-the-implementation)）；模式缺失表示只读取开头的 system 消息，`normalizeModelInfo` 以 `INVALID_MODEL_INFO` 拒绝任何其他值。
 
 ```ts type-equiv
 /** Provider-owned context capacity for one exact provider/model route. */
 interface LlmModelContext {
   /** Maximum combined request and response context in tokens. */
   contextWindow: number
+  /**
+   * Maximum input (prompt-side) tokens when configuration or discovery stated
+   * it separately; never derived from {@link contextWindow} and never
+   * defaulted beside it. Absent means no source stated an input-only cap.
+   */
+  maxInputTokens?: number
+  /**
+   * Provenance of {@link contextWindow}; `default` means no source stated this
+   * capacity and the route fallback stands in for execution.
+   */
+  source?: LlmModelCapacitySource
 }
 ```
 
@@ -572,7 +600,19 @@ interface LlmModelReasoningInfo {
 interface LlmResolvedModelInfo extends LlmModelInfo {
   /** Provider-owned context capacity when known. */
   context?: LlmModelContext
-  /** Adapter-configured per-request output cap materialized when callers omit one. */
+  /**
+   * Output-token capability the route resolved for the model. An adapter that
+   * requires such a field (pi-ai's `Model.maxTokens`) always reports one, so a
+   * value labelled `default` by {@link maxOutputTokensSource} is the execution
+   * fallback rather than a disclosed cap.
+   */
+  maxOutputTokens?: number
+  /** Provenance of {@link maxOutputTokens}; same vocabulary as {@link LlmModelContext.source}. */
+  maxOutputTokensSource?: LlmModelCapacitySource
+  /**
+   * Adapter-configured per-request output cap materialized when callers omit
+   * one; distinct from {@link maxOutputTokens}, which is the model capability.
+   */
   defaultMaxTokens?: number
   /** Adapter-owned selectable reasoning levels when exposed. */
   reasoning?: LlmModelReasoningInfo
@@ -580,6 +620,8 @@ interface LlmResolvedModelInfo extends LlmModelInfo {
   systemPromptUpdate?: SystemPromptUpdate
   /** Declared mid-conversation tool declaration handling; absent means every request declares the complete tool list. */
   toolUpdate?: ToolUpdate
+  /** Explicit native-file admission and pricing policy for this exact route; absent keeps every file as handle text. */
+  nativeFileInputs?: LlmNativeFileInputs
 }
 ```
 
@@ -691,7 +733,7 @@ interface ToolSchema {
 
 面向模型的 `ToolSchema` 是协议类型；产出它的已注册 `ToolDefinition`（schema + `execute`）在 [tools.md](tools.zh.md) 中。
 
-界面正在起草的提供方既没有路由也没有 catalog，因此询问被单独描述：请求携带用户正在编辑的草稿，回复是界面可以采纳的候选，而不是它必须服务的 catalog。
+界面正在起草的提供方既没有路由也没有 catalog，因此询问被单独描述：请求携带用户正在编辑的草稿，回复是界面可以采纳的候选，而不是它必须服务的 catalog。每个候选只携带列表实际声明的内容：容量、独立的仅输入上限、输入模态、工具与推理声明、公布的推理档位，以及没有配置档位接受的推理标识；未公开字段保持缺失，而明确声明的 `false` 与显式空档位表作为答案保留。
 
 ```ts type-equiv
 /**
@@ -737,6 +779,26 @@ interface LlmDiscoveredModel {
   maxTokens?: number
   /** Accepted input types when disclosed by the catalog or endpoint; absent means unknown. */
   inputModalities?: readonly ModelModality[]
+  /**
+   * Maximum input (prompt-side) tokens when the endpoint discloses one
+   * separately from {@link contextWindow}; never derived from it.
+   */
+  maxInputTokens?: number
+  /** Whether the endpoint stated tool-call support; absent means undisclosed. */
+  tools?: boolean
+  /** Whether the endpoint stated reasoning support; absent means undisclosed. */
+  reasoning?: boolean
+  /**
+   * Selectable reasoning levels (picker id → wire value) when the endpoint
+   * advertises them; absent means undisclosed, never "does not reason".
+   */
+  reasoningEfforts?: Readonly<Record<string, string>>
+  /**
+   * Effort identifiers the endpoint advertised that no configured level
+   * accepts, preserved for diagnostics. They are never selectable and never
+   * renamed to a canonical level.
+   */
+  unsupportedReasoningEfforts?: readonly string[]
 }
 ```
 
@@ -786,7 +848,7 @@ interface LlmCallConfigAdapterDefaults {
 
 ## 服务与提供方约定
 
-`LlmAdapter` 是提供方约定：创建子类、实现 `stream()`，再用 `ctx.llm.registerAdapter(providers, adapter)` 注册一个适配器实例。`GenerateOptions.provider` 选择已注册适配器；`GenerateOptions.model` 会传给该适配器，无需在生命周期启动时注册。重复提供方路由会原子失败。可选的 `providerRetryPolicy()` 会按路由捕获并填入 normal 默认值，`providerInfo()` 与异步 `listModels()` 方法则为 `LlmRuntime.listProviders()` / `listModels()` 提供分离的 selector 元数据。该目录仅供参考，不是请求白名单：适配器仍是权威，并可接受未列出的模型 id。单次异步 `resolveModel()` 查询返回确切模型身份，以及可选的对正确性敏感的上下文容量、适配器配置的 `defaultMaxTokens`、由模型持有的有序推理强度 ID 和可选的部署默认值；字段缺失表示元数据不可用或保留提供方持有的行为，而不表示目录成员关系无效。解析器会接收可选的取消信号，并且必须在信号中止后迅速完成结算。`LlmRuntime.resolveModelInfo()` 会校验聚合结果并返回分离值。在最终适配器边界，`resolveCallConfig()` 仅在 `maxTokens` 缺失时填入输出默认值，并校验和填入推理强度，因此直接调用也无法绕过任何一项已配置行为；直接分派会在等待解析前捕获一项适配器注册。agent loop 则使用 `prepareCall()`，使模型解析、请求头持久记录和分派全程使用同一项注册，保留来自同一次查询的分离上下文元数据，并报告适配器填入的配置字段。适配器查找发生在 `llm/stream` waterfall 的终端 continuation，因此 listener 可以在查找前短路调用，或路由一个可变的一次性请求。AgentLoop 在外层 waterfall 返回流句柄时观察到一次请求尝试；这个有限边界不能证明惰性终端适配器已构造完成或开始提供方 I/O。`block-start` / `block-end` 的 `index` 关联与 assembler 共同意味着适配器只需 emit 格式正确的分片——块重组不是每个适配器各自的问题。`ctx.llm.stream()` 与 `llm/stream` waterfall 在一个轮次中的位置见 [architecture.md](../architecture.zh.md#turn-flow)。
+`LlmAdapter` 是提供方约定：创建子类、实现 `stream()`，再用 `ctx.llm.registerAdapter(providers, adapter)` 注册一个适配器实例。`GenerateOptions.provider` 选择已注册适配器；`GenerateOptions.model` 会传给该适配器，无需在生命周期启动时注册。重复提供方路由会原子失败。可选的 `providerRetryPolicy()` 会按路由捕获并填入 normal 默认值，`providerInfo()` 与异步 `listModels()` 方法则为 `LlmRuntime.listProviders()` / `listModels()` 提供分离的 selector 元数据。该目录仅供参考，不是请求白名单：适配器仍是权威，并可接受未列出的模型 id。单次异步 `resolveModel()` 查询返回确切模型身份，以及可选的对正确性敏感的上下文容量（组合窗口、独立的仅输入上限及其来源）、带来源的输出能力、适配器配置的 `defaultMaxTokens`、生效与公布的输入类型、工具与不受支持档位声明，以及由模型持有的有序推理强度 ID 和可选的部署默认值；字段缺失表示元数据不可用或保留提供方持有的行为，而不表示目录成员关系无效。解析器会接收可选的取消信号，并且必须在信号中止后迅速完成结算。`LlmRuntime.resolveModelInfo()` 会校验聚合结果并返回分离值。在最终适配器边界，`resolveCallConfig()` 仅在 `maxTokens` 缺失时填入输出默认值，并校验和填入推理强度，因此直接调用也无法绕过任何一项已配置行为；直接分派会在等待解析前捕获一项适配器注册。agent loop 则使用 `prepareCall()`，使模型解析、请求头持久记录和分派全程使用同一项注册，保留来自同一次查询的分离上下文元数据，并报告适配器填入的配置字段。适配器查找发生在 `llm/stream` waterfall 的终端 continuation，因此 listener 可以在查找前短路调用，或路由一个可变的一次性请求。AgentLoop 在外层 waterfall 返回流句柄时观察到一次请求尝试；这个有限边界不能证明惰性终端适配器已构造完成或开始提供方 I/O。`block-start` / `block-end` 的 `index` 关联与 assembler 共同意味着适配器只需 emit 格式正确的分片——块重组不是每个适配器各自的问题。`ctx.llm.stream()` 与 `llm/stream` waterfall 在一个轮次中的位置见 [architecture.md](../architecture.zh.md#turn-flow)。
 
 ```ts type-equiv
 /** One model call whose config and adapter registration were resolved together. */
@@ -799,10 +861,20 @@ interface PreparedLlmCall {
   readonly context?: LlmModelContext
   /** Exact model modalities captured with the adapter dispatch generation. */
   readonly inputModalities?: readonly ModelModality[]
+  /** Disclosure-only advertised input types captured with the adapter dispatch generation. */
+  readonly advertisedInputModalities?: readonly ModelModality[]
+  /** Exact output-token capability captured with the adapter dispatch generation. */
+  readonly maxOutputTokens?: number
+  /** Whether the exact route accepts tool declarations, when a source stated it. */
+  readonly tools?: boolean
+  /** Advertised effort identifiers outside the selectable ladder, captured for diagnostics. */
+  readonly unsupportedReasoningEfforts?: readonly string[]
   /** Exact model system prompt update mode captured with the adapter dispatch generation. */
   readonly systemPromptUpdate?: SystemPromptUpdate
   /** Exact model tool update mode captured with the adapter dispatch generation. */
   readonly toolUpdate?: ToolUpdate
+  /** Native-file policy copied from the adapter generation that will dispatch this call. */
+  readonly nativeFileInputs?: LlmNativeFileInputs
   /** Config fields materialized by the captured adapter rather than proposed by the caller. */
   readonly adapterDefaults: LlmCallConfigAdapterDefaults
   /**
@@ -846,6 +918,25 @@ declare abstract class LlmAdapter {
    * @returns route-owned image pricing, or `undefined` when the route declares none.
    */
   imageRequestPricing(_provider: string, _model: string): LlmImageRequestPricing | undefined;
+  /**
+   * Resolve this route's explicit native-file policy synchronously. The default
+   * declares none, so request assembly keeps every file as handle text.
+   * Implementations must not perform I/O; the token meter resolves this per
+   * measurement.
+   * @param _provider - a route passed to `registerAdapter()` for this instance.
+   * @param _model - exact model id passed to {@link GenerateOptions.model}.
+   * @returns the route's descriptor, or `undefined` when media is not enabled.
+   */
+  nativeFileInputs(_provider: string, _model: string): LlmNativeFileInputs | undefined;
+  /**
+   * Synchronous native-file request pricing for one exact route. The descriptor
+   * carries the explicit token reserve; routes that override only
+   * {@link nativeFileInputs} inherit this alias unchanged.
+   * @param provider - a route passed to `registerAdapter()` for this instance.
+   * @param model - exact model id passed to {@link GenerateOptions.model}.
+   * @returns the route's descriptor, or `undefined` when media is not enabled.
+   */
+  nativeFileRequestPricing(provider: string, model: string): LlmNativeFileInputs | undefined;
   /**
    * List models this adapter can currently advertise for one owned provider.
    * Core routing accepts unlisted model ids; catalog-driven entry points such
@@ -1058,6 +1149,25 @@ providerRetryPolicy(provider: string): ResolvedRetryPolicy
  * @returns the owning adapter's image pricing for the route, when declared.
  */
 imageRequestPricing(provider: string, model: string): LlmImageRequestPricing | undefined
+
+/**
+ * Resolve the exact route's explicit native-file policy, or `undefined` when
+ * the provider is unregistered or does not enable native media. Unknown
+ * providers degrade to `undefined`, mirroring image pricing for durable
+ * history whose route may no longer be mounted.
+ * @param provider - provider route named by a request header.
+ * @param model - exact model id named by the same header.
+ * @returns the owning adapter's descriptor, when declared.
+ */
+nativeFileInputs(provider: string, model: string): LlmNativeFileInputs | undefined
+
+/**
+ * Resolve the exact route's synchronous native-file request pricing.
+ * @param provider - provider route named by a request header.
+ * @param model - exact model id named by the same header.
+ * @returns the owning adapter's descriptor, when declared.
+ */
+nativeFileRequestPricing(provider: string, model: string): LlmNativeFileInputs | undefined
 
 /**
  * Resolve the exact text one durable file occurrence contributes to every

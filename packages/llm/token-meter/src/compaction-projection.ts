@@ -71,6 +71,20 @@ function zeroView(): ContextCompactionsProjection {
 }
 
 /**
+ * Whether one summary is the deterministic model-free stub rather than a
+ * model-written summary. The stub is the only empty-route summary that records
+ * a failure cause; a custom summarizer may report no route while still writing
+ * real facts, so an empty provider alone does not classify it.
+ * @param data - committed summary facts.
+ * @returns true when the summary came from the model-free stub.
+ */
+function isMechanicalSummary(
+  data: SessionEvent<'compaction/summary'>['data'],
+): boolean {
+  return data.summarizationFailure !== undefined && data.provider === '' && data.model === ''
+}
+
+/**
  * Draft for a summary whose `compaction/start` is missing from the fold
  * window; a legal log always starts one first, but the fold stays total.
  */
@@ -79,7 +93,7 @@ function draftFrom(event: SessionEvent<'compaction/summary'>): OpenCompaction {
     compactionId: event.data.compactionId,
     manual: event.data.sourceCommandId !== undefined,
     summarized: true,
-    mechanical: event.data.provider === '',
+    mechanical: isMechanicalSummary(event.data),
     shadowedNodes: event.data.shadowedSeqs.length,
     shadowedTokens: event.data.shadowedTokenCount,
   }
@@ -88,7 +102,7 @@ function draftFrom(event: SessionEvent<'compaction/summary'>): OpenCompaction {
 /**
  * Committed summarizing compactions. An error-free end with a summary under
  * the same compaction id is the only commit point: it increments `count`
- * (and `mechanicalCount` for a `provider === ''` stub) and replaces `last`.
+ * (and `mechanicalCount` for the model-free failure stub) and replaces `last`.
  * An end carrying `error` increments `failedCount` only. The open lifecycle
  * changes state without changing the view reference.
  */
@@ -119,7 +133,7 @@ export const contextCompactionsProjectionDefinition = {
               ...state.open,
               manual: state.open.manual || event.data.sourceCommandId !== undefined,
               summarized: true,
-              mechanical: event.data.provider === '',
+              mechanical: isMechanicalSummary(event.data),
               shadowedNodes: event.data.shadowedSeqs.length,
               shadowedTokens: event.data.shadowedTokenCount,
             }

@@ -2407,7 +2407,7 @@ describe('Client Typert API', () => {
       const firstItem = first.next()
       await vi.waitFor(() => { expect(FakeWebSocket.sockets[0]?.sent).toHaveLength(1) })
       const socket = FakeWebSocket.sockets[0]!
-      expect(socket.url).toBe('wss://harness.example/api/remote.mux')
+      expect(socket.url).toBe('wss://harness.example/api/remote.mux?heartbeat=1')
       const opened = JSON.parse(socket.sent[0]!) as { streamId: string }
       expect(opened).toMatchObject({
         type: 'open',
@@ -2883,6 +2883,69 @@ describe('Remote stream client carrier lifecycle', () => {
     })
   })
 
+  it('reports each carrier heartbeat to its heartbeat observer once, after the frame report', async () => {
+    await withFakeWebSocket('https://harness.example', async () => {
+      const onFrame = vi.fn<() => void>()
+      const onHeartbeat = vi.fn<() => void>()
+      const client = new RemoteStreamMuxClient(onFrame, onHeartbeat)
+      client.start()
+      const socket = FakeWebSocket.sockets[0]!
+      await vi.waitFor(() => { expect(socket.readyState).toBe(FakeWebSocket.OPEN) })
+      try {
+        socket.receiveRaw(REMOTE_STREAM_HEARTBEAT_TEXT)
+        expect(onFrame).toHaveBeenCalledTimes(1)
+        expect(onHeartbeat).toHaveBeenCalledTimes(1)
+        expect(onFrame.mock.invocationCallOrder[0])
+          .toBeLessThan(onHeartbeat.mock.invocationCallOrder[0]!)
+        expect(socket.closedWith).toHaveLength(0)
+      } finally {
+        await client.close()
+      }
+    })
+  })
+
+  it('does not report a normal item frame as a heartbeat', async () => {
+    await withFakeWebSocket('https://harness.example', async () => {
+      const onFrame = vi.fn<() => void>()
+      const onHeartbeat = vi.fn<() => void>()
+      const client = new RemoteStreamMuxClient(onFrame, onHeartbeat)
+      client.start()
+      const socket = FakeWebSocket.sockets[0]!
+      await vi.waitFor(() => { expect(socket.readyState).toBe(FakeWebSocket.OPEN) })
+      const abort = new AbortController()
+      const source = client.open('probe/watch', {}, abort.signal)[Symbol.asyncIterator]()
+      try {
+        const pending = source.next()
+        await vi.waitFor(() => { expect(socket.sent).toHaveLength(1) })
+        const opened = parseRemoteStreamClientMessage(socket.sent[0]!)
+        if (opened.type !== 'open') throw new Error('fixture expected an open frame')
+        socket.receive({ type: 'item', streamId: opened.streamId, value: 'alpha' })
+        await expect(pending).resolves.toEqual({ done: false, value: 'alpha' })
+        expect(onFrame).toHaveBeenCalledTimes(1)
+        expect(onHeartbeat).not.toHaveBeenCalled()
+      } finally {
+        abort.abort()
+        await source.return?.(undefined)
+        await client.close()
+      }
+    })
+  })
+
+  it('ignores a carrier heartbeat while no Connection generation is active', async () => {
+    await withFakeWebSocket('https://harness.example', async () => {
+      const { client } = await benchFiber(vi.fn<ConnectionHandle['rpc']['call']>(), 'web')
+      try {
+        const socket = FakeWebSocket.sockets[0]!
+        await vi.waitFor(() => { expect(socket.readyState).toBe(FakeWebSocket.OPEN) })
+        socket.receiveRaw(REMOTE_STREAM_HEARTBEAT_TEXT)
+        expect(socket.readyState).toBe(FakeWebSocket.OPEN)
+        expect(socket.closedWith).toHaveLength(0)
+      } finally {
+        await client.dispose()
+      }
+    })
+  })
+
   it('counts a carrier heartbeat as activity without delivering it to a logical stream', async () => {
     await withFakeWebSocket('https://harness.example', async () => {
       const onFrame = vi.fn<() => void>()
@@ -2926,6 +2989,7 @@ describe('Remote stream client carrier lifecycle', () => {
         setNetworkAvailable: vi.fn<(available: boolean) => void>(),
         reconnect,
         isProbablyStale: thresholdMs => lastFrameAt === undefined || Date.now() - lastFrameAt > thresholdMs,
+        connectingForMs: () => undefined,
       }, () => 'connected')
       try {
         client.start()
@@ -2966,6 +3030,7 @@ describe('Remote stream client carrier lifecycle', () => {
         setNetworkAvailable: vi.fn<(available: boolean) => void>(),
         reconnect,
         isProbablyStale: thresholdMs => lastFrameAt === undefined || Date.now() - lastFrameAt > thresholdMs,
+        connectingForMs: () => undefined,
       }, () => 'connected')
       try {
         client.start()
@@ -3069,7 +3134,7 @@ describe('Remote stream client carrier lifecycle', () => {
       const client = new RemoteStreamMuxClient()
       try {
         client.start()
-        expect(FakeWebSocket.sockets[0]!.url).toBe('ws://127.0.0.1:43210/api/remote.mux')
+        expect(FakeWebSocket.sockets[0]!.url).toBe('ws://127.0.0.1:43210/api/remote.mux?heartbeat=1')
       } finally {
         await client.close()
         vi.unstubAllGlobals()
@@ -3259,7 +3324,7 @@ describe('Remote stream client carrier lifecycle', () => {
       const secondPending = second.next()
       expect(FakeWebSocket.sockets).toHaveLength(1)
       const socket = FakeWebSocket.sockets[0]!
-      expect(socket.url).toBe('wss://harness.example/mounted/app/api/remote.mux')
+      expect(socket.url).toBe('wss://harness.example/mounted/app/api/remote.mux?heartbeat=1')
 
       socket.open()
       await vi.waitFor(() => { expect(socket.sent).toHaveLength(2) })
@@ -3308,7 +3373,7 @@ describe('Remote stream client carrier lifecycle', () => {
       abort.abort('cancelled while connecting')
       await expect(aborted).rejects.toBe('cancelled while connecting')
       await abortedClient.close()
-      expect(FakeWebSocket.sockets[3]?.url).toBe('ws://harness.example/api/remote.mux')
+      expect(FakeWebSocket.sockets[3]?.url).toBe('ws://harness.example/api/remote.mux?heartbeat=1')
     })
   })
 

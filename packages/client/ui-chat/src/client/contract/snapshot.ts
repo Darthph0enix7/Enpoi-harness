@@ -37,6 +37,13 @@ export interface ChatNodeStore {
   /** @param key - stable Conversation Context key. @returns its identity-stable observable source. */
   source(key: string): ChatNodeSource
   /**
+   * Drop a keyed source once its last observer unmounted.
+   * The store keeps a live source (a still-mounted seat may share it); a later
+   * source() call creates a fresh one for a node that returns.
+   * @param key - stable Conversation Context key.
+   */
+  release?(key: string): void
+  /**
    * Observe one Turn's data for a single Node kind, including hidden Nodes, in anchor order.
    * Other Turns and kinds do not notify this source.
    * @param turn - resolved owning Turn.
@@ -139,6 +146,7 @@ export const EMPTY_CHAT_SNAPSHOT: ChatSnapshot = {
   nodes: {
     get: () => undefined,
     source: () => EMPTY_NODE_SOURCE,
+    release: () => { /* the empty store holds no keyed sources */ },
     turnDataSource: () => EMPTY_TURN_NODE_SOURCE,
     processSource: () => EMPTY_NODE_PROCESS_SOURCE,
     values: () => EMPTY_LIST,

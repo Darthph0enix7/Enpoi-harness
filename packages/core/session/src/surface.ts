@@ -162,6 +162,70 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+const NATIVE_FILE_MIME_TYPES = new Set([
+  'application/pdf',
+  'audio/wav',
+  'audio/mpeg',
+  'audio/ogg',
+  'audio/flac',
+  'video/mp4',
+  'video/webm',
+])
+
+const NATIVE_FILE_ENCODER_MIMES: Readonly<Record<string, readonly string[]>> = {
+  'anthropic-document': ['application/pdf'],
+  'openai-chat-file': ['application/pdf'],
+  'openai-chat-input-audio': ['audio/wav', 'audio/mpeg', 'audio/ogg', 'audio/flac'],
+  'openai-chat-video-url': ['video/mp4', 'video/webm'],
+}
+
+function validateNativeFileInputs(value: unknown): void {
+  if (!isRecord(value)) throw new Error('native file inputs must be an object')
+  if (value['version'] !== 1) {
+    throw new Error(`native file inputs version must be 1, got ${String(value['version'])}`)
+  }
+  const rawEncoders = value['encoders']
+  if (!isRecord(rawEncoders)) throw new Error('native file inputs encoders must be an object')
+  for (const key of Object.keys(rawEncoders)) {
+    if (!NATIVE_FILE_MIME_TYPES.has(key)) {
+      throw new Error(`native file inputs has unknown MIME type "${key}"`)
+    }
+    const encoder = rawEncoders[key]
+    if (typeof encoder !== 'string' || !Object.hasOwn(NATIVE_FILE_ENCODER_MIMES, encoder)) {
+      throw new Error(`native file inputs has unknown encoder for "${key}"`)
+    }
+    const allowed = NATIVE_FILE_ENCODER_MIMES[encoder]
+    if (allowed === undefined || !allowed.includes(key)) {
+      throw new Error(`native file inputs maps "${key}" to incompatible encoder "${encoder}"`)
+    }
+  }
+  const perFileBytes = value['perFileBytes']
+  if (typeof perFileBytes !== 'number' || !Number.isSafeInteger(perFileBytes) || perFileBytes <= 0) {
+    throw new Error('native file inputs perFileBytes must be a positive safe integer')
+  }
+  const totalBytes = value['totalBytes']
+  if (typeof totalBytes !== 'number' || !Number.isSafeInteger(totalBytes) || totalBytes <= 0) {
+    throw new Error('native file inputs totalBytes must be a positive safe integer')
+  }
+  if (totalBytes < perFileBytes) {
+    throw new Error('native file inputs totalBytes must be at least perFileBytes')
+  }
+  const maxPayloadBytes = value['maxPayloadBytes']
+  if (typeof maxPayloadBytes !== 'number' || !Number.isSafeInteger(maxPayloadBytes) || maxPayloadBytes <= 0) {
+    throw new Error('native file inputs maxPayloadBytes must be a positive safe integer')
+  }
+  const rawReserve = value['tokenReserve']
+  if (!isRecord(rawReserve)) throw new Error('native file inputs tokenReserve must be an object')
+  const perFile = rawReserve['perFile']
+  if (typeof perFile !== 'number' || !Number.isFinite(perFile) || perFile < 0) {
+    throw new Error('native file inputs tokenReserve.perFile must be a non-negative finite number')
+  }
+  const perByte = rawReserve['perByte']
+  if (typeof perByte !== 'number' || !Number.isFinite(perByte) || perByte < 0) {
+    throw new Error('native file inputs tokenReserve.perByte must be a non-negative finite number')
+  }
+}
+
 /**
  * Reject noncanonical request-header fields, developer roles/content, and contradictory tool failure metadata.
  * This does not validate complete event payloads or embedded provider streams.
@@ -214,6 +278,33 @@ export function validateSessionEventData(
     const defaults = header['adapterDefaults']
     if (isRecord(defaults) && Object.keys(defaults).length === 0) {
       throw new Error(`${subject} must omit empty adapterDefaults`)
+    }
+  } else if (event.type === 'request/context') {
+    if (!isRecord(data)) throw new Error(`${subject} data must be an object`)
+    if (typeof data['provider'] !== 'string' || data['provider'].length === 0) {
+      throw new Error(`${subject} requires a nonempty provider`)
+    }
+    if (typeof data['model'] !== 'string' || data['model'].length === 0) {
+      throw new Error(`${subject} requires a nonempty model`)
+    }
+    if (data['contextWindow'] !== undefined
+      && (typeof data['contextWindow'] !== 'number'
+        || !Number.isSafeInteger(data['contextWindow'])
+        || data['contextWindow'] <= 0)) {
+      throw new Error(`${subject} contextWindow must be a positive safe integer`)
+    }
+    if (data['systemPromptUpdate'] !== undefined && data['systemPromptUpdate'] !== 'in-history') {
+      throw new Error(`${subject} systemPromptUpdate must be "in-history"`)
+    }
+    if (data['nativeFileInputs'] !== undefined) {
+      try {
+        validateNativeFileInputs(data['nativeFileInputs'])
+      } catch (error) {
+        throw new Error(
+          `${subject} has invalid nativeFileInputs: ${(error as Error).message}`,
+          { cause: error },
+        )
+      }
     }
   } else if (event.type === 'tool/result') {
     if (!isRecord(data)) throw new Error(`${subject} data must be an object`)

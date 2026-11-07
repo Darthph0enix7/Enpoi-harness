@@ -39,7 +39,7 @@ it('drops a malformed entry with no local copy', () => {
 
 it('a non-object payload falls back to the whole labelled local copy', () => {
   const table = sanitizeHeavyManifests('not a table')
-  expect(table.items).toEqual([fallbackHeavyManifest('freellmapi'), fallbackHeavyManifest('antigravity'), fallbackHeavyManifest('commandcode'), fallbackHeavyManifest('meridian')])
+  expect(table.items).toEqual([fallbackHeavyManifest('freellmapi'), fallbackHeavyManifest('antigravity'), fallbackHeavyManifest('commandcode'), fallbackHeavyManifest('meridian'), fallbackHeavyManifest('cliproxyapi')])
   expect(table.problems.join('\n')).toContain('rendering the labelled local copy')
 })
 
@@ -62,4 +62,32 @@ it('heavyApi.manifests validates the gateway reply end to end', async () => {
   expect(result.value.items[1]).toEqual(fallbackHeavyManifest('freellmapi'))
   expect(result.value.problems.join('\n')).toContain('manifest "freellmapi": host copy rejected')
   console.info(`[heavy-wire] accepted gateway table, rejected entry: ${result.value.problems.join(' | ')}`)
+})
+
+it('heavyApi.reuse keeps the typed catalog answer the host wrote the route from', async () => {
+  const catalog = {
+    state: 'unauthorized',
+    models: [],
+    status: 401,
+    error: 'the endpoint rejected the credential',
+    source: 'endpoint',
+  }
+  vi.stubGlobal('fetch', vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      result: {
+        ok: true,
+        value: {
+          ok: true,
+          health: { ok: false, status: 401, checkedAt: 1, reachable: true },
+          catalog,
+        },
+      },
+    }),
+  } as unknown as Response)))
+  const result = await heavyApi.reuse('cliproxyapi')
+  expect(result.ok).toBe(true)
+  if (!result.ok) return
+  expect(result.value.catalog).toEqual(catalog)
 })

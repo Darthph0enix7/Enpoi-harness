@@ -419,7 +419,7 @@
           "steps": [
             {
               "label": "Link and build the DSH provider package",
-              "command": "node \"{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs\" \"{dshHome}/profiles/web\"",
+              "command": "node \"$DSH_HEAVY_PROFILE_DIR/packages/enpoi-commandcode-provider/scripts/install.mjs\" \"$DSH_HEAVY_PROFILE_DIR\"",
               "weight": 3
             }
           ]
@@ -428,7 +428,7 @@
           "steps": [
             {
               "label": "Link and build the DSH provider package",
-              "command": "node \"{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs\" \"{dshHome}/profiles/web\"",
+              "command": "node \"$DSH_HEAVY_PROFILE_DIR/packages/enpoi-commandcode-provider/scripts/install.mjs\" \"$DSH_HEAVY_PROFILE_DIR\"",
               "weight": 3
             }
           ]
@@ -437,7 +437,7 @@
           "steps": [
             {
               "label": "Link and build the DSH provider package",
-              "command": "node \"{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs\" \"{dshHome}/profiles/web\"",
+              "command": "node \"$DSH_HEAVY_PROFILE_DIR/packages/enpoi-commandcode-provider/scripts/install.mjs\" \"$DSH_HEAVY_PROFILE_DIR\"",
               "weight": 3
             }
           ]
@@ -679,6 +679,120 @@
         "Any other tool pointed at the proxy stops working when the service is removed",
         "If a dotfiles/config repository manages the unit file (systemd unit or launchd plist), remove it there too or the next sync resurrects it",
         "Turns already served drew from the Claude subscription usage windows and are not refunded"
+      ]
+    }
+  },
+  {
+    "id": "cliproxyapi",
+    "label": "CLIProxyAPI",
+    "summary": "Optional multi-account subscription gateway: one OpenAI-compatible endpoint in front of the CLI accounts you configure in its dashboard.",
+    "protocol": "openai-completions",
+    "delivery": "service",
+    "catalogAuthority": "endpoint",
+    "sessionHeader": "x-session-id",
+    "auth": {
+      "kind": "unified",
+      "apiKeyEnv": "CLIPROXYAPI_API_KEY",
+      "keyless": true
+    },
+    "dashboardUrl": "http://127.0.0.1:8317/management.html",
+    "docsUrl": "https://help.router-for.me/",
+    "defaultPort": 8317,
+    "requiresBrowser": [
+      "Adding upstream accounts happens in the local management dashboard; provider OAuth or device-code sign-in can require a browser or a phone confirmation and is never performed by the installer"
+    ],
+    "quirks": [
+      "Local install dependencies: Node.js >= 22 (the harness ships Node); Docker is never required. The profile helper downloads the verified CLIProxyAPI release and writes a systemd or launchd user service — no Go toolchain, npm compile, or curl step, and its Node built-in downloader needs no external tar",
+      "The model catalog comes from the configured inference endpoint (/v1/models); this manifest hardcodes no model, declares catalogAuthority \"endpoint\", and never substitutes a fabricated fallback",
+      "Model capabilities vary by upstream account/channel and by endpoint metadata; no native media capability is declared until the core native-media schema defines it",
+      "The management key is separate from the optional client API key and stays in config.yaml with mode 0600; the installer prints neither key",
+      "Upstream accounts are managed in the /management.html dashboard; the local installer never signs in or auto-authenticates an account, and opening the dashboard is a local handoff rather than an automatic login",
+      "Remote management is a policy decision: the dashboard and management API are loopback by default, and exposing them beyond loopback requires an explicit tunnel and authentication you configure",
+      "The route declaration sets the x-session-id request header for account affinity; affinity is not a cache-hit guarantee and accounts can still switch on quota or rate-limit responses",
+      "The verified binary is about 75 MB; RAM use is not measured here. Removing the local install retains config.yaml, bootstrap.json, and the auths directory under $DSH_HOME/providers/cliproxyapi",
+      "Windows has no supported local install; detected-instance reuse, a custom route, or an instance running on another machine still works"
+    ],
+    "reuse": {
+      "label": "Use a detected instance",
+      "baseURL": "http://127.0.0.1:8317/v1",
+      "note": "Zero install: uses a CLIProxyAPI instance already running on this device. The client API key is optional and the dashboard is not signed in automatically.",
+      "health": {
+        "url": "http://127.0.0.1:8317/healthz",
+        "timeoutMs": 5000
+      }
+    },
+    "local": {
+      "label": "Install locally (verified release + user service)",
+      "baseURL": "http://127.0.0.1:8317/v1",
+      "deps": [
+        "Node.js >= 22",
+        "A reachable systemd user session (systemctl --user) on Linux"
+      ],
+      "diskHint": "~75 MB binary; RAM use not measured",
+      "dashboardUrl": "http://127.0.0.1:8317/management.html",
+      "runtime": "node",
+      "install": {
+        "default": {
+          "steps": [
+            {
+              "label": "Install CLIProxyAPI (verified release and user service)",
+              "command": "node \"$DSH_HEAVY_HELPER\" install --dsh-home \"$DSH_HEAVY_DSH_HOME\"",
+              "weight": 3
+            }
+          ]
+        },
+        "linux": {
+          "label": "Install locally (verified release + systemd user unit)",
+          "requires": [
+            "systemd-user"
+          ],
+          "steps": [
+            {
+              "label": "Install CLIProxyAPI (verified release and user service)",
+              "command": "node \"$DSH_HEAVY_HELPER\" install --dsh-home \"$DSH_HEAVY_DSH_HOME\"",
+              "weight": 3
+            }
+          ]
+        },
+        "darwin": {
+          "label": "Install locally (verified release + launchd agent)",
+          "deps": [
+            "Node.js >= 22",
+            "macOS 11+ (launchd)"
+          ],
+          "diskHint": "~75 MB binary; RAM use not measured",
+          "steps": [
+            {
+              "label": "Install CLIProxyAPI (verified release and user service)",
+              "command": "node \"$DSH_HEAVY_HELPER\" install --dsh-home \"$DSH_HEAVY_DSH_HOME\"",
+              "weight": 3
+            }
+          ]
+        },
+        "win32": {
+          "label": "Not supported on Windows",
+          "unsupported": "CLIProxyAPI has no supported Windows local install: its installer helper manages a verified Linux/macOS release behind a POSIX user service. Run CLIProxyAPI yourself, or add an instance running on another machine with \"Use a detected instance\" or as a custom route.",
+          "steps": []
+        }
+      },
+      "health": {
+        "url": "http://127.0.0.1:8317/healthz",
+        "timeoutMs": 5000
+      }
+    },
+    "removal": {
+      "steps": [
+        {
+          "label": "Remove the CLIProxyAPI install (stop the service and remove verified files)",
+          "command": "node \"$DSH_HEAVY_HELPER\" remove --dsh-home \"$DSH_HEAVY_DSH_HOME\"",
+          "weight": 2
+        }
+      ],
+      "warnings": [
+        "Removal stops the receipt-owned user service and removes the verified binary plus the receipt-owned unit; config.yaml (management key, mode 0600), bootstrap.json, and the auths directory (upstream account credentials) stay under $DSH_HOME/providers/cliproxyapi and must be deleted by hand to remove them",
+        "Any other harness or client pointed at the same CLIProxyAPI instance stops working when the service is removed",
+        "Upstream account state and quota live in CLIProxyAPI and are never touched beyond the local service and binary",
+        "A modified binary or unit makes the installer refuse removal; restore the receipt-owned file or remove it manually after confirming its origin"
       ]
     }
   }

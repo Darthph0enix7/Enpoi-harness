@@ -60,6 +60,7 @@ JSONL record
   → v1-to-v2 stage
   → v2-to-v3 stage
   → v3-to-v4 stage
+  → v4-to-v5 stage
   → current event collector
 ```
 
@@ -68,6 +69,8 @@ Chain 中不存在 `flatMap`、spread expansion、中间 event array 或 schedul
 ### 相邻版本所有权
 
 [V3 到 V4 规范](../../../../packages/session/session-format-v3-to-v4/README.zh.md#v3-to-v4-specification)规定父目录补全：它推进 header 版本，保留已接纳的事件与继承切点，并根据子 Session 证据追加缺失的自身目录记录。它复用 V2→V3 中冻结的 V3 codec。按 generation 校验 delivery 可防止历史确认仅因 header 变化而获得当前水位含义；更早的 migration edge 保留各自的来源准入策略。
+
+[V4 到 V5 规范](../../../../packages/session/session-format-v4-to-v5/README.zh.md#v4-to-v5-specification)规定正文恒等迁移边：它推进 header 版本，逐字保留每个事件、compact run、坐标、时间戳、引用与 payload，根据源标记重新推导继承截点，并在 framing 前应用已发布的 V4 行准入。它复用 V3→V4 中冻结的 V4 codec。唯一的 V5 记录同时确认扩展后的审批结果词汇、新增的 `max-tokens-continuation` 来源 kind、移除 `user-approval` 与 `model-selection` 来源变体，以及可选的 `request/context.nativeFileInputs` 策略描述符。两条终态但未被接受的 V4 记录已迁移到 `docs/archive/retired-persistence/`，因为它们的 V1 形快照与前驱边分叉了已接受的 V4 历史；V5 记录直接从已接受的 V4 尖端重新确认六个分叉根与幸存的 `event:model/selection` 边。
 
 [V2 到 V3 投递保护](../../../../packages/session/session-format-v2-to-v3/README.zh.md#delivery-guards)防止源代中被忽略的标记仅因头部变化就成为有效上传水位。Python 发布冒烟测试独立于跨代 golden 比较，按源代码中的 `SESSION_FORMAT_VERSION` 检查生成日志，因此文件名与 header 自洽不能掩盖过期 writer。
 

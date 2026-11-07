@@ -15,14 +15,19 @@ import LlmRuntime, {
   StreamChunk,
   createMessage,
   createDeveloperMessage,
+  createToolResultMessage,
   createUserMessage,
+  ToolCallId,
 } from '@deepseek-ai/dsh-llm'
 import type {
+  LlmModelCapacitySource,
   LlmModelContext,
   LlmModelInfo,
   LlmModelReasoningInfo,
+  LlmNativeFileInputs,
   LlmProviderInfo,
   LlmResolvedModelInfo,
+  ModelModality,
   SystemPromptUpdate,
 } from '@deepseek-ai/dsh-llm'
 
@@ -347,6 +352,139 @@ describe('LlmRuntime', () => {
         expect(projected.text, fixture.name).toContain('include this saved path in the delegation prompt')
       }
     }
+  })
+
+  const NATIVE_INPUTS: LlmNativeFileInputs = {
+    version: 1,
+    encoders: { 'application/pdf': 'anthropic-document' },
+    perFileBytes: 4_000_000,
+    totalBytes: 8_000_000,
+    maxPayloadBytes: 12_000_000,
+    tokenReserve: { perFile: 120, perByte: 0.5 },
+  }
+
+  it('preserves accepted user files for a native-file route and projects every other occurrence', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new class extends RecordingAdapter {
+      override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({
+          provider,
+          id: model,
+          name: model,
+          nativeFileInputs: NATIVE_INPUTS,
+        })
+      }
+    }(SCRIPT)
+    ctx.llm.registerAdapter(['test-provider'], adapter)
+    const pdf = {
+      attachmentId: AttachmentId(`sha256:${'ab'.repeat(32)}`),
+      name: 'notes.pdf',
+      bytes: 3,
+    }
+    const wav = {
+      attachmentId: AttachmentId(`sha256:${'cd'.repeat(32)}`),
+      name: 'recording.wav',
+      bytes: 3,
+    }
+    const assistant = createMessage({
+      role: 'assistant',
+      content: [{ type: 'file', attachment: pdf }],
+      source: { kind: 'model', provider: 'test-provider', model: 'test-model' },
+    })
+
+    await collect(ctx.llm.stream({
+      provider: 'test-provider',
+      model: 'test-model',
+      messages: [
+        createUserMessage({ content: [{ type: 'file', attachment: pdf }], source: { kind: 'user' } }),
+        createUserMessage({ content: [{ type: 'file', attachment: wav }], source: { kind: 'user' } }),
+        assistant,
+      ],
+    }))
+
+    const content = adapter.lastOptions?.messages.map(message => message.content[0])
+    expect(content?.[0]).toEqual({ type: 'file', attachment: pdf })
+    expect(content?.[1]).toMatchObject({ type: 'text' })
+    expect(content?.[2]).toMatchObject({ type: 'text' })
+  })
+
+  it('validates, detaches, and freezes native-file inputs through resolution and preparation', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const encoders = { 'application/pdf': 'anthropic-document' } as const
+    const tokenReserve = { perFile: 120, perByte: 0.5 }
+    const adapter = new class extends ScriptedAdapter {
+      override resolveModel(): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({
+          provider: 'route',
+          id: 'model',
+          name: 'Model',
+          nativeFileInputs: {
+            version: 1,
+            encoders,
+            perFileBytes: 4_000_000,
+            totalBytes: 8_000_000,
+            maxPayloadBytes: 12_000_000,
+            tokenReserve,
+          },
+        })
+      }
+    }(SCRIPT)
+    ctx.llm.registerAdapter(['route'], adapter)
+
+    const resolved = await ctx.llm.resolveModelInfo('route', 'model')
+    expect(resolved.nativeFileInputs).toEqual(NATIVE_INPUTS)
+    expect(resolved.nativeFileInputs?.encoders).not.toBe(encoders)
+    expect(resolved.nativeFileInputs?.tokenReserve).not.toBe(tokenReserve)
+    expect(Object.isFrozen(resolved.nativeFileInputs)).toBe(true)
+    expect(Object.isFrozen(resolved.nativeFileInputs?.encoders)).toBe(true)
+    expect(Object.isFrozen(resolved.nativeFileInputs?.tokenReserve)).toBe(true)
+
+    const prepared = await ctx.llm.prepareCall({ provider: 'route', model: 'model' })
+    expect(prepared.nativeFileInputs).toEqual(resolved.nativeFileInputs)
+    expect(prepared.nativeFileInputs).not.toBe(resolved.nativeFileInputs)
+    expect(Object.isFrozen(prepared.nativeFileInputs)).toBe(true)
+  })
+
+  it('rejects an incompatible native-file encoder map during model resolution', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new class extends ScriptedAdapter {
+      override resolveModel(): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({
+          provider: 'route',
+          id: 'model',
+          name: 'Model',
+          nativeFileInputs: {
+            ...NATIVE_INPUTS,
+            encoders: { 'application/pdf': 'openai-chat-input-audio' },
+          },
+        })
+      }
+    }(SCRIPT)
+    ctx.llm.registerAdapter(['route'], adapter)
+
+    await expect(ctx.llm.resolveModelInfo('route', 'model')).rejects.toMatchObject({ code: 'INVALID_MODEL_INFO' })
+    await expect(ctx.llm.prepareCall({ provider: 'route', model: 'model' })).rejects.toMatchObject({
+      code: 'INVALID_MODEL_INFO',
+    })
+  })
+
+  it('resolves native-file request pricing through the adapter alias and degrades unmounted routes', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new class extends ScriptedAdapter {
+      override nativeFileInputs(): LlmNativeFileInputs | undefined {
+        return NATIVE_INPUTS
+      }
+    }(SCRIPT)
+    ctx.llm.registerAdapter(['route'], adapter)
+
+    expect(ctx.llm.nativeFileInputs('route', 'model')).toEqual(NATIVE_INPUTS)
+    expect(ctx.llm.nativeFileRequestPricing('route', 'model')).toEqual(NATIVE_INPUTS)
+    expect(ctx.llm.nativeFileInputs('unregistered', 'model')).toBeUndefined()
+    expect(ctx.llm.nativeFileRequestPricing('unregistered', 'model')).toBeUndefined()
   })
 
   it('captures provider-owned retry policy at registration and defaults omission', async () => {
@@ -768,6 +906,240 @@ describe('LlmRuntime', () => {
     expect((await ctx.llm.prepareCall({ provider: 'route', model: 'model' })).toolUpdate).toBe('in-history')
   })
 
+  it('carries disclosed capabilities and capacity provenance through resolution and preparation', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const advertised: ModelModality[] = ['text', 'image', 'audio']
+    const unsupported = ['ultra']
+    const adapter = new class extends ScriptedAdapter {
+      override resolveModel(): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({
+          provider: 'route',
+          id: 'model',
+          name: 'Model',
+          inputModalities: ['text', 'image'],
+          advertisedInputModalities: advertised,
+          tools: false,
+          unsupportedReasoningEfforts: unsupported,
+          context: {
+            contextWindow: 200_000,
+            maxInputTokens: 128_000,
+            maxInputTokensSource: 'discovered',
+            source: 'configured',
+          },
+          maxOutputTokens: 64_000,
+          maxOutputTokensSource: 'installed',
+          defaultMaxTokens: 8192,
+        })
+      }
+    }(SCRIPT)
+    ctx.llm.registerAdapter(['route'], adapter)
+
+    const resolved = await ctx.llm.resolveModelInfo('route', 'model')
+    expect(resolved).toEqual({
+      provider: 'route',
+      id: 'model',
+      name: 'Model',
+      inputModalities: ['text', 'image'],
+      advertisedInputModalities: ['text', 'image', 'audio'],
+      tools: false,
+      unsupportedReasoningEfforts: ['ultra'],
+      context: {
+        contextWindow: 200_000,
+        maxInputTokens: 128_000,
+        maxInputTokensSource: 'discovered',
+        source: 'configured',
+      },
+      maxOutputTokens: 64_000,
+      maxOutputTokensSource: 'installed',
+      defaultMaxTokens: 8192,
+    })
+    // Disclosure lists are detached, so a caller cannot mutate adapter state.
+    expect(resolved.advertisedInputModalities).not.toBe(advertised)
+    expect(resolved.unsupportedReasoningEfforts).not.toBe(unsupported)
+
+    const prepared = await ctx.llm.prepareCall({ provider: 'route', model: 'model' })
+    expect(prepared.context).toEqual({
+      contextWindow: 200_000,
+      maxInputTokens: 128_000,
+      maxInputTokensSource: 'discovered',
+      source: 'configured',
+    })
+    expect(prepared.advertisedInputModalities).toEqual(['text', 'image', 'audio'])
+    expect(prepared.maxOutputTokens).toBe(64_000)
+    expect(prepared.tools).toBe(false)
+    expect(prepared.unsupportedReasoningEfforts).toEqual(['ultra'])
+    // The configured per-request cap is materialized; the model's own output
+    // capability stays a separate fact.
+    expect(prepared.config.maxTokens).toBe(8192)
+  })
+
+  it('strips tool schemas and projects tool history as text when the model declares no tools', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new class extends RecordingAdapter {
+      override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({ provider, id: model, name: model, tools: false })
+      }
+    }(SCRIPT)
+    ctx.llm.registerAdapter(['route'], adapter)
+    const callId = ToolCallId('call-1')
+    const call = createMessage({
+      role: 'assistant',
+      content: [{ type: 'tool-call', id: callId, name: 'read', arguments: '{"path":"a"}' }],
+      source: { kind: 'model', provider: 'route', model: 'model' },
+    })
+    const result = createToolResultMessage({
+      callId,
+      content: [{ type: 'text', text: 'file contents' }],
+      isError: false,
+    })
+    const prompt = createUserMessage({ content: [{ type: 'text', text: 'read a' }], source: { kind: 'test' } })
+    const tools = [{ name: 'read', description: 'read a file', parameters: { type: 'object' as const } }]
+
+    await collect(ctx.llm.stream({
+      provider: 'route',
+      model: 'model',
+      messages: [prompt, call, result],
+      tools,
+      toolHistory: { tools, updates: [] },
+    }))
+
+    const dispatched = adapter.lastOptions
+    expect(dispatched).toBeDefined()
+    expect(dispatched).not.toHaveProperty('tools')
+    expect(dispatched).not.toHaveProperty('toolHistory')
+    expect(dispatched?.messages).toHaveLength(3)
+    expect(dispatched?.messages[1]).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Tool call read (call-1): {"path":"a"}' }],
+    })
+    expect(dispatched?.messages[2]).toMatchObject({
+      role: 'user',
+      content: [{ type: 'text', text: 'Tool result for call-1:\nfile contents' }],
+    })
+  })
+
+  it('carries disclosed capability metadata through the advisory model list', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const advertised: ModelModality[] = ['text', 'image', 'audio']
+    const unsupported = ['ultra']
+    const model: LlmModelInfo = {
+      provider: 'catalog',
+      id: 'm',
+      name: 'M',
+      inputModalities: ['text', 'image'],
+      advertisedInputModalities: advertised,
+      tools: false,
+      unsupportedReasoningEfforts: unsupported,
+    }
+    ctx.llm.registerAdapter(['catalog'], new CatalogAdapter({ id: 'catalog', name: 'Catalog' }, [model]))
+
+    const [listed] = await ctx.llm.listModels('catalog')
+    expect(listed).toEqual({
+      provider: 'catalog',
+      id: 'm',
+      name: 'M',
+      inputModalities: ['text', 'image'],
+      advertisedInputModalities: ['text', 'image', 'audio'],
+      tools: false,
+      unsupportedReasoningEfforts: ['ultra'],
+    })
+    expect(listed?.advertisedInputModalities).not.toBe(advertised)
+    expect(listed?.unsupportedReasoningEfforts).not.toBe(unsupported)
+  })
+
+  it.each([
+    [{ contextWindow: 1_000, maxInputTokens: 0 }, 'INVALID_MODEL_CONTEXT'],
+    [{ contextWindow: 1_000, maxInputTokens: 1.5 }, 'INVALID_MODEL_CONTEXT'],
+    [{ contextWindow: 1_000, source: 'guessed' }, 'INVALID_MODEL_INFO'],
+    [{ contextWindow: 1_000, maxInputTokens: 800, maxInputTokensSource: 'guessed' }, 'INVALID_MODEL_INFO'],
+  ] as const)('rejects invalid model context metadata (%s)', async (context, code) => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new class extends ScriptedAdapter {
+      override resolveModel(): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({
+          provider: 'route',
+          id: 'model',
+          name: 'Model',
+          context: context as LlmModelContext,
+        })
+      }
+    }(SCRIPT)
+    ctx.llm.registerAdapter(['route'], adapter)
+
+    await expect(ctx.llm.resolveModelInfo('route', 'model')).rejects.toMatchObject({ code })
+  })
+
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid maximum output capacity %s',
+    async (maxOutputTokens) => {
+      const ctx = new Context()
+      await ctx.plugin(LlmRuntime)
+      const adapter = new class extends ScriptedAdapter {
+        override resolveModel(): Promise<LlmResolvedModelInfo> {
+          return Promise.resolve({
+            provider: 'route',
+            id: 'model',
+            name: 'Model',
+            maxOutputTokens,
+          })
+        }
+      }(SCRIPT)
+      ctx.llm.registerAdapter(['route'], adapter)
+
+      await expect(ctx.llm.resolveModelInfo('route', 'model'))
+        .rejects.toMatchObject({ code: 'INVALID_MODEL_MAX_TOKENS' })
+    },
+  )
+
+  it.each(['configured', 'discovered', 'installed', 'default'] as const)(
+    'accepts capacity provenance %s and preserves it',
+    async (source) => {
+      const ctx = new Context()
+      await ctx.plugin(LlmRuntime)
+      const adapter = new class extends ScriptedAdapter {
+        override resolveModel(): Promise<LlmResolvedModelInfo> {
+          return Promise.resolve({
+            provider: 'route',
+            id: 'model',
+            name: 'Model',
+            context: { contextWindow: 1_000, source },
+            maxOutputTokens: 100,
+            maxOutputTokensSource: source,
+          })
+        }
+      }(SCRIPT)
+      ctx.llm.registerAdapter(['route'], adapter)
+
+      await expect(ctx.llm.resolveModelInfo('route', 'model')).resolves.toMatchObject({
+        context: { contextWindow: 1_000, source },
+        maxOutputTokensSource: source,
+      })
+    },
+  )
+
+  it('rejects an unknown output-capacity source', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new class extends ScriptedAdapter {
+      override resolveModel(): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({
+          provider: 'route',
+          id: 'model',
+          name: 'Model',
+          maxOutputTokensSource: 'guessed' as LlmModelCapacitySource,
+        })
+      }
+    }(SCRIPT)
+    ctx.llm.registerAdapter(['route'], adapter)
+
+    await expect(ctx.llm.resolveModelInfo('route', 'model'))
+      .rejects.toMatchObject({ code: 'INVALID_MODEL_INFO' })
+  })
+
   it('resolves detached model context independently of advisory catalog membership', async () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
@@ -908,6 +1280,11 @@ describe('LlmRuntime', () => {
       model: 'plain',
       reasoningEffort: ReasoningEffortId('standard'),
     })).rejects.toMatchObject({ code: 'UNSUPPORTED_REASONING_EFFORT' })
+    // Clearing the effort is the recovery path a stale selection uses: the
+    // same no-ladder model resolves its provider default when the request
+    // names no effort, so reselecting the route clears the refusal.
+    await expect(ctx.llm.resolveCallConfig({ provider: 'route', model: 'plain' }))
+      .resolves.toEqual({ provider: 'route', model: 'plain' })
   })
 
   it('resolves reasoning defaults at the final adapter boundary after routing middleware', async () => {

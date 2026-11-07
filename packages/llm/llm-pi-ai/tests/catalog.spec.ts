@@ -11,6 +11,7 @@ import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { AssistantMessageEventStream } from '@earendil-works/pi-ai/utils/event-stream'
 import type { Api, Model, OpenAICompletionsCompat, Provider } from '@earendil-works/pi-ai'
 import { resolveProfiles } from '../src/config.ts'
+import { resolveRouteModels } from '../src/catalog.ts'
 import { createModels, createProvider, getSupportedThinkingLevels } from '../src/models.ts'
 import { buildProvider, supportedProtocols } from '../src/provider.ts'
 import { assemble } from './assemble.ts'
@@ -489,7 +490,7 @@ describe('catalog routes with per-model configuration', () => {
     // The configured field wins and the name still comes from the catalog. The
     // catalog's own output cap is the model's capability, not a cap anyone
     // chose, so it must not arrive as the request default.
-    expect(info.context).toEqual({ contextWindow: 4096 })
+    expect(info.context).toEqual({ contextWindow: 4096, source: 'configured' })
     expect(info.name).toBe(catalogModel.name)
     expect(info.defaultMaxTokens).toBeUndefined()
     // An explicit list replaces the catalog rather than adding to it.
@@ -663,6 +664,19 @@ describe('per-model reasoning efforts', () => {
     return model
   }
 
+  it('keeps reasoning support without inventing selectable effort levels', () => {
+    const model = modelOf(declared([{ id: 'budget-only', reasoning: true }]))
+    expect(model.reasoning).toBe(true)
+    expect(getSupportedThinkingLevels(model)).toEqual([])
+  })
+
+  it('lets an explicit reasoning refusal override an installed model', () => {
+    const [base] = getBuiltinModels('deepseek')
+    if (base === undefined) throw new Error('installed deepseek catalog is empty')
+    const model = modelOf({ deepseek: { models: [{ id: base.id, reasoning: false }] } }, 'deepseek')
+    expect(model.reasoning).toBe(false)
+  })
+
   it('declares selectable levels with their wire spellings on a hand-declared model', () => {
     const model = modelOf(declared([{
       id: 'acme-think',
@@ -684,6 +698,40 @@ describe('per-model reasoning efforts', () => {
       max: 'ultra',
     })
     expect(getSupportedThinkingLevels(model)).toEqual(['off', 'low', 'high', 'max'])
+  })
+
+  it('offers no ladder for an installed model with no thinking-level map', () => {
+    const model = getBuiltinModels('amazon-bedrock').find(entry =>
+      entry.reasoning && entry.thinkingLevelMap === undefined)
+    if (model === undefined) throw new Error('installed catalog has no reasoning model without a map')
+    expect(getSupportedThinkingLevels(model)).toEqual([])
+  })
+
+  it('offers an explicitly mapped off-only ladder', () => {
+    const [base] = getBuiltinModels('deepseek')
+    if (base === undefined) throw new Error('installed deepseek catalog is empty')
+    const model = { ...base, reasoning: true, thinkingLevelMap: { off: 'none' } } as Model<Api>
+    expect(getSupportedThinkingLevels(model)).toEqual(['off'])
+  })
+
+  it('offers no ladder for an installed map that only disables off', () => {
+    const [, model] = getBuiltinModels('azure-openai-responses')
+      .map(entry => [entry, entry] as const)
+      .find(([entry]) => entry.reasoning && Object.keys(entry.thinkingLevelMap ?? {}).length === 1
+        && entry.thinkingLevelMap?.off === null) ?? []
+    if (model === undefined) throw new Error('installed catalog has no off-only reasoning map')
+    expect(getSupportedThinkingLevels(model)).toEqual([])
+  })
+
+  it('offers only explicitly mapped non-null levels', () => {
+    const [base] = getBuiltinModels('deepseek')
+    if (base === undefined) throw new Error('installed deepseek catalog is empty')
+    const model = {
+      ...base,
+      reasoning: true,
+      thinkingLevelMap: { off: null, low: null, high: 'high', max: 'max' },
+    } as Model<Api>
+    expect(getSupportedThinkingLevels(model)).toEqual(['high', 'max'])
   })
 
   it('keeps a declared off value in the map for dispatch to send', () => {
@@ -720,7 +768,7 @@ describe('per-model reasoning efforts', () => {
     const model = modelOf({ deepseek: { models: [{ id: catalogModel.id, reasoningEfforts: false }] } }, 'deepseek')
 
     expect(model.reasoning).toBe(false)
-    expect(getSupportedThinkingLevels(model)).toEqual(['off'])
+    expect(getSupportedThinkingLevels(model)).toEqual([])
   })
 
   it('inherits the catalog capability when the field is absent', () => {
@@ -784,6 +832,20 @@ describe('modelOverrides', () => {
     // A sibling the overrides do not name is byte-identical to the catalog.
     const sibling = models.find(model => model.id !== target.id)
     expect(sibling?.maxTokens).toBe(getBuiltinModels('deepseek').find(model => model.id === sibling?.id)?.maxTokens)
+  })
+
+  it('carries an override’s tool refusal onto the installed model facts', () => {
+    const target = deepseekModel()
+    const catalog = resolveRouteModels({
+      provider: 'deepseek',
+      modelOverrides: { [target.id]: { tools: false } },
+      defaultContextWindow: 262_144,
+      defaultMaxTokens: 32_768,
+      defaultInput: ['text'],
+    })
+    // `modelOverrides` takes the same fields a models entry takes; a route
+    // whose gateway cannot call tools must stop advertising schemas.
+    expect(catalog.facts.get(target.id)?.tools).toBe(false)
   })
 
   it('refuses every override that lands nowhere instead of skipping it', () => {
@@ -1198,6 +1260,198 @@ describe('resolution snapshots', () => {
 
     expect(first.paths).toHaveLength(1)
     expect(second.paths).toHaveLength(1)
+  })
+})
+
+describe('catalog facts and endpoint authority', () => {
+  it('returns per-field sources and keeps the input cap distinct from both capacities', () => {
+    const catalog = resolveRouteModels({
+      provider: 'acme-gateway',
+      api: 'openai-completions',
+      baseURL: 'https://acme.test',
+      models: [
+        { id: 'sized', contextWindow: 200_000, maxInputTokens: 128_000, maxTokens: 8192 },
+        { id: 'bare' },
+      ],
+      defaultContextWindow: 262_144,
+      defaultMaxTokens: 32_768,
+      defaultInput: ['text'],
+    })
+    expect(catalog.models[0]).toMatchObject({ id: 'sized', contextWindow: 200_000, maxTokens: 8192 })
+    expect(catalog.models[0]).not.toHaveProperty('maxInputTokens')
+    expect(catalog.facts.get('sized')).toEqual({
+      contextWindow: 'configured',
+      maxTokens: 'configured',
+      input: 'default',
+      inputModalities: ['text'],
+      maxInputTokens: 128_000,
+      maxInputTokensSource: 'configured',
+    })
+    // A fallback is a route assumption, labeled separately from a disclosure
+    // or declaration, and it never creates an input-only cap.
+    expect(catalog.facts.get('bare')).toEqual({
+      contextWindow: 'default',
+      maxTokens: 'default',
+      input: 'default',
+      inputModalities: ['text'],
+    })
+  })
+
+  it('keeps declared input, tool support, and unsupported efforts from discovery', () => {
+    const catalog = resolveRouteModels({
+      provider: 'acme-gateway',
+      api: 'openai-completions',
+      baseURL: 'https://acme.test',
+      catalogAuthority: 'endpoint',
+      discoveredModels: [{
+        id: 'm',
+        input: ['text', 'image', 'audio'],
+        tools: false,
+        unsupportedReasoningEfforts: ['ultra'],
+        source: 'discovered',
+        discoveredAt: 1,
+      }],
+      defaultContextWindow: 262_144,
+      defaultMaxTokens: 32_768,
+      defaultInput: ['text'],
+    })
+    // The advertised list keeps the disclosure-side token, while the
+    // materialized model carries only what pi-ai can encode, and an explicit
+    // `tools: false` stays a stated negative capability.
+    expect(catalog.models[0]?.input).toEqual(['text', 'image'])
+    expect(catalog.facts.get('m')).toMatchObject({
+      input: 'discovered',
+      inputModalities: ['text', 'image', 'audio'],
+      tools: false,
+      unsupportedReasoningEfforts: ['ultra'],
+    })
+  })
+
+  it('serves an endpoint-authority discovered row without the installed entry of the same id', () => {
+    const installed = getBuiltinModels('deepseek')[0]
+    if (installed === undefined) throw new Error('the installed catalog ships no deepseek model')
+    const catalog = resolveRouteModels({
+      provider: 'deepseek',
+      api: 'openai-completions',
+      baseURL: 'https://proxy.test/v1',
+      catalogAuthority: 'endpoint',
+      discoveredModels: [{ id: installed.id, name: 'proxy alias', source: 'discovered', discoveredAt: 1 }],
+      defaultContextWindow: 262_144,
+      defaultMaxTokens: 32_768,
+      defaultInput: ['text'],
+    })
+    // The id collides with an installed model, but the endpoint never said it
+    // serves that model's capacities, protocol, modalities, or reasoning: the
+    // row keeps its own name and the route's labeled defaults.
+    expect(catalog.models[0]).toMatchObject({
+      id: installed.id,
+      name: 'proxy alias',
+      api: 'openai-completions',
+      baseUrl: 'https://proxy.test/v1',
+      contextWindow: 262_144,
+      maxTokens: 32_768,
+      input: ['text'],
+      reasoning: false,
+    })
+    expect(catalog.models[0]?.thinkingLevelMap).toBeUndefined()
+    expect(catalog.facts.get(installed.id)).toEqual({
+      contextWindow: 'default',
+      maxTokens: 'default',
+      input: 'default',
+      inputModalities: ['text'],
+    })
+    expect(catalog.configuredMaxTokens.size).toBe(0)
+  })
+
+  it('keeps a discovered output capability out of the per-request cap', () => {
+    const catalog = resolveRouteModels({
+      provider: 'acme-gateway',
+      api: 'openai-completions',
+      baseURL: 'https://acme.test',
+      catalogAuthority: 'endpoint',
+      discoveredModels: [{
+        id: 'disc-model',
+        contextWindow: 128_000,
+        maxTokens: 65_536,
+        source: 'discovered',
+        discoveredAt: 1,
+      }],
+      defaultContextWindow: 262_144,
+      defaultMaxTokens: 32_768,
+      defaultInput: ['text'],
+    })
+    // The disclosure sizes the model capability and stops there; only an
+    // explicit entry or override chooses a request default.
+    expect(catalog.models[0]).toMatchObject({ maxTokens: 65_536 })
+    expect(catalog.facts.get('disc-model')?.maxTokens).toBe('discovered')
+    expect(catalog.configuredMaxTokens.size).toBe(0)
+  })
+
+  it('labels installed-catalog facts separately from route assumptions', () => {
+    const installed = getBuiltinModels('deepseek')[0]
+    if (installed === undefined) throw new Error('the installed catalog ships no deepseek model')
+    const catalog = resolveRouteModels({
+      provider: 'deepseek',
+      defaultContextWindow: 262_144,
+      defaultMaxTokens: 32_768,
+      defaultInput: ['text'],
+    })
+    expect(catalog.facts.get(installed.id)).toMatchObject({
+      contextWindow: 'installed',
+      maxTokens: 'installed',
+      input: 'installed',
+    })
+    // An override on an installed model states a configuration fact even
+    // though the entry itself came from the catalog.
+    const overridden = resolveRouteModels({
+      provider: 'deepseek',
+      modelOverrides: { [installed.id]: { contextWindow: 1234 } },
+      defaultContextWindow: 262_144,
+      defaultMaxTokens: 32_768,
+      defaultInput: ['text'],
+    })
+    expect(overridden.facts.get(installed.id)).toMatchObject({
+      contextWindow: 'configured',
+      maxTokens: 'installed',
+      input: 'installed',
+    })
+  })
+
+  it('does not refill an endpoint-authority route from the installed catalog', () => {
+    const request = {
+      provider: 'deepseek',
+      catalogAuthority: 'endpoint' as const,
+      defaultContextWindow: 262_144,
+      defaultMaxTokens: 32_768,
+      defaultInput: ['text'] as const,
+    }
+    // A retained empty listing is authoritative even though pi-ai ships a
+    // deepseek catalog that could otherwise answer.
+    const empty = resolveRouteModels({ ...request, discoveredModels: [] })
+    expect(empty).toMatchObject({ models: [], knownEmpty: true })
+    expect(empty.facts.size).toBe(0)
+
+    // No record is no evidence, so the route still fails loudly.
+    expect(() => resolveRouteModels(request)).toThrow(/resolves no models/)
+
+    const installed = getBuiltinModels('deepseek')[0]
+    if (installed === undefined) throw new Error('the installed catalog ships no deepseek model')
+    expect(() => resolveRouteModels({
+      ...request,
+      modelOverrides: { [installed.id]: { contextWindow: 1 } },
+    })).toThrow(/modelOverrides.*catalogAuthority "endpoint"/)
+  })
+
+  it('rejects a non-positive input cap at resolution', () => {
+    expect(() => resolveRouteModels({
+      provider: 'acme-gateway',
+      api: 'openai-completions',
+      baseURL: 'https://acme.test',
+      models: [{ id: 'm', maxInputTokens: 0 }],
+      defaultContextWindow: 262_144,
+      defaultMaxTokens: 32_768,
+      defaultInput: ['text'],
+    })).toThrow(/maxInputTokens must be a positive integer/)
   })
 })
 

@@ -167,6 +167,32 @@ export interface CommandCodeAdapterOptions {
   now?: () => Date
 }
 
+/** Exact route model settings entry, when settings declare one for this id. */
+function configuredModelOf(profile: CommandCodeRouteProfile, modelId: string): CommandCodeRouteModel | undefined {
+  return profile.models?.find(model => model.id === modelId)
+}
+
+/**
+ * Effective input modalities for one exact model: the catalog entry's own
+ * answer, then a configured model's declared `input`, then no answer. A
+ * silent source never becomes a permissive default.
+ */
+function inputModalitiesFor(
+  profile: CommandCodeRouteProfile,
+  modelId: string,
+  entry: CatalogEntry | undefined,
+): ('text' | 'image')[] | undefined {
+  const catalog = modalitiesOf(entry)
+  if (catalog !== undefined) return catalog
+  const input = configuredModelOf(profile, modelId)?.input
+  return input !== undefined && input.length > 0 ? [...input] : undefined
+}
+
+/** The catalog's tool-call disclosure, or undefined when it states nothing. */
+function toolsSupported(entry: CatalogEntry | undefined): boolean | undefined {
+  return entry?.tool_call
+}
+
 /** Request timeout for one `/alpha/generate` call. */
 const REQUEST_TIMEOUT_MS = 300_000
 
@@ -343,12 +369,17 @@ export class CommandCodeAdapter extends LlmAdapter {
     const profile = this.profileOf(provider)
     const entries = await this.options.catalogFor(profile).entries()
     if (entries.length > 0) {
-      return entries.map(entry => ({
-        provider,
-        id: entry.id,
-        name: entry.name,
-        ...modalitiesOf(entry) === undefined ? {} : { inputModalities: modalitiesOf(entry) },
-      }))
+      return entries.map(entry => {
+        const modalities = inputModalitiesFor(profile, entry.id, entry)
+        const tools = toolsSupported(entry)
+        return {
+          provider,
+          id: entry.id,
+          name: entry.name,
+          ...modalities === undefined ? {} : { inputModalities: modalities },
+          ...tools === undefined ? {} : { tools },
+        }
+      })
     }
     return (profile.models ?? []).map(model => ({
       provider,
@@ -362,6 +393,8 @@ export class CommandCodeAdapter extends LlmAdapter {
     const profile = this.profileOf(provider)
     const entries = await this.options.catalogFor(profile).entries()
     const entry: CatalogEntry | undefined = entryFor(entries, model)
+    const modalities = inputModalitiesFor(profile, model, entry)
+    const tools = toolsSupported(entry)
     const efforts = effortsOf(entry)
     const context = contextWindowOf(entry)
     // The catalog's output ceiling is the call's default budget: without it the
@@ -372,7 +405,8 @@ export class CommandCodeAdapter extends LlmAdapter {
       provider,
       id: model,
       name: entry?.name ?? model,
-      ...modalitiesOf(entry) === undefined ? {} : { inputModalities: modalitiesOf(entry) },
+      ...modalities === undefined ? {} : { inputModalities: modalities },
+      ...tools === undefined ? {} : { tools },
       ...context === undefined ? {} : { context: { contextWindow: context } },
       ...output === undefined ? {} : { defaultMaxTokens: output },
       ...efforts.length === 0
@@ -397,6 +431,8 @@ export class CommandCodeAdapter extends LlmAdapter {
     const catalog = this.options.catalogFor(profile)
     const entries = await catalog.entries()
     const entry = entryFor(entries, options.model)
+    const modalities = inputModalitiesFor(profile, options.model, entry)
+    const visionEnabled = visionOf(entry) || modalities?.includes('image') === true
 
     const effort = options.reasoningEffort
     if (effort !== undefined) {
@@ -443,12 +479,12 @@ export class CommandCodeAdapter extends LlmAdapter {
       // conversion seam sanitizes its text (scrub + 200k cap) once; a legacy
       // loopback keypool route leaves the body to the proxy downstream.
       sanitizeText: pooled || !isLoopbackBaseURL(profile.baseURL),
-      tools: toCcTools(options.tools),
+      tools: entry?.tool_call === false ? [] : toCcTools(options.tools),
       ...options.system === undefined ? {} : { system: options.system },
       ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
       ...options.temperature === undefined ? {} : { temperature: options.temperature },
       ...effort === undefined ? {} : { reasoningEffort: effort },
-      visionEnabled: visionOf(entry),
+      visionEnabled,
       ...this.options.now === undefined ? {} : { now: this.options.now() },
     })
 

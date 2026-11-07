@@ -28,6 +28,25 @@ const CATALOG: ModelCatalog = {
       models: [
         { id: 'big', name: 'Big', contextWindow: 1_000_000, maxTokens: 32_000 },
         { id: 'small', name: 'Small', contextWindow: 32_000 },
+        { id: 'capability', name: 'Capability', contextWindow: 262_144, contextWindowSource: 'installed', maxTokens: 235_929, maxTokensSource: 'installed' },
+        { id: 'capped', name: 'Capped', contextWindow: 200_000, maxTokens: 32_000, defaultMaxTokens: 16_384 },
+        { id: 'fallback-output', name: 'Fallback Output', contextWindow: 200_000, maxTokens: 32_000, maxTokensSource: 'default' },
+        {
+          id: 'assumed-window',
+          name: 'Assumed Window',
+          contextWindow: 262_144,
+          contextWindowSource: 'default',
+          maxTokens: 65_536,
+          maxTokensSource: 'default',
+        },
+        {
+          id: 'assumed-input',
+          name: 'Assumed Input',
+          contextWindow: 262_144,
+          contextWindowSource: 'default',
+          maxInputTokens: 200_000,
+          maxInputTokensSource: 'discovered',
+        },
       ],
     },
   ],
@@ -44,10 +63,33 @@ describe('compaction parameter mirror', () => {
 })
 
 describe('compaction model catalog indexing', () => {
-  it('keys catalog models by provider/model', () => {
+  it('keys catalog models by provider/model and keeps capacity provenance', () => {
     const models = compactionModels(CATALOG)
     expect(models.get('alpha/big')).toEqual({ contextWindow: 1_000_000, maxTokens: 32_000 })
     expect(models.get('alpha/small')).toEqual({ contextWindow: 32_000 })
+    expect(models.get('alpha/capability')).toEqual({
+      contextWindow: 262_144,
+      contextWindowSource: 'installed',
+      maxTokens: 235_929,
+      maxTokensSource: 'installed',
+    })
+    expect(models.get('alpha/capped')).toEqual({
+      contextWindow: 200_000,
+      maxTokens: 32_000,
+      defaultMaxTokens: 16_384,
+    })
+    expect(models.get('alpha/assumed-window')).toEqual({
+      contextWindow: 262_144,
+      contextWindowSource: 'default',
+      maxTokens: 65_536,
+      maxTokensSource: 'default',
+    })
+    expect(models.get('alpha/assumed-input')).toEqual({
+      contextWindow: 262_144,
+      contextWindowSource: 'default',
+      maxInputTokens: 200_000,
+      maxInputTokensSource: 'discovered',
+    })
     expect(compactionModels(undefined).size).toBe(0)
   })
 })
@@ -60,13 +102,86 @@ describe('effective compaction policy derivation', () => {
       null,
       compactionModels(CATALOG),
       t)
-    // 1M window: reserve min(65536, 500000) = 65536; threshold min(600000, 868928).
+    // The declared 32k maxTokens is a capability, not a request budget, so it
+    // reserves nothing; headroom is subtracted once from the whole window.
     expect(readout).toMatchObject({
       route: 'alpha/big',
       contextWindow: 1_000_000,
-      outputReserveTokens: 65_536,
+      outputReserveTokens: 0,
       thresholdTokens: 600_000,
-      retainTokens: Math.floor((1_000_000 - 65_536) * 0.16),
+      retainTokens: Math.floor(1_000_000 * 0.16),
+    })
+    expect(readout.problem).toBeUndefined()
+  })
+
+  it('reserves only the adapter default, never the declared output capability', () => {
+    const readout = deriveCompactionPolicy(
+      PARAMS,
+      { provider: 'alpha', model: 'capped' },
+      null,
+      compactionModels(CATALOG),
+      t)
+    // defaultMaxTokens 16384 is a request budget; maxTokens 32000 is not.
+    expect(readout.outputReserveTokens).toBe(16_384)
+    expect(readout.contextWindow).toBe(200_000)
+    expect(readout.thresholdTokens).toBe(200_000 - 16_384 - 65_536)
+    expect(readout.retainTokens).toBe(Math.floor((200_000 - 16_384) * 0.16))
+    expect(readout.problem).toBeUndefined()
+  })
+
+  it('keeps shipped defaults valid for a 235929 capability on a 262144 window', () => {
+    const readout = deriveCompactionPolicy(
+      PARAMS,
+      { provider: 'alpha', model: 'capability' },
+      null,
+      compactionModels(CATALOG),
+      t)
+    expect(readout).toMatchObject({
+      contextWindow: 262_144,
+      outputReserveTokens: 0,
+      thresholdTokens: 157_286,
+      retainTokens: 41_943,
+    })
+    expect(readout.problem).toBeUndefined()
+  })
+
+  it('reserves nothing for a default-source output capability and rejects a default-source window without an input cap', () => {
+    const fallbackOutput = deriveCompactionPolicy(
+      PARAMS,
+      { provider: 'alpha', model: 'fallback-output' },
+      null,
+      compactionModels(CATALOG),
+      t)
+    expect(fallbackOutput.outputReserveTokens).toBe(0)
+    expect(fallbackOutput.thresholdTokens).toBe(120_000)
+
+    const assumedWindow = deriveCompactionPolicy(
+      PARAMS,
+      { provider: 'alpha', model: 'assumed-window' },
+      null,
+      compactionModels(CATALOG),
+      t)
+    // The 262144 route default is not a disclosed capacity: no threshold may
+    // be computed from it.
+    expect(assumedWindow.thresholdTokens).toBeUndefined()
+    expect(assumedWindow.contextWindow).toBeUndefined()
+    expect(assumedWindow.problem).toContain('route default')
+  })
+
+  it('uses a disclosed input cap when the combined window is only a route default', () => {
+    const readout = deriveCompactionPolicy(
+      PARAMS,
+      { provider: 'alpha', model: 'assumed-input' },
+      null,
+      compactionModels(CATALOG),
+      t)
+    // The default-source 262144 window is not disclosed, but the 200000 input
+    // cap is: it becomes the effective prompt budget.
+    expect(readout).toMatchObject({
+      contextWindow: 200_000,
+      outputReserveTokens: 0,
+      thresholdTokens: 120_000,
+      retainTokens: 32_000,
     })
     expect(readout.problem).toBeUndefined()
   })

@@ -7,6 +7,7 @@ import type {
   LlmCallConfig,
   LlmCallConfigAdapterDefaults,
   LlmFailure,
+  LlmNativeFileInputs,
   ParticipantTag,
   SystemMessage,
   SystemPromptUpdate,
@@ -87,7 +88,7 @@ export type OptionalSessionSeq = SessionSeq | null
  * immutable prior-generation, and current fast-path rules are recorded in
  * `.agents/notes/implemented/architecture/2026-08-31-released-session-format-migrations.md`.
  */
-export const SESSION_FORMAT_VERSION = 4
+export const SESSION_FORMAT_VERSION = 5
 
 /**
  * Immutable validated storage metadata, kept outside the conversation event log.
@@ -280,6 +281,13 @@ export interface RequestContext {
   contextWindow?: number
   /** `'in-history'` when the route reads the latest `system` message at any position as the effective system prompt. */
   systemPromptUpdate?: SystemPromptUpdate
+  /**
+   * Exact native-file admission and pricing policy in force for the route, when
+   * it enables native media. Policy only: filenames, bytes, and sentinels stay
+   * in their durable attachment and message records. Absent means every file
+   * was projected to handle text.
+   */
+  nativeFileInputs?: LlmNativeFileInputs
 }
 
 /**
@@ -415,9 +423,12 @@ export interface SessionEventMap {
   }
   /**
    * Route metadata for the next request, logged only when the route, capacity,
-   * or system prompt update mode changes. It does not participate in request
-   * reconstruction or header equality. Prompt admission uses the bound prepared
-   * call's capability, not this snapshot from an earlier request.
+   * native-file policy, or system prompt update mode changes. It does not
+   * participate in request-header equality, and prompt admission uses the bound
+   * prepared call's capability rather than this snapshot from an earlier
+   * request. Its `nativeFileInputs` policy is the durable record that drives
+   * native-media projection and token pricing: absent means every file was
+   * projected to handle text.
    */
   'request/context': RequestContext
   /**

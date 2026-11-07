@@ -7,7 +7,12 @@ import SessionStore from '@deepseek-ai/dsh-session'
 import { LlmAttemptId, ToolCallId, createMessage, createToolResultMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { MessageSource } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
-import { SessionHistoryController } from '@deepseek-ai/dsh-api-session-controller/src/history.ts'
+import {
+  DEFAULT_SESSION_FOLLOW_BUFFER_LIMITS,
+  SessionHistoryController,
+} from '@deepseek-ai/dsh-api-session-controller/src/history.ts'
+import type { SessionObservation } from '@deepseek-ai/dsh-session-query'
+import { SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionFollowFrame, SessionPage, SessionWireEvent } from '@deepseek-ai/dsh-api-session-controller/types'
 import { createSessionTestRemote, installSessionReadTestServices } from './test-remote.ts'
 
@@ -1062,5 +1067,524 @@ describe('Session history raw journal', () => {
       iterations: [],
       asOfSeq: marker.seq,
     })
+  })
+
+  it('replays a large durable suffix behind a slow opening without retaining it', async () => {
+    const { ctx } = await harness()
+    const session = ctx.sessions.create(undefined, { meta: { cwd: '/workspace' } })
+    const history = new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() })
+    const abort = new AbortController()
+    const iterator = history.follow({
+      address: { kind: 'session', sessionId: session.id },
+    }, abort.signal)[Symbol.asyncIterator]()
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: 'snapshot', cursor: -1 },
+    })
+    // The Client has not pulled the snapshot's successor yet: this is the
+    // window the old unbounded deque retained every event in.
+    for (let index = 0; index < 10_000; index += 1) {
+      session.append('turn/start', { turn: index + 1 })
+    }
+    expect(history.followBacklog()).toEqual({ items: 0, bytes: 0 })
+
+    const seqs: number[] = []
+    for (let index = 0; index < 10_000; index += 1) {
+      const frame = await iterator.next()
+      if (frame.done || frame.value.type !== 'event') throw new Error('follow ended before the durable suffix')
+      seqs.push(frame.value.event.seq)
+      if (index % 997 === 0) expect(history.followBacklog()).toEqual({ items: 0, bytes: 0 })
+    }
+    expect(seqs).toEqual(Array.from({ length: 10_000 }, (_, index) => index))
+
+    abort.abort()
+    await iterator.next()
+    await ctx.fiber.dispose()
+  })
+
+  it('keeps snapshot-to-live durable seqs contiguous without loss or duplication', async () => {
+    const { ctx } = await harness()
+    const session = ctx.sessions.create(undefined, { meta: { cwd: '/workspace' } })
+    const opening = session.append('turn/start', { turn: 1 })
+    const history = new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() })
+    const abort = new AbortController()
+    const iterator = history.follow({
+      address: { kind: 'session', sessionId: session.id },
+    }, abort.signal)[Symbol.asyncIterator]()
+
+    const snapshot = await iterator.next()
+    if (snapshot.done || snapshot.value.type !== 'snapshot') throw new Error('follow did not open')
+    expect(snapshot.value.cursor).toBe(opening.seq)
+    expect(snapshot.value.records.at(-1)?.event.seq).toBe(opening.seq)
+
+    // Appended while the snapshot is in flight: replayed from the log.
+    const duringTransfer = session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    const alsoDuringTransfer = session.append('turn/start', { turn: 2 })
+    const first = await iterator.next()
+    // Appended after listeners installed: delivered live.
+    const afterSwitch = session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+    const second = await iterator.next()
+    const third = await iterator.next()
+
+    const seqs = [first, second, third].map((frame) => {
+      if (frame.done || frame.value.type !== 'event') throw new Error('follow emitted a non-event frame')
+      return frame.value.event.seq
+    })
+    expect(seqs).toEqual([duringTransfer.seq, alsoDuringTransfer.seq, afterSwitch.seq])
+    expect(new Set(seqs).size).toBe(seqs.length)
+    expect(seqs[0]).toBe(snapshot.value.cursor + 1)
+
+    abort.abort()
+    await iterator.next()
+    await ctx.fiber.dispose()
+  })
+
+  it('ends one follow for a clean resync when a slow consumer exhausts the backlog cap', async () => {
+    const { ctx } = await harness()
+    const session = ctx.sessions.create(undefined, { meta: { cwd: '/workspace' } })
+    const agent = { id: session.id, session, status: 'running', ctx } as Agent
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const limits = { maxItems: 3, maxBytes: 1024 * 1024 }
+    const history = new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() }, limits)
+    const abort = new AbortController()
+    const iterator = history.follow({
+      address: { kind: 'session', sessionId: session.id },
+      assistantStream: true,
+    }, abort.signal)[Symbol.asyncIterator]()
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: 'snapshot', cursor: -1, assistantStream: { revision: 0 } },
+    })
+    const attemptId = LlmAttemptId('overflow-attempt')
+    ctx.emit('agent/assistant-stream', {
+      agent,
+      frame: { type: 'start', attemptId, revision: 1, turn: 1, step: 1 },
+    })
+    for (let index = 0; index < 6; index += 1) {
+      ctx.emit('agent/assistant-stream', {
+        agent,
+        frame: {
+          type: 'chunk', attemptId, revision: index + 2, index,
+          time: index + 1, chunk: { type: 'text-delta', index: 0, text: 'x'.repeat(64) },
+        },
+      })
+      expect(history.followBacklog().items).toBeLessThanOrEqual(limits.maxItems)
+      expect(history.followBacklog().bytes).toBeLessThanOrEqual(limits.maxBytes)
+    }
+    // The fourth retained item exceeded the cap: every retained frame is gone.
+    expect(history.followBacklog()).toEqual({ items: 0, bytes: 0 })
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined })
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined })
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn.mock.calls[0]?.[0]).toContain('backlog exceeded')
+
+    abort.abort()
+    await ctx.fiber.dispose()
+  })
+
+  it('ends one follow for a clean resync when live durable events exceed the backlog cap', async () => {
+    const { ctx } = await harness()
+    const session = ctx.sessions.create(undefined, { meta: { cwd: '/workspace' } })
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const history = new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() }, {
+      maxItems: 2,
+      maxBytes: 1024 * 1024,
+    })
+    const abort = new AbortController()
+    const iterator = history.follow({
+      address: { kind: 'session', sessionId: session.id },
+    }, abort.signal)[Symbol.asyncIterator]()
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: 'snapshot', cursor: -1 },
+    })
+    const firstEvent = session.append('turn/start', { turn: 1 })
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: { type: 'event', event: firstEvent },
+    })
+    // The consumer is paused at the yield above; three further appends exceed
+    // the two-item cap and discard the retained events.
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+    session.append('turn/start', { turn: 2 })
+    session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+    expect(history.followBacklog()).toEqual({ items: 0, bytes: 0 })
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined })
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined })
+    expect(warn).toHaveBeenCalledOnce()
+
+    abort.abort()
+    await ctx.fiber.dispose()
+  })
+})
+
+describe('Session history follow resume', () => {
+  /** Ordinary Session with `count` appended user messages, returning the controller. */
+  async function resumeHarness(
+    count: number,
+    options: { readonly resume?: { enabled: boolean; maxEvents: number }; readonly limits?: { maxItems: number; maxBytes: number } } = {},
+  ): Promise<{ ctx: Context; session: Session; history: SessionHistoryController }> {
+    const { ctx } = await harness()
+    const session = ctx.sessions.create(undefined, { meta: { cwd: '/workspace' } })
+    for (let index = 0; index < count; index++) appendUserText(session, `message-${String(index)}`)
+    const history = new SessionHistoryController(
+      ctx,
+      (observation) => { observation[Symbol.dispose]() },
+      options.limits ?? DEFAULT_SESSION_FOLLOW_BUFFER_LIMITS,
+      options.resume ?? { enabled: true, maxEvents: 2048 },
+    )
+    return { ctx, session, history }
+  }
+
+  it('answers a follow without afterSeq with the full opening window (older Client)', async () => {
+    const { ctx, session, history } = await resumeHarness(3)
+    const abort = new AbortController()
+    const iterator = history.follow({
+      address: { kind: 'session', sessionId: session.id },
+    }, abort.signal)[Symbol.asyncIterator]()
+
+    const opening = await iterator.next()
+    expect(opening).toMatchObject({
+      done: false,
+      value: { type: 'snapshot', cursor: 2, hasMore: false },
+    })
+    if (opening.done === true || opening.value.type !== 'snapshot') throw new Error('expected a snapshot')
+    expect('resumedFromSeq' in opening.value).toBe(false)
+    expect(opening.value.records.map(record => record.event.seq)).toEqual([0, 1, 2])
+
+    abort.abort()
+    await expect(iterator.next()).resolves.toMatchObject({ done: true })
+    await ctx.fiber.dispose()
+  })
+
+  it('resumes a short drop with zero records from the observed tail', async () => {
+    const { ctx, session, history } = await resumeHarness(3)
+    const abort = new AbortController()
+    const iterator = history.follow({
+      address: { kind: 'session', sessionId: session.id },
+      afterSeq: SessionSeq(2),
+    }, abort.signal)[Symbol.asyncIterator]()
+
+    const opening = await iterator.next()
+    expect(opening).toMatchObject({
+      done: false,
+      value: {
+        type: 'snapshot', cursor: 2, records: [], hasMore: false, resumedFromSeq: 2,
+      },
+    })
+    if (opening.done === true || opening.value.type !== 'snapshot') throw new Error('expected a snapshot')
+    expect(opening.value.revert.asOfSeq).toBe(2)
+
+    // The resumed generation still follows later appends.
+    const waiting = iterator.next()
+    const live = appendUserText(session, 'after-drop')
+    await expect(waiting).resolves.toEqual({
+      done: false,
+      value: { type: 'event', event: live },
+    })
+
+    abort.abort()
+    await expect(iterator.next()).resolves.toMatchObject({ done: true })
+    await ctx.fiber.dispose()
+  })
+
+  it('resumes with exactly the contiguous suffix after afterSeq', async () => {
+    const { ctx, session, history } = await resumeHarness(6)
+    const abort = new AbortController()
+    const iterator = history.follow({
+      address: { kind: 'session', sessionId: session.id },
+      assistantStream: true,
+      maxMessages: 2,
+      afterSeq: SessionSeq(3),
+    }, abort.signal)[Symbol.asyncIterator]()
+
+    const opening = await iterator.next()
+    if (opening.done === true || opening.value.type !== 'snapshot') throw new Error('expected a snapshot')
+    expect(opening.value).toMatchObject({
+      cursor: 5, hasMore: false, resumedFromSeq: 3,
+    })
+    expect(opening.value.records.map(record => record.event.seq)).toEqual([4, 5])
+    expect(opening.value.assistantStream).toEqual({ revision: 0 })
+    expect(opening.value.revert.asOfSeq).toBe(5)
+
+    abort.abort()
+    await expect(iterator.next()).resolves.toMatchObject({ done: true })
+    await ctx.fiber.dispose()
+  })
+
+  it('falls back to a full snapshot when afterSeq is beyond the tail', async () => {
+    const { ctx, session, history } = await resumeHarness(3)
+    const abort = new AbortController()
+    const iterator = history.follow({
+      address: { kind: 'session', sessionId: session.id },
+      afterSeq: SessionSeq(9),
+    }, abort.signal)[Symbol.asyncIterator]()
+
+    const opening = await iterator.next()
+    if (opening.done === true || opening.value.type !== 'snapshot') throw new Error('expected a snapshot')
+    expect(opening.value.cursor).toBe(2)
+    expect('resumedFromSeq' in opening.value).toBe(false)
+    expect(opening.value.records.map(record => record.event.seq)).toEqual([0, 1, 2])
+
+    abort.abort()
+    await expect(iterator.next()).resolves.toMatchObject({ done: true })
+    await ctx.fiber.dispose()
+  })
+
+  it('falls back to a full snapshot when the dense index does not match afterSeq', async () => {
+    const { ctx } = await harness()
+    const session = ctx.sessions.create(undefined, { meta: { cwd: '/workspace' } })
+    const first = appendUserText(session, 'first')
+    const second = appendUserText(session, 'second')
+    // A retained prefix that no longer occupies its own dense position.
+    const mismatched = { ...second, seq: SessionSeq(0) }
+    const observe = vi.spyOn(ctx.sessionQuery, 'observeSession').mockResolvedValue({
+      source: 'live',
+      header: session.header,
+      inheritedEventCount: SessionLogOffset(0),
+      events: [first, mismatched],
+      cursor: 1,
+      projections: { asOfSeq: 1, values: {} },
+      retain: vi.fn(),
+      [Symbol.dispose]: vi.fn(),
+    } as unknown as SessionObservation)
+    const history = new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() })
+    const abort = new AbortController()
+    const iterator = history.follow({
+      address: { kind: 'session', sessionId: session.id },
+      afterSeq: SessionSeq(1),
+    }, abort.signal)[Symbol.asyncIterator]()
+
+    const opening = await iterator.next()
+    if (opening.done === true || opening.value.type !== 'snapshot') throw new Error('expected a snapshot')
+    expect('resumedFromSeq' in opening.value).toBe(false)
+    expect(opening.value.records).toHaveLength(2)
+
+    abort.abort()
+    await expect(iterator.next()).resolves.toMatchObject({ done: true })
+    observe.mockRestore()
+    await ctx.fiber.dispose()
+  })
+
+  it('bounds a resumed suffix by maxEvents and honors the disabled escape hatch', async () => {
+    const bounded = await resumeHarness(6, { resume: { enabled: true, maxEvents: 2 } })
+    const abort = new AbortController()
+    const atCap = bounded.history.follow({
+      address: { kind: 'session', sessionId: bounded.session.id },
+      afterSeq: SessionSeq(3),
+    }, abort.signal)[Symbol.asyncIterator]()
+    const capped = await atCap.next()
+    if (capped.done === true || capped.value.type !== 'snapshot') throw new Error('expected a snapshot')
+    expect(capped.value.resumedFromSeq).toBe(3)
+    expect(capped.value.records.map(record => record.event.seq)).toEqual([4, 5])
+
+    const overCap = bounded.history.follow({
+      address: { kind: 'session', sessionId: bounded.session.id },
+      afterSeq: SessionSeq(2),
+    }, new AbortController().signal)[Symbol.asyncIterator]()
+    const full = await overCap.next()
+    if (full.done === true || full.value.type !== 'snapshot') throw new Error('expected a snapshot')
+    expect('resumedFromSeq' in full.value).toBe(false)
+    abort.abort()
+    await expect(atCap.next()).resolves.toMatchObject({ done: true })
+    await bounded.ctx.fiber.dispose()
+
+    const disabled = await resumeHarness(3, { resume: { enabled: false, maxEvents: 2048 } })
+    const disabledAbort = new AbortController()
+    const disabledIterator = disabled.history.follow({
+      address: { kind: 'session', sessionId: disabled.session.id },
+      afterSeq: SessionSeq(2),
+    }, disabledAbort.signal)[Symbol.asyncIterator]()
+    const opaque = await disabledIterator.next()
+    if (opaque.done === true || opaque.value.type !== 'snapshot') throw new Error('expected a snapshot')
+    expect('resumedFromSeq' in opaque.value).toBe(false)
+    disabledAbort.abort()
+    await expect(disabledIterator.next()).resolves.toMatchObject({ done: true })
+    await disabled.ctx.fiber.dispose()
+  })
+
+  it('rejects malformed afterSeq as a bad request', async () => {
+    const { ctx, session, history } = await resumeHarness(2)
+    for (const afterSeq of [-2, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const abort = new AbortController()
+      const iterator = history.follow({
+        address: { kind: 'session', sessionId: session.id },
+        afterSeq: afterSeq as never,
+      }, abort.signal)[Symbol.asyncIterator]()
+      await expect(iterator.next()).rejects.toMatchObject({ code: 'gateway/bad-request' })
+      abort.abort()
+    }
+    await ctx.fiber.dispose()
+  })
+
+  it('delivers revert, compaction, and surface replacement events as ordinary suffix records', async () => {
+    const { ctx } = await harness()
+    const session = ctx.sessions.create(undefined, { meta: { cwd: '/workspace' } })
+    session.append('turn/start', { turn: 1 })
+    const anchor = appendUserText(session, 'rewrite me')
+    const answer = appendAssistantText(session, 'first answer', 0)
+    const beforeDrop = SessionSeq(session.seq - 1)
+
+    const revert = session.append('revert/state', { fromSeq: anchor.seq, cause: 'revert' })
+    const summary = appendExtension(session, 'compaction/summary', {
+      summary: [{ type: 'text', text: 'compacted' }],
+      shadowedRange: { start: anchor.seq, end: answer.seq },
+      shadowedSeqs: [anchor.seq, answer.seq],
+      shadowedTokenCount: 3,
+      provider: 'fixture',
+      model: 'fixture',
+    })
+    const replacement = session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'replacement' }],
+      source: { kind: 'user' },
+    }), {
+      surfaceOp: { op: 'replace', startSeq: anchor.seq, endSeq: answer.seq },
+      sourceEventSeqs: [revert.seq, summary.seq, anchor.seq, answer.seq],
+    })
+    const tail = SessionSeq(session.seq - 1)
+
+    const history = new SessionHistoryController(ctx, (observation) => { observation[Symbol.dispose]() })
+    const abort = new AbortController()
+    const iterator = history.follow({
+      address: { kind: 'session', sessionId: session.id },
+      afterSeq: beforeDrop,
+    }, abort.signal)[Symbol.asyncIterator]()
+
+    const opening = await iterator.next()
+    if (opening.done === true || opening.value.type !== 'snapshot') throw new Error('expected a snapshot')
+    expect(opening.value.resumedFromSeq).toBe(beforeDrop)
+    expect(opening.value.cursor).toBe(tail)
+    expect(opening.value.records.map(record => record.event.type))
+      .toEqual(['revert/state', 'compaction/summary', 'user/message'])
+    expect(opening.value.records.map(record => record.event.seq))
+      .toEqual([revert.seq, summary.seq, replacement.seq])
+    // The durable fold is taken at the resume cursor, so it already covers the
+    // suffix and the Client folds none of it again: the user-origin replacement
+    // both closed the boundary and recorded its shadow range in the baseline.
+    expect(opening.value.revert.asOfSeq).toBe(tail)
+    expect(opening.value.revert.fromSeq).toBeNull()
+    expect(opening.value.revert.shadowRanges).toEqual([
+      { start: anchor.seq, end: answer.seq + 1 },
+    ])
+
+    abort.abort()
+    await expect(iterator.next()).resolves.toMatchObject({ done: true })
+    await ctx.fiber.dispose()
+  })
+
+  it('replays events appended during the resume observation exactly once in order', async () => {
+    const { ctx, session, history } = await resumeHarness(2)
+    const original = ctx.sessionQuery.observeSession.bind(ctx.sessionQuery)
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    const observe = vi.spyOn(ctx.sessionQuery, 'observeSession').mockImplementation(async (...args) => {
+      const observation = await original(...args)
+      entered.resolve(undefined)
+      await release.promise
+      return observation
+    })
+    const abort = new AbortController()
+    const iterator = history.follow({
+      address: { kind: 'session', sessionId: session.id },
+      afterSeq: SessionSeq(1),
+    }, abort.signal)[Symbol.asyncIterator]()
+    const opening = iterator.next()
+    await entered.promise
+    session.append('turn/start', { turn: 2 })
+    const later = session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+    release.resolve(undefined)
+
+    await expect(opening).resolves.toMatchObject({
+      value: { type: 'snapshot', resumedFromSeq: 1, cursor: 1, records: [] },
+    })
+    // The observation cut stayed at seq 1; both later appends replay from the
+    // log in seq order, exactly once.
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: 'event', event: { type: 'turn/start', seq: 2 } },
+    })
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: { type: 'event', event: later },
+    })
+    const extra = Promise.resolve(iterator.next())
+    abort.abort()
+    await expect(extra).resolves.toMatchObject({ done: true })
+    observe.mockRestore()
+    await ctx.fiber.dispose()
+  })
+
+  it('carries the Assistant baseline at the resume cut and only post-cut frames after it', async () => {
+    const { ctx, session, history } = await resumeHarness(2)
+    const agent = { id: session.id, session, status: 'running', ctx } as Agent
+    const attemptId = LlmAttemptId('resume-attempt')
+    ctx.emit('agent/assistant-stream', {
+      agent,
+      frame: { type: 'start', attemptId, revision: 1, turn: 1, step: 1 },
+    })
+    const abort = new AbortController()
+    const iterator = history.follow({
+      address: { kind: 'session', sessionId: session.id },
+      assistantStream: true,
+      afterSeq: SessionSeq(1),
+    }, abort.signal)[Symbol.asyncIterator]()
+
+    const opening = await iterator.next()
+    if (opening.done === true || opening.value.type !== 'snapshot') throw new Error('expected a snapshot')
+    expect(opening.value.resumedFromSeq).toBe(1)
+    expect(opening.value.assistantStream?.activeAttempt?.attemptId).toBe(attemptId)
+
+    const waiting = iterator.next()
+    ctx.emit('agent/assistant-stream', {
+      agent,
+      frame: {
+        type: 'chunk', attemptId, revision: 2, index: 0,
+        time: 5, chunk: { type: 'text-delta', index: 0, text: 'live' },
+      },
+    })
+    const frame = await waiting
+    expect(frame).toMatchObject({
+      done: false,
+      value: { type: 'assistant-stream', frame: { type: 'chunk', revision: 2, index: 0 } },
+    })
+
+    abort.abort()
+    await expect(iterator.next()).resolves.toMatchObject({ done: true })
+    await ctx.fiber.dispose()
+  })
+
+  it('ends a resumed generation for a clean resync when live events exceed the backlog cap', async () => {
+    const { ctx, session, history } = await resumeHarness(4, {
+      limits: { maxItems: 2, maxBytes: 1024 * 1024 },
+    })
+    const warn = vi.spyOn(ctx.logger, 'warn').mockImplementation(() => {})
+    const abort = new AbortController()
+    const iterator = history.follow({
+      address: { kind: 'session', sessionId: session.id },
+      afterSeq: SessionSeq(3),
+    }, abort.signal)[Symbol.asyncIterator]()
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: 'snapshot', resumedFromSeq: 3, records: [] },
+    })
+    // Pull one replayed event so the durable listeners are installed and the
+    // follower is paused at a yield before the overflow appends.
+    session.append('turn/start', { turn: 2 })
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: 'event', event: { type: 'turn/start', seq: 4 } },
+    })
+    session.append('turn/end', { turn: 2, reason: { kind: 'completed' } })
+    session.append('turn/start', { turn: 3 })
+    session.append('turn/end', { turn: 3, reason: { kind: 'completed' } })
+    expect(history.followBacklog()).toEqual({ items: 0, bytes: 0 })
+    await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined })
+    expect(warn).toHaveBeenCalledOnce()
+
+    abort.abort()
+    await ctx.fiber.dispose()
   })
 })

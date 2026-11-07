@@ -92,6 +92,31 @@ kind: "package-reference"
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-llm-pi-ai)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
+### 启用原生文件输入
+
+原生媒体是每个模型显式声明的能力。模型名、端点、协议或公开模态都不会启用它，所有随附路由与发现模型默认使用确定性句柄文本。`models` 条目或 `modelOverrides` 值可以声明其网关会翻译的编码器、接受的 MIME 类型、原始与序列化上限，以及计量器使用的 token 预算。
+
+```yaml
+      claude-gateway:
+        api: anthropic-messages
+        apiKeyEnv: CLAUDE_GATEWAY_KEY
+        baseURL: https://proxy.example.com
+        models:
+          - id: claude-sonnet-4-5
+            nativeFileInputs:
+              version: 1
+              encoder: anthropic-document
+              mime: [application/pdf]
+              perFileBytes: 8388608
+              totalBytes: 16777216
+              maxPayloadBytes: 33554432
+              tokenReserve: { perFile: 2000, perByte: 0 }
+```
+
+编码器必须与模型解析后的 `api` 匹配：`anthropic-document` 仅用于 Anthropic Messages 与 `application/pdf`；`openai-chat-file` 仅用于 Chat Completions 与 PDF；`openai-chat-input-audio` 仅用于 Chat Completions 与 `audio/wav`、`audio/mpeg`、`audio/ogg` 或 `audio/flac`；`openai-chat-video-url` 仅用于 Chat Completions 与 `video/mp4` 或 `video/webm`。`openai-responses` 没有经过验证的原生部件，将在配置解析阶段被拒绝，并点名模型与不兼容配对，且发生在读取任何文件之前。拼错或不完整的声明也会在此失败，而不是静默关闭媒体。
+
+只有后缀映射到获准 MIME 的 user-role 文件会被保留；tool 与 assistant 出现位置保持句柄文本。随后适配器通过附件服务读取每个获准文件，并校验声明的字节数、文件名后缀、magic 字节、精确序列化部件大小、聚合编码大小、针对 `maxPayloadBytes` 的完整补丁载荷，以及每次出现位置恰好一个哨兵的放置。任何失败都会在提供方流存在之前拒绝请求。`tokenReserve` 是一次出现位置的同步计量预算（`perFile + perByte × 原始字节数`，向上取整）；记录进 `request/context` 的是描述符而非字节，因此回放绝不依赖附件当前内容。
+
 ### 登录提供方
 
 pi-ai 提供登录的提供方可以通过 harness 授权 seam 登录：流程提供 OAuth 或交互式密钥提示（密钥键入 pi-ai 自己的登录提示，而非设置表单），得到的凭据存储在 harness 凭据存储的 `llm-pi-ai/<provider id>` 记录中。存储的登录在其路由的 `apiKeyEnv` 覆盖之下完成认证，并在存储的跨进程锁下自行刷新；退出登录即删除存储记录。落在记录文法之外——小写连字符标识符——的手工声明路由键无法登录，因为对它的记录写入会以 `LlmError('UNSTORABLE_PROVIDER_ID')` 拒绝；这类路由改用 `apiKeyEnv` 或提供方 ambient 设置认证。
@@ -102,7 +127,7 @@ profile 的 `models` 列表会替换而非扩展路由的已安装目录；每�
 
 ### 带推理（reasoning）与协议兼容运行
 
-`reasoningEfforts` 声明模型可选择的 thinking 等级：每个键都是选择器提供的等级，其值是分派时在协议中发送的拼写，因此 `max: ultra` 可以为拥有自有词汇的网关重命名等级。省略该字段时保留已安装目录条目的能力；`false` 声明非推理模型。对于 pi-ai 无法识别的端点，`compat` 开关重塑请求——哪个角色携带系统提示词、哪个字段限制输出、thinking 等级如何传递——可逐路由、逐模型配置。条目与已安装目录都没有尺寸的模型，会采用路由的 `defaultContextWindow` 与 `defaultMaxTokens` 回退值。
+`reasoningEfforts` 声明模型可选择的 thinking 等级：每个键都是选择器提供的等级，其值是分派时在协议中发送的拼写，因此 `max: ultra` 可以为拥有自有词汇的网关重命名等级。省略该字段时保留已安装目录条目的能力；`false` 声明非推理模型。模型条目、发现记录或已安装目录条目若声明 `reasoning: true` 却没有非空的映射等级，则保留该支持但不提供可选 effort：缺少 `thinkingLevelMap`，或映射仅禁用 `off`，都视为没有档位；模型信息不带 `reasoning` 控件，请求发送提供方默认值，指定 effort 会以 `UNSUPPORTED_REASONING_EFFORT` 失败；显式 `reasoning: false` 会覆盖已安装目录。配置的等级会把所有未声明等级固定为 `null`，因此只有声明的拼写可选。对于 pi-ai 无法识别的端点，`compat` 开关重塑请求——哪个角色携带系统提示词、哪个字段限制输出、thinking 等级如何传递——可逐路由、逐模型配置。条目与已安装目录都没有尺寸的模型，会采用路由的 `defaultContextWindow` 与 `defaultMaxTokens` 回退值。端点权威仅依据配置与该列表解析每个发现行，绝不会继承同一 id 的已安装条目；发现得到的 `maxTokens` 只作为模型能力，不会成为每请求上限。
 
 对于自托管 Chat Completions 端点，`thinkingTokenBudgetField` 选择推理预算参数，`vllmPriority` 在服务端启用优先级调度时设置整数调度优先级。模板参数接受 `$var: thinking.budget`。`openai-responses` 网关可设置 `supportsMaxOutputTokens: false` 来省略 `max_output_tokens`；Azure 与 Codex 传输会忽略这个共享兼容字段。这些控制均需显式启用；目录拥有的 Anthropic effort 和回退能力不是可配置开关。
 
@@ -112,7 +137,7 @@ profile 的 `models` 列表会替换而非扩展路由的已安装目录；每�
 
 ### 从端点发现模型
 
-插件会回答「该提供方可以提供哪些模型？」，供配置界面正在编辑或起草的路由使用。点名了端点的草稿会先询问该端点；对已安装目录提供的路由，实时行会用目录内容补全——未公开的容量字段及其 `input` 数组作为发现结果的 `inputModalities`——当端点无法访问或无法读取时，目录会单独作答。目录路由的草稿未点名端点时直接由目录回答，不发网络请求；目录未描述的路由则必须点名端点。`openai-completions` 与 `openai-responses` 使用带 bearer 鉴权的 `GET {baseURL}/models`，`anthropic-messages` 则以 `x-api-key` 和 `anthropic-version` 使用原生 `GET /v1/models?limit=1000` 语义；其列表 URL 接受带或不带末尾 `/v1` 的 API 根地址，因为网关文档两种写法都会发布，且只有该列表 URL 会归一化这一段，模型请求收到的仍是配置原样的 `baseURL`。已配置且具名的路由会在 Host 内部提供已存凭据与 profile `headers`，因此通过 `cordis.patch.yml` 或 Cordis 配置设置的部署标头可以到达模型发现请求，但不会成为发现请求或 Models 页面的字段；表单中新键入的密钥仍优先于已存凭据。解析器接受标准 `data` 数组或富信息 `models` 对象，并归一化每个候选的 id、显示名、上下文窗口与最大输出 token 数；Anthropic 的 `max_input_tokens` 与 `max_tokens` 会进入相同容量字段，即使对象条目点名了另一个规范 id，对象键仍是请求 id，原始类型的对象属性会被忽略，缺失的显示名则回退到该请求 id。回答是界面可以提供给用户采纳的候选元数据——不存储任何内容，`cordis.patch.yml` 仍然是决定路由服务内容的唯一事实。
+插件会回答「该提供方可以提供哪些模型？」，供配置界面正在编辑或起草的路由使用。点名了端点的草稿会先询问该端点；对已安装目录提供的路由，实时行会用目录内容补全——未公开的容量字段及其 `input` 数组作为发现结果的 `inputModalities`——当端点无法访问或无法读取时，目录会单独作答。目录路由的草稿未点名端点时直接由目录回答，不发网络请求；目录未描述的路由则必须点名端点。`openai-completions` 与 `openai-responses` 使用带 bearer 鉴权的 `GET {baseURL}/models`，`anthropic-messages` 则以 `x-api-key` 和 `anthropic-version` 使用原生 `GET /v1/models?limit=1000` 语义；其列表 URL 接受带或不带末尾 `/v1` 的 API 根地址，因为网关文档两种写法都会发布，且只有该列表 URL 会归一化这一段，模型请求收到的仍是配置原样的 `baseURL`。每个返回行都带 `source: endpoint`；探测失败而由已安装目录作答时，每个行都带 `source: catalog` 以及说明探测失败的 `fallbackReason`，因此 Add/Refresh 界面可以区分实时回答与目录替代答案。已配置且具名的路由会在 Host 内部提供已存凭据与 profile `headers`，因此通过 `cordis.patch.yml` 或 Cordis 配置设置的部署标头可以到达模型发现请求，但不会成为发现请求或 Models 页面的字段；表单中新键入的密钥仍优先于已存凭据。共享列表解析器接受顶层数组、标准 `data` 数组以及两种 `models` 写法；已识别但为空的容器是合法的空结果，而没有容器的响应体才是无效结果。它保留条目的 `id` 作为请求 id，仅当 id 与 map 键都不存在时才接受 `slug`，并将其保留为来源元数据；`max_input_tokens` 填入独立的输入上限字段，而不是合并上下文窗口，`max_completion_tokens`/`outputTokenLimit` 则是输出容量别名。输入模态来自 `supportedInputModalities`、`input_modalities`、`modalities.input`、`architecture.input_modalities` 以及能力布尔值；显式的纯文本数组仍保持 `['text']`。工具与推理支持仅在声明时报告，显式 `false` 与空档位表作为答案保留，推理档位只来自公开的映射/数组或原始 `thinking.levels`，`zero_allowed` 仅在显式时加入 `off`；未知档位名只作为诊断保留，不会成为可选档位，发现流程只持久化配置接受的档位。保留的目录事实还会供 `resolveModelInfo` 与 `listModels` 使用，因此发现的仅输入上限、工具支持与不受支持的档位名会进入用户可见的模型元数据。回答是界面可以提供给用户采纳的候选元数据——不存储任何内容，`cordis.patch.yml` 仍然是决定路由服务内容的唯一事实。
 
 ### 失败与恢复
 
@@ -190,7 +215,7 @@ Settings 写入会在合并组合层与用户层后严格校验每个新增或�
 
 #### 模型看到什么
 
-所选目录模型会收到一条系统提示词（`GenerateOptions.system`，否则取历史中首条 `system` 消息的文本；首条 system 消息文本为空时不发送系统提示词）、其余历史、工具与 pi-ai 通用流式 API 支持的采样字段。每张保留图片前都会有文本，注明其完整附件 id 与实际请求尺寸。当前执行文件系统可以映射附件提供方的宿主对象时，该文本还会携带只读规范化对象路径，并警告规范化或请求投影可能缩放或重新编码上传内容。日志中的图片省略决策选中的每个出现位置都会在替换文本中保留自己的身份与当前已解析访问方式，其规范化附件不会读取或变换。当保留的出现位置按精确 base64 载荷仍超过路由的 `maxRequestImageBytes` 时，调用以 `IMAGE_OFFLOAD_REQUIRED` 失败，由 `dsh-compaction-image-offload` 用 `image/offload` 事件记录所选位置并重试步骤。提供方原生回放元数据只在适配器针对历史内容校验通过后恢复。
+所选目录模型会收到一条系统提示词（`GenerateOptions.system`，否则取历史中首条 `system` 消息的文本；首条 system 消息文本为空时不发送系统提示词）、其余历史、工具与 pi-ai 通用流式 API 支持的采样字段。每张保留图片前都会有文本，注明其完整附件 id 与实际请求尺寸。当前执行文件系统可以映射附件提供方的宿主对象时，该文本还会携带只读规范化对象路径，并警告规范化或请求投影可能缩放或重新编码上传内容。日志中的图片省略决策选中的每个出现位置都会在替换文本中保留自己的身份与当前已解析访问方式，其规范化附件不会读取或变换。当保留的出现位置按精确 base64 载荷仍超过路由的 `maxRequestImageBytes` 时，调用以 `IMAGE_OFFLOAD_REQUIRED` 失败，由 `dsh-compaction-image-offload` 用 `image/offload` 事件记录所选位置并重试步骤。提供方原生回放元数据只在适配器针对历史内容校验通过后恢复。精确模型通过 `nativeFileInputs` 接受的 user 附件会以提供方原生部件（`document`、`file`、`input_audio` 或 `video_url`）到达，而不是句柄文本；其他所有文件保持句柄文本。
 
 #### Token 影响
 
@@ -222,6 +247,9 @@ pi-ai 事件变成 harness 的推理、文本、工具调用、用量与 finish 
 这些限制说明适配器在哪里停止、由未来工作接续。它们是当前包约束，不是通用 pi-ai 对比或任务积压。
 
 - **`maxRequestImageBytes` 只计算 base64 图片载荷**，文本、工具、描述符与 JSON 结构在该上限之外，因此它必须留有余量地低于网关请求体上限。
+- **原生媒体没有真实网关证据**——这些编码器面向的 CLIProxyAPI 翻译器来自源码阅读，未经提供方实测。PDF `document` 是已验证的 Anthropic Messages 形状，把该协议翻译到 Gemini 或 Codex 的代理会携带 PDF；`openai-chat-file` 是网关特有且仅限 PDF；`input_audio` 会被 Gemini 与 Codex 上游接受，而 Claude 返回 400 或将其丢弃；`video_url` 仅作为 Gemini data URL 有效。只有在捕获到网关夹具后才应启用某种组合。
+- **原生部件会重新进入每个请求体**——与句柄文本不同，获准附件的 base64 字节会随同一历史中的每个后续请求重新发送，因此 `maxPayloadBytes` 必须覆盖完整请求体并低于网关上限。文件不会按 URL 缓存或上传。
+- **原生文件描述符是准入条件，不是能力证据**——模型或网关公开 PDF 支持并不会因此获得任何文件；只有确切的逐模型声明才准入文件，移除声明会让下一个请求恢复句柄文本。
 - **登录只存在于发起它的进程中**——授权尝试不持久，因此登录中途刷新页面会放弃它，用户需要重新开始。退出登录是对已存储记录执行 `deleteRecord`，只在本地忘记它，不会告知签发方。
 - **提供方原生发现经本插件的 ambient context 回答**——不点名凭据的路由交由目录提供方自身解析，它会询问环境值（`AZURE_OPENAI_API_KEY`、`AWS_PROFILE` 及各提供方自有集合）与本地凭据文件。两个问题都在这里得到回答：凭据 seam 先于进程环境被查询，文件存在性则针对宿主进程的文件系统以 `~` 展开后检查。它做不到的是*读取*凭据文件内容——自行解析 `~/.aws/credentials` 的提供方会直接读取，不经该 seam。
 - **重置恢复继承配置**——重置下层 profile 提供的路由会恢复该路由。

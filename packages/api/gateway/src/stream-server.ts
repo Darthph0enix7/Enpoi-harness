@@ -38,27 +38,39 @@ type BoundStreamOpener = (
 /** Convert an invocation or carrier failure to a stable wire value. */
 export type RemoteStreamFailureMapper = (error: unknown) => RemoteStreamFailure
 
-const MAX_MISSED_HEARTBEATS = 2
-
 /** Own the no-server WebSocket acceptor and every active logical stream. */
 export class RemoteStreamMuxServer {
   private readonly server = new WebSocketServer({ noServer: true })
   private readonly connections = new Set<Promise<void>>()
-  private readonly missedHeartbeats = new WeakMap<WebSocket, number>()
+  private readonly lastPongAt = new WeakMap<WebSocket, number>()
+  private readonly applicationHeartbeat = new WeakSet<WebSocket>()
   private heartbeatTimer: NodeJS.Timeout | undefined
+
+  private readonly heartbeatTimeoutMs: number
 
   /**
    * @param open - Gateway stream dispatcher.
    * @param failure - Gateway error-to-wire mapper.
-   * @param heartbeatIntervalMs - interval between WebSocket Ping control frames and application heartbeat frames.
+   * @param heartbeatIntervalMs - interval between WebSocket Ping control frames
+   * (and application heartbeat frames for capable Clients); 0 disables both.
    * @param streamInboxBytes - buffered uplink frame bytes one logical stream may hold before it fails.
+   * @param heartbeatTimeoutMs - time since the last Pong or message after which a socket is terminated.
+   * @param maxBufferedBytes - per-socket backlog above which the carrier closes instead of growing memory.
    */
   constructor(
     private readonly open: RemoteStreamOpener,
     private readonly failure: RemoteStreamFailureMapper,
     private readonly heartbeatIntervalMs: number,
     private readonly streamInboxBytes: number,
-  ) {}
+    heartbeatTimeoutMs: number,
+    private readonly maxBufferedBytes: number,
+  ) {
+    // A liveness deadline shorter than two Ping intervals would terminate
+    // healthy sockets before the first response cycle can complete.
+    this.heartbeatTimeoutMs = this.heartbeatIntervalMs > 0
+      ? Math.max(heartbeatTimeoutMs, this.heartbeatIntervalMs * 2)
+      : heartbeatTimeoutMs
+  }
 
   /**
    * Upgrade one admitted request and begin serving its logical streams. Every
@@ -73,12 +85,20 @@ export class RemoteStreamMuxServer {
     this.server.handleUpgrade(req, socket, head, (websocket) => {
       const release = bindPeer(websocket, peer)
       if (release === undefined) return
-      this.missedHeartbeats.set(websocket, 0)
-      websocket.on('pong', () => { this.missedHeartbeats.set(websocket, 0) })
+      this.lastPongAt.set(websocket, Date.now())
+      websocket.on('pong', () => { this.lastPongAt.set(websocket, Date.now()) })
+      websocket.on('message', () => { this.lastPongAt.set(websocket, Date.now()) })
+      if (requestsApplicationHeartbeat(req.url)) this.applicationHeartbeat.add(websocket)
       this.startHeartbeat()
       const bound: BoundStreamOpener = (endpoint, payload, uplink, control) =>
         this.open(endpoint, payload, uplink, peer, control)
-      const connection = new RemoteStreamMuxConnection(websocket, bound, this.failure, this.streamInboxBytes)
+      const connection = new RemoteStreamMuxConnection(
+        websocket,
+        bound,
+        this.failure,
+        this.streamInboxBytes,
+        this.maxBufferedBytes,
+      )
       const done = connection.run()
       this.connections.add(done)
       void done.then(() => {
@@ -104,24 +124,28 @@ export class RemoteStreamMuxServer {
 
   /** Start one `unref()` timer after the first upgrade; it spans empty-client periods until close(). */
   private startHeartbeat(): void {
-    if (this.heartbeatTimer !== undefined) return
+    if (this.heartbeatTimer !== undefined || this.heartbeatIntervalMs <= 0) return
     this.heartbeatTimer = setInterval(() => {
+      const now = Date.now()
       for (const socket of this.server.clients) {
         if (socket.readyState !== WebSocket.OPEN) continue
-        const missed = this.missedHeartbeats.get(socket) as number
-        if (missed >= MAX_MISSED_HEARTBEATS) {
+        const lastPongAt = this.lastPongAt.get(socket) ?? now
+        if (now - lastPongAt >= this.heartbeatTimeoutMs) {
+          // Re-check after the current macrotask: a Pong or message that landed
+          // in this tick proves the peer alive, so only an unchanged timestamp
+          // terminates the socket.
           setImmediate(() => {
-            if ((this.missedHeartbeats.get(socket) as number) >= MAX_MISSED_HEARTBEATS) {
-              socket.terminate()
-            }
+            if ((this.lastPongAt.get(socket) ?? 0) <= lastPongAt) socket.terminate()
           })
           continue
         }
-        this.missedHeartbeats.set(socket, missed + 1)
-        // Browser script cannot observe the Ping control frame; the application
-        // heartbeat keeps an idle Client's liveness window fresh. Its write
-        // result only mirrors the socket error/close events that end the connection.
-        socket.send(REMOTE_STREAM_HEARTBEAT_TEXT, () => {})
+        if (this.applicationHeartbeat.has(socket)) {
+          // Browser script cannot observe the Ping control frame; the
+          // capability-negotiated application heartbeat keeps an idle modern
+          // Client's liveness window fresh. Its write result only mirrors the
+          // socket error/close events that end the connection.
+          socket.send(REMOTE_STREAM_HEARTBEAT_TEXT, () => {})
+        }
         socket.ping()
       }
     }, this.heartbeatIntervalMs)
@@ -146,6 +170,7 @@ class RemoteStreamMuxConnection {
     private readonly open: BoundStreamOpener,
     private readonly failure: RemoteStreamFailureMapper,
     private readonly streamInboxBytes: number,
+    private readonly maxBufferedBytes: number,
   ) {}
 
   async run(): Promise<void> {
@@ -288,6 +313,14 @@ class RemoteStreamMuxConnection {
         reject(new Error('api gateway: Remote stream socket is closed'))
         return
       }
+      if (this.socket.bufferedAmount > this.maxBufferedBytes) {
+        // A Client that cannot drain the downlink would otherwise grow Host
+        // memory without bound. Close with an existing carrier-failure code so
+        // the ordinary reconnect policy (with its climbing backoff) applies.
+        this.socket.close(1011, 'Remote stream backpressure exceeded')
+        reject(new Error('api gateway: Remote stream backpressure exceeded'))
+        return
+      }
       this.socket.send(text, (error) => {
         if (error) reject(error)
         else resolve()
@@ -421,6 +454,20 @@ function bindPeer(websocket: WebSocket, peer: PeerScope): (() => unknown) | unde
   } catch {
     websocket.close(1001, 'peer left')
     return undefined
+  }
+}
+
+/**
+ * Whether this upgrade asked for the capability-gated application heartbeat.
+ * The old bundle never sends the parameter, so it keeps its heartbeat-free
+ * frame vocabulary instead of dying on an unknown frame with 4002.
+ */
+function requestsApplicationHeartbeat(url: string | undefined): boolean {
+  if (url === undefined) return false
+  try {
+    return new URL(url, 'http://localhost').searchParams.get('heartbeat') === '1'
+  } catch {
+    return false
   }
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime, { createUserMessage, ToolCallId, LlmError, ReasoningEffortId, StreamChunk, expandAssistantStream } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createUserMessage, ToolCallId, EMPTY_RESPONSE_CODE, LlmError, ReasoningEffortId, StreamChunk, expandAssistantStream } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, TurnEndReason } from '@deepseek-ai/dsh-session'
@@ -159,7 +159,10 @@ describe('agent loop', () => {
 
   it('abandons a started live attempt when final block assembly fails', async () => {
     const chunks: StreamChunk[] = [
-      { type: 'block-start', index: 0, blockType: 'external-block' } as unknown as StreamChunk,
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: 'partial' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'partial' } },
+      { type: 'block-start', index: 1, blockType: 'external-block' } as unknown as StreamChunk,
       { type: 'finish', reason: { kind: 'stop' } },
     ]
     const ctx = await harness(new MockAdapter([chunks]))
@@ -175,10 +178,10 @@ describe('agent loop', () => {
     send(agent, 'produce an incomplete external block')
     await waitForIdle(ctx, agent)
 
-    expect(frames.map(frame => frame.revision)).toEqual([1, 2, 3, 4])
+    expect(frames.map(frame => frame.revision)).toEqual([1, 2, 3, 4, 5, 6, 7])
     expect(frames.at(-1)).toMatchObject({
       type: 'end',
-      index: 2,
+      index: 5,
       outcome: { kind: 'abandoned' },
     })
     expect(agent.session.snapshotEvents().some(event => (
@@ -1606,9 +1609,9 @@ describe('agent loop', () => {
     }])
   })
 
-  it('appends an empty completion anchor for a normal stop with no usage', async () => {
-    // A clean content-less call stays absent from derived messages but remains
-    // a durable successful-call boundary for replay consumers.
+  it('records EMPTY_RESPONSE for a normal stop with no content instead of an empty completion anchor', async () => {
+    // A content-less completed response is a provider failure: the runtime
+    // replaces the stop with EMPTY_RESPONSE, so no successful message anchor exists.
     const adapter = new MockAdapter([[{ type: 'finish', reason: { kind: 'stop' } }]])
     const ctx = await harness(adapter)
     const agent = await ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
@@ -1619,20 +1622,23 @@ describe('agent loop', () => {
     send(agent, 'go')
     await waitForIdle(ctx, agent)
 
-    expect(reasons).toEqual([{ kind: 'completed' }])
-    const assistant = agent.session.snapshotEvents().find(e => e.type === 'assistant/message')!
-    expect(assistant.type === 'assistant/message' && assistant.data).toMatchObject({
+    expect(reasons).toEqual([{
+      kind: 'error',
+      error: {
+        message: 'model "mock" returned a completed response with no content',
+        code: EMPTY_RESPONSE_CODE,
+        provider: 'mock',
+        model: 'mock',
+      },
+    }])
+    expect(agent.session.snapshotEvents().some(event => event.type === 'assistant/message')).toBe(false)
+    const attempt = agent.session.snapshotEvents().find(event => event.type === 'assistant/attempt')
+    expect(attempt).toBeDefined()
+    expect(attempt?.type === 'assistant/attempt' && attempt.data).toMatchObject({
       turn: 1,
       step: 1,
-      message: {
-        id: expect.any(String) as unknown,
-        role: 'assistant',
-        content: [],
-        source: { kind: 'model', provider: 'mock', model: 'mock' },
-      },
     })
-    expect(assistant.sourceEventSeqs).toBeUndefined()
-    expect(assistant.type === 'assistant/message' ? assistant.data.stream.length : 0).toBe(1)
+    expect(attempt?.type === 'assistant/attempt' ? attempt.data.stream.length : 0).toBe(1)
     expect(agent.session.deriveMessages().slice(1)).toEqual([{
       id: expect.any(String) as unknown,
       role: 'user',

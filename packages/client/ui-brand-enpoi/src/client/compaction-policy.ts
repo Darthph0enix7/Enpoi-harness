@@ -6,7 +6,7 @@
  * operator sees the token threshold and retained tail for the selected
  * summariser route before an incident. The derivation is a pure function over
  * the parameter group, the `personas.compaction` assignment, and the model
- * catalog (context window and adapter output cap).
+ * catalog (context window, prompt-side cap, and adapter output cap).
  */
 import type { ModelCatalog, ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import { PARAM_DEFAULTS } from './params-store.ts'
@@ -16,14 +16,25 @@ import type { BrandT } from './locales.ts'
 /** Catalog facts one route contributes to the derivation. */
 export interface CompactionModelInfo {
   contextWindow?: number
+  /** Provenance of {@link contextWindow}; `default` is a route fallback, not a disclosure. */
+  contextWindowSource?: 'configured' | 'discovered' | 'installed' | 'default'
+  /** Prompt-side cap disclosed separately from {@link contextWindow}, when one was stated. */
+  maxInputTokens?: number
+  /** Provenance of {@link maxInputTokens}; `default` is a route fallback, not a disclosure. */
+  maxInputTokensSource?: 'configured' | 'discovered' | 'installed' | 'default'
+  /** Declared output capability; a capability, not a request budget, so it never reserves. */
   maxTokens?: number
+  /** Provenance of {@link maxTokens}; `default` is a route fallback, not a disclosure. */
+  maxTokensSource?: 'configured' | 'discovered' | 'installed' | 'default'
+  /** Adapter-configured per-request output cap materialized when callers omit one. */
+  defaultMaxTokens?: number
 }
 
 /** Derived, operator-facing compaction policy for the selected route. */
 export interface CompactionPolicyReadout {
   /** Human-readable summariser route (`session model a/b`, `a/b`, `chain c`). */
   route: string
-  /** Effective context window of the route, when the catalog knows it. */
+  /** Effective prompt budget: the disclosed window clipped by a disclosed input cap. */
   contextWindow?: number
   /** Output tokens reserved for the summariser's own generation. */
   outputReserveTokens?: number
@@ -45,7 +56,12 @@ export function compactionModels(catalog: ModelCatalog | undefined): Map<string,
     for (const model of group.models) {
       const info: CompactionModelInfo = {}
       if (model.contextWindow !== undefined) info.contextWindow = model.contextWindow
+      if (model.contextWindowSource !== undefined) info.contextWindowSource = model.contextWindowSource
+      if (model.maxInputTokens !== undefined) info.maxInputTokens = model.maxInputTokens
+      if (model.maxInputTokensSource !== undefined) info.maxInputTokensSource = model.maxInputTokensSource
       if (model.maxTokens !== undefined) info.maxTokens = model.maxTokens
+      if (model.maxTokensSource !== undefined) info.maxTokensSource = model.maxTokensSource
+      if (model.defaultMaxTokens !== undefined) info.defaultMaxTokens = model.defaultMaxTokens
       models.set(`${group.id}/${model.id}`, info)
     }
   }
@@ -63,17 +79,20 @@ function selectionKey(selection: Pick<ModelSelection, 'provider' | 'model'> | un
 }
 
 /**
- * Derive the effective policy exactly as `resolveCompactSpec` does: the
- * threshold is the window fraction capped by the window minus the output
- * reservation and headroom; the tail is the absolute floor when set, else the
- * fraction of the window minus the reservation.
+ * Derive the effective policy exactly as `resolveCompactSpec` does: the output
+ * reservation is the adapter default then zero (a declared output capability is
+ * not a request budget); the prompt budget is the combined window clipped by a
+ * disclosed input-only cap, while a `default`-source window is only a route
+ * fallback; the threshold is the prompt budget fraction capped by that budget
+ * minus the reservation and one headroom subtraction; the tail is the absolute
+ * floor when set, else the fraction of the prompt budget minus the reservation.
  * @param params - the live `parameters.compaction` group.
  * @param assignment - the `personas.compaction` assignment, when one exists.
  * @param fallback - the model a session with no assignment would use (the catalog default).
  * @param models - catalog facts by `provider/model`.
- * @param t - the package dictionary translate for route labels.
+ * @param t - the package dictionary translate for route labels and problems.
  * @returns the readout; a `problem` string replaces the numbers when the
- *   combination cannot fire or the route's window is unknown.
+ *   combination cannot fire or the route's window is unknown or assumed.
  */
 export function deriveCompactionPolicy(
   params: OrchestrationParams['compaction'],
@@ -83,7 +102,7 @@ export function deriveCompactionPolicy(
   t: BrandT = identityT,
 ): CompactionPolicyReadout {
   if (assignment?.chain !== undefined && assignment.chain !== '') {
-    return { route: t('orchRouteChain', { chain: assignment.chain }), problem: 'a chain resolves to its first link at run time' }
+    return { route: t('orchRouteChain', { chain: assignment.chain }), problem: t('orchChainRuntime') }
   }
   const assignedKey = selectionKey(assignment ?? undefined)
   const fallbackKey = selectionKey(fallback ?? undefined)
@@ -93,35 +112,71 @@ export function deriveCompactionPolicy(
     ? assignedKey
     : fallbackKey === undefined ? sessionModel : `${sessionModel} ${fallbackKey}`
   if (key === undefined) {
-    return { route, problem: 'no model window known until the session routes a request' }
+    return { route, problem: t('orchNoModelWindow') }
   }
   const info = models.get(key)
-  const contextWindow = info?.contextWindow
+  if (info === undefined) {
+    return { route, problem: t('orchNoCatalogWindow') }
+  }
+  // Mirror declaredPromptBudget: a disclosed input-only cap binds on its own
+  // even when the combined window is only a route default; otherwise a
+  // default-source window stays unknown.
+  const disclosedInput = info.maxInputTokens !== undefined
+    && info.maxInputTokensSource !== 'default'
+    && info.maxInputTokens > 0
+    ? info.maxInputTokens
+    : undefined
+  const disclosedWindow = info.contextWindowSource === 'default' ? undefined : info.contextWindow
+  const contextWindow = disclosedWindow === undefined
+    ? disclosedInput
+    : disclosedInput === undefined
+      ? disclosedWindow
+      : Math.min(disclosedWindow, disclosedInput)
   if (contextWindow === undefined || contextWindow <= 0) {
-    return { route, problem: 'the catalog has no context window for this route' }
+    return {
+      route,
+      problem: info.contextWindowSource === 'default'
+        ? t('orchWindowDefaultSource')
+        : t('orchNoCatalogWindow'),
+    }
   }
   if (!Number.isInteger(params.headroomTokens) || params.headroomTokens <= 0) {
     // The backend ignores a non-positive settings headroom, so the readout
     // must not pretend it applies.
-    return { route, contextWindow, problem: 'headroom must be a positive integer' }
+    return { route, contextWindow, problem: t('orchHeadroomPositive') }
   }
 
-  const outputReserveTokens = Math.min(params.headroomTokens, Math.floor(contextWindow / 2))
-  const thresholdTokens = Math.floor(Math.min(
-    contextWindow * params.thresholdRatio,
-    contextWindow - outputReserveTokens - params.headroomTokens,
-  ))
+  // Mirror reservedCompletionTokens: a declared `maxTokens` is a capability,
+  // not a request output budget. Only the adapter's per-request default, which
+  // it materializes when the envelope omits one, reserves.
+  const outputReserveTokens = info.defaultMaxTokens ?? 0
+  const messageBudgetTokens = contextWindow - outputReserveTokens
+  if (messageBudgetTokens <= 0) {
+    return {
+      route,
+      contextWindow,
+      outputReserveTokens,
+      problem: t('orchNoMessageBudget', { reserve: outputReserveTokens, tokens: contextWindow }),
+    }
+  }
+  // Headroom applies once on the message budget, exactly as resolveCompactSpec.
+  const pressureBudgetTokens = messageBudgetTokens - params.headroomTokens
+  const thresholdTokens = Math.floor(Math.min(contextWindow * params.thresholdRatio, pressureBudgetTokens))
   if (thresholdTokens <= 0) {
     return {
       route,
       contextWindow,
       outputReserveTokens,
-      problem: `headroom ${params.headroomTokens} leaves no pressure budget below the window`,
+      problem: t('orchNoPressureBudget', {
+        reserve: outputReserveTokens,
+        headroom: params.headroomTokens,
+        tokens: contextWindow,
+      }),
     }
   }
   const retainTokens = params.retainTokens > 0
     ? params.retainTokens
-    : Math.floor((contextWindow - outputReserveTokens) * params.retainRatio)
+    : Math.floor(messageBudgetTokens * params.retainRatio)
   if (retainTokens >= thresholdTokens) {
     return {
       route,
@@ -129,7 +184,7 @@ export function deriveCompactionPolicy(
       outputReserveTokens,
       thresholdTokens,
       retainTokens,
-      problem: `retain ${retainTokens} must stay below the ${thresholdTokens}-token threshold`,
+      problem: t('orchRetainConflict', { retain: retainTokens, threshold: thresholdTokens }),
     }
   }
   return { route, contextWindow, outputReserveTokens, thresholdTokens, retainTokens }

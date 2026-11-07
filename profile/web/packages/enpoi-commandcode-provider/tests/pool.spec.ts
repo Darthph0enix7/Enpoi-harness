@@ -95,7 +95,7 @@ function sseResponse(body: string): Response {
 function makeAdapter(overrides: Partial<CommandCodeAdapterOptions> & { fetchImpl: typeof fetch }): CommandCodeAdapter {
   const catalog = new CatalogStore({
     baseURL: 'http://catalog.invalid',
-    snapshot: [{ id: 'm', name: 'M' }],
+    snapshot: [{ id: 'm', name: 'M', attachment: true }],
     fetchImpl: async () => {
       throw new Error('catalog offline in tests')
     },

@@ -3,13 +3,70 @@
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import type {} from '@deepseek-ai/dsh-settings'
-import type { LlmModelInfo } from '@deepseek-ai/dsh-llm'
+import type { LlmModelInfo, LlmResolvedModelInfo, ModelModality } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 import type {
   ModelCatalog,
   ModelReasoning,
   ModelSelection,
 } from './types.ts'
+
+/**
+ * Native input kinds a resolved descriptor effectively carries, in display
+ * order. Only an exact model whose route declared the descriptor answers any;
+ * advertised-only modalities stay in `advertisedInputModalities`.
+ * @param resolved - exact route metadata resolved from its adapter.
+ * @returns effective modalities with admitted native kinds appended, or undefined when the route disclosed none.
+ */
+function effectiveInputModalities(resolved: LlmResolvedModelInfo): ModelModality[] | undefined {
+  if (resolved.inputModalities === undefined) return undefined
+  const modalities = [...resolved.inputModalities]
+  const inputs = resolved.nativeFileInputs
+  if (inputs === undefined) return modalities
+  const kinds = new Set<ModelModality>()
+  for (const mime of Object.keys(inputs.encoders)) {
+    if (mime === 'application/pdf') kinds.add('pdf')
+    else if (mime.startsWith('audio/')) kinds.add('audio')
+    else if (mime.startsWith('video/')) kinds.add('video')
+  }
+  for (const kind of ['pdf', 'audio', 'video'] as const) {
+    if (kinds.has(kind) && !modalities.includes(kind)) modalities.push(kind)
+  }
+  return modalities
+}
+
+/**
+ * Model ids per provider whose stored settings row is marked `unverified`.
+ * Provider-sync writes that marker when a row's capacities or capabilities
+ * rest on labeled id-hints or on no disclosure at all; the picker reads the
+ * marker from the catalog, so the projection carries it from the same route
+ * profile the panel reads.
+ * @param ctx - Host context whose optional settings service holds route profiles.
+ * @returns provider → model ids marked unverified; empty when settings is absent.
+ */
+function unverifiedModelIds(ctx: Context): ReadonlyMap<string, ReadonlySet<string>> {
+  const unverified = new Map<string, ReadonlySet<string>>()
+  const settings = ctx.get('settings')
+  if (settings === undefined) return unverified
+  const descriptors = settings.describe({ redactSecrets: true })
+  for (const provider of ctx.llm.listConfigurableProviders()) {
+    const descriptor = descriptors.find(row => row.ns === provider.settingsNs)
+    let profile: unknown = descriptor?.value
+    for (const key of provider.settingsPath) {
+      profile = typeof profile === 'object' && profile !== null ? Reflect.get(profile, key) : undefined
+    }
+    const models = typeof profile === 'object' && profile !== null ? Reflect.get(profile, 'models') : undefined
+    if (!Array.isArray(models)) continue
+    const ids = new Set<string>()
+    for (const model of models) {
+      if (typeof model !== 'object' || model === null || Reflect.get(model, 'unverified') !== true) continue
+      const id = Reflect.get(model, 'id')
+      if (typeof id === 'string' && id !== '') ids.add(id)
+    }
+    if (ids.size > 0) unverified.set(provider.provider, ids)
+  }
+  return unverified
+}
 
 /**
  * Build the browser model catalog without requiring a Session.
@@ -22,6 +79,7 @@ export async function buildModelCatalog(
   defaultSelection: ModelSelection = ctx.agentDefaultModel.currentSelection(),
 ): Promise<ModelCatalog> {
   const providers = ctx.llm.listProviders()
+  const unverified = unverifiedModelIds(ctx)
   const catalog = await Promise.all(providers.map(async (provider) => {
     try {
       const models = await ctx.llm.listModels(provider.id)
@@ -39,6 +97,13 @@ export async function buildModelCatalog(
               ? {}
               : { defaultEffort: resolved.reasoning.defaultEffort }),
           }
+        const inputModalities = effectiveInputModalities(resolved)
+        const advertisedInputModalities = resolved.advertisedInputModalities === undefined
+          ? undefined
+          : [...resolved.advertisedInputModalities]
+        const unsupportedReasoningEfforts = resolved.unsupportedReasoningEfforts === undefined
+          ? undefined
+          : [...resolved.unsupportedReasoningEfforts]
         return {
           id: model.id,
           name: model.name,
@@ -46,9 +111,31 @@ export async function buildModelCatalog(
           ...(resolved.context?.contextWindow === undefined
             ? {}
             : { contextWindow: resolved.context.contextWindow }),
+          ...(resolved.context?.source === undefined
+            ? {}
+            : { contextWindowSource: resolved.context.source }),
+          ...(resolved.context?.maxInputTokens === undefined
+            ? {}
+            : { maxInputTokens: resolved.context.maxInputTokens }),
+          ...(resolved.context?.maxInputTokensSource === undefined
+            ? {}
+            : { maxInputTokensSource: resolved.context.maxInputTokensSource }),
+          ...(resolved.maxOutputTokens === undefined
+            ? {}
+            : { maxTokens: resolved.maxOutputTokens }),
+          ...(resolved.maxOutputTokensSource === undefined
+            ? {}
+            : { maxTokensSource: resolved.maxOutputTokensSource }),
           ...(resolved.defaultMaxTokens === undefined
             ? {}
-            : { maxTokens: resolved.defaultMaxTokens }),
+            : { defaultMaxTokens: resolved.defaultMaxTokens }),
+          ...(inputModalities === undefined ? {} : { inputModalities }),
+          ...(advertisedInputModalities === undefined ? {} : { advertisedInputModalities }),
+          ...(resolved.tools === undefined ? {} : { tools: resolved.tools }),
+          ...(unverified.get(provider.id)?.has(model.id) === true ? { unverified: true } : {}),
+          ...(unsupportedReasoningEfforts === undefined
+            ? {}
+            : { unsupportedReasoningEfforts }),
           ...(reasoning === undefined ? {} : { reasoning }),
         }
       }))

@@ -13,12 +13,10 @@
  * exactly as before), and a `source: 'manual'` entry keeps the ladder the
  * operator declared.
  */
-import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { join } from 'node:path'
 import { afterAll, expect, it } from 'vitest'
-import { listingCapabilities } from '@deepseek-ai/dsh-llm-pi-ai/src/listing.ts'
+import { listingCapabilities } from '@deepseek-ai/dsh-llm-pi-ai'
 import { mergeConfiguredModels, normalizeListingEntry, planRouteModels } from '../src/index.ts'
 
 // A missing models.dev cache keeps inference deterministic: no catalog entry
@@ -68,9 +66,6 @@ it('carries the advertised ladder through the shared parser with no second mappi
   // reimplementation would have to reproduce this mapping key for key.
   expect(entry.reasoningEfforts).toEqual(advertised.reasoningEfforts)
   expect(entry.input).toEqual(advertised.inputModalities)
-
-  const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'index.ts'), 'utf8')
-  expect(source).toContain("import { listingCapabilities } from '@deepseek-ai/dsh-llm-pi-ai/src/listing.ts'")
 })
 
 it('a refresh over a configured entry keeps the ladder the endpoint advertises', () => {
@@ -167,5 +162,75 @@ it('a manual entry keeps its own ladder whether the listing omits or advertises 
     id: 'probe-manual-model-88',
     source: 'manual',
     reasoningEfforts: { high: 'high', max: 'max' },
+  })
+})
+
+it('keeps an exact endpoint ladder subset and an explicit off, dropping unknown ids', () => {
+  const planned = planRouteModels({
+    route: ROUTE,
+    configured: [],
+    live: [{
+      id: 'probe-ladder-model-77',
+      reasoning: true,
+      reasoningEfforts: { low: 'low', high: 'high', off: '', custom_level: 'custom' },
+    }],
+    catalogRoute: false,
+    endpointFresh: true,
+    catalogFresh: true,
+    now: 1_000,
+  })
+  // The endpoint's own subset is the whole ladder: no medium/xhigh/max row is
+  // added, the explicit off is kept as the valueless key, and an identifier a
+  // profile does not accept never becomes a settings key.
+  expect(planned.models[0]?.reasoningEfforts).toEqual({ off: null, low: 'low', high: 'high' })
+})
+
+it('keeps every operator-declared manual field over the listing and an overlay upsert', () => {
+  const configured = [{
+    id: 'probe-manual-model-99',
+    source: 'manual',
+    name: 'Operator Name',
+    contextWindow: 12_345,
+    maxTokens: 2_345,
+    input: ['text', 'image'],
+    reasoning: true,
+    reasoningEfforts: { high: 'high' },
+  }]
+  const live = [normalizeListingEntry({
+    id: 'probe-manual-model-99',
+    display_name: 'Listing Name',
+    context_window: 999_999,
+    max_output_tokens: 888_888,
+    input_modalities: ['text'],
+  })!]
+  const planned = planRouteModels({
+    route: ROUTE,
+    configured,
+    live,
+    catalogRoute: false,
+    endpointFresh: true,
+    catalogFresh: true,
+    overlay: {
+      upsert: [{
+        id: 'probe-manual-model-99',
+        name: 'Overlay Name',
+        contextWindow: 777,
+        maxTokens: 77,
+        input: ['text', 'audio'],
+        reasoning: false,
+        reasoningEfforts: { low: 'low' },
+      }],
+    },
+    now: 1_000,
+  })
+  expect(planned.models[0]).toMatchObject({
+    id: 'probe-manual-model-99',
+    source: 'manual',
+    name: 'Operator Name',
+    contextWindow: 12_345,
+    maxTokens: 2_345,
+    input: ['text', 'image'],
+    reasoning: true,
+    reasoningEfforts: { high: 'high' },
   })
 })

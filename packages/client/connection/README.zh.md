@@ -51,11 +51,11 @@ cookie 签名密钥是 `ctx.credentials` 中由 `client-connection/browser-sessi
 
 API Gateway Client 把内部 `$events` 逻辑流注册为唯一 generation source，与有无 `$on` 订阅无关。Host 在 API Remotes source factory 同步挂好所有增量 listener 后，先发送唯一 `{ type: 'ready', clientId, host: { home } }` 项，再发送事件。`ConnectionController` 仅在收到该 ready 项后发布 generation 并调用 `onConnected`，因此 baseline 不会跑在增量 listener 前面。
 
-`$events` 结束、Remote 流报错、收到非 ready 首项或畸形事件项，都会使当前 generation 失效。默认情况下，挂起的握手在 3 秒后记录 Host 响应缓慢告警，在 15 秒后记录就绪超时并中止，包含等待物理 socket 的时间。取消后，source 必须停止投递、释放资源并结束，替换 source 才能启动；已取消 source 迟到的 ready 不能发布 generation。浏览器报告网络可用时，Controller 发布 `connecting`，并在 500ms、1s、2s、4s、8s 与 10s 上限内采用 50%–100% 抖动重试，达到终档后继续尝试直到恢复。每次重试都要求 Gateway 替换一次物理 WebSocket，再重开 `$events`。[持续恢复决策](../../../.agents/notes/implemented/bug-fix/2026-09-05-continuous-client-recovery.zh.md)规定握手期限与重试策略。
+`$events` 结束、Remote 流报错、收到非 ready 首项或畸形事件项，都会使当前 generation 失效。默认情况下，挂起的握手在 3 秒后记录 Host 响应缓慢告警，在 15 秒后记录就绪超时并中止，包含等待物理 socket 的时间。取消后，source 必须停止投递、释放资源并结束，替换 source 才能启动；已取消 source 迟到的 ready 不能发布 generation。`ConnectionController` 只有在 generation 持续就绪达到 `stableConnectionMs`（默认 30 秒）之后，或显式调用 `ctx.connection.reconnect()` 之后，才重置重试序列；若 socket 就绪后很快断开，则继续沿同一抖动退避阶梯上升，因此抖动链路不会永远在最低档反复弹跳。浏览器报告网络可用时，Controller 发布 `connecting`，并在 500ms、1s、2s、4s、8s 与 10s 上限内采用 50%–100% 抖动重试，达到终档后继续尝试直到恢复。每次重试都要求 Gateway 替换一次物理 WebSocket，再重开 `$events`。[持续恢复决策](../../../.agents/notes/implemented/bug-fix/2026-09-05-continuous-client-recovery.zh.md)规定握手期限与重试策略。
 
-`ctx.connection.reconnect()` 会中断活动工作、重置序列，并立即开始 retry 1。浏览器 `offline` 会中断活动工作、发布 `disconnected` 并暂停自动尝试；下一次 `online` 转换会重置序列并从 500ms 档开始。可见的 `visibilitychange` 或 `pageshow`（包括 bfcache 恢复）会按每次唤醒产生的事件簇合并为一次相同的重置请求并做防抖；在首次连接结果产生之前、连接为 `connected` 且最近两个 Host 心跳间隔内（默认 2 秒间隔即 4 秒）收到过帧时，或浏览器报告离线时跳过该请求。Client 在任意 Remote 流上收到的每一帧都会推进该存活窗口，包括 mux 与控制帧 Ping 同间隔写给每个打开套接字的应用层 `{ type: 'heartbeat' }` 帧——因此在默认间隔下，健康的空闲 generation 始终保持新鲜，唤醒请求为空操作。控制帧 Ping 本身仍无法被浏览器脚本观察；若 Host 配置的间隔高于固定窗口，空闲 generation 仍会达到该窗口并在唤醒时重连一次；从不触发这些事件的运行环境仍只以退避循环作为恢复路径。只有 ready 项会发布 `connected`。Gateway mux 不拥有独立重试调度。
+`ctx.connection.reconnect()` 会中断活动工作、重置序列，并立即开始 retry 1。浏览器 `offline` 与 `online` 事件簇按 `networkDebounceMs`（默认 1 秒）防抖，因此一次接口抖动不会反复中断工作或推进重试阶梯；恢复在线后沿用现有阶梯，而不是重置。可见的 `visibilitychange` 或 `pageshow`（包括 bfcache 恢复）会按唤醒事件簇合并为一次重连请求并做防抖；在首次连接结果产生之前、浏览器离线时、连接为 `connected` 且最近 `wakeStaleThresholdMs`（默认 30 秒）内收到过帧时，或握手开始不足 `wakeConnectingGraceMs`（默认 3 秒）时跳过该请求；`disconnected` 或退避中的 generation 会立即被替换。低频看门狗（`watchdogIntervalMs`，默认 5 秒）会在已连接 generation 连续 `watchdogStaleMs`（默认 30 秒）未收到任何帧时重连一次，并把重复触发合并为一次请求；但它只在该 generation 至少收到过一个应用层心跳帧之后才启用：忽略心跳协商请求的旧 Host 永远不会发送该帧，因此纯粹空闲的 generation 仍依靠 Host 关闭、唤醒与网络变化恢复，而不是每个窗口都重连。每次唤醒重连以及已就绪 generation 丢失后的重试都会增加有界的每标签页随机偏移（`reconnectStaggerMs`，默认 100 毫秒；0 表示禁用），避免多个标签页同步重连；从未就绪的首次握手仍只使用普通的 50%–100% 重试抖动。Client 在任意 Remote 流上收到的每一帧都会推进该存活窗口，包括 mux 只发给已声明能力的 Client bundle 的应用层 `{ type: 'heartbeat' }` 帧。控制帧 Ping 本身仍无法被浏览器脚本观察。只有 ready 项会发布 `connected`。Gateway mux 不拥有独立重试调度。
 
-可通过 Host Connection 行的 `config.recovery` 覆盖重试上限、增长因子或握手告警与取消时间；[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-client-connection)列出接受的字段。Host 校验这些值，并将其注入所提供的每个页面。Client 在提供 Connection 前校验启动数据，并在 Gateway 启动循环时采用这些默认值；显式传给 `start()` 的时序覆盖优先。增长因子必须是至少为一的有限数。若就绪、失败、取消或硬期限先于告警发生，该告警会被取消。修改 Host 恢复配置后需重新加载页面。
+可通过 Host Connection 行的 `config.recovery` 覆盖重试上限、增长因子、握手告警与取消时间、稳定性窗口、唤醒/唤醒宽限与看门狗窗口、网络防抖、每标签页重连错峰或 unary RPC 期限；[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-client-connection)列出接受的字段。Host 校验这些值，并将其注入所提供的每个页面。Client 在提供 Connection 前校验启动数据，并在 Gateway 启动循环时采用这些默认值；显式传给 `start()` 的时序覆盖优先。增长因子必须是至少为一的有限数。若就绪、失败、取消或硬期限先于告警发生，该告警会被取消。Unary RPC 调用共享 `rpcTimeoutMs`（默认 45 秒）：半开 HTTP 交换会在期限到达时拒绝，并传播调用方的取消；共享 `settings.describe` 读取超时后会清除其 in-flight promise，使后续读取发起新请求。修改 Host 恢复配置后需重新加载页面。
 
 
 <a id="model-experience"></a>
@@ -71,6 +71,7 @@ API Gateway Client 把内部 `$events` 逻辑流注册为唯一 generation sourc
 
 <a id="known-limitations-and-deferred-work"></a>
 
+- **唤醒陈旧窗口未从 Host 心跳策略推导**：页面拿不到 Gateway 解析后的心跳间隔与超时，因此 `wakeStaleThresholdMs` 保持保守的校验默认值（30 秒），部署可通过 Host 恢复配置覆盖；它刻意不再是旧版“两个 2 秒间隔即 4 秒”的硬编码副本。
 - **缓冲型 `/api` 路由会把每个请求体保留在内存里**：`maxRequestBodyBytes`（默认 300 MiB，按默认 200 MiB 图片总量上限经 base64 膨胀加信封余量得出）限制普通图片与 RPC 信封。显式启用的流式路由接收带背压的分块并绕过总量上限；路由实现负责持久化、取消与存储配额。
 - **浏览器 cookie 不带 `Secure`**：当前随产品提供的传输方式是 loopback HTTP；若部署经明文网络暴露同一 authority，bearer cookie 可能在传输中泄露。
 - **没有 logout 操作**：清除浏览器 cookie 会结束单个浏览器会话；删除 owner 凭据记录并重启 `dsh` 会撤销全部会话。

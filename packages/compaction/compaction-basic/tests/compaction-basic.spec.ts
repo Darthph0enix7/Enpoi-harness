@@ -4,7 +4,7 @@ import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import type { BasicCompactionConfig } from '@deepseek-ai/dsh-compaction-basic'
 import { selectCompactableRange } from '@deepseek-ai/dsh-compaction-basic/src/region.ts'
-import { frameSummary, summarizeWithLlm } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
+import { frameMechanicalOmission, frameSummary, summarizeWithLlm } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import type { SummarizationInput, SummaryResult } from '@deepseek-ai/dsh-compaction-basic/src/summarizer.ts'
 import { CompactionId, toolPairingBalancedAfter, toolPairingBalancedBefore } from '@deepseek-ai/dsh-compaction'
 import {
@@ -470,6 +470,24 @@ describe('compact configuration and defaults', () => {
     })
   })
 
+  // Shipped headroom and ratios must stay usable on real catalog routes that
+  // declare only an output capability. The capability is not a request budget,
+  // so no completion reservation applies when the request states none.
+  it.each([
+    [262_144, 235_929, 157_286, 41_943],
+    [131_072, 131_072, 65_536, 20_971],
+    [200_000, 128_000, 120_000, 32_000],
+  ])('keeps a valid pressure policy for window %i with a %i output capability and no requested cap', (window, capability, threshold, retained) => {
+    const policy = resolveTargetPolicy(resolveConfig({}), { provider: MODEL, model: MODEL })
+
+    expect(capability).toBeGreaterThan(0)
+    expect(resolveCompactSpec(policy, window, 0)).toMatchObject({
+      contextWindow: window,
+      thresholdTokens: threshold,
+      retainTokens: retained,
+    })
+  })
+
   it.each([500, 501])('rejects headroom %i that exhausts the remaining capacity', (headroomTokens) => {
     const policy = resolveTargetPolicy(resolveConfig({ headroomTokens }), { provider: MODEL, model: MODEL })
     expect(() => resolveCompactSpec(policy, 1_000, 500))
@@ -705,6 +723,140 @@ describe('pressure measurement and retention', () => {
     }))
 
     await expect(compactIfNeeded(compact, session)).resolves.not.toBeNull()
+  })
+
+  it('does not reserve the model output capability as a request budget', async () => {
+    const ctx = createContext(1_000)
+    const compact = service({ auto: false, thresholdRatio: 0.8, retainRatio: 0.1, headroomTokens: 0 }, ctx)
+    const session = conversation(4)
+    const measured = ctx.tokenMeter.measure(session).totalTokens
+    expect(measured).toBeLessThan(800)
+
+    // maxOutputTokens is a capability, not a requested output budget. Only an
+    // explicit envelope cap or the adapter's materialized default reserves.
+    vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementation((provider, model) => Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      context: { contextWindow: 1_000 },
+      maxOutputTokens: 1_000 - measured + 1,
+      maxOutputTokensSource: 'configured',
+    }))
+
+    await expect(compactIfNeeded(compact, session)).resolves.toBeNull()
+  })
+
+  it.each([
+    [262_144, 235_929],
+    [131_072, 131_072],
+    [200_000, 128_000],
+  ])('keeps shipped pressure policy usable for window %i with a %i output capability and no requested cap', async (contextWindow, maxOutputTokens) => {
+    const ctx = createContext(contextWindow)
+    const compact = new TestCompactionEngine(ctx, {})
+    const session = conversation(4)
+    vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementation((provider, model) => Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      context: { contextWindow, source: 'installed' },
+      maxOutputTokens,
+      maxOutputTokensSource: 'installed',
+    }))
+
+    await expect(compactIfNeeded(compact, session)).resolves.toBeNull()
+  })
+
+  it('fails loud when the only context capacity is a route default', async () => {
+    const ctx = createContext(1_000)
+    const compact = service({ auto: false, thresholdRatio: 0.8, retainRatio: 0.1 }, ctx)
+    const session = conversation(4)
+    vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementation((provider, model) => Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      context: { contextWindow: 262_144, source: 'default' },
+    }))
+
+    await expect(compactIfNeeded(compact, session))
+      .rejects.toThrow(/no context capacity for .*configure contextWindow/)
+  })
+
+  it('uses a disclosed input-only cap when the combined window is a route default', async () => {
+    const ctx = createContext(1_000)
+    const compact = service({ auto: false, thresholdRatio: 1, retainRatio: 0.1, headroomTokens: 0 }, ctx)
+    const session = conversation(4)
+    expect(ctx.tokenMeter.measure(session).totalTokens).toBeGreaterThan(200)
+    vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementation((provider, model) => Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      context: {
+        contextWindow: 262_144,
+        source: 'default',
+        maxInputTokens: 200,
+        maxInputTokensSource: 'discovered',
+      },
+    }))
+
+    await expect(compactIfNeeded(compact, session)).resolves.not.toBeNull()
+  })
+
+  it('does not reserve a default-source output capability', async () => {
+    const ctx = createContext(1_000)
+    const compact = service({ auto: false, thresholdRatio: 0.8, retainRatio: 0.1, headroomTokens: 0 }, ctx)
+    const session = conversation(4)
+    const measured = ctx.tokenMeter.measure(session).totalTokens
+    expect(measured).toBeLessThan(800)
+    vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementation((provider, model) => Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      context: { contextWindow: 1_000, source: 'configured' },
+      maxOutputTokens: 900,
+      maxOutputTokensSource: 'default',
+    }))
+
+    await expect(compactIfNeeded(compact, session)).resolves.toBeNull()
+  })
+
+  it('thresholds on a declared input-only cap before the combined window', async () => {
+    const ctx = createContext(1_000)
+    const compact = service({ auto: false, thresholdRatio: 1, retainRatio: 0.1, headroomTokens: 0 }, ctx)
+    const session = conversation(4)
+    expect(ctx.tokenMeter.measure(session).totalTokens).toBeGreaterThan(200)
+    vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementation((provider, model) => Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      context: {
+        contextWindow: 1_000,
+        maxInputTokens: 200,
+        maxInputTokensSource: 'configured',
+        source: 'configured',
+      },
+    }))
+
+    await expect(compactIfNeeded(compact, session)).resolves.not.toBeNull()
+  })
+
+  it('ignores a default-source input-only cap as a hard limit', async () => {
+    const ctx = createContext(1_000)
+    const compact = service({ auto: false, thresholdRatio: 0.8, retainRatio: 0.1, headroomTokens: 0 }, ctx)
+    const session = conversation(4)
+    expect(ctx.tokenMeter.measure(session).totalTokens).toBeLessThan(800)
+    vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementation((provider, model) => Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      context: {
+        contextWindow: 1_000,
+        maxInputTokens: 200,
+        maxInputTokensSource: 'default',
+        source: 'configured',
+      },
+    }))
+
+    await expect(compactIfNeeded(compact, session)).resolves.toBeNull()
   })
 
   it('requires capacity only for proactive pressure, not provider-confirmed overflow', async () => {
@@ -1457,6 +1609,24 @@ async function summarizerHarness(
   return { ctx, adapter, compact }
 }
 
+describe('mechanical omission framing', () => {
+  it('carries inherited omitted ranges and states the overflow bound honestly', () => {
+    const inherited = frameMechanicalOmission(SessionSeq(20), SessionSeq(30), 3, true, {
+      ranges: [{ start: SessionSeq(1), end: SessionSeq(2) }, { start: SessionSeq(5), end: SessionSeq(9) }],
+      overflow: false,
+    })
+    const inheritedText = inherited[0]?.type === 'text' ? inherited[0].text : ''
+    expect(inheritedText).toContain('Removed surface seqs 20–30 (3 messages).')
+    expect(inheritedText).toContain('Earlier omitted surface seqs: 1–2, 5–9.')
+    expect(inheritedText).not.toContain('Older omitted ranges')
+
+    const overflow = frameMechanicalOmission(SessionSeq(20), SessionSeq(30), 3, false, { ranges: [], overflow: true })
+    const overflowText = overflow[0]?.type === 'text' ? overflow[0].text : ''
+    expect(overflowText).toContain('Older omitted ranges remain recorded in the session log.')
+    expect(overflowText).not.toContain('Earlier omitted surface seqs')
+  })
+})
+
 describe('default one-shot summarizer', () => {
   it.each([undefined, '', 'SYSTEM HEAD\n精确前缀\n'])('preserves the routed prefix through region summarization with system %j', async (system) => {
     const { adapter, compact } = await summarizerHarness([{ type: 'text', text: 'summary' }])
@@ -1563,6 +1733,36 @@ describe('default one-shot summarizer', () => {
     })
     const instruction = adapter.lastOptions?.messages.at(-1)?.content[0]
     expect(instruction?.type === 'text' ? instruction.text : '').toContain('## Primary Request and Intent')
+  })
+
+  it.each([
+    ['configured', 128],
+    ['default', 512],
+  ] as const)('clips the request cap to the summary route\'s %s output capacity', async (source, expected) => {
+    const { ctx, adapter, compact } = await summarizerHarness(
+      [{ type: 'text', text: 'summary' }],
+      undefined,
+      MODEL,
+      {
+        auto: false,
+        summarizationProvider: MODEL,
+        summarizationModel: MODEL,
+        maxTokens: 512,
+      },
+    )
+    vi.spyOn(ctx.llm, 'resolveModelInfo').mockImplementation((provider, model) => Promise.resolve({
+      provider,
+      id: model,
+      name: model,
+      context: { contextWindow: 100_000 },
+      maxOutputTokens: 128,
+      maxOutputTokensSource: source,
+    }))
+    const session = conversation(1)
+    const nodes = [...session.surface.nodes]
+    await compact.compactRegion(nodes[0]!, nodes.at(-1)!, agent(session, MODEL), SIGNAL)
+
+    expect(adapter.lastOptions?.maxTokens).toBe(expected)
   })
 
   it('replays the conversation prefix and appends the instruction as the final message', async () => {

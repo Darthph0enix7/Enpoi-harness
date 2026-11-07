@@ -34,7 +34,7 @@ import type { ModelPickerFace } from './picker-face.ts'
 import { IconSearch, IconServer } from './capability-icons.tsx'
 import { protocolChoices, providerKeyConfigured, type ModelsSettingsStore, type ProviderRow, type ModelsWire } from './store.ts'
 import { loadHostHeavyManifests, resolveHeavyManifest, useHeavyManifestState } from './heavy-manifest-source.ts'
-import { heavyApi } from './heavy-rpc.ts'
+import { heavyApi, heavyStatusCache, type HeavyStatusView } from './heavy-rpc.ts'
 import { HeavyDashboardLinks, HeavyStatusDot } from './HeavyProviderStatus.tsx'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
 import type { en } from './locales.ts'
@@ -105,6 +105,116 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [heavyUninstall, setHeavyUninstall] = useState(false)
+  const [deleteTargetStatus, setDeleteTargetStatus] = useState<HeavyStatusView | null>(null)
+  const [deleteStatusChecking, setDeleteStatusChecking] = useState(false)
+  const [deleteStatusSettled, setDeleteStatusSettled] = useState(false)
+  // Owned local installs that have no route yet: the sidebar keeps an
+  // uninstall entry for them because no provider row can carry the action.
+  const [heavyInstallStatuses, setHeavyInstallStatuses] = useState<HeavyStatusView[]>([])
+  const [heavyInstallProbe, setHeavyInstallProbe] = useState(0)
+  const [uninstallingId, setUninstallingId] = useState<string | null>(null)
+  const [uninstallError, setUninstallError] = useState<string | null>(null)
+  // Host removal warnings survive the dialog (which closes on a clean exit)
+  // so a credential kept or a skipped teardown is never presented as silence.
+  const [deleteWarnings, setDeleteWarnings] = useState<string[]>([])
+  const [removalWarning, setRemovalWarning] = useState<string | null>(null)
+
+  const heavyDeleteManifest = deleteTarget ? resolveHeavyManifest(deleteTarget.entry.provider) : undefined
+  // A status snapshot is only usable for the provider it was read for: the
+  // dialog can switch targets before the force-read effect settles, and a
+  // prior target's ownership must never enable this one's actions.
+  const deleteProviderId = deleteTarget === null ? undefined : deleteTarget.entry.provider
+  const deleteStatusMatches = deleteProviderId !== undefined && deleteTargetStatus !== null
+    && deleteTargetStatus.id === deleteProviderId
+  const deleteBlockedByInstall = deleteStatusMatches
+    && deleteTargetStatus.job?.state === 'running'
+  const isInstalledLocal = deleteStatusMatches
+    && deleteTargetStatus.installedByHarness === true
+    && deleteTargetStatus.mode === 'local'
+  // A failed read settles with no snapshot; that is allowed only because the
+  // dialog then offers the explicit route-only removal.
+  const deleteStatusFailed = deleteStatusSettled && !deleteStatusChecking && deleteTargetStatus === null
+  const deleteStatusResolvedForTarget = deleteStatusMatches || (deleteStatusSettled && deleteTargetStatus === null)
+
+  useEffect(() => {
+    setHeavyUninstall(false)
+    setDeleteWarnings([])
+    if (!deleteTarget || !resolveHeavyManifest(deleteTarget.entry.provider)) {
+      setDeleteTargetStatus(null)
+      setDeleteStatusChecking(false)
+      setDeleteStatusSettled(false)
+      return
+    }
+    const providerId = deleteTarget.entry.provider
+    setDeleteStatusChecking(true)
+    setDeleteStatusSettled(false)
+    let cancelled = false
+    void heavyStatusCache.read(providerId, { force: true }).then((result) => {
+      if (cancelled) return
+      setDeleteTargetStatus(result.ok ? result.value : null)
+      setDeleteStatusChecking(false)
+      setDeleteStatusSettled(true)
+    }).catch(() => {
+      if (cancelled) return
+      setDeleteTargetStatus(null)
+      setDeleteStatusChecking(false)
+      setDeleteStatusSettled(true)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [deleteTarget])
+  // Route-less owned installs are invisible to the configured-row list, so
+  // one status pass over the manifest table is what lets the sidebar offer
+  // their uninstall. The shared cache keeps this to one probe per TTL.
+  useEffect(() => {
+    let cancelled = false
+    void Promise.all(manifestState.manifests.map(manifest =>
+      heavyStatusCache.read(manifest.id).catch(() => ({ ok: false as const, message: '' })),
+    )).then((results) => {
+      if (cancelled) return
+      setHeavyInstallStatuses(results.flatMap(result => result.ok ? [result.value] : []))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [manifestState.manifests, heavyInstallProbe])
+
+  /** Stop and remove one owned local install that has no configured route. */
+  const uninstallRouteLess = async (status: HeavyStatusView): Promise<void> => {
+    const manifest = resolveHeavyManifest(status.id)
+    const provider = manifest?.label ?? status.id
+    if (!window.confirm(t('heavyUninstallConfirm', { provider }))) return
+    setUninstallingId(status.id)
+    setUninstallError(null)
+    setRemovalWarning(null)
+    const result = await heavyApi.remove(status.id, true)
+    const summary = result.ok ? result.value.summary : undefined
+    const teardown = summary?.teardown
+    const warnings = summary?.warnings ?? []
+    // A route-less uninstall always asked for teardown, so `ran: false` is a
+    // skipped uninstall even though every named step that ran succeeded.
+    if (!result.ok || summary === undefined || summary.errors.length > 0
+      || teardown?.ok === false || teardown?.ran !== true) {
+      const failedStep = summary !== undefined && !summary.teardown.ok ? summary.teardown.failedStep ?? '' : ''
+      const reason = result.ok
+        ? [...summary?.errors ?? [], teardown?.ran !== true ? t('heavyTeardownSkipped') : '', failedStep, ...warnings]
+          .filter(Boolean).join('; ')
+        : result.message
+      setUninstallError(t('heavyUninstallFailed', { reason: reason === '' ? t('heavyJobFailedHint') : reason }))
+      setUninstallingId(null)
+      await controller.load()
+      return
+    }
+    if (warnings.length > 0) {
+      setRemovalWarning(t('heavyRemovedWithWarnings', { warnings: warnings.join('; ') }))
+    }
+    heavyStatusCache.invalidate(status.id)
+    setHeavyInstallStatuses(previous => previous.filter(entry => entry.id !== status.id))
+    setUninstallingId(null)
+    await controller.load()
+  }
+
   // The page-level full refresh: one host pass over every discoverable route.
   // Its statuses stay on screen (unlike the detail panel's toast) because the
   // operator needs to see which endpoints answered and which are static.
@@ -158,6 +268,10 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
   const heavyRows = useMemo(
     () => filteredRows.filter(row => resolveHeavyManifest(row.entry.provider) !== undefined),
     [filteredRows, manifestState.manifests],
+  )
+  const routeLessInstalls = useMemo(
+    () => heavyInstallStatuses.filter(status => status.installedByHarness === true && status.mode === 'local' && !status.configured),
+    [heavyInstallStatuses],
   )
 
   // Selected row
@@ -233,6 +347,8 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
     if (!deleteTarget || deleting) return
     setDeleting(true)
     setDeleteError(null)
+    setDeleteWarnings([])
+    setRemovalWarning(null)
 
     try {
       // A HEAVY provider's removal belongs to its manifest: the host plugin
@@ -240,14 +356,21 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
       // and chain links in one confirmed operation. Per-provider confirmation
       // text (and the antigravity OpenCode/dotfiles caveat) is shown above.
       if (resolveHeavyManifest(deleteTarget.entry.provider) !== undefined) {
-        const removal = await heavyApi.remove(deleteTarget.entry.provider, heavyUninstall)
+        // 1. The HOST removal runs first. It can refuse without mutating
+        //    anything (a running install holds the per-provider lock) or fail
+        //    to unset the route, so no client reference may be wiped before it
+        //    confirms: favorites, defaults, and groups stay usable on a
+        //    refusal and the retry is the same operation.
+        const removal = await heavyApi.remove(deleteTarget.entry.provider, isInstalledLocal && heavyUninstall)
         if (!removal.ok) {
           setDeleteError(removal.message)
           setDeleting(false)
           return
         }
-        const errors = removal.value.summary?.errors ?? []
-        const teardown = removal.value.summary?.teardown
+        const summary = removal.value.summary
+        const errors = summary?.errors ?? []
+        const teardown = summary?.teardown
+        const warnings = summary?.warnings ?? []
         if (errors.length > 0 || teardown?.ok === false) {
           // Keep the dialog up: the operator must see which named step failed
           // instead of believing the provider was fully removed.
@@ -256,6 +379,41 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
           await controller.load()
           return
         }
+        // 2. Only a confirmed host removal lets the client mirrors follow.
+        //    The host already rewrote the settings references itself; this
+        //    pass prunes the picker's synchronous mirrors and is idempotent.
+        if (warnings.length > 0) setDeleteWarnings(warnings)
+        const cleanup = await cleanupRemovedRoute(api, deleteTarget.entry.provider)
+        if (cleanup.error !== null) {
+          setDeleteError(t('deleteCleanupFailed', {
+            provider: providerTargetLabel(deleteTarget.entry),
+            reason: cleanupFailureText(t, cleanup.error),
+          }))
+          setDeleting(false)
+          await controller.load()
+          return
+        }
+        heavyStatusCache.invalidate(deleteTarget.entry.provider)
+        // A route-only removal of an owned local install leaves a route-less
+        // service whose uninstall entry must appear without a page reload.
+        setHeavyInstallProbe(count => count + 1)
+        // A requested uninstall that never ran leaves the service and its
+        // data installed: that is not success, so keep the dialog (and the
+        // named warnings) up while the route-only removal still lands.
+        const teardownSkipped = heavyUninstall && teardown !== undefined && teardown.ran !== true
+        if (teardownSkipped) {
+          setDeleteError(t('heavyTeardownSkipped'))
+          setDeleting(false)
+          await controller.load()
+          return
+        }
+        if (warnings.length > 0) {
+          setRemovalWarning(t('heavyRemovedWithWarnings', { warnings: warnings.join('; ') }))
+        }
+        setDeleteTarget(null)
+        setDeleting(false)
+        await controller.load()
+        return
       } else {
         // 1. Reference cleanup runs BEFORE the route leaves settings. Once the
         //    profile is unset the route vanishes from this page and a failed
@@ -312,6 +470,10 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
           }
         }
       }
+      heavyStatusCache.invalidate(deleteTarget.entry.provider)
+      // A route-only removal of an owned local install leaves a route-less
+      // service whose uninstall entry must appear without a page reload.
+      setHeavyInstallProbe(count => count + 1)
       setDeleteTarget(null)
       await controller.load()
     } catch (err) {
@@ -320,8 +482,6 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
       setDeleting(false)
     }
   }
-
-  const heavyDeleteManifest = deleteTarget ? resolveHeavyManifest(deleteTarget.entry.provider) : undefined
 
   /** One sidebar row; shared by the mainstream list and the heavy group. */
   const renderProviderRow = (row: ProviderRow): ReactNode => {
@@ -430,6 +590,32 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
             )}
           </div>
 
+          {routeLessInstalls.length > 0 && (
+            <div className={styles['heavyInstalledPanel']} data-heavy-route-less>
+              <div className={styles['sidebarGroupLabel']}>{t('heavyRouteLessTitle')}</div>
+              {routeLessInstalls.map((status) => {
+                const manifest = resolveHeavyManifest(status.id)
+                return (
+                  <div key={status.id} className={styles['heavyInstalledRow']}>
+                    <div className={styles['heavyInstalledInfo']}>
+                      <span className={styles['providerListName']}>{manifest?.label ?? status.id}</span>
+                      <span className={styles['heavyModeNote']}>{t('heavyRouteLessHint')}</span>
+                    </div>
+                    <Button
+                      variant="outline"
+                      className={styles['deleteBtn']}
+                      disabled={uninstallingId !== null || !state.writable}
+                      onClick={() => { void uninstallRouteLess(status) }}
+                    >
+                      {uninstallingId === status.id ? t('heavyUninstalling') : t('heavyUninstallAction')}
+                    </Button>
+                  </div>
+                )
+              })}
+              {uninstallError !== null && <p className={styles['error']}>{uninstallError}</p>}
+            </div>
+          )}
+
           <div className={styles['sidebarFooter']}>
             <div className={styles['sidebarFooterRow']}>
               <Button
@@ -451,6 +637,11 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
                 {refreshAll.running ? t('refreshAllRunning') : t('refreshAllAction')}
               </Button>
             </div>
+            {removalWarning !== null && (
+              <p className={styles['refreshAllMessage']} data-removal-warning>
+                {removalWarning}
+              </p>
+            )}
             {refreshAll.message && (
               <p className={refreshAll.isError ? styles['refreshAllError'] : styles['refreshAllMessage']}>
                 {refreshAll.message}
@@ -506,11 +697,15 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
           api={api}
           t={t}
           readOnly={!state.writable}
-          onClose={async (created) => {
-            // The modal stays up until the join that renders the new row has
-            // answered, so the provider is on screen when the form goes away.
+          onClose={async () => {
+            // A failed install can still leave a receipt-owned service with
+            // no route: an endpoint-authority or key failure aborts after the
+            // lifecycle is registered. Always re-read ownership when the form
+            // closes, so that route-less install is visible without a reload.
             try {
-              if (created) await controller.load()
+              heavyStatusCache.invalidate()
+              setHeavyInstallProbe(count => count + 1)
+              await controller.load()
             } finally {
               setAddModalOpen(false)
             }
@@ -544,31 +739,64 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
               <Button
                 variant="outline"
                 className={styles['deleteConfirmBtn']}
-                disabled={deleting}
+                disabled={deleting || (heavyDeleteManifest !== undefined
+                  && (!deleteStatusResolvedForTarget || deleteStatusChecking || deleteBlockedByInstall))}
                 onClick={() => { void confirmDelete() }}
               >
-                {deleting ? (heavyDeleteManifest !== undefined && heavyUninstall ? t('heavyRemoving') : t('deletingAction')) : t('confirmDeleteAction')}
+                {deleting ? (heavyDeleteManifest !== undefined && isInstalledLocal && heavyUninstall ? t('heavyRemoving') : t('deletingAction')) : t('confirmDeleteAction')}
               </Button>
             </>
           }
         >
           {deleteError && <p className={styles['error']}>{deleteError}</p>}
+          {deleteWarnings.length > 0 && (
+            <div className={styles['heavyPanel']} data-removal-warnings>
+              <div className={styles['heavySectionLabel']}>{t('heavyRemovalWarnings')}</div>
+              <ul className={styles['heavyList']}>
+                {deleteWarnings.map(warning => <li key={warning}>{warning}</li>)}
+              </ul>
+            </div>
+          )}
+          {deleteBlockedByInstall && (
+            <p className={styles['error']} data-delete-blocked="running-install">
+              {t('heavyDeleteBlockedRunningInstall')}
+            </p>
+          )}
           {heavyDeleteManifest !== undefined && (
             <div className={styles['heavyPanel']}>
               <div className={styles['heavySectionLabel']}>{t('heavyRemoveWarnings')}</div>
               <ul className={styles['heavyList']}>
                 {heavyDeleteManifest.removal.warnings.map(warning => <li key={warning}>{warning}</li>)}
               </ul>
-              {heavyDeleteManifest.removal.steps.length > 0 && (
-                <label className={styles['heavyMode']}>
-                  <input
-                    type="checkbox"
-                    checked={heavyUninstall}
-                    disabled={deleting}
-                    onChange={(event) => { setHeavyUninstall(event.target.checked) }}
-                  />
-                  <span>{t('heavyAlsoUninstall')}</span>
-                </label>
+              {deleteStatusSettled && !deleteStatusChecking && (
+                deleteStatusFailed ? (
+                  <p className={styles['heavyModeNote']} data-removal-notice="status-unavailable">
+                    {t('heavyStatusReadFailedRouteOnly')}
+                  </p>
+                ) : isInstalledLocal ? (
+                  <>
+                    {heavyDeleteManifest.removal.steps.length > 0 && (
+                      <label className={styles['heavyMode']}>
+                        <input
+                          type="checkbox"
+                          checked={heavyUninstall}
+                          disabled={deleting || deleteBlockedByInstall}
+                          onChange={(event) => { setHeavyUninstall(event.target.checked) }}
+                        />
+                        <span>{t('heavyAlsoUninstall')}</span>
+                      </label>
+                    )}
+                    {!heavyUninstall && (
+                      <p className={styles['heavyModeNote']} data-removal-notice="owned-route-only">
+                        {t('heavyOwnedRouteOnlyNotice')}
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <p className={styles['heavyModeNote']} data-removal-notice="route-only">
+                    {t('heavyRouteOnlyRemovalNotice')}
+                  </p>
+                )
               )}
             </div>
           )}

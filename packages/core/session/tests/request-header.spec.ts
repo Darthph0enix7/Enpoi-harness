@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { Session, SessionId, SessionSeq, canonicalHeader, foldRequestHeader, headerEquals } from '@deepseek-ai/dsh-session'
 import type { EpochHeader, SessionEvent } from '@deepseek-ai/dsh-session'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { LlmNativeFileInputs, ToolSchema } from '@deepseek-ai/dsh-llm'
 
 const CONFIG = { provider: 'mock', model: 'm' }
 
@@ -86,9 +86,19 @@ describe('foldRequestHeader', () => {
 
 describe('Session.requestContext', () => {
   const CAPACITY = { provider: 'mock', model: 'm', contextWindow: 128_000 }
+  const NATIVE_INPUTS: LlmNativeFileInputs = {
+    version: 1,
+    encoders: { 'application/pdf': 'anthropic-document' },
+    perFileBytes: 1_000,
+    totalBytes: 2_000,
+    maxPayloadBytes: 3_000,
+    tokenReserve: { perFile: 10, perByte: 0.25 },
+  }
 
   /** A turn-enclosed capacity record; the invariant rejects one outside a turn. */
-  function seedWith(...records: { provider: string; model: string; contextWindow?: number }[]): SessionEvent[] {
+  function seedWith(
+    ...records: { provider: string; model: string; contextWindow?: number; nativeFileInputs?: LlmNativeFileInputs }[]
+  ): SessionEvent[] {
     const events: SessionEvent[] = [{
       type: 'turn/start', seq: SessionSeq(0), time: 1, data: { turn: 1 },
     }]
@@ -142,5 +152,70 @@ describe('Session.requestContext', () => {
     if (held === undefined) throw new Error('expected a folded capacity record')
     expect(Object.isFrozen(held)).toBe(true)
     expect(() => { (held as { contextWindow?: number }).contextWindow = 1 }).toThrow()
+  })
+
+  it('roundtrips an optional native-file descriptor and accepts records without one', () => {
+    const withMedia = Session.create(SessionId('native-capacity'), seedWith({
+      ...CAPACITY,
+      nativeFileInputs: NATIVE_INPUTS,
+    }))
+    const folded = withMedia.requestContext()
+    expect(folded).toEqual({ ...CAPACITY, nativeFileInputs: NATIVE_INPUTS })
+    expect(Object.isFrozen(folded)).toBe(true)
+    expect(Object.isFrozen(folded?.nativeFileInputs)).toBe(true)
+    expect(Object.isFrozen(folded?.nativeFileInputs?.encoders)).toBe(true)
+    expect(Object.isFrozen(folded?.nativeFileInputs?.tokenReserve)).toBe(true)
+    expect(Session.create(SessionId('old-capacity'), seedWith(CAPACITY)).requestContext()).toEqual(CAPACITY)
+  })
+
+  it('rejects invalid native-file descriptors before appending', () => {
+    const session = Session.create(SessionId('invalid-native-capacity'), seedWith(CAPACITY))
+    const before = session.snapshotEvents().length
+    expect(() => session.append('request/context', {
+      ...CAPACITY,
+      nativeFileInputs: { ...NATIVE_INPUTS, version: 2 },
+    } as never)).toThrow(/nativeFileInputs.*version/)
+    expect(() => session.append('request/context', {
+      ...CAPACITY,
+      nativeFileInputs: { ...NATIVE_INPUTS, encoders: { 'application/pdf': 'openai-chat-input-audio' } },
+    } as never)).toThrow(/nativeFileInputs.*incompatible/)
+    expect(session.snapshotEvents()).toHaveLength(before)
+  })
+
+  it('validates request/context payload fields before appending', () => {
+    const session = Session.create(SessionId('invalid-request-context'), seedWith(CAPACITY))
+    const before = session.snapshotEvents().length
+    const invalid = [
+      [null, /data must be an object/],
+      [{}, /nonempty provider/],
+      [{ provider: '', model: 'mock' }, /nonempty provider/],
+      [{ provider: 'mock' }, /nonempty model/],
+      [{ provider: 'mock', model: '' }, /nonempty model/],
+      [{ provider: 'mock', model: 'mock', contextWindow: 0 }, /contextWindow/],
+      [{ provider: 'mock', model: 'mock', contextWindow: 1.5 }, /contextWindow/],
+      [{ provider: 'mock', model: 'mock', contextWindow: -1 }, /contextWindow/],
+      [{ provider: 'mock', model: 'mock', contextWindow: 'big' }, /contextWindow/],
+      [{ provider: 'mock', model: 'mock', systemPromptUpdate: 'latest' }, /systemPromptUpdate/],
+    ] as const
+    for (const [data, error] of invalid) {
+      expect(() => session.append('request/context', data as never)).toThrow(error)
+    }
+    expect(session.snapshotEvents()).toHaveLength(before)
+    expect(() => session.append('request/context', {
+      provider: 'mock', model: 'mock', contextWindow: 1, systemPromptUpdate: 'in-history',
+    })).not.toThrow()
+  })
+
+  it('rejects invalid native-file descriptors on restore', () => {
+    expect(() => Session.create(SessionId('invalid-native-restore'), seedWith(
+      CAPACITY,
+      {
+        ...CAPACITY,
+        nativeFileInputs: {
+          ...NATIVE_INPUTS,
+          encoders: { 'application/pdf': 'openai-chat-input-audio' },
+        },
+      },
+    ))).toThrow(/nativeFileInputs.*incompatible/)
   })
 })

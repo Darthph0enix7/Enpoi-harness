@@ -185,8 +185,12 @@ interface ConnectionOwner {
 export function installConnection(ctx: Context, options: ConnectionInstallOptions = {}): void {
   const pageLocation = options.location
   const transport = options.transport
-  const recovery = options.recovery ?? {}
-  const rpc = transport?.rpc ?? createWebConnectionRpc(transport?.fetch, transport?.openStream)
+  const recovery = resolveConnectionConfig(options.recovery)
+  const rpc = transport?.rpc ?? createWebConnectionRpc(
+    transport?.fetch,
+    transport?.openStream,
+    recovery.rpcTimeoutMs,
+  )
   let generationSource: ConnectionGenerationSource | undefined
   let owner: ConnectionOwner | undefined
   let generationId = 0
@@ -262,6 +266,7 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
       if (source === undefined) throw new Error('connection: no generation source is registered')
       const token = {}
       const ownsGeneration = (): boolean => owner?.token === token
+      const effective = resolveConnectionConfig({ ...recovery, ...config })
       const controller = new ConnectionController(source, {
         ...sinks,
         onConnected: (host) => {
@@ -278,12 +283,12 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
           publishState(state)
           sinks.onStateChange?.(state)
         },
-      }, { ...recovery, ...config })
+      }, effective)
       const current = {
         token,
         source,
         controller,
-        stopNetworkWatch: watchBrowserNetwork(controller, () => state),
+        stopNetworkWatch: watchBrowserNetwork(controller, () => state, effective),
       }
       owner = current
       controller.start()

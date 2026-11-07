@@ -186,6 +186,22 @@ function resolveTypeName(
   return { ref: { alias: name, imported: imp.imported, specifier: imp.specifier } }
 }
 
+/** The named config type a plugin parameter declares, unwrapping the optional
+ * `Partial<T>` wrapper a loader-aware plugin uses for defaulted fields. */
+function configParamTypeName(type: ts.TypeNode | undefined): string | null {
+  let node = type
+  while (node !== undefined
+    && ts.isTypeReferenceNode(node)
+    && ts.isIdentifier(node.typeName)
+    && node.typeName.text === 'Partial'
+    && node.typeArguments?.length === 1) {
+    node = node.typeArguments[0]
+  }
+  return node !== undefined && ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName)
+    ? node.typeName.text
+    : null
+}
+
 /** Collect every type NAME referenced in type positions under a node. */
 function collectTypeNames(node: ts.Node, out: Set<string>): void {
   const visit = (n: ts.Node): void => {
@@ -763,11 +779,11 @@ export function collectConfigCatalog(scanRoot: string = root): CatalogEntry[] {
     if (kind !== 'config' || !configParam) continue
 
     // Resolve the config type and paste its package-local transitive closure.
-    if (!configParam.type || !ts.isTypeReferenceNode(configParam.type) || !ts.isIdentifier(configParam.type.typeName)) {
+    const typeName = configParamTypeName(configParam.type)
+    if (typeName === null) {
       violations.push(`${pkg}: config parameter type (${pointer(entryRel, ctx.sf, configParam)}) is not a plain type-name reference; declare a named config type.`)
       continue
     }
-    const typeName = configParam.type.typeName.text
     entry.configTypeName = typeName
     const pastes: Paste[] = []
     const refs = new Map<string, TypeRef>()

@@ -135,6 +135,76 @@ describe('ModelSelect reasoning effort', () => {
     expect(screen.getByRole('button', { name: 'Standard' })).toBeTruthy()
   })
 
+  it('offers the provider default to clear a saved effort a no-ladder model cannot take', async () => {
+    const directory = createSnapshotStore<ModelDirectoryState>(state({
+      current: { provider: 'provider', model: 'model', reasoningEffort: 'high' },
+      groups: [{
+        id: 'provider',
+        name: 'Provider',
+        models: [{ id: 'model', name: 'Model' }],
+      }],
+    }))
+    const select = vi.fn(async (selection: ModelSelection) => {
+      directory.set(state({ current: selection }))
+      return { ok: true as const, value: undefined }
+    })
+    render(<ModelSelect
+      locked={false}
+      available
+      directory={directory}
+      load={vi.fn()}
+      select={select}
+      t={t}
+    />)
+
+    // The stale effort stays visible rather than silently disappearing, so a
+    // session resumed onto a model whose provider discloses no ladder has an
+    // explicit action to clear it.
+    const effortTrigger = screen.getByRole('button', { name: 'high' })
+    expect(effortTrigger.textContent).toContain('high')
+    fireEvent.click(effortTrigger)
+    fireEvent.click(screen.getByRole('button', { name: 'Default' }))
+    await waitFor(() => {
+      expect(select).toHaveBeenCalledWith({ provider: 'provider', model: 'model' })
+    })
+  })
+
+  it('offers the provider default when the saved effort is not in the model’s ladder', async () => {
+    const directory = createSnapshotStore<ModelDirectoryState>(state({
+      current: { provider: 'provider', model: 'model', reasoningEffort: 'max' },
+      groups: [{
+        id: 'provider',
+        name: 'Provider',
+        models: [{
+          id: 'model',
+          name: 'Model',
+          reasoning: {
+            efforts: [{ id: 'standard', name: 'Standard' }],
+            defaultEffort: 'standard',
+          },
+        }],
+      }],
+    }))
+    const select = vi.fn(async (selection: ModelSelection) => {
+      directory.set(state({ current: selection }))
+      return { ok: true as const, value: undefined }
+    })
+    render(<ModelSelect
+      locked={false}
+      available
+      directory={directory}
+      load={vi.fn()}
+      select={select}
+      t={t}
+    />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'max' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Default' }))
+    await waitFor(() => {
+      expect(select).toHaveBeenCalledWith({ provider: 'provider', model: 'model' })
+    })
+  })
+
   it('shows the durable model id when the catalog has no matching display name', () => {
     const directory = createSnapshotStore(state({
       current: { provider: 'deepseek-official', model: 'removed-model' },
@@ -362,5 +432,93 @@ describe('ModelSelect reasoning effort', () => {
 
     expect(screen.queryByRole('button')).toBeNull()
     expect(load).not.toHaveBeenCalled()
+  })
+})
+
+describe('ModelSelect catalog capability display', () => {
+  it('renders disclosed context windows only, marks a route-default window assumed, and flags an unverified row', () => {
+    const unknownWindow = { id: 'gemini-9-unknown', name: 'Gemini 9 Unknown' }
+    const exactWindow = { id: 'exact-window', name: 'Exact Window', contextWindow: 65_536 }
+    const assumedWindow = {
+      id: 'assumed-window',
+      name: 'Assumed Window',
+      contextWindow: 262_144,
+      contextWindowSource: 'default' as const,
+    }
+    const unverified = { id: 'unverified-model', name: 'Unverified Model', unverified: true }
+    const groups = [{
+      id: 'gateway',
+      name: 'Gateway',
+      models: [unknownWindow, exactWindow, assumedWindow, unverified],
+    }]
+    render(<ModelSelect
+      locked={false}
+      available
+      directory={createSnapshotStore(state({
+        current: { provider: 'gateway', model: 'exact-window' },
+        groups,
+      }))}
+      load={vi.fn()}
+      select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
+      t={t}
+    />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Exact Window' }))
+
+    // An undisclosed window prints no capacity: the deleted id-family fallback
+    // must never resurface as a guessed 1M/128K badge.
+    expect(screen.queryByText('1M')).toBeNull()
+    expect(screen.queryByText('128K')).toBeNull()
+    expect(screen.getByText('65K')).toBeTruthy()
+    // A route-default window is presented as assumed, not as a disclosed fact.
+    expect(screen.getByText('约 262K（假定）')).toBeTruthy()
+    expect(screen.getByText('未验证')).toBeTruthy()
+  })
+
+  it('marks advertised-only modalities as declared but not sent, and never as supported', () => {
+    const declared = {
+      id: 'declared',
+      name: 'Declared',
+      inputModalities: ['text', 'image'] as const,
+      advertisedInputModalities: ['text', 'image', 'audio', 'video', 'pdf'] as const,
+    }
+    const native = {
+      id: 'native',
+      name: 'Native',
+      inputModalities: ['text', 'image'] as const,
+      advertisedInputModalities: ['text', 'image'] as const,
+    }
+    // An unknown effective list does not turn text/image into disclosure-only
+    // tokens: only audio/video/pdf lack a native encoder.
+    const unstatedEffective = {
+      id: 'unstated-effective',
+      name: 'Unstated Effective',
+      advertisedInputModalities: ['text', 'image'] as const,
+    }
+    const groups = [{
+      id: 'gateway',
+      name: 'Gateway',
+      models: [declared, native, unstatedEffective],
+    }]
+    render(<ModelSelect
+      locked={false}
+      available
+      directory={createSnapshotStore(state({
+        current: { provider: 'gateway', model: 'native' },
+        groups,
+      }))}
+      load={vi.fn()}
+      select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
+      t={t}
+    />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Native' }))
+
+    // Only the effective text/image set belongs to the native row; the audio,
+    // video, and pdf tokens exist solely in the advertised list.
+    expect(screen.getAllByText('已声明，未原生发送')).toHaveLength(1)
+    for (const modality of ['audio', 'video', 'pdf']) {
+      expect(screen.queryByText(modality)).toBeNull()
+    }
   })
 })

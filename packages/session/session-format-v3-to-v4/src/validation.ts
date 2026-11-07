@@ -13,55 +13,73 @@ import { assertV4ForkResult } from './fork-result.ts'
 import { assertV4ToolResultMessage } from './tool-role.ts'
 
 /**
- * Validate the exact native V4 logical header.
- * @param header - decoded or otherwise untrusted V4 Session header candidate.
+ * Validate one released logical Session header with the shared field set.
+ * @param header - decoded or otherwise untrusted header candidate.
+ * @param version - exact logical format version the header must declare.
  */
-export function assertReleasedV4Header(header: unknown): void {
-  if (!isSessionFormatJsonObject(header) || header['version'] !== 4) throw new SessionFormatError('expected format v4 header')
+export function assertReleasedSessionHeader(header: unknown, version: number): void {
+  const label = `format v${version}`
+  if (!isSessionFormatJsonObject(header) || header['version'] !== version) throw new SessionFormatError(`expected ${label} header`)
   const required = ['version', 'id', 'createdAt', 'isSeeded', 'delegationDepth']
   const allowed = new Set([...required, 'cwd', 'parentSession', 'origin', 'agentPreset'])
   const missing = required.find(key => !Object.hasOwn(header, key))
   const unexpected = Object.keys(header).find(key => !allowed.has(key))
-  if (missing !== undefined) throw new SessionFormatError(`format v4 header lacks required field ${missing}`)
-  if (unexpected !== undefined) throw new SessionFormatError(`format v4 header has unexpected field ${unexpected}`)
-  if (typeof header.id !== 'string') throw new SessionFormatError('format v4 header id must be a string')
-  sessionFormatCount(header.createdAt, 'format v4 header createdAt')
-  sessionFormatCount(header.delegationDepth, 'format v4 header delegationDepth')
-  if (typeof header.isSeeded !== 'boolean') throw new SessionFormatError('format v4 header isSeeded must be boolean')
+  if (missing !== undefined) throw new SessionFormatError(`${label} header lacks required field ${missing}`)
+  if (unexpected !== undefined) throw new SessionFormatError(`${label} header has unexpected field ${unexpected}`)
+  if (typeof header.id !== 'string') throw new SessionFormatError(`${label} header id must be a string`)
+  sessionFormatCount(header.createdAt, `${label} header createdAt`)
+  sessionFormatCount(header.delegationDepth, `${label} header delegationDepth`)
+  if (typeof header.isSeeded !== 'boolean') throw new SessionFormatError(`${label} header isSeeded must be boolean`)
   if (header.cwd !== undefined && (typeof header.cwd !== 'string' || !isAbsolute(header.cwd))) {
-    throw new SessionFormatError('format v4 header cwd must be absolute')
+    throw new SessionFormatError(`${label} header cwd must be absolute`)
   }
   for (const key of ['parentSession', 'agentPreset']) {
     if (header[key] !== undefined && typeof header[key] !== 'string') {
-      throw new SessionFormatError(`format v4 header ${key} must be a string`)
+      throw new SessionFormatError(`${label} header ${key} must be a string`)
     }
   }
   if (header.origin !== undefined && header.origin !== 'subagent') {
-    throw new SessionFormatError('format v4 header origin must be "subagent"')
+    throw new SessionFormatError(`${label} header origin must be "subagent"`)
   }
 }
 
 /**
- * Validate V4 inheritance, vocabulary, native message admission, and
+ * Validate the exact native V4 logical header.
+ * @param header - decoded or otherwise untrusted V4 Session header candidate.
+ */
+export function assertReleasedV4Header(header: unknown): void {
+  assertReleasedSessionHeader(header, 4)
+}
+
+/**
+ * Validate released inheritance, vocabulary, native message admission, and
  * lifecycle, compaction, tool, retry, title, command, catalog, and delivery ownership.
  * Installed Session restoration owns common event envelopes and message acceptance.
- * @param artifact - complete detached V4 artifact.
+ * @param artifact - complete detached artifact.
  * @param knownEventTypes - event types understood by the installed Session package.
+ * @param currentVersion - exact logical version this artifact must declare.
+ * @param validateHeader - header validator for `currentVersion`.
  * @returns the same validated artifact and event objects.
  */
-export function restoreReleasedV4Artifact(artifact: SessionFormatArtifact, knownEventTypes: ReadonlySet<string>): SessionFormatArtifact {
-  assertReleasedV4Header(artifact.header)
-  const cut = sessionFormatCount(artifact.inheritedEventCount, 'format v4 inherited event count')
-  if (cut > artifact.events.length) throw new SessionFormatError('format v4 inherited event count exceeds its events')
-  if (!artifact.header.isSeeded && cut !== 0) throw new SessionFormatError('unseeded format v4 Session has inherited events')
+export function restoreReleasedArtifact(
+  artifact: SessionFormatArtifact,
+  knownEventTypes: ReadonlySet<string>,
+  currentVersion: number,
+  validateHeader: (header: unknown) => void,
+): SessionFormatArtifact {
+  validateHeader(artifact.header)
+  const label = `format v${currentVersion}`
+  const cut = sessionFormatCount(artifact.inheritedEventCount, `${label} inherited event count`)
+  if (cut > artifact.events.length) throw new SessionFormatError(`${label} inherited event count exceeds its events`)
+  if (!artifact.header.isSeeded && cut !== 0) throw new SessionFormatError(`unseeded ${label} Session has inherited events`)
   let lastInheritedMarker: number | undefined
   for (const [index, event] of artifact.events.entries()) {
     if (!knownEventTypes.has(event.type) && event['ignorable'] !== true) {
       throw new SessionFormatUnsupportedMigrationError(
-        `format v4 contains unknown event type ${JSON.stringify(event.type)} at seq ${index}`,
+        `${label} contains unknown event type ${JSON.stringify(event.type)} at seq ${index}`,
       )
     }
-    if (event.seq !== index) throw new SessionFormatError(`format v4 event ${index} is not dense`)
+    if (event.seq !== index) throw new SessionFormatError(`${label} event ${index} is not dense`)
     if (!knownEventTypes.has(event.type)) continue
     assertV4RetiredSyntax(event)
     assertV4SystemMessageFields(event)
@@ -71,13 +89,23 @@ export function restoreReleasedV4Artifact(artifact: SessionFormatArtifact, known
       && event.data['inherited'] === true) lastInheritedMarker = index
   }
   if (artifact.header.isSeeded && lastInheritedMarker !== cut) {
-    throw new SessionFormatError('format v4 seeded header disagrees with its last inherited end-seed marker')
+    throw new SessionFormatError(`${label} seeded header disagrees with its last inherited end-seed marker`)
   }
   if (!artifact.header.isSeeded && lastInheritedMarker !== undefined) {
-    throw new SessionFormatError('format v4 unseeded Session contains an inherited end-seed marker')
+    throw new SessionFormatError(`${label} unseeded Session contains an inherited end-seed marker`)
   }
-  assertReleasedV4Relationships(artifact, knownEventTypes)
+  assertReleasedRelationships(artifact, knownEventTypes, currentVersion)
   return artifact
+}
+
+/**
+ * Validate a released artifact as native V4 with the V4 delivery generation.
+ * @param artifact - complete detached V4 artifact.
+ * @param knownEventTypes - event types understood by the installed Session package.
+ * @returns the same validated artifact and event objects.
+ */
+export function restoreReleasedV4Artifact(artifact: SessionFormatArtifact, knownEventTypes: ReadonlySet<string>): SessionFormatArtifact {
+  return restoreReleasedArtifact(artifact, knownEventTypes, 4, assertReleasedV4Header)
 }
 
 /**
@@ -86,7 +114,7 @@ export function restoreReleasedV4Artifact(artifact: SessionFormatArtifact, known
  * @param currentVersion - generation whose watermark coordinates are active.
  * @returns the active delivery's nonempty Session id, or undefined for other events and generations.
  */
-export function validateDeliveryAccepted(event: SessionFormatEvent, currentVersion: 3 | 4): string | undefined {
+export function validateDeliveryAccepted(event: SessionFormatEvent, currentVersion: number): string | undefined {
   if (event.type !== 'session-log-deepseek/delivery-accepted') return undefined
   const data = event.data
   if (!isSessionFormatJsonObject(data)) throw new SessionFormatError('delivery-accepted data must be an object')
@@ -108,12 +136,27 @@ export function validateDeliveryAccepted(event: SessionFormatEvent, currentVersi
  * @param knownEventTypes - installed event types whose payloads this reader interprets.
  */
 export function assertReleasedV4Relationships(artifact: SessionFormatArtifact, knownEventTypes: ReadonlySet<string>): void {
+  assertReleasedRelationships(artifact, knownEventTypes, 4)
+}
+
+/**
+ * Validate native message sources, catalog uniqueness, current-generation delivery
+ * ownership, and lifecycle relationships for one released artifact.
+ * @param artifact - decoded artifact with its final inherited cut.
+ * @param knownEventTypes - installed event types whose payloads this reader interprets.
+ * @param currentVersion - generation whose delivery watermark coordinates are active.
+ */
+export function assertReleasedRelationships(
+  artifact: SessionFormatArtifact,
+  knownEventTypes: ReadonlySet<string>,
+  currentVersion: number,
+): void {
   const ids = new Set<string>()
   for (const event of artifact.events) {
     if (!knownEventTypes.has(event.type)) continue
     assertV4DeveloperData(event)
     assertV4MessageSources(event)
-    const deliveryId = validateDeliveryAccepted(event, 4)
+    const deliveryId = validateDeliveryAccepted(event, currentVersion)
     if (deliveryId !== undefined
       && !(artifact.header.parentSession !== undefined && event.seq < artifact.inheritedEventCount)
       && deliveryId !== artifact.header.id) {

@@ -8,6 +8,12 @@
  * finalizer ONLY after every required step succeeded: a failed install leaves
  * no route, no credential, and no partial settings.
  *
+ * One provider's job owns a per-provider lock (`./provider-lock.ts`) from
+ * before its first step until its terminal snapshot is persisted. A second
+ * manager, process, or removal path therefore cannot run or evict the same
+ * provider concurrently; eviction of an owned job is refused instead of
+ * deleting the file its finalizer still updates.
+ *
  * @module dsh-enpoi-heavy-providers/jobs
  */
 
@@ -15,6 +21,13 @@ import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync
 import { join } from 'node:path'
 import type { HeavyStep } from './manifests.js'
 import type { StepOutcome } from './planner.js'
+import {
+  acquireProviderLock,
+  HeavyProviderLockedError,
+  HeavyProviderLockUnreadableError,
+  inspectProviderLock,
+  type HeavyProviderLock,
+} from './provider-lock.js'
 
 /** One job's observable state. */
 export interface HeavyJobView {
@@ -40,10 +53,12 @@ export type HeavyStepRunner = (step: HeavyStep) => Promise<StepOutcome>
 /** In-memory tail cap for one job's log. */
 const LOG_CAP_BYTES = 8192
 
-/** One job manager per heavy provider id at a time. */
+/** The host-wide job manager; each provider id is exclusive through its lock. */
 export class HeavyJobManager {
   private readonly jobs = new Map<string, HeavyJobView>()
   private readonly running = new Set<string>()
+  /** Provider ids currently covered by {@link withProviderLock}. */
+  private readonly exclusive = new Set<string>()
   private readonly dir: string
   private readonly run: HeavyStepRunner
   private readonly now: () => number
@@ -59,9 +74,11 @@ export class HeavyJobManager {
   }
 
   /**
-   * A job persisted as `running` belongs to a previous process: the runner
-   * died with it, so the file is rewritten as failed instead of leaving the
-   * UI polling a job nothing will ever finish.
+   * A job persisted as `running` without a live lock owner belongs to a
+   * previous process: the runner died with it, so the file is rewritten as
+   * failed instead of leaving the UI polling a job nothing will ever finish.
+   * A live owner, or a lock whose holder cannot be proven dead, keeps its
+   * `running` file untouched.
    */
   private recoverInterrupted(): void {
     try {
@@ -71,12 +88,13 @@ export class HeavyJobManager {
           const path = join(this.dir, name)
           try {
             const view = JSON.parse(readFileSync(path, 'utf8')) as HeavyJobView
-            if (view?.state === 'running') {
-              view.state = 'failed'
-              view.error = 'interrupted by harness restart'
-              view.finishedAt = this.now()
-              this.persist(view)
-            }
+            if (view?.state !== 'running' || typeof view.id !== 'string') return
+            const ownership = inspectProviderLock(this.dir, view.id)
+            if (ownership.kind === 'held' || ownership.kind === 'unverifiable') return
+            view.state = 'failed'
+            view.error = 'interrupted by harness restart'
+            view.finishedAt = this.now()
+            this.persist(view)
           } catch {
             // An unreadable job file is ignored; the next start overwrites it.
           }
@@ -87,9 +105,13 @@ export class HeavyJobManager {
   }
 
   /**
-   * Start a job unless one is already running for that id. The returned view
-   * is the initial snapshot; `finalize` runs only after all required steps
-   * succeed, and its failure marks the job failed.
+   * Start a job unless the provider is already owned. Ownership is taken
+   * before the initial snapshot is written and held through the finalizer and
+   * the terminal persist. A live owner elsewhere returns its snapshot (when
+   * one is readable) or a failed refusal view; a lock that cannot be proven
+   * dead throws `HeavyProviderLockUnreadableError` instead of guessing.
+   * The returned view is the initial snapshot; `finalize` runs only after all
+   * required steps succeed, and its failure marks the job failed.
    * @param id - provider id (the job file name).
    * @param kind - install or teardown.
    * @param steps - declared steps in order.
@@ -98,23 +120,38 @@ export class HeavyJobManager {
    */
   start(id: string, kind: HeavyJobView['kind'], steps: readonly HeavyStep[], finalize?: () => Promise<void>): HeavyJobView {
     if (this.running.has(id)) return this.snapshot(id) ?? failed(id, 'job already running')
-    const total = steps.reduce((sum, step) => sum + (step.weight ?? 1), 0)
-    const view: HeavyJobView = {
-      id,
-      kind,
-      state: 'running',
-      stage: steps[0]?.label ?? 'Finishing',
-      stageIndex: 0,
-      stageCount: steps.length,
-      pct: 0,
-      logTail: '',
-      startedAt: this.now(),
+    let lock: HeavyProviderLock
+    try {
+      lock = acquireProviderLock(this.dir, id, this.now)
+    } catch (error) {
+      if (!(error instanceof HeavyProviderLockedError)) throw error
+      const current = this.snapshot(id)
+      return current?.state === 'running' ? current : failed(id, error.message)
     }
-    this.jobs.set(id, view)
-    this.running.add(id)
-    this.persist(view)
-    void this.runAll(view, steps, total, finalize)
-    return { ...view }
+    try {
+      const total = steps.reduce((sum, step) => sum + (step.weight ?? 1), 0)
+      const view: HeavyJobView = {
+        id,
+        kind,
+        state: 'running',
+        stage: steps[0]?.label ?? 'Finishing',
+        stageIndex: 0,
+        stageCount: steps.length,
+        pct: 0,
+        logTail: '',
+        startedAt: this.now(),
+      }
+      this.jobs.set(id, view)
+      this.running.add(id)
+      this.persist(view)
+      void this.runAll(view, steps, total, lock, finalize)
+      return { ...view }
+    } catch (error) {
+      this.running.delete(id)
+      this.jobs.delete(id)
+      lock.release()
+      throw error
+    }
   }
 
   /** The latest snapshot: in-memory first, then the persisted file (survives a restart). */
@@ -130,12 +167,75 @@ export class HeavyJobManager {
   }
 
   /**
+   * Whether this provider is owned by a running job: this manager's own job,
+   * or a live owner in another manager or process. An unverifiable lock is
+   * reported as running so callers fail closed and never evict its files.
+   * @param id - provider id.
+   * @returns true while the provider's install/teardown must not be evicted.
+   */
+  isRunning(id: string): boolean {
+    if (this.running.has(id)) return true
+    if (this.exclusive.has(id)) return false
+    const ownership = inspectProviderLock(this.dir, id)
+    return ownership.kind === 'held' || ownership.kind === 'unverifiable'
+  }
+
+  /**
    * Evict one provider's snapshot: the in-memory view and its persisted file.
    * A removed provider's terminal job must not resurrect on the next status
-   * poll; a running job is not touched (its run still owns itself).
+   * poll. Eviction owns the provider lock while it removes the file, so a
+   * concurrent `start` either loses to a live eviction or runs after it. A
+   * running job — including one owned by another manager or process — keeps
+   * both the snapshot and its file; a lock that cannot be proven dead also
+   * refuses eviction.
    * @param id - provider id.
+   * @returns true when the snapshot and file were removed, false when a live
+   * or unverifiable owner refused the eviction.
    */
-  evict(id: string): void {
+  evict(id: string): boolean {
+    if (this.running.has(id)) return false
+    if (this.exclusive.has(id)) {
+      this.removeSnapshot(id)
+      return true
+    }
+    let lock: HeavyProviderLock
+    try {
+      lock = acquireProviderLock(this.dir, id, this.now)
+    } catch (error) {
+      if (error instanceof HeavyProviderLockedError || error instanceof HeavyProviderLockUnreadableError) return false
+      throw error
+    }
+    try {
+      this.removeSnapshot(id)
+      return true
+    } finally {
+      lock.release()
+    }
+  }
+
+  /**
+   * Run one provider-scoped operation under the same exclusive lock an
+   * install owns. Removal uses this so route, credential, pool, and cache
+   * cleanup cannot overlap a live install; `evict` is permitted inside the
+   * operation. A live owner refuses with {@link HeavyProviderLockedError}; an
+   * unverifiable record fails closed with `HeavyProviderLockUnreadableError`.
+   * @param id - provider id.
+   * @param operation - async work to run while holding the lock.
+   * @returns the operation's result.
+   */
+  async withProviderLock<T>(id: string, operation: () => Promise<T>): Promise<T> {
+    const lock = acquireProviderLock(this.dir, id, this.now)
+    this.exclusive.add(id)
+    try {
+      return await operation()
+    } finally {
+      this.exclusive.delete(id)
+      lock.release()
+    }
+  }
+
+  /** Drop the in-memory view and the persisted snapshot; callers own the lock. */
+  private removeSnapshot(id: string): void {
     this.jobs.delete(id)
     try {
       rmSync(join(this.dir, `${id}.json`), { force: true })
@@ -166,52 +266,57 @@ export class HeavyJobManager {
     view: HeavyJobView,
     steps: readonly HeavyStep[],
     total: number,
+    lock: HeavyProviderLock,
     finalize?: () => Promise<void>,
   ): Promise<void> {
-    let done = 0
-    for (const [index, step] of steps.entries()) {
-      view.stage = step.label
-      view.stageIndex = index
-      this.persist(view)
-      let outcome: StepOutcome
-      try {
-        outcome = await this.run(step)
-      } catch (error) {
-        if (step.optional === true) {
-          this.appendLog(view, `$ ${step.label}: optional step failed — ${error instanceof Error ? error.message : String(error)}\n`)
-          done += step.weight ?? 1
-          view.pct = Math.min(99, Math.round((done / total) * 99))
-          continue
-        }
-        this.fail(view, `${step.label}: ${error instanceof Error ? error.message : String(error)}`)
-        return
-      }
-      this.appendLog(view, `$ ${step.label}\n${outcome.output}\n`)
-      if (outcome.exitCode !== 0) {
-        if (step.optional === true) {
-          this.appendLog(view, `$ ${step.label}: optional step exited ${String(outcome.exitCode)}\n`)
-        } else {
-          this.fail(view, `${step.label}: exit ${String(outcome.exitCode)}`)
+    try {
+      let done = 0
+      for (const [index, step] of steps.entries()) {
+        view.stage = step.label
+        view.stageIndex = index
+        this.persist(view)
+        let outcome: StepOutcome
+        try {
+          outcome = await this.run(step)
+        } catch (error) {
+          if (step.optional === true) {
+            this.appendLog(view, `$ ${step.label}: optional step failed — ${error instanceof Error ? error.message : String(error)}\n`)
+            done += step.weight ?? 1
+            view.pct = Math.min(99, Math.round((done / total) * 99))
+            continue
+          }
+          this.fail(view, `${step.label}: ${error instanceof Error ? error.message : String(error)}`)
           return
         }
+        this.appendLog(view, `$ ${step.label}\n${outcome.output}\n`)
+        if (outcome.exitCode !== 0) {
+          if (step.optional === true) {
+            this.appendLog(view, `$ ${step.label}: optional step exited ${String(outcome.exitCode)}\n`)
+          } else {
+            this.fail(view, `${step.label}: exit ${String(outcome.exitCode)}`)
+            return
+          }
+        }
+        done += step.weight ?? 1
+        view.pct = Math.min(99, Math.round((done / total) * 99))
+        this.persist(view)
       }
-      done += step.weight ?? 1
-      view.pct = Math.min(99, Math.round((done / total) * 99))
+      view.stage = 'Finishing'
       this.persist(view)
+      try {
+        await finalize?.()
+      } catch (error) {
+        this.fail(view, error instanceof Error ? error.message : String(error))
+        return
+      }
+      view.state = 'succeeded'
+      view.pct = 100
+      view.finishedAt = this.now()
+      this.running.delete(view.id)
+      this.persist(view)
+    } finally {
+      lock.release()
     }
-    view.stage = 'Finishing'
-    this.persist(view)
-    try {
-      await finalize?.()
-    } catch (error) {
-      this.fail(view, error instanceof Error ? error.message : String(error))
-      return
-    }
-    view.state = 'succeeded'
-    view.pct = 100
-    view.finishedAt = this.now()
-    this.running.delete(view.id)
-    this.persist(view)
   }
 
   private fail(view: HeavyJobView, error: string): void {

@@ -76,7 +76,7 @@ export const Config: z<Partial<Config>, Config> = z.object({
   disconnectGraceMs: z.natural().default(DEFAULT_DISCONNECT_GRACE_MS),
   transcriptLimitBytes: z.number().step(1).min(1).default(DEFAULT_TRANSCRIPT_LIMIT_BYTES),
   shell: z.string().default(defaultShell()),
-}) as z<Partial<Config>, Config>
+})
 
 /** API request bodies are tiny JSON objects; anything larger is hostile. Protocol constant: never configurable. */
 const MAX_BODY_BYTES = 64 * 1024
@@ -127,6 +127,7 @@ function parseClientFrame(raw: unknown): TerminalClientFrame | undefined {
     return { t: 'resize', cols: frame['cols'], rows: frame['rows'] }
   }
   if (frame['t'] === 'kill') return { t: 'kill' }
+  if (frame['t'] === 'ping') return { t: 'ping' }
   return undefined
 }
 
@@ -245,7 +246,14 @@ export function apply(ctx: Context, config: Config): void {
         let open = true
         ws.on('message', (raw: unknown) => {
           const frame = parseClientFrame(raw)
-          if (frame !== undefined) registry.frame(key, frame)
+          if (frame === undefined) return
+          // The keepalive never reaches the PTY: answer it at the socket layer
+          // so an idle terminal keeps intermediaries alive without input.
+          if (frame.t === 'ping') {
+            try { ws.send(JSON.stringify({ t: 'pong' })) } catch { /* a dead socket drops its frame */ }
+            return
+          }
+          registry.frame(key, frame)
         })
         const detach = (): void => {
           if (!open) return

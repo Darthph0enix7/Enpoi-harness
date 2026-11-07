@@ -147,7 +147,10 @@ class ClientRemoteService extends Service implements ClientRemote {
   private readonly namespaces = new Map<string, RemoteNamespaceHandle>()
   private hostFacts: RemoteHostFacts | undefined
   private readonly events: ClientRemoteEvents
-  private readonly streams = new RemoteStreamMuxClient(() => { this.events.reportActivity() })
+  private readonly streams = new RemoteStreamMuxClient(
+    () => { this.events.reportActivity() },
+    () => { this.events.reportHeartbeat() },
+  )
   private mutations = Promise.resolve()
 
   constructor(ctx: Context) {

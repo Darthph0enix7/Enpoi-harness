@@ -16,7 +16,7 @@ const modes = (['none', 'zstd'] as const).flatMap(compression =>
   (['read', 'write'] as const).map(access => ({ compression, access })))
 
 describe.each(modes)('retired content in JSONL ($compression, $access)', ({ compression, access }) => {
-  async function stored(version: 3 | 4, opaque: boolean, corruptPrefix: boolean) {
+  async function stored(version: 3 | 4 | 5, opaque: boolean, corruptPrefix: boolean) {
     const root = await mkdtemp(join(tmpdir(), 'dsh-retired-content-'))
     const ctx = new Context()
     onTestFinished(async () => {
@@ -37,7 +37,14 @@ describe.each(modes)('retired content in JSONL ($compression, $access)', ({ comp
     return { ctx, path, bytes, event }
   }
 
-  it.each([{ version: 3, corruptPrefix: false }, { version: 4, corruptPrefix: false }, { version: 4, corruptPrefix: true }] as const)
+  // Historical V4 admission must match the V4 reader even after a malformed
+  // row: the retired wrapper is refused, not suppressed as an untrusted tail.
+  it.each([
+    { version: 3, corruptPrefix: false },
+    { version: 4, corruptPrefix: false },
+    { version: 4, corruptPrefix: true },
+    { version: 5, corruptPrefix: true },
+  ] as const)
   ('refuses V$version content with corruptPrefix=$corruptPrefix and preserves the only generation', async ({ version, corruptPrefix }) => {
     const { ctx, path, bytes } = await stored(version, false, corruptPrefix)
     const opened = ctx.sessionPersistence.open(id, access).then(async (handle) => { await handle.close() })

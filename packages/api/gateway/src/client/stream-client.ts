@@ -62,8 +62,15 @@ export class RemoteStreamMuxClient {
    * @param onFrame - observes every inbound frame on the current physical socket,
    * including frames for unknown logical streams; frames of a replaced socket
    * are not reported.
+   * @param onHeartbeat - observes each inbound carrier `heartbeat` frame on the
+   * current physical socket after the frame report. Such a frame belongs to no
+   * logical stream and does not reach one; frames of a replaced socket are not
+   * reported.
    */
-  constructor(private readonly onFrame?: () => void) {}
+  constructor(
+    private readonly onFrame?: () => void,
+    private readonly onHeartbeat?: () => void,
+  ) {}
 
   /** Ensure a physical attempt exists, following the current attempt once if needed. */
   start(): void {
@@ -313,22 +320,31 @@ export class RemoteStreamMuxClient {
   private receive(socket: WebSocket, data: unknown): void {
     if (socket !== this.socket) return
     this.onFrame?.()
+    let heartbeat = false
     try {
       if (typeof data !== 'string') throw new Error('api gateway: Remote stream WebSocket requires text messages')
       const frame = parseRemoteStreamServerMessage(data)
-      // A carrier heartbeat belongs to no logical stream; the frame report above is its only effect.
-      if (frame.type === 'heartbeat') return
-      const stream = this.streams.get(frame.streamId)
-      if (stream === undefined) return
-      stream.inbox.push(frame)
-      // A terminal frame ends the uplink now, not on the consumer's next read.
-      if (frame.type !== 'item') stream.pump?.stop()
+      // A carrier heartbeat belongs to no logical stream; it refreshes liveness
+      // and arms the current generation's silence watchdog.
+      if (frame.type === 'heartbeat') {
+        heartbeat = true
+      } else {
+        const stream = this.streams.get(frame.streamId)
+        if (stream !== undefined) {
+          stream.inbox.push(frame)
+          // A terminal frame ends the uplink now, not on the consumer's next read.
+          if (frame.type !== 'item') stream.pump?.stop()
+        }
+      }
     } catch (error) {
       const failure = new RemoteStreamCarrierError('api gateway: invalid Remote stream frame', { cause: error })
       this.failAll(failure)
       this.lost(socket, failure)
       socket.close(4002, 'invalid Remote stream frame')
+      return
     }
+    // Reported outside the parse guard: a throwing reporter must not turn a valid frame into a 4002 close.
+    if (heartbeat) this.onHeartbeat?.()
   }
 
   private lost(
@@ -486,5 +502,9 @@ function remoteStreamUrl(): string {
   const globals = globalThis as { __DSH_TRANSPORT__?: { streamBaseUrl?: string } }
   const url = new URL(REMOTE_STREAM_MUX_PATH.slice(1), globals.__DSH_TRANSPORT__?.streamBaseUrl ?? document.baseURI)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  // Capability negotiation: only clients that understand the application
+  // `heartbeat` frame ask for it, so an older bundle never receives a frame its
+  // exact-key parser rejects with 4002.
+  url.searchParams.set('heartbeat', '1')
   return url.href
 }

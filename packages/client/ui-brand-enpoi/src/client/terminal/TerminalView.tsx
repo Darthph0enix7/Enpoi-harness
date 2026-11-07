@@ -7,6 +7,9 @@ import { useEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+// Loaded with this deferred module: the bundle preset compiles a global CSS
+// import into a watched injector the module system claims for this chunk.
+import '@xterm/xterm/css/xterm.css'
 import {
   attachTerminalPaste, terminalClipboardKey, type TerminalClipboardTarget,
 } from '@deepseek-ai/dsh-client-ui-primitives'

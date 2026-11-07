@@ -1,0 +1,5174 @@
+{
+  "format": "dsh-enpoi-cliproxyapi-metadata",
+  "formatVersion": 2,
+  "source": {
+    "sourceUrl": "https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/v8.0.54/internal/registry/models/models.json",
+    "sourceVersion": "v8.0.54",
+    "sourcePath": "internal/registry/models/models.json",
+    "sourceSha256": "3e3f3a50cceaf812714ac85cde1601fc1b36c787a1e0dcf04072a9934c023aff",
+    "fetchedAt": "2026-11-04T21:20:00.000Z",
+    "license": "MIT",
+    "attribution": "CLIProxyAPI model registry (https://github.com/router-for-me/CLIProxyAPI), MIT License; full upstream license in CLIProxyAPI-LICENSE.txt."
+  },
+  "channels": {
+    "claude": [
+      {
+        "id": "claude-haiku-4-5-20251001",
+        "owner": "anthropic",
+        "name": "Claude 4.5 Haiku",
+        "contextWindow": 200000,
+        "maxInputTokens": null,
+        "maxTokens": 64000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": {
+            "min": 1024,
+            "max": 128000
+          }
+        }
+      },
+      {
+        "id": "claude-sonnet-4-5-20250929",
+        "owner": "anthropic",
+        "name": "Claude 4.5 Sonnet",
+        "contextWindow": 200000,
+        "maxInputTokens": null,
+        "maxTokens": 64000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": {
+            "min": 1024,
+            "max": 128000
+          }
+        }
+      },
+      {
+        "id": "claude-sonnet-4-6",
+        "owner": "anthropic",
+        "name": "Claude 4.6 Sonnet",
+        "contextWindow": 200000,
+        "maxInputTokens": null,
+        "maxTokens": 64000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "max"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": {
+            "min": 1024,
+            "max": 128000
+          }
+        }
+      },
+      {
+        "id": "claude-opus-4-6",
+        "owner": "anthropic",
+        "name": "Claude 4.6 Opus",
+        "contextWindow": 1000000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "max"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": {
+            "min": 1024,
+            "max": 128000
+          }
+        }
+      },
+      {
+        "id": "claude-opus-4-7",
+        "owner": "anthropic",
+        "name": "Claude Opus 4.7",
+        "contextWindow": 1000000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": null
+        }
+      },
+      {
+        "id": "claude-opus-4-8",
+        "owner": "anthropic",
+        "name": "Claude Opus 4.8",
+        "contextWindow": 1000000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": null
+        }
+      },
+      {
+        "id": "claude-opus-5",
+        "owner": "anthropic",
+        "name": "Claude Opus 5",
+        "contextWindow": 1000000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": null
+        }
+      },
+      {
+        "id": "claude-sonnet-5",
+        "owner": "anthropic",
+        "name": "Claude Sonnet 5",
+        "contextWindow": 1000000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": null
+        }
+      },
+      {
+        "id": "claude-fable-5",
+        "owner": "anthropic",
+        "name": "Claude Fable 5",
+        "contextWindow": 1000000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": false,
+          "dynamicAllowed": true,
+          "budget": null
+        }
+      },
+      {
+        "id": "claude-fable-5-1",
+        "owner": "anthropic",
+        "name": "Claude Fable 5.1",
+        "contextWindow": 1000000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": false,
+          "dynamicAllowed": true,
+          "budget": null
+        }
+      },
+      {
+        "id": "claude-opus-5-5",
+        "owner": "anthropic",
+        "name": "Claude Opus 5.5",
+        "contextWindow": 1000000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": false,
+          "dynamicAllowed": true,
+          "budget": null
+        }
+      },
+      {
+        "id": "claude-sonnet-5-5",
+        "owner": "anthropic",
+        "name": "Claude Sonnet 5.5",
+        "contextWindow": 1000000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": null
+        }
+      },
+      {
+        "id": "claude-haiku-5-5",
+        "owner": "anthropic",
+        "name": "Claude Haiku 5.5",
+        "contextWindow": 1000000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": null
+        }
+      },
+      {
+        "id": "claude-opus-4-5-20251101",
+        "owner": "anthropic",
+        "name": "Claude 4.5 Opus",
+        "contextWindow": 200000,
+        "maxInputTokens": null,
+        "maxTokens": 64000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": {
+            "min": 1024,
+            "max": 128000
+          }
+        }
+      },
+      {
+        "id": "claude-opus-4-1-20250805",
+        "owner": "anthropic",
+        "name": "Claude 4.1 Opus",
+        "contextWindow": 200000,
+        "maxInputTokens": null,
+        "maxTokens": 32000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": {
+            "min": 1024,
+            "max": 128000
+          }
+        }
+      },
+      {
+        "id": "claude-opus-4-20250514",
+        "owner": "anthropic",
+        "name": "Claude 4 Opus",
+        "contextWindow": 200000,
+        "maxInputTokens": null,
+        "maxTokens": 32000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": {
+            "min": 1024,
+            "max": 128000
+          }
+        }
+      },
+      {
+        "id": "claude-sonnet-4-20250514",
+        "owner": "anthropic",
+        "name": "Claude 4 Sonnet",
+        "contextWindow": 200000,
+        "maxInputTokens": null,
+        "maxTokens": 64000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": {
+            "min": 1024,
+            "max": 128000
+          }
+        }
+      },
+      {
+        "id": "claude-3-7-sonnet-20250219",
+        "owner": "anthropic",
+        "name": "Claude 3.7 Sonnet",
+        "contextWindow": 128000,
+        "maxInputTokens": null,
+        "maxTokens": 8192,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": {
+            "min": 1024,
+            "max": 128000
+          }
+        }
+      },
+      {
+        "id": "claude-3-5-haiku-20241022",
+        "owner": "anthropic",
+        "name": "Claude 3.5 Haiku",
+        "contextWindow": 128000,
+        "maxInputTokens": null,
+        "maxTokens": 8192,
+        "inputModalities": null,
+        "outputModalities": null,
+        "reasoning": null,
+        "effort": null
+      }
+    ],
+    "gemini": [
+      {
+        "id": "gemini-2.5-pro",
+        "owner": "google",
+        "name": "Gemini 2.5 Pro",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-2.5-flash",
+        "owner": "google",
+        "name": "Gemini 2.5 Flash",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": null,
+            "max": 24576
+          }
+        }
+      },
+      {
+        "id": "gemini-2.5-flash-lite",
+        "owner": "google",
+        "name": "Gemini 2.5 Flash Lite",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": null,
+            "max": 24576
+          }
+        }
+      },
+      {
+        "id": "gemini-3-pro-preview",
+        "owner": "google",
+        "name": "Gemini 3 Pro Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.1-pro-preview",
+        "owner": "google",
+        "name": "Gemini 3.1 Pro Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.1-flash-image-preview",
+        "owner": "google",
+        "name": "Gemini 3.1 Flash Image Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text",
+          "image"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3-flash-preview",
+        "owner": "google",
+        "name": "Gemini 3 Flash Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.1-flash-lite-preview",
+        "owner": "google",
+        "name": "Gemini 3.1 Flash Lite Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3-pro-image-preview",
+        "owner": "google",
+        "name": "Gemini 3 Pro Image Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text",
+          "image"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.5-flash",
+        "owner": "google",
+        "name": "Gemini 3.5 Flash",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.5-flash-lite",
+        "owner": "google",
+        "name": "Gemini 3.5 Flash Lite",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.6-flash",
+        "owner": "google",
+        "name": "Gemini 3.6 Flash",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.8-flash",
+        "owner": "google",
+        "name": "Gemini 3.8 Flash",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 65535
+          }
+        }
+      },
+      {
+        "id": "gemini-4-argon",
+        "owner": "google",
+        "name": "Gemini 4 Argon",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 1048576,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 65535
+          }
+        }
+      }
+    ],
+    "vertex": [
+      {
+        "id": "gemini-2.5-pro",
+        "owner": "google",
+        "name": "Gemini 2.5 Pro",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-2.5-flash",
+        "owner": "google",
+        "name": "Gemini 2.5 Flash",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": null,
+            "max": 24576
+          }
+        }
+      },
+      {
+        "id": "gemini-2.5-flash-image",
+        "owner": "google",
+        "name": "Gemini 2.5 Flash Image",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text",
+          "image"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": null,
+            "max": 24576
+          }
+        }
+      },
+      {
+        "id": "gemini-2.5-flash-lite",
+        "owner": "google",
+        "name": "Gemini 2.5 Flash Lite",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": null,
+            "max": 24576
+          }
+        }
+      },
+      {
+        "id": "gemini-3-pro",
+        "owner": "google",
+        "name": "Gemini 3 Pro",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3-flash",
+        "owner": "google",
+        "name": "Gemini 3 Flash",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.1-pro",
+        "owner": "google",
+        "name": "Gemini 3.1 Pro",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.1-pro-preview",
+        "owner": "google",
+        "name": "Gemini 3.1 Pro Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.1-flash-image",
+        "owner": "google",
+        "name": "Gemini 3.1 Flash Image",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text",
+          "image"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.1-flash-lite",
+        "owner": "google",
+        "name": "Gemini 3.1 Flash Lite",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3-pro-image",
+        "owner": "google",
+        "name": "Gemini 3 Pro Image",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text",
+          "image"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "imagen-4.0-generate-001",
+        "owner": "google",
+        "name": "Imagen 4.0 Generate",
+        "contextWindow": null,
+        "maxInputTokens": null,
+        "maxTokens": null,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "image"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "imagen-4.0-ultra-generate-001",
+        "owner": "google",
+        "name": "Imagen 4.0 Ultra Generate",
+        "contextWindow": null,
+        "maxInputTokens": null,
+        "maxTokens": null,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "image"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "imagen-3.0-generate-002",
+        "owner": "google",
+        "name": "Imagen 3.0 Generate",
+        "contextWindow": null,
+        "maxInputTokens": null,
+        "maxTokens": null,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "image"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "imagen-3.0-fast-generate-001",
+        "owner": "google",
+        "name": "Imagen 3.0 Fast Generate",
+        "contextWindow": null,
+        "maxInputTokens": null,
+        "maxTokens": null,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "image"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "imagen-4.0-fast-generate-001",
+        "owner": "google",
+        "name": "Imagen 4.0 Fast Generate",
+        "contextWindow": null,
+        "maxInputTokens": null,
+        "maxTokens": null,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "image"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "gemini-3.5-flash",
+        "owner": "google",
+        "name": "Gemini 3.5 Flash",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.5-flash-lite",
+        "owner": "google",
+        "name": "Gemini 3.5 Flash Lite",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.6-flash",
+        "owner": "google",
+        "name": "Gemini 3.6 Flash",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.8-flash",
+        "owner": "google",
+        "name": "Gemini 3.8 Flash",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 65535
+          }
+        }
+      },
+      {
+        "id": "gemini-4-argon",
+        "owner": "google",
+        "name": "Gemini 4 Argon",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 1048576,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 65535
+          }
+        }
+      }
+    ],
+    "gemini-cli": [
+      {
+        "id": "gemini-2.5-pro",
+        "owner": "google",
+        "name": "Gemini 2.5 Pro",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-2.5-flash",
+        "owner": "google",
+        "name": "Gemini 2.5 Flash",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": null,
+            "max": 24576
+          }
+        }
+      },
+      {
+        "id": "gemini-2.5-flash-lite",
+        "owner": "google",
+        "name": "Gemini 2.5 Flash Lite",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": null,
+            "max": 24576
+          }
+        }
+      },
+      {
+        "id": "gemini-3-pro-preview",
+        "owner": "google",
+        "name": "Gemini 3 Pro Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.1-pro-preview",
+        "owner": "google",
+        "name": "Gemini 3.1 Pro Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3-flash-preview",
+        "owner": "google",
+        "name": "Gemini 3 Flash Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.1-flash-lite-preview",
+        "owner": "google",
+        "name": "Gemini 3.1 Flash Lite Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      }
+    ],
+    "aistudio": [
+      {
+        "id": "gemini-2.5-pro",
+        "owner": "google",
+        "name": "Gemini 2.5 Pro",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-2.5-flash",
+        "owner": "google",
+        "name": "Gemini 2.5 Flash",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": null,
+            "max": 24576
+          }
+        }
+      },
+      {
+        "id": "gemini-2.5-flash-lite",
+        "owner": "google",
+        "name": "Gemini 2.5 Flash Lite",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": null,
+            "max": 24576
+          }
+        }
+      },
+      {
+        "id": "gemini-3-pro-preview",
+        "owner": "google",
+        "name": "Gemini 3 Pro Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.1-pro-preview",
+        "owner": "google",
+        "name": "Gemini 3.1 Pro Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3-flash-preview",
+        "owner": "google",
+        "name": "Gemini 3 Flash Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.1-flash-lite-preview",
+        "owner": "google",
+        "name": "Gemini 3.1 Flash Lite Preview",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-pro-latest",
+        "owner": "google",
+        "name": "Gemini Pro Latest",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-flash-latest",
+        "owner": "google",
+        "name": "Gemini Flash Latest",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": null,
+            "max": 24576
+          }
+        }
+      },
+      {
+        "id": "gemini-flash-lite-latest",
+        "owner": "google",
+        "name": "Gemini Flash-Lite Latest",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 512,
+            "max": 24576
+          }
+        }
+      },
+      {
+        "id": "gemini-2.5-flash-image",
+        "owner": "google",
+        "name": "Gemini 2.5 Flash Image",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 8192,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text",
+          "image"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "gemini-3.5-flash",
+        "owner": "google",
+        "name": "Gemini 3.5 Flash",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.5-flash-lite",
+        "owner": "google",
+        "name": "Gemini 3.5 Flash Lite",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.6-flash",
+        "owner": "google",
+        "name": "Gemini 3.6 Flash",
+        "contextWindow": null,
+        "maxInputTokens": 1048576,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.8-flash",
+        "owner": "google",
+        "name": "Gemini 3.8 Flash",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 65535
+          }
+        }
+      }
+    ],
+    "codex-free": [
+      {
+        "id": "gpt-6-luna",
+        "owner": "openai",
+        "name": "GPT 6.0 Luna",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-6.1-terra",
+        "owner": "openai",
+        "name": "GPT 6.1 Terra",
+        "contextWindow": 500000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-5.6-terra",
+        "owner": "openai",
+        "name": "GPT 5.6 Terra",
+        "contextWindow": 372000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-5.6-luna",
+        "owner": "openai",
+        "name": "GPT 5.6 Luna",
+        "contextWindow": 372000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "codex-auto-review",
+        "owner": "openai",
+        "name": "Codex Auto Review",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      }
+    ],
+    "codex-team": [
+      {
+        "id": "gpt-6-astra",
+        "owner": "openai",
+        "name": "GPT 6.0 Astra",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-6-sol",
+        "owner": "openai",
+        "name": "GPT 6.0 Sol",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-6.1-sol",
+        "owner": "openai",
+        "name": "GPT 6.1 Sol",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-6.1-terra",
+        "owner": "openai",
+        "name": "GPT 6.1 Terra",
+        "contextWindow": 500000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-6-luna",
+        "owner": "openai",
+        "name": "GPT 6.0 Luna",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-5.6-sol",
+        "owner": "openai",
+        "name": "GPT 5.6 Sol",
+        "contextWindow": 372000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-5.6-terra",
+        "owner": "openai",
+        "name": "GPT 5.6 Terra",
+        "contextWindow": 372000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-5.6-luna",
+        "owner": "openai",
+        "name": "GPT 5.6 Luna",
+        "contextWindow": 372000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "codex-auto-review",
+        "owner": "openai",
+        "name": "Codex Auto Review",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      }
+    ],
+    "codex-plus": [
+      {
+        "id": "gpt-6-astra",
+        "owner": "openai",
+        "name": "GPT 6.0 Astra",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-6-sol",
+        "owner": "openai",
+        "name": "GPT 6.0 Sol",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-6.1-sol",
+        "owner": "openai",
+        "name": "GPT 6.1 Sol",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-6.1-terra",
+        "owner": "openai",
+        "name": "GPT 6.1 Terra",
+        "contextWindow": 500000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-6-luna",
+        "owner": "openai",
+        "name": "GPT 6.0 Luna",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-5.6-sol",
+        "owner": "openai",
+        "name": "GPT 5.6 Sol",
+        "contextWindow": 372000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-5.6-terra",
+        "owner": "openai",
+        "name": "GPT 5.6 Terra",
+        "contextWindow": 372000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-5.6-luna",
+        "owner": "openai",
+        "name": "GPT 5.6 Luna",
+        "contextWindow": 372000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "codex-auto-review",
+        "owner": "openai",
+        "name": "Codex Auto Review",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      }
+    ],
+    "codex-pro": [
+      {
+        "id": "gpt-6-astra",
+        "owner": "openai",
+        "name": "GPT 6.0 Astra",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-6-sol",
+        "owner": "openai",
+        "name": "GPT 6.0 Sol",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-6.1-sol",
+        "owner": "openai",
+        "name": "GPT 6.1 Sol",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-6.1-terra",
+        "owner": "openai",
+        "name": "GPT 6.1 Terra",
+        "contextWindow": 500000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-6-luna",
+        "owner": "openai",
+        "name": "GPT 6.0 Luna",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-5.6-sol",
+        "owner": "openai",
+        "name": "GPT 5.6 Sol",
+        "contextWindow": 921000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-5.6-terra",
+        "owner": "openai",
+        "name": "GPT 5.6 Terra",
+        "contextWindow": 921000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "gpt-5.6-luna",
+        "owner": "openai",
+        "name": "GPT 5.6 Luna",
+        "contextWindow": 921000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "codex-auto-review",
+        "owner": "openai",
+        "name": "Codex Auto Review",
+        "contextWindow": 272000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      }
+    ],
+    "kimi": [
+      {
+        "id": "kimi-k2",
+        "owner": "moonshot",
+        "name": "Kimi K2",
+        "contextWindow": 131072,
+        "maxInputTokens": null,
+        "maxTokens": 32768,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "kimi-k2-thinking",
+        "owner": "moonshot",
+        "name": "Kimi K2 Thinking",
+        "contextWindow": 131072,
+        "maxInputTokens": null,
+        "maxTokens": 32768,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "kimi-k2.5",
+        "owner": "moonshot",
+        "name": "Kimi K2.5",
+        "contextWindow": 262144,
+        "maxInputTokens": null,
+        "maxTokens": 32768,
+        "inputModalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "kimi-k2.6",
+        "owner": "moonshot",
+        "name": "Kimi K2.6",
+        "contextWindow": 262144,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "kimi-k2.7-code",
+        "owner": "moonshot",
+        "name": "Kimi K2.7 Code",
+        "contextWindow": 262144,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": false,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "kimi-k2.7-code-highspeed",
+        "owner": "moonshot",
+        "name": "Kimi K2.7 Code HighSpeed",
+        "contextWindow": 262144,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": false,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "kimi-k2.8",
+        "owner": "moonshot",
+        "name": "Kimi K2.8 Preview",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "high",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "kimi-k2.8-code",
+        "owner": "moonshot",
+        "name": "Kimi K2.8 Code Preview",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "high",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "kimi-k3",
+        "owner": "moonshot",
+        "name": "Kimi K3",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "high",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "kimi-k3-256k",
+        "owner": "moonshot",
+        "name": "Kimi K3 256K",
+        "contextWindow": 262144,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "high",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "kimi-k3.1-pro",
+        "owner": "moonshot",
+        "name": "Kimi K3.1 Pro",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "high",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "kimi-k3.1-pro-highspeed",
+        "owner": "moonshot",
+        "name": "Kimi K3.1 Pro Highspeed",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "high",
+            "max"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "high",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      }
+    ],
+    "antigravity": [
+      {
+        "id": "claude-opus-4-6-thinking",
+        "owner": "antigravity",
+        "name": "Claude Opus 4.6 (Thinking)",
+        "contextWindow": 200000,
+        "maxInputTokens": null,
+        "maxTokens": 64000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 1024,
+            "max": 64000
+          }
+        }
+      },
+      {
+        "id": "claude-sonnet-4-6",
+        "owner": "antigravity",
+        "name": "Claude Sonnet 4.6 (Thinking)",
+        "contextWindow": 200000,
+        "maxInputTokens": null,
+        "maxTokens": 64000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": null,
+          "supportedKeys": [
+            "off"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 1024,
+            "max": 64000
+          }
+        }
+      },
+      {
+        "id": "claude-opus-5-5-high",
+        "owner": "antigravity",
+        "name": "Claude Opus 5.5 (High)",
+        "contextWindow": 1000000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 1024,
+            "max": 64000
+          }
+        }
+      },
+      {
+        "id": "claude-sonnet-5-5-high",
+        "owner": "antigravity",
+        "name": "Claude Sonnet 5.5 (High)",
+        "contextWindow": 1000000,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 1024,
+            "max": 64000
+          }
+        }
+      },
+      {
+        "id": "gemini-4-argon-high",
+        "owner": "antigravity",
+        "name": "Gemini 4 Argon",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 1048576,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 1,
+            "max": 65535
+          }
+        }
+      },
+      {
+        "id": "gemini-3.8-flash-high",
+        "owner": "antigravity",
+        "name": "Gemini 3.8 Flash",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 1,
+            "max": 65535
+          }
+        }
+      },
+      {
+        "id": "gemini-3-flash",
+        "owner": "antigravity",
+        "name": "Gemini 3 Flash",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gemini-3.1-flash-image",
+        "owner": "antigravity",
+        "name": "Gemini 3.1 Flash Image",
+        "contextWindow": null,
+        "maxInputTokens": null,
+        "maxTokens": null,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text",
+          "image"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 128,
+            "max": 32768
+          }
+        }
+      },
+      {
+        "id": "gpt-oss-120b-medium",
+        "owner": "antigravity",
+        "name": "GPT-OSS 120B (Medium)",
+        "contextWindow": 114000,
+        "maxInputTokens": null,
+        "maxTokens": 32768,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "gemini-3.1-flash-lite",
+        "owner": "antigravity",
+        "name": "Gemini 3.1 Flash Lite",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65535,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": true,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 1,
+            "max": 65535
+          }
+        }
+      },
+      {
+        "id": "gemini-3.5-flash-lite",
+        "owner": "antigravity",
+        "name": "Gemini 3.5 Flash Lite",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65535,
+        "inputModalities": [
+          "text",
+          "image",
+          "audio",
+          "video"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": true,
+          "budget": {
+            "min": 1,
+            "max": 65535
+          }
+        }
+      }
+    ],
+    "xai": [
+      {
+        "id": "grok-4.7",
+        "owner": "xai",
+        "name": "Grok 4.7",
+        "contextWindow": 500000,
+        "maxInputTokens": null,
+        "maxTokens": 500000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": false,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "grok-4.7-build-fast",
+        "owner": "xai",
+        "name": "Grok 4.7 Fast",
+        "contextWindow": 500000,
+        "maxInputTokens": null,
+        "maxTokens": 500000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": false,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "grok-4.6",
+        "owner": "xai",
+        "name": "Grok 4.6",
+        "contextWindow": 500000,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": false,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "grok-build-0.1",
+        "owner": "xai",
+        "name": "Grok Build 0.1",
+        "contextWindow": 256000,
+        "maxInputTokens": null,
+        "maxTokens": 256000,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "grok-4.5",
+        "owner": "xai",
+        "name": "Grok 4.5",
+        "contextWindow": 500000,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": false,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "grok-4.3",
+        "owner": "xai",
+        "name": "Grok 4.3",
+        "contextWindow": 1000000,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "none",
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "off",
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [
+            "none"
+          ],
+          "zeroAllowed": true,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "grok-4.20-0309-reasoning",
+        "owner": "xai",
+        "name": "Grok 4.20 0309 Reasoning",
+        "contextWindow": 2000000,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "grok-4.20-0309-non-reasoning",
+        "owner": "xai",
+        "name": "Grok 4.20 0309 Non Reasoning",
+        "contextWindow": 2000000,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "grok-4.20-multi-agent-0309",
+        "owner": "xai",
+        "name": "Grok 4.20 Multi Agent 0309",
+        "contextWindow": 2000000,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "grok-3-mini",
+        "owner": "xai",
+        "name": "Grok 3 Mini",
+        "contextWindow": 131072,
+        "maxInputTokens": null,
+        "maxTokens": 32768,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "grok-3-mini-fast",
+        "owner": "xai",
+        "name": "Grok 3 Mini Fast",
+        "contextWindow": 131072,
+        "maxInputTokens": null,
+        "maxTokens": 32768,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "grok-composer-2.5-fast",
+        "owner": "xai",
+        "name": "Composer 2.5 Fast",
+        "contextWindow": 200000,
+        "maxInputTokens": null,
+        "maxTokens": 32768,
+        "inputModalities": null,
+        "outputModalities": null,
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "grok-imagine-image",
+        "owner": "xai",
+        "name": "grok-imagine-image",
+        "contextWindow": null,
+        "maxInputTokens": null,
+        "maxTokens": null,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "image"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "grok-imagine-image-2.0",
+        "owner": "xai",
+        "name": "grok-imagine-image-2.0",
+        "contextWindow": null,
+        "maxInputTokens": null,
+        "maxTokens": null,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "image"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "grok-imagine-image-quality",
+        "owner": "xai",
+        "name": "grok-imagine-image-quality",
+        "contextWindow": null,
+        "maxInputTokens": null,
+        "maxTokens": null,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "image"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "grok-imagine-video",
+        "owner": "xai",
+        "name": "grok-imagine-video",
+        "contextWindow": null,
+        "maxInputTokens": null,
+        "maxTokens": null,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "video"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "grok-imagine-video-1.5",
+        "owner": "xai",
+        "name": "grok-imagine-video-1.5",
+        "contextWindow": null,
+        "maxInputTokens": null,
+        "maxTokens": null,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "video"
+        ],
+        "reasoning": null,
+        "effort": null
+      },
+      {
+        "id": "grok-imagine-video-1.5-lite",
+        "owner": "xai",
+        "name": "Grok Imagine Video 1.5 Lite",
+        "contextWindow": null,
+        "maxInputTokens": null,
+        "maxTokens": null,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "video"
+        ],
+        "reasoning": null,
+        "effort": null
+      }
+    ],
+    "meta": [
+      {
+        "id": "muse-wonder-1.0",
+        "owner": "meta",
+        "name": "Muse Wonder 1.0",
+        "contextWindow": 1007997,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image",
+          "video",
+          "audio"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "muse-wonder-1.0-contributor",
+        "owner": "meta",
+        "name": "Muse Wonder 1.0 Contributor",
+        "contextWindow": 1007997,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image",
+          "video",
+          "audio"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "muse-wonder-full-1.0",
+        "owner": "meta",
+        "name": "Muse Wonder Full 1.0",
+        "contextWindow": 1007997,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image",
+          "video",
+          "audio"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "muse-wonder-full-1.0-contributor",
+        "owner": "meta",
+        "name": "Muse Wonder Full 1.0 Contributor",
+        "contextWindow": 1007997,
+        "maxInputTokens": null,
+        "maxTokens": 128000,
+        "inputModalities": [
+          "text",
+          "image",
+          "video",
+          "audio"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "muse-spark-1.3",
+        "owner": "meta",
+        "name": "Muse Spark 1.3",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "muse-spark-1.3-contributor",
+        "owner": "meta",
+        "name": "Muse Spark 1.3 Contributor",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "muse-spark-1.2",
+        "owner": "meta",
+        "name": "Muse Spark 1.2",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "muse-spark-1.2-contributor",
+        "owner": "meta",
+        "name": "Muse Spark 1.2 Contributor",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text",
+          "image"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "supportedKeys": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      },
+      {
+        "id": "muse-spark-1.1",
+        "owner": "meta",
+        "name": "Muse Spark 1.1",
+        "contextWindow": 1048576,
+        "maxInputTokens": null,
+        "maxTokens": 65536,
+        "inputModalities": [
+          "text"
+        ],
+        "outputModalities": [
+          "text"
+        ],
+        "reasoning": true,
+        "effort": {
+          "levels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "supportedKeys": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "unsupportedLevels": [],
+          "zeroAllowed": null,
+          "dynamicAllowed": null,
+          "budget": null
+        }
+      }
+    ]
+  }
+}

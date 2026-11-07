@@ -119,7 +119,9 @@ describe('Inbox projection intake', () => {
       try {
         manager.handleConnected()
         refreshed = manager.refreshList()
-        expect(face.getSnapshot()).toBeUndefined()
+        // No blank flash: the previous generation's value stays visible until
+        // the new list block or control baseline replaces it.
+        expect(face.getSnapshot()).toEqual({ ...empty, 'next-turn': [ghost] })
         if (order === 'control-first') manager.handleControlFrame(baseline)
         list.resolve(result)
         await refreshed

@@ -41,6 +41,8 @@ interface CompactionFacts {
   readonly shadowedTokens?: number
   readonly error?: string
   readonly manual?: boolean
+  /** Durable failure cause recorded only by the deterministic model-free stub. */
+  readonly summarizationFailure?: { readonly code: string; readonly message: string }
 }
 
 /** Append one complete or truncated compaction lifecycle in the backend's order. */
@@ -59,6 +61,9 @@ function appendCompaction(session: Session, facts: CompactionFacts): void {
       shadowedTokenCount: facts.shadowedTokens ?? 0,
       provider: facts.provider ?? 'mock',
       model: facts.provider === '' ? '' : 'mock-model',
+      ...(facts.summarizationFailure === undefined
+        ? {}
+        : { summarizationFailure: facts.summarizationFailure }),
     })
   }
   if (facts.error !== undefined || facts.shadowedNodes !== undefined || facts.provider !== undefined) {
@@ -101,15 +106,33 @@ describe('contextCompactions session projection', () => {
     })
   })
 
-  it('counts a mechanical stub in count and mechanicalCount and marks it mechanical', async () => {
+  it('counts a model-free failure stub in count and mechanicalCount and marks it mechanical', async () => {
     const { ctx, session } = await harness()
-    appendCompaction(session, { id: 'c1', provider: '', shadowedNodes: 2, shadowedTokens: 50 })
+    appendCompaction(session, {
+      id: 'c1',
+      provider: '',
+      shadowedNodes: 2,
+      shadowedTokens: 50,
+      summarizationFailure: { code: 'PROVIDER_DOWN', message: 'provider down' },
+    })
     const value = projected(ctx, session)
     expect(value).toMatchObject({
       count: 1,
       mechanicalCount: 1,
       failedCount: 0,
       last: { shadowedNodes: 2, shadowedTokens: 50, manual: false, mechanical: true },
+    })
+  })
+
+  it('keeps a custom empty-route summary out of mechanicalCount', async () => {
+    const { ctx, session } = await harness()
+    appendCompaction(session, { id: 'c1', provider: '', shadowedNodes: 3, shadowedTokens: 70 })
+    const value = projected(ctx, session)
+    expect(value).toMatchObject({
+      count: 1,
+      mechanicalCount: 0,
+      failedCount: 0,
+      last: { shadowedNodes: 3, shadowedTokens: 70, manual: false, mechanical: false },
     })
   })
 
@@ -156,6 +179,7 @@ describe('contextCompactions session projection', () => {
       shadowedTokenCount: 200,
       provider: '',
       model: '',
+      summarizationFailure: { code: 'PROVIDER_DOWN', message: 'provider down' },
     })
     expect(projected(ctx, session).count).toBe(0)
     session.append('compaction/end', { compactionId: CompactionId('c1'), turn: null })
@@ -201,7 +225,7 @@ describe('contextCompactions session projection', () => {
     const { ctx, session } = await harness()
     appendCompaction(session, { id: 'c1', shadowedNodes: 2, shadowedTokens: 10, manual: true })
     appendCompaction(session, { id: 'c2', error: 'boom' })
-    appendCompaction(session, { id: 'c3', provider: '', shadowedNodes: 5, shadowedTokens: 80 })
+    appendCompaction(session, { id: 'c3', provider: '', shadowedNodes: 5, shadowedTokens: 80, summarizationFailure: { code: 'PROVIDER_DOWN', message: 'provider down' } })
     const events = session.snapshotEvents()
     const fold = (): ContextCompactionsProjection => {
       let state = contextCompactionsProjectionDefinition.init()
