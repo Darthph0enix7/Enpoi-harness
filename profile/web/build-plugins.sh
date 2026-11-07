@@ -112,6 +112,8 @@ elif [ -f "$PROFILE_ROOT/../../harness/current/node_modules/esbuild/bin/esbuild"
   ESBUILD_CMD=("$NODE_BIN" "$PROFILE_ROOT/../../harness/current/node_modules/esbuild/bin/esbuild")
 elif command -v esbuild >/dev/null 2>&1; then
   ESBUILD_CMD=("$(command -v esbuild)")
+elif (cd "$SCRIPT_DIR" && pnpm exec which esbuild >/dev/null 2>&1); then
+  ESBUILD_CMD=(pnpm --dir "$SCRIPT_DIR/../.." exec esbuild)
 fi
 
 ERRDIR="$(mktemp -d "${TMPDIR:-/tmp}/dsh-profile-build.XXXXXX")" || exit 1

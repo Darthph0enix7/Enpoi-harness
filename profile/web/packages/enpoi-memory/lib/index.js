@@ -217,8 +217,7 @@ function registerCompactionFacts(ctx, db, pipeline, config) {
   const onSummary = (session, event) => {
     if (!config.compactionFacts) return;
     const data = event.data;
-    if (data.provider === "") return;
-    if (data.summarizationFailure !== void 0) return;
+    if (data.summarizationFailure !== void 0 && data.provider === "" && data.model === "") return;
     if (session.header.parentSession !== void 0 && !config.compactionFactsIncludeChildSessions) return;
     const facts = parseDurableFacts(summaryText(data.summary)).slice(0, config.compactionFactsMax);
     if (facts.length === 0) return;

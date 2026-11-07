@@ -123,10 +123,10 @@ var init_remote = __esm({
 });
 
 // src/index.ts
-import { readFileSync as readFileSync2, existsSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { readFileSync as readFileSync3, existsSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
 import Schema from "@deepseek-ai/schemastery";
 import { readSettingsDocument, ORCHESTRATION_NAMESPACE } from "dsh-enpoi-contracts";
 
@@ -419,18 +419,809 @@ function getBuiltinModels(provider) {
 }
 
 // src/index.ts
-import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from "@deepseek-ai/dsh-llm-pi-ai/src/config.ts";
-import { listingCapabilities } from "@deepseek-ai/dsh-llm-pi-ai/src/listing.ts";
+import {
+  Config as PiAiConfig,
+  listingText,
+  readModelListing
+} from "@deepseek-ai/dsh-llm-pi-ai";
+import * as piAiRoot from "@deepseek-ai/dsh-llm-pi-ai";
 
-// src/capability-hints.ts
+// src/registry-metadata.ts
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+var REGISTRY_SNAPSHOT_FORMAT = "dsh-enpoi-cliproxyapi-metadata";
+var REGISTRY_SNAPSHOT_FORMAT_VERSION = 2;
+var BUNDLED_REGISTRY_SNAPSHOT_FILE = "cliproxyapi-metadata.v8.0.54.json";
+var BUNDLED_REGISTRY_LICENSE = "MIT";
+var BUNDLED_REGISTRY_ATTRIBUTION = "CLIProxyAPI model registry (https://github.com/router-for-me/CLIProxyAPI), MIT License; full upstream license in CLIProxyAPI-LICENSE.txt.";
+var CANONICAL_EFFORT_KEYS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max"
+];
+var CANONICAL_EFFORT_SET = new Set(CANONICAL_EFFORT_KEYS);
+var MODEL_MODALITY_TOKENS = ["text", "image", "audio", "video", "pdf"];
+var MODALITY_SET = new Set(MODEL_MODALITY_TOKENS);
+var OWNER_CHANNEL_ALIASES = Object.freeze({
+  anthropic: ["claude"],
+  openai: ["codex-free", "codex-team", "codex-plus", "codex-pro"],
+  antigravity: ["antigravity"],
+  google: ["gemini", "vertex", "gemini-cli", "aistudio"],
+  moonshot: ["kimi"],
+  xai: ["xai"],
+  meta: ["meta"]
+});
+var DEFAULT_REGISTRY_FETCH_TIMEOUT_MS = 15e3;
+var DEFAULT_REGISTRY_FETCH_MAX_BYTES = 2 * 1024 * 1024;
+function nonEmptyString(value2) {
+  return typeof value2 === "string" && value2.length > 0 ? value2 : null;
+}
+function positiveInteger(value2) {
+  return typeof value2 === "number" && Number.isSafeInteger(value2) && value2 > 0 ? value2 : null;
+}
+function asRecord(value2) {
+  return typeof value2 === "object" && value2 !== null && !Array.isArray(value2) ? value2 : null;
+}
+function booleanOrNull(value2) {
+  return typeof value2 === "boolean" ? value2 : null;
+}
+function sourceSha256(value2) {
+  const sha = nonEmptyString(value2);
+  if (sha === null) return null;
+  if (!/^[0-9a-f]{64}$/i.test(sha)) {
+    throw new TypeError("CLIProxyAPI registry sourceSha256 must be a hex SHA-256 digest");
+  }
+  return sha.toLowerCase();
+}
+function attributionUrl(value2) {
+  const raw = nonEmptyString(value2);
+  if (raw === null) throw new TypeError("CLIProxyAPI registry sourceUrl must be a non-empty string");
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new TypeError("CLIProxyAPI registry sourceUrl must be a valid URL");
+  }
+  if (parsed.username.length > 0 || parsed.password.length > 0) {
+    throw new TypeError("CLIProxyAPI registry sourceUrl must not carry credentials");
+  }
+  return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+}
+function normalizeSource(input) {
+  const sourceUrl = attributionUrl(input.sourceUrl);
+  const sourceVersion = nonEmptyString(input.sourceVersion);
+  if (sourceVersion === null) throw new TypeError("CLIProxyAPI registry sourceVersion must be a non-empty string");
+  return {
+    sourceUrl,
+    sourceVersion,
+    sourcePath: nonEmptyString(input.sourcePath),
+    sourceSha256: sourceSha256(input.sourceSha256),
+    fetchedAt: nonEmptyString(input.fetchedAt),
+    license: nonEmptyString(input.license) ?? BUNDLED_REGISTRY_LICENSE,
+    attribution: nonEmptyString(input.attribution) ?? BUNDLED_REGISTRY_ATTRIBUTION
+  };
+}
+function levelNames(value2, channel, id, diagnostics) {
+  if (value2 === void 0 || value2 === null) return [];
+  if (!Array.isArray(value2)) {
+    diagnostics.push({
+      code: "invalid-record",
+      message: `${channel}/${id}: thinking levels must be an array of strings`,
+      id,
+      channel
+    });
+    return [];
+  }
+  const levels = [];
+  for (const level of value2) {
+    if (typeof level !== "string" || level.length === 0) {
+      diagnostics.push({
+        code: "invalid-record",
+        message: `${channel}/${id}: ignoring a non-string thinking level`,
+        id,
+        channel
+      });
+      continue;
+    }
+    if (!levels.includes(level)) levels.push(level);
+  }
+  return levels;
+}
+function modalities(value2, channel, id, field, diagnostics) {
+  if (value2 === void 0 || value2 === null) return null;
+  if (!Array.isArray(value2)) {
+    diagnostics.push({
+      code: "invalid-record",
+      message: `${channel}/${id}: ${field} must be an array of modality tokens`,
+      id,
+      channel
+    });
+    return null;
+  }
+  const tokens = [];
+  for (const token of value2) {
+    if (typeof token !== "string" || token.length === 0) {
+      diagnostics.push({
+        code: "invalid-record",
+        message: `${channel}/${id}: ignoring a non-string ${field} token`,
+        id,
+        channel
+      });
+      continue;
+    }
+    if (!MODALITY_SET.has(token)) {
+      diagnostics.push({
+        code: "unknown-modality",
+        message: `${channel}/${id}: unknown ${field} token "${token}" was not retained`,
+        id,
+        channel
+      });
+      continue;
+    }
+    if (!tokens.includes(token)) tokens.push(token);
+  }
+  return tokens;
+}
+function makeEffort(input) {
+  const levels = input.levels.length > 0 ? [...input.levels] : null;
+  const supportedKeys = CANONICAL_EFFORT_KEYS.filter((key) => {
+    if (key === "off") return input.zeroAllowed === true || levels?.includes("off") === true;
+    return levels?.includes(key) === true;
+  });
+  const unsupportedLevels = levels === null ? [] : levels.filter((level) => !CANONICAL_EFFORT_SET.has(level));
+  const budget = input.min !== null || input.max !== null ? { min: input.min, max: input.max } : null;
+  return {
+    levels,
+    supportedKeys,
+    unsupportedLevels,
+    zeroAllowed: input.zeroAllowed,
+    dynamicAllowed: input.dynamicAllowed,
+    budget
+  };
+}
+function effortFromThinking(value2, channel, id, diagnostics) {
+  return makeEffort({
+    levels: levelNames(value2.levels, channel, id, diagnostics),
+    zeroAllowed: booleanOrNull(value2.zero_allowed),
+    dynamicAllowed: booleanOrNull(value2.dynamic_allowed),
+    min: positiveInteger(value2.min),
+    max: positiveInteger(value2.max)
+  });
+}
+function stringArray(value2) {
+  if (!Array.isArray(value2)) return null;
+  return value2.filter((entry) => typeof entry === "string");
+}
+function sameStrings(left, right) {
+  return left.length === right.length && left.every((value2, index) => value2 === right[index]);
+}
+function effortFromSnapshot(value2, channel, id, diagnostics) {
+  const budget = asRecord(value2.budget);
+  const effort = makeEffort({
+    levels: levelNames(value2.levels, channel, id, diagnostics),
+    zeroAllowed: booleanOrNull(value2.zeroAllowed),
+    dynamicAllowed: booleanOrNull(value2.dynamicAllowed),
+    min: positiveInteger(budget?.min),
+    max: positiveInteger(budget?.max)
+  });
+  const storedSupported = stringArray(value2.supportedKeys);
+  const storedUnsupported = stringArray(value2.unsupportedLevels);
+  if (storedSupported !== null && !sameStrings(storedSupported, effort.supportedKeys)) {
+    diagnostics.push({
+      code: "invalid-record",
+      message: `${channel}/${id}: snapshot supportedKeys disagreed with disclosed levels; recomputed`,
+      id,
+      channel
+    });
+  }
+  if (storedUnsupported !== null && !sameStrings(storedUnsupported, effort.unsupportedLevels)) {
+    diagnostics.push({
+      code: "invalid-record",
+      message: `${channel}/${id}: snapshot unsupportedLevels disagreed with disclosed levels; recomputed`,
+      id,
+      channel
+    });
+  }
+  return effort;
+}
+function rawModelRecord(value2, channel, diagnostics) {
+  const record = asRecord(value2);
+  const id = record === null ? null : nonEmptyString(record.id);
+  if (record === null || id === null) {
+    diagnostics.push({
+      code: "invalid-record",
+      message: `${channel}: ignoring a model entry without a non-empty string id`,
+      channel
+    });
+    return null;
+  }
+  let reasoning = null;
+  let effort = null;
+  if (record.thinking === void 0 || record.thinking === null) {
+    reasoning = null;
+    effort = null;
+  } else if (record.thinking === false) {
+    reasoning = false;
+    effort = null;
+  } else if (record.thinking === true) {
+    reasoning = true;
+    effort = null;
+  } else {
+    const thinking = asRecord(record.thinking);
+    if (thinking === null) {
+      diagnostics.push({
+        code: "invalid-record",
+        message: `${channel}/${id}: thinking must be an object, true, or false; treating it as unknown`,
+        id,
+        channel
+      });
+    } else {
+      reasoning = true;
+      effort = effortFromThinking(thinking, channel, id, diagnostics);
+    }
+  }
+  return {
+    id,
+    owner: nonEmptyString(record.owned_by),
+    name: nonEmptyString(record.display_name),
+    // context_length is the only context disclosure. inputTokenLimit is an
+    // input ceiling and is never summed with output to synthesize context.
+    contextWindow: positiveInteger(record.context_length),
+    maxInputTokens: positiveInteger(record.inputTokenLimit),
+    maxTokens: positiveInteger(record.max_completion_tokens) ?? positiveInteger(record.outputTokenLimit),
+    inputModalities: modalities(record.supportedInputModalities, channel, id, "supportedInputModalities", diagnostics),
+    outputModalities: modalities(record.supportedOutputModalities, channel, id, "supportedOutputModalities", diagnostics),
+    reasoning,
+    effort
+  };
+}
+function snapshotModelRecord(value2, channel, diagnostics) {
+  const record = asRecord(value2);
+  const id = record === null ? null : nonEmptyString(record.id);
+  if (record === null || id === null) {
+    diagnostics.push({
+      code: "invalid-record",
+      message: `${channel}: ignoring a snapshot model entry without a non-empty string id`,
+      channel
+    });
+    return null;
+  }
+  let effort = null;
+  const effortRecord = asRecord(record.effort);
+  if (record.effort !== void 0 && record.effort !== null && effortRecord === null) {
+    diagnostics.push({
+      code: "invalid-record",
+      message: `${channel}/${id}: snapshot effort must be an object or null; no effort metadata retained`,
+      id,
+      channel
+    });
+  } else if (effortRecord !== null) {
+    effort = effortFromSnapshot(effortRecord, channel, id, diagnostics);
+  }
+  let reasoning = null;
+  if (typeof record.reasoning === "boolean") {
+    reasoning = record.reasoning;
+  } else if (record.reasoning !== null) {
+    diagnostics.push({
+      code: "invalid-record",
+      message: `${channel}/${id}: snapshot reasoning must be a boolean or null; treating it as unknown`,
+      id,
+      channel
+    });
+  }
+  return {
+    id,
+    owner: nonEmptyString(record.owner),
+    name: nonEmptyString(record.name),
+    contextWindow: positiveInteger(record.contextWindow),
+    maxInputTokens: positiveInteger(record.maxInputTokens),
+    maxTokens: positiveInteger(record.maxTokens),
+    inputModalities: modalities(record.inputModalities, channel, id, "inputModalities", diagnostics),
+    outputModalities: modalities(record.outputModalities, channel, id, "outputModalities", diagnostics),
+    reasoning,
+    effort
+  };
+}
+function buildIndex(channels, source, diagnostics) {
+  const recordsById = /* @__PURE__ */ new Map();
+  for (const [channel, models] of channels) {
+    for (const model of models) {
+      const entry = { channel, model };
+      const existing = recordsById.get(model.id);
+      if (existing === void 0) recordsById.set(model.id, [entry]);
+      else existing.push(entry);
+    }
+  }
+  return { source, channels, recordsById, diagnostics };
+}
+function parseRegistryModelDocument(raw, source) {
+  const root = asRecord(raw);
+  if (root === null) {
+    throw new TypeError(
+      "CLIProxyAPI registry: document must be an object mapping channel names to model arrays"
+    );
+  }
+  const normalizedSource = normalizeSource(source);
+  const diagnostics = [];
+  const channels = /* @__PURE__ */ new Map();
+  for (const [channel, value2] of Object.entries(root)) {
+    if (!Array.isArray(value2)) {
+      diagnostics.push({
+        code: "invalid-channel",
+        message: `${channel}: registry channel must be an array of model entries`,
+        channel
+      });
+      continue;
+    }
+    const models = [];
+    for (const entry of value2) {
+      const model = rawModelRecord(entry, channel, diagnostics);
+      if (model !== null) models.push(model);
+    }
+    channels.set(channel, models);
+  }
+  return buildIndex(channels, normalizedSource, diagnostics);
+}
+function createRegistryMetadataSnapshot(raw, source) {
+  const index = parseRegistryModelDocument(raw, source);
+  const channels = {};
+  for (const [channel, models] of index.channels) channels[channel] = [...models];
+  return {
+    format: REGISTRY_SNAPSHOT_FORMAT,
+    formatVersion: REGISTRY_SNAPSHOT_FORMAT_VERSION,
+    source: index.source,
+    channels
+  };
+}
+function parseRegistryMetadataSnapshot(raw) {
+  const root = asRecord(raw);
+  if (root === null) throw new TypeError("CLIProxyAPI metadata snapshot must be an object");
+  if (root.format !== REGISTRY_SNAPSHOT_FORMAT) {
+    throw new TypeError(`CLIProxyAPI metadata snapshot: unsupported format ${JSON.stringify(root.format)}`);
+  }
+  if (root.formatVersion !== REGISTRY_SNAPSHOT_FORMAT_VERSION) {
+    throw new TypeError(
+      `CLIProxyAPI metadata snapshot: unsupported formatVersion ${JSON.stringify(root.formatVersion)}`
+    );
+  }
+  const source = asRecord(root.source);
+  if (source === null) throw new TypeError("CLIProxyAPI metadata snapshot: source must be an object");
+  const normalizedSource = normalizeSource(source);
+  const channelsRaw = asRecord(root.channels);
+  if (channelsRaw === null) {
+    throw new TypeError("CLIProxyAPI metadata snapshot: channels must be an object");
+  }
+  const diagnostics = [];
+  const channels = /* @__PURE__ */ new Map();
+  for (const [channel, value2] of Object.entries(channelsRaw)) {
+    if (!Array.isArray(value2)) {
+      diagnostics.push({
+        code: "invalid-channel",
+        message: `${channel}: snapshot channel must be an array of model entries`,
+        channel
+      });
+      continue;
+    }
+    const models = [];
+    for (const entry of value2) {
+      const model = snapshotModelRecord(entry, channel, diagnostics);
+      if (model !== null) models.push(model);
+    }
+    channels.set(channel, models);
+  }
+  return buildIndex(channels, normalizedSource, diagnostics);
+}
+function resolveRegistryModel(index, id, options = {}) {
+  if (typeof id !== "string" || id.length === 0) {
+    return {
+      status: "unknown",
+      id: String(id),
+      diagnostics: [{ code: "invalid-query", message: "model id must be a non-empty string", id: String(id) }]
+    };
+  }
+  const channel = nonEmptyString(options.channel);
+  const owner = nonEmptyString(options.owner);
+  if (channel === null && owner === null) {
+    return {
+      status: "unknown",
+      id,
+      diagnostics: [
+        {
+          code: "invalid-query",
+          message: "metadata resolution requires an exact owner or channel; id-only lookup is refused",
+          id
+        }
+      ]
+    };
+  }
+  const all = index.recordsById.get(id);
+  if (all === void 0 || all.length === 0) {
+    return {
+      status: "unknown",
+      id,
+      diagnostics: [{ code: "not-found", message: `model "${id}" is not present in the registry snapshot`, id }]
+    };
+  }
+  let eligible = all;
+  if (channel !== null) {
+    eligible = eligible.filter((entry) => entry.channel === channel);
+    if (eligible.length === 0) {
+      return {
+        status: "unknown",
+        id,
+        diagnostics: [
+          {
+            code: "not-found",
+            message: `model "${id}" has no record in channel "${channel}"`,
+            id,
+            channel
+          }
+        ]
+      };
+    }
+  }
+  if (owner !== null) {
+    eligible = eligible.filter((entry) => entry.model.owner === owner);
+    if (eligible.length === 0) {
+      return {
+        status: "unknown",
+        id,
+        diagnostics: [
+          {
+            code: "not-found",
+            message: `model "${id}" has no record owned by "${owner}"`,
+            id
+          }
+        ]
+      };
+    }
+  }
+  if (channel === null && owner !== null) {
+    const aliases = options.ownerChannels?.[owner] ?? OWNER_CHANNEL_ALIASES[owner];
+    if (aliases !== void 0) {
+      const allowed = new Set(aliases);
+      eligible = eligible.filter((entry) => allowed.has(entry.channel));
+      if (eligible.length === 0) {
+        return {
+          status: "unknown",
+          id,
+          diagnostics: [
+            {
+              code: "not-found",
+              message: `model "${id}" is not published by any channel aliased to owner "${owner}"`,
+              id,
+              channels: aliases
+            }
+          ]
+        };
+      }
+    }
+  }
+  const first = eligible[0];
+  if (first === void 0) {
+    return {
+      status: "unknown",
+      id,
+      diagnostics: [{ code: "not-found", message: `model "${id}" produced no eligible record`, id }]
+    };
+  }
+  const fingerprint = disclosedFingerprint(first.model);
+  const conflict = eligible.find((entry) => disclosedFingerprint(entry.model) !== fingerprint);
+  if (conflict !== void 0) {
+    const channels2 = [...new Set(eligible.map((entry) => entry.channel))];
+    return {
+      status: "unknown",
+      id,
+      diagnostics: [
+        {
+          code: "ambiguous",
+          message: `model "${id}" has conflicting records across channels: ${channels2.join(", ")}; supply the exact owner or channel to resolve it`,
+          id,
+          channels: channels2
+        }
+      ]
+    };
+  }
+  const channels = [...new Set(eligible.map((entry) => entry.channel))];
+  return {
+    status: "resolved",
+    metadata: {
+      ...first.model,
+      channel: channels.length === 1 ? channels[0] : null,
+      channels,
+      source: index.source
+    },
+    diagnostics: []
+  };
+}
+function disclosedFingerprint(model) {
+  return JSON.stringify({
+    id: model.id,
+    owner: model.owner,
+    name: model.name,
+    contextWindow: model.contextWindow,
+    maxInputTokens: model.maxInputTokens,
+    maxTokens: model.maxTokens,
+    inputModalities: model.inputModalities,
+    outputModalities: model.outputModalities,
+    reasoning: model.reasoning,
+    levels: model.effort?.levels ?? null,
+    zeroAllowed: model.effort?.zeroAllowed ?? null,
+    dynamicAllowed: model.effort?.dynamicAllowed ?? null,
+    budget: model.effort?.budget ?? null
+  });
+}
+function concatChunks(chunks, total) {
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
+}
+var MAX_REDIRECTS = 5;
+var REDIRECT_STATUSES = /* @__PURE__ */ new Set([301, 302, 303, 307, 308]);
+function isLoopbackHost(hostname) {
+  const host = hostname.toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]" || host.endsWith(".localhost");
+}
+function sanitizedUrl(url) {
+  return `${url.protocol}//${url.host}${url.pathname}`;
+}
+function urlProblem(url, previous) {
+  if (url.protocol !== "https:" && url.protocol !== "http:") return "unsupported registry URL protocol";
+  if (url.username.length > 0 || url.password.length > 0) return "registry URL must not carry credentials";
+  if (url.protocol === "http:" && !isLoopbackHost(url.hostname)) {
+    return "plain-http registry URLs are allowed only for loopback hosts";
+  }
+  if (previous?.protocol === "https:" && url.protocol === "http:") {
+    return "registry redirect from HTTPS to HTTP is not allowed";
+  }
+  return null;
+}
+async function discardBody(response) {
+  if (response.body === null) return;
+  try {
+    await response.body.cancel();
+  } catch {
+  }
+}
+function safeErrorMessage() {
+  return "registry request failed";
+}
+async function fetchRegistryDocument(options) {
+  let current;
+  try {
+    current = new URL(options.url);
+  } catch {
+    return {
+      ok: false,
+      url: "",
+      bytes: 0,
+      diagnostic: { code: "fetch-failed", message: "invalid registry URL" }
+    };
+  }
+  const failure = (url, message, bytes = 0) => ({
+    ok: false,
+    url,
+    bytes,
+    diagnostic: { code: "fetch-failed", message }
+  });
+  const initialProblem = urlProblem(current, null);
+  if (initialProblem !== null) return failure("", initialProblem);
+  if (options.signal?.aborted === true) return failure(sanitizedUrl(current), "registry request aborted before dispatch");
+  const timeoutMs = options.timeoutMs !== void 0 && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? Math.floor(options.timeoutMs) : DEFAULT_REGISTRY_FETCH_TIMEOUT_MS;
+  const maxBytes = options.maxBytes !== void 0 && Number.isFinite(options.maxBytes) && options.maxBytes > 0 ? Math.floor(options.maxBytes) : DEFAULT_REGISTRY_FETCH_MAX_BYTES;
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const onAbort = () => controller.abort();
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  let safeUrl = sanitizedUrl(current);
+  try {
+    for (let redirects = 0; ; ) {
+      const response = await (options.fetchImpl ?? fetch)(current.toString(), {
+        signal: controller.signal,
+        redirect: "manual"
+      });
+      if (REDIRECT_STATUSES.has(response.status)) {
+        await discardBody(response);
+        const location = response.headers.get("location");
+        if (location === null || location.length === 0) {
+          return failure(safeUrl, "registry redirect is missing a Location header");
+        }
+        let next;
+        try {
+          next = new URL(location, current);
+        } catch {
+          return failure(safeUrl, "invalid registry redirect target");
+        }
+        const nextProblem = urlProblem(next, current);
+        if (nextProblem !== null) return failure(safeUrl, nextProblem);
+        if (redirects >= MAX_REDIRECTS) {
+          return failure(safeUrl, `registry redirect limit (${MAX_REDIRECTS}) exceeded`);
+        }
+        redirects += 1;
+        current = next;
+        safeUrl = sanitizedUrl(current);
+        continue;
+      }
+      if (!response.ok) {
+        await discardBody(response);
+        return failure(safeUrl, `registry request failed with HTTP ${response.status}`);
+      }
+      const declared = response.headers.get("content-length");
+      if (declared !== null) {
+        const length = Number(declared);
+        if (Number.isFinite(length) && length > maxBytes) {
+          await discardBody(response);
+          return {
+            ok: false,
+            url: safeUrl,
+            bytes: Math.max(0, Math.floor(length)),
+            diagnostic: {
+              code: "response-too-large",
+              message: `registry response declared ${length} bytes, over the ${maxBytes}-byte limit`
+            }
+          };
+        }
+      }
+      const hash = createHash("sha256");
+      let bytes = 0;
+      const chunks = [];
+      if (response.body !== null) {
+        const reader = response.body.getReader();
+        for (; ; ) {
+          const { done, value: value2 } = await reader.read();
+          if (done) break;
+          if (value2 === void 0) continue;
+          bytes += value2.byteLength;
+          if (bytes > maxBytes) {
+            await reader.cancel().catch(() => {
+            });
+            controller.abort();
+            return {
+              ok: false,
+              url: safeUrl,
+              bytes,
+              diagnostic: {
+                code: "response-too-large",
+                message: `registry response exceeded the ${maxBytes}-byte limit`
+              }
+            };
+          }
+          hash.update(value2);
+          chunks.push(value2);
+        }
+      } else {
+        const buffer = new Uint8Array(await response.arrayBuffer());
+        bytes = buffer.byteLength;
+        if (bytes > maxBytes) {
+          return {
+            ok: false,
+            url: safeUrl,
+            bytes,
+            diagnostic: {
+              code: "response-too-large",
+              message: `registry response exceeded the ${maxBytes}-byte limit`
+            }
+          };
+        }
+        hash.update(buffer);
+        chunks.push(buffer);
+      }
+      const text = new TextDecoder().decode(concatChunks(chunks, bytes));
+      try {
+        return {
+          ok: true,
+          url: safeUrl,
+          document: JSON.parse(text),
+          bytes,
+          sha256: hash.digest("hex")
+        };
+      } catch {
+        return failure(safeUrl, "registry response is not valid JSON", bytes);
+      }
+    }
+  } catch {
+    if (timedOut) return failure(safeUrl, `registry request timed out after ${timeoutMs}ms`);
+    return failure(safeUrl, safeErrorMessage());
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener("abort", onAbort);
+  }
+}
+function createRegistryMetadataSource(options) {
+  let lastGood = null;
+  let lastState = null;
+  const staleState = (failure) => {
+    if (lastGood === null) {
+      lastState = { snapshot: null, index: null, stale: true, diagnostics: failure };
+      return lastState;
+    }
+    lastState = {
+      snapshot: lastGood.snapshot,
+      index: lastGood.index,
+      stale: true,
+      diagnostics: [
+        {
+          code: "stale-last-good",
+          message: `registry refresh failed; returning last-good snapshot ${lastGood.snapshot.source.sourceVersion}`
+        },
+        ...failure
+      ]
+    };
+    return lastState;
+  };
+  return {
+    async refresh() {
+      const fetched = await fetchRegistryDocument(options);
+      if (!fetched.ok) return staleState([fetched.diagnostic]);
+      try {
+        const snapshot = createRegistryMetadataSnapshot(fetched.document, {
+          sourceUrl: fetched.url,
+          sourceVersion: options.sourceVersion,
+          sourcePath: options.sourcePath ?? null,
+          sourceSha256: fetched.sha256,
+          fetchedAt: (options.now?.() ?? /* @__PURE__ */ new Date()).toISOString(),
+          license: options.license,
+          attribution: options.attribution
+        });
+        const index = parseRegistryMetadataSnapshot(snapshot);
+        lastGood = { snapshot, index };
+        lastState = { snapshot, index, stale: false, diagnostics: index.diagnostics };
+        return lastState;
+      } catch (error) {
+        return staleState([
+          {
+            code: "invalid-document",
+            message: `registry document was refused: ${error instanceof Error ? error.message : String(error)}`
+          }
+        ]);
+      }
+    },
+    current() {
+      return lastState;
+    }
+  };
+}
+function bundledSnapshotPath() {
+  return fileURLToPath(new URL(`../${BUNDLED_REGISTRY_SNAPSHOT_FILE}`, import.meta.url));
+}
+function readBundledSnapshotRaw() {
+  const path = bundledSnapshotPath();
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `CLIProxyAPI metadata snapshot ${path}: unreadable \u2014 ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  return raw;
+}
+function loadBundledRegistryMetadataIndex() {
+  return parseRegistryMetadataSnapshot(readBundledSnapshotRaw());
+}
+
+// src/capability-hints.ts
+import { readFileSync as readFileSync2 } from "node:fs";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
 var HINT_FAMILIES = ["reasoning", "image", "audio", "video", "files", "toolsExclude"];
 var OVERRIDABLE_HINT_FAMILIES = ["reasoning", "image", "audio", "video", "files"];
 function capabilityHintsPath() {
   const override = process.env.DSH_CAPABILITY_HINTS;
   if (override !== void 0 && override.length > 0) return override;
-  return fileURLToPath(new URL("../model-capability-hints.json", import.meta.url));
+  return fileURLToPath2(new URL("../model-capability-hints.json", import.meta.url));
 }
 function hintString(value2) {
   return typeof value2 === "string" && value2.length > 0 ? value2 : void 0;
@@ -462,7 +1253,7 @@ function parseCapabilityHints(raw, path) {
 function loadCapabilityHints(path = capabilityHintsPath()) {
   let raw;
   try {
-    raw = JSON.parse(readFileSync(path, "utf8"));
+    raw = JSON.parse(readFileSync2(path, "utf8"));
   } catch (error) {
     throw new Error(`capability hints ${path}: unreadable \u2014 ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -554,13 +1345,13 @@ function routeFamilies(hints, route, override) {
   return families;
 }
 function pinModalities(input) {
-  const modalities = [];
+  const modalities2 = [];
   for (const token of input ?? []) {
     if (token === "image" || token === "audio" || token === "video" || token === "pdf") {
-      if (!modalities.includes(token)) modalities.push(token);
+      if (!modalities2.includes(token)) modalities2.push(token);
     }
   }
-  return modalities;
+  return modalities2;
 }
 function claimCapabilityHints(route, id, hints, override) {
   const routeOverride = override?.routes?.[route];
@@ -584,6 +1375,8 @@ function claimCapabilityHints(route, id, hints, override) {
 }
 
 // src/index.ts
+var rootThinkingLevels = Reflect.get(piAiRoot, "THINKING_LEVELS");
+var THINKING_LEVELS = Array.isArray(rootThinkingLevels) ? rootThinkingLevels.filter((level) => typeof level === "string") : CANONICAL_EFFORT_KEYS;
 var name = "enpoi-provider-sync";
 var inject = [];
 function live(schema) {
@@ -595,6 +1388,9 @@ function value(field) {
 var DEFAULT_MODELS_DEV_URL = "https://models.dev/api.json";
 var ENDPOINT_ONLY_GRACE_MS = 14 * 24 * 60 * 60 * 1e3;
 var CATALOG_FRESH_MS = 48 * 60 * 60 * 1e3;
+var DEFAULT_ROUTE_METADATA_SOURCES = {
+  cliproxyapi: { source: "cliproxyapi" }
+};
 var Config = Schema.object({
   intervalMs: live(Schema.number().default(36e5)),
   syncOnStart: live(Schema.boolean().default(true)),
@@ -606,7 +1402,16 @@ var Config = Schema.object({
   routeProviderMap: live(Schema.dict(Schema.array(String)).default({})),
   pinnedModels: live(Schema.dict(Schema.array(String)).default({})),
   endpointGraceMs: live(Schema.number().default(ENDPOINT_ONLY_GRACE_MS)),
-  catalogFreshMs: live(Schema.number().default(CATALOG_FRESH_MS))
+  catalogFreshMs: live(Schema.number().default(CATALOG_FRESH_MS)),
+  metadataSources: live(Schema.dict(Schema.object({
+    source: Schema.union(["cliproxyapi"]).required(),
+    channel: Schema.string(),
+    owner: Schema.string(),
+    ownerChannels: Schema.dict(Schema.array(String)),
+    refreshUrl: Schema.string(),
+    sourceVersion: Schema.string(),
+    refresh: Schema.boolean()
+  })).default(DEFAULT_ROUTE_METADATA_SOURCES))
 });
 var SIGN_IN_REQUIRED = "sign-in required";
 var DEFAULT_FREE_TIER_GATE_REASON = "free tier is gated to the provider's own clients";
@@ -636,6 +1441,8 @@ function applyFreeTierGate(models, gate) {
 }
 var LLM_NS = "llm-pi-ai";
 var AGENT_DEFAULT_MODEL_NS = "agent-default-model";
+var SUBAGENT_MODEL_SELECTION_NS = "subagent-model-selection-settings";
+var SUBAGENT_MODEL_SELECTION_NAMESPACES = [SUBAGENT_MODEL_SELECTION_NS, "subagent-model-selection"];
 async function enforceSessionHeaders(settings, wanted, log) {
   const written = [];
   for (const [route, header] of Object.entries(wanted)) {
@@ -698,7 +1505,7 @@ function loadModelsDev() {
   const path = modelsDevCachePath();
   try {
     if (path !== void 0 && existsSync(path)) {
-      const raw = readFileSync2(path, "utf8");
+      const raw = readFileSync3(path, "utf8");
       modelsDevCache = JSON.parse(raw);
       return modelsDevCache;
     }
@@ -767,32 +1574,11 @@ var DEFAULT_ROUTE_PROVIDER_MAP = Object.freeze({
 });
 function resolveFromModelsDev(route, modelId, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP) {
   const db = loadModelsDev();
-  const cleanId = modelId.toLowerCase().trim();
-  const SUFFIXES = ["-thinking", "-tiered", "-preview", "-exp", "-high", "-low", "-medium", "-agent", "-latest", "-image"];
-  const candidates = [modelId, cleanId];
-  let base = cleanId;
-  for (const suffix of SUFFIXES) {
-    if (base.endsWith(suffix)) {
-      base = base.slice(0, -suffix.length);
-      candidates.push(base);
-    }
-  }
   const candidateProviders = routeProviderMap[route] ?? [route];
   const find = (pModels) => {
     if (!pModels) return void 0;
-    for (const c of candidates) {
-      const hit = pModels[c];
-      if (hit) return hit;
-    }
-    const prefix = base;
-    if (prefix.length >= 8) {
-      const matches = Object.keys(pModels).filter((k) => k.startsWith(`${prefix}-`));
-      if (matches.length > 0) {
-        matches.sort((a, b) => a.length - b.length);
-        return pModels[matches[0]];
-      }
-    }
-    return void 0;
+    const hit = pModels[modelId];
+    return hit;
   };
   for (const p of candidateProviders) {
     const hit = find(db[p]?.models);
@@ -816,8 +1602,6 @@ function catalogIndexForRoute(route, routeProviderMap) {
     }
     for (const m of models) {
       if (!index.has(m.id)) index.set(m.id, m);
-      const short = m.id.includes("/") ? m.id.split("/").pop() : m.id;
-      if (!index.has(short)) index.set(short, m);
     }
   }
   routeCatalogIndexes.set(cacheKey, index);
@@ -838,12 +1622,6 @@ function beautifyId(id) {
     return " ";
   }).replace(/\s+/g, " ").trim().replace(/\b([a-z])/g, (_, c) => c.toUpperCase()).replace(/Gpt/g, "GPT").replace(/Vl/g, "VL").replace(/Ai/g, "AI").replace(/Qwen/g, "Qwen").replace(/Glm/g, "GLM").replace(/R1/g, "R1").replace(/V(\d)/g, "V$1").replace(/Free\b/i, "(Free)");
 }
-function listingCapacity(...candidates) {
-  for (const candidate of candidates) {
-    if (typeof candidate === "number" && Number.isInteger(candidate) && candidate > 0) return candidate;
-  }
-  return void 0;
-}
 function listingString(...candidates) {
   for (const candidate of candidates) {
     if (typeof candidate === "string" && candidate.length > 0) return candidate;
@@ -862,33 +1640,6 @@ function liveModalities(raw) {
   }
   return inputs;
 }
-function listingModalities(entry) {
-  const architecture = entry.architecture;
-  const raw = Array.isArray(entry.input_modalities) ? entry.input_modalities : Array.isArray(entry.modalities) ? entry.modalities : Array.isArray(architecture?.input_modalities) ? architecture.input_modalities : void 0;
-  if (raw === void 0) return void 0;
-  const inputs = liveModalities(raw);
-  return inputs.length === 0 ? void 0 : inputs;
-}
-function mergeModalities(listed, capabilities) {
-  if (listed === void 0 && capabilities === void 0) return void 0;
-  const modalities = [];
-  for (const modality of [...listed ?? [], ...capabilities ?? []]) {
-    if (!modalities.includes(modality)) modalities.push(modality);
-  }
-  return modalities.length === 0 ? void 0 : modalities;
-}
-function liveEfforts(ladder) {
-  return ladder === void 0 || Object.keys(ladder).length === 0 ? void 0 : ladder;
-}
-function listingSupported(entry) {
-  const raw = entry.supported_parameters;
-  if (!Array.isArray(raw)) return {};
-  const strings = raw.filter((value2) => typeof value2 === "string");
-  return {
-    tools: strings.includes("tools") || strings.includes("tool_choice"),
-    reasoning: strings.includes("reasoning")
-  };
-}
 function listingPricing(entry) {
   const raw = entry.pricing;
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return void 0;
@@ -899,49 +1650,45 @@ function listingPricing(entry) {
   }
   return Object.keys(pricing).length === 0 ? void 0 : pricing;
 }
-function normalizeListingEntry(entry) {
-  if (entry === null || typeof entry !== "object") return void 0;
-  const row = entry;
-  const id = listingString(row.id);
-  if (id === void 0) return void 0;
-  const displayName = listingString(row.name, row.display_name, row.displayName, row.description);
-  const topProvider = row.top_provider;
-  const limit = row.limit;
-  const contextWindow = listingCapacity(
-    row.context_length,
-    row.contextWindow,
-    row.context_window,
-    row.max_input_tokens,
-    topProvider?.context_length,
-    limit?.context
-  );
-  const maxTokens = listingCapacity(
-    row.maxOutputTokens,
-    row.max_output_tokens,
-    row.maxTokens,
-    row.max_tokens,
-    topProvider?.max_completion_tokens,
-    limit?.output
-  );
-  const supported = listingSupported(row);
+function normalizeListingModel(listing, raw) {
+  const row = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  const pricing = listingPricing(row);
   const isFree = typeof row.isFree === "boolean" ? row.isFree : void 0;
-  const capabilities = listingCapabilities(row);
-  const modalities = mergeModalities(listingModalities(row), capabilities.inputModalities);
-  const efforts = liveEfforts(capabilities.reasoningEfforts);
   return {
-    id,
-    ...displayName === void 0 || displayName.length > 120 ? {} : { name: displayName },
-    ...contextWindow === void 0 ? {} : { contextWindow },
-    ...maxTokens === void 0 ? {} : { maxTokens },
-    ...modalities === void 0 ? {} : { input: modalities },
-    ...supported.tools === void 0 ? {} : { tools: supported.tools },
-    ...supported.reasoning === void 0 ? {} : { reasoning: supported.reasoning },
-    ...listingPricing(row) === void 0 ? {} : { pricing: listingPricing(row) },
+    id: listing.id,
+    ...listing.name === void 0 ? {} : { name: listing.name },
+    ...listing.contextWindow === void 0 ? {} : { contextWindow: listing.contextWindow },
+    ...listing.maxInputTokens === void 0 ? {} : { maxInputTokens: listing.maxInputTokens },
+    ...listing.maxTokens === void 0 ? {} : { maxTokens: listing.maxTokens },
+    ...listing.inputModalities === void 0 ? {} : { input: [...listing.inputModalities] },
+    ...listing.tools === void 0 ? {} : { tools: listing.tools },
+    ...listing.reasoning === void 0 ? {} : { reasoning: listing.reasoning },
+    ...listing.reasoningEfforts === void 0 ? {} : { reasoningEfforts: { ...listing.reasoningEfforts } },
+    ...listing.unsupportedReasoningEfforts === void 0 ? {} : { unsupportedReasoningEfforts: [...listing.unsupportedReasoningEfforts] },
+    ...listing.owner === void 0 ? {} : { owner: listing.owner },
+    ...pricing === void 0 ? {} : { pricing },
     ...isFree === void 0 ? {} : { isFree },
-    ...efforts === void 0 ? {} : { reasoningEfforts: { ...efforts } },
     ...isFree === false ? { gated: true, gateReason: SIGN_IN_REQUIRED } : {}
   };
 }
+function normalizeListingEntry(entry) {
+  const parsed = readModelListing([entry]);
+  if (!parsed.ok) return void 0;
+  const listing = parsed.models[0];
+  return listing === void 0 ? void 0 : normalizeListingModel(listing, entry);
+}
+function rawListingRows(body) {
+  if (Array.isArray(body)) return body.map((raw) => ({ raw }));
+  if (body === null || typeof body !== "object") return [];
+  const listing = body;
+  if (Array.isArray(listing.data)) return listing.data.map((raw) => ({ raw }));
+  if (Array.isArray(listing.models)) return listing.models.map((raw) => ({ raw }));
+  if (listing.models !== null && typeof listing.models === "object") {
+    return Object.entries(listing.models).map(([key, raw]) => ({ key, raw }));
+  }
+  return [];
+}
+var MAX_MODEL_LISTING_BYTES = 4 * 1024 * 1024;
 var ANTHROPIC_VERSION = "2023-06-01";
 function modelListingRequest(baseURL, api, key) {
   const base = baseURL.replace(/\/+$/, "");
@@ -955,20 +1702,63 @@ function modelListingRequest(baseURL, api, key) {
   if (key !== void 0 && key.length > 0) headers.authorization = `Bearer ${key}`;
   return { url: `${base}/models`, headers };
 }
+async function readBoundedListingText(response, url) {
+  const oversized = () => new Error(`GET ${url} answered with more than ${String(MAX_MODEL_LISTING_BYTES)} bytes`);
+  const declared = Number(response.headers.get("content-length") ?? Number.NaN);
+  if (Number.isFinite(declared) && declared > MAX_MODEL_LISTING_BYTES) {
+    await response.body?.cancel();
+    throw oversized();
+  }
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (; ; ) {
+      const { done, value: value2 } = await reader.read();
+      if (done) break;
+      total += value2.byteLength;
+      if (total > MAX_MODEL_LISTING_BYTES) throw oversized();
+      chunks.push(value2);
+    }
+  } finally {
+    await reader.cancel().catch(() => {
+    });
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(body);
+}
 async function fetchModels(baseURL, key, api) {
   const request = modelListingRequest(baseURL, api, key);
   const response = await fetch(request.url, { headers: request.headers, signal: AbortSignal.timeout(15e3) });
   if (!response.ok) throw new Error(`GET ${request.url} -> HTTP ${String(response.status)}`);
-  const body = await response.json();
-  const data = Array.isArray(body) ? body : body.data;
-  if (!Array.isArray(data)) throw new Error(`GET ${request.url} -> unexpected shape`);
+  const text = await readBoundedListingText(response, request.url);
+  let body;
+  try {
+    body = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`GET ${request.url} -> invalid JSON \u2014 ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const parsed = readModelListing(body);
+  if (!parsed.ok) throw new Error(`GET ${request.url} -> unexpected shape`);
+  const rawById = /* @__PURE__ */ new Map();
+  for (const row of rawListingRows(body)) {
+    const raw = row.raw;
+    const entry = raw !== null && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const id = listingText(row.key) ?? listingText(entry.id) ?? listingText(entry.slug);
+    if (id !== void 0 && !rawById.has(id)) rawById.set(id, raw);
+  }
   const seen = /* @__PURE__ */ new Set();
   const models = [];
-  for (const raw of data) {
-    const model = normalizeListingEntry(raw);
-    if (model === void 0 || seen.has(model.id)) continue;
-    seen.add(model.id);
-    models.push(model);
+  for (const listing of parsed.models) {
+    if (seen.has(listing.id)) continue;
+    seen.add(listing.id);
+    models.push(normalizeListingModel(listing, rawById.get(listing.id)));
   }
   return models;
 }
@@ -976,10 +1766,10 @@ var COMMANDCODE_NS = "commandcode-provider";
 function commandCodeCatalogPath() {
   const override = process.env.DSH_COMMANDCODE_CATALOG;
   if (override !== void 0 && override.length > 0) return override;
-  return fileURLToPath2(new URL("../../enpoi-commandcode-provider/catalog.snapshot.json", import.meta.url));
+  return fileURLToPath3(new URL("../../enpoi-commandcode-provider/catalog.snapshot.json", import.meta.url));
 }
 function loadCommandCodeCatalog(path = commandCodeCatalogPath()) {
-  const raw = JSON.parse(readFileSync2(path, "utf8"));
+  const raw = JSON.parse(readFileSync3(path, "utf8"));
   const rows = Array.isArray(raw) ? raw : Object.values(raw ?? {});
   const seen = /* @__PURE__ */ new Set();
   const models = [];
@@ -989,7 +1779,7 @@ function loadCommandCodeCatalog(path = commandCodeCatalogPath()) {
     const id = listingString(entry.id);
     if (id === void 0 || seen.has(id)) continue;
     const limit = entry.limit;
-    const modalities = entry.modalities;
+    const modalities2 = entry.modalities;
     const supported = [
       ...entry.tool_call === true ? ["tools"] : [],
       ...entry.reasoning === true ? ["reasoning"] : []
@@ -1000,7 +1790,7 @@ function loadCommandCodeCatalog(path = commandCodeCatalogPath()) {
       name: entry.name,
       context_window: limit?.context,
       max_output_tokens: limit?.output,
-      ...Array.isArray(modalities?.input) ? { input_modalities: modalities.input } : {},
+      ...Array.isArray(modalities2?.input) ? { input_modalities: modalities2.input } : {},
       ...supported.length === 0 ? {} : { supported_parameters: supported },
       ...advertisedLevels.length === 0 ? {} : {
         capabilities: { effort: Object.fromEntries(advertisedLevels.map((level) => [level, { supported: true }])) }
@@ -1020,11 +1810,11 @@ function loadCommandCodeCatalog(path = commandCodeCatalogPath()) {
 function catalogOverlaysPath() {
   const override = process.env.DSH_CATALOG_OVERLAYS;
   if (override !== void 0 && override.length > 0) return override;
-  return fileURLToPath2(new URL("../catalog-overlays.json", import.meta.url));
+  return fileURLToPath3(new URL("../catalog-overlays.json", import.meta.url));
 }
 function loadCatalogOverlays(path = catalogOverlaysPath()) {
   if (!existsSync(path)) return {};
-  const raw = JSON.parse(readFileSync2(path, "utf8"));
+  const raw = JSON.parse(readFileSync3(path, "utf8"));
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(`catalog overlays ${path}: document must be an object`);
   }
@@ -1053,11 +1843,19 @@ function loadCatalogOverlays(path = catalogOverlaysPath()) {
       if (entry === null || typeof entry !== "object" || Array.isArray(entry) || listingString(entry.id) === void 0) {
         throw new Error(`catalog overlays ${path}: route "${route}" has an upsert entry without a model id`);
       }
+      const id = listingString(entry.id) ?? "";
+      try {
+        PiAiConfig({ providers: { [route]: { models: [entry] } } });
+      } catch (error) {
+        throw new Error(
+          `catalog overlays ${path}: route "${route}" upsert "${id}" is not a valid model record \u2014 ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
     }
   }
   return raw;
 }
-function applyCatalogOverlay(models, overlay) {
+function applyCatalogOverlay(models, overlay, protection) {
   if (overlay === void 0) return models;
   const removed = new Set(overlay.remove ?? []);
   const upserts = /* @__PURE__ */ new Map();
@@ -1070,17 +1868,41 @@ function applyCatalogOverlay(models, overlay) {
   const seen = /* @__PURE__ */ new Set();
   for (const entry of models) {
     const id = listingString(entry.id);
-    if (id !== void 0 && removed.has(id)) continue;
+    if (id !== void 0 && removed.has(id)) {
+      const upsert2 = upserts.get(id);
+      if (protection?.keep?.has(id) === true) {
+        applied.push({
+          ...entry,
+          ...upsert2 === void 0 ? {} : { ...upsert2, unverified: void 0, capabilityHints: void 0 },
+          ...preservedManualFields(entry)
+        });
+        seen.add(id);
+        continue;
+      }
+      if (protection?.deprecate?.has(id) === true) {
+        applied.push({
+          ...entry,
+          ...upsert2 === void 0 ? {} : { ...upsert2, unverified: void 0, capabilityHints: void 0 },
+          ...preservedManualFields(entry),
+          source: "pinned-in-use",
+          deprecated: true
+        });
+        seen.add(id);
+        continue;
+      }
+      continue;
+    }
     const upsert = id === void 0 ? void 0 : upserts.get(id);
     if (upsert === void 0) {
       applied.push(entry);
     } else {
-      applied.push({ ...entry, ...upsert, unverified: void 0, capabilityHints: void 0 });
+      applied.push({ ...entry, ...upsert, ...preservedManualFields(entry), unverified: void 0, capabilityHints: void 0 });
     }
     if (id !== void 0) seen.add(id);
   }
   for (const [id, entry] of upserts) {
     if (seen.has(id)) continue;
+    if (removed.has(id) && protection?.keep?.has(id) !== true) continue;
     applied.push({ ...entry });
   }
   return applied;
@@ -1109,7 +1931,7 @@ function loadCapabilityHintsOverride(path = capabilityHintsOverridePath()) {
   if (!existsSync(path)) return {};
   let raw;
   try {
-    raw = JSON.parse(readFileSync2(path, "utf8"));
+    raw = JSON.parse(readFileSync3(path, "utf8"));
   } catch (error) {
     throw new Error(`capability-hints override ${path}: unreadable \u2014 ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -1118,7 +1940,7 @@ function loadCapabilityHintsOverride(path = capabilityHintsOverridePath()) {
 function readDiscoveredFile(path) {
   try {
     if (!existsSync(path)) return { version: DISCOVERED_CACHE_VERSION, routes: {} };
-    const raw = JSON.parse(readFileSync2(path, "utf8"));
+    const raw = JSON.parse(readFileSync3(path, "utf8"));
     const routes = raw.routes;
     if (routes === null || typeof routes !== "object" || Array.isArray(routes)) {
       return { version: DISCOVERED_CACHE_VERSION, routes: {} };
@@ -1198,15 +2020,6 @@ function writeDiscoveredRoute(route, record) {
 function describeSyncFailure(route, error, ns = LLM_NS) {
   return `route ${route}: sync failed \u2014 ${error instanceof Error ? error.message : String(error)}; add models manually on the Models page, or list them in ${ns}.providers["${route}"].models`;
 }
-function fallbackFor(capacities, route, modelId) {
-  const routeCaps = capacities?.[route];
-  if (routeCaps === void 0) return void 0;
-  if (routeCaps.prefixes !== void 0) {
-    const hit = Object.entries(routeCaps.prefixes).find(([prefix]) => modelId.startsWith(prefix));
-    if (hit !== void 0) return { ...hit[1], matched: "prefix" };
-  }
-  return routeCaps.default === void 0 ? void 0 : { ...routeCaps.default, matched: "default" };
-}
 function modelsDevReleaseDate(value2) {
   if (typeof value2 !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value2)) return void 0;
   return Number.isNaN(Date.parse(`${value2}T00:00:00Z`)) ? void 0 : value2;
@@ -1244,83 +2057,106 @@ function modelsDevCostTiers(value2) {
   }
   return tiers.length === 0 ? void 0 : tiers.sort((left, right) => left.inputTokensAbove - right.inputTokensAbove);
 }
-function analyzeModel(route, model, fallback, hints, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP) {
-  const mDev = resolveFromModelsDev(route, model.id, routeProviderMap);
-  const catalog = catalogIndexForRoute(route, routeProviderMap);
-  const shortId = model.id.includes("/") ? model.id.split("/").pop() : model.id;
-  const cat = catalog.get(model.id) ?? catalog.get(shortId);
-  let name2 = mDev?.name;
-  if (name2 === void 0 || name2.length === 0) {
-    const liveName = model.name;
-    if (liveName !== void 0 && liveName !== model.id && liveName.length <= 60) {
-      name2 = liveName;
-    } else {
-      name2 = cat?.name ?? beautifyId(model.id);
+function disclosedLadder(ladder) {
+  if (ladder === void 0) return void 0;
+  const copied = {};
+  let thinking = false;
+  for (const level of THINKING_LEVELS) {
+    if (!Object.hasOwn(ladder, level)) continue;
+    const wire = ladder[level];
+    if (level === "off") {
+      if (wire === null || wire === "") copied.off = null;
+      else if (typeof wire === "string") copied.off = wire;
+      continue;
+    }
+    if (typeof wire !== "string" || wire.length === 0) continue;
+    copied[level] = wire;
+    thinking = true;
+  }
+  return thinking ? copied : void 0;
+}
+function catalogReasoningLadder(mDev, catalogModel) {
+  const merged = /* @__PURE__ */ new Map();
+  if (Array.isArray(mDev?.reasoning_options)) {
+    for (const option of mDev.reasoning_options) {
+      for (const value2 of option.values ?? []) {
+        if (typeof value2 === "string" && value2.length > 0) merged.set(value2, value2);
+      }
     }
   }
-  const devContext = mDev?.limit?.context ?? mDev?.limit?.input ?? mDev?.contextWindow;
+  if (catalogModel?.thinkingLevelMap !== void 0) {
+    for (const [level, wire] of Object.entries(catalogModel.thinkingLevelMap)) merged.set(level, wire);
+  }
+  return disclosedLadder(Object.fromEntries(merged));
+}
+function registryMetadataFor(context, model) {
+  if (context === void 0) return void 0;
+  const owner = context.owner !== void 0 && context.owner.length > 0 ? context.owner : model.owner;
+  const channel = context.channel !== void 0 && context.channel.length > 0 ? context.channel : void 0;
+  if ((owner === void 0 || owner.length === 0) && channel === void 0) return void 0;
+  const lookup = resolveRegistryModel(context.index, model.id, {
+    ...channel === void 0 ? {} : { channel },
+    ...owner === void 0 || owner.length === 0 ? {} : { owner },
+    ...context.ownerChannels === void 0 ? {} : { ownerChannels: { ...OWNER_CHANNEL_ALIASES, ...context.ownerChannels } }
+  });
+  return lookup.status === "resolved" ? lookup.metadata : void 0;
+}
+function registryReasoningLadder(effort) {
+  const supported = new Set(effort.supportedKeys);
+  const ladder = {};
+  let thinking = false;
+  for (const level of THINKING_LEVELS) {
+    if (level === "off") {
+      if (supported.has("off")) ladder.off = null;
+      continue;
+    }
+    if (!supported.has(level)) continue;
+    ladder[level] = level;
+    thinking = true;
+  }
+  return thinking ? ladder : void 0;
+}
+function analyzeModel(route, model, hints, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP, registryContext = void 0) {
+  const mDev = resolveFromModelsDev(route, model.id, routeProviderMap);
+  const catalog = catalogIndexForRoute(route, routeProviderMap);
+  const cat = catalog.get(model.id);
+  const registry = registryMetadataFor(registryContext, model);
+  const liveName = model.name;
+  const name2 = liveName !== void 0 && liveName !== model.id && liveName.length <= 60 ? liveName : registry?.name ?? mDev?.name ?? cat?.name ?? beautifyId(model.id);
+  const devContext = mDev?.limit?.context ?? mDev?.contextWindow;
+  const devMaxInputTokens = mDev?.limit?.input;
   const devMax = mDev?.limit?.output ?? mDev?.maxTokens;
-  const prefixContext = fallback?.matched === "prefix" ? fallback.contextWindow : void 0;
-  const prefixMax = fallback?.matched === "prefix" ? fallback.maxTokens : void 0;
-  const contextWindow = model.contextWindow ?? devContext ?? cat?.contextWindow ?? prefixContext ?? fallback?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
-  const maxTokens = model.maxTokens ?? devMax ?? cat?.maxTokens ?? prefixMax ?? fallback?.maxTokens ?? DEFAULT_MAX_TOKENS;
-  const disclosed = [model.input, mDev?.modalities?.input, cat?.input].find((value2) => Array.isArray(value2) && liveModalities(value2).length > 0);
+  const contextWindow = model.contextWindow ?? registry?.contextWindow ?? devContext ?? cat?.contextWindow;
+  const maxInputTokens = model.maxInputTokens ?? registry?.maxInputTokens ?? devMaxInputTokens;
+  const maxTokens = model.maxTokens ?? registry?.maxTokens ?? devMax ?? cat?.maxTokens;
+  const registryInput = registry?.inputModalities !== null && registry?.inputModalities !== void 0 && registry.inputModalities.length > 0 ? registry.inputModalities : void 0;
+  const disclosed = [model.input, registryInput, mDev?.modalities?.input, cat?.input].find((value2) => Array.isArray(value2) && liveModalities(value2).length > 0);
   const modalityDisclosed = disclosed !== void 0;
   const inputModalities = modalityDisclosed ? ["text", ...liveModalities(disclosed).filter((modality) => modality !== "text")] : ["text"];
-  const listingReasoning = typeof model.reasoning === "boolean" ? model.reasoning : void 0;
-  const endpointEfforts = liveEfforts(model.reasoningEfforts);
-  const catalogMaySpeak = endpointEfforts === void 0 && listingReasoning === void 0;
+  const endpointReasoning = typeof model.reasoning === "boolean" ? model.reasoning : void 0;
+  const endpointLadderDeclared = model.reasoningEfforts !== void 0;
+  const endpointLadder = endpointLadderDeclared ? disclosedLadder(model.reasoningEfforts) : void 0;
+  const registryReasoning = registry?.reasoning ?? void 0;
+  const registryEffort = registry?.effort ?? void 0;
+  const registryLadder = registryEffort === void 0 ? void 0 : registryReasoningLadder(registryEffort);
+  const registryBlocksReasoning = registryReasoning !== void 0 || registryEffort !== void 0;
+  const catalogMaySpeak = !endpointLadderDeclared && endpointReasoning !== false && !registryBlocksReasoning;
   const enrichedReasoning = [mDev?.reasoning, cat?.reasoning].filter((value2) => typeof value2 === "boolean");
-  const reasoningOptions = catalogMaySpeak && Array.isArray(mDev?.reasoning_options) && mDev.reasoning_options.length > 0;
-  const thinkingLevels = catalogMaySpeak && cat?.thinkingLevelMap !== void 0 && Object.keys(cat.thinkingLevelMap).some((key) => key !== "off");
-  const reasoningDisclosed = endpointEfforts !== void 0 || listingReasoning !== void 0 || enrichedReasoning.length > 0 || reasoningOptions || thinkingLevels;
-  const isReasoning = endpointEfforts !== void 0 ? true : listingReasoning ?? (enrichedReasoning.some((value2) => value2 === true) || reasoningOptions || thinkingLevels);
+  const catalogEfforts = catalogMaySpeak ? catalogReasoningLadder(mDev, cat) : void 0;
+  const reasoningKnown = endpointLadderDeclared || endpointReasoning !== void 0 || registryBlocksReasoning || enrichedReasoning.length > 0 || catalogEfforts !== void 0;
+  const reasoningDisclosed = reasoningKnown;
+  const isReasoning = endpointReasoning !== void 0 ? endpointReasoning : endpointLadderDeclared ? true : registryReasoning !== void 0 ? registryReasoning : registryEffort !== void 0 ? true : enrichedReasoning.some((value2) => value2 === true) || catalogEfforts !== void 0;
   const claim = claimCapabilityHints(route, model.id, hints.table, hints.override);
   const hintedInput = !modalityDisclosed && claim !== void 0 && claim.input.length > 0;
   const hintedReasoning = !reasoningDisclosed && claim?.reasoning === true;
-  const nothingDescribed = mDev === void 0 && cat === void 0 && model.input === void 0 && model.reasoning === void 0 && model.tools === void 0 && endpointEfforts === void 0;
+  const nothingDescribed = registry === void 0 && mDev === void 0 && cat === void 0 && model.input === void 0 && model.reasoning === void 0 && model.tools === void 0 && !endpointLadderDeclared;
   const unverified = nothingDescribed || hintedInput || hintedReasoning;
   const capabilityHints = claim === void 0 ? void 0 : {
     ...claim.input.length === 0 || modalityDisclosed ? {} : { input: claim.input },
     ...claim.reasoning && !reasoningDisclosed ? { reasoning: true } : {},
     source: claim.source
   };
-  let reasoningEfforts;
-  if (endpointEfforts !== void 0) {
-    reasoningEfforts = { ...endpointEfforts };
-  } else if (isReasoning) {
-    const levels = {};
-    const VALID_THINKING_KEYS = /* @__PURE__ */ new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
-    if (Array.isArray(mDev?.reasoning_options)) {
-      for (const opt of mDev.reasoning_options) {
-        if (Array.isArray(opt.values)) {
-          for (const val of opt.values) {
-            if (typeof val === "string" && VALID_THINKING_KEYS.has(val)) {
-              levels[val] = val;
-            }
-          }
-        }
-      }
-    }
-    if (cat?.thinkingLevelMap !== void 0) {
-      for (const [k, v] of Object.entries(cat.thinkingLevelMap)) {
-        if (VALID_THINKING_KEYS.has(k) && typeof v === "string" && v.length > 0) {
-          levels[k] = v;
-        }
-      }
-    }
-    if (Object.keys(levels).length === 0) {
-      levels.minimal = "minimal";
-      levels.low = "low";
-      levels.medium = "medium";
-      levels.high = "high";
-      levels.xhigh = "xhigh";
-      levels.max = "max";
-    }
-    if (Object.keys(levels).length > 0) {
-      reasoningEfforts = levels;
-    }
-  }
+  const reasoningEfforts = endpointReasoning === false ? void 0 : endpointLadderDeclared ? endpointLadder : registryBlocksReasoning ? registryLadder : catalogEfforts;
   const tools = typeof model.tools === "boolean" ? model.tools : mDev?.tool_call;
   const costInput = typeof mDev?.cost?.input === "number" && Number.isFinite(mDev.cost.input) ? mDev.cost.input : void 0;
   const costOutput = typeof mDev?.cost?.output === "number" && Number.isFinite(mDev.cost.output) ? mDev.cost.output : void 0;
@@ -1331,14 +2167,22 @@ function analyzeModel(route, model, fallback, hints, routeProviderMap = DEFAULT_
   const gate = gated ? { gated: true, gateReason: model.gateReason ?? SIGN_IN_REQUIRED } : {};
   const discoveredEfforts = reasoningEfforts === void 0 ? void 0 : Object.fromEntries(Object.entries(reasoningEfforts).filter(([, wire]) => typeof wire === "string" && wire.length > 0));
   const discoveredEffortsValue = discoveredEfforts !== void 0 && Object.keys(discoveredEfforts).length > 0 ? discoveredEfforts : void 0;
+  const discoveredReasoning = model.reasoning ?? registry?.reasoning ?? void 0;
+  const unsupportedEfforts = [.../* @__PURE__ */ new Set([
+    ...model.unsupportedReasoningEfforts ?? [],
+    ...registryEffort?.unsupportedLevels ?? []
+  ])];
   return {
     settings: {
       id: model.id,
       name: name2,
-      contextWindow,
-      maxTokens,
+      ...contextWindow === void 0 ? {} : { contextWindow },
+      ...maxInputTokens === void 0 ? {} : { maxInputTokens },
+      ...maxTokens === void 0 ? {} : { maxTokens },
       input: inputModalities,
-      reasoning: isReasoning,
+      // A registry lookup with omitted thinking is UNKNOWN: omit the field
+      // instead of asserting false. Generic unknown records keep the floor.
+      ...!reasoningKnown && registry !== void 0 ? {} : { reasoning: isReasoning },
       ...tools !== void 0 ? { tools } : {},
       ...cost !== void 0 ? { cost } : {},
       ...releaseDate === void 0 ? {} : { releaseDate },
@@ -1351,12 +2195,14 @@ function analyzeModel(route, model, fallback, hints, routeProviderMap = DEFAULT_
     discovered: {
       id: model.id,
       name: name2,
-      contextWindow,
-      maxTokens,
+      ...contextWindow === void 0 ? {} : { contextWindow },
+      ...maxInputTokens === void 0 ? {} : { maxInputTokens },
+      ...maxTokens === void 0 ? {} : { maxTokens },
       ...modalityDisclosed ? { input: inputModalities } : {},
       ...tools === void 0 ? {} : { tools },
-      ...model.reasoning === void 0 ? {} : { reasoning: model.reasoning },
+      ...discoveredReasoning === void 0 ? {} : { reasoning: discoveredReasoning },
       ...discoveredEffortsValue === void 0 ? {} : { reasoningEfforts: discoveredEffortsValue },
+      ...unsupportedEfforts.length === 0 ? {} : { unsupportedReasoningEfforts: unsupportedEfforts },
       ...model.pricing === void 0 ? {} : { pricing: model.pricing },
       ...model.isFree === void 0 ? {} : { isFree: model.isFree },
       ...releaseDate === void 0 ? {} : { releaseDate },
@@ -1368,14 +2214,47 @@ function analyzeModel(route, model, fallback, hints, routeProviderMap = DEFAULT_
 }
 function preservedManualFields(entry) {
   if (entry.source !== "manual") return {};
+  const preserved = {
+    ...preservedOperatorFields(entry)
+  };
+  if (typeof entry.name === "string") preserved.name = entry.name;
+  if (typeof entry.contextWindow === "number" && Number.isFinite(entry.contextWindow)) {
+    preserved.contextWindow = entry.contextWindow;
+  }
+  if (typeof entry.maxInputTokens === "number" && Number.isFinite(entry.maxInputTokens)) {
+    preserved.maxInputTokens = entry.maxInputTokens;
+  }
+  if (typeof entry.maxTokens === "number" && Number.isFinite(entry.maxTokens)) {
+    preserved.maxTokens = entry.maxTokens;
+  }
+  if (Array.isArray(entry.input)) preserved.input = [...entry.input];
+  if (typeof entry.reasoning === "boolean") preserved.reasoning = entry.reasoning;
   const ladder = entry.reasoningEfforts;
-  return ladder !== null && typeof ladder === "object" && !Array.isArray(ladder) && Object.keys(ladder).length > 0 ? { reasoningEfforts: { ...ladder } } : {};
+  if (ladder !== null && typeof ladder === "object" && !Array.isArray(ladder) && Object.keys(ladder).length > 0) {
+    preserved.reasoningEfforts = { ...ladder };
+  }
+  return preserved;
 }
-function mergeConfiguredModels(route, configured, live2, capacities, hints = { table: loadCapabilityHints(), override: {} }, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP) {
+function preservedOperatorFields(entry) {
+  const preserved = {};
+  const nativeFileInputs = entry.nativeFileInputs;
+  if (nativeFileInputs !== null && typeof nativeFileInputs === "object" && !Array.isArray(nativeFileInputs)) {
+    preserved.nativeFileInputs = { ...nativeFileInputs };
+  }
+  const compat = entry.compat;
+  if (compat !== null && typeof compat === "object" && !Array.isArray(compat)) {
+    preserved.compat = { ...compat };
+  }
+  return preserved;
+}
+function preservedConfiguredFields(entry) {
+  return { ...preservedManualFields(entry), ...preservedOperatorFields(entry) };
+}
+function mergeConfiguredModels(route, configured, live2, hints = { table: loadCapabilityHints(), override: {} }, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP, registryContext = void 0) {
   const advertised = /* @__PURE__ */ new Map();
   for (const model of live2) {
     if (advertised.has(model.id)) continue;
-    advertised.set(model.id, analyzeModel(route, model, fallbackFor(capacities, route, model.id), hints, routeProviderMap).settings);
+    advertised.set(model.id, analyzeModel(route, model, hints, routeProviderMap, registryContext).settings);
   }
   const models = [];
   const unadvertised = [];
@@ -1390,7 +2269,7 @@ function mergeConfiguredModels(route, configured, live2, capacities, hints = { t
     seen.add(id);
     const fresh = advertised.get(id);
     if (fresh !== void 0) {
-      models.push(entry.source === "manual" ? { ...fresh, ...preservedManualFields(entry), source: "manual" } : fresh);
+      models.push(entry.source === "manual" ? { ...fresh, ...preservedConfiguredFields(entry), source: "manual" } : { ...fresh, ...preservedOperatorFields(entry) });
       continue;
     }
     const keptSource = entry.source === "manual" || entry.source === "pinned-in-use" ? entry.source : "configured";
@@ -1411,58 +2290,54 @@ function firstSeenAtOf(entry) {
 function modelsDevProviderModelIds(providerKey) {
   const provider = loadModelsDev()[providerKey];
   if (provider?.models === void 0) return void 0;
-  const ids = /* @__PURE__ */ new Set();
-  for (const key of Object.keys(provider.models)) {
-    ids.add(key);
-    ids.add(key.toLowerCase());
-  }
-  return ids;
+  return new Set(Object.keys(provider.models));
 }
-function referencedRouteModels(defaultModel, orchestration, route) {
+function referencedRouteModels(defaultModel, orchestration, route, subagentSelections = void 0) {
   const found = [];
-  if (defaultModel !== null && typeof defaultModel === "object" && !Array.isArray(defaultModel)) {
-    const selection = defaultModel;
-    if (selection.provider === route && typeof selection.model === "string" && selection.model !== "") {
-      found.push({ id: selection.model, reason: "agent-default-model" });
+  const pushRoute = (entry, providerKey, modelKey, reason) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return;
+    const candidate = entry;
+    const model = candidate[modelKey];
+    if (candidate[providerKey] === route && typeof model === "string" && model !== "") {
+      found.push({ id: model, reason });
     }
-  }
-  if (orchestration === null || typeof orchestration !== "object" || Array.isArray(orchestration)) return found;
-  const document = orchestration;
-  const chains = document.chains;
-  if (chains !== null && typeof chains === "object" && !Array.isArray(chains)) {
-    for (const [chainId, raw] of Object.entries(chains)) {
-      if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
-      const links = raw.links;
-      if (!Array.isArray(links)) continue;
-      for (const link of links) {
-        if (link === null || typeof link !== "object" || Array.isArray(link)) continue;
-        const entry = link;
-        if (entry.provider === route && typeof entry.model === "string" && entry.model !== "") {
-          found.push({ id: entry.model, reason: `chain:${chainId}` });
-        }
+  };
+  pushRoute(defaultModel, "provider", "model", "agent-default-model");
+  if (orchestration !== null && typeof orchestration === "object" && !Array.isArray(orchestration)) {
+    const document = orchestration;
+    const chains = document.chains;
+    if (chains !== null && typeof chains === "object" && !Array.isArray(chains)) {
+      for (const [chainId, raw] of Object.entries(chains)) {
+        if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
+        const links = raw.links;
+        if (!Array.isArray(links)) continue;
+        for (const link of links) pushRoute(link, "provider", "model", `chain:${chainId}`);
+      }
+    }
+    const personas = document.personas;
+    if (personas !== null && typeof personas === "object" && !Array.isArray(personas)) {
+      for (const [seat, raw] of Object.entries(personas)) {
+        pushRoute(raw, "provider", "model", `persona:${seat}`);
+      }
+    }
+    const preferences = document.uiPreferences;
+    if (preferences !== null && typeof preferences === "object" && !Array.isArray(preferences)) {
+      const favorites = preferences.favorites;
+      if (Array.isArray(favorites)) {
+        for (const favorite of favorites) pushRoute(favorite, "provider", "modelId", "favorite");
       }
     }
   }
-  const preferences = document.uiPreferences;
-  if (preferences !== null && typeof preferences === "object" && !Array.isArray(preferences)) {
-    const favorites = preferences.favorites;
-    if (Array.isArray(favorites)) {
-      for (const favorite of favorites) {
-        if (favorite === null || typeof favorite !== "object" || Array.isArray(favorite)) continue;
-        const entry = favorite;
-        if (entry.provider === route && typeof entry.modelId === "string" && entry.modelId !== "") {
-          found.push({ id: entry.modelId, reason: "favorite" });
-        }
-      }
-    }
+  for (const selection of Array.isArray(subagentSelections) ? subagentSelections : [subagentSelections]) {
+    if (selection === null || typeof selection !== "object" || Array.isArray(selection)) continue;
+    const allowed = selection.allowedModels;
+    if (!Array.isArray(allowed)) continue;
+    for (const entry of allowed) pushRoute(entry, "provider", "model", "subagent-allowed-model");
   }
   return found;
 }
-function mergeDiscoveredModels(route, live2, capacities, hints = { table: loadCapabilityHints(), override: {} }, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP) {
-  return live2.map((model) => {
-    const fallback = fallbackFor(capacities, route, model.id);
-    return analyzeModel(route, model, fallback, hints, routeProviderMap).discovered;
-  });
+function mergeDiscoveredModels(route, live2, hints = { table: loadCapabilityHints(), override: {} }, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP, registryContext = void 0) {
+  return live2.map((model) => analyzeModel(route, model, hints, routeProviderMap, registryContext).discovered);
 }
 function pruneRouteReferences(orchestration, route, removed) {
   const cleanup = {};
@@ -1505,10 +2380,11 @@ function planRouteModels(input) {
   const advertised = /* @__PURE__ */ new Map();
   for (const model of live2 ?? []) {
     if (advertised.has(model.id)) continue;
-    advertised.set(model.id, analyzeModel(input.route, model, fallbackFor(input.capacities, input.route, model.id), hints, routeProviderMap).settings);
+    advertised.set(model.id, analyzeModel(input.route, model, hints, routeProviderMap, input.metadata).settings);
   }
-  const catalogIds = input.catalogRoute && input.catalogProviderKey !== void 0 ? modelsDevProviderModelIds(input.catalogProviderKey) : void 0;
-  const authority = live2 === void 0 ? "none" : catalogIds !== void 0 ? "catalog" : input.catalogRoute ? "none" : "endpoint";
+  const endpointAuthority = input.endpointAuthority === true;
+  const catalogIds = !endpointAuthority && input.catalogRoute && input.catalogProviderKey !== void 0 ? modelsDevProviderModelIds(input.catalogProviderKey) : void 0;
+  const authority = live2 === void 0 ? "none" : catalogIds !== void 0 ? "catalog" : input.catalogRoute && !endpointAuthority ? "none" : "endpoint";
   const report = {
     removed: [],
     deprecated: [],
@@ -1524,7 +2400,7 @@ function planRouteModels(input) {
   const grace = /* @__PURE__ */ new Set();
   if (authority === "catalog" && catalogIds !== void 0) {
     for (const id of advertised.keys()) {
-      if (catalogIds.has(id) || catalogIds.has(id.toLowerCase())) continue;
+      if (catalogIds.has(id)) continue;
       const prior = configuredById.get(id);
       const firstSeen = prior === void 0 ? input.now : firstSeenAtOf(prior);
       if (firstSeen !== void 0 && input.now - firstSeen < endpointGraceMs) grace.add(id);
@@ -1537,7 +2413,9 @@ function planRouteModels(input) {
     if (id !== void 0) overlayUpserts.add(id);
   }
   const protectedIds = /* @__PURE__ */ new Set();
+  const overlayKeepIds = new Set(pinned);
   for (const [id, entry] of configuredById) {
+    if (entry.source === "manual" || pinned.has(id)) overlayKeepIds.add(id);
     if (entry.source === "manual" || pinned.has(id) || overlayUpserts.has(id)) protectedIds.add(id);
   }
   for (const id of pinned) if (advertised.has(id)) protectedIds.add(id);
@@ -1551,7 +2429,7 @@ function planRouteModels(input) {
   const memberBase = /* @__PURE__ */ new Set();
   if (authority === "catalog" && catalogIds !== void 0) {
     for (const id of advertised.keys()) {
-      if (catalogIds.has(id) || catalogIds.has(id.toLowerCase())) memberBase.add(id);
+      if (catalogIds.has(id)) memberBase.add(id);
     }
   } else if (authority === "endpoint") {
     for (const id of advertised.keys()) memberBase.add(id);
@@ -1566,11 +2444,13 @@ function planRouteModels(input) {
     const currentIds = [...configuredById.keys()];
     const wouldRemove = currentIds.filter((id) => !isMember(id) && !references.has(id));
     const skipWithholdGuard = input.force === true;
-    if (memberBase.size === 0 && protectedIds.size === 0 && grace.size === 0) {
+    const emptySet = memberBase.size === 0 && protectedIds.size === 0 && grace.size === 0;
+    const emptyAllowed = input.allowEmpty === true && authority === "endpoint";
+    if (emptySet && !emptyAllowed) {
       keepAll = true;
       report.degraded = true;
       report.degradedReason = "the effective model set would be empty";
-    } else if (!skipWithholdGuard && currentIds.length > 0 && wouldRemove.length * 2 > currentIds.length) {
+    } else if (!skipWithholdGuard && !(emptyAllowed && wouldRemove.length === currentIds.length) && currentIds.length > 0 && wouldRemove.length * 2 > currentIds.length) {
       keepAll = true;
       report.degraded = true;
       report.degradedReason = `removals would drop ${String(wouldRemove.length)} of ${String(currentIds.length)} stored models (more than half)`;
@@ -1578,7 +2458,7 @@ function planRouteModels(input) {
   }
   const models = [];
   if (keepAll) {
-    models.push(...live2 === void 0 ? configured : mergeConfiguredModels(input.route, configured, live2, input.capacities, hints, routeProviderMap).models);
+    models.push(...live2 === void 0 ? configured : mergeConfiguredModels(input.route, configured, live2, hints, routeProviderMap, input.metadata).models);
   } else {
     const seen = /* @__PURE__ */ new Set();
     for (const entry of configured) {
@@ -1605,8 +2485,10 @@ function planRouteModels(input) {
         models.push({
           ...fresh,
           // The healthy pass refreshes the record too; a manual entry's own
-          // ladder is the operator's claim and survives it.
-          ...preservedManualFields(entry),
+          // ladder is the operator's claim and survives it, and every entry
+          // keeps the operator-only declarations (`nativeFileInputs`,
+          // `compat`) no disclosure can restate.
+          ...preservedConfiguredFields(entry),
           ...entry.source === "manual" ? { source: "manual" } : {},
           ...isGrace ? { firstSeenAt: firstSeenAtOf(entry) ?? input.now } : {}
         });
@@ -1623,7 +2505,16 @@ function planRouteModels(input) {
       models.push(grace.has(id) ? { ...fresh, firstSeenAt: input.now } : fresh);
     }
   }
-  return { models: applyFreeTierGate(applyCatalogOverlay(models, input.overlay), input.freeTierGate), report };
+  const overlaid = applyCatalogOverlay(models, input.overlay, {
+    keep: overlayKeepIds,
+    deprecate: new Set(references.keys())
+  });
+  for (const id of input.overlay?.remove ?? []) {
+    if (!references.has(id) || overlayKeepIds.has(id)) continue;
+    if (!models.some((model) => model.id === id)) continue;
+    if (!report.deprecated.includes(id)) report.deprecated.push(id);
+  }
+  return { models: applyFreeTierGate(overlaid, input.freeTierGate), report };
 }
 function stringifyComparable(models) {
   return JSON.stringify(
@@ -1631,6 +2522,7 @@ function stringifyComparable(models) {
       id: m.id,
       name: m.name,
       contextWindow: m.contextWindow,
+      maxInputTokens: m.maxInputTokens,
       maxTokens: m.maxTokens,
       input: m.input ?? null,
       reasoning: m.reasoning ?? null,
@@ -1638,7 +2530,12 @@ function stringifyComparable(models) {
       // renames a level's wire value (or changes which levels exist) must be
       // written, not treated as an unchanged key set.
       reasoningEfforts: m.reasoningEfforts !== null && typeof m.reasoningEfforts === "object" && !Array.isArray(m.reasoningEfforts) ? Object.entries(m.reasoningEfforts).sort(([left], [right]) => left.localeCompare(right)) : null,
+      unsupportedReasoningEfforts: m.unsupportedReasoningEfforts ?? null,
       tools: m.tools ?? null,
+      // Operator-only declarations are part of the record: a change (or a
+      // refresh that would drop them) must be written, not treated as equal.
+      nativeFileInputs: m.nativeFileInputs ?? null,
+      compat: m.compat ?? null,
       cost: m.cost ?? null,
       releaseDate: m.releaseDate ?? null,
       costTiers: m.costTiers ?? null,
@@ -1656,9 +2553,127 @@ function apply(ctx, config) {
   const logger = ctx.logger("enpoi-provider-sync");
   const endpoints = value(config.endpoints) ?? {};
   const sessionHeaders = value(config.sessionHeaders) ?? {};
-  const capacities = value(config.capacityDefaults) ?? {};
   const modelsDevUrl = value(config.modelsDevUrl) ?? DEFAULT_MODELS_DEV_URL;
+  const legacyCapacityDefaults = value(config.capacityDefaults) ?? {};
+  if (Object.keys(legacyCapacityDefaults).length > 0) {
+    reportSyncDiagnostic(
+      "provider-sync/capacity-defaults",
+      "capacityDefaults is an explicit operator assumption and is no longer written into model records; declare exact per-model capacities or a catalog-overlay upsert when a value must reach the catalog"
+    );
+  }
   const routeProviderMap = { ...DEFAULT_ROUTE_PROVIDER_MAP, ...value(config.routeProviderMap) };
+  const metadataSources = {
+    ...DEFAULT_ROUTE_METADATA_SOURCES,
+    ...value(config.metadataSources)
+  };
+  const registrySources = /* @__PURE__ */ new Map();
+  const registryAbort = new AbortController();
+  ctx.effect(() => () => {
+    registryAbort.abort();
+  }, "enpoi-provider-sync registry metadata");
+  for (const [route, declaration] of Object.entries(metadataSources)) {
+    if (declaration.refreshUrl === void 0 || declaration.refresh === false) continue;
+    if (declaration.sourceVersion === void 0 || declaration.sourceVersion.length === 0) {
+      reportSyncDiagnostic(
+        "provider-sync/registry-metadata",
+        `route ${route}: refreshUrl declared without sourceVersion; using the bundled baseline until the actual source version is configured`
+      );
+      continue;
+    }
+    registrySources.set(route, createRegistryMetadataSource({
+      url: declaration.refreshUrl,
+      sourceVersion: declaration.sourceVersion,
+      signal: registryAbort.signal
+    }));
+  }
+  let registryBaseline;
+  let registryRefresh;
+  function registryBaselineIndex() {
+    if (registryBaseline !== void 0) return registryBaseline ?? void 0;
+    const started = Date.now();
+    try {
+      const index = loadBundledRegistryMetadataIndex();
+      registryBaseline = index;
+      const models = [...index.channels.values()].reduce((count, entries) => count + entries.length, 0);
+      logger.info(`registry metadata baseline ${index.source.sourceVersion}: ${String(models)} model(s) in ${String(Date.now() - started)} ms`);
+      return index;
+    } catch (error) {
+      registryBaseline = null;
+      reportSyncDiagnostic(
+        "provider-sync/registry-metadata",
+        `registry metadata baseline could not be loaded \u2014 ${error instanceof Error ? error.message : String(error)}`
+      );
+      return void 0;
+    }
+  }
+  function refreshRegistrySources() {
+    if (registryRefresh !== void 0) return registryRefresh;
+    if (registryAbort.signal.aborted || registrySources.size === 0) return Promise.resolve();
+    const started = Date.now();
+    registryRefresh = (async () => {
+      await Promise.allSettled([...registrySources].map(async ([route, source]) => {
+        const before = Date.now();
+        let state;
+        try {
+          state = await source.refresh();
+        } catch (error) {
+          if (registryAbort.signal.aborted) return;
+          reportSyncDiagnostic(
+            "provider-sync/registry-metadata",
+            `route ${route}: registry refresh failed \u2014 ${error instanceof Error ? error.message : String(error)}`
+          );
+          return;
+        }
+        if (registryAbort.signal.aborted) return;
+        const models = state.index === null ? 0 : [...state.index.channels.values()].reduce((count, entries) => count + entries.length, 0);
+        logger.info(
+          `route ${route}: registry metadata ${state.stale ? "kept last-good" : "refreshed"} (${String(models)} model(s), ${String(Date.now() - before)} ms)`
+        );
+        if (state.diagnostics.length > 0) {
+          reportSyncDiagnostic(
+            "provider-sync/registry-metadata",
+            `route ${route}: registry refresh diagnostics \u2014 ${state.diagnostics.slice(0, 3).map((diagnostic) => diagnostic.message).join("; ")}`
+          );
+        }
+      }));
+      if (!registryAbort.signal.aborted) {
+        logger.debug(`registry metadata refresh finished in ${String(Date.now() - started)} ms`);
+      }
+    })().finally(() => {
+      registryRefresh = void 0;
+    });
+    return registryRefresh;
+  }
+  function metadataContextFor(route) {
+    const declaration = metadataSources[route];
+    if (declaration === void 0) return void 0;
+    const index = registrySources.get(route)?.current()?.index ?? registryBaselineIndex();
+    if (index === void 0) return void 0;
+    return {
+      index,
+      ...declaration.channel === void 0 ? {} : { channel: declaration.channel },
+      ...declaration.owner === void 0 ? {} : { owner: declaration.owner },
+      ...declaration.ownerChannels === void 0 ? {} : { ownerChannels: declaration.ownerChannels }
+    };
+  }
+  function configuredEndpointAuthority(settings, route) {
+    return sectionOf(settings, LLM_NS)?.providers?.[route]?.catalogAuthority === "endpoint";
+  }
+  function reportRegistryUsage(route, live2, metadata) {
+    if (live2 === void 0 || live2.length === 0 || metadata === void 0) return;
+    let resolved = 0;
+    const unsupported = /* @__PURE__ */ new Set();
+    for (const model of live2) {
+      const record = registryMetadataFor(metadata, model);
+      if (record === void 0) continue;
+      resolved += 1;
+      for (const level of record.effort?.unsupportedLevels ?? []) unsupported.add(level);
+    }
+    reportSyncDiagnostic(
+      "provider-sync/registry-metadata",
+      `route ${route}: registry metadata ${metadata.index.source.sourceVersion} resolved ${String(resolved)}/${String(live2.length)} model(s) (${String(live2.length - resolved)} unknown fall through to models.dev/catalog)` + (unsupported.size === 0 ? "" : `; unsupported raw effort names (diagnostic only): ${[...unsupported].join(", ")}`) + "; provenance is diagnostic-only"
+    );
+  }
   function reportSyncDiagnostic(kind, message) {
     let code;
     try {
@@ -1670,12 +2685,16 @@ function apply(ctx, config) {
   }
   loadModelsDev();
   void refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl);
+  void refreshRegistrySources();
+  let lastGoodOverlays;
   function loadOverlays() {
     try {
-      return loadCatalogOverlays();
+      const document = loadCatalogOverlays();
+      lastGoodOverlays = document;
+      return document;
     } catch (error) {
       reportSyncDiagnostic("provider-sync/catalog-overlays", error instanceof Error ? error.message : String(error));
-      return {};
+      return lastGoodOverlays ?? {};
     }
   }
   function loadHints() {
@@ -1705,31 +2724,38 @@ function apply(ctx, config) {
   function revisionOf2(settings, ns) {
     return settings.describe().find((entry) => entry.ns === ns)?.revision;
   }
+  function routeReferences(settings, route) {
+    return referencedRouteModels(
+      readSettingsDocument(settings, AGENT_DEFAULT_MODEL_NS),
+      readSettingsDocument(settings, ORCHESTRATION_NAMESPACE),
+      route,
+      SUBAGENT_MODEL_SELECTION_NAMESPACES.map((ns) => readSettingsDocument(settings, ns)).filter((document) => document !== void 0)
+    );
+  }
   function authorityLabel(report) {
     if (report.authority === "catalog") return "live endpoint \u2229 models.dev";
     if (report.authority === "endpoint") return report.source === "catalog" ? "bundled catalog snapshot" : "live endpoint";
     return "no authority";
   }
   function planWith(route, configured, recipe, settings) {
+    const endpointAuthority = configuredEndpointAuthority(settings, route);
     return planRouteModels({
       route,
       configured,
       live: recipe.live,
       catalogRoute: recipe.catalogRoute,
       catalogProviderKey: recipe.catalogProviderKey,
+      endpointAuthority,
+      allowEmpty: endpointAuthority,
       endpointFresh: recipe.live !== void 0,
       catalogFresh: recipe.catalogOnlineOk || (catalogCacheAgeMs(Date.now()) ?? Number.POSITIVE_INFINITY) < (value(config.catalogFreshMs) ?? CATALOG_FRESH_MS),
       pinnedModels: (value(config.pinnedModels) ?? {})[route],
       overlay: recipe.overlay,
-      references: referencedRouteModels(
-        readSettingsDocument(settings, AGENT_DEFAULT_MODEL_NS),
-        readSettingsDocument(settings, ORCHESTRATION_NAMESPACE),
-        route
-      ),
+      references: routeReferences(settings, route),
       now: Date.now(),
-      capacities,
       hints: recipe.hints,
       routeProviderMap,
+      ...recipe.metadata === void 0 ? {} : { metadata: recipe.metadata },
       ...recipe.freeTierGate === void 0 ? {} : { freeTierGate: recipe.freeTierGate },
       source: recipe.source,
       endpointGraceMs: value(config.endpointGraceMs) ?? ENDPOINT_ONLY_GRACE_MS,
@@ -1753,7 +2779,7 @@ function apply(ctx, config) {
     if (profile === void 0 && knownEndpoint === void 0) return void 0;
     const catalogRoute = isCatalogRoute(route);
     if (profile === void 0 && catalogRoute) return void 0;
-    const baseURL = knownEndpoint ?? profile?.baseURL;
+    const baseURL = profile?.baseURL ?? knownEndpoint;
     if (baseURL === void 0) {
       logger.debug(`route ${route}: no baseURL and no known endpoint \u2014 skipped`);
       return void 0;
@@ -1769,6 +2795,7 @@ function apply(ctx, config) {
       logger.warn(describeSyncFailure(route, error, ns));
     }
     const gate = freeTierGateOf(profile);
+    const metadata = metadataContextFor(route);
     const recipe = {
       live: live2,
       catalogRoute,
@@ -1776,22 +2803,28 @@ function apply(ctx, config) {
       catalogOnlineOk: options.catalogOnlineOk,
       overlay,
       hints: options.hints,
+      ...metadata === void 0 ? {} : { metadata },
       ...gate === void 0 ? {} : { freeTierGate: gate },
       source: ns === COMMANDCODE_NS ? "catalog" : "live",
       force: options.force
     };
     const planned = planWith(route, profile?.models, recipe, options.settings);
-    const references = referencedRouteModels(
-      readSettingsDocument(options.settings, AGENT_DEFAULT_MODEL_NS),
-      readSettingsDocument(options.settings, ORCHESTRATION_NAMESPACE),
-      route
-    );
-    const unadvertised = unadvertisedIds(profile?.models ?? [], live2);
+    const references = routeReferences(options.settings, route);
+    reportRegistryUsage(route, live2, metadata);
+    const plannedIds = new Set(planned.models.map((model) => typeof model.id === "string" ? model.id : ""));
+    const unadvertised = unadvertisedIds(profile?.models ?? [], live2).filter((id) => plannedIds.has(id));
     const cleanup = danglingIds(profile?.models ?? [], planned.models);
     if (planned.report.removed.length > 0) {
       reportSyncDiagnostic(
         "provider-sync/model-pruned",
         `route ${route}: pruned ${String(planned.report.removed.length)} outdated model(s) (source: ${authorityLabel(planned.report)}): ${planned.report.removed.join(", ")}`
+      );
+    }
+    const overlayRemoved = cleanup.filter((id) => !planned.report.removed.includes(id));
+    if (overlayRemoved.length > 0) {
+      reportSyncDiagnostic(
+        "provider-sync/overlay-model-removed",
+        `route ${route}: overlay removed ${String(overlayRemoved.length)} model(s): ${overlayRemoved.join(", ")}`
       );
     }
     for (const id of planned.report.deprecated) {
@@ -1812,6 +2845,7 @@ function apply(ctx, config) {
       ns,
       hasProfile: profile !== void 0,
       configured: profile?.models ?? [],
+      endpointAuthority: profile?.catalogAuthority === "endpoint",
       overlay,
       live: live2,
       baseURL,
@@ -1822,23 +2856,25 @@ function apply(ctx, config) {
       ...live2 === void 0 ? {} : { advertisedCount: live2.length },
       ...fetchError === void 0 ? {} : { fetchError },
       references,
+      ...metadata === void 0 ? {} : { metadata },
       plan: recipe
     };
   }
   async function persistRouteModels(settings, outcome) {
     let current = outcome;
-    if (stringifyComparable(current.configured) === stringifyComparable(current.models)) {
-      logger.debug(`route ${current.route}: ${current.live === void 0 ? "overlay" : `${String(current.advertisedCount ?? 0)} ${current.report.source} models`}, no change`);
-      return current;
-    }
     for (let attempt = 0; ; attempt++) {
+      const modelsChanged = stringifyComparable(current.configured) !== stringifyComparable(current.models);
+      if (!modelsChanged) {
+        logger.debug(`route ${current.route}: ${current.live === void 0 ? "overlay" : `${String(current.advertisedCount ?? 0)} ${current.report.source} models`}, no change`);
+        return current;
+      }
       try {
         await settings.mutate(
           current.ns,
           [{ op: "set", path: ["providers", current.route, "models"], value: current.models }],
           revisionOf2(settings, current.ns)
         );
-        const removed = current.report.removed.length;
+        const removed = current.cleanup.length;
         logger.info(removed > 0 ? `route ${current.route}: catalog refresh \u2014 ${String(current.models.length)} models (${String(removed)} outdated pruned)` : current.live === void 0 ? `route ${current.route}: catalog overlay applied \u2014 ${String(current.models.length)} models` : `route ${current.route}: catalog merged & enriched from models.dev \u2014 ${String(current.advertisedCount ?? 0)} ${current.report.source} models (${String(current.unadvertised.length)} kept)`);
         return current;
       } catch (error) {
@@ -1850,15 +2886,33 @@ function apply(ctx, config) {
           return current;
         }
         const configured = profile.models ?? [];
+        const previous = current;
         const planned = planWith(current.route, configured, current.plan, settings);
+        const rePlannedReferences = routeReferences(settings, current.route);
         current = {
           ...current,
           configured,
           models: planned.models,
           report: planned.report,
           cleanup: danglingIds(configured, planned.models),
-          unadvertised: unadvertisedIds(configured, current.live)
+          unadvertised: unadvertisedIds(configured, current.live).filter((id) => planned.models.some((model) => model.id === id)),
+          references: rePlannedReferences
         };
+        for (const id of planned.report.deprecated) {
+          if (previous.report.deprecated.includes(id)) continue;
+          const reasons = rePlannedReferences.filter((reference) => reference.id === id).map((reference) => reference.reason);
+          reportSyncDiagnostic(
+            "provider-sync/active-model-deprecated",
+            `route ${current.route}: model "${id}" is no longer a member but is referenced by ${reasons.join(", ")}; kept as deprecated (source: pinned-in-use)`
+          );
+        }
+        for (const id of planned.report.removed) {
+          if (previous.report.removed.includes(id)) continue;
+          reportSyncDiagnostic(
+            "provider-sync/model-pruned",
+            `route ${current.route}: pruned model "${id}" after a concurrent edit (source: ${authorityLabel(planned.report)})`
+          );
+        }
         if (stringifyComparable(current.configured) === stringifyComparable(current.models)) {
           logger.debug(`route ${current.route}: concurrent edit already converged \u2014 no second write`);
           return current;
@@ -1899,26 +2953,28 @@ function apply(ctx, config) {
   }
   async function writeDiscoveredCache(outcome, hints) {
     if (outcome.live === void 0) return false;
-    if (outcome.live.length === 0) {
-      logger.warn(`route ${outcome.route}: endpoint advertised no models \u2014 discovered cache kept`);
+    if (outcome.live.length === 0 && !outcome.endpointAuthority) {
+      logger.info(`route ${outcome.route}: empty listing not cached \u2014 route is not endpoint-authoritative`);
       return false;
     }
     try {
       const previous = readDiscoveredFile(discoveredCachePath()).routes[outcome.route];
       const pinned = (value(config.pinnedModels) ?? {})[outcome.route] ?? [];
+      const now = Date.now();
       const record = mergeDiscoveredRoute(
         previous,
         outcome.baseURL,
-        mergeDiscoveredModels(outcome.route, outcome.live, capacities, hints, routeProviderMap),
-        Date.now(),
+        mergeDiscoveredModels(outcome.route, outcome.live, hints, routeProviderMap, outcome.metadata),
+        now,
         [...outcome.references.map((reference) => reference.id), ...pinned]
       );
+      if (outcome.live.length === 0) record.fetchedAt = now;
       if (previous !== void 0 && JSON.stringify(previous) === JSON.stringify(record)) {
         logger.debug(`route ${outcome.route}: ${String(outcome.live.length)} discovered models, no change`);
       } else {
         try {
           await writeDiscoveredRoute(outcome.route, record);
-          logger.info(`route ${outcome.route}: discovered ${String(outcome.live.length)} models from ${outcome.baseURL} (source: discovered)`);
+          logger.info(outcome.live.length === 0 ? `route ${outcome.route}: endpoint advertised no models \u2014 discovered cache records the empty listing` : `route ${outcome.route}: discovered ${String(outcome.live.length)} models from ${outcome.baseURL} (source: discovered)`);
         } catch (error) {
           logger.warn(`route ${outcome.route}: discovered models could not be cached \u2014 ${error instanceof Error ? error.message : String(error)}`);
           return false;
@@ -1926,7 +2982,7 @@ function apply(ctx, config) {
       }
       return true;
     } catch (error) {
-      logger.warn(describeSyncFailure(outcome.route));
+      logger.warn(describeSyncFailure(outcome.route, error));
       return false;
     }
   }
@@ -1943,6 +2999,7 @@ function apply(ctx, config) {
   }
   async function runSyncPass() {
     const onlineOk = await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl);
+    void refreshRegistrySources();
     const overlays = loadOverlays();
     const hints = loadHints();
     const settings = ctx.get("settings");
@@ -1985,9 +3042,9 @@ function apply(ctx, config) {
           logger.warn(describeSyncFailure(route, error, outcome.ns));
         }
       }
-      stats.pruned += final.report.removed.length;
+      stats.pruned += final.cleanup.length;
       unadvertised.push(...final.unadvertised.map((id) => `${route}/${id}`));
-      if (outcome.ns === LLM_NS && !isCatalogRoute(route)) await writeDiscoveredCache(outcome, hints);
+      if (final.ns === LLM_NS && !isCatalogRoute(route)) await writeDiscoveredCache(final, hints);
     }
     if (stats.pruned > 0 || stats.deprecated > 0 || stats.degraded > 0) {
       reportSyncDiagnostic(
@@ -2006,6 +3063,7 @@ function apply(ctx, config) {
     const settings = ctx.get("settings");
     if (settings === void 0) throw new Error("settings seam absent \u2014 cannot refresh a route");
     const onlineOk = await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl);
+    void refreshRegistrySources();
     const overlays = loadOverlays();
     const hints = loadHints();
     const outcome = await computeRouteRefresh(route, { catalogOnlineOk: onlineOk, overlays, hints, settings, force: true });
@@ -2015,7 +3073,9 @@ function apply(ctx, config) {
     return {
       route,
       models: outcome.models,
-      removed: outcome.report.removed,
+      // The cleanup union, not the membership audit alone: the caller merges
+      // stored rows into this list and must drop overlay removals too.
+      removed: outcome.cleanup,
       deprecated: outcome.report.deprecated,
       degraded: outcome.report.degraded,
       ...outcome.report.degradedReason === void 0 ? {} : { degradedReason: outcome.report.degradedReason },
@@ -2028,6 +3088,7 @@ function apply(ctx, config) {
     const settings = ctx.get("settings");
     if (settings === void 0) throw new Error("settings seam absent \u2014 cannot refresh routes");
     const onlineOk = await refreshModelsDevOnline(reportSyncDiagnostic, modelsDevUrl);
+    void refreshRegistrySources();
     const overlays = loadOverlays();
     const hints = loadHints();
     const llmProviders = sectionOf(settings, LLM_NS)?.providers;
@@ -2041,7 +3102,7 @@ function apply(ctx, config) {
     for (const route of routes) {
       const profile = llmProviders?.[route] ?? commandCode?.[route];
       const catalogRoute = isCatalogRoute(route);
-      const baseURL = endpoints[route] ?? profile?.baseURL;
+      const baseURL = profile?.baseURL ?? endpoints[route];
       const outcome = await computeRouteRefresh(route, { catalogOnlineOk: onlineOk, overlays, hints, settings, force: true });
       if (outcome === void 0) {
         const staticCatalog = profile === void 0 && catalogRoute && baseURL !== void 0;
@@ -2069,7 +3130,7 @@ function apply(ctx, config) {
           logger.warn(describeSyncFailure(route, error, outcome.ns));
         }
       }
-      const cached = outcome.ns === LLM_NS && !catalogRoute ? await writeDiscoveredCache(outcome, hints) : false;
+      const cached = final.ns === LLM_NS && !catalogRoute ? await writeDiscoveredCache(final, hints) : false;
       statuses.push({
         route,
         status: outcome.live === void 0 ? "unreachable" : "ok",
@@ -2077,7 +3138,7 @@ function apply(ctx, config) {
         authority: outcome.report.authority,
         ...outcome.advertisedCount === void 0 ? {} : { advertised: outcome.advertisedCount },
         modelCount: final.models.length,
-        removed: final.report.removed,
+        removed: final.cleanup,
         deprecated: final.report.deprecated,
         degraded: final.report.degraded,
         ...final.report.degradedReason === void 0 ? {} : { degradedReason: final.report.degradedReason },
@@ -2130,8 +3191,10 @@ export {
   Config,
   DEFAULT_FREE_TIER_GATE_REASON,
   DEFAULT_MODELS_DEV_URL,
+  DEFAULT_ROUTE_METADATA_SOURCES,
   DEFAULT_ROUTE_PROVIDER_MAP,
   ENDPOINT_ONLY_GRACE_MS,
+  MAX_MODEL_LISTING_BYTES,
   apply,
   applyCatalogOverlay,
   applyFreeTierGate,

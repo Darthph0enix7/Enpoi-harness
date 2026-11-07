@@ -1,4 +1,155 @@
 {
   "version": 1,
-  "packages": {}
+  "packages": {
+    "enpoi-agent-switch": {
+      "sourceInputs": "adf4c5ffd7ec3270a92dec61e9b795e8758286776bdcbc0fc79a45f4e99bc71b",
+      "outputSha": "24ac21a10b52d80244e86ccb7a18e5c8e930a308d5826748b5bd913d115ebe59",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-capabilities": {
+      "sourceInputs": "19b8294b2e26c194aa2bbdae2dbfa2ce77e4c057a9503a78994f5a59796299ef",
+      "outputSha": "b8d60c6d4ea3d64b8e4d8442c7c7e7f31f2bd214210f1329c11c84488062ac0c",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-cascade": {
+      "sourceInputs": "fd4adec53f228748dceaddaa2bddb7390e382f06cd6697b7d37f1aa8a2238af5",
+      "outputSha": "10790e5463a14011153561c059964818a6bb6cb8395556a6e5d4a4f3ad839e04",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-catalog-rules": {
+      "sourceInputs": "c3effcd0215b1d541b22a6ee3002450640785768996c25b6246cace9eef75fea",
+      "outputSha": "3a1ec24f494d2aa41605f0b0929ba68ef3fb7db2ab310e11b93e1629eef52456",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-commandcode-provider": {
+      "sourceInputs": "4b4c0eda4efe9205b736742d1d340d92c9cde4c87b8e957c204edb82e87709b4",
+      "outputSha": "999e25fd92a214d60ba405ea7eaa7454f0ee84c8e6ee3a7828a9e486e5bda6c5",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-context-keeper": {
+      "sourceInputs": "ff8c245d3af3e11a446a6a24e071df68180f9cc87b3b3087472ca900418701af",
+      "outputSha": "3ade88a79861ee1a79b3e1a9cc8baa10e70408a332d9b8c9315440893d4b26be",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-contracts": {
+      "sourceInputs": "4c03e02ab16d16f42c23c5163344b1b59cbe2de3cdee2f37e76b5f5aed8c70e3",
+      "outputSha": "36c4c99954560da90cc5966f0dc040afd5bc5a3b6f5a4079efc85567b49acc4a",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-council": {
+      "sourceInputs": "67c684cf0bf794764d5af49e3a6cbf9f622b7f4bd53e50dd2e0ac6433cab8731",
+      "outputSha": "c2ed13dd6d0c0b5668f13a107724b028dd85cb06a438b2eb2297c152d1384b20",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-custom-tools": {
+      "sourceInputs": "cb97977050bf3d805fd7f6b815aed7a8d50b1051a3fb94524f9517ff579aab50",
+      "outputSha": "68654c69e985f816d2f23750008d7f602e4b1ffe61d3eb918a0fabe502441564",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-debug": {
+      "sourceInputs": "860078de8cd6292b20ea5b383b99e06b570fcef2aa89f443bcf7c2de5c9d3ad0",
+      "outputSha": "8c5b65084169c93cc236c14b379da66c9b74fb6228940454ecf3dbe33fcd2e29",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-diagnostics": {
+      "sourceInputs": "34601ca4a772dd8928aa0ed82407033893fd88115c9d2e91104b6f65640d7819",
+      "outputSha": "30821bedd7bac073428d9525f5106e697a110b575bc8635b0a52aa015f9aac3f",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-file-revert": {
+      "sourceInputs": "4f050e6ff40b8548dbebad715b0d01222420e65dec4a1ccbb3797f994885642d",
+      "outputSha": "eaf8327cf47efcc32d820e80b0dd057ba85e375a2e8bded9c520b423099cb8c1",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-fs-ops": {
+      "sourceInputs": "c287e833e224f67d99b99d159f1fa952d03e91da3f452c54514d7b01354b9e06",
+      "outputSha": "6b6a03de535b501cff481ba95d5a49b960f87d11f01072d2c81b7522554c9202",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-git": {
+      "sourceInputs": "810465444db64a2f235692cfed3d6e864bd98469df4b7d60c9139f3687297696",
+      "outputSha": "4c9995844097cf2242881c171e3d6abc3536e46d7ef6698d3e9aed191b879b51",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-heavy-providers": {
+      "sourceInputs": "e9eb43698d556ea206e51529bf87d63ea8588fb296dea7d8695f314b8dd3a089",
+      "outputSha": "3f05527c041689e6108c47661aea3156e372656d430596d984710ea4ddf1dbfd",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-living-brief": {
+      "sourceInputs": "bf007df44ed7e18f249efd7ba3e9ff013e5f1f2116dee6b3012a90093bb196e2",
+      "outputSha": "b12c171fc2b3b51443424a8be065df0c645f0a20120938105d250510db0f5eda",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-memory": {
+      "sourceInputs": "3051a0dda4db3e45505271a38678400e968c72b2fe0b4b538e3df8fbcb133971",
+      "outputSha": "a4ff115e844c45eba82885c3e0c9667c2bf165c185add39176293d7c1c6bf33e",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-model-chains": {
+      "sourceInputs": "1a08592d533c3d7358d0f8fa52a30381af370a27ec9c486a1df8de53216ca35e",
+      "outputSha": "0970973c834179ebf0723896de9ee43432f9fe7beb97d8c6cd2a340271fdfcdb",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-oracle": {
+      "sourceInputs": "c2675840336eb16a2aec52179e8cb3516c8d44435b12fd14212a5e76b76f1ba1",
+      "outputSha": "43943939c2a74b07750d4d27b550638a534ac9e69fb23b84fac1599819a63f0b",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-peer-bridge": {
+      "sourceInputs": "be879ee804f9d44cfc79332ebb25e2b75f4459940c108e8a7f0da3985a839a65",
+      "outputSha": "73d040c70e62f28cda656fc760ec16f039313023a60c540b0c5463964763d76d",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-preset-authoring": {
+      "sourceInputs": "c9d01dcaec1c2cda7ba1c8e2bb663ce40357386f7f001737622531a058350c6b",
+      "outputSha": "12be78f5624f481dfd4623c36cfd322247553032b6f9fa77a338189479cff501",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-provider-sync": {
+      "sourceInputs": "f1fd2eb7a5374fe89ef34d745aa4b4f7dbb76f20b453cd4a4a1af63afb3c8a4e",
+      "outputSha": "06db285b9fe542d79a96e6cbc260ac74f0f2e0d8107a2614a801ed17c5e895c2",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-role-registry": {
+      "sourceInputs": "aacc673d650e7532b7d4a0d22cd9515766b457879e20c50f80cbee9539e2b6fc",
+      "outputSha": "6a894db3bf24868cfd4dc3cd8c530d9a79a5bdaeba0e0258f41b7fdd8041f96b",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-runtime-probe": {
+      "sourceInputs": "92dd642cb7e49943a6bcb0d427f3f987c8f64f1cd5aef7bc4927df2a2482b4fd",
+      "outputSha": "c02c894c3368729401a0203afed48dd9547896aec5f662cc45c8e8e09bf835c1",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-skin-guard": {
+      "sourceInputs": "588cfd79fdb4ddaa3c6e19864eebce1afe8cf87cdcdce3295b31a16929d95827",
+      "outputSha": "bb9163691232d58af75ceb2c5afe74cde292ed58622cbed41a8a8295bc21c07f",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-tool-groups": {
+      "sourceInputs": "a55946a7926622856128bd7b93d966d11daabd0d135070120ec2fe8f9692bafc",
+      "outputSha": "a8bf158d8def27f5484ff7053414558c8b6d40444a0d4699f571c78de7ed6d5e",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-ui-state": {
+      "sourceInputs": "4ec765c0285aca563ffd8eb1d31c4383463d4d0f7e39d0c5657c2eeee1552926",
+      "outputSha": "a309eb300f9c59faeef1551635e6a791d8e92af55481ee615dbb5d14b2d8f3bb",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-update-check": {
+      "sourceInputs": "9bc5c6bdde5a5d98f4e069daf306dcb746c9c3ab58dc593c997ed69b5a85db64",
+      "outputSha": "b9bf6bb3307a176a0431d23ec47c251ad1636f6a399524e97b8e626f042bab75",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-verify-gate": {
+      "sourceInputs": "1ce61f9ddbf1a273f94739445f6675cb447da4792751ab2e2ee115412efbcedf",
+      "outputSha": "031f86eef007364a96b33f27470824a77bc0ed05c9f8fe54b844ae0c13723c74",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-whiteboard": {
+      "sourceInputs": "b0459ef210a97503289421ddf6d504cd77ed4726c267da7f29a1a77e2940342b",
+      "outputSha": "d1ea9e9e711188dc63bad60792707cd7b8e436d1ad3cf828c65d6ae4f112ea74",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    }
+  }
 }

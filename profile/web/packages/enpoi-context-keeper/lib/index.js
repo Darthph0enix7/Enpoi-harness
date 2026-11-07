@@ -699,6 +699,7 @@ function commitCheckpointMessage(session, text) {
   }
   append.call(session, "user/message", message, { surfaceOp: "append" });
 }
+var KEEPER_COMPACTION_ID_MEMORY = 8;
 var CheckpointService = class {
   constructor(ctx, config) {
     this.ctx = ctx;
@@ -713,6 +714,20 @@ var CheckpointService = class {
   pending = /* @__PURE__ */ new Map();
   /** Sessions with a flush microtask already queued (coalesces event bursts). */
   flushQueued = /* @__PURE__ */ new Set();
+  /**
+   * Per-session compaction id memory: summaries held for their matching end,
+   * plus ids whose end was already consumed so a replayed summary/end pair
+   * cannot refresh twice. Both rings are capped per session, so state stays
+   * bounded regardless of compaction count. LRU-bounded by session too.
+   */
+  compactionMemory = new BoundedSessionCache();
+  /**
+   * Small late-completion guard: a refresh that resolves after its session was
+   * forgotten (or after plugin disposal) must not publish. The set holds only
+   * in-flight refreshes, so it is naturally bounded.
+   */
+  refreshOwnership = /* @__PURE__ */ new Set();
+  disposed = false;
   /** Live cache entries (diagnostics/tests; the map is LRU-bounded). */
   get cacheSize() {
     return this.cache.size;
@@ -724,17 +739,114 @@ var CheckpointService = class {
    * @param sessionId - the disposed session's id.
    */
   forget(sessionId) {
+    for (const ownership of this.refreshOwnership) {
+      if (ownership.sessionId === sessionId) ownership.stale = true;
+    }
     this.cache.delete(sessionId);
     this.pending.delete(sessionId);
+    this.compactionMemory.delete(sessionId);
     this.flushQueued.delete(sessionId);
+  }
+  /** Drop every per-session projection and held boundary (plugin teardown). */
+  dispose() {
+    this.disposed = true;
+    for (const ownership of this.refreshOwnership) ownership.stale = true;
+    this.cache.clear();
+    this.pending.clear();
+    this.compactionMemory.clear();
+    this.flushQueued.clear();
+  }
+  /**
+   * Record a `compaction/start` bracket. The keeper may log its durable
+   * `state/checkpoint` while the bracket is open, but must not commit a
+   * surface message until the matching end: the compaction backend asserts the
+   * whole surface is unchanged during summarization.
+   * @param session - the compacting session.
+   * @param compactionId - the durable compaction identity.
+   */
+  noteCompactionStart(session, compactionId) {
+    const memory = this.compactionMemory.get(session.id) ?? { pending: [], handled: [], open: [] };
+    if (memory.open.includes(compactionId)) return;
+    memory.open.push(compactionId);
+    if (memory.open.length > KEEPER_COMPACTION_ID_MEMORY) memory.open.shift();
+    this.compactionMemory.set(session.id, memory);
+  }
+  /**
+   * Close a `compaction/start` bracket on its matching end, success or error.
+   * @param session - the compacting session.
+   * @param compactionId - the id the end event names.
+   * @returns whether a matching bracket was open.
+   */
+  noteCompactionEnd(session, compactionId) {
+    const memory = this.compactionMemory.get(session.id);
+    if (memory === void 0) return false;
+    const index = memory.open.indexOf(compactionId);
+    if (index === -1) return false;
+    memory.open.splice(index, 1);
+    this.compactionMemory.set(session.id, memory);
+    return true;
+  }
+  /**
+   * Whether a compaction bracket is open for the session.
+   * @param session - the session to probe.
+   * @returns whether a surface commit must wait for the bracket's end.
+   */
+  compactionOpen(session) {
+    const memory = this.compactionMemory.get(session.id);
+    return memory !== void 0 && memory.open.length > 0;
+  }
+  /**
+   * Hold a compaction summary until its matching end. Mechanical summaries are
+   * held too: the end's `error` — not the summary's provider or
+   * `summarizationFailure` diagnostic — is the transaction outcome. Duplicate
+   * or already-handled ids are ignored.
+   * @param session - the compacting session.
+   * @param compactionId - the durable compaction identity.
+   */
+  noteCompactionSummary(session, compactionId) {
+    const memory = this.compactionMemory.get(session.id) ?? { pending: [], handled: [], open: [] };
+    if (memory.handled.includes(compactionId) || memory.pending.includes(compactionId)) return;
+    memory.pending.push(compactionId);
+    if (memory.pending.length > KEEPER_COMPACTION_ID_MEMORY) memory.pending.shift();
+    this.compactionMemory.set(session.id, memory);
+  }
+  /**
+   * Consume the `compaction/end` attempt for a held summary. A matching clean
+   * end is the single refresh for that id; an errored end consumes it without
+   * refreshing. An end for an unheld id (mismatch or lost summary) drops every
+   * held id because that transaction can no longer complete. Already-handled
+   * ids are idempotent.
+   * @param session - the compacting session.
+   * @param compactionId - the id the end event names.
+   * @param failed - whether the end carried an `error`.
+   * @returns whether this clean end is the one refresh for the held id.
+   */
+  consumeCompactionEnd(session, compactionId, failed) {
+    const memory = this.compactionMemory.get(session.id);
+    if (memory === void 0) return false;
+    if (memory.handled.includes(compactionId)) return false;
+    const index = memory.pending.indexOf(compactionId);
+    if (index === -1) {
+      if (memory.pending.length > 0) {
+        memory.pending = [];
+        this.compactionMemory.set(session.id, memory);
+      }
+      return false;
+    }
+    memory.pending.splice(index, 1);
+    memory.handled.push(compactionId);
+    if (memory.handled.length > KEEPER_COMPACTION_ID_MEMORY) memory.handled.shift();
+    this.compactionMemory.set(session.id, memory);
+    return !failed;
   }
   /**
    * Commit a checkpoint that was deferred while a tool batch was open.
    *
    * Safe to call from any wake (the on-demand path, a lifecycle listener, a
    * queued microtask):
-   * - a still-open batch leaves the text pending (commit is never allowed
-   *   between a call and its result);
+   * - a still-open tool batch or compaction bracket leaves the text pending
+   *   (a surface message is never allowed between a call and its result, nor
+   *   while the compaction's whole-surface summary is being prepared);
    * - a newer `state/checkpoint` already committed wins — the pending record is
    *   dropped instead of resurrecting stale text through `surfaceOp: replace`;
    * - a re-entered append (a session-event publication is still open) restores
@@ -746,6 +858,7 @@ var CheckpointService = class {
     const pending = this.pending.get(session.id);
     if (pending === void 0) return false;
     if (openToolBatch(session)) return false;
+    if (this.compactionOpen(session)) return false;
     const latest = latestCheckpoint(session);
     const superseded = latest !== null && (latest.version > pending.data.version || latest.version === pending.data.version && latest.basedOnSeq > pending.data.basedOnSeq);
     if (superseded) {
@@ -760,7 +873,8 @@ var CheckpointService = class {
           model: latest.model,
           via: latest.via,
           createdAt: latest.createdAt,
-          inFlight: current.inFlight
+          inFlight: current.inFlight,
+          inFlightSeq: current.inFlightSeq
         });
       }
       diag(`flushPendingCheckpoint: session=${session.id} \u2014 dropping v${pending.data.version} (v${latest.version} already committed)`);
@@ -803,22 +917,30 @@ var CheckpointService = class {
    *
    * `force` (a segment cut) refreshes even inside the freshness window: the
    * boundary busts the prompt cache anyway, and the keeper's brief is a
-   * point-in-time snapshot by contract. Never throws for provider failures —
-   * the deterministic template always yields a valid checkpoint.
+   * point-in-time snapshot by contract. When this call flushes a deferred
+   * surface commit, that commit IS the segment's single surface write: paying a
+   * second pass would append another checkpoint for the same boundary. Never
+   * throws for provider failures — the deterministic template always yields a
+   * valid checkpoint.
    * @param session - the session to checkpoint.
    * @param opts - `force` for a segment-cut refresh.
    * @returns whether the checkpoint is present and how it was produced.
    */
   async ensureCheckpoint(session, opts = {}) {
     if (!keeperEnabled(this.ctx)) return { ok: false, text: null, reason: "keeper-disabled" };
+    let flushed = false;
     try {
-      this.flushPendingCheckpoint(session);
+      flushed = this.flushPendingCheckpoint(session);
     } catch (error) {
       diag(`ensureCheckpoint: session=${session.id} \u2014 deferred flush failed (${String(error)})`);
     }
     const cfg = resolveKeeperParams(this.ctx, this.config);
     const key = session.id;
     const now = Date.now();
+    if (flushed && opts.force === true) {
+      const latest = latestCheckpoint(session);
+      if (latest !== null) return { ok: true, text: latest.text, model: latest.model, reason: "refreshed" };
+    }
     let entry = this.cache.get(key);
     if (entry === void 0) {
       const logged = latestCheckpoint(session);
@@ -831,7 +953,8 @@ var CheckpointService = class {
           model: logged.model,
           via: logged.via,
           createdAt: logged.createdAt,
-          inFlight: null
+          inFlight: null,
+          inFlightSeq: 0
         };
         this.cache.set(key, entry);
       }
@@ -845,14 +968,36 @@ var CheckpointService = class {
       }
     }
     if (entry?.inFlight != null) {
-      try {
-        return await entry.inFlight;
-      } catch {
-        return { ok: false, text: null, reason: "refreshed" };
+      const targetSeq = session.seq;
+      if (opts.force !== true || entry.inFlightSeq >= targetSeq) {
+        try {
+          return await entry.inFlight;
+        } catch {
+          return { ok: false, text: null, reason: "refreshed" };
+        }
       }
+      const prior = await entry.inFlight.then(
+        (result) => result,
+        () => null
+      );
+      const current = this.cache.get(key);
+      if (current?.inFlight != null && current.inFlightSeq >= targetSeq) {
+        try {
+          return await current.inFlight;
+        } catch {
+          return { ok: false, text: null, reason: "refreshed" };
+        }
+      }
+      if (current !== void 0 && current.basedOnSeq >= targetSeq) {
+        return { ok: true, text: current.text, model: current.model, reason: "refreshed" };
+      }
+      if (prior === null || prior.ok !== true) {
+        return prior ?? { ok: false, text: null, reason: "refreshed" };
+      }
+      entry = current ?? entry;
     }
     const snapshotSeq = session.seq;
-    const promise = this.refresh(session, snapshotSeq, cfg, structural);
+    const promise = this.refresh(session, snapshotSeq, cfg, structuralTotal(session));
     this.cache.set(key, {
       ...entry ?? {
         version: 0,
@@ -863,7 +1008,8 @@ var CheckpointService = class {
         via: "template",
         createdAt: 0
       },
-      inFlight: promise
+      inFlight: promise,
+      inFlightSeq: snapshotSeq
     });
     try {
       return await promise;
@@ -874,72 +1020,86 @@ var CheckpointService = class {
   }
   /** One refresh: model chain, then the deterministic template fallback. */
   async refresh(session, snapshotSeq, cfg, structural) {
-    let text = "";
-    let model = "template";
-    let via = "template";
-    const lease = new AbortController();
-    const leaseTimer = setTimeout(() => lease.abort(), cfg.leaseMs ?? 45e3);
+    const ownership = { sessionId: session.id, stale: false };
+    this.refreshOwnership.add(ownership);
     try {
-      const input = frameInput(session, cfg.maxInputEvents ?? 80);
-      if (input.length > 0) {
-        const route = resolveKeeperRoute(this.ctx, cfg);
-        diag(`ensureCheckpoint: session=${session.id} \u2014 calling LLM (input ${input.length} chars, route ${route.provider}/${route.model}, basedOnSeq ${snapshotSeq})`);
-        const result = await summarize(this.ctx, cfg, session, input, lease.signal, route, PROSE_PROMPT, false);
-        const prose = cleanKeeperProse(result.text);
-        if (prose.length > 0) {
-          text = prose;
-          model = result.route;
-          via = "llm";
+      let text = "";
+      let model = "template";
+      let via = "template";
+      const lease = new AbortController();
+      const leaseTimer = setTimeout(() => lease.abort(), cfg.leaseMs ?? 45e3);
+      try {
+        const input = frameInput(session, cfg.maxInputEvents ?? 80);
+        if (input.length > 0) {
+          const route = resolveKeeperRoute(this.ctx, cfg);
+          diag(`ensureCheckpoint: session=${session.id} \u2014 calling LLM (input ${input.length} chars, route ${route.provider}/${route.model}, basedOnSeq ${snapshotSeq})`);
+          const result = await summarize(this.ctx, cfg, session, input, lease.signal, route, PROSE_PROMPT, false);
+          const prose = cleanKeeperProse(result.text);
+          if (prose.length > 0) {
+            text = prose;
+            model = result.route;
+            via = "llm";
+          }
         }
+      } catch (error) {
+        diag(`ensureCheckpoint: session=${session.id} \u2014 model path failed, using template (${String(error)})`);
+      } finally {
+        clearTimeout(leaseTimer);
       }
-    } catch (error) {
-      diag(`ensureCheckpoint: session=${session.id} \u2014 model path failed, using template (${String(error)})`);
+      if (via === "template") {
+        text = buildTemplateCheckpoint(session);
+        model = "template";
+      }
+      const current = this.cache.get(session.id);
+      const version = (latestCheckpoint(session)?.version ?? current?.version ?? 0) + 1;
+      const data = {
+        version,
+        basedOnSeq: snapshotSeq,
+        basedOnStructuralCount: structural,
+        model,
+        via,
+        text,
+        telemetry: checkpointTelemetry(session, { seq: snapshotSeq, model, via }),
+        createdAt: Date.now()
+      };
+      const rendered = renderCheckpointBlock(data);
+      if (this.disposed || ownership.stale) {
+        diag(`ensureCheckpoint: session=${session.id} \u2014 refresh abandoned (session forgotten or keeper disposed)`);
+        return { ok: false, text: null, reason: "refreshed" };
+      }
+      try {
+        appendCheckpoint(session, data);
+        const batchOpen = openToolBatch(session);
+        const compactionHeld = this.compactionOpen(session);
+        if (batchOpen || compactionHeld) {
+          this.pending.set(session.id, { data, text: rendered });
+          const hold = compactionHeld ? "open compaction" : "open tool batch";
+          diag(`ensureCheckpoint: session=${session.id} \u2014 checkpoint v${version} deferred (${hold})`);
+        } else {
+          this.pending.delete(session.id);
+          commitCheckpointMessage(session, rendered);
+        }
+      } catch (error) {
+        diag(`ensureCheckpoint: session=${session.id} \u2014 commit failed (${String(error)})`);
+        return { ok: false, text: null, reason: "refreshed" };
+      }
+      checkpointCursors.set(session, { seq: session.seq, data });
+      this.cache.set(session.id, {
+        version,
+        basedOnSeq: snapshotSeq,
+        basedOnStructuralCount: structural,
+        text,
+        model,
+        via,
+        createdAt: data.createdAt,
+        inFlight: current?.inFlight ?? null,
+        inFlightSeq: current?.inFlight != null ? current.inFlightSeq : 0
+      });
+      diag(`ensureCheckpoint: session=${session.id} \u2014 appended state/checkpoint v${version} via ${via} (${text.length} chars)`);
+      return { ok: true, text, model, reason: "refreshed" };
     } finally {
-      clearTimeout(leaseTimer);
+      this.refreshOwnership.delete(ownership);
     }
-    if (via === "template") {
-      text = buildTemplateCheckpoint(session);
-      model = "template";
-    }
-    const current = this.cache.get(session.id);
-    const version = (latestCheckpoint(session)?.version ?? current?.version ?? 0) + 1;
-    const data = {
-      version,
-      basedOnSeq: snapshotSeq,
-      basedOnStructuralCount: structural,
-      model,
-      via,
-      text,
-      telemetry: checkpointTelemetry(session, { seq: snapshotSeq, model, via }),
-      createdAt: Date.now()
-    };
-    const rendered = renderCheckpointBlock(data);
-    try {
-      appendCheckpoint(session, data);
-      if (openToolBatch(session)) {
-        this.pending.set(session.id, { data, text: rendered });
-        diag(`ensureCheckpoint: session=${session.id} \u2014 checkpoint v${version} deferred (open tool batch)`);
-      } else {
-        this.pending.delete(session.id);
-        commitCheckpointMessage(session, rendered);
-      }
-    } catch (error) {
-      diag(`ensureCheckpoint: session=${session.id} \u2014 commit failed (${String(error)})`);
-      return { ok: false, text: null, reason: "refreshed" };
-    }
-    checkpointCursors.set(session, { seq: session.seq, data });
-    this.cache.set(session.id, {
-      version,
-      basedOnSeq: snapshotSeq,
-      basedOnStructuralCount: structural,
-      text,
-      model,
-      via,
-      createdAt: data.createdAt,
-      inFlight: current?.inFlight ?? null
-    });
-    diag(`ensureCheckpoint: session=${session.id} \u2014 appended state/checkpoint v${version} via ${via} (${text.length} chars)`);
-    return { ok: true, text, model, reason: "refreshed" };
   }
 };
 function pressureAboveHalf(ctx, session) {
@@ -1043,9 +1203,27 @@ function apply(ctx, config) {
       checkpointCursors.set(session, { seq: event.seq + 1, data: event.data });
     }
     ownedCheckpoint.schedulePendingFlush(session);
-    if ((event.type === "compaction/end" || event.type === "compaction/summary") && keeperEnabled(ctx)) {
-      void ownedCheckpoint.ensureCheckpoint(session, { force: true }).catch(() => {
-      });
+    if (event.type === "compaction/start") {
+      const data = event.data;
+      if (typeof data.compactionId === "string" && data.compactionId.length > 0) {
+        ownedCheckpoint.noteCompactionStart(session, data.compactionId);
+      }
+    } else if (event.type === "compaction/summary") {
+      if (keeperEnabled(ctx)) {
+        const data = event.data;
+        if (typeof data.compactionId === "string" && data.compactionId.length > 0) {
+          ownedCheckpoint.noteCompactionSummary(session, data.compactionId);
+        }
+      }
+    } else if (event.type === "compaction/end") {
+      const data = event.data;
+      if (typeof data.compactionId === "string" && data.compactionId.length > 0) {
+        ownedCheckpoint.noteCompactionEnd(session, data.compactionId);
+      }
+      if (typeof data.compactionId === "string" && data.compactionId.length > 0 && ownedCheckpoint.consumeCompactionEnd(session, data.compactionId, data.error !== void 0) && keeperEnabled(ctx)) {
+        void ownedCheckpoint.ensureCheckpoint(session, { force: true }).catch(() => {
+        });
+      }
     }
     if (event.type !== "turn/end") return;
     if (!keeperEnabled(ctx)) return;
@@ -1082,6 +1260,7 @@ function apply(ctx, config) {
     for (const timer of prefetchTimers.values()) clearTimeout(timer);
     prefetchTimers.clear();
     prefetchRunning.clear();
+    ownedCheckpoint.dispose();
     if (briefService === ownedService) briefService = null;
     if (globalThis[BRIEF_SERVICE_ANCHOR] === ownedService) {
       delete globalThis[BRIEF_SERVICE_ANCHOR];
@@ -1615,6 +1794,7 @@ export {
   Config,
   DEFAULT_KEEPER_ROUTE,
   KEEPER_CACHE_CAP,
+  KEEPER_COMPACTION_ID_MEMORY,
   KEEPER_MAX_OUTPUT_TOKENS,
   KEEPER_MESSAGE_KIND,
   KEEPER_MIN_BRIEF_CHARS,

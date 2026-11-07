@@ -37,17 +37,13 @@ function parseCatalog(raw) {
   return entries;
 }
 function entryFor(entries, modelId) {
-  const exact = entries.find((entry) => entry.id === modelId);
-  if (exact !== void 0) return exact;
-  const short = modelId.split("/").pop() ?? modelId;
-  return entries.find((entry) => entry.id === short || entry.id.split("/").pop() === short);
+  return entries.find((entry) => entry.id === modelId);
 }
 function visionOf(entry) {
-  if (entry === void 0) return true;
+  if (entry === void 0) return false;
   if (entry.attachment === true) return true;
   const inputs = entry.modalities?.input;
-  if (Array.isArray(inputs) && inputs.length > 0) return inputs.includes("image");
-  return true;
+  return Array.isArray(inputs) && inputs.includes("image");
 }
 function modalitiesOf(entry) {
   const inputs = entry?.modalities?.input;
@@ -461,7 +457,7 @@ function toolNamesById(messages) {
 }
 function buildRequest(input) {
   const scrub = input.sanitizeText === true ? sanitizeText : KEEP_TEXT;
-  const forwarder = createImageForwarder(input.visionEnabled !== false);
+  const forwarder = createImageForwarder(input.visionEnabled === true);
   const userImagePlan = forwarder.enabled ? planUserImages(input.messages, input.resolveImage) : /* @__PURE__ */ new Map();
   const names = toolNamesById(input.messages);
   const entries = [];
@@ -891,6 +887,18 @@ async function* parseCommandCodeStream(source) {
 // src/adapter.ts
 var DEFAULT_USER_IMAGE_MAX_PIXELS = 2048 * 2048;
 var DEFAULT_USER_IMAGE_MAX_BYTES = 1024 * 1024;
+function configuredModelOf(profile, modelId) {
+  return profile.models?.find((model) => model.id === modelId);
+}
+function inputModalitiesFor(profile, modelId, entry) {
+  const catalog = modalitiesOf(entry);
+  if (catalog !== void 0) return catalog;
+  const input = configuredModelOf(profile, modelId)?.input;
+  return input !== void 0 && input.length > 0 ? [...input] : void 0;
+}
+function toolsSupported(entry) {
+  return entry?.tool_call;
+}
 var REQUEST_TIMEOUT_MS = 3e5;
 var DEFAULT_POOL_MAX_ATTEMPTS = 5;
 var DEFAULT_POOL_DEADLINE_MS = 3e4;
@@ -1013,12 +1021,17 @@ var CommandCodeAdapter = class extends LlmAdapter {
     const profile = this.profileOf(provider);
     const entries = await this.options.catalogFor(profile).entries();
     if (entries.length > 0) {
-      return entries.map((entry) => ({
-        provider,
-        id: entry.id,
-        name: entry.name,
-        ...modalitiesOf(entry) === void 0 ? {} : { inputModalities: modalitiesOf(entry) }
-      }));
+      return entries.map((entry) => {
+        const modalities = inputModalitiesFor(profile, entry.id, entry);
+        const tools = toolsSupported(entry);
+        return {
+          provider,
+          id: entry.id,
+          name: entry.name,
+          ...modalities === void 0 ? {} : { inputModalities: modalities },
+          ...tools === void 0 ? {} : { tools }
+        };
+      });
     }
     return (profile.models ?? []).map((model) => ({
       provider,
@@ -1031,6 +1044,8 @@ var CommandCodeAdapter = class extends LlmAdapter {
     const profile = this.profileOf(provider);
     const entries = await this.options.catalogFor(profile).entries();
     const entry = entryFor(entries, model);
+    const modalities = inputModalitiesFor(profile, model, entry);
+    const tools = toolsSupported(entry);
     const efforts = effortsOf(entry);
     const context = contextWindowOf(entry);
     const output = maxOutputTokensOf(entry);
@@ -1038,7 +1053,8 @@ var CommandCodeAdapter = class extends LlmAdapter {
       provider,
       id: model,
       name: entry?.name ?? model,
-      ...modalitiesOf(entry) === void 0 ? {} : { inputModalities: modalitiesOf(entry) },
+      ...modalities === void 0 ? {} : { inputModalities: modalities },
+      ...tools === void 0 ? {} : { tools },
       ...context === void 0 ? {} : { context: { contextWindow: context } },
       ...output === void 0 ? {} : { defaultMaxTokens: output },
       ...efforts.length === 0 ? {} : {
@@ -1059,6 +1075,8 @@ var CommandCodeAdapter = class extends LlmAdapter {
     const catalog = this.options.catalogFor(profile);
     const entries = await catalog.entries();
     const entry = entryFor(entries, options.model);
+    const modalities = inputModalitiesFor(profile, options.model, entry);
+    const visionEnabled = visionOf(entry) || modalities?.includes("image") === true;
     const effort = options.reasoningEffort;
     if (effort !== void 0) {
       const supported = effortsOf(entry);
@@ -1094,12 +1112,12 @@ var CommandCodeAdapter = class extends LlmAdapter {
       // conversion seam sanitizes its text (scrub + 200k cap) once; a legacy
       // loopback keypool route leaves the body to the proxy downstream.
       sanitizeText: pooled || !isLoopbackBaseURL(profile.baseURL),
-      tools: toCcTools(options.tools),
+      tools: entry?.tool_call === false ? [] : toCcTools(options.tools),
       ...options.system === void 0 ? {} : { system: options.system },
       ...options.maxTokens === void 0 ? {} : { maxTokens: options.maxTokens },
       ...options.temperature === void 0 ? {} : { temperature: options.temperature },
       ...effort === void 0 ? {} : { reasoningEffort: effort },
-      visionEnabled: visionOf(entry),
+      visionEnabled,
       ...this.options.now === void 0 ? {} : { now: this.options.now() }
     });
     if (pooled) {
@@ -1623,7 +1641,9 @@ function apply(ctx, config = {}) {
         name: entry.name,
         ...contextWindow === void 0 ? {} : { contextWindow },
         ...maxTokens === void 0 ? {} : { maxTokens },
-        ...input === void 0 ? {} : { inputModalities: input }
+        ...input === void 0 ? {} : { inputModalities: input },
+        ...entry.tool_call === void 0 ? {} : { tools: entry.tool_call },
+        ...entry.reasoning === void 0 ? {} : { reasoning: entry.reasoning }
       };
     });
   });

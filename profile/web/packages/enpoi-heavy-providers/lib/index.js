@@ -48,16 +48,312 @@ var __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, "
 var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
 
 // src/index.ts
+import { createHash as createHash2 } from "node:crypto";
+import { readFileSync as readFileSync5, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { join as join3 } from "node:path";
+import { isAbsolute, join as join5 } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import Schema from "@deepseek-ai/schemastery";
 
 // src/jobs.ts
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync as mkdirSync2, readdirSync as readdirSync2, readFileSync as readFileSync2, renameSync, rmSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { join as join2 } from "node:path";
+
+// src/provider-lock.ts
+import { spawnSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { linkSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+var LOCK_DIRECTORY = "locks";
+var LOCK_VERSION = 1;
+var MAX_ACQUIRE_ATTEMPTS = 5;
+var GENERATION_FILE = /^(\d{12})\.lock$/;
+var MAX_GENERATION = 999999999999;
+var MAX_EPOCH_MS = 864e13;
+var PROCESS_START_TIMEOUT_MS = 5e3;
+var HeavyProviderLockedError = class extends Error {
+  /**
+   * @param path - the highest lock generation that refused acquisition.
+   * @param owner - the recorded holder, when the record was readable.
+   */
+  constructor(path, owner) {
+    super(
+      owner === void 0 ? `heavy-provider lock at ${path} is held` : `heavy-provider lock at ${path} is held by pid ${String(owner.pid)} (started ${new Date(owner.startedAt).toISOString()})`
+    );
+    this.path = path;
+    this.owner = owner;
+    this.name = "HeavyProviderLockedError";
+  }
+};
+var HeavyProviderLockUnreadableError = class extends Error {
+  /**
+   * @param path - the lock path that failed inspection.
+   * @param reason - the concrete inspection failure.
+   */
+  constructor(path, reason) {
+    super(`heavy-provider lock at ${path} ${reason}; refusing to reclaim it automatically`);
+    this.path = path;
+    this.name = "HeavyProviderLockUnreadableError";
+  }
+};
+var liveTokens = /* @__PURE__ */ new Map();
+function errorCode(error) {
+  return error?.code;
+}
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+function lockDirectory(jobDir, id) {
+  return join(jobDir, LOCK_DIRECTORY, encodeURIComponent(id));
+}
+function readLinuxProcess(pid) {
+  if (process.platform !== "linux") return void 0;
+  try {
+    const stat = readFileSync(`/proc/${String(pid)}/stat`, "utf8");
+    const closing = stat.lastIndexOf(")");
+    if (closing < 0) return void 0;
+    const fields = stat.slice(closing + 1).trim().split(/\s+/);
+    const state = fields[0];
+    const start = fields[19];
+    if (state === void 0 || start === void 0 || !/^\d+$/.test(start)) return void 0;
+    return { state, start };
+  } catch {
+    return void 0;
+  }
+}
+function readProcessStart(pid) {
+  if (process.platform === "linux") return readLinuxProcess(pid)?.start;
+  if (process.platform !== "darwin") return void 0;
+  try {
+    const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: PROCESS_START_TIMEOUT_MS,
+      windowsHide: true
+    });
+    if (result.error !== void 0 || result.status !== 0) return void 0;
+    const stamp = typeof result.stdout === "string" ? result.stdout.trim() : "";
+    return stamp === "" ? void 0 : `ps:${stamp}`;
+  } catch {
+    return void 0;
+  }
+}
+function ownProcessStart() {
+  return readProcessStart(process.pid) ?? null;
+}
+function comparableProcessStart(processStart) {
+  if (process.platform === "linux") return /^\d+$/u.test(processStart);
+  if (process.platform === "darwin") return processStart.startsWith("ps:") && processStart.length > 3;
+  return false;
+}
+function processLiveness(pid, processStart, tokenLive) {
+  if (pid === process.pid) {
+    if (tokenLive) return "live";
+    if (processStart !== null && comparableProcessStart(processStart)) {
+      const ownStart = readProcessStart(process.pid);
+      if (ownStart !== void 0 && ownStart !== processStart) return "dead";
+    }
+    return "live";
+  }
+  let probe;
+  try {
+    process.kill(pid, 0);
+    probe = "alive";
+  } catch (error) {
+    const code = errorCode(error);
+    probe = code === "ESRCH" ? "gone" : code === "EPERM" ? "alive" : "unknown";
+  }
+  if (probe === "gone") return "dead";
+  if (probe === "unknown") return "ambiguous";
+  if (process.platform === "linux") {
+    const stat = readLinuxProcess(pid);
+    if (stat === void 0) return processStart === null ? "live" : "ambiguous";
+    if (stat.state.startsWith("Z") || stat.state === "X") return "dead";
+    if (processStart !== null && comparableProcessStart(processStart) && stat.start !== processStart) {
+      return "dead";
+    }
+    return processStart === null || comparableProcessStart(processStart) ? "live" : "ambiguous";
+  }
+  if (process.platform === "darwin") {
+    const start = readProcessStart(pid);
+    if (start === void 0) return processStart === null ? "live" : "ambiguous";
+    if (processStart === null) return "live";
+    if (!comparableProcessStart(processStart)) return "ambiguous";
+    return start === processStart ? "live" : "dead";
+  }
+  return processStart === null ? "live" : "ambiguous";
+}
+function parseLockOwner(raw, id) {
+  let value;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return void 0;
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return void 0;
+  const record = value;
+  if (record.version !== LOCK_VERSION || record.id !== id) return void 0;
+  const { token, pid, startedAt, processStart } = record;
+  if (typeof token !== "string" || token === "") return void 0;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || pid > 2147483647) return void 0;
+  if (typeof startedAt !== "number" || !Number.isFinite(startedAt) || startedAt < 0 || startedAt > MAX_EPOCH_MS) return void 0;
+  if (processStart !== null && (typeof processStart !== "string" || !(/^\d+$/.test(processStart) || processStart.startsWith("ps:") && processStart.length > 3))) return void 0;
+  return { id, token, pid, startedAt, processStart };
+}
+function readGenerations(providerDir, id) {
+  let names;
+  try {
+    names = readdirSync(providerDir);
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return [];
+    return [{ path: providerDir, generation: 0, status: "unverifiable", reason: `cannot be listed (${errorMessage(error)})` }];
+  }
+  const locks = [];
+  for (const name2 of names) {
+    const match = GENERATION_FILE.exec(name2);
+    if (match === null) continue;
+    const generation = Number(match[1]);
+    if (!Number.isSafeInteger(generation)) continue;
+    const path = join(providerDir, name2);
+    let raw;
+    try {
+      raw = readFileSync(path, "utf8");
+    } catch (error) {
+      locks.push({ path, generation, status: "unverifiable", reason: `cannot be read (${errorMessage(error)})` });
+      continue;
+    }
+    const owner = parseLockOwner(raw, id);
+    if (owner === void 0) {
+      locks.push({ path, generation, status: "unverifiable", reason: "is malformed or names a different provider" });
+      continue;
+    }
+    const liveness = processLiveness(owner.pid, owner.processStart, liveTokens.has(owner.token));
+    if (liveness === "live") {
+      locks.push({ path, generation, status: "held", parsed: { owner } });
+    } else if (liveness === "dead") {
+      locks.push({ path, generation, status: "dead", parsed: { owner } });
+    } else {
+      locks.push({
+        path,
+        generation,
+        status: "unverifiable",
+        reason: `names pid ${String(owner.pid)}, whose liveness cannot be verified`
+      });
+    }
+  }
+  locks.sort((left, right) => left.generation - right.generation);
+  return locks;
+}
+function inspectProviderLock(jobDir, id) {
+  const locks = readGenerations(lockDirectory(jobDir, id), id);
+  const highest = locks.at(-1);
+  if (highest === void 0) return { kind: "none" };
+  if (highest.status === "held" && highest.parsed !== void 0) {
+    return { kind: "held", path: highest.path, owner: highest.parsed.owner };
+  }
+  if (highest.status === "dead") return { kind: "dead", path: highest.path };
+  return { kind: "unverifiable", path: highest.path, reason: highest.reason ?? "cannot be verified" };
+}
+function removeDeadGenerations(locks, ownedPath) {
+  for (const lock of locks) {
+    if (lock.status !== "dead" || lock.path === ownedPath) continue;
+    try {
+      unlinkSync(lock.path);
+    } catch {
+    }
+  }
+}
+var HeavyProviderLock = class {
+  /**
+   * @param path - the owned generation's file.
+   * @param owner - the recorded identity.
+   * @param content - the exact serialized record release compares against.
+   */
+  constructor(path, owner, content) {
+    this.path = path;
+    this.owner = owner;
+    this.content = content;
+  }
+  released = false;
+  /**
+   * Remove this lock only when the generation still carries this exact
+   * record. A replaced record belongs to another owner and is left in place.
+   * Idempotent.
+   */
+  release() {
+    if (this.released) return;
+    this.released = true;
+    try {
+      if (readFileSync(this.path, "utf8") === this.content) unlinkSync(this.path);
+    } catch {
+    } finally {
+      liveTokens.delete(this.owner.token);
+    }
+  }
+};
+function acquireProviderLock(jobDir, id, now = Date.now) {
+  const providerDir = lockDirectory(jobDir, id);
+  for (let attempt = 0; attempt < MAX_ACQUIRE_ATTEMPTS; attempt += 1) {
+    try {
+      mkdirSync(providerDir, { recursive: true, mode: 448 });
+    } catch (error) {
+      throw new HeavyProviderLockUnreadableError(providerDir, `cannot be created (${errorMessage(error)})`);
+    }
+    const existing = readGenerations(providerDir, id);
+    const highest = existing.at(-1);
+    let generation = 1;
+    if (highest !== void 0) {
+      if (highest.status === "held" && highest.parsed !== void 0) {
+        throw new HeavyProviderLockedError(highest.path, highest.parsed.owner);
+      }
+      if (highest.status === "unverifiable") {
+        throw new HeavyProviderLockUnreadableError(highest.path, highest.reason ?? "cannot be verified");
+      }
+      if (highest.generation >= MAX_GENERATION) {
+        throw new HeavyProviderLockUnreadableError(highest.path, "exhausted the generation name space");
+      }
+      generation = highest.generation + 1;
+    }
+    const owner = {
+      id,
+      token: randomUUID(),
+      pid: process.pid,
+      startedAt: now(),
+      processStart: ownProcessStart()
+    };
+    const content = JSON.stringify({ version: LOCK_VERSION, ...owner });
+    const path = join(providerDir, `${String(generation).padStart(12, "0")}.lock`);
+    const temporary = `${path}.tmp-${String(process.pid)}-${createHash("sha256").update(owner.token).digest("hex").slice(0, 12)}`;
+    try {
+      writeFileSync(temporary, content, { encoding: "utf8", mode: 384, flag: "wx" });
+      try {
+        linkSync(temporary, path);
+      } catch (error) {
+        if (errorCode(error) === "EEXIST") continue;
+        throw new HeavyProviderLockUnreadableError(path, `cannot be created (${errorMessage(error)})`);
+      }
+    } catch (error) {
+      if (error instanceof HeavyProviderLockUnreadableError) throw error;
+      throw new HeavyProviderLockUnreadableError(path, `cannot be written (${errorMessage(error)})`);
+    } finally {
+      try {
+        unlinkSync(temporary);
+      } catch {
+      }
+    }
+    liveTokens.set(owner.token, owner);
+    removeDeadGenerations(existing, path);
+    return new HeavyProviderLock(path, owner, content);
+  }
+  throw new HeavyProviderLockedError(providerDir);
+}
+
+// src/jobs.ts
 var LOG_CAP_BYTES = 8192;
 var HeavyJobManager = class {
   jobs = /* @__PURE__ */ new Map();
   running = /* @__PURE__ */ new Set();
+  /** Provider ids currently covered by {@link withProviderLock}. */
+  exclusive = /* @__PURE__ */ new Set();
   dir;
   run;
   now;
@@ -71,22 +367,25 @@ var HeavyJobManager = class {
     this.recoverInterrupted();
   }
   /**
-   * A job persisted as `running` belongs to a previous process: the runner
-   * died with it, so the file is rewritten as failed instead of leaving the
-   * UI polling a job nothing will ever finish.
+   * A job persisted as `running` without a live lock owner belongs to a
+   * previous process: the runner died with it, so the file is rewritten as
+   * failed instead of leaving the UI polling a job nothing will ever finish.
+   * A live owner, or a lock whose holder cannot be proven dead, keeps its
+   * `running` file untouched.
    */
   recoverInterrupted() {
     try {
-      readdirSync(this.dir).filter((name2) => name2.endsWith(".json")).forEach((name2) => {
-        const path = join(this.dir, name2);
+      readdirSync2(this.dir).filter((name2) => name2.endsWith(".json")).forEach((name2) => {
+        const path = join2(this.dir, name2);
         try {
-          const view = JSON.parse(readFileSync(path, "utf8"));
-          if (view?.state === "running") {
-            view.state = "failed";
-            view.error = "interrupted by harness restart";
-            view.finishedAt = this.now();
-            this.persist(view);
-          }
+          const view = JSON.parse(readFileSync2(path, "utf8"));
+          if (view?.state !== "running" || typeof view.id !== "string") return;
+          const ownership = inspectProviderLock(this.dir, view.id);
+          if (ownership.kind === "held" || ownership.kind === "unverifiable") return;
+          view.state = "failed";
+          view.error = "interrupted by harness restart";
+          view.finishedAt = this.now();
+          this.persist(view);
         } catch {
         }
       });
@@ -94,9 +393,13 @@ var HeavyJobManager = class {
     }
   }
   /**
-   * Start a job unless one is already running for that id. The returned view
-   * is the initial snapshot; `finalize` runs only after all required steps
-   * succeed, and its failure marks the job failed.
+   * Start a job unless the provider is already owned. Ownership is taken
+   * before the initial snapshot is written and held through the finalizer and
+   * the terminal persist. A live owner elsewhere returns its snapshot (when
+   * one is readable) or a failed refusal view; a lock that cannot be proven
+   * dead throws `HeavyProviderLockUnreadableError` instead of guessing.
+   * The returned view is the initial snapshot; `finalize` runs only after all
+   * required steps succeed, and its failure marks the job failed.
    * @param id - provider id (the job file name).
    * @param kind - install or teardown.
    * @param steps - declared steps in order.
@@ -105,45 +408,120 @@ var HeavyJobManager = class {
    */
   start(id, kind, steps, finalize) {
     if (this.running.has(id)) return this.snapshot(id) ?? failed(id, "job already running");
-    const total = steps.reduce((sum, step) => sum + (step.weight ?? 1), 0);
-    const view = {
-      id,
-      kind,
-      state: "running",
-      stage: steps[0]?.label ?? "Finishing",
-      stageIndex: 0,
-      stageCount: steps.length,
-      pct: 0,
-      logTail: "",
-      startedAt: this.now()
-    };
-    this.jobs.set(id, view);
-    this.running.add(id);
-    this.persist(view);
-    void this.runAll(view, steps, total, finalize);
-    return { ...view };
+    let lock;
+    try {
+      lock = acquireProviderLock(this.dir, id, this.now);
+    } catch (error) {
+      if (!(error instanceof HeavyProviderLockedError)) throw error;
+      const current = this.snapshot(id);
+      return current?.state === "running" ? current : failed(id, error.message);
+    }
+    try {
+      const total = steps.reduce((sum, step) => sum + (step.weight ?? 1), 0);
+      const view = {
+        id,
+        kind,
+        state: "running",
+        stage: steps[0]?.label ?? "Finishing",
+        stageIndex: 0,
+        stageCount: steps.length,
+        pct: 0,
+        logTail: "",
+        startedAt: this.now()
+      };
+      this.jobs.set(id, view);
+      this.running.add(id);
+      this.persist(view);
+      void this.runAll(view, steps, total, lock, finalize);
+      return { ...view };
+    } catch (error) {
+      this.running.delete(id);
+      this.jobs.delete(id);
+      lock.release();
+      throw error;
+    }
   }
   /** The latest snapshot: in-memory first, then the persisted file (survives a restart). */
   snapshot(id) {
     const memory = this.jobs.get(id);
     if (memory !== void 0) return { ...memory };
     try {
-      const raw = JSON.parse(readFileSync(join(this.dir, `${id}.json`), "utf8"));
+      const raw = JSON.parse(readFileSync2(join2(this.dir, `${id}.json`), "utf8"));
       return raw !== null && typeof raw === "object" ? raw : void 0;
     } catch {
       return void 0;
     }
   }
   /**
+   * Whether this provider is owned by a running job: this manager's own job,
+   * or a live owner in another manager or process. An unverifiable lock is
+   * reported as running so callers fail closed and never evict its files.
+   * @param id - provider id.
+   * @returns true while the provider's install/teardown must not be evicted.
+   */
+  isRunning(id) {
+    if (this.running.has(id)) return true;
+    if (this.exclusive.has(id)) return false;
+    const ownership = inspectProviderLock(this.dir, id);
+    return ownership.kind === "held" || ownership.kind === "unverifiable";
+  }
+  /**
    * Evict one provider's snapshot: the in-memory view and its persisted file.
    * A removed provider's terminal job must not resurrect on the next status
-   * poll; a running job is not touched (its run still owns itself).
+   * poll. Eviction owns the provider lock while it removes the file, so a
+   * concurrent `start` either loses to a live eviction or runs after it. A
+   * running job — including one owned by another manager or process — keeps
+   * both the snapshot and its file; a lock that cannot be proven dead also
+   * refuses eviction.
    * @param id - provider id.
+   * @returns true when the snapshot and file were removed, false when a live
+   * or unverifiable owner refused the eviction.
    */
   evict(id) {
+    if (this.running.has(id)) return false;
+    if (this.exclusive.has(id)) {
+      this.removeSnapshot(id);
+      return true;
+    }
+    let lock;
+    try {
+      lock = acquireProviderLock(this.dir, id, this.now);
+    } catch (error) {
+      if (error instanceof HeavyProviderLockedError || error instanceof HeavyProviderLockUnreadableError) return false;
+      throw error;
+    }
+    try {
+      this.removeSnapshot(id);
+      return true;
+    } finally {
+      lock.release();
+    }
+  }
+  /**
+   * Run one provider-scoped operation under the same exclusive lock an
+   * install owns. Removal uses this so route, credential, pool, and cache
+   * cleanup cannot overlap a live install; `evict` is permitted inside the
+   * operation. A live owner refuses with {@link HeavyProviderLockedError}; an
+   * unverifiable record fails closed with `HeavyProviderLockUnreadableError`.
+   * @param id - provider id.
+   * @param operation - async work to run while holding the lock.
+   * @returns the operation's result.
+   */
+  async withProviderLock(id, operation) {
+    const lock = acquireProviderLock(this.dir, id, this.now);
+    this.exclusive.add(id);
+    try {
+      return await operation();
+    } finally {
+      this.exclusive.delete(id);
+      lock.release();
+    }
+  }
+  /** Drop the in-memory view and the persisted snapshot; callers own the lock. */
+  removeSnapshot(id) {
     this.jobs.delete(id);
     try {
-      rmSync(join(this.dir, `${id}.json`), { force: true });
+      rmSync(join2(this.dir, `${id}.json`), { force: true });
     } catch {
     }
   }
@@ -152,63 +530,67 @@ var HeavyJobManager = class {
   }
   persist(view) {
     try {
-      mkdirSync(this.dir, { recursive: true });
-      const path = join(this.dir, `${view.id}.json`);
+      mkdirSync2(this.dir, { recursive: true });
+      const path = join2(this.dir, `${view.id}.json`);
       const temporary = `${path}.tmp-${String(process.pid)}`;
-      writeFileSync(temporary, JSON.stringify(view), "utf8");
+      writeFileSync2(temporary, JSON.stringify(view), "utf8");
       renameSync(temporary, path);
     } catch {
     }
   }
-  async runAll(view, steps, total, finalize) {
-    let done = 0;
-    for (const [index, step] of steps.entries()) {
-      view.stage = step.label;
-      view.stageIndex = index;
-      this.persist(view);
-      let outcome;
-      try {
-        outcome = await this.run(step);
-      } catch (error) {
-        if (step.optional === true) {
-          this.appendLog(view, `$ ${step.label}: optional step failed \u2014 ${error instanceof Error ? error.message : String(error)}
+  async runAll(view, steps, total, lock, finalize) {
+    try {
+      let done = 0;
+      for (const [index, step] of steps.entries()) {
+        view.stage = step.label;
+        view.stageIndex = index;
+        this.persist(view);
+        let outcome;
+        try {
+          outcome = await this.run(step);
+        } catch (error) {
+          if (step.optional === true) {
+            this.appendLog(view, `$ ${step.label}: optional step failed \u2014 ${error instanceof Error ? error.message : String(error)}
 `);
-          done += step.weight ?? 1;
-          view.pct = Math.min(99, Math.round(done / total * 99));
-          continue;
-        }
-        this.fail(view, `${step.label}: ${error instanceof Error ? error.message : String(error)}`);
-        return;
-      }
-      this.appendLog(view, `$ ${step.label}
-${outcome.output}
-`);
-      if (outcome.exitCode !== 0) {
-        if (step.optional === true) {
-          this.appendLog(view, `$ ${step.label}: optional step exited ${String(outcome.exitCode)}
-`);
-        } else {
-          this.fail(view, `${step.label}: exit ${String(outcome.exitCode)}`);
+            done += step.weight ?? 1;
+            view.pct = Math.min(99, Math.round(done / total * 99));
+            continue;
+          }
+          this.fail(view, `${step.label}: ${error instanceof Error ? error.message : String(error)}`);
           return;
         }
+        this.appendLog(view, `$ ${step.label}
+${outcome.output}
+`);
+        if (outcome.exitCode !== 0) {
+          if (step.optional === true) {
+            this.appendLog(view, `$ ${step.label}: optional step exited ${String(outcome.exitCode)}
+`);
+          } else {
+            this.fail(view, `${step.label}: exit ${String(outcome.exitCode)}`);
+            return;
+          }
+        }
+        done += step.weight ?? 1;
+        view.pct = Math.min(99, Math.round(done / total * 99));
+        this.persist(view);
       }
-      done += step.weight ?? 1;
-      view.pct = Math.min(99, Math.round(done / total * 99));
+      view.stage = "Finishing";
       this.persist(view);
+      try {
+        await finalize?.();
+      } catch (error) {
+        this.fail(view, error instanceof Error ? error.message : String(error));
+        return;
+      }
+      view.state = "succeeded";
+      view.pct = 100;
+      view.finishedAt = this.now();
+      this.running.delete(view.id);
+      this.persist(view);
+    } finally {
+      lock.release();
     }
-    view.stage = "Finishing";
-    this.persist(view);
-    try {
-      await finalize?.();
-    } catch (error) {
-      this.fail(view, error instanceof Error ? error.message : String(error));
-      return;
-    }
-    view.state = "succeeded";
-    view.pct = 100;
-    view.finishedAt = this.now();
-    this.running.delete(view.id);
-    this.persist(view);
   }
   fail(view, error) {
     view.state = "failed";
@@ -238,7 +620,7 @@ function visibleJobSnapshot(job, configured) {
 }
 
 // src/manifests.ts
-import { offeredCompatFields } from "@deepseek-ai/dsh-llm-pi-ai/src/compat.ts";
+import { offeredCompatFields } from "@deepseek-ai/dsh-llm-pi-ai";
 function platformInstallVariant(local, platform) {
   return platform === "linux" || platform === "darwin" || platform === "win32" ? local.install[platform] ?? local.install.default : local.install.default;
 }
@@ -253,6 +635,47 @@ function resolveHeavyInstall(local, platform) {
     diskHint: variant.diskHint ?? local.diskHint,
     steps: variant.steps
   };
+}
+var HEAVY_ENV = {
+  /** User home directory. */
+  home: "DSH_HEAVY_HOME",
+  /** DSH home directory. */
+  dshHome: "DSH_HEAVY_DSH_HOME",
+  /** Running profile root; empty when no launcher supplied one. */
+  profileDir: "DSH_HEAVY_PROFILE_DIR",
+  /** Absolute path of this package's installer helper. */
+  helper: "DSH_HEAVY_HELPER"
+};
+var RELEASE_REPO_RE = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+function parseReleaseSource(value) {
+  const trimmed = value.trim();
+  if (trimmed === "" || /\s|\u0000/u.test(trimmed)) return void 0;
+  if (RELEASE_REPO_RE.test(trimmed)) return { kind: "repo", value: trimmed };
+  let url;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return void 0;
+  }
+  if (url.protocol !== "https:") return void 0;
+  if (url.username !== "" || url.password !== "") return void 0;
+  if (url.hash !== "") return void 0;
+  return { kind: "api", value: url.href };
+}
+function releaseSourceArguments(source) {
+  if (source === void 0) return [];
+  const parsed = parseReleaseSource(source);
+  if (parsed === void 0) return [];
+  return parsed.kind === "api" ? ["--releases-api", parsed.value] : ["--repo", parsed.value];
+}
+function shellQuoteArgument(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+function withReleaseSource(steps, source) {
+  const args = releaseSourceArguments(source);
+  if (args.length === 0) return steps;
+  const suffix = args.map((arg, index) => index % 2 === 0 ? arg : shellQuoteArgument(arg)).join(" ");
+  return steps.map((step) => step.command.includes("$DSH_HEAVY_HELPER") ? { ...step, command: `${step.command} ${suffix}` } : step);
 }
 var LLM_PI_AI_PROTOCOLS = ["openai-completions", "openai-responses", "anthropic-messages"];
 var RUNTIME_TOOL_RE = {
@@ -367,7 +790,7 @@ var COMMANDCODE_HEALTH = {
 };
 var COMMANDCODE_INSTALL_STEP = {
   label: "Link and build the DSH provider package",
-  command: 'node "{dshHome}/profiles/web/packages/enpoi-commandcode-provider/scripts/install.mjs" "{dshHome}/profiles/web"',
+  command: 'node "$DSH_HEAVY_PROFILE_DIR/packages/enpoi-commandcode-provider/scripts/install.mjs" "$DSH_HEAVY_PROFILE_DIR"',
   weight: 3
 };
 var MERIDIAN_PORT = 3456;
@@ -493,6 +916,27 @@ var MERIDIAN_LAUNCHD_STEPS = [
   MERIDIAN_LAUNCHD_LOAD_STEP,
   MERIDIAN_WAIT_STEP
 ];
+var CLIPROXYAPI_PORT = 8317;
+var CLIPROXYAPI_DOCS_URL = "https://help.router-for.me/";
+var CLIPROXYAPI_HELPER_ENV = "$DSH_HEAVY_HELPER";
+var CLIPROXYAPI_HELPER_FILE = {
+  paths: ["{helper}"],
+  hint: "The CLIProxyAPI installer helper (scripts/cliproxyapi-install.mjs) is missing from this plugin package \u2014 reinstall the profile plugin or use a detected instance"
+};
+var CLIPROXYAPI_INSTALL_STEP = {
+  label: "Install CLIProxyAPI (verified release and user service)",
+  command: `node "${CLIPROXYAPI_HELPER_ENV}" install --dsh-home "$DSH_HEAVY_DSH_HOME"`,
+  weight: 3
+};
+var CLIPROXYAPI_REMOVE_STEP = {
+  label: "Remove the CLIProxyAPI install (stop the service and remove verified files)",
+  command: `node "${CLIPROXYAPI_HELPER_ENV}" remove --dsh-home "$DSH_HEAVY_DSH_HOME"`,
+  weight: 2
+};
+var CLIPROXYAPI_HEALTH = {
+  url: `http://127.0.0.1:${CLIPROXYAPI_PORT}/healthz`,
+  timeoutMs: 5e3
+};
 var HEAVY_MANIFESTS = [
   {
     id: "freellmapi",
@@ -972,6 +1416,90 @@ var HEAVY_MANIFESTS = [
     }
     // No fallbackModel: /v1/models is the catalog shipped in the release, so
     // discovery is the only model source and nothing is fabricated.
+  },
+  {
+    id: "cliproxyapi",
+    label: "CLIProxyAPI",
+    summary: "Optional multi-account subscription gateway: one OpenAI-compatible endpoint in front of the CLI accounts you configure in its dashboard.",
+    protocol: "openai-completions",
+    delivery: "service",
+    // The endpoint's listing is authoritative: the gateway's channels decide
+    // which models exist, and an empty successful listing is not backfilled
+    // from the installed catalog.
+    catalogAuthority: "endpoint",
+    // The gateway's account-affinity route keys sessions by this header.
+    sessionHeader: "x-session-id",
+    // Anonymous routing is the shipped default; an operator may store the
+    // optional gateway key under CLIPROXYAPI_API_KEY, but no key is required
+    // for a local instance that accepts unauthenticated clients.
+    auth: { kind: "unified", apiKeyEnv: "CLIPROXYAPI_API_KEY", keyless: true },
+    dashboardUrl: `http://127.0.0.1:${CLIPROXYAPI_PORT}/management.html`,
+    docsUrl: CLIPROXYAPI_DOCS_URL,
+    defaultPort: CLIPROXYAPI_PORT,
+    requiresBrowser: [
+      "Adding upstream accounts happens in the local management dashboard; provider OAuth or device-code sign-in can require a browser or a phone confirmation and is never performed by the installer"
+    ],
+    quirks: [
+      "Local install dependencies: Node.js >= 22 (the harness ships Node); Docker is never required. The profile helper downloads the verified CLIProxyAPI release and writes a systemd or launchd user service \u2014 no Go toolchain, npm compile, or curl step, and its Node built-in downloader needs no external tar",
+      'The model catalog comes from the configured inference endpoint (/v1/models); this manifest hardcodes no model, declares catalogAuthority "endpoint", and never substitutes a fabricated fallback',
+      "Model capabilities vary by upstream account/channel and by endpoint metadata; no native media capability is declared until the core native-media schema defines it",
+      "The management key is separate from the optional client API key and stays in config.yaml with mode 0600; the installer prints neither key",
+      "Upstream accounts are managed in the /management.html dashboard; the local installer never signs in or auto-authenticates an account, and opening the dashboard is a local handoff rather than an automatic login",
+      "Remote management is a policy decision: the dashboard and management API are loopback by default, and exposing them beyond loopback requires an explicit tunnel and authentication you configure",
+      "The route declaration sets the x-session-id request header for account affinity; affinity is not a cache-hit guarantee and accounts can still switch on quota or rate-limit responses",
+      "The verified binary is about 75 MB; RAM use is not measured here. Removing the local install retains config.yaml, bootstrap.json, and the auths directory under $DSH_HOME/providers/cliproxyapi",
+      "Windows has no supported local install; detected-instance reuse, a custom route, or an instance running on another machine still works"
+    ],
+    reuse: {
+      label: "Use a detected instance",
+      baseURL: `http://127.0.0.1:${CLIPROXYAPI_PORT}/v1`,
+      note: "Zero install: uses a CLIProxyAPI instance already running on this device. The client API key is optional and the dashboard is not signed in automatically.",
+      health: CLIPROXYAPI_HEALTH
+    },
+    local: {
+      label: "Install locally (verified release + user service)",
+      baseURL: `http://127.0.0.1:${CLIPROXYAPI_PORT}/v1`,
+      deps: ["Node.js >= 22", "A reachable systemd user session (systemctl --user) on Linux"],
+      diskHint: "~75 MB binary; RAM use not measured",
+      dashboardUrl: `http://127.0.0.1:${CLIPROXYAPI_PORT}/management.html`,
+      runtime: "node",
+      install: {
+        default: {
+          steps: [CLIPROXYAPI_INSTALL_STEP],
+          requiresFiles: [CLIPROXYAPI_HELPER_FILE]
+        },
+        linux: {
+          label: "Install locally (verified release + systemd user unit)",
+          requires: ["systemd-user"],
+          steps: [CLIPROXYAPI_INSTALL_STEP],
+          requiresFiles: [CLIPROXYAPI_HELPER_FILE]
+        },
+        darwin: {
+          label: "Install locally (verified release + launchd agent)",
+          deps: ["Node.js >= 22", "macOS 11+ (launchd)"],
+          diskHint: "~75 MB binary; RAM use not measured",
+          steps: [CLIPROXYAPI_INSTALL_STEP],
+          requiresFiles: [CLIPROXYAPI_HELPER_FILE]
+        },
+        win32: {
+          label: "Not supported on Windows",
+          unsupported: 'CLIProxyAPI has no supported Windows local install: its installer helper manages a verified Linux/macOS release behind a POSIX user service. Run CLIProxyAPI yourself, or add an instance running on another machine with "Use a detected instance" or as a custom route.',
+          steps: []
+        }
+      },
+      health: CLIPROXYAPI_HEALTH
+    },
+    removal: {
+      steps: [CLIPROXYAPI_REMOVE_STEP],
+      warnings: [
+        "Removal stops the receipt-owned user service and removes the verified binary plus the receipt-owned unit; config.yaml (management key, mode 0600), bootstrap.json, and the auths directory (upstream account credentials) stay under $DSH_HOME/providers/cliproxyapi and must be deleted by hand to remove them",
+        "Any other harness or client pointed at the same CLIProxyAPI instance stops working when the service is removed",
+        "Upstream account state and quota live in CLIProxyAPI and are never touched beyond the local service and binary",
+        "A modified binary or unit makes the installer refuse removal; restore the receipt-owned file or remove it manually after confirming its origin"
+      ]
+    }
+    // No fallbackModel: the endpoint's /v1/models listing is the only model
+    // source, so an empty listing writes no fabricated id.
   }
 ];
 function manifestById(id) {
@@ -1030,6 +1558,15 @@ function manifestProblems(manifests = HEAVY_MANIFESTS) {
     if (manifest.unsupported === void 0 && !LLM_PI_AI_PROTOCOLS.includes(manifest.protocol) && manifest.settingsNs === void 0) {
       problems.push(`${where}: protocol "${manifest.protocol}" is not served by llm-pi-ai and needs an explicit settingsNs`);
     }
+    if (manifest.sessionHeader !== void 0 && (typeof manifest.sessionHeader !== "string" || manifest.sessionHeader.trim() === "")) {
+      problems.push(`${where}: sessionHeader must be a non-empty header name`);
+    }
+    if (manifest.catalogAuthority !== void 0 && manifest.catalogAuthority !== "endpoint") {
+      problems.push(`${where}: catalogAuthority must be "endpoint" when declared`);
+    }
+    if (manifest.releaseSource !== void 0 && parseReleaseSource(manifest.releaseSource) === void 0) {
+      problems.push(`${where}: releaseSource must be an https URL or an "owner/repo" slug`);
+    }
     const offered = offeredCompatFields(manifest.protocol);
     for (const [field, value] of Object.entries(manifest.compat ?? {})) {
       if (!offered.includes(field)) {
@@ -1073,13 +1610,139 @@ function manifestProblems(manifests = HEAVY_MANIFESTS) {
 }
 
 // src/planner.ts
-import { existsSync, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { dirname, join as join2 } from "node:path";
-import { listingCapabilities, listingText } from "@deepseek-ai/dsh-llm-pi-ai/src/listing.ts";
+import { existsSync, mkdirSync as mkdirSync4, readFileSync as readFileSync4, renameSync as renameSync3, rmSync as rmSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { dirname as dirname2, join as join4 } from "node:path";
+import { listingText, readModelListing } from "@deepseek-ai/dsh-llm-pi-ai";
+
+// src/state.ts
+import { randomUUID as randomUUID2 } from "node:crypto";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync3, readdirSync as readdirSync3, renameSync as renameSync2, rmSync as rmSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { dirname, join as join3 } from "node:path";
+var HEAVY_LIFECYCLE_DIRECTORY = "heavy-providers";
+var HEAVY_LIFECYCLE_FILE = "heavy-providers.json";
+var HEAVY_LIFECYCLE_VERSION = 1;
+var MAX_RECEIPT_CHARS = 512;
+function heavyLifecyclePath(dshHome) {
+  return join3(dshHome, HEAVY_LIFECYCLE_FILE);
+}
+function heavyLifecycleDirectory(dshHome) {
+  return join3(dshHome, HEAVY_LIFECYCLE_DIRECTORY);
+}
+function providerLifecyclePath(dshHome, id) {
+  if (id === "") throw new Error("heavy-provider lifecycle id is empty");
+  return join3(heavyLifecycleDirectory(dshHome), `${encodeURIComponent(id)}.json`);
+}
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+function errorCode2(error) {
+  return error?.code;
+}
+function readEntry(raw) {
+  if (!isRecord(raw)) return void 0;
+  const mode = raw.mode;
+  if (mode !== "reuse" && mode !== "local") return void 0;
+  if (typeof raw.installedByHarness !== "boolean") return void 0;
+  const receipt = raw.receipt;
+  if (receipt !== void 0 && (typeof receipt !== "string" || receipt === "" || receipt.length > MAX_RECEIPT_CHARS)) {
+    return void 0;
+  }
+  if (mode === "local" && (raw.installedByHarness !== true || receipt === void 0)) return void 0;
+  if (mode === "reuse" && raw.installedByHarness !== false) return void 0;
+  if (typeof raw.updatedAt !== "number" || !Number.isFinite(raw.updatedAt) || raw.updatedAt < 0) return void 0;
+  return {
+    mode,
+    installedByHarness: raw.installedByHarness,
+    ...receipt === void 0 ? {} : { receipt },
+    updatedAt: raw.updatedAt
+  };
+}
+function readLegacyAggregate(dshHome) {
+  try {
+    const raw = JSON.parse(readFileSync3(heavyLifecyclePath(dshHome), "utf8"));
+    if (!isRecord(raw) || raw.version !== HEAVY_LIFECYCLE_VERSION || !isRecord(raw.providers)) {
+      return { version: HEAVY_LIFECYCLE_VERSION, providers: {} };
+    }
+    const providers = {};
+    for (const [id, value] of Object.entries(raw.providers)) {
+      const entry = readEntry(value);
+      if (id !== "" && entry !== void 0) providers[id] = entry;
+    }
+    return { version: HEAVY_LIFECYCLE_VERSION, providers };
+  } catch {
+    return { version: HEAVY_LIFECYCLE_VERSION, providers: {} };
+  }
+}
+function readProviderRecord(dshHome, id) {
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync3(providerLifecyclePath(dshHome, id), "utf8"));
+  } catch (error) {
+    return errorCode2(error) === "ENOENT" ? { kind: "missing" } : { kind: "invalid" };
+  }
+  if (!isRecord(raw) || raw.version !== HEAVY_LIFECYCLE_VERSION || raw.id !== id) return { kind: "invalid" };
+  if (raw.cleared === true) return { kind: "cleared" };
+  const entry = readEntry(raw);
+  return entry === void 0 ? { kind: "invalid" } : { kind: "entry", entry };
+}
+function lifecycleOf(dshHome, id) {
+  const local = readProviderRecord(dshHome, id);
+  if (local.kind === "entry") return local.entry;
+  if (local.kind !== "missing") return void 0;
+  return readLegacyAggregate(dshHome).providers[id];
+}
+function ownsLocalInstall(entry) {
+  return entry !== void 0 && entry.mode === "local" && entry.installedByHarness && entry.receipt !== void 0 && entry.receipt.length > 0;
+}
+function persist(path, record) {
+  mkdirSync3(dirname(path), { recursive: true });
+  const temporary = `${path}.tmp-${String(process.pid)}-${randomUUID2()}`;
+  try {
+    writeFileSync3(temporary, JSON.stringify(record), { encoding: "utf8", mode: 384 });
+    renameSync2(temporary, path);
+  } catch (error) {
+    rmSync2(temporary, { force: true });
+    throw error;
+  }
+}
+function writeProviderLifecycle(dshHome, id, entry, now = Date.now) {
+  const path = providerLifecyclePath(dshHome, id);
+  persist(
+    path,
+    entry === null ? { version: HEAVY_LIFECYCLE_VERSION, id, cleared: true } : { version: HEAVY_LIFECYCLE_VERSION, id, ...entry, updatedAt: now() }
+  );
+}
+function recordReuseLifecycle(dshHome, id) {
+  writeProviderLifecycle(dshHome, id, { mode: "reuse", installedByHarness: false });
+}
+function registerInstallOwnership(dshHome, id, receipt) {
+  const trimmed = receipt.trim();
+  if (trimmed === "") throw new Error("heavy-provider ownership receipt is empty");
+  if (trimmed.length > MAX_RECEIPT_CHARS) throw new Error("heavy-provider ownership receipt is too long");
+  writeProviderLifecycle(dshHome, id, { mode: "local", installedByHarness: true, receipt: trimmed });
+}
+function clearProviderLifecycle(dshHome, id) {
+  writeProviderLifecycle(dshHome, id, null);
+}
+
+// src/planner.ts
 var LLM_NS = "llm-pi-ai";
 var ORCHESTRATION_NS = "enpoi-orchestration";
-function substitute(value, home, dshHome) {
-  return value.replaceAll("{home}", home).replaceAll("{config}", join2(home, ".config")).replaceAll("{dshHome}", dshHome ?? join2(home, ".dsh"));
+var UNSAFE_PLACEHOLDER_CHAR = /[\u0000\n\r`$"';|&<>()*?\[\]{}!#~]/;
+function substitute(value, home, dshHome, profileDir) {
+  const expand = (source, token, replacement) => {
+    if (!source.includes(token)) return source;
+    if (UNSAFE_PLACEHOLDER_CHAR.test(replacement)) {
+      throw new Error(
+        `Cannot expand ${token}: the host path contains a shell metacharacter, so interpolating it into a command would change what the shell executes. Commands that need a host path must read it from the runner environment instead.`
+      );
+    }
+    return source.replaceAll(token, replacement);
+  };
+  let expanded = expand(value, "{home}", home);
+  expanded = expand(expanded, "{config}", join4(home, ".config"));
+  expanded = expand(expanded, "{dshHome}", dshHome ?? join4(home, ".dsh"));
+  return profileDir === void 0 ? expanded : expand(expanded, "{profileDir}", profileDir);
 }
 function modeBaseURL(manifest, mode) {
   return mode === "reuse" ? manifest.reuse.baseURL : manifest.local.baseURL;
@@ -1145,6 +1808,9 @@ function instanceCandidates(manifest, configuredBaseURL) {
   add(instanceBaseURL(manifest, manifest.defaultPort), instanceHealth(manifest, manifest.defaultPort).url);
   return candidates;
 }
+function reachable(health) {
+  return health.ok || health.status === 401 || health.status === 403;
+}
 async function detectInstance(deps, manifest, configuredBaseURL) {
   if (manifest.delivery === "direct") {
     return {
@@ -1158,13 +1824,13 @@ async function detectInstance(deps, manifest, configuredBaseURL) {
   for (const candidate of instanceCandidates(manifest, configuredBaseURL)) {
     const health = await probeHealth({ ...manifest.reuse.health, url: candidate.url }, deps.fetchImpl);
     const detection = {
-      ok: health.ok,
+      ok: reachable(health),
       baseURL: candidate.baseURL,
       ...candidate.port === void 0 ? {} : { port: candidate.port },
       url: candidate.url,
       health
     };
-    if (health.ok) return detection;
+    if (reachable(health)) return detection;
     firstFailure ??= detection;
   }
   return firstFailure ?? {
@@ -1195,7 +1861,11 @@ async function detectRuntimes(runStep2) {
 function missingFileRequirement(requirements, context) {
   if (context === void 0) return void 0;
   for (const requirement of requirements ?? []) {
-    if (requirement.paths.some((path) => existsSync(substitute(path, context.home, context.dshHome)))) continue;
+    const withHelper = requirement.paths.map((path) => {
+      if (!path.includes("{helper}")) return path;
+      return context.helperPath === void 0 ? void 0 : path.replaceAll("{helper}", context.helperPath);
+    });
+    if (withHelper.some((path) => path === void 0 ? true : existsSync(substitute(path, context.home, context.dshHome, context.profileDir)))) continue;
     return requirement.hint;
   }
   return void 0;
@@ -1242,13 +1912,13 @@ function chooseLocalPath(manifest, platform, runtime, detectedPort, context) {
       if (requiredNodeMajor !== void 0 && runtime.nodeMajor !== void 0 && runtime.nodeMajor < requiredNodeMajor) {
         return { path: "unsupported", label: resolved.label, ...base, requires: [], missing: [`Node.js >= ${String(requiredNodeMajor)}`] };
       }
-      const needsSystemdUser = resolved.steps.some((step) => step.command.includes("systemctl --user"));
+      const needsSystemdUser = platformInstallVariant(manifest.local, platform).requires?.includes("systemd-user") === true || resolved.steps.some((step) => step.command.includes("systemctl --user"));
       if (needsSystemdUser && !runtime.systemdUser) {
         return {
           path: "unsupported",
           label: resolved.label,
           ...base,
-          requires: [],
+          requires: ["systemd-user"],
           missing: ["A reachable systemd user session (`systemctl --user`)"]
         };
       }
@@ -1341,11 +2011,13 @@ function sanitizeOverlayEntry(raw) {
   if (fallbackModel !== void 0) entry.fallbackModel = fallbackModel;
   const pool = overlayPool(raw.pool);
   if (pool !== void 0) entry.pool = pool;
+  const releaseSource = overlayString(raw, "releaseSource");
+  if (releaseSource !== void 0 && parseReleaseSource(releaseSource) !== void 0) entry.releaseSource = releaseSource;
   return Object.keys(entry).length === 0 ? void 0 : entry;
 }
 function readServerOverlay(dshHome) {
   try {
-    const document = JSON.parse(readFileSync2(join2(dshHome, "heavy-server-overlay.json"), "utf8"));
+    const document = JSON.parse(readFileSync4(join4(dshHome, "heavy-server-overlay.json"), "utf8"));
     if (!isOverlayRecord(document) || !isOverlayRecord(document.providers)) return {};
     const overlay = {};
     for (const [id, raw] of Object.entries(document.providers)) {
@@ -1387,6 +2059,7 @@ function overlayManifest(manifest, entry) {
   else if (entry.fallbackModel !== void 0) next.fallbackModel = entry.fallbackModel;
   if (entry.pool === null) delete next.pool;
   else if (entry.pool !== void 0) next.pool = entry.pool;
+  if (entry.releaseSource !== void 0) next.releaseSource = entry.releaseSource;
   return next;
 }
 function effectiveHeavyManifests(manifests, overlay) {
@@ -1404,25 +2077,39 @@ function overlayInjectionRow(dshHome) {
   if (Object.keys(providers).length === 0) return void 0;
   return { kind: "global", name: HEAVY_OVERLAY_GLOBAL, value: { providers } };
 }
+function catalogAuthorityOf(manifest) {
+  return manifest.catalogAuthority;
+}
 function routeProfile(manifest, mode, models, overrides = {}) {
+  const authority = overrides.catalogAuthority ?? catalogAuthorityOf(manifest);
+  const anonymous = manifest.auth.kind === "none" ? true : overrides.keyless ?? manifest.auth.keyless;
+  const carriesKey = !anonymous && manifest.auth.apiKeyEnv !== void 0;
+  const explicitKeyless = manifest.auth.kind === "unified" && !anonymous && manifest.auth.keyless;
+  const piAiRoute = routeSettingsNs(manifest) === LLM_NS;
   const list = models.length > 0 ? models.map((model) => ({
     id: model.id,
     ...model.name === void 0 ? {} : { name: model.name },
     ...model.contextWindow === void 0 ? {} : { contextWindow: model.contextWindow },
+    ...model.maxInputTokens === void 0 ? {} : { maxInputTokens: model.maxInputTokens },
     ...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens },
     ...model.input === void 0 || model.input.length === 0 ? {} : { input: [...model.input] },
+    ...!piAiRoute || model.tools === void 0 ? {} : { tools: model.tools },
+    ...!piAiRoute || model.reasoning === void 0 ? {} : { reasoning: model.reasoning },
     // An empty ladder states nothing and the route schema refuses it as a
     // declared-but-empty capability, so it is omitted like an absent one.
-    ...model.reasoningEfforts === void 0 || Object.keys(model.reasoningEfforts).length === 0 ? {} : { reasoningEfforts: { ...model.reasoningEfforts } }
-  })) : manifest.fallbackModel === void 0 ? [] : [{ id: manifest.fallbackModel }];
+    // An explicit false is a declared answer and stays.
+    ...model.reasoningEfforts === void 0 ? {} : model.reasoningEfforts === false ? { reasoningEfforts: false } : Object.keys(model.reasoningEfforts).length === 0 ? {} : { reasoningEfforts: { ...model.reasoningEfforts } }
+  })) : authority === "endpoint" || manifest.fallbackModel === void 0 || overrides.catalogState !== "empty" ? [] : [{ id: manifest.fallbackModel, name: `${manifest.fallbackModel} (fallback)` }];
   const suffix = manifest.delivery === "direct" ? " (direct)" : mode === "local" ? " (local)" : " (detected)";
   return {
     displayName: `${manifest.label}${suffix}`,
     api: manifest.protocol,
     baseURL: overrides.baseURL ?? modeBaseURL(manifest, mode),
-    ...manifest.auth.apiKeyEnv === void 0 ? {} : { apiKeyEnv: manifest.auth.apiKeyEnv },
-    ...manifest.auth.kind === "none" ? { keyless: true } : {},
+    ...carriesKey ? { apiKeyEnv: manifest.auth.apiKeyEnv } : {},
+    ...anonymous || explicitKeyless ? { keyless: anonymous } : {},
     ...manifest.compat === void 0 ? {} : { compat: { ...manifest.compat } },
+    ...manifest.sessionHeader === void 0 ? {} : { sessionHeader: manifest.sessionHeader },
+    ...authority === "endpoint" ? { catalogAuthority: "endpoint" } : {},
     ...manifest.pool === void 0 ? {} : {
       pool: {
         ...manifest.pool.strategy === void 0 ? {} : { strategy: manifest.pool.strategy },
@@ -1451,45 +2138,115 @@ async function probeHealth(probe, fetchImpl = globalThis.fetch, now = Date.now) 
   }
 }
 var ANTHROPIC_VERSION = "2023-06-01";
+var MODEL_LISTING_TIMEOUT_MS = 15e3;
+var MODEL_LISTING_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 function modelListingUrl(baseURL, api) {
   const base = baseURL.replace(/\/+$/, "");
   if (api !== "anthropic-messages") return `${base}/models`;
   const root = base.endsWith("/v1") ? base.slice(0, -3) : base;
   return `${root}/v1/models?limit=1000`;
 }
-function readModelListing(body) {
-  const listing = body;
-  let rows;
+function listingDescriptionNames(body) {
+  const names = /* @__PURE__ */ new Map();
+  const rows = [];
   if (Array.isArray(body)) {
-    rows = body.map((raw) => ({ raw }));
-  } else if (Array.isArray(listing?.data)) {
-    rows = listing.data.map((raw) => ({ raw }));
-  } else if (listing?.models !== null && typeof listing?.models === "object" && !Array.isArray(listing.models)) {
-    rows = Object.entries(listing.models).filter(([, raw]) => raw !== null && typeof raw === "object" && !Array.isArray(raw)).map(([key, raw]) => ({ key, raw }));
-  } else {
-    return [];
+    for (const raw of body) rows.push({ raw });
+  } else if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+    const listing = body;
+    if (Array.isArray(listing.data)) {
+      for (const raw of listing.data) rows.push({ raw });
+    } else if (Array.isArray(listing.models)) {
+      for (const raw of listing.models) rows.push({ raw });
+    } else if (listing.models !== null && typeof listing.models === "object") {
+      for (const [key, raw] of Object.entries(listing.models)) rows.push({ key, raw });
+    }
   }
-  const seen = /* @__PURE__ */ new Set();
-  const models = [];
-  for (const { key, raw } of rows.slice(0, 2e3)) {
+  for (const { key, raw } of rows) {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) continue;
     const entry = raw;
-    const id = listingText(key, entry?.id);
-    if (id === void 0 || seen.has(id)) continue;
-    seen.add(id);
-    const name2 = listingText(entry?.name, entry?.displayName, entry?.display_name, entry?.description);
-    const capabilities = listingCapabilities(entry);
-    models.push({
-      id,
-      ...name2 === void 0 || name2 === id ? {} : { name: name2 },
-      ...capabilities.contextWindow === void 0 ? {} : { contextWindow: capabilities.contextWindow },
-      ...capabilities.maxTokens === void 0 ? {} : { maxTokens: capabilities.maxTokens },
-      ...capabilities.inputModalities === void 0 ? {} : { input: [...capabilities.inputModalities] },
-      ...capabilities.reasoningEfforts === void 0 ? {} : { reasoningEfforts: { ...capabilities.reasoningEfforts } }
+    const id = listingText(key, entry.id, entry.slug);
+    if (id === void 0) continue;
+    const name2 = listingText(entry.name, entry.displayName, entry.display_name, entry.description);
+    if (name2 === void 0 || name2 === id || names.has(id)) continue;
+    names.set(id, name2);
+  }
+  return names;
+}
+function discoveredFromListing(model, descriptionName) {
+  const name2 = model.name ?? descriptionName;
+  return {
+    id: model.id,
+    ...name2 === void 0 || name2 === model.id ? {} : { name: name2 },
+    ...model.contextWindow === void 0 ? {} : { contextWindow: model.contextWindow },
+    ...model.maxInputTokens === void 0 ? {} : { maxInputTokens: model.maxInputTokens },
+    ...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens },
+    ...model.inputModalities === void 0 || model.inputModalities.length === 0 ? {} : { input: [...model.inputModalities] },
+    ...model.tools === void 0 ? {} : { tools: model.tools },
+    ...model.reasoning === void 0 ? {} : { reasoning: model.reasoning },
+    ...model.reasoningEfforts === void 0 ? {} : { reasoningEfforts: { ...model.reasoningEfforts } }
+  };
+}
+function discoveredFromEntry(model) {
+  if (model.id === "") return void 0;
+  const input = (model.inputModalities ?? []).filter((modality) => typeof modality === "string" && modality !== "");
+  return {
+    id: model.id,
+    ...model.name === void 0 || model.name === model.id ? {} : { name: model.name },
+    ...model.contextWindow === void 0 ? {} : { contextWindow: model.contextWindow },
+    ...model.maxInputTokens === void 0 ? {} : { maxInputTokens: model.maxInputTokens },
+    ...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens },
+    ...input.length === 0 ? {} : { input },
+    ...model.tools === void 0 ? {} : { tools: model.tools },
+    ...model.reasoning === void 0 ? {} : { reasoning: model.reasoning },
+    ...model.reasoningEfforts === void 0 ? {} : model.reasoningEfforts === false ? { reasoningEfforts: false } : { reasoningEfforts: { ...model.reasoningEfforts } }
+  };
+}
+function sanitizedDiscoveryError(error, apiKey) {
+  const raw = error instanceof Error ? error.name === "TimeoutError" ? "listing request timed out" : error.message : String(error);
+  const redacted = apiKey === void 0 || apiKey === "" ? raw : raw.split(apiKey).join("[redacted]");
+  return redacted.replace(/https?:\/\/\S+/gu, "[endpoint]").slice(0, 300);
+}
+async function readBoundedListingBody(response) {
+  const oversized = `listing response exceeds ${String(MODEL_LISTING_MAX_RESPONSE_BYTES)} bytes`;
+  const declared = Number(response.headers?.get("content-length") ?? Number.NaN);
+  if (Number.isFinite(declared) && declared > MODEL_LISTING_MAX_RESPONSE_BYTES) {
+    return { ok: false, error: oversized };
+  }
+  const body = response.body;
+  if (body === void 0 || body === null) {
+    const text2 = await response.text();
+    return Buffer.byteLength(text2, "utf8") > MODEL_LISTING_MAX_RESPONSE_BYTES ? { ok: false, error: oversized } : { ok: true, text: text2 };
+  }
+  const reader = body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (; ; ) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value === void 0) continue;
+    total += value.byteLength;
+    if (total > MODEL_LISTING_MAX_RESPONSE_BYTES) {
+      if (reader.cancel !== void 0) {
+        await reader.cancel().catch(() => {
+        });
+      }
+      return { ok: false, error: oversized };
+    }
+    chunks.push(value);
+  }
+  if (reader.cancel !== void 0) {
+    await reader.cancel().catch(() => {
     });
   }
-  return models;
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return { ok: true, text: new TextDecoder().decode(bytes) };
 }
-async function discoverModels(baseURL, apiKey, fetchImpl = globalThis.fetch, api) {
+async function discoverModelListing(baseURL, apiKey, fetchImpl = globalThis.fetch, api) {
   const url = modelListingUrl(baseURL, api);
   const headers = { accept: "application/json" };
   if (api === "anthropic-messages") {
@@ -1499,16 +2256,44 @@ async function discoverModels(baseURL, apiKey, fetchImpl = globalThis.fetch, api
     headers.authorization = `Bearer ${apiKey}`;
   }
   try {
-    const response = await fetchImpl(url, { headers, signal: AbortSignal.timeout(15e3) });
-    if (!response.ok) return [];
-    return readModelListing(JSON.parse(await response.text()));
-  } catch {
-    return [];
+    const response = await fetchImpl(url, { headers, signal: AbortSignal.timeout(MODEL_LISTING_TIMEOUT_MS) });
+    const status = response.status;
+    if (!response.ok) {
+      return {
+        state: status === 401 || status === 403 ? "unauthorized" : "failed",
+        models: [],
+        status,
+        error: `HTTP ${String(status)}`
+      };
+    }
+    const bounded = await readBoundedListingBody(response);
+    if (!bounded.ok) return { state: "failed", models: [], status, error: bounded.error };
+    let body;
+    try {
+      body = JSON.parse(bounded.text);
+    } catch {
+      return { state: "failed", models: [], status, error: "listing response is not JSON" };
+    }
+    const parsed = readModelListing(body);
+    if (!parsed.ok) {
+      return { state: "failed", models: [], status, error: "listing response is not a model listing" };
+    }
+    const names = listingDescriptionNames(body);
+    const seen = /* @__PURE__ */ new Set();
+    const models = [];
+    for (const model of parsed.models) {
+      if (seen.has(model.id)) continue;
+      seen.add(model.id);
+      models.push(discoveredFromListing(model, names.get(model.id)));
+    }
+    return { state: models.length === 0 ? "empty" : "fresh", models, status };
+  } catch (error) {
+    return { state: "failed", models: [], error: sanitizedDiscoveryError(error, apiKey) };
   }
 }
-async function discoverRouteModels(deps, manifest, baseURL, apiKey) {
+async function discoverNamespaceModels(deps, manifest, baseURL, apiKey) {
   const llm = deps.llm;
-  if (llm === void 0) return [];
+  if (llm === void 0) return { state: "failed", models: [], error: "no model discovery is registered" };
   try {
     const found = await llm.discoverModels(routeSettingsNs(manifest), {
       provider: manifest.id,
@@ -1516,39 +2301,49 @@ async function discoverRouteModels(deps, manifest, baseURL, apiKey) {
       api: manifest.protocol,
       ...apiKey === void 0 || apiKey.length === 0 ? {} : { apiKey }
     });
-    return found.flatMap((model) => {
-      if (model.id === "") return [];
-      const input = (model.inputModalities ?? []).filter((modality) => typeof modality === "string" && modality !== "");
-      const reasoningEfforts = model.reasoningEfforts === void 0 ? void 0 : Object.keys(model.reasoningEfforts).length === 0 ? void 0 : { ...model.reasoningEfforts };
-      return [{
-        id: model.id,
-        ...model.name === void 0 || model.name === model.id ? {} : { name: model.name },
-        ...model.contextWindow === void 0 ? {} : { contextWindow: model.contextWindow },
-        ...model.maxTokens === void 0 ? {} : { maxTokens: model.maxTokens },
-        ...input.length === 0 ? {} : { input },
-        ...reasoningEfforts === void 0 ? {} : { reasoningEfforts }
-      }];
-    });
-  } catch {
-    return [];
+    const models = [];
+    for (const entry of found) {
+      const model = discoveredFromEntry(entry);
+      if (model !== void 0) models.push(model);
+    }
+    return { state: models.length === 0 ? "empty" : "fresh", models };
+  } catch (error) {
+    return { state: "failed", models: [], error: sanitizedDiscoveryError(error, apiKey) };
   }
 }
-async function discoverServiceModels(deps, manifest, baseURL, apiKey) {
-  if (manifest.delivery === "direct") return discoverRouteModels(deps, manifest, baseURL, apiKey);
-  let key = apiKey;
-  const ref = manifest.auth.apiKeyEnv;
-  if (key === void 0 && ref !== void 0 && deps.credentials !== void 0) {
-    try {
-      key = (await deps.credentials.resolve(ref))?.value;
-    } catch {
-      key = void 0;
-    }
+async function resolveStoredCredential(deps, ref) {
+  if (deps.credentials === void 0) return void 0;
+  try {
+    const value = (await deps.credentials.resolve(ref))?.value?.trim();
+    return value === void 0 || value === "" ? void 0 : value;
+  } catch {
+    return void 0;
   }
-  const listed = await discoverModels(baseURL, key, deps.fetchImpl, manifest.protocol);
-  return listed.length > 0 ? listed : discoverRouteModels(deps, manifest, baseURL, key);
+}
+async function resolveRouteKey(deps, manifest, supplied) {
+  const explicit = supplied?.trim();
+  if (explicit !== void 0 && explicit !== "") return explicit;
+  if (manifest.auth.kind !== "unified") return void 0;
+  const ref = manifest.auth.apiKeyEnv;
+  return ref === void 0 ? void 0 : resolveStoredCredential(deps, ref);
+}
+async function discoverServiceCatalog(deps, manifest, baseURL, apiKey, options = {}) {
+  if (manifest.delivery === "direct" || manifest.settingsNs !== void 0) {
+    return { ...await discoverNamespaceModels(deps, manifest, baseURL, apiKey), source: "namespace" };
+  }
+  let key = apiKey;
+  const ref = manifest.auth.kind === "unified" ? manifest.auth.apiKeyEnv : void 0;
+  if (key === void 0 && options.resolveStoredCredential !== false && ref !== void 0 && deps.credentials !== void 0) {
+    key = await resolveStoredCredential(deps, ref);
+  }
+  return { ...await discoverModelListing(baseURL, key, deps.fetchImpl, manifest.protocol), source: "endpoint" };
 }
 function revisionOf(settings, ns) {
   return settings.describe?.().find((entry) => entry.ns === ns)?.revision;
+}
+function namespaceSnapshot(settings, ns) {
+  const entry = settings.describe?.().find((candidate) => candidate.ns === ns);
+  return entry === void 0 ? void 0 : { ...entry.revision === void 0 ? {} : { revision: entry.revision }, ...entry.value === void 0 ? {} : { value: entry.value } };
 }
 function readNamespace(settings, ns) {
   const value = settings?.describe?.().find((entry) => entry.ns === ns)?.value;
@@ -1585,8 +2380,20 @@ async function writeRoute(deps, manifest, mode, models, overrides = {}) {
   if (pending !== void 0) throw new Error(pending.message);
   const profile = routeProfile(manifest, mode, models, overrides);
   const settingsNs = routeSettingsNs(manifest);
-  await settings.mutate(settingsNs, [{ op: "set", path: ["providers", manifest.id], value: profile }], revisionOf(settings, settingsNs));
+  await settings.mutate(
+    settingsNs,
+    [{ op: "set", path: ["providers", manifest.id], value: profile }],
+    overrides.expectedRevision ?? revisionOf(settings, settingsNs)
+  );
   return profile;
+}
+async function storeCredential(deps, manifest, key) {
+  const ref = manifest.pool?.identities[0]?.credentialRef ?? manifest.auth.apiKeyEnv;
+  if (key === void 0 || key.trim() === "" || ref === void 0) return false;
+  const credentials = deps.credentials;
+  if (credentials === void 0) throw new Error("credentials seam absent \u2014 cannot store the key");
+  await credentials.set(ref, key.trim());
+  return true;
 }
 async function commitRoute(deps, manifest, mode, models, key, overrides = {}) {
   if (deps.settings === void 0) throw new Error("settings seam absent \u2014 cannot write the route");
@@ -1596,15 +2403,47 @@ async function commitRoute(deps, manifest, mode, models, key, overrides = {}) {
   const ref = manifest.pool?.identities[0]?.credentialRef ?? manifest.auth.apiKeyEnv;
   const value = key?.trim() ?? "";
   const store = value !== "" && ref !== void 0;
+  const keyless = manifest.auth.kind === "none" ? true : store ? false : overrides.keyless;
   let previous;
   if (store) {
     if (credentials === void 0) throw new Error("credentials seam absent \u2014 cannot store the key");
     previous = await credentials.resolve(ref);
     await credentials.set(ref, value);
   }
+  const writeOverrides = {
+    ...overrides.baseURL === void 0 ? {} : { baseURL: overrides.baseURL },
+    ...overrides.catalogAuthority === void 0 ? {} : { catalogAuthority: overrides.catalogAuthority },
+    ...overrides.catalogState === void 0 ? {} : { catalogState: overrides.catalogState },
+    ...keyless === void 0 ? {} : { keyless }
+  };
   let route;
   try {
-    route = await writeRoute(deps, manifest, mode, models, overrides);
+    const settingsNs = routeSettingsNs(manifest);
+    for (let attempt = 0; attempt < MAX_SETTINGS_WRITE_ATTEMPTS; attempt += 1) {
+      let expectedRevision;
+      if (overrides.refuseExisting === true) {
+        const snapshot = namespaceSnapshot(deps.settings, settingsNs);
+        const section = isPlainRecord(snapshot?.value) ? snapshot.value : void 0;
+        const providers = isPlainRecord(section?.providers) ? section.providers : void 0;
+        if (providers !== void 0 && Object.hasOwn(providers, manifest.id)) {
+          throw new Error(
+            `provider "${manifest.id}" received a route while the install was running; the install refused to overwrite it (remove or retry deliberately)`
+          );
+        }
+        expectedRevision = snapshot?.revision;
+      }
+      try {
+        route = await writeRoute(deps, manifest, mode, models, {
+          ...writeOverrides,
+          ...expectedRevision === void 0 ? {} : { expectedRevision }
+        });
+        break;
+      } catch (error) {
+        if (isSettingsConflict(error) && attempt < MAX_SETTINGS_WRITE_ATTEMPTS - 1) continue;
+        throw error;
+      }
+    }
+    if (route === void 0) throw new Error("route commit exhausted its settings attempts");
   } catch (error) {
     if (store && credentials !== void 0) {
       try {
@@ -1630,15 +2469,46 @@ async function useDetectedInstance(deps, manifest, key, options = {}) {
   const profile = configuredProfile(deps, manifest.id, routeSettingsNs(manifest));
   const configuredBase = typeof profile?.baseURL === "string" ? profile.baseURL : void 0;
   const detection = direct || customBase !== void 0 ? void 0 : await detectInstance(deps, manifest, configuredBase);
+  if (!direct && customBase === void 0 && detection?.ok !== true) {
+    throw new Error(`no running ${manifest.label} instance was detected \u2014 start it, install it locally, or enter a custom instance address`);
+  }
   const endpoint = direct ? manifest.reuse.baseURL : customBase ?? (detection.ok ? detection.baseURL : manifest.reuse.baseURL);
-  const models = await discoverServiceModels(deps, manifest, endpoint, key);
-  const health = direct ? await probeHealth(manifest.reuse.health, deps.fetchImpl) : typedOrigin !== void 0 ? await probeHealth(healthForBase(manifest, typedOrigin), deps.fetchImpl) : detection.health;
-  const { route, credentialStored } = await commitRoute(deps, manifest, "reuse", models, key, { baseURL: endpoint });
+  let effectiveKey = await resolveRouteKey(deps, manifest, key);
+  let recoveredKey;
+  const operatorKey = key?.trim() ?? "";
+  if (effectiveKey === void 0 && operatorKey === "" && ownsLocalInstall(lifecycleOf(deps.dshHome, manifest.id))) {
+    const readable = (await deps.readInstallCredential?.(manifest.id))?.trim();
+    if (readable !== void 0 && readable !== "") {
+      effectiveKey = readable;
+      recoveredKey = readable;
+    }
+  }
+  const catalog = await discoverServiceCatalog(deps, manifest, endpoint, effectiveKey, { resolveStoredCredential: false });
+  const models = catalog.models;
+  const rawHealth = direct ? await probeHealth(manifest.reuse.health, deps.fetchImpl) : typedOrigin !== void 0 ? await probeHealth(healthForBase(manifest, typedOrigin), deps.fetchImpl) : detection.health;
+  const health = { ...rawHealth, reachable: reachable(rawHealth) };
+  const wouldBeAnonymous = manifest.auth.kind === "none" || effectiveKey === void 0 && manifest.auth.keyless;
+  if (catalog.state === "unauthorized" && effectiveKey === void 0 && wouldBeAnonymous) {
+    throw new Error(
+      `${manifest.label} answered at ${endpoint} but requires authorization (HTTP ${String(health.status ?? "401/403")}); enter the instance key and retry, or check its access configuration`
+    );
+  }
+  const suppliedKey = operatorKey !== "" ? operatorKey : recoveredKey;
+  const keyless = manifest.auth.kind === "unified" && effectiveKey !== void 0 ? false : void 0;
+  if (catalog.state === "empty") writeKnownEmptyDiscoveredEntry(deps, manifest.id, endpoint);
+  const { route, credentialStored } = await commitRoute(deps, manifest, "reuse", models, suppliedKey, {
+    baseURL: endpoint,
+    catalogState: catalog.state,
+    ...keyless === void 0 ? {} : { keyless }
+  });
+  const existingLifecycle = lifecycleOf(deps.dshHome, manifest.id);
+  if (!ownsLocalInstall(existingLifecycle)) recordReuseLifecycle(deps.dshHome, manifest.id);
   const customPort = typedOrigin === void 0 ? void 0 : urlPort(typedOrigin);
   return {
     route,
     health,
     models,
+    catalog,
     credentialStored,
     ...detection?.ok === true && detection.port !== void 0 ? { port: detection.port } : customPort === void 0 ? {} : { port: customPort },
     endpoint
@@ -1647,31 +2517,55 @@ async function useDetectedInstance(deps, manifest, key, options = {}) {
 function discoveredCachePath(deps) {
   const override = process.env.DSH_DISCOVERED_MODELS;
   if (override !== void 0 && override.length > 0) return override;
-  return join2(deps.dshHome, "cache", "discovered-models.json");
+  return join4(deps.dshHome, "cache", "discovered-models.json");
 }
 function removeDiscoveredEntry(deps, id) {
   const path = discoveredCachePath(deps);
   if (!existsSync(path)) return false;
   try {
-    const document = JSON.parse(readFileSync2(path, "utf8"));
+    const document = JSON.parse(readFileSync4(path, "utf8"));
     const routes = document.routes;
     if (routes === null || typeof routes !== "object" || routes === void 0) return false;
     if (!(id in routes)) return false;
     delete routes[id];
-    mkdirSync2(dirname(path), { recursive: true });
+    mkdirSync4(dirname2(path), { recursive: true });
     const temporary = `${path}.tmp-${String(process.pid)}`;
-    writeFileSync2(temporary, JSON.stringify(document), "utf8");
-    renameSync2(temporary, path);
+    writeFileSync4(temporary, JSON.stringify(document), "utf8");
+    renameSync3(temporary, path);
     return true;
   } catch {
     return false;
   }
 }
+var DISCOVERED_CACHE_VERSION = 1;
+function writeKnownEmptyDiscoveredEntry(deps, id, baseURL, now = Date.now) {
+  const path = discoveredCachePath(deps);
+  let document = { version: DISCOVERED_CACHE_VERSION, routes: {} };
+  if (existsSync(path)) {
+    try {
+      const parsed = JSON.parse(readFileSync4(path, "utf8"));
+      if (isPlainRecord(parsed) && parsed.version === DISCOVERED_CACHE_VERSION && isPlainRecord(parsed.routes)) {
+        document = { version: DISCOVERED_CACHE_VERSION, routes: { ...parsed.routes } };
+      }
+    } catch {
+    }
+  }
+  document.routes[id] = { baseURL, fetchedAt: now(), models: [] };
+  mkdirSync4(dirname2(path), { recursive: true });
+  const temporary = `${path}.tmp-${String(process.pid)}`;
+  try {
+    writeFileSync4(temporary, JSON.stringify(document), "utf8");
+    renameSync3(temporary, path);
+  } catch (error) {
+    rmSync3(temporary, { force: true });
+    throw error;
+  }
+}
 function removePoolState(deps, id) {
-  const path = join2(deps.dshHome, "pools", `${id}.json`);
+  const path = join4(deps.dshHome, "pools", `${id}.json`);
   if (!existsSync(path)) return false;
   try {
-    rmSync2(path);
+    rmSync3(path);
     return true;
   } catch {
     return false;
@@ -1680,32 +2574,165 @@ function removePoolState(deps, id) {
 function linkReferences(link, id) {
   return link !== null && typeof link === "object" && link.provider === id;
 }
-async function removeChainReferences(deps, id) {
-  const settings = deps.settings;
-  const document = readNamespace(settings, ORCHESTRATION_NS);
-  const chains = document?.chains;
-  if (chains === null || typeof chains !== "object" || Array.isArray(chains)) return 0;
-  let removed = 0;
-  const next = {};
-  for (const [chainId, raw] of Object.entries(chains)) {
-    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
-      next[chainId] = raw;
-      continue;
+function isPlainRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+var MAX_SETTINGS_WRITE_ATTEMPTS = 3;
+function isSettingsConflict(error) {
+  return error !== null && typeof error === "object" && error.code === "SETTINGS_CONFLICT";
+}
+async function applySettingsPlan(settings, ns, plan) {
+  let lastError;
+  for (let attempt = 0; attempt < MAX_SETTINGS_WRITE_ATTEMPTS; attempt += 1) {
+    const planned = plan(readNamespace(settings, ns));
+    if (planned.ops.length === 0) return { committed: false, result: planned.result };
+    try {
+      await settings.mutate(ns, planned.ops, revisionOf(settings, ns));
+      return { committed: true, result: planned.result };
+    } catch (error) {
+      lastError = error;
+      if (!isSettingsConflict(error) || attempt === MAX_SETTINGS_WRITE_ATTEMPTS - 1) throw error;
     }
-    const chain = raw;
-    const links = Array.isArray(chain.links) ? chain.links : [];
-    const kept = links.filter((link) => {
-      const drop = linkReferences(link, id);
-      if (drop) removed += 1;
-      return !drop;
-    });
-    const selectors = Array.isArray(chain.selectors) ? chain.selectors : [];
-    if (kept.length === 0 && selectors.length === 0 && links.length > 0) continue;
-    next[chainId] = kept.length === links.length ? chain : { ...chain, links: kept };
   }
-  if (removed === 0 || settings === void 0) return removed;
-  await settings.mutate(ORCHESTRATION_NS, [{ op: "set", path: ["chains"], value: next }], revisionOf(settings, ORCHESTRATION_NS));
-  return removed;
+  throw lastError;
+}
+function planOrchestrationCleanup(document, id) {
+  const ops = [];
+  const rewritten = [];
+  const droppedChains = /* @__PURE__ */ new Set();
+  let chainLinksRemoved = 0;
+  const chains = document?.chains;
+  if (isPlainRecord(chains)) {
+    for (const [chainId, raw] of Object.entries(chains)) {
+      if (!isPlainRecord(raw)) continue;
+      const links = Array.isArray(raw.links) ? raw.links : [];
+      const kept = links.filter((link) => !linkReferences(link, id));
+      if (kept.length === links.length) continue;
+      chainLinksRemoved += links.length - kept.length;
+      const selectors = Array.isArray(raw.selectors) ? raw.selectors : [];
+      if (kept.length === 0 && selectors.length === 0) {
+        ops.push({ op: "unset", path: ["chains", chainId] });
+        droppedChains.add(chainId);
+        rewritten.push(`chains.${chainId}: dropped (last link removed)`);
+        continue;
+      }
+      ops.push({ op: "set", path: ["chains", chainId], value: { ...raw, links: kept } });
+      rewritten.push(`chains.${chainId}: dropped ${String(links.length - kept.length)} link(s)`);
+    }
+  }
+  const personas = document?.personas;
+  if (isPlainRecord(personas)) {
+    for (const [seat, raw] of Object.entries(personas)) {
+      if (!isPlainRecord(raw)) continue;
+      const chain = typeof raw.chain === "string" && raw.chain !== "" ? raw.chain : void 0;
+      const namesRoute = raw.provider === id;
+      const namesDroppedChain = chain !== void 0 && droppedChains.has(chain);
+      if (!namesRoute && !namesDroppedChain) continue;
+      ops.push({ op: "set", path: ["personas", seat], value: null });
+      rewritten.push(`personas.${seat}: reset to inherit`);
+    }
+  }
+  const preferences = document?.uiPreferences;
+  if (isPlainRecord(preferences)) {
+    const favorites = Array.isArray(preferences.favorites) ? preferences.favorites : void 0;
+    if (favorites !== void 0) {
+      const kept = favorites.filter((entry) => !(isPlainRecord(entry) && entry.provider === id));
+      if (kept.length !== favorites.length) {
+        ops.push({ op: "set", path: ["uiPreferences", "favorites"], value: kept });
+        rewritten.push("uiPreferences.favorites: pruned");
+      }
+    }
+    const hidden = preferences.hiddenModels;
+    if (isPlainRecord(hidden) && Object.hasOwn(hidden, id)) {
+      const next = { ...hidden };
+      delete next[id];
+      ops.push({ op: "set", path: ["uiPreferences", "hiddenModels"], value: next });
+      rewritten.push("uiPreferences.hiddenModels: pruned");
+    }
+    const order = Array.isArray(preferences.providerOrder) ? preferences.providerOrder : void 0;
+    if (order !== void 0) {
+      const kept = order.filter((entry) => entry !== id);
+      if (kept.length !== order.length) {
+        ops.push({ op: "set", path: ["uiPreferences", "providerOrder"], value: kept });
+        rewritten.push("uiPreferences.providerOrder: pruned");
+      }
+    }
+  }
+  return { ops, chainLinksRemoved, rewritten, droppedChains };
+}
+var DEFAULT_BASELINE_PROVIDER = "kilo";
+var DEFAULT_BASELINE_MODEL = "poolside/laguna-s-2.1:free";
+function planDefaultModelCleanup(document, id, droppedChains) {
+  if (document === void 0) return { ops: [], rewritten: [] };
+  const ops = [];
+  const rewritten = [];
+  const chain = typeof document.chain === "string" && document.chain !== "" ? document.chain : void 0;
+  if (chain !== void 0 && droppedChains.has(chain)) {
+    ops.push({ op: "unset", path: ["chain"] });
+    rewritten.push("agent-default-model.chain: dropped");
+  }
+  if (document.provider !== id) return { ops, rewritten };
+  const baseline = document.baseline === "off" ? "off" : "kilo";
+  ops.push(
+    { op: "set", path: ["provider"], value: baseline === "off" ? "" : DEFAULT_BASELINE_PROVIDER },
+    { op: "set", path: ["model"], value: baseline === "off" ? "" : DEFAULT_BASELINE_MODEL }
+  );
+  rewritten.push("agent-default-model: reset");
+  return { ops, rewritten };
+}
+var AGENT_DEFAULT_MODEL_NS = "agent-default-model";
+var SUBAGENT_MODEL_SELECTION_NS = "subagent-model-selection-settings";
+var LEGACY_SUBAGENT_MODEL_SELECTION_NS = "subagent-model-selection";
+function planSubagentCleanup(document, id) {
+  if (document === void 0) return { ops: [], rewritten: [] };
+  const allowed = Array.isArray(document.allowedModels) ? document.allowedModels : void 0;
+  if (allowed === void 0) return { ops: [], rewritten: [] };
+  const kept = allowed.filter((entry) => !(isPlainRecord(entry) && entry.provider === id));
+  if (kept.length === allowed.length) return { ops: [], rewritten: [] };
+  const ops = [{ op: "set", path: ["allowedModels"], value: kept }];
+  if (kept.length === 0 && document.enabled === true) ops.push({ op: "set", path: ["enabled"], value: false });
+  return { ops, rewritten: ["subagent-model-selection: pruned"] };
+}
+async function removeRouteReferences(deps, id) {
+  const settings = deps.settings;
+  if (settings === void 0) return { chainLinksRemoved: 0, rewritten: [], errors: [] };
+  const rewritten = [];
+  const errors = [];
+  let chainLinksRemoved = 0;
+  let droppedChains = /* @__PURE__ */ new Set();
+  try {
+    const outcome = await applySettingsPlan(settings, ORCHESTRATION_NS, (document) => {
+      const planned = planOrchestrationCleanup(document, id);
+      return { ops: planned.ops, result: planned };
+    });
+    chainLinksRemoved = outcome.result.chainLinksRemoved;
+    droppedChains = outcome.result.droppedChains;
+    rewritten.push(...outcome.result.rewritten);
+  } catch (error) {
+    errors.push(`references (${ORCHESTRATION_NS}): ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    const outcome = await applySettingsPlan(settings, AGENT_DEFAULT_MODEL_NS, (document) => {
+      const planned = planDefaultModelCleanup(document, id, droppedChains);
+      return { ops: planned.ops, result: planned.rewritten };
+    });
+    rewritten.push(...outcome.result);
+  } catch (error) {
+    errors.push(`references (${AGENT_DEFAULT_MODEL_NS}): ${error instanceof Error ? error.message : String(error)}`);
+  }
+  for (const ns of [SUBAGENT_MODEL_SELECTION_NS, LEGACY_SUBAGENT_MODEL_SELECTION_NS]) {
+    if (readNamespace(settings, ns) === void 0) continue;
+    try {
+      const outcome = await applySettingsPlan(settings, ns, (document) => {
+        const planned = planSubagentCleanup(document, id);
+        return { ops: planned.ops, result: planned.rewritten };
+      });
+      rewritten.push(...outcome.result);
+    } catch (error) {
+      errors.push(`references (${ns}): ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return { chainLinksRemoved, rewritten, errors };
 }
 function credentialRefInUse(deps, manifest, ref) {
   const entries = deps.settings?.describe?.();
@@ -1730,74 +2757,210 @@ function credentialRefInUse(deps, manifest, ref) {
   }
   return false;
 }
-async function removeProvider(deps, manifest, options = {}) {
-  const errors = [];
-  let teardown = { ran: false, ok: true, output: "" };
-  if (options.uninstall === true && manifest.removal.steps.length > 0) {
-    let output = "";
-    let ok = true;
-    let failedStep;
-    for (const step of manifest.removal.steps) {
-      try {
-        const outcome = await deps.runStep(step);
-        output += `$ ${step.label}
-${outcome.output}
-`;
-        if (outcome.exitCode !== 0 && step.optional !== true) {
-          ok = false;
-          failedStep = step.label;
-          break;
-        }
-      } catch (error) {
-        if (step.optional === true) {
-          output += `$ ${step.label} (optional, failed: ${error instanceof Error ? error.message : String(error)})
-`;
-          continue;
-        }
-        ok = false;
-        failedStep = step.label;
-        output += `$ ${step.label} (failed: ${error instanceof Error ? error.message : String(error)})
-`;
-        break;
+function routeCredentialRefs(manifest, profile) {
+  const refs = /* @__PURE__ */ new Set();
+  const add = (value) => {
+    if (typeof value === "string" && value !== "") refs.add(value);
+  };
+  add(manifest.auth.apiKeyEnv);
+  for (const identity of manifest.pool?.identities ?? []) add(identity.credentialRef);
+  if (profile !== void 0) {
+    add(profile.apiKeyEnv);
+    const pool = profile.pool;
+    if (isPlainRecord(pool) && Array.isArray(pool.identities)) {
+      for (const identity of pool.identities) {
+        if (isPlainRecord(identity)) add(identity.credentialRef);
       }
     }
-    teardown = { ran: true, ok, ...failedStep === void 0 ? {} : { failedStep }, output };
   }
-  let routeRemoved = false;
-  const settingsNs = routeSettingsNs(manifest);
-  if (deps.settings !== void 0 && configuredProfile(deps, manifest.id, settingsNs) !== void 0) {
+  return [...refs];
+}
+function lockRefusal(error) {
+  if (error === null || typeof error !== "object") return void 0;
+  const name2 = error.name;
+  if (name2 !== "HeavyProviderLockedError" && name2 !== "HeavyProviderLockUnreadableError") return void 0;
+  return {
+    reason: error instanceof Error ? error.message : String(error),
+    lock: name2 === "HeavyProviderLockedError" ? "held" : "unreadable"
+  };
+}
+function refusedRemoval(reason, lock) {
+  return {
+    routeRemoved: false,
+    credentialRemoved: false,
+    poolStateRemoved: false,
+    cacheEntryRemoved: false,
+    chainLinksRemoved: 0,
+    teardown: { ran: false, ok: false, output: "" },
+    warnings: [],
+    errors: [`lock: ${reason}`],
+    blocked: { reason, lock }
+  };
+}
+async function runTeardown(deps, manifest) {
+  let output = "";
+  let ok = true;
+  let failedStep;
+  for (const step of manifest.removal.steps) {
     try {
-      await deps.settings.mutate(settingsNs, [{ op: "unset", path: ["providers", manifest.id] }], revisionOf(deps.settings, settingsNs));
+      const outcome = await deps.runStep(step);
+      output += `$ ${step.label}
+${outcome.output}
+`;
+      if (outcome.exitCode !== 0 && step.optional !== true) {
+        ok = false;
+        failedStep = step.label;
+        break;
+      }
+    } catch (error) {
+      if (step.optional === true) {
+        output += `$ ${step.label} (optional, failed: ${error instanceof Error ? error.message : String(error)})
+`;
+        continue;
+      }
+      ok = false;
+      failedStep = step.label;
+      output += `$ ${step.label} (failed: ${error instanceof Error ? error.message : String(error)})
+`;
+      break;
+    }
+  }
+  return { ran: true, ok, ...failedStep === void 0 ? {} : { failedStep }, output };
+}
+async function removeProviderLocked(deps, manifest, options) {
+  const warnings = [];
+  const errors = [];
+  const lifecycle = lifecycleOf(deps.dshHome, manifest.id);
+  const owned = ownsLocalInstall(lifecycle);
+  const settingsNs = routeSettingsNs(manifest);
+  const profile = configuredProfile(deps, manifest.id, settingsNs);
+  const credentialRefs = routeCredentialRefs(manifest, profile);
+  let routeRemoved = false;
+  if (deps.settings !== void 0 && profile !== void 0) {
+    try {
+      await applySettingsPlan(deps.settings, settingsNs, () => ({
+        ops: [{ op: "unset", path: ["providers", manifest.id] }],
+        result: void 0
+      }));
       routeRemoved = true;
     } catch (error) {
       errors.push(`route: ${error instanceof Error ? error.message : String(error)}`);
+      return {
+        routeRemoved: false,
+        credentialRemoved: false,
+        poolStateRemoved: false,
+        cacheEntryRemoved: false,
+        chainLinksRemoved: 0,
+        teardown: { ran: false, ok: true, output: "" },
+        warnings,
+        errors,
+        referencesRemoved: []
+      };
     }
   }
-  const warnings = [];
+  let teardown = { ran: false, ok: true, output: "" };
+  if (options.uninstall === true) {
+    if (!owned) {
+      if (manifest.removal.steps.length > 0) {
+        warnings.push(
+          `local teardown skipped for ${manifest.id}: no verified harness ownership receipt; the vendor service was not touched`
+        );
+      }
+    } else if (manifest.removal.steps.length > 0) {
+      teardown = await runTeardown(deps, manifest);
+      if (!teardown.ok) warnings.push(`local install kept: teardown did not complete, lifecycle record preserved for retry`);
+    }
+  }
+  const retainOwnedCredential = owned && options.uninstall !== true;
   let credentialRemoved = false;
-  const credentialRef = manifest.auth.apiKeyEnv;
-  if (deps.credentials !== void 0 && credentialRef !== void 0) {
-    if (credentialRefInUse(deps, manifest, credentialRef)) {
-      warnings.push(`credential ${credentialRef} kept: another configured route references it`);
-    } else {
+  if (retainOwnedCredential) {
+    if (credentialRefs.length > 0) {
+      warnings.push(
+        `credential ${credentialRefs.join(", ")} kept: ${manifest.id} is still an owned local install (remove with uninstall to run its teardown); the generated key is required to re-add it`
+      );
+    }
+  } else if (deps.credentials !== void 0) {
+    for (const ref of credentialRefs) {
+      if (credentialRefInUse(deps, manifest, ref)) {
+        warnings.push(`credential ${ref} kept: another configured route references it`);
+        continue;
+      }
       try {
-        await deps.credentials.unset(credentialRef);
+        await deps.credentials.unset(ref);
         credentialRemoved = true;
       } catch (error) {
-        errors.push(`credential: ${error instanceof Error ? error.message : String(error)}`);
+        errors.push(`credential ${ref}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   }
   const poolStateRemoved = removePoolState(deps, manifest.id);
   const cacheEntryRemoved = removeDiscoveredEntry(deps, manifest.id);
-  let chainLinksRemoved = 0;
+  const references = await removeRouteReferences(deps, manifest.id);
+  errors.push(...references.errors);
   try {
-    chainLinksRemoved = await removeChainReferences(deps, manifest.id);
+    if (lifecycle !== void 0) {
+      const uninstalled = owned && options.uninstall === true && teardown.ok;
+      const reused = lifecycle.mode === "reuse";
+      if (uninstalled || reused) {
+        clearProviderLifecycle(deps.dshHome, manifest.id);
+      } else if (owned && options.uninstall !== true) {
+        warnings.push(`local install left in place: ${manifest.id} is still owned by this harness; remove with uninstall to run its teardown`);
+      }
+    }
   } catch (error) {
-    errors.push(`chains: ${error instanceof Error ? error.message : String(error)}`);
+    errors.push(`state: ${error instanceof Error ? error.message : String(error)}`);
   }
-  deps.jobs?.evict(manifest.id);
-  return { routeRemoved, credentialRemoved, poolStateRemoved, cacheEntryRemoved, chainLinksRemoved, teardown, warnings, errors };
+  const evicted = deps.jobs?.evict(manifest.id) ?? true;
+  if (!evicted) warnings.push(`job snapshot for ${manifest.id} kept: a live owner still holds it`);
+  return {
+    routeRemoved,
+    credentialRemoved,
+    poolStateRemoved,
+    cacheEntryRemoved,
+    chainLinksRemoved: references.chainLinksRemoved,
+    teardown,
+    warnings,
+    errors,
+    referencesRemoved: references.rewritten
+  };
+}
+async function removeProvider(deps, manifest, options = {}) {
+  const jobs = deps.jobs;
+  if (jobs?.withProviderLock !== void 0) {
+    try {
+      return await jobs.withProviderLock(manifest.id, () => removeProviderLocked(deps, manifest, options));
+    } catch (error) {
+      const refusal = lockRefusal(error);
+      if (refusal === void 0) throw error;
+      return refusedRemoval(refusal.reason, refusal.lock);
+    }
+  }
+  const dir = join4(deps.dshHome, "cache", "heavy-jobs");
+  let lock;
+  try {
+    lock = acquireProviderLock(dir, manifest.id);
+  } catch (error) {
+    const refusal = lockRefusal(error);
+    if (refusal === void 0) throw error;
+    return refusedRemoval(refusal.reason, refusal.lock);
+  }
+  try {
+    const fallbackJobs = {
+      evict: deps.jobs?.evict ?? ((id) => {
+        try {
+          rmSync3(join4(dir, `${id}.json`), { force: true });
+          return true;
+        } catch {
+          return false;
+        }
+      }),
+      isRunning: deps.jobs?.isRunning ?? (() => false),
+      withProviderLock: async (_id, operation) => operation()
+    };
+    return await removeProviderLocked({ ...deps, jobs: fallbackJobs }, manifest, options);
+  } finally {
+    lock.release();
+  }
 }
 
 // src/remote.ts
@@ -1914,7 +3077,18 @@ var zh = {
   "meridian.removal.0": "\u505C\u6B62\u5E76\u7981\u7528\u7528\u6237\u670D\u52A1",
   "meridian.removal.1": "\u5220\u9664\u7528\u6237\u670D\u52A1\u6587\u4EF6",
   "meridian.removal.2": "\u5220\u9664 macOS \u4EE3\u7406\u65E5\u5FD7",
-  "meridian.removal.3": "\u4FDD\u7559\u5168\u5C40 npm \u5305\uFF08\u4E0D\u5378\u8F7D @rynfar/meridian \u4E0E @anthropic-ai/claude-code\uFF09"
+  "meridian.removal.3": "\u4FDD\u7559\u5168\u5C40 npm \u5305\uFF08\u4E0D\u5378\u8F7D @rynfar/meridian \u4E0E @anthropic-ai/claude-code\uFF09",
+  "summary.cliproxyapi": "\u53EF\u9009\u7684\u591A\u8D26\u53F7\u8BA2\u9605\u7F51\u5173\uFF1A\u5728\u7BA1\u7406\u9762\u677F\u4E2D\u914D\u7F6E\u7684 CLI \u8D26\u53F7\u524D\u63D0\u4F9B\u4E00\u4E2A OpenAI \u517C\u5BB9\u7AEF\u70B9\u3002",
+  "reuse.cliproxyapi.label": "\u4F7F\u7528\u68C0\u6D4B\u5230\u7684\u5B9E\u4F8B",
+  "reuse.cliproxyapi.note": "\u96F6\u5B89\u88C5\uFF1A\u4F7F\u7528\u672C\u673A\u5DF2\u5728\u8FD0\u884C\u7684 CLIProxyAPI \u5B9E\u4F8B\u3002\u5BA2\u6237\u7AEF API \u5BC6\u94A5\u53EF\u9009\uFF0C\u9762\u677F\u4E0D\u4F1A\u81EA\u52A8\u767B\u5F55\u3002",
+  "local.cliproxyapi.label": "\u672C\u5730\u5B89\u88C5\uFF08\u6821\u9A8C\u53D1\u5E03\u5305 + \u7528\u6237\u670D\u52A1\uFF09",
+  "local.cliproxyapi.linux.label": "\u672C\u5730\u5B89\u88C5\uFF08\u6821\u9A8C\u53D1\u5E03\u5305 + systemd \u7528\u6237\u5355\u5143\uFF09",
+  "local.cliproxyapi.darwin.label": "\u672C\u5730\u5B89\u88C5\uFF08\u6821\u9A8C\u53D1\u5E03\u5305 + launchd \u4EE3\u7406\uFF09",
+  "local.cliproxyapi.win32.label": "Windows \u4E0D\u652F\u6301",
+  "cliproxyapi.default.0": "\u5B89\u88C5 CLIProxyAPI\uFF08\u6821\u9A8C\u53D1\u5E03\u5305\u5E76\u914D\u7F6E\u7528\u6237\u670D\u52A1\uFF09",
+  "cliproxyapi.linux.0": "\u5B89\u88C5 CLIProxyAPI\uFF08\u6821\u9A8C\u53D1\u5E03\u5305\u5E76\u914D\u7F6E\u7528\u6237\u670D\u52A1\uFF09",
+  "cliproxyapi.darwin.0": "\u5B89\u88C5 CLIProxyAPI\uFF08\u6821\u9A8C\u53D1\u5E03\u5305\u5E76\u914D\u7F6E\u7528\u6237\u670D\u52A1\uFF09",
+  "cliproxyapi.removal.0": "\u79FB\u9664 CLIProxyAPI \u5B89\u88C5\uFF08\u505C\u6B62\u670D\u52A1\u5E76\u5220\u9664\u53D7\u56DE\u6267\u4FDD\u62A4\u7684\u6587\u4EF6\uFF09"
 };
 var en = {
   "summary.freellmapi": "Self-hosted free-tier gateway: ~30 providers behind one OpenAI-compatible endpoint.",
@@ -2009,7 +3183,18 @@ var en = {
   "meridian.removal.0": "Stop and disable the user service",
   "meridian.removal.1": "Remove the user service file",
   "meridian.removal.2": "Remove the macOS agent logs",
-  "meridian.removal.3": "Leave the global npm packages installed (@rynfar/meridian and @anthropic-ai/claude-code are not uninstalled)"
+  "meridian.removal.3": "Leave the global npm packages installed (@rynfar/meridian and @anthropic-ai/claude-code are not uninstalled)",
+  "summary.cliproxyapi": "Optional multi-account subscription gateway: one OpenAI-compatible endpoint in front of the CLI accounts you configure in its dashboard.",
+  "reuse.cliproxyapi.label": "Use a detected instance",
+  "reuse.cliproxyapi.note": "Zero install: uses a CLIProxyAPI instance already running on this device. The client API key is optional and the dashboard is not signed in automatically.",
+  "local.cliproxyapi.label": "Install locally (verified release + user service)",
+  "local.cliproxyapi.linux.label": "Install locally (verified release + systemd user unit)",
+  "local.cliproxyapi.darwin.label": "Install locally (verified release + launchd agent)",
+  "local.cliproxyapi.win32.label": "Not supported on Windows",
+  "cliproxyapi.default.0": "Install CLIProxyAPI (verified release and user service)",
+  "cliproxyapi.linux.0": "Install CLIProxyAPI (verified release and user service)",
+  "cliproxyapi.darwin.0": "Install CLIProxyAPI (verified release and user service)",
+  "cliproxyapi.removal.0": "Remove the CLIProxyAPI install (stop the service and remove verified files)"
 };
 function text(locale, key, fallback) {
   const value = (locale === "zh" ? zh : en)[key];
@@ -2099,6 +3284,27 @@ function optionalBaseURL(value) {
   }
   return normalized;
 }
+function duplicateRouteBlock(manifest) {
+  return {
+    ok: false,
+    blocked: {
+      reason: `provider "${manifest.id}" already has a configured route; remove it before adding it again`,
+      plannedWith: "remove the existing route first (Add never overwrites a configured profile)"
+    }
+  };
+}
+function stepNeedsProfileDir(step) {
+  return step.command.includes("{profileDir}") || step.command.includes("$DSH_HEAVY_PROFILE_DIR") || step.cwd?.includes("{profileDir}") === true;
+}
+function missingProfileDirBlock() {
+  return {
+    ok: false,
+    blocked: {
+      reason: 'The running profile root is unknown, so the local install command containing "{profileDir}" cannot be expanded. Start this profile through the dsh launcher (which supplies profileContext.dir), or set the enpoi-heavy-providers profileDir config explicitly, then retry.',
+      plannedWith: 'No install step was started; the command containing "{profileDir}" was never executed.'
+    }
+  };
+}
 var _remove_dec, _job_dec, _install_dec, _reuse_dec, _status_dec, _manifests_dec, _a, _init;
 var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_dec = [Remote], _status_dec = [Remote], _reuse_dec = [Remote], _install_dec = [Remote], _job_dec = [Remote], _remove_dec = [Remote], _a) {
   /**
@@ -2152,6 +3358,17 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
       platform: process.platform
     };
   }
+  /**
+   * Secretless installer paths for the status hint. Only a verified owned
+   * local install asks the host reader; the reader never returns a key.
+   */
+  async installPaths(id) {
+    try {
+      return await this.options.deps().readInstallPaths?.(id) ?? {};
+    } catch {
+      return {};
+    }
+  }
   async status(request) {
     const manifest = this.requireEnabledManifest(request?.id);
     const deps = this.options.deps();
@@ -2160,7 +3377,9 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     const profile = configuredProfile(deps, manifest.id, settingsNs);
     const configured = profile !== void 0;
     const configuredBase = typeof profile?.baseURL === "string" ? profile.baseURL : void 0;
-    const mode = configuredBase === void 0 ? void 0 : configuredBase === manifest.reuse.baseURL ? "reuse" : "local";
+    const lifecycle = lifecycleOf(deps.dshHome, manifest.id);
+    const ownedLocal = ownsLocalInstall(lifecycle);
+    const mode = configured ? lifecycle?.mode ?? "unknown" : ownedLocal ? "local" : void 0;
     const direct = manifest.delivery === "direct";
     const detection = direct ? void 0 : await detectInstance(deps, manifest, configuredBase);
     const runtime = await this.runtime();
@@ -2169,11 +3388,18 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
       process.platform,
       runtime,
       detection?.ok === true ? detection.port : void 0,
-      { home: deps.home, dshHome: deps.dshHome }
+      {
+        home: deps.home,
+        dshHome: deps.dshHome,
+        ...deps.profileDir === void 0 ? {} : { profileDir: deps.profileDir },
+        ...deps.installHelperPath === void 0 ? {} : { helperPath: deps.installHelperPath }
+      }
     );
     const localizedManifest = localizeHeavyManifest(manifest, locale);
     const localizedPreflight = localizeHeavyPreflight(preflight, localizedManifest, process.platform, locale);
-    const health = configuredBase !== void 0 ? await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl) : direct ? await probeHealth(manifest.reuse.health, deps.fetchImpl) : detection.health;
+    const configuredHealthUrl = configuredBase === void 0 ? void 0 : healthForBase(manifest, configuredBase).url;
+    const health = direct ? await probeHealth(manifest.reuse.health, deps.fetchImpl) : configuredBase !== void 0 ? detection !== void 0 && detection.url === configuredHealthUrl ? detection.health : await probeHealth(healthForBase(manifest, configuredBase), deps.fetchImpl) : detection.health;
+    const isReachable = reachable(health);
     const settingsReady = settingsNamespaceReady(deps, settingsNs);
     const job = visibleJobSnapshot(this.options.jobs.snapshot(manifest.id), configured);
     return {
@@ -2183,7 +3409,9 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
       ...settingsReady === void 0 ? {} : { settingsReady },
       configured,
       ...mode === void 0 ? {} : { mode },
-      health,
+      ...lifecycle === void 0 ? {} : { installedByHarness: lifecycle.installedByHarness },
+      ...ownedLocal ? await this.installPaths(manifest.id) : {},
+      health: { ...health, reachable: isReachable },
       platform: process.platform,
       runtime,
       preflight: localizedPreflight,
@@ -2204,10 +3432,14 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
         {}
       );
     }
+    const deps = this.options.deps();
+    if (configuredProfile(deps, manifest.id, routeSettingsNs(manifest)) !== void 0) {
+      this.options.log?.(`reuse ${manifest.id}: refused, route already configured`);
+      return duplicateRouteBlock(manifest);
+    }
     if (manifest.unsupported !== void 0) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } };
     }
-    const deps = this.options.deps();
     const pendingRestart = pendingRestartForManifest(deps, manifest);
     if (pendingRestart !== void 0) {
       this.options.log?.(`reuse ${manifest.id}: waiting for restart (${pendingRestart.ns} is not mounted)`);
@@ -2217,9 +3449,26 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     this.options.log?.(`detected ${manifest.id}: health=${outcome.health.ok ? "ok" : "down"} endpoint=${outcome.endpoint} models=${String(outcome.models.length)}`);
     return { ok: true, ...outcome };
   }
-  install(request) {
+  async install(request) {
+    if (request !== null && typeof request === "object" && Object.hasOwn(request, "receipt")) {
+      throw new RemoteError(
+        "gateway/bad-request",
+        "enpoiHeavy: install does not accept a client ownership receipt",
+        {}
+      );
+    }
     const manifest = this.requireEnabledManifest(request?.id);
-    const key = optionalKey(request?.key);
+    const submittedKey = optionalKey(request?.key);
+    const selfKeyingInstaller = manifest.id === "cliproxyapi";
+    const key = selfKeyingInstaller ? void 0 : submittedKey;
+    if (selfKeyingInstaller && submittedKey !== void 0 && submittedKey !== "") {
+      this.options.log?.(`install ${manifest.id}: ignoring the client-supplied key; the installer generates its own`);
+    }
+    const deps = this.options.deps();
+    if (configuredProfile(deps, manifest.id, routeSettingsNs(manifest)) !== void 0) {
+      this.options.log?.(`install ${manifest.id}: refused, route already configured`);
+      return duplicateRouteBlock(manifest);
+    }
     if (manifest.unsupported !== void 0) {
       return { ok: false, blocked: { reason: manifest.unsupported.reason, plannedWith: manifest.unsupported.plannedWith } };
     }
@@ -2228,7 +3477,34 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
       this.options.log?.(`install ${manifest.id}: refused on ${process.platform} (${platformBlocked})`);
       return { ok: false, blocked: { reason: platformBlocked, plannedWith: 'run the service manually and add it with "Use a detected instance"' } };
     }
-    const deps = this.options.deps();
+    const localSteps = resolveHeavyInstall(manifest.local, process.platform).steps;
+    if (deps.profileDir === void 0 && localSteps.some(stepNeedsProfileDir)) {
+      this.options.log?.(`install ${manifest.id}: refused, running profile root is unknown`);
+      return missingProfileDirBlock();
+    }
+    const runtime = await this.runtime();
+    const preflight = chooseLocalPath(manifest, process.platform, runtime, void 0, {
+      home: deps.home,
+      dshHome: deps.dshHome,
+      ...deps.profileDir === void 0 ? {} : { profileDir: deps.profileDir },
+      ...deps.installHelperPath === void 0 ? {} : { helperPath: deps.installHelperPath }
+    });
+    if (preflight.path === "unsupported") {
+      const reason = preflight.missing.length > 0 ? preflight.missing.join("; ") : preflight.label;
+      this.options.log?.(`install ${manifest.id}: runtime preflight refused (${reason})`);
+      return { ok: false, blocked: { reason, plannedWith: preflight.label } };
+    }
+    let helperRefusal;
+    try {
+      const helperPreflight = await deps.installPreflight?.(manifest.id);
+      if (helperPreflight !== void 0 && helperPreflight.ok === false) helperRefusal = helperPreflight.reason ?? "the installer port preflight refused the install";
+    } catch (error) {
+      helperRefusal = `the installer port preflight failed (${error instanceof Error ? error.message : String(error)})`;
+    }
+    if (helperRefusal !== void 0) {
+      this.options.log?.(`install ${manifest.id}: helper preflight refused (${helperRefusal})`);
+      return { ok: false, blocked: { reason: helperRefusal, plannedWith: "No install job was started and no port was claimed." } };
+    }
     const pendingRestart = pendingRestartForManifest(deps, manifest);
     if (pendingRestart !== void 0) {
       this.options.log?.(`install ${manifest.id}: waiting for restart (${pendingRestart.ns} is not mounted)`);
@@ -2237,15 +3513,76 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     const steps = localizeHeavySteps(
       manifest,
       process.platform,
-      resolveHeavyInstall(manifest.local, process.platform).steps,
+      withReleaseSource(localSteps, manifest.releaseSource),
       this.locale()
     );
     const job = this.options.jobs.start(manifest.id, "install", steps, async () => {
       const current = this.options.deps();
       const late = pendingRestartForManifest(current, manifest);
       if (late !== void 0) throw new Error(late.message);
-      const models = await discoverServiceModels(current, manifest, modeBaseURL(manifest, "local"), key);
-      await commitRoute(current, manifest, "local", models, key);
+      if (configuredProfile(current, manifest.id, routeSettingsNs(manifest)) !== void 0) {
+        throw new Error(
+          `provider "${manifest.id}" received a route while the install was running; the install refused to overwrite it (remove the existing route first)`
+        );
+      }
+      const receipt = await current.readInstallReceipt?.(manifest.id);
+      const requiresOwnedInstaller = manifest.id === "cliproxyapi";
+      if (requiresOwnedInstaller && receipt === void 0) {
+        throw new Error(
+          "CLIProxyAPI install finished without a verified ownership receipt. The service may still be installed; no route was written and existing credentials were not changed. Repair the receipt, binary/unit hashes, and bootstrap owner token, then retry the install or add the detected instance."
+        );
+      }
+      if (receipt !== void 0) registerInstallOwnership(current.dshHome, manifest.id, receipt);
+      const installedCredential = manifest.auth.kind === "unified" ? (await current.readInstallCredential?.(manifest.id))?.trim() : void 0;
+      const seededKey = installedCredential === void 0 || installedCredential === "" ? void 0 : installedCredential;
+      if (requiresOwnedInstaller && seededKey === void 0) {
+        throw new Error(
+          "CLIProxyAPI is installed but its generated inference key is unreadable. No route was written and existing credentials were not overwritten. Repair config.yaml access.api-keys or bootstrap.json, then retry the install or add the detected instance."
+        );
+      }
+      let seededStored = false;
+      if (seededKey !== void 0) {
+        try {
+          seededStored = await storeCredential(current, manifest, seededKey);
+        } catch (error) {
+          if (!requiresOwnedInstaller) throw error;
+          const cause = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `CLIProxyAPI is installed but its generated inference key could not be stored (${cause}). No route was written and existing credentials were not intentionally changed; repair the credentials service and retry the install or add the detected instance.`
+          );
+        }
+      }
+      if (requiresOwnedInstaller && !seededStored) {
+        throw new Error(
+          "CLIProxyAPI is installed but its generated inference key could not be stored. No route was written; repair the credentials service and retry the install or add the detected instance."
+        );
+      }
+      const effectiveKey = requiresOwnedInstaller ? seededKey : await resolveRouteKey(current, manifest, seededStored ? seededKey : key);
+      const localBaseURL = modeBaseURL(manifest, "local");
+      const catalog = await discoverServiceCatalog(current, manifest, localBaseURL, effectiveKey, {
+        resolveStoredCredential: false
+      });
+      if (catalogAuthorityOf(manifest) === "endpoint" && (catalog.state === "failed" || catalog.state === "unauthorized")) {
+        throw new Error(
+          `${manifest.label} is installed but its model listing was ${catalog.state}${catalog.error === void 0 ? "" : ` (${catalog.error})`}; no route was written. Check the service and its client key, then retry the install or add the detected instance.`
+        );
+      }
+      if (catalog.state === "empty") writeKnownEmptyDiscoveredEntry(current, manifest.id, localBaseURL);
+      const routeKey = seededStored ? void 0 : key;
+      const keyless = manifest.auth.kind === "unified" && effectiveKey !== void 0 ? false : void 0;
+      try {
+        await commitRoute(current, manifest, "local", catalog.models, routeKey, {
+          catalogState: catalog.state,
+          refuseExisting: true,
+          ...keyless === void 0 ? {} : { keyless }
+        });
+      } catch (error) {
+        const cause = error instanceof Error ? error.message : String(error);
+        if (receipt !== void 0 || seededKey !== void 0) {
+          throw new Error(`${cause} \u2014 ${manifest.label} is installed; retry the install or add the detected instance`);
+        }
+        throw error;
+      }
     });
     return { ok: true, job };
   }
@@ -2259,7 +3596,10 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
     if (request?.uninstall !== void 0 && typeof request.uninstall !== "boolean") {
       throw new RemoteError("gateway/bad-request", "enpoiHeavy: uninstall must be a boolean", {});
     }
-    const summary = await removeProvider(this.options.deps(), manifest, { uninstall: request?.uninstall === true });
+    const deps = this.options.deps();
+    const effective = overlayManifest(manifest, readServerOverlay(deps.dshHome)[manifest.id]);
+    const lockedDeps = deps.jobs === void 0 ? { ...deps, jobs: this.options.jobs } : deps;
+    const summary = await removeProvider(lockedDeps, effective, { uninstall: request?.uninstall === true });
     this.options.log?.(`remove ${manifest.id}: route=${String(summary.routeRemoved)} pool=${String(summary.poolStateRemoved)} cache=${String(summary.cacheEntryRemoved)} teardown=${String(summary.teardown.ok)}`);
     return { ok: summary.errors.length === 0, summary };
   }
@@ -2276,15 +3616,147 @@ __decoratorMetadata(_init, HeavyProvidersService);
 __publicField(HeavyProvidersService, "inject", []);
 
 // src/index.ts
+var INSTALL_HELPER_PATH = fileURLToPath(new URL("../scripts/cliproxyapi-install.mjs", import.meta.url));
+var cliProxyHelpers = /* @__PURE__ */ new Map();
 var name = "enpoi-heavy-providers";
 var inject = [];
-async function runStep(ctx, step, home, dshHome) {
+var CLIPROXYAPI_ID = "cliproxyapi";
+var Config = Schema.object({
+  profileDir: Schema.string()
+});
+function profileDirectory(ctx, config) {
+  const profile = ctx.get("profileContext");
+  if (typeof profile?.dir === "string" && profile.dir.trim() !== "") return profile.dir;
+  const configured = config.profileDir?.trim();
+  if (configured === void 0 || configured === "") return void 0;
+  if (!isAbsolute(configured)) {
+    throw new Error(
+      `enpoi-heavy-providers: config.profileDir must be an absolute path (got ${JSON.stringify(configured)}); a relative value cannot be resolved consistently for the running profile.`
+    );
+  }
+  return configured;
+}
+function needsProfileDir(step) {
+  return step.command.includes("{profileDir}") || step.command.includes("$DSH_HEAVY_PROFILE_DIR") || step.cwd?.includes("{profileDir}") === true;
+}
+async function loadCliProxyHelper() {
+  const script = INSTALL_HELPER_PATH;
+  const info = statSync(script);
+  const stamp = `${String(info.mtimeMs)}:${String(info.size)}:${String(info.ino)}`;
+  const cached = cliProxyHelpers.get(script);
+  if (cached !== void 0 && cached.stamp === stamp) return await cached.promise;
+  const pending = import(`${pathToFileURL(script).href}?stamp=${encodeURIComponent(stamp)}`);
+  cliProxyHelpers.set(script, { stamp, promise: pending });
+  try {
+    return await pending;
+  } catch (error) {
+    const current = cliProxyHelpers.get(script);
+    if (current?.stamp === stamp) cliProxyHelpers.delete(script);
+    throw error;
+  }
+}
+function readOwnedRecord(path) {
+  try {
+    const value = JSON.parse(readFileSync5(path, "utf8"));
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? value : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function ownerTokenDigest(token) {
+  return createHash2("sha256").update(token).digest("hex");
+}
+function installStatusRejectsOwnership(status) {
+  return status.portMismatch === true || status.credentialsPresent === false;
+}
+async function cliproxyapiReceipt(dshHome) {
+  try {
+    const helper = await loadCliProxyHelper();
+    const status = await helper.statusCliProxyApi({ dshHome });
+    if (status.installed !== true || status.binaryMatches !== true || status.unitMatches !== true) return void 0;
+    if (installStatusRejectsOwnership(status)) return void 0;
+    if (status.installId === void 0 || status.installId === "") return void 0;
+    const layout = helper.resolveCliProxyLayout({ dshHome });
+    const receipt = readOwnedRecord(layout.receiptPath);
+    const bootstrap = readOwnedRecord(layout.bootstrapPath);
+    if (receipt === void 0 || bootstrap === void 0) return void 0;
+    if (receipt.version !== helper.RECEIPT_VERSION || bootstrap.version !== helper.RECEIPT_VERSION) return void 0;
+    if (receipt.installId !== status.installId || bootstrap.installId !== receipt.installId) return void 0;
+    const expectedPaths = {
+      root: layout.root,
+      binaryPath: layout.binaryPath,
+      configPath: layout.configPath,
+      authDir: layout.authDir,
+      bootstrapPath: layout.bootstrapPath,
+      unitPath: layout.unitPath,
+      serviceLabel: layout.serviceLabel,
+      serviceKind: layout.serviceKind
+    };
+    for (const [field, expected] of Object.entries(expectedPaths)) {
+      if (receipt[field] !== expected) return void 0;
+    }
+    const ownerToken = bootstrap.ownerToken;
+    const ownerTokenSha256 = receipt.ownerTokenSha256;
+    if (typeof ownerToken !== "string" || !/^[a-f0-9]{64}$/u.test(ownerToken)) return void 0;
+    if (typeof ownerTokenSha256 !== "string" || ownerTokenDigest(ownerToken) !== ownerTokenSha256) return void 0;
+    return status.installId;
+  } catch {
+    return void 0;
+  }
+}
+async function cliproxyapiCredential(dshHome) {
+  try {
+    const helper = await loadCliProxyHelper();
+    return await helper.readOwnedInferenceCredential(dshHome);
+  } catch {
+    return void 0;
+  }
+}
+async function cliproxyapiInstallPaths(dshHome) {
+  try {
+    const helper = await loadCliProxyHelper();
+    const layout = helper.resolveCliProxyLayout({ dshHome });
+    return { bootstrapPath: layout.bootstrapPath, managementKeyPath: layout.bootstrapPath };
+  } catch {
+    return void 0;
+  }
+}
+async function cliproxyapiInstallPreflight(dshHome) {
+  try {
+    const helper = await loadCliProxyHelper();
+    const candidate = helper.preflightCliProxyApi;
+    if (typeof candidate !== "function") return void 0;
+    const result = await candidate({ dshHome });
+    if (result === null || typeof result !== "object") return { ok: true };
+    const record = result;
+    if (record.ok !== false) return { ok: true };
+    const reason = typeof record.reason === "string" && record.reason !== "" ? record.reason : typeof record.error?.message === "string" && record.error.message !== "" ? record.error.message : "the CLIProxyAPI installer port preflight refused the install";
+    return { ok: false, reason };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+  }
+}
+async function runStep(ctx, step, home, dshHome, profileDir) {
+  if (profileDir === void 0 && needsProfileDir(step)) {
+    throw new Error(
+      `Cannot run heavy-provider step "${step.label}": the running profile root is unknown. Start this profile through the dsh launcher so it supplies profileContext.dir, or set the enpoi-heavy-providers profileDir config explicitly; the command containing "{profileDir}" was not executed.`
+    );
+  }
   const subprocess = ctx.get("subprocess");
   if (subprocess === void 0) throw new Error("subprocess seam absent \u2014 cannot run install steps");
   try {
     const handle = subprocess.spawn({
-      argv: ["/bin/bash", "-lc", substitute(step.command, home, dshHome)],
-      cwd: step.cwd === void 0 ? home : substitute(step.cwd, home, dshHome),
+      argv: ["/bin/bash", "-lc", substitute(step.command, home, dshHome, profileDir)],
+      cwd: step.cwd === void 0 ? home : substitute(step.cwd, home, dshHome, profileDir),
+      // Host paths travel in the environment, never in the command text:
+      // quoting a path is not enough when it can contain `$`, a backtick, or
+      // a quote. Steps reference these as "$DSH_HEAVY_*".
+      env: {
+        [HEAVY_ENV.home]: home,
+        [HEAVY_ENV.dshHome]: dshHome,
+        [HEAVY_ENV.profileDir]: profileDir ?? "",
+        [HEAVY_ENV.helper]: INSTALL_HELPER_PATH
+      },
       stdio: {
         stdin: "ignore",
         stdout: { maxBytes: 65536 },
@@ -2302,17 +3774,19 @@ async function runStep(ctx, step, home, dshHome) {
     );
   }
 }
-function apply(ctx) {
+function apply(ctx, config = {}) {
   const logger = ctx.logger("enpoi-heavy-providers");
-  const home = process.env.HOME ?? homedir();
-  const dshHome = process.env.DSH_HOME !== void 0 && process.env.DSH_HOME !== "" ? process.env.DSH_HOME : join3(home, ".dsh");
+  const home = homedir();
+  const profile = ctx.get("profileContext");
+  const dshHome = typeof profile?.home === "string" && profile.home !== "" ? profile.home : join5(home, ".dsh");
+  const profileDir = profileDirectory(ctx, config);
   const problems = manifestProblems();
   if (problems.length > 0) {
     for (const problem of problems) logger.warn(`[enpoi-heavy-providers] ${problem}`);
   }
   const jobs = new HeavyJobManager({
-    dir: join3(dshHome, "cache", "heavy-jobs"),
-    run: (step) => runStep(ctx, step, home, dshHome)
+    dir: join5(dshHome, "cache", "heavy-jobs"),
+    run: (step) => runStep(ctx, step, home, dshHome, profileDir)
   });
   ctx.on("webserver/index-inject", (table) => {
     const row = overlayInjectionRow(dshHome);
@@ -2326,15 +3800,26 @@ function apply(ctx) {
       credentials: ctx.get("credentials"),
       llm: ctx.get("llm"),
       jobs,
+      profileDir,
+      // Only the local CLIProxyAPI install owns a receipt and a seeded key;
+      // every other provider (and every detected instance) stays untrusted.
+      installHelperPath: INSTALL_HELPER_PATH,
+      readInstallReceipt: async (id) => id === CLIPROXYAPI_ID ? cliproxyapiReceipt(dshHome) : void 0,
+      readInstallCredential: async (id) => id === CLIPROXYAPI_ID ? cliproxyapiCredential(dshHome) : void 0,
+      readInstallPaths: async (id) => id === CLIPROXYAPI_ID ? cliproxyapiInstallPaths(dshHome) : void 0,
+      installPreflight: async (id) => id === CLIPROXYAPI_ID ? cliproxyapiInstallPreflight(dshHome) : void 0,
       fetchImpl: globalThis.fetch,
-      runStep: (step) => runStep(ctx, step, home, dshHome)
+      runStep: (step) => runStep(ctx, step, home, dshHome, profileDir)
     }),
     jobs,
     log: (line) => logger.info(`[enpoi-heavy-providers] ${line}`)
   });
 }
 export {
+  Config,
+  INSTALL_HELPER_PATH,
   apply,
   inject,
+  installStatusRejectsOwnership,
   name
 };
