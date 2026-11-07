@@ -1,8 +1,18 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-10-31T18:14:06.556Z",
+  "generatedAt": "2026-11-07T23:23:47.191Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.117",
+      "commit": "5128a87",
+      "releasedAt": "2026-11-07T22:58:53.000Z",
+      "notes": [
+        "fix(client): avoid sibling shared chunks in ui-brand-enpoi by keeping eager bodies in entry",
+        "fix(build): ensure profile plugins find esbuild in release workflow and record bundle fingerprints",
+        "feat(session): accept Session format V5 with native media policy descriptor and identity body migration"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.114",
       "commit": "2fb2cf4",
@@ -392,14 +402,6 @@
       "releasedAt": "2026-10-12T13:57:02.000Z",
       "notes": [
         "perf+ux(update): rename-based stage flatten; announce retention prunes and commit resolution"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.71",
-      "commit": "d9311e4",
-      "releasedAt": "2026-10-12T10:52:11.000Z",
-      "notes": [
-        "fix(health): context-robust service probe; service-only failures never restore files"
       ]
     }
   ]
