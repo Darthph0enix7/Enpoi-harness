@@ -106,4 +106,37 @@ describe('unary RPC deadline', () => {
     await expect(second).resolves.toEqual({ ok: true, value: 42 })
     expect(send).toHaveBeenCalledTimes(2)
   })
+
+  it('preserves native branded receiver when reading response properties', async () => {
+    const { createWebConnectionRpc } = await import('../src/client/rpc.ts')
+    let brandChecked = false
+    const send = vi.fn(async (_input: string | URL, init: RequestInit): Promise<Response> => {
+      const request = JSON.parse(init.body as string) as { rpcId: string }
+      const raw = new Response(JSON.stringify({
+        type: 'server-response',
+        rpcId: request.rpcId,
+        result: { ok: true, value: 'test' },
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+
+      Object.defineProperty(raw, 'headers', {
+        get() {
+          if (this !== raw) throw new TypeError('Illegal invocation')
+          brandChecked = true
+          return new Headers({ 'content-type': 'application/json' })
+        },
+      })
+      Object.defineProperty(raw, 'status', {
+        get() {
+          if (this !== raw) throw new TypeError('Illegal invocation')
+          return 200
+        },
+      })
+      return raw
+    })
+
+    const rpc = createWebConnectionRpc(send, undefined, 1000)
+    const res = await rpc.call('/api', 'probe/call', { args: {} })
+    expect(res).toEqual({ ok: true, value: 'test' })
+    expect(brandChecked).toBe(true)
+  })
 })

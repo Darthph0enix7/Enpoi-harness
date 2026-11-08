@@ -173,6 +173,7 @@ async function withDeadline(
     if (signal.aborted) onAbort()
     else signal.addEventListener('abort', onAbort, { once: true })
   })
+  aborted.catch(() => {})
   let cleanedUp = false
   const cleanup = (): void => {
     if (cleanedUp) return
@@ -189,13 +190,13 @@ async function withDeadline(
     const wrap = <T>(promise: Promise<T>): Promise<T> =>
       Promise.race([promise, aborted]).finally(cleanup)
     return new Proxy(response, {
-      get(target, prop, receiver) {
+      get(target, prop) {
         if (prop === 'json') return () => wrap(target.json())
         if (prop === 'text') return () => wrap(target.text())
         if (prop === 'formData') return () => wrap(target.formData())
         if (prop === 'blob') return () => wrap(target.blob())
         if (prop === 'arrayBuffer') return () => wrap(target.arrayBuffer())
-        const val: unknown = Reflect.get(target, prop, receiver)
+        const val: unknown = Reflect.get(target, prop, target)
         if (typeof val === 'function') {
           return (val as (...args: unknown[]) => unknown).bind(target)
         }
