@@ -14,10 +14,10 @@
  * @module dsh-enpoi-heavy-providers
  */
 
-import { createHash } from 'node:crypto'
-import { readFileSync, statSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -210,6 +210,74 @@ async function cliproxyapiReceipt(dshHome: string): Promise<string | undefined> 
   }
 }
 
+function providerReceiptDir(dshHome: string, id: string): string {
+  return join(dshHome, 'providers', id)
+}
+
+function providerReceiptPath(dshHome: string, id: string): string {
+  return join(providerReceiptDir(dshHome, id), 'receipt.json')
+}
+
+/**
+ * Read the verified ownership proof for any heavy provider installed locally.
+ * CLIProxyAPI uses its cryptographic receipt verified by its helper; other
+ * heavy providers check the receipt recorded at the time their install steps completed.
+ */
+async function providerInstallReceipt(dshHome: string, id: string): Promise<string | undefined> {
+  if (id === CLIPROXYAPI_ID) return cliproxyapiReceipt(dshHome)
+  try {
+    const file = providerReceiptPath(dshHome, id)
+    if (!existsSync(file)) return undefined
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
+    if (raw && raw.version === 1 && raw.id === id && typeof raw.receipt === 'string' && raw.receipt.length > 0) {
+      return raw.receipt
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
+/**
+ * Record a verified install receipt when a local install job's steps complete.
+ * Used for providers that don't have a standalone helper script writing receipt.json.
+ */
+async function issueHostInstallReceipt(dshHome: string, id: string): Promise<string | undefined> {
+  if (id === CLIPROXYAPI_ID) return cliproxyapiReceipt(dshHome)
+  try {
+    const dir = providerReceiptDir(dshHome, id)
+    mkdirSync(dir, { recursive: true })
+    const file = providerReceiptPath(dshHome, id)
+    const installId = randomUUID()
+    const receipt = `dsh-owned:${id}:${installId}`
+    const record = {
+      version: 1,
+      id,
+      installId,
+      installedAt: Date.now(),
+      platform: process.platform,
+      receipt,
+    }
+    const tmp = `${file}.tmp-${String(process.pid)}-${randomUUID()}`
+    writeFileSync(tmp, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 })
+    renameSync(tmp, file)
+    return receipt
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Clean up a provider receipt file on teardown.
+ */
+async function clearHostInstallReceipt(dshHome: string, id: string): Promise<void> {
+  if (id !== CLIPROXYAPI_ID) {
+    try {
+      rmSync(providerReceiptPath(dshHome, id), { force: true })
+    } catch {}
+  }
+}
+
 /**
  * Read the installer-seeded client credential after a successful install. The
  * helper verifies the receipt and private owner token before returning it.
@@ -291,10 +359,12 @@ async function runStep(ctx: Context, step: HeavyStep, home: string, dshHome: str
   }
   const subprocess = ctx.get('subprocess') as SubprocessRuntime | undefined
   if (subprocess === undefined) throw new Error('subprocess seam absent — cannot run install steps')
+  const targetCwd = step.cwd === undefined ? home : substitute(step.cwd, home, dshHome, profileDir)
+  const actualCwd = existsSync(targetCwd) ? targetCwd : home
   try {
     const handle = subprocess.spawn({
       argv: ['/bin/bash', '-lc', substitute(step.command, home, dshHome, profileDir)],
-      cwd: step.cwd === undefined ? home : substitute(step.cwd, home, dshHome, profileDir),
+      cwd: actualCwd,
       // Host paths travel in the environment, never in the command text:
       // quoting a path is not enough when it can contain `$`, a backtick, or
       // a quote. Steps reference these as "$DSH_HEAVY_*".
@@ -369,10 +439,12 @@ export function apply(ctx: Context, config: Config = {}): void {
       llm: ctx.get('llm') as ModelDiscoverySeam | undefined,
       jobs,
       profileDir,
-      // Only the local CLIProxyAPI install owns a receipt and a seeded key;
-      // every other provider (and every detected instance) stays untrusted.
+      // Host installer ownership readers and issuers: every local install
+      // completed by the harness acquires a verified receipt and is tracked.
       installHelperPath: INSTALL_HELPER_PATH,
-      readInstallReceipt: async id => id === CLIPROXYAPI_ID ? cliproxyapiReceipt(dshHome) : undefined,
+      readInstallReceipt: async id => providerInstallReceipt(dshHome, id),
+      issueInstallReceipt: async id => issueHostInstallReceipt(dshHome, id),
+      clearInstallReceipt: async id => clearHostInstallReceipt(dshHome, id),
       readInstallCredential: async id => id === CLIPROXYAPI_ID ? cliproxyapiCredential(dshHome) : undefined,
       readInstallPaths: async id => id === CLIPROXYAPI_ID ? cliproxyapiInstallPaths(dshHome) : undefined,
       installPreflight: async id => id === CLIPROXYAPI_ID ? cliproxyapiInstallPreflight(dshHome) : undefined,

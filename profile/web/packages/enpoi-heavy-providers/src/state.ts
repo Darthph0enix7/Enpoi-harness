@@ -32,6 +32,9 @@ export const HEAVY_LIFECYCLE_VERSION = 1
 /** How the current provider entry was created. */
 export type HeavyLifecycleMode = 'reuse' | 'local'
 
+/** How the instance was introduced to the harness. */
+export type HeavySetupKind = 'harness-install' | 'detected-instance' | 'custom-instance'
+
 /** One provider's durable lifecycle facts. */
 export interface HeavyLifecycleEntry {
   /** `reuse` for a detected instance, `local` for an install this harness owns. */
@@ -47,6 +50,13 @@ export interface HeavyLifecycleEntry {
    * harness. Bounded text, never a credential or secret.
    */
   receipt?: string
+  /**
+   * Specific setup provenance: whether the harness installed it locally,
+   * detected a pre-existing local listener, or the operator typed a custom endpoint.
+   */
+  setupKind?: HeavySetupKind
+  /** The configured endpoint / baseURL at the time of setup. */
+  endpoint?: string
   /** Unix epoch milliseconds of the last lifecycle commit. */
   updatedAt: number
 }
@@ -111,10 +121,19 @@ function readEntry(raw: unknown): HeavyLifecycleEntry | undefined {
   if (mode === 'local' && (raw.installedByHarness !== true || receipt === undefined)) return undefined
   if (mode === 'reuse' && raw.installedByHarness !== false) return undefined
   if (typeof raw.updatedAt !== 'number' || !Number.isFinite(raw.updatedAt) || raw.updatedAt < 0) return undefined
+  const setupKind = raw.setupKind
+  const validSetupKind = setupKind === 'harness-install' || setupKind === 'detected-instance' || setupKind === 'custom-instance'
+    ? setupKind
+    : undefined
+  const endpoint = typeof raw.endpoint === 'string' && raw.endpoint.length > 0 && raw.endpoint.length <= 2048
+    ? raw.endpoint
+    : undefined
   return {
     mode,
     installedByHarness: raw.installedByHarness,
     ...receipt === undefined ? {} : { receipt },
+    ...validSetupKind === undefined ? {} : { setupKind: validSetupKind },
+    ...endpoint === undefined ? {} : { endpoint },
     updatedAt: raw.updatedAt,
   }
 }
@@ -260,9 +279,19 @@ export function writeProviderLifecycle(
  * instance belongs to the operator, not this harness.
  * @param dshHome - the DSH home directory.
  * @param id - provider id.
+ * @param options - optional setup provenance and configured endpoint.
  */
-export function recordReuseLifecycle(dshHome: string, id: string): void {
-  writeProviderLifecycle(dshHome, id, { mode: 'reuse', installedByHarness: false })
+export function recordReuseLifecycle(
+  dshHome: string,
+  id: string,
+  options?: { setupKind?: 'detected-instance' | 'custom-instance'; endpoint?: string },
+): void {
+  writeProviderLifecycle(dshHome, id, {
+    mode: 'reuse',
+    installedByHarness: false,
+    ...options?.setupKind ? { setupKind: options.setupKind } : {},
+    ...options?.endpoint ? { endpoint: options.endpoint } : {},
+  })
 }
 
 /**
@@ -273,12 +302,24 @@ export function recordReuseLifecycle(dshHome: string, id: string): void {
  * @param dshHome - the DSH home directory.
  * @param id - provider id.
  * @param receipt - bounded opaque ownership receipt returned by the installer.
+ * @param options - optional setup provenance and configured endpoint.
  */
-export function registerInstallOwnership(dshHome: string, id: string, receipt: string): void {
+export function registerInstallOwnership(
+  dshHome: string,
+  id: string,
+  receipt: string,
+  options?: { setupKind?: 'harness-install'; endpoint?: string },
+): void {
   const trimmed = receipt.trim()
   if (trimmed === '') throw new Error('heavy-provider ownership receipt is empty')
   if (trimmed.length > MAX_RECEIPT_CHARS) throw new Error('heavy-provider ownership receipt is too long')
-  writeProviderLifecycle(dshHome, id, { mode: 'local', installedByHarness: true, receipt: trimmed })
+  writeProviderLifecycle(dshHome, id, {
+    mode: 'local',
+    installedByHarness: true,
+    receipt: trimmed,
+    setupKind: options?.setupKind ?? 'harness-install',
+    ...options?.endpoint ? { endpoint: options.endpoint } : {},
+  })
 }
 
 /**

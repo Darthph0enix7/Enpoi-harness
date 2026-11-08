@@ -126,6 +126,14 @@ export interface HeavyDeps {
    */
   readInstallReceipt?: ((id: string) => Promise<string | undefined> | string | undefined) | undefined
   /**
+   * Trusted host receipt creator or issuer when a local install succeeds.
+   */
+  issueInstallReceipt?: ((id: string) => Promise<string | undefined> | string | undefined) | undefined
+  /**
+   * Clear an install receipt file on disk when a local install is uninstalled.
+   */
+  clearInstallReceipt?: ((id: string) => Promise<void> | void) | undefined
+  /**
    * Trusted host installer credential reader. Called only after every install
    * step succeeded, for a local install whose service seeds its own client
    * credential. The value is stored through the credentials seam before model
@@ -1841,10 +1849,19 @@ export async function useDetectedInstance(
   })
   // The route is the durable outcome; the lifecycle record is committed only
   // after it lands. A detected instance of a harness-owned local install keeps
-  // its local ownership record: overwriting it with `reuse` would erase the
-  // only proof that an uninstall is still available.
+  // its local ownership record only when reconnecting to the same loopback
+  // endpoint. A custom typed URL or external endpoint is an external instance
+  // and must always be recorded as reuse.
   const existingLifecycle = lifecycleOf(deps.dshHome, manifest.id)
-  if (!ownsLocalInstall(existingLifecycle)) recordReuseLifecycle(deps.dshHome, manifest.id)
+  const isReconnectingToLocalInstall = options.baseURL === undefined
+    && endpoint === manifest.local.baseURL
+    && ownsLocalInstall(existingLifecycle)
+  if (!isReconnectingToLocalInstall) {
+    recordReuseLifecycle(deps.dshHome, manifest.id, {
+      setupKind: options.baseURL !== undefined ? 'custom-instance' : 'detected-instance',
+      endpoint,
+    })
+  }
   const customPort = typedOrigin === undefined ? undefined : urlPort(typedOrigin)
   return {
     route,
@@ -2465,6 +2482,9 @@ async function removeProviderLocked(
       const uninstalled = owned && options.uninstall === true && teardown.ok
       const reused = lifecycle.mode === 'reuse'
       if (uninstalled || reused) {
+        if (uninstalled) {
+          await deps.clearInstallReceipt?.(manifest.id)
+        }
         clearProviderLifecycle(deps.dshHome, manifest.id)
       } else if (owned && options.uninstall !== true) {
         warnings.push(`local install left in place: ${manifest.id} is still owned by this harness; remove with uninstall to run its teardown`)

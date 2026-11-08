@@ -127,7 +127,7 @@ export function HeavyProviderCard({ providerId, t, modelIds = [], onAutoPopulate
             {health?.status !== undefined && !isAuth ? ` · ${String(health.status)}` : ''}
           </span>
           <span className={styles['heavyHealthBadge']}>
-            {t('heavyModeInUse')}: {status?.mode === 'local' ? t('heavyModeLocal') : status?.mode === 'reuse' ? t('heavyModeReuse') : status?.mode === 'unknown' ? t('heavyModeUnknown') : '—'}
+            {t('heavyModeInUse')}: {status?.setupKind === 'custom-instance' ? t('heavyModeCustom') : status?.mode === 'local' ? t('heavyModeLocal') : status?.mode === 'reuse' ? t('heavyModeReuse') : status?.mode === 'unknown' ? t('heavyModeUnknown') : '—'}
           </span>
         </div>
         <div className={styles['poolHeaderActions']}>
@@ -142,7 +142,7 @@ export function HeavyProviderCard({ providerId, t, modelIds = [], onAutoPopulate
               {t('heavyDocs')} ↗
             </a>
           )}
-          <button type="button" className={styles['heavyLinkBtn']} aria-pressed={showDocs} onClick={() => setShowDocs(open => !open)}>
+          <button type="button" className={styles['heavyLinkBtn']} aria-pressed={showDocs} onClick={() => { setShowDocs(open => !open) }}>
             {showDocs ? t('heavyHideDocumentation') : t('heavyDocumentation')}
           </button>
           <button type="button" className={styles['heavyLinkBtn']} onClick={refresh} disabled={checking}>

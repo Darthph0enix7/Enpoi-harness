@@ -78,11 +78,33 @@ it('a reuse record stays reuse even when its route address equals a local defaul
   const { service } = serviceWith({
     route: { baseURL: 'http://127.0.0.1:3002/v1' },
     fetch,
-    lifecycle: dshHome => recordReuseLifecycle(dshHome, 'freellmapi'),
+    lifecycle: dshHome => recordReuseLifecycle(dshHome, 'freellmapi', {
+      setupKind: 'detected-instance',
+      endpoint: 'http://127.0.0.1:3002/v1',
+    }),
   })
   const value = await service.status({ id: 'freellmapi' })
   expect(value.mode).toBe('reuse')
   expect(value.installedByHarness).toBe(false)
+  expect(value.setupKind).toBe('detected-instance')
+  expect(value.endpoint).toBe('http://127.0.0.1:3002/v1')
+})
+
+it('status reports setupKind custom-instance for external instances', async () => {
+  const fetch: FetchLike = vi.fn(async () => ({ ok: true, status: 200, text: async () => '{}' }))
+  const { service } = serviceWith({
+    route: { baseURL: 'http://192.168.1.50:4000/v1' },
+    fetch,
+    lifecycle: dshHome => recordReuseLifecycle(dshHome, 'freellmapi', {
+      setupKind: 'custom-instance',
+      endpoint: 'http://192.168.1.50:4000/v1',
+    }),
+  })
+  const value = await service.status({ id: 'freellmapi' })
+  expect(value.mode).toBe('reuse')
+  expect(value.installedByHarness).toBe(false)
+  expect(value.setupKind).toBe('custom-instance')
+  expect(value.endpoint).toBe('http://192.168.1.50:4000/v1')
 })
 
 it('a legacy configured route is unknown, never inferred from the declared reuse address', async () => {

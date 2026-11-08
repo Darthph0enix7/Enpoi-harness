@@ -48,8 +48,8 @@ var __privateSet = (obj, member, value, setter) => (__accessCheck(obj, member, "
 var __privateMethod = (obj, member, method) => (__accessCheck(obj, member, "access private method"), method);
 
 // src/index.ts
-import { createHash as createHash2 } from "node:crypto";
-import { readFileSync as readFileSync5, statSync } from "node:fs";
+import { createHash as createHash2, randomUUID as randomUUID3 } from "node:crypto";
+import { existsSync as existsSync2, mkdirSync as mkdirSync5, readFileSync as readFileSync5, renameSync as renameSync4, rmSync as rmSync4, statSync, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join as join5 } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1650,10 +1650,15 @@ function readEntry(raw) {
   if (mode === "local" && (raw.installedByHarness !== true || receipt === void 0)) return void 0;
   if (mode === "reuse" && raw.installedByHarness !== false) return void 0;
   if (typeof raw.updatedAt !== "number" || !Number.isFinite(raw.updatedAt) || raw.updatedAt < 0) return void 0;
+  const setupKind = raw.setupKind;
+  const validSetupKind = setupKind === "harness-install" || setupKind === "detected-instance" || setupKind === "custom-instance" ? setupKind : void 0;
+  const endpoint = typeof raw.endpoint === "string" && raw.endpoint.length > 0 && raw.endpoint.length <= 2048 ? raw.endpoint : void 0;
   return {
     mode,
     installedByHarness: raw.installedByHarness,
     ...receipt === void 0 ? {} : { receipt },
+    ...validSetupKind === void 0 ? {} : { setupKind: validSetupKind },
+    ...endpoint === void 0 ? {} : { endpoint },
     updatedAt: raw.updatedAt
   };
 }
@@ -1712,14 +1717,25 @@ function writeProviderLifecycle(dshHome, id, entry, now = Date.now) {
     entry === null ? { version: HEAVY_LIFECYCLE_VERSION, id, cleared: true } : { version: HEAVY_LIFECYCLE_VERSION, id, ...entry, updatedAt: now() }
   );
 }
-function recordReuseLifecycle(dshHome, id) {
-  writeProviderLifecycle(dshHome, id, { mode: "reuse", installedByHarness: false });
+function recordReuseLifecycle(dshHome, id, options) {
+  writeProviderLifecycle(dshHome, id, {
+    mode: "reuse",
+    installedByHarness: false,
+    ...options?.setupKind ? { setupKind: options.setupKind } : {},
+    ...options?.endpoint ? { endpoint: options.endpoint } : {}
+  });
 }
-function registerInstallOwnership(dshHome, id, receipt) {
+function registerInstallOwnership(dshHome, id, receipt, options) {
   const trimmed = receipt.trim();
   if (trimmed === "") throw new Error("heavy-provider ownership receipt is empty");
   if (trimmed.length > MAX_RECEIPT_CHARS) throw new Error("heavy-provider ownership receipt is too long");
-  writeProviderLifecycle(dshHome, id, { mode: "local", installedByHarness: true, receipt: trimmed });
+  writeProviderLifecycle(dshHome, id, {
+    mode: "local",
+    installedByHarness: true,
+    receipt: trimmed,
+    setupKind: options?.setupKind ?? "harness-install",
+    ...options?.endpoint ? { endpoint: options.endpoint } : {}
+  });
 }
 function clearProviderLifecycle(dshHome, id) {
   writeProviderLifecycle(dshHome, id, null);
@@ -2502,7 +2518,13 @@ async function useDetectedInstance(deps, manifest, key, options = {}) {
     ...keyless === void 0 ? {} : { keyless }
   });
   const existingLifecycle = lifecycleOf(deps.dshHome, manifest.id);
-  if (!ownsLocalInstall(existingLifecycle)) recordReuseLifecycle(deps.dshHome, manifest.id);
+  const isReconnectingToLocalInstall = options.baseURL === void 0 && endpoint === manifest.local.baseURL && ownsLocalInstall(existingLifecycle);
+  if (!isReconnectingToLocalInstall) {
+    recordReuseLifecycle(deps.dshHome, manifest.id, {
+      setupKind: options.baseURL !== void 0 ? "custom-instance" : "detected-instance",
+      endpoint
+    });
+  }
   const customPort = typedOrigin === void 0 ? void 0 : urlPort(typedOrigin);
   return {
     route,
@@ -2902,6 +2924,9 @@ async function removeProviderLocked(deps, manifest, options) {
       const uninstalled = owned && options.uninstall === true && teardown.ok;
       const reused = lifecycle.mode === "reuse";
       if (uninstalled || reused) {
+        if (uninstalled) {
+          await deps.clearInstallReceipt?.(manifest.id);
+        }
         clearProviderLifecycle(deps.dshHome, manifest.id);
       } else if (owned && options.uninstall !== true) {
         warnings.push(`local install left in place: ${manifest.id} is still owned by this harness; remove with uninstall to run its teardown`);
@@ -3409,7 +3434,11 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
       ...settingsReady === void 0 ? {} : { settingsReady },
       configured,
       ...mode === void 0 ? {} : { mode },
-      ...lifecycle === void 0 ? {} : { installedByHarness: lifecycle.installedByHarness },
+      ...lifecycle === void 0 ? {} : {
+        installedByHarness: lifecycle.installedByHarness,
+        ...lifecycle.setupKind === void 0 ? {} : { setupKind: lifecycle.setupKind },
+        ...lifecycle.endpoint === void 0 && configuredBase === void 0 ? {} : { endpoint: lifecycle.endpoint ?? configuredBase }
+      },
       ...ownedLocal ? await this.installPaths(manifest.id) : {},
       health: { ...health, reachable: isReachable },
       platform: process.platform,
@@ -3525,14 +3554,23 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
           `provider "${manifest.id}" received a route while the install was running; the install refused to overwrite it (remove the existing route first)`
         );
       }
-      const receipt = await current.readInstallReceipt?.(manifest.id);
+      const localBaseURL = modeBaseURL(manifest, "local");
+      let receipt = await current.readInstallReceipt?.(manifest.id);
       const requiresOwnedInstaller = manifest.id === "cliproxyapi";
+      if (receipt === void 0 && !requiresOwnedInstaller) {
+        receipt = await current.issueInstallReceipt?.(manifest.id);
+      }
       if (requiresOwnedInstaller && receipt === void 0) {
         throw new Error(
           "CLIProxyAPI install finished without a verified ownership receipt. The service may still be installed; no route was written and existing credentials were not changed. Repair the receipt, binary/unit hashes, and bootstrap owner token, then retry the install or add the detected instance."
         );
       }
-      if (receipt !== void 0) registerInstallOwnership(current.dshHome, manifest.id, receipt);
+      if (receipt !== void 0) {
+        registerInstallOwnership(current.dshHome, manifest.id, receipt, {
+          setupKind: "harness-install",
+          endpoint: localBaseURL
+        });
+      }
       const installedCredential = manifest.auth.kind === "unified" ? (await current.readInstallCredential?.(manifest.id))?.trim() : void 0;
       const seededKey = installedCredential === void 0 || installedCredential === "" ? void 0 : installedCredential;
       if (requiresOwnedInstaller && seededKey === void 0) {
@@ -3558,7 +3596,6 @@ var HeavyProvidersService = class extends (_a = TypertRemoteService, _manifests_
         );
       }
       const effectiveKey = requiresOwnedInstaller ? seededKey : await resolveRouteKey(current, manifest, seededStored ? seededKey : key);
-      const localBaseURL = modeBaseURL(manifest, "local");
       const catalog = await discoverServiceCatalog(current, manifest, localBaseURL, effectiveKey, {
         resolveStoredCredential: false
       });
@@ -3704,6 +3741,58 @@ async function cliproxyapiReceipt(dshHome) {
     return void 0;
   }
 }
+function providerReceiptDir(dshHome, id) {
+  return join5(dshHome, "providers", id);
+}
+function providerReceiptPath(dshHome, id) {
+  return join5(providerReceiptDir(dshHome, id), "receipt.json");
+}
+async function providerInstallReceipt(dshHome, id) {
+  if (id === CLIPROXYAPI_ID) return cliproxyapiReceipt(dshHome);
+  try {
+    const file = providerReceiptPath(dshHome, id);
+    if (!existsSync2(file)) return void 0;
+    const raw = JSON.parse(readFileSync5(file, "utf8"));
+    if (raw && raw.version === 1 && raw.id === id && typeof raw.receipt === "string" && raw.receipt.length > 0) {
+      return raw.receipt;
+    }
+  } catch {
+    return void 0;
+  }
+  return void 0;
+}
+async function issueHostInstallReceipt(dshHome, id) {
+  if (id === CLIPROXYAPI_ID) return cliproxyapiReceipt(dshHome);
+  try {
+    const dir = providerReceiptDir(dshHome, id);
+    mkdirSync5(dir, { recursive: true });
+    const file = providerReceiptPath(dshHome, id);
+    const installId = randomUUID3();
+    const receipt = `dsh-owned:${id}:${installId}`;
+    const record = {
+      version: 1,
+      id,
+      installId,
+      installedAt: Date.now(),
+      platform: process.platform,
+      receipt
+    };
+    const tmp = `${file}.tmp-${String(process.pid)}-${randomUUID3()}`;
+    writeFileSync5(tmp, JSON.stringify(record, null, 2), { encoding: "utf8", mode: 384 });
+    renameSync4(tmp, file);
+    return receipt;
+  } catch {
+    return void 0;
+  }
+}
+async function clearHostInstallReceipt(dshHome, id) {
+  if (id !== CLIPROXYAPI_ID) {
+    try {
+      rmSync4(providerReceiptPath(dshHome, id), { force: true });
+    } catch {
+    }
+  }
+}
 async function cliproxyapiCredential(dshHome) {
   try {
     const helper = await loadCliProxyHelper();
@@ -3744,10 +3833,12 @@ async function runStep(ctx, step, home, dshHome, profileDir) {
   }
   const subprocess = ctx.get("subprocess");
   if (subprocess === void 0) throw new Error("subprocess seam absent \u2014 cannot run install steps");
+  const targetCwd = step.cwd === void 0 ? home : substitute(step.cwd, home, dshHome, profileDir);
+  const actualCwd = existsSync2(targetCwd) ? targetCwd : home;
   try {
     const handle = subprocess.spawn({
       argv: ["/bin/bash", "-lc", substitute(step.command, home, dshHome, profileDir)],
-      cwd: step.cwd === void 0 ? home : substitute(step.cwd, home, dshHome, profileDir),
+      cwd: actualCwd,
       // Host paths travel in the environment, never in the command text:
       // quoting a path is not enough when it can contain `$`, a backtick, or
       // a quote. Steps reference these as "$DSH_HEAVY_*".
@@ -3801,10 +3892,12 @@ function apply(ctx, config = {}) {
       llm: ctx.get("llm"),
       jobs,
       profileDir,
-      // Only the local CLIProxyAPI install owns a receipt and a seeded key;
-      // every other provider (and every detected instance) stays untrusted.
+      // Host installer ownership readers and issuers: every local install
+      // completed by the harness acquires a verified receipt and is tracked.
       installHelperPath: INSTALL_HELPER_PATH,
-      readInstallReceipt: async (id) => id === CLIPROXYAPI_ID ? cliproxyapiReceipt(dshHome) : void 0,
+      readInstallReceipt: async (id) => providerInstallReceipt(dshHome, id),
+      issueInstallReceipt: async (id) => issueHostInstallReceipt(dshHome, id),
+      clearInstallReceipt: async (id) => clearHostInstallReceipt(dshHome, id),
       readInstallCredential: async (id) => id === CLIPROXYAPI_ID ? cliproxyapiCredential(dshHome) : void 0,
       readInstallPaths: async (id) => id === CLIPROXYAPI_ID ? cliproxyapiInstallPaths(dshHome) : void 0,
       installPreflight: async (id) => id === CLIPROXYAPI_ID ? cliproxyapiInstallPreflight(dshHome) : void 0,

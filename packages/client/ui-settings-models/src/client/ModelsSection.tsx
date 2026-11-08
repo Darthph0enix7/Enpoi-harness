@@ -400,7 +400,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
         // A requested uninstall that never ran leaves the service and its
         // data installed: that is not success, so keep the dialog (and the
         // named warnings) up while the route-only removal still lands.
-        const teardownSkipped = heavyUninstall && teardown !== undefined && teardown.ran !== true
+        const teardownSkipped = heavyUninstall && teardown !== undefined && !teardown.ran
         if (teardownSkipped) {
           setDeleteError(t('heavyTeardownSkipped'))
           setDeleting(false)
@@ -786,7 +786,11 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
                         <span>{t('heavyAlsoUninstall')}</span>
                       </label>
                     )}
-                    {!heavyUninstall && (
+                    {heavyUninstall ? (
+                      <p className={styles['heavyModeNote']} data-removal-notice="owned-uninstall">
+                        {t('heavyOwnedUninstallNotice')}
+                      </p>
+                    ) : (
                       <p className={styles['heavyModeNote']} data-removal-notice="owned-route-only">
                         {t('heavyOwnedRouteOnlyNotice')}
                       </p>
@@ -794,7 +798,9 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
                   </>
                 ) : (
                   <p className={styles['heavyModeNote']} data-removal-notice="route-only">
-                    {t('heavyRouteOnlyRemovalNotice')}
+                    {deleteTargetStatus?.endpoint
+                      ? t('heavyRouteOnlyRemovalNoticeWithEndpoint', { endpoint: deleteTargetStatus.endpoint })
+                      : t('heavyRouteOnlyRemovalNotice')}
                   </p>
                 )
               )}

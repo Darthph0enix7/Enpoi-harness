@@ -856,3 +856,47 @@ it('commitRoute can refuse a route that appeared before the commit', async () =>
     .rejects.toThrow(/received a route/)
   expect(base.mutations).toEqual([])
 })
+
+it('useDetectedInstance flags custom-instance provenance and overwrites stale local install ownership for external URLs', async () => {
+  const { registerInstallOwnership, lifecycleOf } = await import('../src/state.js')
+  const fetch: FetchLike = vi.fn(async (url) => {
+    if (url.includes('/api/ping')) return { ok: true, status: 200, text: async () => '{"status":"ok"}' }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: 'auto' }] }) }
+  })
+  const { deps } = depsWith({ fetch })
+  const manifest = manifestById('freellmapi')!
+  // Seed a pre-existing local install ownership
+  registerInstallOwnership(deps.dshHome, 'freellmapi', 'stale-local-receipt')
+  expect(lifecycleOf(deps.dshHome, 'freellmapi')?.mode).toBe('local')
+
+  // Now connect to an external custom URL
+  const outcome = await useDetectedInstance(deps, manifest, undefined, { baseURL: 'http://192.168.1.50:4000' })
+  expect(outcome.endpoint).toBe('http://192.168.1.50:4000/v1')
+
+  const lifecycle = lifecycleOf(deps.dshHome, 'freellmapi')
+  expect(lifecycle).toMatchObject({
+    mode: 'reuse',
+    installedByHarness: false,
+    setupKind: 'custom-instance',
+    endpoint: 'http://192.168.1.50:4000/v1',
+  })
+})
+
+it('useDetectedInstance flags detected-instance provenance on loopback detection', async () => {
+  const { lifecycleOf } = await import('../src/state.js')
+  const fetch: FetchLike = vi.fn(async (url) => {
+    if (url.endsWith('/api/ping')) return { ok: true, status: 200, text: async () => '{"status":"ok"}' }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: 'auto' }] }) }
+  })
+  const { deps } = depsWith({ fetch })
+  const manifest = manifestById('freellmapi')!
+  await useDetectedInstance(deps, manifest)
+
+  const lifecycle = lifecycleOf(deps.dshHome, 'freellmapi')
+  expect(lifecycle).toMatchObject({
+    mode: 'reuse',
+    installedByHarness: false,
+    setupKind: 'detected-instance',
+    endpoint: 'http://127.0.0.1:3002/v1',
+  })
+})

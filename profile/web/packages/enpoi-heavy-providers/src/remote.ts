@@ -86,6 +86,10 @@ export interface StatusValue {
   mode?: 'reuse' | 'local' | 'unknown'
   /** Present only when the lifecycle record says this harness owns a local install. */
   installedByHarness?: boolean
+  /** Setup provenance: how this provider was introduced to the harness. */
+  setupKind?: 'harness-install' | 'detected-instance' | 'custom-instance'
+  /** The configured or detected endpoint address. */
+  endpoint?: string
   /**
    * The endpoint probe. `reachable` counts an authentication challenge (401 /
    * 403) as an answered service even though `ok` stays false.
@@ -375,7 +379,11 @@ export class HeavyProvidersService extends TypertRemoteService {
       ...settingsReady === undefined ? {} : { settingsReady },
       configured,
       ...mode === undefined ? {} : { mode },
-      ...lifecycle === undefined ? {} : { installedByHarness: lifecycle.installedByHarness },
+      ...lifecycle === undefined ? {} : {
+        installedByHarness: lifecycle.installedByHarness,
+        ...lifecycle.setupKind === undefined ? {} : { setupKind: lifecycle.setupKind },
+        ...lifecycle.endpoint === undefined && configuredBase === undefined ? {} : { endpoint: lifecycle.endpoint ?? configuredBase },
+      },
       ...ownedLocal ? await this.installPaths(manifest.id) : {},
       health: { ...health, reachable: isReachable },
       platform: process.platform,
@@ -550,11 +558,12 @@ export class HeavyProvidersService extends TypertRemoteService {
       // Ownership is read only from the trusted host installer after its steps
       // succeeded. A browser-supplied string never reaches this point. The
       // proof is an opaque receipt (never the installer's credential).
-      const receipt = await current.readInstallReceipt?.(manifest.id)
-      // CLIProxyAPI's helper seeds a client key, so its local install is only
-      // usable when both the receipt and that key are verified. Other heavy
-      // providers keep the generic optional-receipt behavior.
+      const localBaseURL = modeBaseURL(manifest, 'local')
+      let receipt = await current.readInstallReceipt?.(manifest.id)
       const requiresOwnedInstaller = manifest.id === 'cliproxyapi'
+      if (receipt === undefined && !requiresOwnedInstaller) {
+        receipt = await current.issueInstallReceipt?.(manifest.id)
+      }
       if (requiresOwnedInstaller && receipt === undefined) {
         throw new Error(
           'CLIProxyAPI install finished without a verified ownership receipt.'
@@ -563,7 +572,12 @@ export class HeavyProvidersService extends TypertRemoteService {
           + ' or add the detected instance.',
         )
       }
-      if (receipt !== undefined) registerInstallOwnership(current.dshHome, manifest.id, receipt)
+      if (receipt !== undefined) {
+        registerInstallOwnership(current.dshHome, manifest.id, receipt, {
+          setupKind: 'harness-install',
+          endpoint: localBaseURL,
+        })
+      }
       // A local installer may seed its own client credential. Read it through
       // the trusted host seam and store it BEFORE discovery and the route
       // commit: the seeded service accepts the same key discovery presents,
@@ -615,7 +629,6 @@ export class HeavyProvidersService extends TypertRemoteService {
       // address; a direct route's catalog is the bundled snapshot (the vendor
       // exposes no listing), so both resolve through the same seam. The
       // fallback model applies when discovery answers nothing.
-      const localBaseURL = modeBaseURL(manifest, 'local')
       const catalog = await discoverServiceCatalog(current, manifest, localBaseURL, effectiveKey, {
         resolveStoredCredential: false,
       })

@@ -228,6 +228,33 @@ it('a reused instance is never owned, so uninstall runs no vendor teardown', asy
   expect(lifecycleOf(deps.dshHome, 'antigravity')).toBeUndefined()
 })
 
+it('a custom external instance removal never runs teardown and drops only DSH state', async () => {
+  const { deps, stepped } = world('antigravity', {}, {
+    route: { baseURL: 'http://192.168.1.50:8082' },
+  })
+  recordReuseLifecycle(deps.dshHome, 'antigravity', {
+    setupKind: 'custom-instance',
+    endpoint: 'http://192.168.1.50:8082',
+  })
+  const summary = await removeProvider(deps, manifestById('antigravity')!, { uninstall: true })
+  expect(stepped).toEqual([])
+  expect(summary.teardown.ran).toBe(false)
+  expect(summary.routeRemoved).toBe(true)
+  expect(summary.warnings.join('\n')).toContain('no verified harness ownership receipt')
+  expect(lifecycleOf(deps.dshHome, 'antigravity')).toBeUndefined()
+})
+
+it('an owned uninstall invokes clearInstallReceipt on successful teardown', async () => {
+  const { deps } = world('freellmapi', {}, { lifecycle: 'local' })
+  const cleared: string[] = []
+  deps.clearInstallReceipt = async (id) => { cleared.push(id) }
+
+  const summary = await removeProvider(deps, manifestById('freellmapi')!, { uninstall: true })
+  expect(summary.teardown.ok).toBe(true)
+  expect(cleared).toEqual(['freellmapi'])
+  expect(lifecycleOf(deps.dshHome, 'freellmapi')).toBeUndefined()
+})
+
 it('commandcode removal drops DSH state with no local teardown and no keypool script', async () => {
   const { deps, mutations, credentialUnsets, stepped } = world('commandcode')
   const summary = await removeProvider(deps, manifestById('commandcode')!, { uninstall: true })

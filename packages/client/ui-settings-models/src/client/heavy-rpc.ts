@@ -68,6 +68,10 @@ export interface HeavyStatusView {
    * reused and teardown steps must never be offered or executed.
    */
   installedByHarness?: boolean
+  /** Setup provenance: how this provider was introduced to the harness. */
+  setupKind?: 'harness-install' | 'detected-instance' | 'custom-instance'
+  /** The configured or detected endpoint address. */
+  endpoint?: string
   health: HeavyHealthView
   /** The host platform installs execute on (`process.platform`). */
   platform?: string
