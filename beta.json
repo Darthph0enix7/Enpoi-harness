@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-11-08T13:42:33.030Z",
+  "generatedAt": "2026-11-08T17:24:47.353Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.119",
+      "commit": "0cd2853",
+      "releasedAt": "2026-11-08T17:03:05.000Z",
+      "notes": [
+        "feat(heavy-providers): track setup provenance and enforce safe conditional uninstallation"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.118",
       "commit": "064b3b8",
@@ -394,14 +402,6 @@
       "releasedAt": "2026-10-12T17:17:28.000Z",
       "notes": [
         "feat(providers): opencode-go routing-affinity delivery + retro-review fixes + heavy-provider hygiene"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.73",
-      "commit": "626afc2",
-      "releasedAt": "2026-10-12T14:55:58.000Z",
-      "notes": [
-        "chore(consistency): managed-install CLI home model, release trim, unify leftovers"
       ]
     }
   ]
