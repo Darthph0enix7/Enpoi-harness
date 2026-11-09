@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-11-08T17:24:47.318Z",
+  "generatedAt": "2026-11-09T13:00:10.560Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.120",
+      "commit": "5d7fe7e",
+      "releasedAt": "2026-11-09T12:36:44.000Z",
+      "notes": [
+        "fix(harness): performance and robustness wave across gateway, compaction, llm, and ui"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.119",
       "commit": "0cd2853",
@@ -394,14 +402,6 @@
       "releasedAt": "2026-10-12T19:10:24.000Z",
       "notes": [
         "chore(maintenance): docs truth pass, i18n reconciliation, orphan/dead-code cleanup, test:gui triage"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.74",
-      "commit": "d694efa",
-      "releasedAt": "2026-10-12T17:17:28.000Z",
-      "notes": [
-        "feat(providers): opencode-go routing-affinity delivery + retro-review fixes + heavy-provider hygiene"
       ]
     }
   ]
