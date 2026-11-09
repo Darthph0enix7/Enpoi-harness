@@ -475,7 +475,7 @@ describe('ModelSelect catalog capability display', () => {
     expect(screen.getByText('未验证')).toBeTruthy()
   })
 
-  it('marks advertised-only modalities as declared but not sent, and never as supported', () => {
+  it('omits noisy advertised modality tags in the picker dropdown', () => {
     const declared = {
       id: 'declared',
       name: 'Declared',
@@ -514,9 +514,8 @@ describe('ModelSelect catalog capability display', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Native' }))
 
-    // Only the effective text/image set belongs to the native row; the audio,
-    // video, and pdf tokens exist solely in the advertised list.
-    expect(screen.getAllByText('已声明，未原生发送')).toHaveLength(1)
+    // Picker rows stay clean: no raw modality tokens or noisy declared-not-sent tags
+    expect(screen.queryByText('已声明，未原生发送')).toBeNull()
     for (const modality of ['audio', 'video', 'pdf']) {
       expect(screen.queryByText(modality)).toBeNull()
     }

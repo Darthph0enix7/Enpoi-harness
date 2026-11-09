@@ -36,7 +36,7 @@ import type { ModelSelectInjected } from './slots.ts'
 import {
   isModelFavorite, toggleModelFavorite, getFavoriteModels, setFavoriteModels,
   getRecentModels, recordRecentModel, getProviderOrder, setProviderOrder,
-  toggleGroupCollapsed, formatCompactContext, resolveContextTokens, advertisedOnlyModalities,
+  toggleGroupCollapsed, formatCompactContext, resolveContextTokens,
   type ModelContextTarget,
 } from './model-picker-store.ts'
 import {
@@ -87,23 +87,20 @@ function resolveModelContext(model: ModelContextTarget, t: PropsLocale<'model'>[
 }
 
 /**
- * Catalog-derived row markers. The picker makes no supported-modality claim:
- * only an advertised token the adapter does not send natively carries the
- * "declared, not sent" tag, and an unverified row says so.
+ * Catalog-derived row markers. The picker makes no supported-modality claim,
+ * and an unverified row says so.
  * @param model - catalog row whose provenance markers are rendered.
  * @param t - the package dictionary translate.
- * @returns the row's context, provenance, and disclosure tags.
+ * @returns the row's context and provenance tags.
  */
 function ModelCapabilityTags(
   { model, t }: { model: ModelContextTarget; t: PropsLocale<'model'>['t'] },
 ): React.ReactNode {
   const context = resolveModelContext(model, t)
-  const declaredOnly = advertisedOnlyModalities(model)
   return (
     <>
       {context !== '' && <span className={css.contextTag}>{context}</span>}
       {model.unverified === true && <span className={css.ruleTag}>{t('capability.unverified')}</span>}
-      {declaredOnly.length > 0 && <span className={css.ruleTag}>{t('capability.declaredNotSent')}</span>}
     </>
   )
 }
