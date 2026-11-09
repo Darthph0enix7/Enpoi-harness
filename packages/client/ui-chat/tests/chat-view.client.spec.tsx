@@ -2320,6 +2320,26 @@ describe('ChatView', () => {
     expect(view.queryByRole('button', { name: '去充值' })).toBeNull()
   })
 
+  it('clamps a long turn error to three lines behind a show-more toggle', () => {
+    const long = `upstream exploded: ${'{"detail":"'.repeat(60)}`
+    const h = makeHarness({ nodes: [
+      user(1, 'try'),
+      { kind: 'turn-error', seq: 2, time: 2_000, turn: 1, step: 0, message: long },
+    ] })
+    const view = render(<h.ChatView {...h.props} />)
+    const clamped = view.container.querySelector('[data-clamped]')
+    expect(clamped?.textContent).toBe(long)
+    const showMore = view.getByRole('button', { name: '显示全部' })
+    expect(showMore.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(showMore)
+    // Expanded: the full copy is plain text again and the toggle flips to collapse.
+    expect(view.container.querySelector('[data-clamped]')).toBeNull()
+    const showLess = view.getByRole('button', { name: '收起' })
+    expect(showLess.getAttribute('aria-expanded')).toBe('true')
+    fireEvent.click(showLess)
+    expect(view.container.querySelector('[data-clamped]')).not.toBeNull()
+  })
+
   it('renders the max-tokens notice with localized guidance, distinct from turn errors', () => {
     const h = makeHarness({ nodes: [user(1, 'try'), assistant(2, 'truncated'), turnMaxTokens(3)] })
     const view = render(<h.ChatView {...h.props} />)

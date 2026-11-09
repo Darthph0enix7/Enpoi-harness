@@ -90,6 +90,8 @@ function routeKey(link: RouteHealthLink): string {
 
 /**
  * Classify one failure code. Codes outside the cooled set answer `undefined`.
+ * `PROVIDER_POOL_EXHAUSTED` joins `RATE_LIMIT`, so
+ * {@link RouteHealthLedger.recordFailure} honors its provider reset hint.
  * @param code - stable provider-neutral failure code.
  * @returns the failure class, or undefined when the code carries no cooldown.
  */
@@ -102,7 +104,11 @@ export function routeHealthClassOf(code: string): RouteHealthClass | undefined {
     case 'AUTH':
     case 'FREE_TIER_GATED':
     case 'ENTITLEMENT_GATED': return 'auth'
-    case 'RATE_LIMIT': return 'rate_limit'
+    case 'RATE_LIMIT':
+    // An exhausted credential pool is the route's quota/rate gate: cool it
+    // like a rate limit so the provider reset hint applies and the next request
+    // does not pay the same exhausted pool first.
+    case 'PROVIDER_POOL_EXHAUSTED': return 'rate_limit'
     case 'SERVER':
     case 'TIMEOUT': return 'server'
     default: return undefined

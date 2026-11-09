@@ -1,4 +1,4 @@
-# Update system — release log `0.1.7-enpoi.2.78` → `2.92` (work log, 2026-10-14)
+# Update system — release log `0.1.7-enpoi.2.78` → `2.119` (work log, 2026-11-08)
 
 Scope: the release arc that built, shipped, hardened, and live-verified the in-app update system (catalog + host check + client surface + two-phase engine + live-run observability). The reference for the shipped system is [`update-system.md`](update-system.md); the design and phase history stay in [`ui-update-manifest.md`](ui-update-manifest.md); mechanics and maintenance stay in [`../creator/02-install-and-update.md`](../creator/02-install-and-update.md) and [`../creator/14-update-maintenance.md`](../creator/14-update-maintenance.md).
 
@@ -23,6 +23,29 @@ No `0.1.7-enpoi.2.84` or `0.1.7-enpoi.2.89` release exists (no tag, no catalog e
 | `0.1.7-enpoi.2.90` | 2026-10-14 09:06 | Source builds stamp `base+g<short sha>` everywhere; commit-identity current-detection (no same-release loop) with the `(source build)` client qualifier; the release-commit divergence pre-check that skips a stale prebuilt before any download. |
 | `0.1.7-enpoi.2.91` | 2026-10-14 14:50 | Docs: the 2.90 cross-device verification evidence recorded in the plan. |
 | `0.1.7-enpoi.2.92` | 2026-10-14 15:57 | The landed-run pill guard is scoped to the offered version (a persisted success no longer suppresses later releases) and reconnect/status reads reconcile a stale run; docs hygiene (STATE.md superseded banner, roster line, note pairings). |
+| `0.1.7-enpoi.2.93` | 2026-10-14 17:46 | Pre-sign-off fix wave: source-built base+g<sha> comparisons, staged-tree-missing validation, single-flight engine launch, terminal marker authority. |
+| `0.1.7-enpoi.2.94` | 2026-10-15 12:37 | Cross-platform frozen-skin restore via `enpoi-skin-guard` plugin (array guard, EEXIST self-heal). |
+| `0.1.7-enpoi.2.95` | 2026-10-15 17:04 | macOS launchd job lifecycle: remove launchd submit jobs when runs rest to prevent relaunch loops; sweep only non-running jobs. |
+| `0.1.7-enpoi.2.96` | 2026-10-15 19:03 | Fresh-updates core cleanup: byte-driven download progress, evidence-gated liveness, sweep progress residue, treat completed pnpm output as success when process lingers. |
+| `0.1.7-enpoi.2.97` | 2026-10-17 16:44 | Subagent delivery contract pinned (anti-poll guidance), visible slot crash faces, root error boundary, bottom-follow streaming corrections, failed turn take-back, terminal copy/paste chords. |
+| `0.1.7-enpoi.2.98` | 2026-10-17 19:38 | Compaction 60% default trigger shipped and mirrored in settings; durable failure cause recorded on mechanical stubs. |
+| `0.1.7-enpoi.2.99` | 2026-10-18 06:58 | Update UI: prevent premature reload during step 9 pruning; clean completed-update dialog footer. |
+| `0.1.7-enpoi.2.100` | 2026-10-21 18:03 | Subagent explicit role requirement, continuable truncation recovery, tailnet port 8443 ownership, anti-duplication rule. |
+| `0.1.7-enpoi.2.101` | 2026-10-22 15:59 | Session tool-batch healing: reorder displaced checkpoints after tool results to heal poisoned histories. |
+| `0.1.7-enpoi.2.102` | 2026-10-22 17:54 | Update UI: display staged target version, aggregate release changelog across hops, bypass catalog CDN cache. |
+| `0.1.7-enpoi.2.103` | 2026-10-23 15:23 | Context-UX feature batch: leading prompt pin, durable facts memory integration, persistent Oracle child per session, Tab agent cycling, Enter-again steering, visible compaction metrics. |
+| `0.1.7-enpoi.2.104` | 2026-10-23 16:47 | Memory tool guidance polish. |
+| `0.1.7-enpoi.2.105` | 2026-10-23 17:18 | Updates: ensure pinning and recall reach existing installations. |
+| `0.1.7-enpoi.2.106` | 2026-10-23 19:07 | Claude Code (Meridian) heavy provider listed; automatic continuation for turns cut off by output limits. |
+| `0.1.7-enpoi.2.107` | 2026-10-24 18:02 | Meridian Anthropic Messages protocol and adaptive thinking support; preserve advertised effort ladders on sync; compaction summarizer resilience. |
+| `0.1.7-enpoi.2.108` | 2026-10-25 17:13 | Shipped dynamic free model group; cooldowns for empty responses; persistent right sidebar width; group-aware compaction seat. |
+| `0.1.7-enpoi.2.109` | 2026-10-25 19:37 | Free default seat with valid responding models; route-level free tier gating; legacy free row migration. |
+| `0.1.7-enpoi.2.112` | 2026-10-31 15:56 | Fix Command Code image hoisting contiguous tool batching; provider reset hint parsing; close unanswered tool calls; hide status on replaced turns. |
+| `0.1.7-enpoi.2.113` | 2026-10-31 16:49 | Keyless nightly CI skips gracefully instead of failing. |
+| `0.1.7-enpoi.2.114` | 2026-10-31 17:53 | Prebuilt-only update policy: published releases are always installed without source build fallbacks. |
+| `0.1.7-enpoi.2.117` | 2026-11-07 22:58 | Session format V5 finalized and accepted; native media policy descriptor and identity body migration; build-fingerprint and esbuild release workflow fixes; browser dynamic chunk packaging fix. |
+| `0.1.7-enpoi.2.118` | 2026-11-08 13:18 | Fix RPC response proxy targeting native receiver, resolving browser `Illegal invocation` TypeError on Web IDL getters. |
+| `0.1.7-enpoi.2.119` | 2026-11-08 17:03 | CLIProxyAPI heavy provider complete integration; setup provenance tracking (`harness-install`, `detected-instance`, `custom-instance`); protective isolation and safe conditional uninstallation. |
 
 ## Pre-sign-off fix wave
 

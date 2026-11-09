@@ -14,6 +14,7 @@ import LlmRuntime, {
   LlmAdapter,
   LlmError,
   MODEL_CHAIN_EXHAUSTED_CODE,
+  ProviderRequestId,
   ReasoningEffortId,
   resolveRetryPolicy,
   STREAM_CLOSED_CODE,
@@ -570,6 +571,7 @@ describe('model-group failover', () => {
     expect(finish.reason.failure.code).toBe(MODEL_CHAIN_EXHAUSTED_CODE)
     expect(finish.reason.failure.message).toContain('link 4 chain-d/chain-d-model')
     expect(finish.reason.failure.message).not.toContain('chain-e')
+    expect(finish.reason.failure.message).toContain('failover budget elapsed')
     expect(hanging.calls.map(call => call.provider)).toEqual(['chain-a', 'chain-b', 'chain-c', 'chain-d'])
   })
 
@@ -730,6 +732,37 @@ describe('model-group failover', () => {
         kind: 'error',
         failure: { message: 'a is down', code: 'RATE_LIMIT', provider: 'chain-a', model: 'm-a' },
       },
+    })
+  })
+
+  it('carries the last attempted link facts on the exhausted chain failure', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['chain-a'], new FailingAdapter(new LlmError('a is down', 'RATE_LIMIT')))
+    ctx.llm.registerAdapter(['chain-b'], new FailingAdapter(new LlmError('b is down', 'SERVER', {
+      status: 503,
+      providerRetryAfterMs: 7_000,
+      requestId: ProviderRequestId('req_chain_last'),
+    })))
+    provideChains(ctx, id => id === 'facts' ? group('facts', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'facts',
+      messages: [],
+    }))
+
+    const finish = chunks.at(-1)
+    if (finish?.type !== 'finish' || finish.reason.kind !== 'error') throw new Error('expected error finish')
+    expect(finish.reason.failure).toMatchObject({
+      code: MODEL_CHAIN_EXHAUSTED_CODE,
+      provider: 'chain-b',
+      model: 'm-b',
+      status: 503,
+      providerRetryAfterMs: 7_000,
+      requestId: 'req_chain_last',
     })
   })
 

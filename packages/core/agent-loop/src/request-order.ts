@@ -38,7 +38,12 @@
  * - A batch with any genuinely missing result is left exactly as logged;
  *   {@link completeToolBatches} is the separate repair path that synthesizes a
  *   result for each unresolved call. No message is ever invented, dropped, or
- *   mutated: the same frozen references are returned in a new array.
+ *   mutated: the same frozen references are returned in a new array, except an
+ *   orphan tool result, which becomes a wire-only user notice.
+ * - A `tool` message whose call id never appeared in a preceding assistant
+ *   message is an orphan: strict providers reject such a `tool_result` with no
+ *   matching `tool_use`, so the projection carries its identity as a user-role
+ *   text notice instead.
  * - The walk is single-pass: the cursor advances past each batch it rewrites,
  *   so the result is idempotent.
  *
@@ -55,6 +60,9 @@ const NO_TOOL_CALLS: readonly ToolCallBlock[] = []
 /** Message-id prefix of a recovery result synthesized only for one request. */
 const REQUEST_TOOL_RESULT_PREFIX = 'request-tool-result'
 
+/** Message-id prefix of a wire-only notice that replaces an orphan tool result. */
+const REQUEST_ORPHAN_TOOL_PREFIX = 'request-orphan-tool'
+
 /** Whether a message is an assistant message carrying at least one tool call. */
 function hasToolCalls(message: Message): boolean {
   return message.role === 'assistant' && message.content.some(block => block.type === 'tool-call')
@@ -70,8 +78,8 @@ function toolCallsOf(message: Message): readonly ToolCallBlock[] {
  * Normalize tool-batch adjacency for a request payload.
  *
  * Returns a new array holding the same message references in wire order, with
- * every complete assistant tool batch immediately followed by its results.
- * Incomplete batches and unchanged messages keep their relative position.
+ * every complete assistant tool batch immediately followed by its results and
+ * any orphan tool result replaced by a user-role notice.
  *
  * @param messages - the derived conversation, in durable order.
  * @returns a new array; no input element is mutated, dropped, or duplicated.
@@ -141,7 +149,25 @@ export function orderToolBatches(messages: readonly Message[]): Message[] {
     cursor = lastMatch + 1
   }
 
-  return ordered
+  // A `tool` result whose call id never appeared in a preceding assistant
+  // message cannot be answered by any `tool_call` on the wire. Strict
+  // providers reject the turn (`tool_result` without `tool_use`), so carry the
+  // result's identity as a user-role notice instead: nothing durable changes,
+  // and a repeated pass sees a user message rather than another orphan.
+  const seenCalls = new Set<ToolCallId>()
+  return ordered.map((message, index): Message => {
+    if (message.role === 'assistant') {
+      for (const call of toolCallsOf(message)) seenCalls.add(call.id)
+      return message
+    }
+    if (message.role !== 'tool' || seenCalls.has(message.toolCallId)) return message
+    return deepFreeze({
+      id: brandString<MessageId>(`${REQUEST_ORPHAN_TOOL_PREFIX}-${message.toolCallId}-${index}`),
+      role: 'user',
+      content: [{ type: 'text', text: `[Orphan tool result: ${message.toolCallId}]` }],
+      source: message.source,
+    })
+  })
 }
 
 /**

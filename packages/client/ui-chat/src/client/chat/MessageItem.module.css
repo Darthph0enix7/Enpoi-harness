@@ -302,6 +302,29 @@
   color: var(--dsw-alias-label-secondary);
 }
 
+.turnErrorMessage[data-clamped] {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+
+.turnErrorToggle {
+  display: block;
+  margin-top: 2px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--dsw-alias-link);
+  font: inherit;
+  cursor: pointer;
+}
+
+.turnErrorToggle:hover {
+  text-decoration: underline;
+}
+
 .turnErrorCode {
   color: var(--dsw-alias-label-tertiary);
   font: var(--dsw-font-markdown-code-block-small);

@@ -10,7 +10,12 @@ import { CompactionEngine, ManualCompactionError } from '@deepseek-ai/dsh-compac
 import type { CompactionResult, CompactionTrigger } from '@deepseek-ai/dsh-compaction'
 import type { Session, SessionSeq } from '@deepseek-ai/dsh-session'
 import { scopeOf } from '@deepseek-ai/dsh-scope'
-import { CONTEXT_WINDOW_EXCEEDED_CODE, HarnessError, LlmError } from '@deepseek-ai/dsh-llm'
+import {
+  CONTEXT_WINDOW_EXCEEDED_CODE,
+  HarnessError,
+  isRequestSizeFailure,
+  LlmError,
+} from '@deepseek-ai/dsh-llm'
 import type { LlmCallConfig, LlmResolvedModelInfo } from '@deepseek-ai/dsh-llm'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
 import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
@@ -86,6 +91,24 @@ interface SummarizerRouteState {
   open: boolean
   /** The most recent recorded failure class, for the durable circuit notice. */
   lastCode: string
+  /** Epoch milliseconds when the circuit last opened, for the half-open probe. */
+  openedAt?: number
+}
+
+/** How long an open summariser circuit refuses calls before one half-open probe. */
+const SUMMARIZER_CIRCUIT_COOLDOWN_MS = 5 * 60 * 1000
+
+/**
+ * Whether one route's circuit still refuses calls. An open circuit older than
+ * the cooldown admits one probe so a route that recovered is not condemned for
+ * the whole session.
+ * @param state - the route's consecutive-failure state.
+ * @param now - epoch milliseconds used for the cooldown comparison.
+ * @returns true when the route must not be called now.
+ */
+function summarizerCircuitRefuses(state: SummarizerRouteState, now = Date.now()): boolean {
+  if (!state.open) return false
+  return state.openedAt === undefined || now - state.openedAt <= SUMMARIZER_CIRCUIT_COOLDOWN_MS
 }
 
 /**
@@ -130,7 +153,7 @@ function circuitOpenError(key: string, state: SummarizerRouteState): HarnessErro
   return new HarnessError(
     `summariser route ${key} is circuit-open after ${state.failures} consecutive `
     + `failures (${state.lastCode}); no summary call is paid on it until the route, `
-    + 'the session configuration, or /compact resets it',
+    + 'the session configuration, or /compact resets it, or its cooldown admits a probe',
     SUMMARIZER_CIRCUIT_OPEN_CODE,
   )
 }
@@ -518,17 +541,24 @@ export class BasicCompactionEngine extends CompactionEngine {
       ...fallbackKey === undefined || fallbackKey === preferredKey ? [] : [fallbackKey],
     ])
     const preferredState = this.summarizerRouteState(agent.session, preferredKey)
+    // An open circuit past its cooldown probes the preferred route once; a
+    // plain failure threshold never replaces that probe with the fallback.
+    const preferredRefuses = summarizerCircuitRefuses(preferredState)
+    const halfOpenProbe = preferredState.open && !preferredRefuses
     const escalateTo = fallbackKey !== undefined
       && fallbackKey !== preferredKey
-      && (preferredState.open || preferredState.failures >= settings.summarizerEscalationFailures)
+      && !halfOpenProbe
+      && (preferredRefuses || preferredState.failures >= settings.summarizerEscalationFailures)
       ? fallbackKey
       : undefined
-    if (preferredState.open && escalateTo === undefined) throw circuitOpenError(preferredKey, preferredState)
+    if (preferredRefuses && escalateTo === undefined) {
+      throw circuitOpenError(preferredKey, preferredState)
+    }
     const active = escalateTo === undefined ? preferred : fallback
     const activeKey = escalateTo ?? preferredKey
     if (active === undefined) throw circuitOpenError(preferredKey, preferredState)
     const activeState = this.summarizerRouteState(agent.session, activeKey)
-    if (activeState.open) throw circuitOpenError(activeKey, activeState)
+    if (summarizerCircuitRefuses(activeState)) throw circuitOpenError(activeKey, activeState)
     try {
       const invocation = await this.summarizerInvocation(
         active,
@@ -547,18 +577,23 @@ export class BasicCompactionEngine extends CompactionEngine {
       activeState.failures = 0
       activeState.open = false
       activeState.lastCode = ''
+      delete activeState.openedAt
       return result
     } catch (error: unknown) {
       // Cancellation is not a route fault, and an input that carried no region
       // content is a framing decision that would repeat identically on every
       // route: neither may count toward escalation or the breaker, or the
       // recorded failure would stop explaining why the call was never made.
-      if (signal?.aborted !== true && !isFramingFailure(error)) {
+      // A size-class rejection is the frame ladder's decision, not a route
+      // fault: the same route can carry the smaller frame, so it must not
+      // escalate the route or trip the breaker.
+      if (signal?.aborted !== true && !isFramingFailure(error) && !isRequestSizeFailure(error)) {
         const cause = summarizationFailureCause(error)
         activeState.failures += 1
         activeState.lastCode = cause.code
         if (activeState.failures >= settings.summarizerCircuitFailures) {
           activeState.open = true
+          activeState.openedAt = Date.now()
           this.ctx.logger.warn(
             `compaction: summariser route ${activeKey} open after `
             + `${activeState.failures} consecutive failures (${cause.code}); `
@@ -612,11 +647,16 @@ export class BasicCompactionEngine extends CompactionEngine {
       const promptBudget = declaredPromptBudget(info)
       if (promptBudget === undefined) return { config: effective, framing: conservative }
       // Never reserve more than half the route's prompt budget, and reserve the
-      // effective cap actually sent rather than the larger configured one.
+      // effective cap actually sent rather than the larger configured one. The
+      // cap passed to the adapter must not exceed that reservation, or the
+      // request asks for more completion tokens than the window holds.
       const outputReserve = Math.min(effective.maxTokens, Math.floor(promptBudget / 2))
+      const clamped = outputReserve < effective.maxTokens
+        ? { ...effective, maxTokens: outputReserve }
+        : effective
       const inputBudgetTokens = promptBudget - outputReserve
       return {
-        config: effective,
+        config: clamped,
         framing: inputBudgetTokens > 0 ? { inputBudgetTokens } : conservative,
       }
     } catch {

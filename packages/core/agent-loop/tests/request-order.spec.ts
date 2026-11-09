@@ -159,6 +159,42 @@ describe('orderToolBatches', () => {
     ])
   })
 
+  it('converts an orphan tool result into a user notice at the wire boundary', () => {
+    const orphan = toolResult('call_ghost', 'unmatched')
+    const assistant = assistantCalls('call_1')
+    const result = toolResult('call_1')
+    const input: Message[] = [user('go'), orphan, assistant, result]
+
+    const output = orderToolBatches(input)
+
+    expect(output[0]).toBe(input[0])
+    expect(output[1]).toMatchObject({
+      role: 'user',
+      content: [{ type: 'text', text: '[Orphan tool result: call_ghost]' }],
+      source: { kind: 'tool', callId: 'call_ghost' },
+    })
+    expect(output[1]).not.toBe(orphan)
+    expect(Object.isFrozen(output[1])).toBe(true)
+    expect(output[2]).toBe(assistant)
+    expect(output[3]).toBe(result)
+
+    // The notice is a user message, so the projection is idempotent.
+    const second = orderToolBatches(output)
+    expect(ids(second)).toEqual(ids(output))
+    second.forEach((message, index) => { expect(message).toBe(output[index]) })
+  })
+
+  it('leaves a tool result that matches an earlier assistant call alone', () => {
+    const assistant = assistantCalls('call_1')
+    const input: Message[] = [assistant, user('checkpoint'), toolResult('call_1')]
+
+    const output = orderToolBatches(input)
+
+    expect(output.map(message => message.role)).toEqual(['assistant', 'tool', 'user'])
+    expect(output[1]).toBe(input[2])
+    expect(output[2]).toBe(input[1])
+  })
+
   it('is idempotent', () => {
     const assistant1 = assistantCalls('call_1', 'call_2')
     const checkpoint1 = user('### State checkpoint')

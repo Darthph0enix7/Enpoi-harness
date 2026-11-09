@@ -308,12 +308,22 @@ class RemoteStreamMuxConnection {
     } catch (cause) {
       return Promise.reject(new Error('api gateway: Remote stream item is not JSON serializable', { cause }))
     }
+    const frameBytes = Buffer.byteLength(text, 'utf8')
     const delivery = this.writes.then(() => new Promise<void>((resolve, reject) => {
       if (this.socket.readyState !== WebSocket.OPEN) {
         reject(new Error('api gateway: Remote stream socket is closed'))
         return
       }
-      if (this.socket.bufferedAmount > this.maxBufferedBytes) {
+      if (frameBytes > this.maxBufferedBytes) {
+        // No backlog can fit a single frame larger than the whole ceiling.
+        // Reject the frame so its pump can deliver a failure for the logical
+        // stream instead of discarding the physical generation.
+        reject(new Error(
+          `api gateway: Remote stream frame exceeded ${String(this.maxBufferedBytes)} buffered bytes`,
+        ))
+        return
+      }
+      if (this.socket.bufferedAmount + frameBytes > this.maxBufferedBytes) {
         // A Client that cannot drain the downlink would otherwise grow Host
         // memory without bound. Close with an existing carrier-failure code so
         // the ordinary reconnect policy (with its climbing backoff) applies.

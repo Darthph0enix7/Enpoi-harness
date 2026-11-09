@@ -135,6 +135,15 @@ export const ChatGroupSeat = memo(function ChatGroupSeat({
   const foldCompleted = props.usePresentation(policy => policy.foldCompletedTurns)
   const { expanded: open, setExpanded: setOpen } = useDisclosure()
   const firstKey = members?.[0]?.key ?? ''
+  // The group reads the first member through keyed hooks but owns no seat of
+  // its own; release that key after its subscriptions tear down on unmount.
+  useEffect(() => () => {
+    if (firstKey !== '') {
+      queueMicrotask(() => {
+        props.nodeStore.release?.(firstKey)
+      })
+    }
+  }, [props.nodeStore, firstKey])
   const presentation = props.useChatNodeProcess(firstKey)
   const turnLocation = props.useChatNode(firstKey, (node) => {
     const location = node?.location

@@ -1040,7 +1040,7 @@ function HeavyProviderForm(props: {
             {t('heavyDocs')} ↗
           </a>
         )}
-        <span className={styles['heavyHealthBadge']} data-ok={isAuth ? 'auth' : health?.ok === true ? 'true' : 'false'}>
+        <span className={styles['heavyHealthBadge']} data-ok={isAuth ? 'auth' : health === null ? 'unknown' : health.ok ? 'true' : 'false'}>
           {health === null
             ? t('heavyHealthUnknown')
             : isAuth

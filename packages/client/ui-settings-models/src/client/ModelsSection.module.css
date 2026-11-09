@@ -1212,6 +1212,7 @@ select.input {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -1533,6 +1534,7 @@ select.input {
 .modelMetaRow {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   flex-shrink: 0;
 }
@@ -1550,6 +1552,7 @@ select.input {
 .capIconsList {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 3px;
 }
 
@@ -2134,6 +2137,7 @@ select.input {
 .poolHeaderActions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -2388,6 +2392,11 @@ select.input {
   color: var(--dsw-alias-state-warn-label);
 }
 
+.heavyHealthBadge[data-ok='unknown'] {
+  border-color: var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-tertiary);
+}
+
 .heavyLinkBtn {
   border: none;
   background: none;
@@ -2419,6 +2428,29 @@ select.input {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--dsw-alias-label-tertiary);
+}
+
+.heavyQuirksDetails {
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+  padding: 4px 10px 8px;
+}
+
+.heavyQuirksSummary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.heavyQuirksSummary:hover {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.heavyQuirksDetails[open] .heavyQuirksSummary {
+  margin-bottom: 6px;
 }
 
 .heavyList {

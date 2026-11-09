@@ -58,15 +58,23 @@ function stubFetch(answers: { status?: unknown; job?: unknown }): void {
 }
 
 it('renders the dashboard URL and the polled job, then surfaces a failed run with its log tail', async () => {
-  stubFetch({
-    job: {
-      job: {
-        id: 'freellmapi', kind: 'install', state: 'failed', stage: 'Start the stack',
-        stageIndex: 2, stageCount: 4, pct: 50, logTail: 'compose exploded', startedAt: 1, finishedAt: 2,
-        error: 'Start the stack: exit 1',
-      },
-    },
-  })
+  let polls = 0
+  vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: { body?: string }) => {
+    const body = JSON.parse(init?.body ?? '{}') as { method: string }
+    if (body.method === 'enpoiHeavy.status') return envelope(running)
+    if (body.method === 'enpoiHeavy.job') {
+      polls += 1
+      if (polls === 1) return envelope({ job: running.job })
+      return envelope({
+        job: {
+          id: 'freellmapi', kind: 'install', state: 'failed', stage: 'Start the stack',
+          stageIndex: 2, stageCount: 4, pct: 50, logTail: 'compose exploded', startedAt: 1, finishedAt: 2,
+          error: 'Start the stack: exit 1',
+        },
+      })
+    }
+    return envelope({})
+  }))
   render(<HeavyProviderCard providerId="freellmapi" t={t} />)
 
   await waitFor(() => { expect(screen.getByText(running.job.stage)).toBeTruthy() })

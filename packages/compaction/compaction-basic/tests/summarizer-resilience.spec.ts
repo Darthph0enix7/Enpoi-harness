@@ -41,6 +41,12 @@ const SIZE_FAILURE: LlmFailure = {
     + '400 "The upstream provider was unable to process the request"',
 }
 
+/** A route fault that is not a frame decision, for the circuit fixtures. */
+const CIRCUIT_FAILURE: LlmFailure = {
+  code: 'SERVER',
+  message: 'summariser route unavailable',
+}
+
 /** Per-context document holder so a spec can replace the settings document in place. */
 const documents = new WeakMap<Context, { current: Record<string, unknown> }>()
 
@@ -289,7 +295,7 @@ describe('unknown summariser window', () => {
 })
 
 describe('size-class frame retries and route escalation', () => {
-  it('shrinks the same compaction, then summarizes on the session route and keeps the tail', async () => {
+  it('shrinks the same compaction on its own route instead of escalating a size rejection', async () => {
     const ctx = newContext(['session_event_search', 'session_event_read'])
     withDocument(ctx, { personas: { compaction: { provider: SEAT_PROVIDER, model: SEAT_MODEL } } })
     const seat = new ScriptedAdapter(200_000, SIZE_FAILURE)
@@ -308,28 +314,68 @@ describe('size-class frame retries and route escalation', () => {
 
     const result = await compact.compactRegion(start, end, agent(session), SIGNAL)
 
-    // The seat route rejected twice, each time with a smaller frame.
-    expect(seat.requests).toHaveLength(2)
+    // The seat route rejected the initial frame and both shrunk retries; a
+    // size rejection is the ladder's decision, never a route fault.
+    expect(seat.requests).toHaveLength(3)
     expect(seat.requests.every(request => request.provider === SEAT_PROVIDER)).toBe(true)
     expect(seat.requests[1]!.messages.length).toBeLessThan(seat.requests[0]!.messages.length)
+    expect(seat.requests[2]!.messages.length).toBeLessThan(seat.requests[1]!.messages.length)
+    expect(sessionRoute.requests).toHaveLength(0)
 
-    // The escalated attempt names the session's own route and shrinks again.
-    expect(sessionRoute.requests).toHaveLength(1)
-    expect(sessionRoute.requests[0]?.provider).toBe(MODEL)
-    expect(sessionRoute.requests[0]?.model).toBe(MODEL)
-    expect(sessionRoute.requests[0]!.messages.length).toBeLessThan(seat.requests[1]!.messages.length)
-
-    // The tail survives verbatim and is what the successful frame carried.
-    const sentReplay = sessionRoute.requests[0]!.messages.slice(0, -1)
-    expect(JSON.stringify(sentReplay.at(-1))).toContain('assistant 3')
-    expect(JSON.stringify(sentReplay)).not.toContain('fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail fixture detail user 1')
-
-    // The committed region is the smaller suffix: older nodes stay on the surface.
+    // The exhausted ladder still commits the mechanical omission and records
+    // the size-class failure on it.
     expect(result.shadowedSeqs.at(-1)).toBe(end)
     expect(result.shadowedSeqs.length).toBeLessThan(6)
-    expect(result.shadowedSeqs[0]).not.toBe(start)
     expect(session.surface.nodes).toContain(start)
-    expect(latestSummary(session)?.data).toMatchObject({ provider: MODEL, model: MODEL })
+    expect(latestSummary(session)?.data).toMatchObject({
+      provider: '',
+      model: '',
+      summarizationFailure: { code: 'INVALID_REQUEST' },
+    })
+  })
+
+  it('escalates to the session route after repeated non-size route failures', async () => {
+    const ctx = newContext(['session_event_search', 'session_event_read'])
+    withDocument(ctx, { personas: { compaction: { provider: SEAT_PROVIDER, model: SEAT_MODEL } } })
+    const seat = new ScriptedAdapter(200_000, CIRCUIT_FAILURE)
+    const sessionRoute = new ScriptedAdapter(200_000)
+    ctx.llm.registerAdapter([SEAT_PROVIDER], seat)
+    ctx.llm.registerAdapter([MODEL], sessionRoute)
+    const compact = new ExposedEngine(ctx, {
+      auto: false,
+      headroomTokens: 0,
+      maxTokens: 8192,
+    })
+    const owner = agent(conversation(1))
+    const input = replayInput(2)
+
+    await expect(compact.runSummarize(input, owner)).rejects.toThrow(/summariser route unavailable/)
+    await expect(compact.runSummarize(input, owner)).rejects.toThrow(/summariser route unavailable/)
+    const result = await compact.runSummarize(input, owner)
+
+    expect(seat.requests).toHaveLength(2)
+    expect(sessionRoute.requests).toHaveLength(1)
+    expect(result.provider).toBe(MODEL)
+  })
+})
+
+describe('summariser output reserve', () => {
+  it('clamps the request generation cap to the reserved share of the prompt budget', async () => {
+    const ctx = newContext(['session_event_search', 'session_event_read'])
+    const adapter = new ScriptedAdapter(4_000)
+    ctx.llm.registerAdapter([MODEL], adapter)
+    const compact = new ExposedEngine(ctx, {
+      auto: false,
+      headroomTokens: 0,
+      maxTokens: 8192,
+    })
+
+    const result = await compact.runSummarize(replayInput(2), agent(conversation(1)))
+
+    // Half of the 4,000-token window is reserved for output, so the request
+    // must not ask for the configured 8,192 completion tokens.
+    expect(result.maxTokens).toBe(2_000)
+    expect(adapter.requests[0]?.maxTokens).toBe(2_000)
   })
 })
 
@@ -499,7 +545,7 @@ describe('mechanical fallback relief', () => {
 describe('summariser route circuit breaker', () => {
   it('stops paying a failing route at K and re-probes after a configuration change', async () => {
     const ctx = newContext(['session_event_search', 'session_event_read'])
-    const adapter = new ScriptedAdapter(100_000, SIZE_FAILURE)
+    const adapter = new ScriptedAdapter(100_000, CIRCUIT_FAILURE)
     ctx.llm.registerAdapter([MODEL], adapter)
     const config: BasicCompactionConfig = {
       auto: true,
@@ -512,8 +558,8 @@ describe('summariser route circuit breaker', () => {
     const owner = agent(session)
     const input = replayInput(2)
 
-    await expect(compact.runSummarize(input, owner)).rejects.toThrow(/400/)
-    await expect(compact.runSummarize(input, owner)).rejects.toThrow(/400/)
+    await expect(compact.runSummarize(input, owner)).rejects.toThrow(/summariser route unavailable/)
+    await expect(compact.runSummarize(input, owner)).rejects.toThrow(/summariser route unavailable/)
     expect(adapter.requests).toHaveLength(2)
 
     // The circuit is open: the route is not called again, and the reason is a
@@ -534,7 +580,7 @@ describe('summariser route circuit breaker', () => {
 
   it('re-enables the same route on an explicit /compact', async () => {
     const ctx = newContext(['session_event_search', 'session_event_read'])
-    const adapter = new ScriptedAdapter(100_000, SIZE_FAILURE, 2)
+    const adapter = new ScriptedAdapter(100_000, CIRCUIT_FAILURE, 2)
     ctx.llm.registerAdapter([MODEL], adapter)
     const compact = new ExposedEngine(ctx, {
       auto: false,
@@ -547,8 +593,8 @@ describe('summariser route circuit breaker', () => {
     const input = replayInput(2)
     const owner = agent(session)
 
-    await expect(compact.runSummarize(input, owner)).rejects.toThrow(/400/)
-    await expect(compact.runSummarize(input, owner)).rejects.toThrow(/400/)
+    await expect(compact.runSummarize(input, owner)).rejects.toThrow(/summariser route unavailable/)
+    await expect(compact.runSummarize(input, owner)).rejects.toThrow(/summariser route unavailable/)
     expect(adapter.requests).toHaveLength(2)
 
     // /compact resets the breaker and the route answers on the next paid call.
@@ -557,9 +603,47 @@ describe('summariser route circuit breaker', () => {
     expect(adapter.requests).toHaveLength(3)
   })
 
+  it('probes the preferred route after the cooldown even when a fallback exists', async () => {
+    vi.useFakeTimers()
+    try {
+      const ctx = newContext(['session_event_search', 'session_event_read'])
+      withDocument(ctx, { personas: { compaction: { provider: SEAT_PROVIDER, model: SEAT_MODEL } } })
+      const seat = new ScriptedAdapter(200_000, CIRCUIT_FAILURE)
+      const sessionRoute = new ScriptedAdapter(200_000)
+      ctx.llm.registerAdapter([SEAT_PROVIDER], seat)
+      ctx.llm.registerAdapter([MODEL], sessionRoute)
+      const compact = new ExposedEngine(ctx, {
+        auto: true,
+        headroomTokens: 0,
+        maxTokens: 8192,
+        summarizerCircuitFailures: 1,
+        summarizerEscalationFailures: 1,
+      })
+      const owner = agent(conversation(1))
+      const input = replayInput(2)
+
+      await expect(compact.runSummarize(input, owner)).rejects.toThrow(/summariser route unavailable/)
+      expect(seat.requests).toHaveLength(1)
+
+      // The open circuit escalates to the fallback while it refuses calls.
+      const escalated = await compact.runSummarize(input, owner)
+      expect(escalated.provider).toBe(MODEL)
+      expect(sessionRoute.requests).toHaveLength(1)
+      expect(seat.requests).toHaveLength(1)
+
+      // After the cooldown the preferred route gets the probe, not the fallback.
+      vi.advanceTimersByTime(5 * 60 * 1000 + 1)
+      await expect(compact.runSummarize(input, owner)).rejects.toThrow(/summariser route unavailable/)
+      expect(seat.requests).toHaveLength(2)
+      expect(sessionRoute.requests).toHaveLength(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('records the open circuit on the mechanical checkpoint it forces', async () => {
     const ctx = newContext(['session_event_search', 'session_event_read'])
-    ctx.llm.registerAdapter([MODEL], new ScriptedAdapter(100_000, SIZE_FAILURE))
+    ctx.llm.registerAdapter([MODEL], new ScriptedAdapter(100_000, CIRCUIT_FAILURE))
     const compact = new BasicCompactionEngine(ctx, {
       auto: false,
       headroomTokens: 0,
@@ -575,8 +659,63 @@ describe('summariser route circuit breaker', () => {
     expect(latestSummary(session)?.data).toMatchObject({
       provider: '',
       model: '',
-      summarizationFailure: { code: 'INVALID_REQUEST' },
+      summarizationFailure: { code: 'SERVER' },
     })
+  })
+
+  it('does not count a size-class rejection toward the circuit', async () => {
+    const ctx = newContext(['session_event_search', 'session_event_read'])
+    const adapter = new ScriptedAdapter(100_000, SIZE_FAILURE)
+    ctx.llm.registerAdapter([MODEL], adapter)
+    const compact = new ExposedEngine(ctx, {
+      auto: true,
+      headroomTokens: 0,
+      maxTokens: 8192,
+      summarizerCircuitFailures: 1,
+    })
+    const owner = agent(conversation(1))
+    const input = replayInput(2)
+
+    // The frame ladder owns size rejections; every call stays a paid route
+    // attempt instead of opening a circuit that hides the real reason.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await expect(compact.runSummarize(input, owner)).rejects.toThrow(/400/)
+    }
+    expect(adapter.requests).toHaveLength(3)
+  })
+
+  it('admits one half-open probe after the circuit cooldown', async () => {
+    vi.useFakeTimers()
+    try {
+      const ctx = newContext(['session_event_search', 'session_event_read'])
+      const adapter = new ScriptedAdapter(100_000, CIRCUIT_FAILURE)
+      ctx.llm.registerAdapter([MODEL], adapter)
+      const compact = new ExposedEngine(ctx, {
+        auto: true,
+        headroomTokens: 0,
+        maxTokens: 8192,
+        summarizerCircuitFailures: 1,
+      })
+      const owner = agent(conversation(1))
+      const input = replayInput(2)
+
+      await expect(compact.runSummarize(input, owner)).rejects.toThrow(/summariser route unavailable/)
+      await expect(compact.runSummarize(input, owner)).rejects.toMatchObject({
+        code: SUMMARIZER_CIRCUIT_OPEN_CODE,
+      })
+      expect(adapter.requests).toHaveLength(1)
+
+      // Five minutes later one probe may run; its failure re-opens the circuit.
+      vi.advanceTimersByTime(5 * 60 * 1000 + 1)
+      await expect(compact.runSummarize(input, owner)).rejects.toThrow(/summariser route unavailable/)
+      expect(adapter.requests).toHaveLength(2)
+      await expect(compact.runSummarize(input, owner)).rejects.toMatchObject({
+        code: SUMMARIZER_CIRCUIT_OPEN_CODE,
+      })
+      expect(adapter.requests).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

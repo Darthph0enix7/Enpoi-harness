@@ -113,6 +113,22 @@ describe('RouteHealthLedger', () => {
       .toBe(POLICY.rateLimitCooldownMs)
   })
 
+  it('cools an exhausted provider pool like a rate limit with its reset hint', () => {
+    const health = ledger(() => 0)
+    expect(health.recordFailure('p', 'm', 'PROVIDER_POOL_EXHAUSTED', 7_000)).toBe(true)
+    expect(health.snapshot()[0]).toMatchObject({
+      provider: 'p',
+      model: 'm',
+      class: 'rate_limit',
+      code: 'PROVIDER_POOL_EXHAUSTED',
+      coolingUntil: 7_000,
+    })
+    expect(health.order(
+      [{ provider: 'p', model: 'm' }, { provider: 'q', model: 'n' }],
+      link => link,
+    ).map(link => link.provider)).toEqual(['q', 'p'])
+  })
+
   it('ignores failure codes that carry no cooldown', () => {
     const health = ledger(() => 0)
     expect(health.recordFailure('p', 'm', 'BAD_REQUEST')).toBe(false)

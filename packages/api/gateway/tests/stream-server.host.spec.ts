@@ -215,7 +215,7 @@ describe('Remote stream mux server carrier lifecycle', () => {
     }
   })
 
-  it('closes a socket whose buffered downlink exceeds the configured ceiling', async () => {
+  it('closes a socket whose backlog plus the next frame exceeds the configured ceiling', async () => {
     let opened!: () => void
     const didOpen = new Promise<void>((resolve) => { opened = resolve })
     const release = Promise.withResolvers<undefined>()
@@ -231,12 +231,40 @@ describe('Remote stream mux server carrier lifecycle', () => {
     const serverSocket = acceptedSocket(entry.mux)
     client.send(openFrame('overflow'))
     await didOpen
-    Object.defineProperty(serverSocket, 'bufferedAmount', { configurable: true, value: 2_048 })
+    // The backlog alone fits; only the pending frame pushes the total over.
+    Object.defineProperty(serverSocket, 'bufferedAmount', { configurable: true, value: 1_020 })
     const closed = once(client, 'close')
     release.resolve(undefined)
     const closeEvent = await closed
     expect(closeEvent[0]).toBe(1011)
     expect(String(closeEvent[1])).toBe('Remote stream backpressure exceeded')
+  })
+
+  it('rejects an individually oversized frame without closing the physical socket', async () => {
+    const entry = await startMux(
+      async () => (async function *() {
+        yield 'x'.repeat(2_048)
+      })(),
+      2_000,
+      262_144,
+      undefined,
+      30_000,
+      512,
+    )
+    const client = await connect(entry.url)
+    const frames = collectFrames(client)
+    client.send(openFrame('oversized'))
+    await vi.waitFor(() => {
+      const failure = frames.find(frame => frame.type === 'error' && frame.streamId === 'oversized')
+      expect(failure).toBeDefined()
+      expect(failure?.error).toMatchObject({ code: 'internal' })
+    })
+    expect(frames.some(frame => frame.type === 'end')).toBe(false)
+    expect(client.readyState).toBe(WebSocket.OPEN)
+
+    const closed = once(client, 'close')
+    client.close()
+    await closed
   })
 
   it('rejects binary, malformed, and duplicate logical-stream messages', async () => {

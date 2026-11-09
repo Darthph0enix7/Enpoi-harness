@@ -110,13 +110,17 @@ export function HeavyProviderCard({ providerId, t, modelIds = [], onAutoPopulate
 
   const health = status?.health
   const isAuth = health?.status === 401 || health?.status === 403
+  // An absent probe is "not checked", never the red unreachable state.
+  const okState = isAuth ? 'auth' : health === undefined ? 'unknown' : health.ok ? 'true' : 'false'
+  // Leave the mode pill out until the host answers: "Mode: —" is noise, not information.
+  const modeLabel = status?.setupKind === 'custom-instance' ? t('heavyModeCustom') : status?.mode === 'local' ? t('heavyModeLocal') : status?.mode === 'reuse' ? t('heavyModeReuse') : status?.mode === 'unknown' ? t('heavyModeUnknown') : undefined
   const hasDashboard = Boolean(manifest.dashboardUrl || manifest.local.dashboardUrl)
   return (
     <div className={styles['settingsCard']}>
       <div className={styles['cardHead']}>
         <div className={styles['cardTitleRow']}>
           <h3 className={styles['cardTitle']}>{t('heavyBadge')}</h3>
-          <span className={styles['heavyHealthBadge']} data-ok={isAuth ? 'auth' : health?.ok === true ? 'true' : 'false'}>
+          <span className={styles['heavyHealthBadge']} data-ok={okState}>
             {health === undefined
               ? t('heavyHealthUnknown')
               : isAuth
@@ -126,9 +130,11 @@ export function HeavyProviderCard({ providerId, t, modelIds = [], onAutoPopulate
                   : t('heavyHealthDown')}
             {health?.status !== undefined && !isAuth ? ` · ${String(health.status)}` : ''}
           </span>
-          <span className={styles['heavyHealthBadge']}>
-            {t('heavyModeInUse')}: {status?.setupKind === 'custom-instance' ? t('heavyModeCustom') : status?.mode === 'local' ? t('heavyModeLocal') : status?.mode === 'reuse' ? t('heavyModeReuse') : status?.mode === 'unknown' ? t('heavyModeUnknown') : '—'}
-          </span>
+          {modeLabel !== undefined && (
+            <span className={styles['heavyHealthBadge']}>
+              {t('heavyModeInUse')}: {modeLabel}
+            </span>
+          )}
         </div>
         <div className={styles['poolHeaderActions']}>
           <HeavyDashboardLinks
@@ -169,10 +175,14 @@ export function HeavyProviderCard({ providerId, t, modelIds = [], onAutoPopulate
             ))}
           </div>
         )}
-        <div className={styles['heavySectionLabel']}>{t('heavyQuirks')}</div>
-        <ul className={styles['heavyList']}>
-          {manifest.quirks.map(quirk => <li key={quirk}>{quirk}</li>)}
-        </ul>
+        <details className={styles['heavyQuirksDetails']}>
+          <summary className={styles['heavyQuirksSummary']}>
+            {t('heavyQuirks')} ({String(manifest.quirks.length)})
+          </summary>
+          <ul className={styles['heavyList']}>
+            {manifest.quirks.map(quirk => <li key={quirk}>{quirk}</li>)}
+          </ul>
+        </details>
         {manifest.unsupported !== undefined && (
           <div className={styles['heavyBlocked']}>
             <strong>{t('heavyBlockedTitle')}</strong>

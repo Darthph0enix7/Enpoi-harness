@@ -402,6 +402,36 @@ describe('Typert Remote streams', () => {
     }
   })
 
+  it('rejects an enabled heartbeat whose missed timeout does not exceed its interval', async () => {
+    const equal = new Context()
+    roots.push(equal)
+    await equal.plugin(TypertRegistry)
+    await expect(equal.plugin(TypertGatewayService, {
+      websocketHeartbeatIntervalMs: 2_000,
+      websocketMissedHeartbeatTimeoutMs: 2_000,
+    })).rejects.toThrow(RangeError)
+
+    const shorter = new Context()
+    roots.push(shorter)
+    await shorter.plugin(TypertRegistry)
+    await expect(shorter.plugin(TypertGatewayService, {
+      websocketHeartbeatIntervalMs: 2_000,
+      websocketMissedHeartbeatTimeoutMs: 1_500,
+    })).rejects.toThrow(
+      'typert gateway: websocketMissedHeartbeatTimeoutMs must exceed websocketHeartbeatIntervalMs',
+    )
+
+    // A disabled interval exerts no cadence constraint on the liveness deadline.
+    const disabled = new Context()
+    roots.push(disabled)
+    await disabled.plugin(TypertRegistry)
+    await disabled.plugin(TypertGatewayService, {
+      websocketHeartbeatIntervalMs: 0,
+      websocketMissedHeartbeatTimeoutMs: 1,
+    })
+    expect(disabled.typertGateway).toBeInstanceOf(TypertGatewayService)
+  })
+
   it('opens decoded carrier payloads through the in-process wire adapter', async () => {
     const { ctx } = await setup(false)
     const source = await ctx.typertGateway.wireStream.open(
@@ -1071,6 +1101,83 @@ describe('Typert Remote streams', () => {
     client.socket.close()
   })
 
+  it('trims the forwarded event queue in one forward pass, keeping the newest emits in order', async () => {
+    const { ctx } = await setup(false, { remoteEventQueueMaxFrames: 4 })
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const events = rawGatewayEventHarness(ctx).openRemoteEvents({ args: {} }, new AbortController().signal)
+    await expect(events.next()).resolves.toMatchObject({ done: false, value: { type: 'ready' } })
+
+    for (const label of ['one', 'two', 'three', 'four', 'five', 'six']) {
+      source.push({ event: 'fixture/changed', args: [label] })
+    }
+    // The consumer still has no pending read, so every dispatch reaches the
+    // queue before trimming settles.
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+
+    const delivered: unknown[] = []
+    for (let index = 0; index < 4; index += 1) {
+      const next = await events.next()
+      const frame = next.value as { readonly type?: string; readonly args?: readonly unknown[] }
+      expect(frame.type).toBe('emit')
+      delivered.push(frame.args?.[0])
+    }
+    expect(delivered).toEqual(['three', 'four', 'five', 'six'])
+
+    await events.return(undefined)
+    await unregister()
+  })
+
+  it('retains a waterfall frame while dropping an emit queued after it', async () => {
+    const { ctx } = await setup(false, { remoteEventQueueMaxBytes: 400 })
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const pending = pendingInvocation(ctx.extend())
+    const events = rawGatewayEventHarness(ctx).openRemoteEvents({ args: {} }, new AbortController().signal)
+    await expect(events.next()).resolves.toMatchObject({ done: false, value: { type: 'ready' } })
+
+    // The single pass pops the retained waterfall into `kept` before the
+    // oversized emit, then restores it ahead of the remaining frames.
+    source.push(pending.dispatch)
+    source.push({ event: 'fixture/changed', args: ['x'.repeat(300)] })
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+
+    await expect(events.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: 'waterfall', event: 'fixture/approval' },
+    })
+
+    await events.return(undefined)
+    pending.reject(new Error('fixture done'))
+    await expect(pending.outcome).rejects.toThrow('fixture done')
+    await unregister()
+  })
+
+  it('ends the event stream when non-droppable frames alone exceed the queue budget', async () => {
+    const { ctx } = await setup(false, { remoteEventQueueMaxBytes: 64 })
+    const source = new RemoteEventSourceProbe()
+    const unregister = ctx.typertGateway.registerRemoteEvents(source.source, REMOTE_HOST)
+    const pending = pendingInvocation(ctx.extend())
+    const settled = expect(pending.outcome).rejects.toThrow('fixture done')
+    const events = rawGatewayEventHarness(ctx).openRemoteEvents({ args: {} }, new AbortController().signal)
+    await expect(events.next()).resolves.toMatchObject({ done: false, value: { type: 'ready' } })
+
+    source.push(pending.dispatch)
+    await new Promise<void>((resolve) => { setImmediate(resolve) })
+
+    // The undroppable waterfall frame still reaches the Client before the
+    // clean end that bounds the queue.
+    await expect(events.next()).resolves.toMatchObject({
+      done: false,
+      value: { type: 'waterfall', event: 'fixture/approval' },
+    })
+    await expect(events.next()).resolves.toEqual({ done: true, value: undefined })
+
+    pending.reject(new Error('fixture done'))
+    await settled
+    await unregister()
+  })
+
   it('rejects a scoped dispatch yielded after its Remote event source is withdrawn', async () => {
     const { ctx } = await setup(false)
     const publish = Promise.withResolvers<undefined>()
@@ -1646,6 +1753,20 @@ async function acceptsSocket(ctx: Context): Promise<boolean> {
   if (opened) socket.close()
   await closed
   return opened
+}
+
+interface GatewayEventHarness {
+  openRemoteEvents(
+    payload: unknown,
+    signal: AbortSignal,
+  ): AsyncGenerator<Record<string, unknown>>
+}
+
+function rawGatewayEventHarness(ctx: Context): GatewayEventHarness {
+  const receiver = ctx.get('typertGateway') as unknown as GatewayEventHarness & {
+    [symbols.original]?: GatewayEventHarness
+  }
+  return receiver[symbols.original] ?? receiver
 }
 
 function descriptors(): InvocationDescriptor[] {

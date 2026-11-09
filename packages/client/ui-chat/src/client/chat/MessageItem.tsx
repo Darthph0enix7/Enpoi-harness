@@ -133,17 +133,35 @@ function ModelRetryItem({ node, active, t }: {
   )
 }
 
+/** Failure copy longer than this collapses to three lines behind a toggle. */
+const TURN_ERROR_CLAMP_CHARS = 240
+
 /** Persistent, turn-positioned feedback for a terminal failure. */
 function TurnErrorItem({ node, t }: {
   node: TurnErrorNode
   t: ChatViewSlotProps['t']
 }) {
+  const [expanded, setExpanded] = useState(false)
+  const message = failureMessage(node.message, node.code, t)
+  // Server failures can be multi-kilobyte JSON or HTML dumps; keep the row
+  // three lines tall and let the operator open the full text on demand.
+  const clamped = message.length > TURN_ERROR_CLAMP_CHARS
   return (
     <div className={css.turnErrorRow} role="status">
       <StateDot state="error" className={css.turnErrorDot} />
       <div className={css.turnErrorCopy}>
         <span className={css.turnErrorTitle}>{node.code === 'ACCOUNT_SIGNED_OUT' ? t('message.accountStopped') : t('message.turnError')}</span>
-        <span className={css.turnErrorMessage}>{failureMessage(node.message, node.code, t)}</span>
+        <span className={css.turnErrorMessage} data-clamped={clamped && !expanded ? '' : undefined}>{message}</span>
+        {clamped && (
+          <button
+            type="button"
+            className={css.turnErrorToggle}
+            aria-expanded={expanded}
+            onClick={() => { setExpanded(open => !open) }}
+          >
+            {expanded ? t('message.turnError.less') : t('message.turnError.more')}
+          </button>
+        )}
       </div>
       {node.code !== undefined && <code className={css.turnErrorCode}>{node.code}</code>}
     </div>

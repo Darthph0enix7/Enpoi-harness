@@ -458,6 +458,7 @@ function writeChainEscalation(
 function chainFailureChunk(
   chainId: string,
   attempted: readonly { link: ModelChainLink; failure: LlmFailure }[],
+  budgetElapsed = false,
 ): StreamChunk {
   const last = attempted[attempted.length - 1]
   if (last === undefined) {
@@ -472,20 +473,30 @@ function chainFailureChunk(
       },
     }
   }
-  // One attempted link is today's single-model call: keep its exact failure so
-  // consumers route on the same code and facts they already handle.
-  if (attempted.length === 1) return { type: 'finish', reason: { kind: 'error', failure: last.failure } }
+  // One attempted link that failed on its own is today's single-model call:
+  // keep its exact failure so consumers route on the same code and facts they
+  // already handle. A budget-exhausted stop is a chain outcome even then.
+  if (attempted.length === 1 && !budgetElapsed) {
+    return { type: 'finish', reason: { kind: 'error', failure: last.failure } }
+  }
   const named = attempted
     .map((entry, position) =>
       `link ${position + 1} ${entry.link.provider}/${entry.link.model} (${entry.failure.code}: ${entry.failure.message})`)
     .join('; ')
+  const linkCount = `${attempted.length} link${attempted.length === 1 ? '' : 's'}`
+  const budgetNote = budgetElapsed ? '; the failover budget elapsed' : ''
   return {
     type: 'finish',
     reason: {
       kind: 'error',
       failure: withRoute({
-        message: `model chain "${chainId}" failed after ${attempted.length} links: ${named}`,
+        message: `model chain "${chainId}" failed after ${linkCount}${budgetNote}: ${named}`,
         code: MODEL_CHAIN_EXHAUSTED_CODE,
+        ...last.failure.status === undefined ? {} : { status: last.failure.status },
+        ...last.failure.providerRetryAfterMs === undefined
+          ? {}
+          : { providerRetryAfterMs: last.failure.providerRetryAfterMs },
+        ...last.failure.requestId === undefined ? {} : { requestId: last.failure.requestId },
       }, linkRoute(last.link)),
     },
   }
@@ -1968,7 +1979,10 @@ export class LlmRuntime extends TypertRemoteService {
     chain: ResolvedModelChain,
   ): AsyncGenerator<StreamChunk> {
     const order = await this.chainAttemptOrder(options, chain)
-    const budgetEnd = Date.now() + CHAIN_BUDGET_MS
+    // Monotonic: the overall failover budget must not stretch with a wall-clock
+    // adjustment while links are being tried.
+    const budgetEnd = performance.now() + CHAIN_BUDGET_MS
+    let budgetElapsed = false
     const attempted: { link: ModelChainLink; failure: LlmFailure }[] = []
     // A provider condemned by AUTH or the free-tier gate stays condemned for
     // the rest of this request, even if a later different provider also fails.
@@ -1977,8 +1991,11 @@ export class LlmRuntime extends TypertRemoteService {
       const candidate = order[step]
       if (candidate === undefined) continue
       const link = candidate.link
-      const remaining = budgetEnd - Date.now()
-      if (remaining <= 0) break
+      const remaining = budgetEnd - performance.now()
+      if (remaining <= 0) {
+        budgetElapsed = true
+        break
+      }
       // Manual iteration instead of an assignment from `yield*`: the packed
       // webworker deployment transform only accepts `yield*` in statement
       // position, and an expression here broke that build.
@@ -1999,8 +2016,11 @@ export class LlmRuntime extends TypertRemoteService {
       const nextCandidate = nextStep === undefined ? undefined : order[nextStep]
       const next = nextCandidate?.link
       if (!outcome.retryable || nextStep === undefined || next === undefined
-        || nextCandidate === undefined || budgetEnd - Date.now() <= 0) {
-        yield chainFailureChunk(chain.id, attempted)
+        || nextCandidate === undefined || budgetEnd - performance.now() <= 0) {
+        if (outcome.retryable && nextCandidate !== undefined && budgetEnd - performance.now() <= 0) {
+          budgetElapsed = true
+        }
+        yield chainFailureChunk(chain.id, attempted, budgetElapsed)
         return
       }
       // Durable before the escalation: a debugger or peer can see the attempt
@@ -2011,7 +2031,7 @@ export class LlmRuntime extends TypertRemoteService {
       writeChainEscalation(chain.id, candidate.position, link, nextCandidate.position, next, failure)
       step = nextStep - 1
     }
-    yield chainFailureChunk(chain.id, attempted)
+    yield chainFailureChunk(chain.id, attempted, budgetElapsed)
   }
 
   /**

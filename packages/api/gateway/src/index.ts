@@ -166,12 +166,15 @@ export interface Config {
   /**
    * Milliseconds since the last Pong or inbound message after which the Host
    * terminates a socket. Decoupled from the Ping cadence so a bursty or
-   * high-RTT link is not killed for answering late. @default 30000
+   * high-RTT link is not killed for answering late; when the heartbeat
+   * interval is enabled this must exceed it. @default 30000
    */
   readonly websocketMissedHeartbeatTimeoutMs?: number
   /**
-   * Per-socket `bufferedAmount` ceiling in bytes. Above it the carrier closes
-   * with 1011 instead of growing Host memory. @default 16777216
+   * Per-socket `bufferedAmount` ceiling in bytes. When the backlog plus the
+   * next frame would exceed it the carrier closes with 1011 instead of growing
+   * Host memory; a single frame larger than the ceiling fails only its logical
+   * stream. @default 16777216
    */
   readonly websocketMaxBufferedBytes?: number
   /** Buffered uplink frame bytes one logical stream may hold before it fails with `gateway/uplink-overflow`. @default 262144 */
@@ -179,13 +182,15 @@ export interface Config {
   /**
    * Frames retained in one Client's forwarded-event queue before the oldest
    * plain `emit` frames are dropped; waterfall and cancellation frames are
-   * never dropped. @default 4096
+   * never dropped, and a queue that cannot fit them ends that Client's event
+   * stream. @default 4096
    */
   readonly remoteEventQueueMaxFrames?: number
   /**
    * Approximate JSON bytes retained in one Client's forwarded-event queue
    * before the oldest plain `emit` frames are dropped; waterfall and
-   * cancellation frames are never dropped. @default 8388608
+   * cancellation frames are never dropped, and a queue that cannot fit them
+   * ends that Client's event stream. @default 8388608
    */
   readonly remoteEventQueueMaxBytes?: number
   /**
@@ -286,8 +291,17 @@ export class TypertGatewayService extends Service implements TypertGateway {
    * @param config - validated Gateway transport configuration.
    */
   constructor(ctx: Context, config: Config) {
-    super(ctx, 'typertGateway')
     const resolved = config as ResolvedConfig
+    // A liveness deadline at or below the Ping cadence would terminate healthy
+    // sockets before the first response cycle can complete. `0` disables the
+    // heartbeat entirely, so the deadline is then free to be any positive value.
+    if (resolved.websocketHeartbeatIntervalMs > 0
+      && resolved.websocketMissedHeartbeatTimeoutMs <= resolved.websocketHeartbeatIntervalMs) {
+      throw new RangeError(
+        'typert gateway: websocketMissedHeartbeatTimeoutMs must exceed websocketHeartbeatIntervalMs',
+      )
+    }
+    super(ctx, 'typertGateway')
     this.remoteEventReplayMaxAgeMs = resolved.remoteEventReplayMaxAgeMs
     this.remoteEventQueueMaxFrames = resolved.remoteEventQueueMaxFrames
     this.remoteEventQueueMaxBytes = resolved.remoteEventQueueMaxBytes
@@ -1143,12 +1157,17 @@ interface RemoteEventQueueEntry {
 /**
  * Pull-driven queue owned by one connected Client event generation. A slow
  * Client cannot grow it without bound: overflow drops the oldest plain `emit`
- * frames (invalidations that self-heal on the next reset) while waterfall and
- * cancellation frames are always retained.
+ * frames (invalidations that self-heal on the next reset) in one forward pass,
+ * while waterfall and cancellation frames are always retained. When the
+ * retained waterfall and cancellation frames alone exceed the budget, no emit
+ * can relieve it, so the queue ends that Client's event stream instead of
+ * growing without bound.
  */
 class RemoteEventQueue {
   private readonly frames = new Deque<RemoteEventQueueEntry>()
   private bytes = 0
+  private emitCount = 0
+  private emitBytes = 0
   private waiter: (() => void) | undefined
   private closed = false
 
@@ -1166,28 +1185,39 @@ class RemoteEventQueue {
     const bytes = Buffer.byteLength(JSON.stringify(frame), 'utf8')
     this.frames.pushBack({ frame, bytes })
     this.bytes += bytes
+    if (frame.type === 'emit') {
+      this.emitCount += 1
+      this.emitBytes += bytes
+    }
     this.trim()
     this.waiter?.()
   }
 
-  /** Drop oldest plain emits until the queue fits, retaining every waterfall and cancel. */
+  /**
+   * Drop the oldest plain emits in one forward pass until the queue fits.
+   * Retained waterfall and cancellation frames alone over budget end the
+   * stream: they are not droppable, so memory could not be bounded otherwise.
+   */
   private trim(): void {
-    while (this.frames.size > this.maxFrames || this.bytes > this.maxBytes) {
-      const kept: RemoteEventQueueEntry[] = []
-      let dropped = false
-      while (this.frames.size > 0) {
-        const entry = this.frames.popFront() as RemoteEventQueueEntry
-        if (!dropped && entry.frame.type === 'emit') {
-          this.bytes -= entry.bytes
-          dropped = true
-          continue
-        }
-        kept.push(entry)
+    if (this.frames.size - this.emitCount > this.maxFrames
+      || this.bytes - this.emitBytes > this.maxBytes) {
+      this.end()
+      return
+    }
+    if (this.frames.size <= this.maxFrames && this.bytes <= this.maxBytes) return
+    const kept: RemoteEventQueueEntry[] = []
+    while (this.frames.size + kept.length > this.maxFrames || this.bytes > this.maxBytes) {
+      const entry = this.frames.popFront() as RemoteEventQueueEntry
+      if (entry.frame.type === 'emit') {
+        this.bytes -= entry.bytes
+        this.emitBytes -= entry.bytes
+        this.emitCount -= 1
+        continue
       }
-      for (let index = kept.length - 1; index >= 0; index -= 1) {
-        this.frames.pushFront(kept[index] as RemoteEventQueueEntry)
-      }
-      if (!dropped) return
+      kept.push(entry)
+    }
+    for (let index = kept.length - 1; index >= 0; index -= 1) {
+      this.frames.pushFront(kept[index] as RemoteEventQueueEntry)
     }
   }
 
@@ -1205,6 +1235,10 @@ class RemoteEventQueue {
         while (this.frames.size > 0) {
           const entry = this.frames.popFront() as RemoteEventQueueEntry
           this.bytes -= entry.bytes
+          if (entry.frame.type === 'emit') {
+            this.emitCount -= 1
+            this.emitBytes -= entry.bytes
+          }
           yield entry.frame
         }
         if (this.closed || signal.aborted) return
