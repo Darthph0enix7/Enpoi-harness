@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-11-09T13:00:10.605Z",
+  "generatedAt": "2026-11-09T17:14:45.305Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.121",
+      "commit": "c96afd6",
+      "releasedAt": "2026-11-09T16:56:52.000Z",
+      "notes": [
+        "fix(model-selection): omit noisy declared-not-sent tags in picker dropdown"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.120",
       "commit": "5d7fe7e",
@@ -394,14 +402,6 @@
       "notes": [
         "fix(spec): satisfy the host typecheck in the service-restart reload assertions",
         "fix(update): macOS service reload after plist changes (bootout/bootstrap/kickstart)"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.75",
-      "commit": "c81abd4",
-      "releasedAt": "2026-10-12T19:10:24.000Z",
-      "notes": [
-        "chore(maintenance): docs truth pass, i18n reconciliation, orphan/dead-code cleanup, test:gui triage"
       ]
     }
   ]
