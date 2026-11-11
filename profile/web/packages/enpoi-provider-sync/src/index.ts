@@ -1949,16 +1949,29 @@ function analyzeModel(
   const devMaxInputTokens = mDev?.limit?.input
   const devMax = mDev?.limit?.output ?? mDev?.maxTokens
 
-  const maxTokens = model.maxTokens ?? registry?.maxTokens ?? devMax ?? cat?.maxTokens
-  const hostInputCap = model.maxInputTokens ?? registry?.maxInputTokens ?? undefined
+  // A source that states `0` (CLIProxyAPI's image models, for one) disclosed
+  // nothing usable: a capacity is a positive token count, and persisting a
+  // zero fails the settings schema and blocks the whole route's write.
+  const positive = (value: number | undefined): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 1 ? value : undefined
+
+  const maxTokens = positive(model.maxTokens ?? registry?.maxTokens ?? devMax ?? cat?.maxTokens)
+  const hostInputCap = positive(model.maxInputTokens ?? registry?.maxInputTokens ?? undefined)
   const allowDevContext = devContext !== undefined
     && (hostInputCap === undefined || devContext <= hostInputCap + (maxTokens ?? 0))
 
-  const contextWindow = model.contextWindow
+  // An endpoint that disclosed only an input cap (Gemini `/v1beta/models`'s
+  // `inputTokenLimit`, Anthropic `/v1/models`'s `max_input_tokens`) stated the
+  // budget it actually accepts; that cap is the usable window for that route,
+  // so it stands in for a combined window no source disclosed. This is the
+  // endpoint's own number, never a guess, and it is what keeps a smaller
+  // hosting tier (a 372K Codex plan) from reading as the vendor's 1M window.
+  const contextWindow = positive(model.contextWindow
     ?? registry?.contextWindow
     ?? (allowDevContext ? devContext : undefined)
     ?? cat?.contextWindow
-  const maxInputTokens = hostInputCap ?? devMaxInputTokens
+    ?? hostInputCap)
+  const maxInputTokens = positive(hostInputCap ?? devMaxInputTokens)
 
   // 3. Resolve Modalities, Reasoning, and their provenance. The endpoint's own
   // listing speaks for the route it serves, so a disclosure it makes wins over
@@ -2015,7 +2028,16 @@ function analyzeModel(
     && model.contextWindow === undefined && model.maxInputTokens === undefined && model.maxTokens === undefined
     && model.input === undefined && model.reasoning === undefined && model.tools === undefined
     && !endpointLadderDeclared
-  const unverified = nothingDescribed || hintedInput || hintedReasoning
+  // A row whose limits the endpoint itself disclosed is not an unknown model
+  // just because the name table also predicted something the endpoint omitted:
+  // `unverified` marks rows whose numbers nothing disclosed, and a real
+  // capacity disclosure keeps the row out of that bucket. A modality-only
+  // listing still leaves the row unverified — the numbers are the point.
+  const endpointDescribed = model.contextWindow !== undefined
+    || model.maxInputTokens !== undefined
+    || model.maxTokens !== undefined
+    || endpointLadderDeclared
+  const unverified = nothingDescribed || (!endpointDescribed && (hintedInput || hintedReasoning))
   // A disclosed capability keeps its fact; the labeled hint field carries only
   // the claims a disclosure did not cover.
   const capabilityHints: Record<string, unknown> | undefined = claim === undefined ? undefined : {
@@ -2191,6 +2213,72 @@ function preservedConfiguredFields(entry: Record<string, unknown>): Record<strin
   return { ...preservedManualFields(entry), ...preservedOperatorFields(entry) }
 }
 
+/** Facts a sparser analysis must never erase from an already-described record. */
+const MONOTONIC_FACT_FIELDS = [
+  'contextWindow',
+  'maxInputTokens',
+  'maxTokens',
+  'tools',
+  'cost',
+  'releaseDate',
+  'costTiers',
+] as const
+
+/**
+ * Keep the facts an earlier pass already disclosed when this pass's analysis
+ * is sparser for the same id. Listings are not always uniform: a sibling
+ * metadata probe can miss, a model can answer a listing without its limits,
+ * and a registry refresh can be unavailable — none of that makes a previously
+ * disclosed capacity or capability untrue. Capacity and tool facts are always
+ * carried over; modalities and reasoning are carried over only from a record
+ * that was itself disclosed (never from a hint-only `unverified` row, which
+ * would promote a guess into a fact).
+ * @param entry - the stored model record.
+ * @param fresh - this pass's analyzed record for the same id.
+ * @returns the disclosed fields this pass did not restate; `{}` when none.
+ */
+function preservedKnownFacts(
+  entry: Record<string, unknown>,
+  fresh: Record<string, unknown>,
+): Record<string, unknown> {
+  const preserved: Record<string, unknown> = {}
+  const entryUnverified = entry.unverified === true
+  for (const field of MONOTONIC_FACT_FIELDS) {
+    if (fresh[field] === undefined && entry[field] !== undefined) preserved[field] = entry[field]
+  }
+  if (fresh.reasoningEfforts === undefined && entry.reasoningEfforts !== undefined) {
+    preserved.reasoningEfforts = entry.reasoningEfforts
+  }
+  if (!entryUnverified) {
+    const freshInput = Array.isArray(fresh.input) ? liveModalities(fresh.input) : []
+    const entryInput = Array.isArray(entry.input) ? liveModalities(entry.input) : []
+    const union = [...new Set([...freshInput, ...entryInput])]
+    if (union.length > freshInput.length && entryInput.some(modality => modality !== 'text')) {
+      preserved.input = ['text', ...union.filter(modality => modality !== 'text')]
+    }
+    if (fresh.reasoning !== true && entry.reasoning === true) preserved.reasoning = true
+  }
+  return preserved
+}
+
+/**
+ * The full merge for one advertised id: this pass's record, the facts earlier
+ * passes disclosed, and the operator-only declarations configuration owns.
+ * @param entry - the stored model record.
+ * @param fresh - this pass's analyzed record.
+ * @returns the fields to layer over `fresh`.
+ */
+function mergedRefreshFields(
+  entry: Record<string, unknown>,
+  fresh: Record<string, unknown>,
+): Record<string, unknown> {
+  const known = preservedKnownFacts(entry, fresh)
+  const merged: Record<string, unknown> = { ...known, ...preservedConfiguredFields(entry) }
+  // A restated disclosure clears the hint-era stamp: the row is described now.
+  if (fresh.unverified === true && Object.keys(known).length > 0) delete merged.unverified
+  return merged
+}
+
 /** One route's merged model list plus the configured ids the listing omitted. */
 export interface ConfiguredMerge {
   /** Configured entries first (updated in place), then newly advertised entries. */
@@ -2253,8 +2341,8 @@ export function mergeConfiguredModels(
       // merge that dropped them would silently disable media or wire
       // behavior the operator configured.
       models.push(entry.source === 'manual'
-        ? { ...fresh, ...preservedConfiguredFields(entry), source: 'manual' }
-        : { ...fresh, ...preservedOperatorFields(entry) })
+        ? { ...fresh, ...mergedRefreshFields(entry, fresh), source: 'manual' }
+        : { ...fresh, ...mergedRefreshFields(entry, fresh) })
       continue
     }
     const keptSource = entry.source === 'manual' || entry.source === 'pinned-in-use' ? entry.source : 'configured'
@@ -2540,6 +2628,30 @@ export interface PlanRouteInput {
  * @param input - the route, its stored records, the listing, and the gate facts.
  * @returns the records to persist and the removal audit.
  */
+/**
+ * Drop capacity values the settings schema rejects. A capacity is a positive
+ * token count; a source that states `0` (or a negative) disclosed nothing, and
+ * a single such value would fail the whole `models` array's validation and
+ * silently block the route's write. Overlay upserts and stored rows pass
+ * through here too, so no path can emit one.
+ * @param models - the planned model records.
+ * @returns the same records with non-positive capacities removed.
+ */
+function sanitizeCapacities(
+  models: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  return models.map(model => {
+    let copy: Record<string, unknown> | undefined
+    for (const field of ['contextWindow', 'maxInputTokens', 'maxTokens'] as const) {
+      const value = model[field]
+      if (typeof value !== 'number' || (Number.isFinite(value) && value >= 1)) continue
+      copy ??= { ...model }
+      delete copy[field]
+    }
+    return copy ?? model
+  })
+}
+
 export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
   const configured = input.configured ?? []
   const live = input.live
@@ -2693,10 +2805,12 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
         models.push({
           ...fresh,
           // The healthy pass refreshes the record too; a manual entry's own
-          // ladder is the operator's claim and survives it, and every entry
-          // keeps the operator-only declarations (`nativeFileInputs`,
-          // `compat`) no disclosure can restate.
-          ...preservedConfiguredFields(entry),
+          // ladder is the operator's claim and survives it, every entry keeps
+          // the operator-only declarations (`nativeFileInputs`, `compat`) no
+          // disclosure can restate, and a fact an earlier pass disclosed
+          // survives a sparser pass (a missed sibling probe never erases a
+          // known capacity).
+          ...mergedRefreshFields(entry, fresh),
           ...entry.source === 'manual' ? { source: 'manual' } : {},
           ...isGrace ? { firstSeenAt: firstSeenAtOf(entry) ?? input.now } : {},
         })
@@ -2726,7 +2840,7 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
     if (!models.some(model => model.id === id)) continue
     if (!report.deprecated.includes(id)) report.deprecated.push(id)
   }
-  return { models: applyFreeTierGate(overlaid, input.freeTierGate), report }
+  return { models: sanitizeCapacities(applyFreeTierGate(overlaid, input.freeTierGate)), report }
 }
 
 /** The value `providerSync.refreshRoute` returns to the client. */

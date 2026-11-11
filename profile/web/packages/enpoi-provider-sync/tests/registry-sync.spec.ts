@@ -403,8 +403,9 @@ describe('registry metadata precedence', () => {
       input: ['text', 'image', 'audio', 'video'],
       reasoning: true,
     })
-    // context_length was null upstream; the 1M registry value is input-only.
-    expect(model.contextWindow).toBeUndefined()
+    // context_length was null upstream; the 1M registry value is input-only,
+    // and an endpoint's own input cap is the usable window its route accepts.
+    expect(model.contextWindow).toBe(1_048_576)
     expect(model.reasoningEfforts).toBeUndefined()
     // The hint table may label provenance, but it never injects a ladder claim
     // over a registry disclosure.
@@ -551,5 +552,25 @@ describe('registry metadata precedence', () => {
     const legacy = planned.models.find(model => model.id === 'claude-opus-4-1-20250805')
     expect(legacy?.reasoning).toBe(true)
     expect(legacy?.reasoningEfforts).toBeUndefined()
+  })
+})
+
+describe('capacity sanitation', () => {
+  it('never emits a zero capacity that would fail the settings schema', () => {
+    // CLIProxyAPI states 0 for its image models; persisting 0 fails validation
+    // and silently blocks the whole route's model write.
+    const planned = planRouteModels({
+      route: 'cliproxyapi',
+      configured: [],
+      live: [{ id: 'gpt-image-2', maxInputTokens: 0, maxTokens: 0 }],
+      catalogRoute: false,
+      endpointFresh: true,
+      catalogFresh: true,
+      now: 1_000,
+    })
+    const model = planned.models[0]!
+    expect(model.contextWindow).toBeUndefined()
+    expect(model.maxInputTokens).toBeUndefined()
+    expect(model.maxTokens).toBeUndefined()
   })
 })

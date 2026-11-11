@@ -87,11 +87,11 @@ it('a refresh over a configured entry keeps the ladder the endpoint advertises',
   expect(merged.unadvertised).toEqual([])
 })
 
-it('a listing without a capability block keeps today\'s inference result, replacing the configured ladder', () => {
-  // Intent: the endpoint is authoritative for the route it serves, so silence
-  // falls back to the models.dev/catalog inference the sync always used — for
-  // an id no catalog knows that inference yields no ladder, so the configured
-  // one is replaced (behaviour is unchanged from before this change).
+it('a silent listing never erases a ladder the stored record already carries', () => {
+  // Intent: nothing this pass disclosed replaces what an earlier pass or the
+  // operator already established. A listing that says nothing about efforts
+  // leaves the stored ladder and its reasoning claim intact, so a missed
+  // capability block can never downgrade a described model.
   const configured = [{
     id: 'probe-ladder-model-77',
     reasoning: true,
@@ -101,8 +101,8 @@ it('a listing without a capability block keeps today\'s inference result, replac
   expect(plain.reasoningEfforts).toBeUndefined()
 
   const merged = mergeConfiguredModels(ROUTE, configured, [plain], undefined)
-  expect(merged.models[0]!.reasoningEfforts).toBeUndefined()
-  expect(merged.models[0]!.reasoning).toBe(false)
+  expect(merged.models[0]!.reasoningEfforts).toEqual({ high: 'high', max: 'max' })
+  expect(merged.models[0]!.reasoning).toBe(true)
 })
 
 it('the healthy pass keeps the advertised ladder, and a manual ladder over a different one', () => {

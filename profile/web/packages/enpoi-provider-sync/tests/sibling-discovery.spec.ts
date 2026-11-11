@@ -299,12 +299,14 @@ describe('consensus resolution and host-first precedence', () => {
 
     const gpt = byId.get('gpt-5.6-sol')!
     expect(gpt.maxInputTokens).toBe(372_000)
-    expect(gpt.contextWindow).toBeUndefined()
+    // The host's own 372K tier is the window this route accepts; the vendor's
+    // larger models.dev window never replaces it.
+    expect(gpt.contextWindow).toBe(372_000)
     expect(gpt.unverified).toBeUndefined()
 
-    // Sibling-described model retains its live 1M+ / 65K limits and modalities,
-    // while accurately flagging an unverified reasoning hint when neither
-    // /v1beta nor models.dev disclosed reasoning.
+    // A sibling-described model keeps its live 1M / 65K limits and modalities;
+    // a disclosed capacity is a real disclosure, so the row is not unverified
+    // even though no source named its reasoning ladder.
     const tiered = planRouteModels({
       route: 'renamed-cpa',
       configured: [],
@@ -323,7 +325,7 @@ describe('consensus resolution and host-first precedence', () => {
     expect(tiered.maxInputTokens).toBe(1_048_576)
     expect(tiered.maxTokens).toBe(65_536)
     expect(tiered.input).toEqual(['text', 'image', 'audio', 'video'])
-    expect(tiered.unverified).toBe(true)
+    expect(tiered.unverified).toBeUndefined()
 
     const localBare = byId.get('llama-3.3-70b')!
     expect(localBare.contextWindow).toBeUndefined()

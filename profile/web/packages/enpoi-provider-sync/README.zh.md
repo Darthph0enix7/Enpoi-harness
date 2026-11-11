@@ -48,11 +48,11 @@ metadataSources:
 
 ## 能力诚实性
 
-只有当列表声明了阶梯、解析后的注册表记录提供了命名级别，或目录来源提供了可用级别时，阶梯才会写入设置。仅 `reasoning: true` 不会提供阶梯；只有预算的注册表记录保持无阶梯，而不是编造全部六档。未知级别 id 会被丢弃，显式 `off` 保留为无值键，仅含 `off` 的阶梯会被省略，因为设置会拒绝它。`maxInputTokens` 与合并上下文窗口分开持久化，绝不并入其中。没有任何来源披露的容量会被省略，交由路由的 `defaultContextWindow` / `defaultMaxTokens` 在请求时解析，而不是把适配器默认值当作已披露事实持久化。`unverified: true` 标记没有任何来源描述的记录。
+只有当列表声明了阶梯、解析后的注册表记录提供了命名级别，或目录来源提供了可用级别时，阶梯才会写入设置。仅 `reasoning: true` 不会提供阶梯；只有预算的注册表记录保持无阶梯，而不是编造全部六档。未知级别 id 会被丢弃，显式 `off` 保留为无值键，仅含 `off` 的阶梯会被省略，因为设置会拒绝它。`maxInputTokens` 与合并上下文窗口并列持久化。当端点只披露了输入上限（Gemini `/v1beta/models` 的 `inputTokenLimit`、Anthropic 的 `max_input_tokens`）且没有任何来源披露合并窗口时，该上限就是这条路由实际接受的窗口，同样写入 `contextWindow` —— 这是端点自己给出的数字，也正是让较小的托管档位（372K 的 Codex 档）不会被读成厂商的 1M 窗口的原因。来源声明的非正容量（图像模型给出的 `0`）视为未披露并被丢弃：单个这样的值会令 `models` schema 校验失败，从而静默阻断整条路由的写入。没有任何来源披露的容量会被省略，交由路由的 `defaultContextWindow` / `defaultMaxTokens` 在请求时解析，而不是把适配器默认值当作已披露事实持久化。早前轮次已披露的事实绝不会被之后对此沉默的轮次抹去（一次错过的同源探测不会把已描述的模型降级），`unverified: true` 标记的是数字与能力都没有任何来源描述的记录。
 
 ## 容量与补全来源
 
-随包配置不再声明 `capacityDefaults`。该配置键仍然可被解析以保持兼容：设置它的操作者是在声明一个显式的路由级假设，同步绝不会把它当作逐模型事实持久化。只有端点披露、精确注册表记录、models.dev、已安装目录、`source: 'manual'` 记录或 overlay `upsert` 会进入已存容量；没有来源描述容量的 id 保持未定，由路由在请求时用带来源标记的 `defaultContextWindow` / `defaultMaxTokens` 解析。models.dev 的 `limit.context` 与 `limit.input` 是两个独立事实：只发布输入上限的记录会得到 `maxInputTokens`，不会得到 `contextWindow`。
+随包配置不再声明 `capacityDefaults`。该配置键仍然可被解析以保持兼容：设置它的操作者是在声明一个显式的路由级假设，同步绝不会把它当作逐模型事实持久化。只有端点披露、精确注册表记录、models.dev、已安装目录、`source: 'manual'` 记录或 overlay `upsert` 会进入已存容量；没有来源描述容量的 id 保持未定，由路由在请求时用带来源标记的 `defaultContextWindow` / `defaultMaxTokens` 解析。models.dev 的 `limit.context` 与 `limit.input` 是两个独立事实：只发布输入上限的记录会得到 `maxInputTokens`；当没有披露合并窗口时，端点自身给出的上限会充当 `contextWindow`。
 
 补全在 models.dev、已安装目录与注册表之间只按精确 id 匹配。后缀剥离、厂商族前缀、去掉厂商段的短 id 与大小写折叠拼写都不构成别名；映射列表中靠后提供方的精确记录优先于靠前的非精确记录。真正不同的别名应写入以精确 id 为键的 overlay `upsert`。overlay upsert 会通过共享的 pi-ai 模型 schema 校验；格式错误的文件会被整体拒绝并给出 `provider-sync/catalog-overlays` 诊断，上一份正常文档继续生效。`/models` 回复通过共享列表解析器读取，超过 4 MiB 响应上限会被拒绝。
 
