@@ -1,8 +1,18 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-11-09T17:14:45.305Z",
+  "generatedAt": "2026-11-11T23:29:05.702Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.124",
+      "commit": "112dee9",
+      "releasedAt": "2026-11-11T23:03:44.000Z",
+      "notes": [
+        "chore(profile): rebuild enpoi-provider-sync bundle for the capacity fixes",
+        "fix(provider-sync): persist real capacities, use endpoint input cap as window, never downgrade known facts",
+        "feat(provider-sync): enrich model limits and capabilities from sibling host endpoints and owner-scoped registries"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.121",
       "commit": "c96afd6",
@@ -393,15 +403,6 @@
       "notes": [
         "fix(spec): guard the optional bootstrap index in the fallback-reload assertion",
         "fix(update): rollback rewrites install-state; race-proof macOS service restart; quieter pnpm pin note"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.76",
-      "commit": "61ca959",
-      "releasedAt": "2026-10-12T19:48:39.000Z",
-      "notes": [
-        "fix(spec): satisfy the host typecheck in the service-restart reload assertions",
-        "fix(update): macOS service reload after plist changes (bootout/bootstrap/kickstart)"
       ]
     }
   ]
