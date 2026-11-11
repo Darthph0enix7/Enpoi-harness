@@ -2557,11 +2557,12 @@ function analyzeModel(route, model, hints, routeProviderMap = DEFAULT_ROUTE_PROV
   const devContext = mDev?.limit?.context ?? mDev?.contextWindow;
   const devMaxInputTokens = mDev?.limit?.input;
   const devMax = mDev?.limit?.output ?? mDev?.maxTokens;
-  const maxTokens = model.maxTokens ?? registry?.maxTokens ?? devMax ?? cat?.maxTokens;
-  const hostInputCap = model.maxInputTokens ?? registry?.maxInputTokens ?? void 0;
+  const positive = (value2) => typeof value2 === "number" && Number.isFinite(value2) && value2 >= 1 ? value2 : void 0;
+  const maxTokens = positive(model.maxTokens ?? registry?.maxTokens ?? devMax ?? cat?.maxTokens);
+  const hostInputCap = positive(model.maxInputTokens ?? registry?.maxInputTokens ?? void 0);
   const allowDevContext = devContext !== void 0 && (hostInputCap === void 0 || devContext <= hostInputCap + (maxTokens ?? 0));
-  const contextWindow = model.contextWindow ?? registry?.contextWindow ?? (allowDevContext ? devContext : void 0) ?? cat?.contextWindow;
-  const maxInputTokens = hostInputCap ?? devMaxInputTokens;
+  const contextWindow = positive(model.contextWindow ?? registry?.contextWindow ?? (allowDevContext ? devContext : void 0) ?? cat?.contextWindow ?? hostInputCap);
+  const maxInputTokens = positive(hostInputCap ?? devMaxInputTokens);
   const registryInput = registry?.inputModalities !== null && registry?.inputModalities !== void 0 && registry.inputModalities.length > 0 ? registry.inputModalities : void 0;
   const disclosed = [model.input, registryInput, mDev?.modalities?.input, cat?.input].find((value2) => Array.isArray(value2) && liveModalities(value2).length > 0);
   const modalityDisclosed = disclosed !== void 0;
@@ -2583,7 +2584,8 @@ function analyzeModel(route, model, hints, routeProviderMap = DEFAULT_ROUTE_PROV
   const hintedInput = !modalityDisclosed && claim !== void 0 && claim.input.length > 0;
   const hintedReasoning = !reasoningDisclosed && claim?.reasoning === true;
   const nothingDescribed = registry === void 0 && mDev === void 0 && cat === void 0 && model.contextWindow === void 0 && model.maxInputTokens === void 0 && model.maxTokens === void 0 && model.input === void 0 && model.reasoning === void 0 && model.tools === void 0 && !endpointLadderDeclared;
-  const unverified = nothingDescribed || hintedInput || hintedReasoning;
+  const endpointDescribed = model.contextWindow !== void 0 || model.maxInputTokens !== void 0 || model.maxTokens !== void 0 || endpointLadderDeclared;
+  const unverified = nothingDescribed || !endpointDescribed && (hintedInput || hintedReasoning);
   const capabilityHints = claim === void 0 ? void 0 : {
     ...claim.input.length === 0 || modalityDisclosed ? {} : { input: claim.input },
     ...claim.reasoning && !reasoningDisclosed ? { reasoning: true } : {},
@@ -2683,6 +2685,41 @@ function preservedOperatorFields(entry) {
 function preservedConfiguredFields(entry) {
   return { ...preservedManualFields(entry), ...preservedOperatorFields(entry) };
 }
+var MONOTONIC_FACT_FIELDS = [
+  "contextWindow",
+  "maxInputTokens",
+  "maxTokens",
+  "tools",
+  "cost",
+  "releaseDate",
+  "costTiers"
+];
+function preservedKnownFacts(entry, fresh) {
+  const preserved = {};
+  const entryUnverified = entry.unverified === true;
+  for (const field of MONOTONIC_FACT_FIELDS) {
+    if (fresh[field] === void 0 && entry[field] !== void 0) preserved[field] = entry[field];
+  }
+  if (fresh.reasoningEfforts === void 0 && entry.reasoningEfforts !== void 0) {
+    preserved.reasoningEfforts = entry.reasoningEfforts;
+  }
+  if (!entryUnverified) {
+    const freshInput = Array.isArray(fresh.input) ? liveModalities(fresh.input) : [];
+    const entryInput = Array.isArray(entry.input) ? liveModalities(entry.input) : [];
+    const union = [.../* @__PURE__ */ new Set([...freshInput, ...entryInput])];
+    if (union.length > freshInput.length && entryInput.some((modality) => modality !== "text")) {
+      preserved.input = ["text", ...union.filter((modality) => modality !== "text")];
+    }
+    if (fresh.reasoning !== true && entry.reasoning === true) preserved.reasoning = true;
+  }
+  return preserved;
+}
+function mergedRefreshFields(entry, fresh) {
+  const known = preservedKnownFacts(entry, fresh);
+  const merged = { ...known, ...preservedConfiguredFields(entry) };
+  if (fresh.unverified === true && Object.keys(known).length > 0) delete merged.unverified;
+  return merged;
+}
 function mergeConfiguredModels(route, configured, live2, hints = { table: loadCapabilityHints(), override: {} }, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP, registryContext = void 0) {
   const advertised = /* @__PURE__ */ new Map();
   for (const model of live2) {
@@ -2702,7 +2739,7 @@ function mergeConfiguredModels(route, configured, live2, hints = { table: loadCa
     seen.add(id);
     const fresh = advertised.get(id);
     if (fresh !== void 0) {
-      models.push(entry.source === "manual" ? { ...fresh, ...preservedConfiguredFields(entry), source: "manual" } : { ...fresh, ...preservedOperatorFields(entry) });
+      models.push(entry.source === "manual" ? { ...fresh, ...mergedRefreshFields(entry, fresh), source: "manual" } : { ...fresh, ...mergedRefreshFields(entry, fresh) });
       continue;
     }
     const keptSource = entry.source === "manual" || entry.source === "pinned-in-use" ? entry.source : "configured";
@@ -2803,6 +2840,18 @@ function pruneRouteReferences(orchestration, route, removed) {
     if (next.length !== favorites.length) cleanup.favorites = next;
   }
   return cleanup;
+}
+function sanitizeCapacities(models) {
+  return models.map((model) => {
+    let copy;
+    for (const field of ["contextWindow", "maxInputTokens", "maxTokens"]) {
+      const value2 = model[field];
+      if (typeof value2 !== "number" || Number.isFinite(value2) && value2 >= 1) continue;
+      copy ??= { ...model };
+      delete copy[field];
+    }
+    return copy ?? model;
+  });
 }
 function planRouteModels(input) {
   const configured = input.configured ?? [];
@@ -2918,10 +2967,12 @@ function planRouteModels(input) {
         models.push({
           ...fresh,
           // The healthy pass refreshes the record too; a manual entry's own
-          // ladder is the operator's claim and survives it, and every entry
-          // keeps the operator-only declarations (`nativeFileInputs`,
-          // `compat`) no disclosure can restate.
-          ...preservedConfiguredFields(entry),
+          // ladder is the operator's claim and survives it, every entry keeps
+          // the operator-only declarations (`nativeFileInputs`, `compat`) no
+          // disclosure can restate, and a fact an earlier pass disclosed
+          // survives a sparser pass (a missed sibling probe never erases a
+          // known capacity).
+          ...mergedRefreshFields(entry, fresh),
           ...entry.source === "manual" ? { source: "manual" } : {},
           ...isGrace ? { firstSeenAt: firstSeenAtOf(entry) ?? input.now } : {}
         });
@@ -2947,7 +2998,7 @@ function planRouteModels(input) {
     if (!models.some((model) => model.id === id)) continue;
     if (!report.deprecated.includes(id)) report.deprecated.push(id);
   }
-  return { models: applyFreeTierGate(overlaid, input.freeTierGate), report };
+  return { models: sanitizeCapacities(applyFreeTierGate(overlaid, input.freeTierGate)), report };
 }
 function stringifyComparable(models) {
   return JSON.stringify(

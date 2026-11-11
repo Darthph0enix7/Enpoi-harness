@@ -107,8 +107,8 @@
       "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
     },
     "enpoi-provider-sync": {
-      "sourceInputs": "f1fd2eb7a5374fe89ef34d745aa4b4f7dbb76f20b453cd4a4a1af63afb3c8a4e",
-      "outputSha": "06db285b9fe542d79a96e6cbc260ac74f0f2e0d8107a2614a801ed17c5e895c2",
+      "sourceInputs": "8ccdf293d0d72aec038b4dac26a01d0e93492eda94e0933d2c45ddbe2fc76a39",
+      "outputSha": "0c5f2c948a98f50cea9305b38cfaadc18e9ee3defb55954e24eb2da086b10bb4",
       "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
     },
     "enpoi-role-registry": {
