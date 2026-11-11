@@ -76,12 +76,13 @@ import {
   OWNER_CHANNEL_ALIASES,
   createRegistryMetadataSource,
   loadBundledRegistryMetadataIndex,
-  resolveRegistryModel,
+  resolveRegistryConsensus,
   type RegistryMetadataIndex,
   type RegistryMetadataSource,
   type RegistryMetadataSourceState,
   type RegistryResolvedModel,
 } from './registry-metadata.ts'
+import { enrichFromSiblingEndpoints } from './sibling-discovery.ts'
 import {
   claimCapabilityHints,
   loadCapabilityHints,
@@ -176,7 +177,11 @@ export interface RouteMetadataSourceConfig {
  * the opt-in for a live upstream refresh.
  */
 export const DEFAULT_ROUTE_METADATA_SOURCES: Readonly<Record<string, RouteMetadataSourceConfig>> = {
-  cliproxyapi: { source: 'cliproxyapi' },
+  cliproxyapi: {
+    source: 'cliproxyapi',
+    refreshUrl: 'https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/main/internal/registry/models/models.json',
+    sourceVersion: 'main',
+  },
 }
 
 /** Live-editable sync schedule and enrichment configuration. */
@@ -714,22 +719,74 @@ export const DEFAULT_ROUTE_PROVIDER_MAP: RouteProviderMap = Object.freeze({
 })
 
 /**
- * Resolve a model from models.dev within the route's own provider namespace.
+ * First-party vendor `owned_by` values → `models.dev` provider keys.
+ * Generic self-hosting/engine labels (`library`, `ollama`, `vllm`, `lmstudio`,
+ * `llamacpp`, `local`, `custom`) are deliberately excluded so an undisclosed
+ * local/quantized model never inherits a cloud provider's larger context window.
+ */
+const OWNER_MODELS_DEV_MAP: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  anthropic: ['anthropic'],
+  openai: ['openai'],
+  google: ['google'],
+  antigravity: ['google', 'anthropic'],
+  vertex: ['google-vertex', 'google', 'anthropic'],
+  xai: ['xai'],
+  deepseek: ['deepseek'],
+  mistral: ['mistral'],
+  mistralai: ['mistral'],
+  moonshot: ['moonshotai'],
+  moonshotai: ['moonshotai'],
+  meta: ['meta'],
+  qwen: ['alibaba'],
+  alibaba: ['alibaba'],
+  zai: ['zai'],
+  zhipu: ['zai'],
+  minimax: ['minimax'],
+  cohere: ['cohere'],
+})
+
+/** First-party vendor `owned_by` values → canonical OpenRouter model-id prefixes. */
+const OPENROUTER_OWNER_PREFIXES: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  anthropic: ['anthropic/'],
+  openai: ['openai/'],
+  google: ['google/'],
+  antigravity: ['google/', 'anthropic/'],
+  vertex: ['google/', 'anthropic/'],
+  xai: ['x-ai/'],
+  deepseek: ['deepseek/'],
+  mistral: ['mistralai/'],
+  mistralai: ['mistralai/'],
+  moonshot: ['moonshotai/'],
+  moonshotai: ['moonshotai/'],
+  meta: ['meta-llama/'],
+  qwen: ['qwen/'],
+  alibaba: ['qwen/'],
+  zai: ['z-ai/'],
+  zhipu: ['z-ai/'],
+  minimax: ['minimax/'],
+  cohere: ['cohere/'],
+})
+
+/**
+ * Resolve a model from models.dev within the route's mapped provider namespace,
+ * or — when the listing row declared an explicit first-party `owned_by` vendor
+ * (for multi-provider aggregator proxies like CLIProxyAPI) — within that exact
+ * vendor's models.dev namespace and vendor-prefixed OpenRouter entry.
  *
- * Only the providers the route declares are consulted: the mapped keys when
- * the route map names the route, its own key alone otherwise. There is no
- * cross-provider fallback — an id that no declared provider carries is
- * resolved by no one, so a route can never inherit another vendor's metadata
- * through an id collision. Callers disclose nothing for it instead.
+ * There is no un-scoped global scan and no fallback for generic local-hosting
+ * engines, so an id collision or self-hosted quantization can never inherit
+ * another vendor's larger capacity.
  * @param route - the provider route key.
  * @param modelId - the endpoint-advertised model id.
  * @param routeProviderMap - the effective route → models.dev provider keys.
- * @returns the mapped provider's record, or `undefined` when none carries it.
+ * @param modelOwner - optional endpoint `owned_by` namespace.
+ * @returns the matched provider's record, or `undefined` when none carries it.
  */
 function resolveFromModelsDev(
   route: string,
   modelId: string,
   routeProviderMap: RouteProviderMap = DEFAULT_ROUTE_PROVIDER_MAP,
+  modelOwner?: string,
 ): ModelsDevModel | undefined {
   const db = loadModelsDev()
   const candidateProviders = routeProviderMap[route] ?? [route]
@@ -737,18 +794,42 @@ function resolveFromModelsDev(
   // Exact key only: a suffix, family prefix, or case-folded spelling is a
   // different id, and borrowing another row's facts is a guess. A deployment
   // that needs an alias declares it as exact data (an overlay upsert).
-  const find = (pModels: Record<string, unknown> | undefined): ModelsDevModel | undefined => {
+  const find = (pModels: Record<string, unknown> | undefined, key: string = modelId): ModelsDevModel | undefined => {
     if (!pModels) return undefined
-    const hit = pModels[modelId] as ModelsDevModel | undefined
+    const hit = pModels[key] as ModelsDevModel | undefined
     return hit
   }
 
-  // The route's declared providers are the only namespace consulted; there is
-  // deliberately no global scan, so an id collision cannot lend this route a
-  // foreign vendor's metadata.
   for (const p of candidateProviders) {
     const hit = find(db[p]?.models)
     if (hit) return hit
+  }
+
+  // Multi-provider proxies (CLIProxyAPI, etc.) label each row with `owned_by`.
+  // Scope strictly by that recognized first-party vendor; never guess globally.
+  const ownerKey = modelOwner?.trim().toLowerCase()
+  if (ownerKey !== undefined && ownerKey.length > 0) {
+    const ownerProviders = OWNER_MODELS_DEV_MAP[ownerKey]
+    if (ownerProviders !== undefined) {
+      for (const p of ownerProviders) {
+        if (candidateProviders.includes(p)) continue
+        const hit = find(db[p]?.models)
+        if (hit) return hit
+      }
+    }
+    const openrouterModels = db.openrouter?.models
+    const prefixes = OPENROUTER_OWNER_PREFIXES[ownerKey]
+    if (openrouterModels !== undefined && prefixes !== undefined) {
+      const dotVersionId = modelId.replace(/(\d)-(\d)/g, '$1.$2')
+      for (const prefix of prefixes) {
+        const exactPrefixed = find(openrouterModels, `${prefix}${modelId}`)
+        if (exactPrefixed) return exactPrefixed
+        if (dotVersionId !== modelId) {
+          const dottedPrefixed = find(openrouterModels, `${prefix}${dotVersionId}`)
+          if (dottedPrefixed) return dottedPrefixed
+        }
+      }
+    }
   }
 
   return undefined
@@ -1044,7 +1125,12 @@ async function readBoundedListingText(response: Response, url: string): Promise<
  *   keeps `{baseURL}/models` with Bearer.
  * @returns the normalized listing in endpoint order, deduplicated by id.
  */
-export async function fetchModels(baseURL: string, key: string | undefined, api?: string): Promise<LiveModel[]> {
+export async function fetchModels(
+  baseURL: string,
+  key: string | undefined,
+  api?: string,
+  options?: { probeSiblings?: boolean },
+): Promise<LiveModel[]> {
   const request = modelListingRequest(baseURL, api, key)
   const response = await fetch(request.url, { headers: request.headers, signal: AbortSignal.timeout(15_000) })
   if (!response.ok) throw new Error(`GET ${request.url} -> HTTP ${String(response.status)}`)
@@ -1074,6 +1160,9 @@ export async function fetchModels(baseURL: string, key: string | undefined, api?
     if (seen.has(listing.id)) continue
     seen.add(listing.id)
     models.push(normalizeListingModel(listing, rawById.get(listing.id)))
+  }
+  if (options?.probeSiblings === true) {
+    await enrichFromSiblingEndpoints(baseURL, models, { api, key })
   }
   return models
 }
@@ -1756,7 +1845,7 @@ function registryMetadataFor(
   // metadata to a different provider's model, so a missing owner/channel is
   // an unknown record rather than a fallback.
   if ((owner === undefined || owner.length === 0) && channel === undefined) return undefined
-  const lookup = resolveRegistryModel(context.index, model.id, {
+  const lookup = resolveRegistryConsensus(context.index, model.id, {
     ...channel === undefined ? {} : { channel },
     ...owner === undefined || owner.length === 0 ? {} : { owner },
     ...context.ownerChannels === undefined
@@ -1829,7 +1918,7 @@ function analyzeModel(
   routeProviderMap: RouteProviderMap = DEFAULT_ROUTE_PROVIDER_MAP,
   registryContext: RegistryMetadataContext | undefined = undefined,
 ): AnalyzedModel {
-  const mDev = resolveFromModelsDev(route, model.id, routeProviderMap)
+  const mDev = resolveFromModelsDev(route, model.id, routeProviderMap, model.owner)
   const catalog = catalogIndexForRoute(route, routeProviderMap)
   const cat = catalog.get(model.id)
   const registry = registryMetadataFor(registryContext, model)
@@ -1851,13 +1940,25 @@ function analyzeModel(
   // of being persisted as if a source had disclosed it. models.dev's
   // `limit.input` is a prompt-side cap, never a substitute for the combined
   // window and never derived from one.
+  //
+  // When the live endpoint (or exact registry) explicitly disclosed an input
+  // cap (e.g. from /v1beta/models or Anthropic /v1/models) without a combined
+  // contextWindow, do not import a larger external models.dev contextWindow
+  // that exceeds the host's own disclosed budget (e.g. a smaller Codex tier).
   const devContext = mDev?.limit?.context ?? mDev?.contextWindow
   const devMaxInputTokens = mDev?.limit?.input
   const devMax = mDev?.limit?.output ?? mDev?.maxTokens
 
-  const contextWindow = model.contextWindow ?? registry?.contextWindow ?? devContext ?? cat?.contextWindow
-  const maxInputTokens = model.maxInputTokens ?? registry?.maxInputTokens ?? devMaxInputTokens
   const maxTokens = model.maxTokens ?? registry?.maxTokens ?? devMax ?? cat?.maxTokens
+  const hostInputCap = model.maxInputTokens ?? registry?.maxInputTokens ?? undefined
+  const allowDevContext = devContext !== undefined
+    && (hostInputCap === undefined || devContext <= hostInputCap + (maxTokens ?? 0))
+
+  const contextWindow = model.contextWindow
+    ?? registry?.contextWindow
+    ?? (allowDevContext ? devContext : undefined)
+    ?? cat?.contextWindow
+  const maxInputTokens = hostInputCap ?? devMaxInputTokens
 
   // 3. Resolve Modalities, Reasoning, and their provenance. The endpoint's own
   // listing speaks for the route it serves, so a disclosure it makes wins over
@@ -1911,6 +2012,7 @@ function analyzeModel(
   const hintedInput = !modalityDisclosed && claim !== undefined && claim.input.length > 0
   const hintedReasoning = !reasoningDisclosed && claim?.reasoning === true
   const nothingDescribed = registry === undefined && mDev === undefined && cat === undefined
+    && model.contextWindow === undefined && model.maxInputTokens === undefined && model.maxTokens === undefined
     && model.input === undefined && model.reasoning === undefined && model.tools === undefined
     && !endpointLadderDeclared
   const unverified = nothingDescribed || hintedInput || hintedReasoning
@@ -2820,12 +2922,17 @@ export function apply(ctx: Context, config: Config): void {
   function refreshRegistrySources(): Promise<void> {
     if (registryRefresh !== undefined) return registryRefresh
     if (registryAbort.signal.aborted || registrySources.size === 0) return Promise.resolve()
+    const settings = ctx.get('settings') as SettingsSeam | undefined
+    const llmProfiles = settings ? sectionOf(settings, LLM_NS)?.providers : undefined
+    const activeSources = [...registrySources].filter(([route]) =>
+      llmProfiles?.[route] !== undefined || endpoints[route] !== undefined)
+    if (activeSources.length === 0) return Promise.resolve()
     const started = Date.now()
     registryRefresh = (async () => {
-      // One bounded task per declared source; they run concurrently and share
-      // the single in-flight promise so startup/hourly/manual callers never
-      // serialize 15-second fetches or stack duplicate refreshes.
-      await Promise.allSettled([...registrySources].map(async ([route, source]) => {
+      // One bounded task per active declared source; they run concurrently and
+      // share the single in-flight promise so startup/hourly/manual callers
+      // never serialize 15-second fetches or stack duplicate refreshes.
+      await Promise.allSettled(activeSources.map(async ([route, source]) => {
         const before = Date.now()
         let state: RegistryMetadataSourceState
         try {
@@ -3199,7 +3306,9 @@ export function apply(ctx: Context, config: Config): void {
       let fetchError: string | undefined
       try {
         // Command Code serves no model listing; its bundled snapshot is the listing.
-        live = ns === COMMANDCODE_NS ? loadCommandCodeCatalog() : await fetchModels(baseURL, key, profile?.api)
+        live = ns === COMMANDCODE_NS
+          ? loadCommandCodeCatalog()
+          : await fetchModels(baseURL, key, profile?.api, { probeSiblings: profile?.api !== 'anthropic-messages' })
       } catch (error) {
         fetchError = error instanceof Error ? error.message : String(error)
         logger.warn(describeSyncFailure(route, error, ns))

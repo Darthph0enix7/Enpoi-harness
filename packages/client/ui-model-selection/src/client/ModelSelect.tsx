@@ -83,7 +83,15 @@ function resolveModelContext(model: ModelContextTarget, t: PropsLocale<'model'>[
   const tokens = resolveContextTokens(model)
   if (tokens <= 0) return ''
   const size = formatCompactContext(tokens)
-  return model.contextWindowSource === 'default' ? t('context.assumed', { tokens: size }) : size
+  const hasDisclosedContext = model.contextWindowSource !== 'default'
+    && ((typeof model.contextWindow === 'number' && model.contextWindow > 0)
+      || (typeof model.context?.contextWindow === 'number' && model.context.contextWindow > 0))
+  const hasDisclosedInput = model.maxInputTokensSource !== 'default'
+    && ((typeof model.maxInputTokens === 'number' && model.maxInputTokens > 0)
+      || (typeof model.context?.maxInputTokens === 'number' && model.context.maxInputTokens > 0))
+  const isAssumed = !hasDisclosedContext && !hasDisclosedInput
+    && (model.contextWindowSource === 'default' || model.maxInputTokensSource === 'default')
+  return isAssumed ? t('context.assumed', { tokens: size }) : size
 }
 
 /**

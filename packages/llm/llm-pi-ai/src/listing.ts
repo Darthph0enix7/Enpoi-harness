@@ -68,6 +68,13 @@ export interface ListingEntry {
   description?: unknown
   /** Instruction text some registries publish; never read as a prompt or a label. */
   base_instructions?: unknown
+  /** Active runtime context caps reported by open-source/local engines (LM Studio, vLLM, SGLang). */
+  loaded_context_length?: unknown
+  loadedContextLength?: unknown
+  max_model_len?: unknown
+  maxModelLen?: unknown
+  max_context_length?: unknown
+  maxContextLength?: unknown
   contextWindow?: unknown
   context_window?: unknown
   context_length?: unknown
@@ -83,9 +90,19 @@ export interface ListingEntry {
   /** Google-style output alias. */
   outputTokenLimit?: unknown
   limit?: { context?: unknown; output?: unknown } | null
-  top_provider?: { context_length?: unknown; max_completion_tokens?: unknown } | null
-  /** Provider-neutral capability block some gateways (and Anthropic) nest per model. */
+  top_provider?: { context_length?: unknown; max_completion_tokens?: unknown; max_output_tokens?: unknown } | null
+  /** Model type tag some local engines publish (for example LM Studio `vlm`). */
+  type?: unknown
+  /** Provider-neutral capability block some gateways (and Anthropic) nest per model, or string capability array. */
   capabilities?: unknown
+  /** Flat boolean disclosures used by LiteLLM / OpenAI-compatible hosting servers. */
+  supports_function_calling?: unknown
+  supports_tool_choice?: unknown
+  supports_vision?: unknown
+  supports_reasoning?: unknown
+  supports_audio_input?: unknown
+  supports_video_input?: unknown
+  supports_pdf_input?: unknown
   /** Raw registry input-modality spellings. */
   supportedInputModalities?: unknown
   input_modalities?: unknown
@@ -234,9 +251,26 @@ function declaredModalities(entry: ListingEntry): readonly unknown[] | undefined
   return undefined
 }
 
-/** The modalities a provider-neutral capability block advertises through booleans. */
-function capabilityModalities(capabilities: Readonly<Record<string, unknown>> | undefined): ModelModality[] {
+/** Explicit capability flags parsed from a string `capabilities` array (Ollama / LM Studio). */
+function capabilityArrayTags(raw: unknown): ReadonlySet<string> | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const tags = new Set<string>()
+  for (const item of raw) {
+    if (typeof item === 'string' && item.length > 0) tags.add(item.toLowerCase())
+  }
+  return tags
+}
+
+/** The modalities a provider-neutral capability block, tag array, or flat host booleans advertise. */
+function capabilityModalities(
+  entry: ListingEntry,
+  capabilities: Readonly<Record<string, unknown>> | undefined,
+  capabilityTags: ReadonlySet<string> | undefined,
+): ModelModality[] {
   const modalities: ModelModality[] = []
+  const add = (modality: ModelModality): void => {
+    if (!modalities.includes(modality)) modalities.push(modality)
+  }
   const flags: readonly [string, ModelModality][] = [
     ['text_input', 'text'],
     ['image_input', 'image'],
@@ -245,8 +279,19 @@ function capabilityModalities(capabilities: Readonly<Record<string, unknown>> | 
     ['pdf_input', 'pdf'],
   ]
   for (const [field, modality] of flags) {
-    if (supported(capabilities?.[field]) && !modalities.includes(modality)) modalities.push(modality)
+    if (supported(capabilities?.[field])) add(modality)
   }
+  if (capabilityTags !== undefined) {
+    if (capabilityTags.has('vision') || capabilityTags.has('image')) add('image')
+    if (capabilityTags.has('audio')) add('audio')
+    if (capabilityTags.has('video')) add('video')
+    if (capabilityTags.has('pdf')) add('pdf')
+  }
+  if (typeof entry.type === 'string' && entry.type.toLowerCase() === 'vlm') add('image')
+  if (entry.supports_vision === true) add('image')
+  if (entry.supports_audio_input === true) add('audio')
+  if (entry.supports_video_input === true) add('video')
+  if (entry.supports_pdf_input === true) add('pdf')
   return modalities
 }
 
@@ -371,26 +416,44 @@ function zeroAllowed(entry: ListingEntry, capabilities: Readonly<Record<string, 
     || capabilityThinking?.zeroAllowed === true
 }
 
-/** Explicit tool-call support, when the entry or its capability block states it. */
-function listedTools(entry: ListingEntry, capabilities: Readonly<Record<string, unknown>> | undefined): boolean | undefined {
+/** Explicit tool-call support, when the entry, tag array, or capability block states it. */
+function listedTools(
+  entry: ListingEntry,
+  capabilities: Readonly<Record<string, unknown>> | undefined,
+  capabilityTags: ReadonlySet<string> | undefined,
+): boolean | undefined {
   const stated = statedBoolean(entry.tools)
     ?? statedBoolean(entry.tool_call)
     ?? capabilityBoolean(entry.tools)
     ?? capabilityBoolean(entry.tool_call)
+    ?? statedBoolean(entry.supports_function_calling)
+    ?? statedBoolean(entry.supports_tool_choice)
   if (stated !== undefined) return stated
   const blocked = capabilityBoolean(capabilities?.tools) ?? capabilityBoolean(capabilities?.tool_call)
   if (blocked !== undefined) return blocked
+  if (capabilityTags !== undefined && (capabilityTags.has('tools') || capabilityTags.has('tool_use') || capabilityTags.has('function_calling'))) {
+    return true
+  }
   if (!Array.isArray(entry.supported_parameters)) return undefined
   const parameters = entry.supported_parameters.filter((value): value is string => typeof value === 'string')
   return parameters.includes('tools') || parameters.includes('tool_choice')
 }
 
-/** Explicit reasoning support, when the entry or its capability block states it. */
-function listedReasoning(entry: ListingEntry, capabilities: Readonly<Record<string, unknown>> | undefined): boolean | undefined {
-  const stated = statedBoolean(entry.reasoning) ?? capabilityBoolean(entry.reasoning)
+/** Explicit reasoning support, when the entry, tag array, or capability block states it. */
+function listedReasoning(
+  entry: ListingEntry,
+  capabilities: Readonly<Record<string, unknown>> | undefined,
+  capabilityTags: ReadonlySet<string> | undefined,
+): boolean | undefined {
+  const stated = statedBoolean(entry.reasoning)
+    ?? capabilityBoolean(entry.reasoning)
+    ?? statedBoolean(entry.supports_reasoning)
   if (stated !== undefined) return stated
   const blocked = capabilityBoolean(capabilities?.reasoning) ?? capabilityBoolean(capabilities?.thinking)
   if (blocked !== undefined) return blocked
+  if (capabilityTags !== undefined && (capabilityTags.has('thinking') || capabilityTags.has('reasoning'))) {
+    return true
+  }
   if (!Array.isArray(entry.supported_parameters)) return undefined
   return entry.supported_parameters.includes('reasoning')
 }
@@ -410,6 +473,12 @@ function listedReasoning(entry: ListingEntry, capabilities: Readonly<Record<stri
  */
 export function listingCapabilities(entry: ListingEntry | null | undefined): ListingCapabilities {
   const contextWindow = listingCapacity(
+    entry?.loaded_context_length,
+    entry?.loadedContextLength,
+    entry?.max_model_len,
+    entry?.maxModelLen,
+    entry?.max_context_length,
+    entry?.maxContextLength,
     entry?.contextWindow,
     entry?.context_window,
     entry?.context_length,
@@ -426,11 +495,13 @@ export function listingCapabilities(entry: ListingEntry | null | undefined): Lis
     entry?.outputTokenLimit,
     entry?.limit?.output,
     entry?.top_provider?.max_completion_tokens,
+    entry?.top_provider?.max_output_tokens,
   )
   const capabilities = record(entry?.capabilities)
+  const capabilityTags = capabilityArrayTags(entry?.capabilities)
 
   const declared = declaredModalities(entry ?? {})
-  const advertised = capabilityModalities(capabilities)
+  const advertised = capabilityModalities(entry ?? {}, capabilities, capabilityTags)
   let inputModalities: ModelModality[] | undefined
   if (declared !== undefined) {
     const normalized = modalityList(declared)
@@ -458,8 +529,8 @@ export function listingCapabilities(entry: ListingEntry | null | undefined): Lis
   }
   const declaredLadder = levels.length > 0 || supportsZero
 
-  const tools = listedTools(entry ?? {}, capabilities)
-  const reasoning = listedReasoning(entry ?? {}, capabilities)
+  const tools = listedTools(entry ?? {}, capabilities, capabilityTags)
+  const reasoning = listedReasoning(entry ?? {}, capabilities, capabilityTags)
 
   return {
     ...contextWindow === undefined ? {} : { contextWindow },

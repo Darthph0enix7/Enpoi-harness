@@ -520,4 +520,35 @@ describe('ModelSelect catalog capability display', () => {
       expect(screen.queryByText(modality)).toBeNull()
     }
   })
+
+  it('prefers disclosed maxInputTokens over an assumed default contextWindow in picker rows', () => {
+    const inputOnly = {
+      id: 'gpt-5.6-sol',
+      name: 'GPT 5.6 Sol',
+      contextWindow: 262_144,
+      contextWindowSource: 'default' as const,
+      maxInputTokens: 372_000,
+      maxInputTokensSource: 'configured' as const,
+    }
+    const groups = [{
+      id: 'cliproxyapi',
+      name: 'CLIProxyAPI',
+      models: [inputOnly],
+    }]
+    render(<ModelSelect
+      locked={false}
+      available
+      directory={createSnapshotStore(state({
+        current: { provider: 'cliproxyapi', model: 'gpt-5.6-sol' },
+        groups,
+      }))}
+      load={vi.fn()}
+      select={vi.fn().mockResolvedValue({ ok: true, value: undefined })}
+      t={t}
+    />)
+
+    fireEvent.click(screen.getByRole('button', { name: /GPT 5\.6 Sol/ }))
+    expect(screen.getAllByText('372K').length).toBeGreaterThan(0)
+    expect(screen.queryByText(/262K/)).toBeNull()
+  })
 })

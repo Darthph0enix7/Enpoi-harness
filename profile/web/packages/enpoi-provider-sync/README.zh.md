@@ -40,7 +40,7 @@ metadataSources:
 
 端点的 `owned_by` 用于限定查找范围；`owner`、`channel` 与 `ownerChannels` 用于重命名自建实例或无法推断 channel 的实例。缺少 owner 与 channel 时按未知处理，绝不退化为仅按 id 查找。同时声明 `refreshUrl` 与实际 `sourceVersion` 会让该路由在后台启动和每小时刷新：各来源并发执行、共享同一个 in-flight promise、销毁时中止，并为正在运行的 pass 保留 last-good 或随包基线。手动刷新立即使用当前 last-good/基线，不等待网络。省略 URL 则完全不进行注册表网络读取。成员关系仍只来自路由的推理 `/models`。注册表只提供精确元数据：不使用 `?client_version` 富投影，不读取 `base_instructions`，不决定成员关系。
 
-解析成功时，注册表字段位于端点自身披露与 models.dev 之间：端点精确字段、注册表、按 owner 限定的 models.dev、已安装目录、运行时路由默认值。`source: 'manual'` 记录仍然赢得操作者声明的每个字段。设置词表之外的原始级别名称只作为诊断保留；只有预算的 `thinking` 记录不会提供命名阶梯。来源 source/version 通过 `provider-sync/registry-metadata` 诊断上报，因为当前设置与已发现缓存 schema 没有来源字段。
+解析成功时，注册表字段位于端点自身披露（当主 `/models` 回复省略元数据时，包含同一主机上的只读同源端点，如 Gemini `/v1beta/models`、Anthropic `/v1/models`、LM Studio `/api/v0/models`、LiteLLM `/model/info` 与 Ollama `/api/show`）与按 owner 限定的 models.dev 之间：端点精确字段、同源端点字段、注册表（精确匹配或跨通道共识）、按 owner 限定的 models.dev（仅限已识别的一方厂商 owner，绝不套用于通用自托管引擎）、已安装目录、运行时路由默认值。更大的外部 models.dev `contextWindow` 绝不会覆盖主机实际披露的较小 `maxInputTokens`。`source: 'manual'` 记录仍然赢得操作者声明的每个字段。设置词表之外的原始级别名称只作为诊断保留；只有预算的 `thinking` 记录不会提供命名阶梯。来源 source/version 通过 `provider-sync/registry-metadata` 诊断上报，因为当前设置与已发现缓存 schema 没有来源字段。
 
 ## 引用
 

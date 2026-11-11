@@ -787,15 +787,17 @@ export function parseRegistryMetadataSnapshot(raw: unknown): RegistryMetadataInd
   return buildIndex(channels, normalizedSource, diagnostics)
 }
 
-/** Resolve one exact model id to disclosed metadata. */
-export function resolveRegistryModel(
+/** Shared eligible-channel filter for exact and consensus registry lookups. */
+function selectEligibleRecords(
   index: RegistryMetadataIndex,
   id: string,
   options: RegistryResolveOptions = {},
-): RegistryModelLookup {
+):
+  | { ok: true; id: string; eligible: readonly RegistryChannelRecord[] }
+  | { ok: false; id: string; diagnostics: readonly RegistryDiagnostic[] } {
   if (typeof id !== 'string' || id.length === 0) {
     return {
-      status: 'unknown',
+      ok: false,
       id: String(id),
       diagnostics: [{ code: 'invalid-query', message: 'model id must be a non-empty string', id: String(id) }],
     }
@@ -805,7 +807,7 @@ export function resolveRegistryModel(
   const owner = nonEmptyString(options.owner)
   if (channel === null && owner === null) {
     return {
-      status: 'unknown',
+      ok: false,
       id,
       diagnostics: [
         {
@@ -820,7 +822,7 @@ export function resolveRegistryModel(
   const all = index.recordsById.get(id)
   if (all === undefined || all.length === 0) {
     return {
-      status: 'unknown',
+      ok: false,
       id,
       diagnostics: [{ code: 'not-found', message: `model "${id}" is not present in the registry snapshot`, id }],
     }
@@ -832,7 +834,7 @@ export function resolveRegistryModel(
     eligible = eligible.filter((entry) => entry.channel === channel)
     if (eligible.length === 0) {
       return {
-        status: 'unknown',
+        ok: false,
         id,
         diagnostics: [
           {
@@ -850,7 +852,7 @@ export function resolveRegistryModel(
     eligible = eligible.filter((entry) => entry.model.owner === owner)
     if (eligible.length === 0) {
       return {
-        status: 'unknown',
+        ok: false,
         id,
         diagnostics: [
           {
@@ -870,7 +872,7 @@ export function resolveRegistryModel(
       eligible = eligible.filter((entry) => allowed.has(entry.channel))
       if (eligible.length === 0) {
         return {
-          status: 'unknown',
+          ok: false,
           id,
           diagnostics: [
             {
@@ -885,15 +887,30 @@ export function resolveRegistryModel(
     }
   }
 
-  const first = eligible[0]
-  if (first === undefined) {
+  if (eligible.length === 0) {
     return {
-      status: 'unknown',
+      ok: false,
       id,
       diagnostics: [{ code: 'not-found', message: `model "${id}" produced no eligible record`, id }],
     }
   }
 
+  return { ok: true, id, eligible }
+}
+
+/** Resolve one exact model id to disclosed metadata. */
+export function resolveRegistryModel(
+  index: RegistryMetadataIndex,
+  id: string,
+  options: RegistryResolveOptions = {},
+): RegistryModelLookup {
+  const selected = selectEligibleRecords(index, id, options)
+  if (!selected.ok) {
+    return { status: 'unknown', id: selected.id, diagnostics: selected.diagnostics }
+  }
+
+  const eligible = selected.eligible
+  const first = eligible[0]!
   const fingerprint = disclosedFingerprint(first.model)
   const conflict = eligible.find((entry) => disclosedFingerprint(entry.model) !== fingerprint)
   if (conflict !== undefined) {
@@ -924,6 +941,76 @@ export function resolveRegistryModel(
       source: index.source,
     },
     diagnostics: [],
+  }
+}
+
+/** Return `first` only when every eligible record agrees on its serialized value, else `null`. */
+function unanimousField<T>(
+  eligible: readonly RegistryChannelRecord[],
+  pick: (model: RegistryModelRecord) => T | null,
+): T | null {
+  const baseline = pick(eligible[0]!.model)
+  const encoded = JSON.stringify(baseline)
+  for (let i = 1; i < eligible.length; i++) {
+    if (JSON.stringify(pick(eligible[i]!.model)) !== encoded) return null
+  }
+  return baseline
+}
+
+/**
+ * Resolve one exact model id preserving every field that all eligible channels
+ * agree on (e.g. shared reasoning ladder and output limit when only plan-tier
+ * context windows differ). Any disputed field becomes `null` rather than
+ * picking one tier arbitrarily.
+ * @param index - parsed registry metadata index.
+ * @param id - exact model id to resolve.
+ * @param options - owner/channel scope options.
+ * @returns resolved exact or consensus metadata, or `unknown` when no record matches.
+ */
+export function resolveRegistryConsensus(
+  index: RegistryMetadataIndex,
+  id: string,
+  options: RegistryResolveOptions = {},
+): RegistryModelLookup {
+  const exact = resolveRegistryModel(index, id, options)
+  if (exact.status === 'resolved') return exact
+  if (exact.diagnostics[0]?.code !== 'ambiguous') return exact
+
+  const selected = selectEligibleRecords(index, id, options)
+  if (!selected.ok) return exact
+
+  const eligible = selected.eligible
+  const channels = [...new Set(eligible.map((entry) => entry.channel))]
+  const consensus: RegistryResolvedModel = {
+    id,
+    owner: unanimousField(eligible, (model) => model.owner),
+    name: unanimousField(eligible, (model) => model.name),
+    contextWindow: unanimousField(eligible, (model) => model.contextWindow),
+    maxInputTokens: unanimousField(eligible, (model) => model.maxInputTokens),
+    maxTokens: unanimousField(eligible, (model) => model.maxTokens),
+    inputModalities: unanimousField(eligible, (model) => model.inputModalities),
+    outputModalities: unanimousField(eligible, (model) => model.outputModalities),
+    reasoning: unanimousField(eligible, (model) => model.reasoning),
+    effort: unanimousField(eligible, (model) => model.effort),
+    channel: null,
+    channels,
+    source: index.source,
+  }
+  const hasConsensusField =
+    consensus.name !== null
+    || consensus.contextWindow !== null
+    || consensus.maxInputTokens !== null
+    || consensus.maxTokens !== null
+    || consensus.inputModalities !== null
+    || consensus.outputModalities !== null
+    || consensus.reasoning !== null
+    || consensus.effort !== null
+  if (!hasConsensusField) return exact
+
+  return {
+    status: 'resolved',
+    metadata: consensus,
+    diagnostics: exact.diagnostics,
   }
 }
 

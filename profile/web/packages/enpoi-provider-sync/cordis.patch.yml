@@ -66,3 +66,9 @@
         # withheld. Both values below are the shipped defaults.
         endpointGraceMs: 1209600000
         catalogFreshMs: 172800000
+        # Upstream raw CLIProxyAPI registry refresh (fail-open to bundled baseline).
+        metadataSources:
+          cliproxyapi:
+            source: cliproxyapi
+            refreshUrl: https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/main/internal/registry/models/models.json
+            sourceVersion: main

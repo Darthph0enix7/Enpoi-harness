@@ -47,6 +47,7 @@ type ModelItem = {
   id: string
   name?: string
   contextWindow?: number
+  maxInputTokens?: number
   maxTokens?: number
   /** An explicit `false` disables reasoning; `{}` states no selectable level. */
   reasoningEfforts?: false | Record<string, unknown>
@@ -713,7 +714,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       model: m,
       visibility: modelVisibility(m, hiddenSet, catalogDecisions.get(`${providerId}/${m.id}`), shownSet),
       caps: getCapsCached(m),
-      contextStr: formatTokens(m.contextWindow),
+      contextStr: formatTokens(m.contextWindow ?? m.maxInputTokens),
       maxTokStr: formatTokens(m.maxTokens),
     }))
   }, [filteredModels, hiddenSet, shownSet, catalogDecisions, providerId])

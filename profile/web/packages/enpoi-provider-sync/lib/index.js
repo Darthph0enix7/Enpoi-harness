@@ -816,10 +816,10 @@ function parseRegistryMetadataSnapshot(raw) {
   }
   return buildIndex(channels, normalizedSource, diagnostics);
 }
-function resolveRegistryModel(index, id, options = {}) {
+function selectEligibleRecords(index, id, options = {}) {
   if (typeof id !== "string" || id.length === 0) {
     return {
-      status: "unknown",
+      ok: false,
       id: String(id),
       diagnostics: [{ code: "invalid-query", message: "model id must be a non-empty string", id: String(id) }]
     };
@@ -828,7 +828,7 @@ function resolveRegistryModel(index, id, options = {}) {
   const owner = nonEmptyString(options.owner);
   if (channel === null && owner === null) {
     return {
-      status: "unknown",
+      ok: false,
       id,
       diagnostics: [
         {
@@ -842,7 +842,7 @@ function resolveRegistryModel(index, id, options = {}) {
   const all = index.recordsById.get(id);
   if (all === void 0 || all.length === 0) {
     return {
-      status: "unknown",
+      ok: false,
       id,
       diagnostics: [{ code: "not-found", message: `model "${id}" is not present in the registry snapshot`, id }]
     };
@@ -852,7 +852,7 @@ function resolveRegistryModel(index, id, options = {}) {
     eligible = eligible.filter((entry) => entry.channel === channel);
     if (eligible.length === 0) {
       return {
-        status: "unknown",
+        ok: false,
         id,
         diagnostics: [
           {
@@ -869,7 +869,7 @@ function resolveRegistryModel(index, id, options = {}) {
     eligible = eligible.filter((entry) => entry.model.owner === owner);
     if (eligible.length === 0) {
       return {
-        status: "unknown",
+        ok: false,
         id,
         diagnostics: [
           {
@@ -888,7 +888,7 @@ function resolveRegistryModel(index, id, options = {}) {
       eligible = eligible.filter((entry) => allowed.has(entry.channel));
       if (eligible.length === 0) {
         return {
-          status: "unknown",
+          ok: false,
           id,
           diagnostics: [
             {
@@ -902,14 +902,22 @@ function resolveRegistryModel(index, id, options = {}) {
       }
     }
   }
-  const first = eligible[0];
-  if (first === void 0) {
+  if (eligible.length === 0) {
     return {
-      status: "unknown",
+      ok: false,
       id,
       diagnostics: [{ code: "not-found", message: `model "${id}" produced no eligible record`, id }]
     };
   }
+  return { ok: true, id, eligible };
+}
+function resolveRegistryModel(index, id, options = {}) {
+  const selected = selectEligibleRecords(index, id, options);
+  if (!selected.ok) {
+    return { status: "unknown", id: selected.id, diagnostics: selected.diagnostics };
+  }
+  const eligible = selected.eligible;
+  const first = eligible[0];
   const fingerprint = disclosedFingerprint(first.model);
   const conflict = eligible.find((entry) => disclosedFingerprint(entry.model) !== fingerprint);
   if (conflict !== void 0) {
@@ -937,6 +945,45 @@ function resolveRegistryModel(index, id, options = {}) {
       source: index.source
     },
     diagnostics: []
+  };
+}
+function unanimousField(eligible, pick) {
+  const baseline = pick(eligible[0].model);
+  const encoded = JSON.stringify(baseline);
+  for (let i = 1; i < eligible.length; i++) {
+    if (JSON.stringify(pick(eligible[i].model)) !== encoded) return null;
+  }
+  return baseline;
+}
+function resolveRegistryConsensus(index, id, options = {}) {
+  const exact = resolveRegistryModel(index, id, options);
+  if (exact.status === "resolved") return exact;
+  if (exact.diagnostics[0]?.code !== "ambiguous") return exact;
+  const selected = selectEligibleRecords(index, id, options);
+  if (!selected.ok) return exact;
+  const eligible = selected.eligible;
+  const channels = [...new Set(eligible.map((entry) => entry.channel))];
+  const consensus = {
+    id,
+    owner: unanimousField(eligible, (model) => model.owner),
+    name: unanimousField(eligible, (model) => model.name),
+    contextWindow: unanimousField(eligible, (model) => model.contextWindow),
+    maxInputTokens: unanimousField(eligible, (model) => model.maxInputTokens),
+    maxTokens: unanimousField(eligible, (model) => model.maxTokens),
+    inputModalities: unanimousField(eligible, (model) => model.inputModalities),
+    outputModalities: unanimousField(eligible, (model) => model.outputModalities),
+    reasoning: unanimousField(eligible, (model) => model.reasoning),
+    effort: unanimousField(eligible, (model) => model.effort),
+    channel: null,
+    channels,
+    source: index.source
+  };
+  const hasConsensusField = consensus.name !== null || consensus.contextWindow !== null || consensus.maxInputTokens !== null || consensus.maxTokens !== null || consensus.inputModalities !== null || consensus.outputModalities !== null || consensus.reasoning !== null || consensus.effort !== null;
+  if (!hasConsensusField) return exact;
+  return {
+    status: "resolved",
+    metadata: consensus,
+    diagnostics: exact.diagnostics
   };
 }
 function disclosedFingerprint(model) {
@@ -1213,6 +1260,319 @@ function loadBundledRegistryMetadataIndex() {
   return parseRegistryMetadataSnapshot(readBundledSnapshotRaw());
 }
 
+// src/sibling-discovery.ts
+import { listingCapabilities } from "@deepseek-ai/dsh-llm-pi-ai";
+var SIBLING_PROBE_TIMEOUT_MS = 2500;
+var MAX_SIBLING_BYTES = 4 * 1024 * 1024;
+var MAX_OLLAMA_SHOW_MODELS = 32;
+var OLLAMA_SHOW_CONCURRENCY = 4;
+var ANTHROPIC_VERSION = "2023-06-01";
+function needsSiblingMetadata(model) {
+  return model.name === void 0 || model.contextWindow === void 0 && model.maxInputTokens === void 0 || model.maxTokens === void 0 || model.input === void 0 || model.tools === void 0 || model.reasoning === void 0;
+}
+function endpointRootUrl(baseURL) {
+  const trimmed = baseURL.replace(/\/+$/, "");
+  return trimmed.replace(/\/(?:api\/v1|v1beta|v1)$/i, "");
+}
+function asObject(value2) {
+  return value2 !== null && typeof value2 === "object" && !Array.isArray(value2) ? value2 : void 0;
+}
+function positiveInt(value2) {
+  return typeof value2 === "number" && Number.isInteger(value2) && value2 > 0 ? value2 : void 0;
+}
+async function fetchBoundedJson(url, init, fetchImpl) {
+  try {
+    const response = await fetchImpl(url, init);
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {
+      });
+      return void 0;
+    }
+    const declared = Number(response.headers?.get("content-length") ?? Number.NaN);
+    if (Number.isFinite(declared) && declared > MAX_SIBLING_BYTES) {
+      await response.body?.cancel().catch(() => {
+      });
+      return void 0;
+    }
+    let text;
+    if (response.body === null || response.body === void 0) {
+      text = await response.text();
+      if (Buffer.byteLength(text, "utf8") > MAX_SIBLING_BYTES) return void 0;
+    } else {
+      const reader = response.body.getReader();
+      const chunks = [];
+      let total = 0;
+      try {
+        for (; ; ) {
+          const { done, value: value2 } = await reader.read();
+          if (done) break;
+          if (value2 === void 0) continue;
+          total += value2.byteLength;
+          if (total > MAX_SIBLING_BYTES) return void 0;
+          chunks.push(value2);
+        }
+      } finally {
+        await reader.cancel().catch(() => {
+        });
+      }
+      const merged = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        merged.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      text = new TextDecoder().decode(merged);
+    }
+    return JSON.parse(text);
+  } catch {
+    return void 0;
+  }
+}
+function bearerHeaders(key) {
+  const headers = { accept: "application/json" };
+  if (key !== void 0 && key.length > 0) headers.authorization = `Bearer ${key}`;
+  return headers;
+}
+function applyPatchMissing(target, patch) {
+  if (target.name === void 0 && patch.name !== void 0 && patch.name !== target.id && patch.name.length <= 60) {
+    target.name = patch.name;
+  }
+  if (target.contextWindow === void 0 && patch.contextWindow !== void 0) {
+    target.contextWindow = patch.contextWindow;
+  }
+  if (target.maxInputTokens === void 0 && patch.maxInputTokens !== void 0) {
+    target.maxInputTokens = patch.maxInputTokens;
+  }
+  if (target.maxTokens === void 0 && patch.maxTokens !== void 0) {
+    target.maxTokens = patch.maxTokens;
+  }
+  if (target.input === void 0 && patch.input !== void 0 && patch.input.length > 0) {
+    target.input = [...patch.input];
+  }
+  if (target.tools === void 0 && patch.tools !== void 0) {
+    target.tools = patch.tools;
+  }
+  if (target.reasoning === void 0 && patch.reasoning !== void 0) {
+    target.reasoning = patch.reasoning;
+  }
+  if (target.reasoningEfforts === void 0 && patch.reasoningEfforts !== void 0) {
+    target.reasoningEfforts = { ...patch.reasoningEfforts };
+  }
+  if (target.unsupportedReasoningEfforts === void 0 && patch.unsupportedReasoningEfforts !== void 0) {
+    target.unsupportedReasoningEfforts = [...patch.unsupportedReasoningEfforts];
+  }
+}
+function patchFromListingRecord(row, id) {
+  const caps = listingCapabilities(row);
+  const rawName = typeof row.displayName === "string" && row.displayName.length > 0 ? row.displayName : typeof row.display_name === "string" && row.display_name.length > 0 ? row.display_name : typeof row.name === "string" && row.name.length > 0 && !row.name.startsWith("models/") ? row.name : void 0;
+  return {
+    ...rawName === void 0 || rawName === id ? {} : { name: rawName },
+    ...caps.contextWindow === void 0 ? {} : { contextWindow: caps.contextWindow },
+    ...caps.maxInputTokens === void 0 ? {} : { maxInputTokens: caps.maxInputTokens },
+    ...caps.maxTokens === void 0 ? {} : { maxTokens: caps.maxTokens },
+    ...caps.inputModalities === void 0 ? {} : { input: [...caps.inputModalities] },
+    ...caps.tools === void 0 ? {} : { tools: caps.tools },
+    ...caps.reasoning === void 0 ? {} : { reasoning: caps.reasoning },
+    ...caps.reasoningEfforts === void 0 ? {} : { reasoningEfforts: caps.reasoningEfforts },
+    ...caps.unsupportedReasoningEfforts === void 0 ? {} : { unsupportedReasoningEfforts: caps.unsupportedReasoningEfforts }
+  };
+}
+async function probeGeminiModels(root, key, knownIds, fetchImpl, timeoutMs) {
+  const result = /* @__PURE__ */ new Map();
+  const headers = bearerHeaders(key);
+  if (key !== void 0 && key.length > 0) headers["x-goog-api-key"] = key;
+  const body = await fetchBoundedJson(
+    `${root}/v1beta/models`,
+    { headers, signal: AbortSignal.timeout(timeoutMs) },
+    fetchImpl
+  );
+  const obj = asObject(body);
+  if (!Array.isArray(obj?.models)) return result;
+  for (const item of obj.models) {
+    const row = asObject(item);
+    if (row === void 0) continue;
+    const rawId = typeof row.id === "string" && row.id.length > 0 ? row.id : typeof row.name === "string" && row.name.length > 0 ? row.name.startsWith("models/") ? row.name.slice(7) : row.name : void 0;
+    if (rawId === void 0 || !knownIds.has(rawId)) continue;
+    const patch = patchFromListingRecord(row, rawId);
+    const inputLimit = positiveInt(row.inputTokenLimit);
+    if (patch.maxInputTokens === void 0 && inputLimit !== void 0) {
+      patch.maxInputTokens = inputLimit;
+    }
+    result.set(rawId, patch);
+  }
+  return result;
+}
+async function probeAnthropicModels(root, key, knownIds, fetchImpl, timeoutMs) {
+  const result = /* @__PURE__ */ new Map();
+  const headers = {
+    ...bearerHeaders(key),
+    "anthropic-version": ANTHROPIC_VERSION
+  };
+  if (key !== void 0 && key.length > 0) headers["x-api-key"] = key;
+  const body = await fetchBoundedJson(
+    `${root}/v1/models?limit=1000`,
+    { headers, signal: AbortSignal.timeout(timeoutMs) },
+    fetchImpl
+  );
+  const obj = asObject(body);
+  const rows = Array.isArray(obj?.data) ? obj.data : void 0;
+  if (rows === void 0) return result;
+  for (const item of rows) {
+    const row = asObject(item);
+    if (row === void 0) continue;
+    const id = typeof row.id === "string" ? row.id : void 0;
+    if (id === void 0 || !knownIds.has(id)) continue;
+    result.set(id, patchFromListingRecord(row, id));
+  }
+  return result;
+}
+async function probeLmStudioModels(root, key, knownIds, fetchImpl, timeoutMs) {
+  const result = /* @__PURE__ */ new Map();
+  const body = await fetchBoundedJson(
+    `${root}/api/v0/models`,
+    { headers: bearerHeaders(key), signal: AbortSignal.timeout(timeoutMs) },
+    fetchImpl
+  );
+  const obj = asObject(body);
+  const rows = Array.isArray(body) ? body : Array.isArray(obj?.data) ? obj.data : void 0;
+  if (rows === void 0) return result;
+  for (const item of rows) {
+    const row = asObject(item);
+    if (row === void 0) continue;
+    const id = typeof row.id === "string" ? row.id : void 0;
+    if (id === void 0 || !knownIds.has(id)) continue;
+    result.set(id, patchFromListingRecord(row, id));
+  }
+  return result;
+}
+async function probeLiteLlmModelInfo(root, key, knownIds, fetchImpl, timeoutMs) {
+  const result = /* @__PURE__ */ new Map();
+  const body = await fetchBoundedJson(
+    `${root}/model/info`,
+    { headers: bearerHeaders(key), signal: AbortSignal.timeout(timeoutMs) },
+    fetchImpl
+  );
+  const obj = asObject(body);
+  if (!Array.isArray(obj?.data)) return result;
+  for (const item of obj.data) {
+    const row = asObject(item);
+    if (row === void 0) continue;
+    const info = asObject(row.model_info);
+    const id = typeof row.model_name === "string" && row.model_name.length > 0 ? row.model_name : typeof info?.id === "string" && info.id.length > 0 ? info.id : void 0;
+    if (id === void 0 || !knownIds.has(id) || info === void 0) continue;
+    const patch = patchFromListingRecord(info, id);
+    const maxInput = positiveInt(info.max_input_tokens);
+    if (patch.maxInputTokens === void 0 && maxInput !== void 0) {
+      patch.maxInputTokens = maxInput;
+    }
+    result.set(id, patch);
+  }
+  return result;
+}
+function parseOllamaShow(body) {
+  const obj = asObject(body);
+  if (obj === void 0) return void 0;
+  let contextWindow;
+  if (typeof obj.parameters === "string") {
+    const match = /^\s*num_ctx\s+(\d+)\b/m.exec(obj.parameters);
+    if (match?.[1] !== void 0) {
+      const parsed = Number.parseInt(match[1], 10);
+      if (Number.isInteger(parsed) && parsed > 0) contextWindow = parsed;
+    }
+  }
+  if (contextWindow === void 0) {
+    const modelInfo = asObject(obj.model_info);
+    if (modelInfo !== void 0) {
+      for (const [field, value2] of Object.entries(modelInfo)) {
+        if (field.endsWith(".context_length")) {
+          const cap = positiveInt(value2);
+          if (cap !== void 0) {
+            contextWindow = cap;
+            break;
+          }
+        }
+      }
+    }
+  }
+  const caps = listingCapabilities({ capabilities: obj.capabilities });
+  const patch = {
+    ...contextWindow === void 0 ? {} : { contextWindow },
+    ...caps.inputModalities === void 0 ? {} : { input: [...caps.inputModalities] },
+    ...caps.tools === void 0 ? {} : { tools: caps.tools },
+    ...caps.reasoning === void 0 ? {} : { reasoning: caps.reasoning }
+  };
+  return Object.keys(patch).length === 0 ? void 0 : patch;
+}
+async function probeOllamaModels(root, key, knownIds, fetchImpl, timeoutMs) {
+  const result = /* @__PURE__ */ new Map();
+  const headers = bearerHeaders(key);
+  const tagsBody = await fetchBoundedJson(
+    `${root}/api/tags`,
+    { headers, signal: AbortSignal.timeout(timeoutMs) },
+    fetchImpl
+  );
+  const tagsObj = asObject(tagsBody);
+  if (!Array.isArray(tagsObj?.models)) return result;
+  const matchedIds = [];
+  for (const item of tagsObj.models) {
+    const row = asObject(item);
+    const name2 = typeof row?.name === "string" ? row.name : typeof row?.model === "string" ? row.model : void 0;
+    if (name2 !== void 0 && knownIds.has(name2) && !matchedIds.includes(name2)) {
+      matchedIds.push(name2);
+    }
+  }
+  const targets = matchedIds.slice(0, MAX_OLLAMA_SHOW_MODELS);
+  if (targets.length === 0) return result;
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(OLLAMA_SHOW_CONCURRENCY, targets.length) }, async () => {
+    while (cursor < targets.length) {
+      const id = targets[cursor++];
+      const showBody = await fetchBoundedJson(
+        `${root}/api/show`,
+        {
+          method: "POST",
+          headers: { ...headers, "content-type": "application/json" },
+          body: JSON.stringify({ model: id }),
+          signal: AbortSignal.timeout(timeoutMs)
+        },
+        fetchImpl
+      );
+      const patch = parseOllamaShow(showBody);
+      if (patch !== void 0) result.set(id, patch);
+    }
+  });
+  await Promise.all(workers);
+  return result;
+}
+async function enrichFromSiblingEndpoints(baseURL, models, options = {}) {
+  if (models.length === 0 || !models.some(needsSiblingMetadata)) return models;
+  const root = endpointRootUrl(baseURL);
+  if (root === "") return models;
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const timeoutMs = options.timeoutMs ?? SIBLING_PROBE_TIMEOUT_MS;
+  const knownIds = new Set(models.map((model) => model.id));
+  const probes = [
+    probeLmStudioModels(root, options.key, knownIds, fetchImpl, timeoutMs),
+    probeLiteLlmModelInfo(root, options.key, knownIds, fetchImpl, timeoutMs),
+    probeOllamaModels(root, options.key, knownIds, fetchImpl, timeoutMs)
+  ];
+  if (options.api !== "google-generative-ai") {
+    probes.unshift(probeGeminiModels(root, options.key, knownIds, fetchImpl, timeoutMs));
+  }
+  if (options.api !== "anthropic-messages") {
+    probes.splice(1, 0, probeAnthropicModels(root, options.key, knownIds, fetchImpl, timeoutMs));
+  }
+  const settled = await Promise.allSettled(probes);
+  for (const outcome of settled) {
+    if (outcome.status !== "fulfilled") continue;
+    for (const model of models) {
+      const patch = outcome.value.get(model.id);
+      if (patch !== void 0) applyPatchMissing(model, patch);
+    }
+  }
+  return models;
+}
+
 // src/capability-hints.ts
 import { readFileSync as readFileSync2 } from "node:fs";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
@@ -1389,7 +1749,11 @@ var DEFAULT_MODELS_DEV_URL = "https://models.dev/api.json";
 var ENDPOINT_ONLY_GRACE_MS = 14 * 24 * 60 * 60 * 1e3;
 var CATALOG_FRESH_MS = 48 * 60 * 60 * 1e3;
 var DEFAULT_ROUTE_METADATA_SOURCES = {
-  cliproxyapi: { source: "cliproxyapi" }
+  cliproxyapi: {
+    source: "cliproxyapi",
+    refreshUrl: "https://raw.githubusercontent.com/router-for-me/CLIProxyAPI/main/internal/registry/models/models.json",
+    sourceVersion: "main"
+  }
 };
 var Config = Schema.object({
   intervalMs: live(Schema.number().default(36e5)),
@@ -1572,17 +1936,81 @@ var DEFAULT_ROUTE_PROVIDER_MAP = Object.freeze({
   "openrouter": ["openrouter"],
   "huggingface": ["huggingface"]
 });
-function resolveFromModelsDev(route, modelId, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP) {
+var OWNER_MODELS_DEV_MAP = Object.freeze({
+  anthropic: ["anthropic"],
+  openai: ["openai"],
+  google: ["google"],
+  antigravity: ["google", "anthropic"],
+  vertex: ["google-vertex", "google", "anthropic"],
+  xai: ["xai"],
+  deepseek: ["deepseek"],
+  mistral: ["mistral"],
+  mistralai: ["mistral"],
+  moonshot: ["moonshotai"],
+  moonshotai: ["moonshotai"],
+  meta: ["meta"],
+  qwen: ["alibaba"],
+  alibaba: ["alibaba"],
+  zai: ["zai"],
+  zhipu: ["zai"],
+  minimax: ["minimax"],
+  cohere: ["cohere"]
+});
+var OPENROUTER_OWNER_PREFIXES = Object.freeze({
+  anthropic: ["anthropic/"],
+  openai: ["openai/"],
+  google: ["google/"],
+  antigravity: ["google/", "anthropic/"],
+  vertex: ["google/", "anthropic/"],
+  xai: ["x-ai/"],
+  deepseek: ["deepseek/"],
+  mistral: ["mistralai/"],
+  mistralai: ["mistralai/"],
+  moonshot: ["moonshotai/"],
+  moonshotai: ["moonshotai/"],
+  meta: ["meta-llama/"],
+  qwen: ["qwen/"],
+  alibaba: ["qwen/"],
+  zai: ["z-ai/"],
+  zhipu: ["z-ai/"],
+  minimax: ["minimax/"],
+  cohere: ["cohere/"]
+});
+function resolveFromModelsDev(route, modelId, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP, modelOwner) {
   const db = loadModelsDev();
   const candidateProviders = routeProviderMap[route] ?? [route];
-  const find = (pModels) => {
+  const find = (pModels, key = modelId) => {
     if (!pModels) return void 0;
-    const hit = pModels[modelId];
+    const hit = pModels[key];
     return hit;
   };
   for (const p of candidateProviders) {
     const hit = find(db[p]?.models);
     if (hit) return hit;
+  }
+  const ownerKey = modelOwner?.trim().toLowerCase();
+  if (ownerKey !== void 0 && ownerKey.length > 0) {
+    const ownerProviders = OWNER_MODELS_DEV_MAP[ownerKey];
+    if (ownerProviders !== void 0) {
+      for (const p of ownerProviders) {
+        if (candidateProviders.includes(p)) continue;
+        const hit = find(db[p]?.models);
+        if (hit) return hit;
+      }
+    }
+    const openrouterModels = db.openrouter?.models;
+    const prefixes = OPENROUTER_OWNER_PREFIXES[ownerKey];
+    if (openrouterModels !== void 0 && prefixes !== void 0) {
+      const dotVersionId = modelId.replace(/(\d)-(\d)/g, "$1.$2");
+      for (const prefix of prefixes) {
+        const exactPrefixed = find(openrouterModels, `${prefix}${modelId}`);
+        if (exactPrefixed) return exactPrefixed;
+        if (dotVersionId !== modelId) {
+          const dottedPrefixed = find(openrouterModels, `${prefix}${dotVersionId}`);
+          if (dottedPrefixed) return dottedPrefixed;
+        }
+      }
+    }
   }
   return void 0;
 }
@@ -1689,13 +2117,13 @@ function rawListingRows(body) {
   return [];
 }
 var MAX_MODEL_LISTING_BYTES = 4 * 1024 * 1024;
-var ANTHROPIC_VERSION = "2023-06-01";
+var ANTHROPIC_VERSION2 = "2023-06-01";
 function modelListingRequest(baseURL, api, key) {
   const base = baseURL.replace(/\/+$/, "");
   const headers = { accept: "application/json" };
   if (api === "anthropic-messages") {
     const root = base.endsWith("/v1") ? base.slice(0, -3) : base;
-    headers["anthropic-version"] = ANTHROPIC_VERSION;
+    headers["anthropic-version"] = ANTHROPIC_VERSION2;
     if (key !== void 0 && key.length > 0) headers["x-api-key"] = key;
     return { url: `${root}/v1/models?limit=1000`, headers };
   }
@@ -1733,7 +2161,7 @@ async function readBoundedListingText(response, url) {
   }
   return new TextDecoder().decode(body);
 }
-async function fetchModels(baseURL, key, api) {
+async function fetchModels(baseURL, key, api, options) {
   const request = modelListingRequest(baseURL, api, key);
   const response = await fetch(request.url, { headers: request.headers, signal: AbortSignal.timeout(15e3) });
   if (!response.ok) throw new Error(`GET ${request.url} -> HTTP ${String(response.status)}`);
@@ -1759,6 +2187,9 @@ async function fetchModels(baseURL, key, api) {
     if (seen.has(listing.id)) continue;
     seen.add(listing.id);
     models.push(normalizeListingModel(listing, rawById.get(listing.id)));
+  }
+  if (options?.probeSiblings === true) {
+    await enrichFromSiblingEndpoints(baseURL, models, { api, key });
   }
   return models;
 }
@@ -2094,7 +2525,7 @@ function registryMetadataFor(context, model) {
   const owner = context.owner !== void 0 && context.owner.length > 0 ? context.owner : model.owner;
   const channel = context.channel !== void 0 && context.channel.length > 0 ? context.channel : void 0;
   if ((owner === void 0 || owner.length === 0) && channel === void 0) return void 0;
-  const lookup = resolveRegistryModel(context.index, model.id, {
+  const lookup = resolveRegistryConsensus(context.index, model.id, {
     ...channel === void 0 ? {} : { channel },
     ...owner === void 0 || owner.length === 0 ? {} : { owner },
     ...context.ownerChannels === void 0 ? {} : { ownerChannels: { ...OWNER_CHANNEL_ALIASES, ...context.ownerChannels } }
@@ -2117,7 +2548,7 @@ function registryReasoningLadder(effort) {
   return thinking ? ladder : void 0;
 }
 function analyzeModel(route, model, hints, routeProviderMap = DEFAULT_ROUTE_PROVIDER_MAP, registryContext = void 0) {
-  const mDev = resolveFromModelsDev(route, model.id, routeProviderMap);
+  const mDev = resolveFromModelsDev(route, model.id, routeProviderMap, model.owner);
   const catalog = catalogIndexForRoute(route, routeProviderMap);
   const cat = catalog.get(model.id);
   const registry = registryMetadataFor(registryContext, model);
@@ -2126,9 +2557,11 @@ function analyzeModel(route, model, hints, routeProviderMap = DEFAULT_ROUTE_PROV
   const devContext = mDev?.limit?.context ?? mDev?.contextWindow;
   const devMaxInputTokens = mDev?.limit?.input;
   const devMax = mDev?.limit?.output ?? mDev?.maxTokens;
-  const contextWindow = model.contextWindow ?? registry?.contextWindow ?? devContext ?? cat?.contextWindow;
-  const maxInputTokens = model.maxInputTokens ?? registry?.maxInputTokens ?? devMaxInputTokens;
   const maxTokens = model.maxTokens ?? registry?.maxTokens ?? devMax ?? cat?.maxTokens;
+  const hostInputCap = model.maxInputTokens ?? registry?.maxInputTokens ?? void 0;
+  const allowDevContext = devContext !== void 0 && (hostInputCap === void 0 || devContext <= hostInputCap + (maxTokens ?? 0));
+  const contextWindow = model.contextWindow ?? registry?.contextWindow ?? (allowDevContext ? devContext : void 0) ?? cat?.contextWindow;
+  const maxInputTokens = hostInputCap ?? devMaxInputTokens;
   const registryInput = registry?.inputModalities !== null && registry?.inputModalities !== void 0 && registry.inputModalities.length > 0 ? registry.inputModalities : void 0;
   const disclosed = [model.input, registryInput, mDev?.modalities?.input, cat?.input].find((value2) => Array.isArray(value2) && liveModalities(value2).length > 0);
   const modalityDisclosed = disclosed !== void 0;
@@ -2149,7 +2582,7 @@ function analyzeModel(route, model, hints, routeProviderMap = DEFAULT_ROUTE_PROV
   const claim = claimCapabilityHints(route, model.id, hints.table, hints.override);
   const hintedInput = !modalityDisclosed && claim !== void 0 && claim.input.length > 0;
   const hintedReasoning = !reasoningDisclosed && claim?.reasoning === true;
-  const nothingDescribed = registry === void 0 && mDev === void 0 && cat === void 0 && model.input === void 0 && model.reasoning === void 0 && model.tools === void 0 && !endpointLadderDeclared;
+  const nothingDescribed = registry === void 0 && mDev === void 0 && cat === void 0 && model.contextWindow === void 0 && model.maxInputTokens === void 0 && model.maxTokens === void 0 && model.input === void 0 && model.reasoning === void 0 && model.tools === void 0 && !endpointLadderDeclared;
   const unverified = nothingDescribed || hintedInput || hintedReasoning;
   const capabilityHints = claim === void 0 ? void 0 : {
     ...claim.input.length === 0 || modalityDisclosed ? {} : { input: claim.input },
@@ -2609,9 +3042,13 @@ function apply(ctx, config) {
   function refreshRegistrySources() {
     if (registryRefresh !== void 0) return registryRefresh;
     if (registryAbort.signal.aborted || registrySources.size === 0) return Promise.resolve();
+    const settings = ctx.get("settings");
+    const llmProfiles = settings ? sectionOf(settings, LLM_NS)?.providers : void 0;
+    const activeSources = [...registrySources].filter(([route]) => llmProfiles?.[route] !== void 0 || endpoints[route] !== void 0);
+    if (activeSources.length === 0) return Promise.resolve();
     const started = Date.now();
     registryRefresh = (async () => {
-      await Promise.allSettled([...registrySources].map(async ([route, source]) => {
+      await Promise.allSettled(activeSources.map(async ([route, source]) => {
         const before = Date.now();
         let state;
         try {
@@ -2789,7 +3226,7 @@ function apply(ctx, config) {
     let live2;
     let fetchError;
     try {
-      live2 = ns === COMMANDCODE_NS ? loadCommandCodeCatalog() : await fetchModels(baseURL, key, profile?.api);
+      live2 = ns === COMMANDCODE_NS ? loadCommandCodeCatalog() : await fetchModels(baseURL, key, profile?.api, { probeSiblings: profile?.api !== "anthropic-messages" });
     } catch (error) {
       fetchError = error instanceof Error ? error.message : String(error);
       logger.warn(describeSyncFailure(route, error, ns));

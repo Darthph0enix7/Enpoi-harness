@@ -335,4 +335,42 @@ describe('listingCapabilities compatibility', () => {
     expect(LlmPiAi.listingCapabilities).toBe(listingCapabilities)
     expect(LlmPiAi.offeredCompatFields('openai-completions')).toContain('thinkingFormat')
   })
+
+  it('prefers live hosting engine context caps and reads capability arrays and flat host flags', () => {
+    // LM Studio / vLLM active host caps outrank static model context_length.
+    expect(listingCapabilities({
+      loaded_context_length: 16_384,
+      max_context_length: 131_072,
+      context_length: 131_072,
+      type: 'vlm',
+      capabilities: ['tool_use'],
+    })).toEqual({
+      contextWindow: 16_384,
+      inputModalities: ['text', 'image'],
+      tools: true,
+    })
+
+    expect(listingCapabilities({
+      max_model_len: 32_768,
+      context_length: 131_072,
+      capabilities: ['completion', 'vision', 'tools', 'thinking'],
+    })).toEqual({
+      contextWindow: 32_768,
+      inputModalities: ['text', 'image'],
+      tools: true,
+      reasoning: true,
+    })
+
+    // LiteLLM / flat host booleans preserve explicit false as well as true.
+    expect(listingCapabilities({
+      supports_function_calling: false,
+      supports_vision: true,
+      supports_reasoning: true,
+      supports_pdf_input: true,
+    })).toEqual({
+      inputModalities: ['text', 'image', 'pdf'],
+      tools: false,
+      reasoning: true,
+    })
+  })
 })

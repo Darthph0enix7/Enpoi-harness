@@ -537,8 +537,8 @@ describe('registry metadata precedence', () => {
     expect(live.every(model => model.owner !== undefined)).toBe(true)
     const planned = planRouteModels({ ...planBase, configured: [], live, metadata })
     expect(planned.models).toHaveLength(41)
-    // 22 records carry a named ladder; 7 budget-only records stay ladderless.
-    expect(planned.models.filter(model => model.reasoningEfforts !== undefined)).toHaveLength(22)
+    // 25 records carry a named ladder (22 exact + 3 Codex tier-consensus ladders); 7 budget-only records stay ladderless.
+    expect(planned.models.filter(model => model.reasoningEfforts !== undefined)).toHaveLength(25)
     expect(planned.models.filter(model => model.reasoning === true && model.reasoningEfforts === undefined)).toHaveLength(7)
     const claude = planned.models.find(model => model.id === 'claude-sonnet-4-6')!
     expect(claude).toMatchObject({

@@ -169,7 +169,10 @@ export interface ModelContextTarget {
   contextWindow?: number | undefined
   /** Provenance of `contextWindow`; `default` names a route fallback, not a disclosed capacity. */
   contextWindowSource?: 'configured' | 'discovered' | 'installed' | 'default' | undefined
-  context?: { contextWindow?: number | undefined } | undefined
+  maxInputTokens?: number | undefined
+  /** Provenance of `maxInputTokens`; `default` names a route fallback, not a disclosed capacity. */
+  maxInputTokensSource?: 'configured' | 'discovered' | 'installed' | 'default' | undefined
+  context?: { contextWindow?: number | undefined; maxInputTokens?: number | undefined } | undefined
   maxTokens?: number | undefined
   /** Whether the catalog could not verify this row's facts. */
   unverified?: boolean | undefined
@@ -181,17 +184,44 @@ export interface ModelContextTarget {
 
 /**
  * Resolve context window size in tokens from disclosed catalog fields only;
- * an undisclosed window returns 0 so the picker renders no capacity.
+ * falls back to disclosed prompt-input cap (`maxInputTokens`) when combined
+ * context window is omitted (e.g. Anthropic / Gemini endpoints); an undisclosed
+ * window returns 0 so the picker renders no capacity.
  * @param model - catalog row whose context capacity is displayed.
- * @returns the disclosed window size, or 0 when no field states one.
+ * @returns the disclosed window or input cap size, or 0 when no field states one.
  */
 export function resolveContextTokens(model: ModelContextTarget): number {
+  const disclosedContext = model.contextWindowSource !== 'default'
+    ? (typeof model.contextWindow === 'number' && model.contextWindow > 0
+      ? model.contextWindow
+      : typeof model.context?.contextWindow === 'number' && model.context.contextWindow > 0
+        ? model.context.contextWindow
+        : undefined)
+    : undefined
+  if (disclosedContext !== undefined) return disclosedContext
+
+  const disclosedInput = model.maxInputTokensSource !== 'default'
+    ? (typeof model.maxInputTokens === 'number' && model.maxInputTokens > 0
+      ? model.maxInputTokens
+      : typeof model.context?.maxInputTokens === 'number' && model.context.maxInputTokens > 0
+        ? model.context.maxInputTokens
+        : undefined)
+    : undefined
+  if (disclosedInput !== undefined) return disclosedInput
+
   if (typeof model.contextWindow === 'number' && model.contextWindow > 0) {
     return model.contextWindow
   }
   const rawContext = model.context?.contextWindow
   if (typeof rawContext === 'number' && rawContext > 0) {
     return rawContext
+  }
+  if (typeof model.maxInputTokens === 'number' && model.maxInputTokens > 0) {
+    return model.maxInputTokens
+  }
+  const rawInput = model.context?.maxInputTokens
+  if (typeof rawInput === 'number' && rawInput > 0) {
+    return rawInput
   }
   return 0
 }
