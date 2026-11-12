@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-11-11T23:29:05.662Z",
+  "generatedAt": "2026-11-12T18:33:36.502Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.125",
+      "commit": "e1afeb6",
+      "releasedAt": "2026-11-12T18:04:05.000Z",
+      "notes": [
+        "fix(llm): preserve live streams and bound automatic retry spending"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.124",
       "commit": "112dee9",
@@ -394,15 +402,6 @@
         "feat(feedback): non-blocking dialog submit with a bottom-right pipeline chip; robust dialog layout",
         "fix(feedback): triage preset + reply capture — the pipeline now returns real analyses",
         "feat(feedback): end-to-end feedback pipeline — dialog checkboxes, collection, triage, live submission"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.77",
-      "commit": "a45158b",
-      "releasedAt": "2026-10-12T20:46:14.000Z",
-      "notes": [
-        "fix(spec): guard the optional bootstrap index in the fallback-reload assertion",
-        "fix(update): rollback rewrites install-state; race-proof macOS service restart; quieter pnpm pin note"
       ]
     }
   ]
