@@ -1,7 +1,7 @@
 /** SSE framing delegated to eventsource-parser; JSON errors remain provider failures. */
 
 import { EventSourceParserStream } from 'eventsource-parser/stream'
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import { LlmError, POLICY_REFUSAL_CODE } from '@deepseek-ai/dsh-llm'
 import { object } from './replay.ts'
 import { providerError } from './transport.ts'
 
@@ -22,7 +22,13 @@ export async function* parseSse(body: ReadableStream<BufferSource>, activity: ()
     if (typeof event.type !== 'string' || (frame.event !== undefined && frame.event !== event.type)) {
       throw new LlmError('DeepSeek Messages SSE event type mismatch', 'MALFORMED_RESPONSE')
     }
-    if (event.type === 'error') throw providerError(event, undefined)
+    if (event.type === 'error') {
+      const failure = providerError(event, undefined)
+      // The translator owns the terminal refusal chunk so it can carry the
+      // usage accumulated before the provider's in-band error. Every other
+      // in-band failure keeps its previous throw path.
+      if (failure.code !== POLICY_REFUSAL_CODE) throw failure
+    }
     yield event
   }
 }

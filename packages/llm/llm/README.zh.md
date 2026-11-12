@@ -63,7 +63,8 @@ for await (const chunk of ctx.llm.stream({
 ### 你可以做什么
 
 - **流式发起一次模型调用**——`ctx.llm.stream(options)` 为任何已注册提供方与模型产出原始分片（token 级增量）；消费方用 `BlockAssembler` 组装。
-- **注册提供方适配器**——一个适配器拥有一个或多个提供方路由，其注册会捕获该路由的重试策略；重复注册同一路由会以 `DUPLICATE_ADAPTER` 失败。
+- **注册提供方适配器**——一个适配器拥有一个或多个提供方路由，其注册会捕获该路由不可变的重试策略；重复注册同一路由会以 `DUPLICATE_ADAPTER` 失败。
+- **解析提供方重试策略**——`resolveRetryPolicy()` 校验并冻结路由的 normal 或 always 配置，normal mode 默认五次重试，quota guard 默认为尝试与等待合计 600,000 毫秒、失败且无产出累计 300,000 毫秒；`POLICY_REFUSAL` 与 `MODEL_CHAIN_EXHAUSTED` 在两种模式下都是终态，normal mode 配置也拒绝把任一 code 列为可重试。
 - **通过配置暴露并激活提供方**——适配器声明可配置提供方路由与 settings namespace，配置界面因此可以激活休眠提供方并编辑连接信息，无需重启。`LlmConfigurableProvider.error` 报告供修复的配置诊断；未受影响的模型仍可提供服务。
 - **发现与解析模型**——列出适配器公布的模型、询问端点它提供哪些模型（候选只携带列表实际声明的内容：容量、独立的仅输入上限、输入模态、工具与推理声明以及公布的推理档位；缺省表示未公开，且每行标明回答来自端点还是已安装目录），并解析某个精确模型的组合上下文窗口及其来源、独立的仅输入上限、输出能力与请求默认值、推理（reasoning）强度、公布与生效的输入模态以及系统提示词更新模式：当模型把任意位置最新的 `system` 消息读作有效系统提示词时，`LlmResolvedModelInfo.systemPromptUpdate` 为 `'in-history'`；只读取开头 system 消息时该字段缺失；`normalizeModelInfo` 以 `INVALID_MODEL_INFO` 拒绝任何其他值。
 - **校验调用配置**——显式或配置的推理强度会在任何提供方 I/O 之前对照精确模型校验；请求省略输出上限时，会填入适配器配置的输出上限。
@@ -72,6 +73,10 @@ for await (const chunk of ctx.llm.stream({
 ### 失败与恢复
 
 每个流都恰好以一个终止 `finish` 分片结束：失败为 `{ kind: 'error', failure }`，取消为 `{ kind: 'aborted', failure }`。失败携带稳定 code，如 `NO_ADAPTER`、`MISSING_CREDENTIAL`、`AUTH`、`RATE_LIMIT` 与 `CONTEXT_WINDOW_EXCEEDED`；消费方依据 code 路由，绝不解析消息文本。`QUOTA` 表示提供方中立的额度耗尽，`ACCOUNT_QUOTA` 专用于当前产品能够充值的第一方账号余额不足。每个失败还会点名其运行所在的 `provider` 与 `model` 路由，调用方无需重新推导路由即可归因并处理失败。点名未注册提供方的请求会以 `NO_ADAPTER` 失败，格式错误的凭据会以 `INVALID_CREDENTIAL` 失败，而不是表现为不透明的 fetch 错误。本服务从不自行重跑请求：重试是 `dsh-llm-retry` 在 agent 失败步骤扩展点上的职责。
+
+有两个 code 会在任何恢复之前终止。`POLICY_REFUSAL` 表示提供方以内容、安全或使用政策拒绝了该请求；`MODEL_CHAIN_EXHAUSTED` 表示模型链已尝试所有合格链路。重试策略在两种模式下都把两者视为终态，normal mode 配置也拒绝把任一 code 列为可重试，因为重发不会产生不同结果。
+
+模型组请求可以按顺序尝试各条链路。第一个语义性非 usage chunk——文本、推理、block-start 或结构化工具身份——即提交该链路：它立即流出并结束内部故障转移，因为已有实时输出后再重发会复制生成或合并两个模型的块。只有未产生语义 chunk 的链路才能升级。usage chunk 会保留到模型链唯一的终止 `finish`，因此一份累计报告覆盖所有尝试过的链路；可选计数只有在每个贡献链路都上报时才保留，因为聚合无法恢复缺失的分量，而各路由成本仍是提供方账单的事实。链路进展——语义 chunk 或适配器上报的原始活动脉冲，例如响应体 keepalive 或空的提供方更新——会重置链路的静默预算；只有提交才会停止它。
 
 提交前失败并因此被留下的尝试会通过 `appendAttemptFailedRecord()` 追加一条持久的 `llm/attempt-failed` 记录，点名失败的尝试及其让位给的下一次尝试；在自身凭据之间重试的适配器会追加同一种记录。记录携带事件信封的 `ignorable` 标记，因此不认识该类型的读取方会跳过它。
 
@@ -100,6 +105,7 @@ for await (const chunk of ctx.llm.stream({
 | [`src/assistant-stream.ts`](src/assistant-stream.ts) | 带时间信息的紧凑 Assistant 流累积、严格校验、精确展开与记录级读取器 |
 | [`src/call-config.ts`](src/call-config.ts) | 调用配置校验、适配器默认值填入与请求冻结 |
 | [`src/retry-policy.ts`](src/retry-policy.ts) | 提供方自有重试策略解析（normal 与 always 模式） |
+| [`src/attempt-activity.ts`](src/attempt-activity.ts) | 以尝试的 `AbortSignal` 为键的进程本地尝试活动通知；脉冲绝不会变成 chunk、会话事件、请求字段或缓存字节 |
 | [`src/route-health.ts`](src/route-health.ts) | 内存中的按路由冷却账本，用于重排模型组内的尝试顺序 |
 | [`src/error.ts`](src/error.ts) | `HarnessError`/`LlmError` 分类体系与提供方无关失败 code |
 | [`src/content.ts`](src/content.ts) | 共享文件与图片辅助函数：内容遍历、文件投影、图片卸载计数与已卸载图片投影 |
@@ -119,7 +125,8 @@ for await (const chunk of ctx.llm.stream({
 - **已准备调用是一次性的**——已准备调用只能分发一次，且其调用配置字段必须与准备好的配置一致。
 - **图片投影遵循捕获的路由**——只有支持图片的模型会把持久 `ImageBlock` 引用转换为路由专用请求版本；纯文本模型接收稳定占位符。
 - **文件投影跟随捕获的路由**——只有当精确路由显式的 `nativeFileInputs` 描述符接受某个 user 出现位置时，`FileBlock` 才变为原生部件；其他所有出现位置都得到一行确定性句柄文本，文件绝不会被静默丢弃。
-- **协议顺序**——`usage` 先于 `finish`，工具参数保持原始 JSON 字符串，终止 `finish` 之后不再有任何内容。
+- **协议顺序**——`usage` 先于 `finish`，工具参数保持原始 JSON 字符串，终止 `finish` 之后不再有任何内容；模型链在其唯一的终止 `finish` 之前立即上报一份累计 `usage`。
+- **尝试活动仅限进程本地**——原始提供方脉冲只重置存活的静默时钟；它绝不会被持久化、序列化、发上协议，也不会加入请求或缓存。
 - **注册表变更具有原子性**——路由与目录注册会在任何变动前整体校验候选集合，因此被拒绝的变更会让此前状态继续服务。
 
 </details>
@@ -158,6 +165,8 @@ for await (const chunk of ctx.llm.stream({
 这些限制说明本服务在哪里停止、由其他包或未来工作接续。它们是当前包约束，不是任务积压。
 
 - **本服务不提供重试执行、缓存或速率限制**——提供方注册会存储重试策略，但一次流仍是一次提供方尝试；`@deepseek-ai/dsh-llm-retry` 在持久 agent 步骤边界上执行该策略。
+- **重试配额 guard 只约束失败**——其 elapsed 与 no-work 上限只在失败触发的重发前检查，健康的长生成不会被它们切断。
+- **故障转移在第一个语义 chunk 处结束**——包括推理、block-start 或工具调用身份在内的第一个语义非 usage chunk 会立即流出并提交该链路；已提交的生成会运行到自身结束，即使随后为空或被截断，而每个尝试过的链路都会汇入同一份累计用量，其可选计数只有在每个上报用量的链路都上报了该计数时才保留。
 - **`GenerateOptions` 采样只包含 `temperature`／`maxTokens`／`stop`**——没有 `tool_choice`、`top_p` 或 penalty 字段；有产生方落地时词汇才会增长（见[已删除惰性旋钮](../../../.agents/notes/archived/simplification/2026-07-04-drop-inert-request-knobs.md)）。
 - **变体通常要求实际产生方**——`prefill`、逐工具 `strict`、内容块 `cache` 提示和 `agent` 消息来源变体都没有产生方（见 [Agent Note](../../../.agents/notes/archived/simplification/2026-07-04-prune-producerless-vocabulary-variants.md)）。
 - **`BlockAssembler` 只处理核心块类型**——插件添加块类型的流若从未由 `block-end` 关闭，`blocks()` 会抛出异常。

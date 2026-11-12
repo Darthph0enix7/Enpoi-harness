@@ -990,20 +990,23 @@ Source: [`packages/core/agent/src/runtime-types.ts`](../../packages/core/agent/s
 
 #### `agent/request-error` — waterfall
 
-Handle one failed model-request attempt before the loop retries or closes its step. A listener returns `{ kind: 'retry' }` without calling `next()` when it owns recovery, or calls `next()` to delegate. The default `undefined` leaves the failure terminal.
+Handle one failed model-request attempt before the loop retries or closes its step. A listener returns `{ kind: 'retry' }` without calling `next()` when it owns recovery, or calls `next()` to delegate. The default `undefined` leaves the failure terminal. The payload names the route and policy that actually served the failure, which may differ from the prepared route after a chain or prefilter reroute.
 
 ```ts cordis-catalog
 /**
  * Handle one failed model-request attempt before the loop retries or closes
  * its step. A listener returns `{ kind: 'retry' }` without calling `next()`
  * when it owns recovery, or calls `next()` to delegate. The default
- * `undefined` leaves the failure terminal.
+ * `undefined` leaves the failure terminal. The payload names the route and
+ * policy that actually served the failure, which may differ from the
+ * prepared route after a chain or prefilter reroute.
  * @param payload.agent - the agent whose request failed.
  * @param payload.turn - the turn containing the failed request.
  * @param payload.step - the step containing the failed request attempt.
- * @param payload.provider - the provider selected for the failed request.
- * @param payload.failure - serializable facts normalized at the final adapter boundary.
- * @param payload.retryPolicy - the policy of the adapter registration that served the failed request.
+ * @param payload.provider - the provider that served the failed attempt.
+ * @param payload.model - the model that served the failed attempt.
+ * @param payload.failure - serializable facts normalized at the final adapter boundary, stamped with the serving route.
+ * @param payload.retryPolicy - the immutable policy captured for the serving provider, or undefined when no registered route owns it.
  * @param payload.signal - the turn abort signal.
  * Scope-filtered dispatch (`@deepseek-ai/dsh-scope`): agent-scoped listeners receive only that agent.
  * @mode waterfall

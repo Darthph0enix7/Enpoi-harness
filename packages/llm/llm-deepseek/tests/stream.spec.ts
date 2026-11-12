@@ -1,5 +1,6 @@
 /** Protocol invariants at JSON/SSE boundaries, including partial and failed responses. */
 import { describe, expect, it } from 'vitest'
+import { POLICY_REFUSAL_CODE } from '@deepseek-ai/dsh-llm'
 import { translate } from '../src/translate.ts'
 import { parseSse } from '../src/sse.ts'
 import { providerError } from '../src/transport.ts'
@@ -92,6 +93,46 @@ describe('Messages stream', () => {
     await expect(chunks(translate(events([start, { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } }, { type: 'content_block_stop', index: 0 }, ...end()]), MODEL))).rejects.toMatchObject({ code: 'EMPTY_RESPONSE' })
     await expect(chunks(translate(events(textEvents.slice(0, -1)), MODEL))).rejects.toMatchObject({ code: 'STREAM_CLOSED' })
   })
+
+  it('does not infer a refusal from assistant text that discusses refusal vocabulary', async () => {
+    const result = await assemble(translate(events([start,
+      { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+      { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'This answer may discuss refusal, content_filter, quota, and authentication.' } },
+      { type: 'content_block_stop', index: 0 }, ...end()]), MODEL))
+    expect(result.assembler.finish).toEqual({ kind: 'stop' })
+  })
+
+  it.each([
+    [{ stop_reason: 'content_filter', content_filter: { reason: 'provider policy' } }, 'provider policy'],
+    [{ stop_reason: 'refusal', refusal: 'provider safety block' }, 'provider safety block'],
+    [{ finish_reason: 'content_filter', message: 'structured finish explanation' }, 'structured finish explanation'],
+    [{ finish_reason: 'incomplete.content_filter', message: 'incomplete refusal' }, 'incomplete refusal'],
+  ])('terminates a structured policy stop with usage and its explanation %#', async (delta, explanation) => {
+    const result = await chunks(translate(events([start,
+      { type: 'message_delta', delta, usage: { output_tokens: 5 } },
+      { type: 'message_stop' }]), MODEL))
+    expect(result.at(-2)).toEqual({
+      type: 'usage',
+      usage: { inputTokens: 12, outputTokens: 5, totalTokens: 17 },
+    })
+    expect(result.at(-1)).toEqual({
+      type: 'finish',
+      reason: { kind: 'error', failure: { message: explanation, code: POLICY_REFUSAL_CODE } },
+    })
+  })
+
+  it('terminates a structured in-band refusal event with accumulated usage', async () => {
+    const result = await chunks(translate(events([start,
+      { type: 'error', error: { code: 'content_filter', message: 'provider explanation', usage: { output_tokens: 2 } } }]), MODEL))
+    expect(result.at(-2)).toEqual({
+      type: 'usage',
+      usage: { inputTokens: 12, outputTokens: 2, totalTokens: 14 },
+    })
+    expect(result.at(-1)).toEqual({
+      type: 'finish',
+      reason: { kind: 'error', failure: { message: 'provider explanation', code: POLICY_REFUSAL_CODE } },
+    })
+  })
 })
 
 describe('SSE framing and provider failures', () => {
@@ -144,5 +185,37 @@ describe('SSE framing and provider failures', () => {
     // A gateway that answers non-JSON still carries an envelope in its text.
     expect(providerError({}, 429, undefined, '429: {"retry_after_ms":1200}').failure)
       .toMatchObject({ code: 'RATE_LIMIT', providerRetryAfterMs: 1_200 })
+  })
+
+  it('carries accumulated usage through an in-band structured refusal', async () => {
+    const result = await read(sse([start,
+      { type: 'error', error: { code: 'content_filter', message: 'quota wording must not win' }, usage: { output_tokens: 2 } }]))
+    expect(result.result.at(-2)).toEqual({
+      type: 'usage',
+      usage: { inputTokens: 12, outputTokens: 2, totalTokens: 14 },
+    })
+    expect(result.result.at(-1)).toEqual({
+      type: 'finish',
+      reason: { kind: 'error', failure: { message: 'quota wording must not win', code: POLICY_REFUSAL_CODE } },
+    })
+  })
+
+  it('maps structured refusal evidence before status, auth, and quota wording', () => {
+    expect(providerError({ error: { code: 'content_filter', message: 'quota exceeded and authentication failed' } }, 500))
+      .toMatchObject({ code: POLICY_REFUSAL_CODE, message: 'quota exceeded and authentication failed', failure: { status: 500 } })
+    expect(providerError({ error: { type: 'refusal', message: 'safety stop' } }, 401))
+      .toMatchObject({ code: POLICY_REFUSAL_CODE, message: 'safety stop' })
+    expect(providerError({ error: { finish_reason: 'content_filter', message: 'blocked' } }, 429))
+      .toMatchObject({ code: POLICY_REFUSAL_CODE, message: 'blocked' })
+    expect(providerError({ error: { content_filter: { reason: 'violence' } } }, 500))
+      .toMatchObject({ code: POLICY_REFUSAL_CODE, message: 'violence' })
+    expect(providerError({ error: { refusal: 'provider explanation' } }, 500))
+      .toMatchObject({ code: POLICY_REFUSAL_CODE, message: 'provider explanation' })
+  })
+
+  it('keeps ordinary prose and non-positive content_filter fields out of the refusal class', () => {
+    expect(providerError({ error: { message: 'The model refused because of content_filter and quota wording' } }, 500).code).toBe('SERVER')
+    expect(providerError({ error: { content_filter: false, message: 'ordinary server failure' } }, 500).code).toBe('SERVER')
+    expect(providerError({ error: { content_filter: { filtered: false }, message: 'ordinary server failure' } }, 500).code).toBe('SERVER')
   })
 })

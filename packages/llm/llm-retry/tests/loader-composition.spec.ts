@@ -7,8 +7,9 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
+import type { RequestErrorAction } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { createUserMessage, LlmAdapter, LlmError, resolveRetryPolicy  } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createUserMessage, LlmAdapter, LlmError, POLICY_REFUSAL_CODE, resolveRetryPolicy  } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
@@ -39,6 +40,23 @@ class TransientOnceAdapter extends LlmAdapter {
     yield { type: 'text-delta', index: 0, text: 'recovered' }
     yield { type: 'block-end', index: 0, block: { type: 'text', text: 'recovered' } }
     yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+class RefusalAlwaysAdapter extends LlmAdapter {
+  requests = 0
+  private readonly retryPolicy = resolveRetryPolicy({
+    mode: 'always',
+    backoff: { initialDelayMs: 1, maxDelayMs: 1, jitterRatio: 0 },
+  }, 'loader test provider retryPolicy')
+
+  override providerRetryPolicy(_provider: string): ResolvedRetryPolicy {
+    return this.retryPolicy
+  }
+
+  async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.requests += 1
+    throw new LlmError('provider policy refusal', POLICY_REFUSAL_CODE, { status: 400 })
   }
 }
 
@@ -83,21 +101,23 @@ async function loadYaml(lines: readonly string[]): Promise<Context> {
   return context
 }
 
+const BASE_ROWS = [
+  "- name: '@deepseek-ai/dsh-llm'",
+  "- name: '@deepseek-ai/dsh-session'",
+  "- name: '@deepseek-ai/dsh-session-projection'",
+  "- name: '@deepseek-ai/dsh-system-prompt'",
+  "- name: '@deepseek-ai/dsh-tools'",
+  "- name: '@deepseek-ai/dsh-agent'",
+  "- name: '@deepseek-ai/dsh-llm-retry'",
+  "- name: '@deepseek-ai/dsh-agent-loop'",
+]
+
 describe('real Loader composition', () => {
   // Real-Loader composition resolves workspace packages through tsx at test
   // time; first resolution after the host/client program split is slow enough
   // to trip the default 5s budget on cold caches.
   it('loads provider-supplied policy and records recovery through the shipping loop', { timeout: 60_000 }, async () => {
-    const loaded = await loadYaml([
-      "- name: '@deepseek-ai/dsh-llm'",
-      "- name: '@deepseek-ai/dsh-session'",
-      "- name: '@deepseek-ai/dsh-session-projection'",
-      "- name: '@deepseek-ai/dsh-system-prompt'",
-      "- name: '@deepseek-ai/dsh-tools'",
-      "- name: '@deepseek-ai/dsh-agent'",
-      "- name: '@deepseek-ai/dsh-llm-retry'",
-      "- name: '@deepseek-ai/dsh-agent-loop'",
-    ])
+    const loaded = await loadYaml(BASE_ROWS)
 
     const unloaded = [...loaded.loader.entries()]
       .filter(entry => entry.fiber === undefined && !entry.disabled)
@@ -116,6 +136,30 @@ describe('real Loader composition', () => {
     expect(agent.session.deriveMessages().at(-1)).toMatchObject({
       role: 'assistant',
       content: [{ type: 'text', text: 'recovered' }],
+    })
+  })
+
+  it('keeps a policy refusal terminal through the shipping loop', { timeout: 60_000 }, async () => {
+    const loaded = await loadYaml(BASE_ROWS)
+    const adapter = new RefusalAlwaysAdapter()
+    loaded.llm.registerAdapter(['mock'], adapter)
+    let downstreamCalls = 0
+    loaded.on('agent/request-error', async (): Promise<RequestErrorAction> => {
+      downstreamCalls += 1
+      return { kind: 'retry' }
+    })
+    const agent = await loaded.agentLoop.create(SessionId('loader-refusal'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'refuse' }], source: { kind: 'user' } }))
+    await agent.whenIdle()
+
+    const ending = agent.session.snapshotEvents().findLast(event => event.type === 'turn/end')
+    if (ending?.type !== 'turn/end') throw new Error('expected a terminal turn')
+    expect(adapter.requests).toBe(1)
+    expect(downstreamCalls).toBe(0)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    expect(ending.data.reason).toMatchObject({
+      kind: 'error',
+      error: { code: POLICY_REFUSAL_CODE, message: 'provider policy refusal' },
     })
   })
 })

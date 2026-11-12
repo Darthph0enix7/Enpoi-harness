@@ -49,6 +49,8 @@ import {
   LlmAdapter,
   LlmError,
   llmNativeFileEncoderFor,
+  POLICY_REFUSAL_CODE,
+  reportAttemptActivity,
   ReasoningEffortId,
 } from '@deepseek-ai/dsh-llm'
 import type {
@@ -712,8 +714,14 @@ export class PiAiAdapter extends LlmAdapter {
         identityId?: string,
       ): AsyncGenerator<StreamChunk> => {
         // One response record per attempt: a rotated-away identity's HTTP facts
-        // must never describe the next attempt's failure.
-        const capture = captureResponse(model.api)
+        // must never describe the next attempt's failure. Body bytes keep the
+        // idle watchdog armed while the attempt yields no semantic chunk; the
+        // attempt signal stops reporting once this attempt is torn down so its
+        // late bytes cannot mask the next attempt's silence.
+        const capture = captureResponse(model.api, {
+          onStreamActivity: () => { watchdog.pulse(); reportAttemptActivity(options.signal) },
+          activitySignal: signal,
+        })
         return toStreamChunks(snapshot.models.streamSimple(model, context, {
           ...attemptOptions(apiKeyOverride, identityId, capture.fetch),
           signal,
@@ -806,6 +814,7 @@ export class PiAiAdapter extends LlmAdapter {
           const iterator = makeAttempt(keylessAttempt ? undefined : key, attemptSignal, identity.id)
           const buffered: StreamChunk[] = []
           let committed = false
+          let abortedFinish: StreamChunk | undefined
           let failure: LlmFailure | undefined
           try {
             while (true) {
@@ -823,6 +832,13 @@ export class PiAiAdapter extends LlmAdapter {
                   failure = chunk.reason.failure
                   break
                 }
+                if (chunk.type === 'finish' && chunk.reason.kind === 'aborted') {
+                  // A cancelled or idle-timed-out attempt produced no answer:
+                  // it never commits, never records success, and never emits
+                  // the buffered usage as if the attempt had answered.
+                  abortedFinish = chunk
+                  break
+                }
                 committed = true
                 for (const held of buffered) yield held
                 buffered.length = 0
@@ -830,11 +846,13 @@ export class PiAiAdapter extends LlmAdapter {
               }
               if (chunk.type === 'finish') {
                 if (chunk.reason.kind === 'error') {
-                  const midFailureClass = classifyFailure(chunk.reason.failure.message)
+                  const midFailureClass = classifyFailure(chunk.reason.failure.message, chunk.reason.failure)
+                  // A provider policy refusal is the request's own answer, not
+                  // a credential event: leave the identity's counters alone.
                   // A keyless attempt's 401/403 is the route's own answer
                   // (e.g. a free tier that now demands a key), not a
                   // credential failure: there is no key to cool down.
-                  if (!(keylessAttempt && midFailureClass === 'AUTH')) {
+                  if (midFailureClass !== 'REFUSAL' && !(keylessAttempt && midFailureClass === 'AUTH')) {
                     // Mid-stream failure: too late to rotate transparently,
                     // but the state update steers the NEXT request away.
                     engine.recordFailure(
@@ -858,8 +876,29 @@ export class PiAiAdapter extends LlmAdapter {
               }
             }
           }
+          if (abortedFinish !== undefined) {
+            // Preserve the caller's cancellation as the terminal outcome; an
+            // idle deadline still wins as the adapter's own TIMEOUT.
+            const timeout = timeoutOf(watchdog.signal, 'LLM_STREAM_IDLE_TIMEOUT')
+            if (timeout !== undefined) throw timeout
+            yield abortedFinish
+            return
+          }
           if (committed) return
-          const failureClass = classifyFailure(failure?.message ?? '')
+          const failureClass = classifyFailure(failure?.message ?? '', failure)
+          // A structured policy refusal is terminal and request-scoped: no
+          // rotation, no cooldown, and no identity counters change. Keep the
+          // provider's original message, code, status, and request id.
+          if (failureClass === 'REFUSAL') {
+            // A refused request can still consume billed tokens. Report the
+            // provider's usage without committing the attempt or its identity.
+            for (const held of buffered) yield held
+            throwAttemptFailure(
+              failure?.message ?? 'provider refused the request under its content or usage policy',
+              failure?.code ?? POLICY_REFUSAL_CODE,
+              failure,
+            )
+          }
           attemptedFailureClasses.push(failureClass)
           // A keyless attempt has no credential to rotate or cool: a 401/403
           // is the route's own answer (e.g. a free tier that now demands a
@@ -995,7 +1034,14 @@ export class PiAiAdapter extends LlmAdapter {
         }
       }
 
-      const capture = captureResponse(model.api)
+      // Response body bytes count as provider activity even when pi-ai renders
+      // them as no event: gateways keep healthy streams open with SSE comments
+      // and providers send empty reasoning updates. The stable signal ends the
+      // reporting as soon as the caller aborts or the idle watchdog fires.
+      const capture = captureResponse(model.api, {
+        onStreamActivity: () => { watchdog.pulse(); reportAttemptActivity(options.signal) },
+        activitySignal: watchdog.signal,
+      })
       const events = snapshot.models.streamSimple(model, context, {
         ...attemptOptions(apiKey, undefined, capture.fetch),
         signal: watchdog.signal,

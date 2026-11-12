@@ -59,7 +59,7 @@ kind: "package-reference"
 | `maxTokens` | `256,000` | 单次请求输出上限；模型自身上限与显式请求值优先。它以 `defaultMaxTokens` 报告，绝不会作为已公开的 `maxOutputTokens` 能力。 |
 | `defaultContextWindow` | `1,000,000` | 无精确值模型的容量回退 |
 | `models` | V41 Flash + V4 Pro | 供发现消费方查看的建议性目录 |
-| `streamIdleTimeoutMs` | `300,000` | 单次流读取未完成的最大提供方空闲时间 |
+| `streamIdleTimeoutMs` | `300,000` | 单次未完成流读取的提供方静默上限；任何响应体字节（含 SSE keepalive 注释与空的提供方更新）都会重置它 |
 | `maxRequestFilesBytes` | `128 MiB` | file 模式请求图片字节预算，保留图片超过时请求以 `IMAGE_OFFLOAD_REQUIRED` 失败 |
 | `maxInlineRequestImageBytes` | `20 MiB` | 独立的 base64 回退高水位 |
 | `maxImagesPerRequest` | `600` | 保留请求图片数量的高水位 |
@@ -115,6 +115,8 @@ Files 模式通过 `maxRequestFilesBytes` 与 `maxImagesPerRequest` 限制保留
 
 非 2xx 响应以稳定 code 失败：`AUTH`（401/403）、`QUOTA`、`RATE_LIMIT`、`CONTEXT_WINDOW_EXCEEDED`、`INVALID_REQUEST`、`SERVER` 以及其他情况的 `HTTP_<status>`；响应前传输失败抛出 `TRANSPORT`，调用方中止抛出 `ABORTED`，流空闲超时抛出 `TIMEOUT`。请求扩展准备、字段冲突或 2xx 后接受失败使用 `REQUEST_EXTENSION`。当提供方未指出 file id 时，规范化图片拒绝会列出所有可能附件及其持久位置。陈旧文件拒绝会使点名映射（或该次尝试使用的全部映射）失效，并允许一次替换模型请求。协议违规抛出 `STREAM_CLOSED` 或 `MALFORMED_RESPONSE`；不带内容块的终止 `stop` 变成 `EMPTY_RESPONSE`，默认重试策略会重试它。官方路由缺少 API Key 的请求以 `MISSING_CREDENTIAL` 失败；格式错误的凭据以 `INVALID_CREDENTIAL` 失败，并点名需要修复的引用——绝不包含密钥的任何部分。
 
+结构化的 `POLICY_REFUSAL` 是提供方对该请求的终止性答复。只有具名字段会选择它——`finish_reason`、`stop_reason`、`code`、`type`、`content_filter` 或 `refusal`——并且先于 HTTP 状态或措辞，因此正文同时提到认证或额度的 401、500 响应仍是拒绝；失败保留提供方的解释、状态与 request id。拒绝绝不会消耗 Files 恢复请求，也不会进入凭据层的认证分类器。带内拒绝以 `usage` 后接终止 `finish` 结束流，保留提供方已经上报的用量。
+
 提供方插件负责目录可用性；仅账号路由要求存有凭据才能发现模型。两者的目录独立配置；传输层提供共享的默认模型元数据和能力解析。
 
 -----
@@ -137,7 +139,7 @@ Files 模式通过 `maxRequestFilesBytes` 与 `maxImagesPerRequest` 限制保留
 
 ### 协议流程
 
-一次 `stream()` 调用通常发一条模型请求：解析确定性请求图片、优先使用 Files id、准备所有已注册顶层请求扩展、向解析后的 `baseURL` 发起 fetch、在 HTTP 2xx 后接受扩展事务，并把 SSE 流翻译为 harness 协议。文件解析失败会让首条请求使用内联模式；提供方的陈旧文件响应允许一次替换尝试，且替换解析失败时也使用内联模式。每条模型与 Files 调用都携带共享归因。模型请求还在模型输入之外携带稳定匿名用户 id，并在存在 session id 时携带该值。推理历史会按需序列化回请求，缓存计量则把 DeepSeek 的缓存命中指标映射进 harness 用量桶。
+一次 `stream()` 调用通常发一条模型请求：解析确定性请求图片、优先使用 Files id、准备所有已注册顶层请求扩展、向解析后的 `baseURL` 发起 fetch、在 HTTP 2xx 后接受扩展事务，并把 SSE 流翻译为 harness 协议。文件解析失败会让首条请求使用内联模式；提供方的陈旧文件响应允许一次替换尝试，且替换解析失败时也使用内联模式。每条模型与 Files 调用都携带共享归因。模型请求还在模型输入之外携带稳定匿名用户 id，并在存在 session id 时携带该值。推理历史会按需序列化回请求，缓存计量则把 DeepSeek 的缓存命中指标映射进 harness 用量桶。原始响应体字节还会向模型链的静默时钟上报进程本地活动脉冲：keepalive 注释与空的提供方更新都算进展，但绝不会进入请求、会话事件或提供方缓存条目。
 
 </details>
 

@@ -1,6 +1,6 @@
 /** Direct Messages transport with one cancellable lifecycle per model request. */
 
-import { attributionHeaders, LlmAdapter, LlmError } from '@deepseek-ai/dsh-llm'
+import { attributionHeaders, LlmAdapter, LlmError, POLICY_REFUSAL_CODE, reportAttemptActivity } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, ImageAttachmentAccessResolver, PreparedAdapterCall, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { DeepSeekLlmApiJson } from '@deepseek-ai/dsh-deepseek-llm-api-extensions'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
@@ -52,7 +52,16 @@ export class DeepSeekAdapter<C extends Connection = Connection> extends LlmAdapt
     const consumer = new AbortController()
     const signal = options.signal === undefined ? consumer.signal : AbortSignal.any([consumer.signal, options.signal])
     using watchdog = idleWatchdog(signal, connection.streamIdleTimeoutMs, 'MESSAGES_IDLE')
-    const iterator = this.request(options, connection, watchdog.signal, () => { watchdog.pulse() })
+    // Response bytes are attempt progress even when they produce no semantic
+    // chunk (SSE comments and empty provider updates). Report on the request's
+    // public signal so the model-chain silence clock can re-arm; an aborted or
+    // stale attempt is ignored by the reporter itself.
+    const activity = (): void => { watchdog.pulse() }
+    const streamActivity = (): void => {
+      watchdog.pulse()
+      if (options.signal === undefined || !options.signal.aborted) reportAttemptActivity(options.signal)
+    }
+    const iterator = this.request(options, connection, watchdog.signal, activity, streamActivity)
     try {
       while (true) {
         const next = await watchdog.next(iterator)
@@ -73,7 +82,7 @@ export class DeepSeekAdapter<C extends Connection = Connection> extends LlmAdapt
   }
 
   private async * request(
-    options: GenerateOptions, connection: C, signal: AbortSignal, activity: () => void,
+    options: GenerateOptions, connection: C, signal: AbortSignal, activity: () => void, streamActivity: () => void,
   ): AsyncGenerator<StreamChunk> {
     signal.throwIfAborted()
     const { messages, versions } = await prepareImages(
@@ -137,17 +146,25 @@ export class DeepSeekAdapter<C extends Connection = Connection> extends LlmAdapt
             // HTTP status is authoritative when a gateway does not return JSON.
           }
           const detail = providerErrorDetail(raw)
-          if (await files.retry(detail)) continue
           const failure = providerError(raw, response.status, response.headers, text)
+          // A structured refusal is terminal: never spend a Files recovery
+          // request or rewrite its explanation into an image diagnostic.
+          if (failure.code === POLICY_REFUSAL_CODE) {
+            throw new LlmError(failure.message, failure.code, { ...failure.failure, cause: new Error(text) })
+          }
+          if (await files.retry(detail)) continue
           const message = files.errorMessage(response.status, failure.message, detail)
           throw new LlmError(message, failure.code, { ...failure.failure, cause: new Error(text) })
         }
         await extensions.accept()
         if (response.body === null) throw new LlmError('DeepSeek Messages returned no response body', 'EMPTY_RESPONSE')
-        yield* translate(parseSse(response.body, activity), options.model)
+        yield* translate(parseSse(response.body, streamActivity), options.model)
         return
       }
     } catch (error) {
+      // A structured policy refusal is the request's terminal answer. The
+      // credential layer must not reinterpret it as an auth/quota failure.
+      if (error instanceof LlmError && error.code === POLICY_REFUSAL_CODE) throw error
       if (auth.onRequestError !== undefined) {
         let mapped: unknown
         try { mapped = await auth.onRequestError(error) }

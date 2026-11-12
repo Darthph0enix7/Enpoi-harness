@@ -48,7 +48,7 @@ import { buildProvider, supportedProtocols } from './provider.ts'
 import { discoveredModelsFor } from './discovered.ts'
 import { DEFAULT_DISCOVERY_TIMEOUT_MS, DEFAULT_MAX_RESPONSE_BYTES } from './discovery.ts'
 
-/** Default maximum idle interval while an adapter stream read is outstanding. */
+/** Default maximum provider silence while an adapter stream read is outstanding. */
 export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000
 
 /**
@@ -228,7 +228,7 @@ export interface PiAiProviderProfile {
   timeoutMs?: number
   /** WebSocket connection timeout in milliseconds. */
   websocketConnectTimeoutMs?: number
-  /** Maximum provider idle time while one stream read is outstanding. */
+  /** Maximum provider silence while one stream read is outstanding; response-body bytes, including SSE keepalives, reset it. */
   streamIdleTimeoutMs?: number
   /**
    * Maximum base64-encoded image payload per request. When a request's
@@ -284,7 +284,7 @@ export interface ResolvedPiAiProviderProfile
   apiKeyEnv?: CredentialRef
   /** Whether this route serves requests without a credential when none resolves. */
   keyless: boolean
-  /** Positive finite provider-idle interval after defaulting. */
+  /** Positive finite provider-silence interval after defaulting. */
   streamIdleTimeoutMs: number
   /** Positive request-level base64 image payload bound after defaulting. */
   maxRequestImageBytes: number

@@ -49,11 +49,17 @@ Choose it when a composition runs the agent loop and wants durable request recov
 
 Omission of `retryPolicy` uses normal mode: five retries for `EMPTY_RESPONSE`, `RATE_LIMIT`, `SERVER`, `TIMEOUT`, and `TRANSPORT`, with bounded exponential backoff from 500 ms to 10 seconds and 10 percent jitter. Normal mode can change its finite budget, eligible codes, and backoff; always mode asks downstream recovery first, then retries every model-request failure without an attempt limit, stopping only on success, cancellation, or plugin disposal.
 
+Every policy also carries a quota guard. Before a failure-triggered reissue it checks 600,000 ms of attempt-plus-wait elapsed and 300,000 ms of failed no-work elapsed; either limit set to 0 disables it. The guard is failure-only — it is never a deadline on a healthy generation. A trip ends the step with the original failure's code, status, request id, reset hint, provider, and model plus a message naming the reached limit. The limits configure as `retryPolicy.guard.maxElapsedMs` and `retryPolicy.guard.maxNoWorkElapsedMs`; `retryPolicy.guard.terminalCodes` adds failure codes that terminate like the two mandatory ones.
+
 ### What you can observe
+
+The guard derives its accounting from the open step's existing `step/start`, `llm/retry-started`, and `assistant/attempt` events, so a restored log reaches the same decision without a new event or format. Elapsed counts every attempt and retry wait on every provider and policy in that step; no-work counts failed-attempt time since the last content-bearing attempt. Cancellation or plugin disposal owns the outcome and is never converted into a quota error.
 
 Each scheduled retry is durable before its wait: the plugin appends a non-surface `llm/retry` event carrying the retry id, provider, mode, policy key, failure, and scheduled delay, then a `llm/retry-started` event immediately before the retry begins. A `RATE_LIMIT` failure carrying a provider reset (`Retry-After` or `providerRetryAfterMs`) waits at least that reset — jittered upward and capped by `maxDelayMs` — so a retry never starts inside the window the provider named. A reset wider than that cap, or a turn whose remaining attempt budget cannot reach it, ends the turn immediately with a `RATE_LIMIT` failure naming the wait instead of spending attempts. When the wait completes, the loop re-runs the failed step inside the same open turn over the same durable history, so the retried request is reconstructable from the session log exactly like the original. Cancellation or plugin disposal aborts active backoff, drains active delegated recovery, and makes a callback captured before disposal fail closed.
 
 ### Failures and recovery
+
+`POLICY_REFUSAL` and `MODEL_CHAIN_EXHAUSTED` terminate before any mode or downstream recovery and append no retry event: the first describes the request, and the second already tried every eligible chain link. Recovery is priced from the policy captured for the provider that actually served the failure; after a chain or prefilter reroute that provider may differ from the prepared route, and a provider no longer registered leaves the failure terminal instead of borrowing another route's budget.
 
 A failure before any final adapter is selected has no provider policy and delegates downstream unchanged. In normal mode, a failure code outside the eligible set delegates; an exhausted budget also delegates, except that a `RATE_LIMIT` carrying a provider reset surfaces the wait. A reset wider than `maxDelayMs` surfaces that wait immediately rather than spending attempts. In always mode, an over-cap provider delay uses the configured local backoff so the policy cannot terminate on that instruction. Hints on other codes are ignored because reset semantics belong to rate limits. Nothing here is model-visible: no retry event, delay, provider error, or failed partial output reaches the model or derived messages.
 
@@ -76,13 +82,14 @@ The executor is built on one rule: **durable before wait, open-step boundaries.*
 | File | Role |
 |---|---|
 | [`src/index.ts`](src/index.ts) | The function plugin: waterfall listener, policy lookup, backoff, durable event appends |
+| [`src/guard.ts`](src/guard.ts) | Durable step-clock and failed no-work accounting for the quota guard, folded from existing session events |
 | [`src/history.ts`](src/history.ts) | Durable retry-history lookup from the session log |
 | [`src/types.ts`](src/types.ts) | Browser-safe `llm/retry` and `llm/retry-started` event payload types |
 | [`src/brand.ts`](src/brand.ts) | The `RetryId` brand shared by the event payloads |
 
 ### Recovery flow
 
-A failed step arrives on the waterfall with its provider and resolved policy. Always mode settles downstream recovery first and honors a downstream `retry` decision; normal mode first checks that the failure code is eligible and the budget is not exhausted. The plugin computes the delay — for `RATE_LIMIT`, the provider reset when it fits the cap, jittered upward; otherwise local bounded exponential backoff with symmetric jitter — appends the `llm/retry` event, waits on a cancellable timer, appends `llm/retry-started`, and returns `{ kind: 'retry' }`. The loop then re-runs the failed step inside the same open turn over the same durable history.
+A failed step arrives on the waterfall with the provider and policy that actually served it. A mandatory terminal code ends immediately. Always mode settles downstream recovery first and honors a downstream `retry` decision; normal mode first checks that the failure code is eligible and the budget is not exhausted. Before scheduling, the guard combines the durable fold with process-local monotonic timing and evaluates elapsed and failed no-work time plus the proposed delay; a reached limit throws the terminal failure instead of another request. The plugin computes the delay — for `RATE_LIMIT`, the provider reset when it fits the cap, jittered upward; otherwise local bounded exponential backoff with symmetric jitter — appends the `llm/retry` event, waits on a cancellable timer, appends `llm/retry-started`, and returns `{ kind: 'retry' }`. The loop then re-runs the failed step inside the same open turn over the same durable history.
 
 ### Waterfall composition
 
@@ -130,7 +137,9 @@ The reconstructed request preserves the prior prefix and is eligible for provide
 These limits define where the executor stops and future work begins. They are current package constraints, not a general retry comparison or a task backlog.
 
 - **Agent turns are the only retry boundary** — direct `ctx.llm.stream()` consumers remain single-attempt because a raw stream cannot separate already-emitted chunks durably.
-- **Always mode retries permanent failures** — authentication, quota, invalid-request, protocol, and unrecoverable context errors continue until success, cancellation, or disposal; deployments own provider-specific cost and latency controls.
+- **Always mode retries permanent failures except terminal codes** — authentication, quota, invalid-request, protocol, and unrecoverable context errors continue until success, cancellation, or disposal; `POLICY_REFUSAL` and `MODEL_CHAIN_EXHAUSTED` still terminate immediately, and deployments own provider-specific cost and latency controls.
+- **The quota guard is not a generation deadline** — it is checked only before a failure-triggered reissue; a healthy stream that keeps producing content is never cut by its elapsed or no-work limits.
+- **Recovery uses the failed route's policy** — a chain or prefilter reroute prices retries from the provider that actually served the failure, not the prepared route; a provider no longer registered has no policy and leaves the failure terminal.
 - **Finite plugin budgets add** — normal mode counts only its configured codes and exact provider policy, while context-overflow compaction owns a separate budget. Any overlapping policy must define registration-order behavior.
 - **Recovery policies compose by waterfall order** — always mode accepts a downstream retry before applying its fallback. A later policy that ignores cancellation and never settles also prevents fallback, turn quiescence, and plugin disposal from completing.
 - **`llm/retry` records scheduling, not completion** — later step and turn events establish success, exhaustion, or cancellation.

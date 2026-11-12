@@ -20,6 +20,7 @@ import type {
 import { agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
 import type {
   AnsweringLink, GenerateOptions, LlmCallConfig, Message, ModelChainLink, ModelChainResolver, PreparedLlmCall,
+  ResolvedRetryPolicy,
 } from '@deepseek-ai/dsh-llm'
 import {
   LlmError,
@@ -712,14 +713,15 @@ export class ReactLoopAgent implements Agent {
             'assistant/attempt',
             () => this.session.append('assistant/attempt', { turn, step, stream: live.stream }).seq,
           )
+          const failed = this.failedRequestRoute(request, preparedCall, finish.failure)
           const action = await this.dispatch.waterfall(
             'agent/request-error', {
               turn,
               step,
-              provider: request.provider,
-              model: request.model,
+              provider: failed.provider,
+              model: failed.model,
               failure: finish.failure,
-              retryPolicy: preparedCall?.retryPolicy,
+              retryPolicy: failed.retryPolicy,
               signal,
             },
             () => Promise.resolve<RequestErrorAction>(undefined),
@@ -773,6 +775,41 @@ export class ReactLoopAgent implements Agent {
         throw error
       }
     }
+  }
+
+  /**
+   * The route and retry policy one terminal request failure actually ran
+   * under. The LLM seam stamps every adapter failure with the route that
+   * produced it, so a runtime chain or prefilter may have run a link other
+   * than the proposed route; that link's policy prices its own retries. A
+   * failure without a provider keeps the proposed provider and the policy
+   * prepared for it, and a route removed since dispatch offers no policy
+   * rather than borrowing another route's budget.
+   * @param request - the request the loop dispatched.
+   * @param preparedCall - the prepared starting route, when one existed.
+   * @param failure - the terminal failure facts.
+   * @returns route and policy to hand to `agent/request-error`.
+   */
+  private failedRequestRoute(
+    request: GenerateOptions,
+    preparedCall: PreparedLlmCall | undefined,
+    failure: LlmFailure,
+  ): { provider: string; model: string; retryPolicy: ResolvedRetryPolicy | undefined } {
+    const provider = failure.provider ?? request.provider
+    const model = failure.model ?? request.model
+    if (failure.provider === undefined || failure.provider === request.provider) {
+      return { provider, model, retryPolicy: preparedCall?.retryPolicy }
+    }
+    let retryPolicy: ResolvedRetryPolicy | undefined
+    try {
+      retryPolicy = this.loopCtx.llm.providerRetryPolicy(failure.provider)
+    } catch (error) {
+      if (!(error instanceof LlmError) || error.code !== 'NO_ADAPTER') throw error
+      // The failure names a route that is no longer registered: it has no
+      // policy, and the failure must stay terminal rather than inherit one.
+      retryPolicy = undefined
+    }
+    return { provider, model, retryPolicy }
   }
 
   /**

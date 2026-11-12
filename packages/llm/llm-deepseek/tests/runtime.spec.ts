@@ -1741,6 +1741,11 @@ describe('plugin registration and config', () => {
       initialDelayMs: 25,
       maxDelayMs: 100,
       jitterRatio: 0.2,
+      guard: {
+        maxElapsedMs: 600_000,
+        maxNoWorkElapsedMs: 300_000,
+        terminalCodes: [],
+      },
     })
   })
 

@@ -1,9 +1,10 @@
 /** Translate Messages events while preserving block order and cumulative usage. */
 
-import { STREAM_CLOSED_CODE, LlmError, ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
+import { STREAM_CLOSED_CODE, LlmError, POLICY_REFUSAL_CODE, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, FinishReason, LlmFailure, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { object, replayState } from './replay.ts'
 import type { ReplayBlock } from './replay.ts'
+import { providerError, providerRefusal } from './transport.ts'
 
 interface Block {
   index: number
@@ -40,6 +41,37 @@ function updateUsage(usage: TokenUsage, raw: unknown): void {
     if (!Number.isSafeInteger(value) || (value as number) < 0) return malformed(`invalid ${wire}`)
     usage[local] = value as number
   }
+}
+
+/** Read one optional JSON object without treating arrays as records. */
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+/** Absorb usage reported by the event or its message/error envelope. */
+function absorbUsage(usage: TokenUsage, event: Record<string, unknown>): void {
+  if (event.usage !== undefined) updateUsage(usage, event.usage)
+  const message = recordOf(event.message)
+  if (message?.usage !== undefined) updateUsage(usage, message.usage)
+  const error = recordOf(event.error)
+  if (error?.usage !== undefined) updateUsage(usage, error.usage)
+}
+
+/** Complete the reported usage and emit it as the protocol's one usage chunk. */
+function usageChunk(usage: TokenUsage): StreamChunk {
+  usage.totalTokens = usage.inputTokens + usage.outputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
+  return { type: 'usage', usage }
+}
+
+/** Build the terminal refusal chunk for structured provider evidence. */
+function refusalFinish(evidence: { readonly reason: string; readonly explanation?: string }): StreamChunk {
+  const failure: LlmFailure = {
+    message: evidence.explanation ?? `DeepSeek Messages refused the request (${evidence.reason})`,
+    code: POLICY_REFUSAL_CODE,
+  }
+  return { type: 'finish', reason: { kind: 'error', failure } }
 }
 
 function startBlock(event: Record<string, unknown>, index: number): Block {
@@ -107,6 +139,23 @@ export async function* translate(events: AsyncIterable<Record<string, unknown>>,
   let started = false
   let reason: FinishReason | undefined
   for await (const event of events) {
+    if (event.type === 'error') {
+      const failure = providerError(event, undefined)
+      if (failure.code !== POLICY_REFUSAL_CODE) throw failure
+      absorbUsage(usage, event)
+      yield usageChunk(usage)
+      yield { type: 'finish', reason: { kind: 'error', failure: failure.failure } }
+      return
+    }
+    // Structured refusal evidence is terminal before any stop-reason mapping.
+    // The translator owns this chunk so accumulated provider usage survives.
+    const refusal = providerRefusal(event)
+    if (refusal !== undefined) {
+      absorbUsage(usage, event)
+      yield usageChunk(usage)
+      yield refusalFinish(refusal)
+      return
+    }
     if (event.type === 'message_start') {
       if (started) return malformed('duplicate message_start')
       updateUsage(usage, object(event.message).usage)
@@ -165,8 +214,7 @@ export async function* translate(events: AsyncIterable<Record<string, unknown>>,
           object(parsed)
         }
       }
-      usage.totalTokens = usage.inputTokens + usage.outputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0)
-      yield { type: 'usage', usage }
+      yield usageChunk(usage)
       yield { type: 'finish', reason, replayState: replayState(model, [...blocks.values()].map(block => block.replay)) }
       return
     }

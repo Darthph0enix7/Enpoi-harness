@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { LLM_ATTEMPT_FAILED_EVENT, LlmError } from '@deepseek-ai/dsh-llm'
+import { LLM_ATTEMPT_FAILED_EVENT, LlmError, POLICY_REFUSAL_CODE } from '@deepseek-ai/dsh-llm'
 import type { AttemptRecordSink } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import { resolveProfiles } from '../src/config.ts'
@@ -363,6 +363,125 @@ describe('PiAiAdapter credential pools', () => {
     expect((error as LlmError).failure.code).toBe('FREE_TIER_GATED')
     expect(server.requests).toHaveLength(1)
     expect(engine.cooldownRemaining('deepseek', 'exhausted', 'deepseek-v4-flash')).toBe(0)
+  })
+
+  it('keeps a structured policy refusal terminal without touching pool state', async () => {
+    // Refusal prose that also names every rotatable failure signal. The
+    // structured POLICY_REFUSAL code must win over all of it.
+    const refusal = 'This request was blocked by our content policy: 429 rate limit,'
+      + ' 401 authentication, a 500 and a timeout in the safety service'
+    const server = await mockServer([
+      { status: 500, body: JSON.stringify({ error: { message: refusal } }) },
+      { events: textEvents },
+    ])
+    const engine = await engineOf()
+    const adapter = pooledAdapter(POOLED_PROVIDERS(server.url), engine, {
+      POOL_KEY_A: 'key-a',
+      POOL_KEY_B: 'key-b',
+    })
+
+    const error = await collect(adapter, server.url).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(LlmError)
+    expect((error as LlmError).failure.code).toBe(POLICY_REFUSAL_CODE)
+    expect((error as LlmError).failure.status).toBe(500)
+    expect((error as LlmError).failure.message).toContain('blocked by our content policy')
+    // Original message preserved at the top level, not replaced by pool prose.
+    expect((error as LlmError).message).toBe((error as LlmError).failure.message)
+    // Exactly one provider request: two configured identities, no rotation.
+    expect(server.requests).toHaveLength(1)
+    // Neither identity nor the pool was touched: no cooldown, failure, or success.
+    expect(engine.snapshot('deepseek')).toEqual({})
+    expect(engine.cooldownRemaining('deepseek', 'exhausted', 'deepseek-v4-flash')).toBe(0)
+    expect(engine.cooldownRemaining('deepseek', 'healthy', 'deepseek-v4-flash')).toBe(0)
+  })
+
+  it('retains reported usage on a refusal before any content commits', async () => {
+    const server = await mockServer([{
+      events: [
+        '{"choices":[{"delta":{},"index":0,"finish_reason":"content_filter"}],"usage":{"prompt_tokens":37,"completion_tokens":11}}',
+        '[DONE]',
+      ],
+    }])
+    const engine = await engineOf()
+    const adapter = pooledAdapter(POOLED_PROVIDERS(server.url), engine, {
+      POOL_KEY_A: 'key-a', POOL_KEY_B: 'key-b',
+    })
+    const chunks: unknown[] = []
+    const drain = async (): Promise<void> => {
+      for await (const chunk of adapter.stream({
+        provider: 'deepseek', model: 'deepseek-v4-flash', messages: [],
+      })) chunks.push(chunk)
+    }
+    await expect(drain()).rejects.toMatchObject({ code: POLICY_REFUSAL_CODE })
+    expect(chunks).toHaveLength(1)
+    expect(chunks[0]).toMatchObject({ type: 'usage', usage: { inputTokens: 37, outputTokens: 11 } })
+    expect(server.requests).toHaveLength(1)
+    expect(engine.snapshot('deepseek')).toEqual({})
+  })
+
+  it('does not mark a pre-commit caller abort as a successful identity', async () => {
+    const server = await mockServer([{ events: textEvents, firstEventDelayMs: 100 }])
+    const engine = await engineOf()
+    const adapter = pooledAdapter(POOLED_PROVIDERS(server.url), engine, {
+      POOL_KEY_A: 'key-a',
+      POOL_KEY_B: 'key-b',
+    })
+    const controller = new AbortController()
+    const chunks: unknown[] = []
+    const drain = async (): Promise<void> => {
+      for await (const chunk of adapter.stream({
+        provider: 'deepseek',
+        model: 'deepseek-v4-flash',
+        messages: [],
+        signal: controller.signal,
+      })) chunks.push(chunk)
+    }
+    const drained = drain()
+    // Abort while the provider request is in flight but before its first
+    // event: the attempt must end as the caller's cancellation, not a commit.
+    while (server.requests.length === 0) await new Promise(resolve => setTimeout(resolve, 2))
+    controller.abort('stopped before first content')
+    await expect(drained).resolves.toBeUndefined()
+
+    // The caller's aborted terminal survives, without synthesized usage.
+    expect(chunks).toHaveLength(1)
+    expect(chunks[0]).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'aborted', failure: { code: 'ABORTED' } },
+    })
+    // No provider call beyond the cancelled attempt, and no pool mutation.
+    expect(server.requests).toHaveLength(1)
+    expect(engine.snapshot('deepseek')).toEqual({})
+  })
+
+  it('does not mark an idle-timed-out pre-commit attempt as successful', async () => {
+    const server = await mockServer([{ events: textEvents, firstEventDelayMs: 200 }])
+    const engine = await engineOf()
+    const adapter = pooledAdapter({
+      deepseek: {
+        baseURL: server.url,
+        streamIdleTimeoutMs: 20,
+        pool: {
+          identities: [
+            { id: 'exhausted', credentialRef: 'POOL_KEY_A', priority: 1 },
+            { id: 'healthy', credentialRef: 'POOL_KEY_B', priority: 2 },
+          ],
+        },
+      },
+    }, engine, {
+      POOL_KEY_A: 'key-a',
+      POOL_KEY_B: 'key-b',
+    })
+
+    await expect(collect(adapter, server.url)).rejects.toMatchObject({
+      code: 'TIMEOUT',
+    })
+
+    // The idle deadline terminated the attempt before any answer: no success,
+    // no fake usage, and no rotation to the second identity.
+    expect(server.requests).toHaveLength(1)
+    expect(engine.snapshot('deepseek')).toEqual({})
   })
 
   it('hands a pooled Anthropic reset hint to the caller and the attempt record', async () => {

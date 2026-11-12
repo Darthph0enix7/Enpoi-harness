@@ -59,7 +59,7 @@ A request selects the route with `provider: deepseek-official`; the model id pas
 | `maxTokens` | `256,000` | Per-request output cap; a model's own cap and explicit request values win. It is reported as `defaultMaxTokens`, never as a disclosed `maxOutputTokens` capability. |
 | `defaultContextWindow` | `1,000,000` | Capacity fallback for models without an exact value |
 | `models` | V41 Flash + V4 Pro | Advisory catalog shown by discovery consumers |
-| `streamIdleTimeoutMs` | `300,000` | Maximum provider idle time per outstanding stream read |
+| `streamIdleTimeoutMs` | `300,000` | Provider-silence bound for one outstanding stream read; response-body bytes, including SSE keepalive comments and empty provider updates, reset it |
 | `maxRequestFilesBytes` | `128 MiB` | File-mode request-image byte budget; a request whose retained images exceed it fails with `IMAGE_OFFLOAD_REQUIRED` |
 | `maxInlineRequestImageBytes` | `20 MiB` | Independent base64 fallback high watermark |
 | `maxImagesPerRequest` | `600` | High watermark for retained request-image count |
@@ -115,6 +115,8 @@ Successful Files responses must contain valid JSON. JSON decoding failures from 
 
 Non-2xx responses fail with stable codes: `AUTH` (401/403), `QUOTA`, `RATE_LIMIT`, `CONTEXT_WINDOW_EXCEEDED`, `INVALID_REQUEST`, `SERVER`, and `HTTP_<status>` otherwise; pre-response transport failures throw `TRANSPORT`, caller aborts throw `ABORTED`, and stream-idle expiry throws `TIMEOUT`. Request-extension preparation, field collision, or post-2xx acceptance fails with `REQUEST_EXTENSION`. A normalized-image rejection names every plausible attachment and its durable position when the provider does not identify a file id. Stale-file rejection invalidates the named mappings (or every mapping used by the attempt) and permits one replacement model request. Protocol violations throw `STREAM_CLOSED` or `MALFORMED_RESPONSE`, and a terminal `stop` with no content blocks becomes `EMPTY_RESPONSE`, which the default retry policy retries. A request on the official route without an API key fails with `MISSING_CREDENTIAL`, and a malformed credential fails with `INVALID_CREDENTIAL` naming the reference to fix — never any part of the key.
 
+A structured `POLICY_REFUSAL` is the provider's terminal answer to the request. Only named provider fields select it — `finish_reason`, `stop_reason`, `code`, `type`, `content_filter`, or `refusal` — and they win before HTTP status or wording, so a 401 or 500 body that mentions auth or quota stays a refusal; the failure keeps the provider's explanation, status, and request id. A refusal never spends the Files recovery request and never reaches the credential layer's auth classifier. An in-band refusal ends the stream with `usage` then the terminal `finish`, retaining usage the provider already reported.
+
 Provider plugins own catalog availability; only the account route requires a stored grant for discovery. Their catalogs are configured independently; the transport supplies shared default model metadata and capability resolution.
 
 -----
@@ -137,7 +139,7 @@ The plugin is built on one explicit resolve step and one registration fact. `res
 
 ### Wire flow
 
-One `stream()` call normally makes one model request: resolve deterministic request images, prefer Files ids, prepare any registered top-level request extensions, fetch from the resolved `baseURL`, accept extension transactions after HTTP 2xx, and translate the SSE stream into the harness protocol. File-resolution failure makes the first request inline; a provider stale-file response permits one replacement attempt, also inline if replacement resolution fails. Every model and Files call carries shared attribution. Model requests also carry the stable anonymous user id outside model input, plus a session id when present. Reasoning history is serialized back when required, and cache accounting maps DeepSeek's cache-hit metrics into harness usage.
+One `stream()` call normally makes one model request: resolve deterministic request images, prefer Files ids, prepare any registered top-level request extensions, fetch from the resolved `baseURL`, accept extension transactions after HTTP 2xx, and translate the SSE stream into the harness protocol. File-resolution failure makes the first request inline; a provider stale-file response permits one replacement attempt, also inline if replacement resolution fails. Every model and Files call carries shared attribution. Model requests also carry the stable anonymous user id outside model input, plus a session id when present. Reasoning history is serialized back when required, and cache accounting maps DeepSeek's cache-hit metrics into harness usage. Raw response-body bytes also feed a process-local activity pulse for the model chain's silence clock: keepalive comments and empty provider updates count as progress but never enter a request, session event, or provider cache entry.
 
 </details>
 

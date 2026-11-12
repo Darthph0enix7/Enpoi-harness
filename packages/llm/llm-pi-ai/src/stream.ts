@@ -13,7 +13,7 @@ import {
   STREAM_CLOSED_CODE, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, ENTITLEMENT_GATED_CODE,
   ENTITLEMENT_GATED_EXPLANATION, FREE_TIER_GATED_CODE, FREE_TIER_GATED_EXPLANATION,
   isContextWindowExceededError, isEntitlementGatedError, isFreeTierGatedError, isQuotaExceededError,
-  LlmError, parseProviderRetryAfterMs, QUOTA_EXCEEDED_CODE,
+  LlmError, parseProviderRetryAfterMs, POLICY_REFUSAL_CODE, QUOTA_EXCEEDED_CODE,
 } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, StreamChunk, TokenUsage, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { isContextOverflow } from '@earendil-works/pi-ai/utils/overflow'
@@ -35,6 +35,109 @@ export function mapUsage(usage: PiUsage): TokenUsage {
     ...usage.cacheRead > 0 ? { cacheReadTokens: usage.cacheRead } : {},
     ...usage.cacheWrite > 0 ? { cacheWriteTokens: usage.cacheWrite } : {},
   }
+}
+
+/**
+ * Canonical provider-neutral code for a request a provider refused under its
+ * content, safety, or usage policy. The code marks the refusal terminal so a
+ * retry does not reissue an unchanged refused request; it does not assert that
+ * no later request could succeed. The failure keeps the provider's own
+ * explanation in `message`.
+ */
+export { POLICY_REFUSAL_CODE } from '@deepseek-ai/dsh-llm'
+
+/**
+ * Provider stop reasons that mark a content-policy refusal. pi-ai reports each
+ * as `stopReason: 'error'` and preserves the provider's value on
+ * `rawStopReason`: Anthropic's `refusal`/`sensitive`, OpenAI's
+ * `content_filter`, Google's safety blocklist family, and Bedrock's guardrail
+ * stops. The OpenAI Responses form is `incomplete.content_filter`.
+ */
+const POLICY_STOP_REASONS: ReadonlySet<string> = new Set([
+  'refusal',
+  'sensitive',
+  'content_filter',
+  'safety',
+  'recitation',
+  'blocklist',
+  'prohibited_content',
+  'spii',
+  'image_safety',
+  'image_prohibited_content',
+  'image_recitation',
+  'guardrail_intervened',
+  'content_filtered',
+])
+
+/**
+ * Read the provider's content-policy stop reason when pi-ai preserved one.
+ * @param message - the terminal assistant message.
+ * @returns the provider's raw stop reason, or undefined for any other stop.
+ */
+function policyStopReason(message: AssistantMessage): string | undefined {
+  // Caller cancellation is a different terminal outcome; an error that was
+  // already in flight must not resurrect as a policy refusal.
+  if (message.stopReason === 'aborted') return undefined
+  const raw = message.rawStopReason?.trim()
+  if (raw === undefined || raw.length === 0) return undefined
+  if (POLICY_STOP_REASONS.has(raw.toLowerCase())) return raw
+  // OpenAI Responses documents `incomplete.<reason>`; only a known policy
+  // reason under that form counts, so an unrelated `foo.safety` stays unknown.
+  const incomplete = /^incomplete\.([a-z_]+)$/i.exec(raw)?.[1]
+  return incomplete !== undefined && POLICY_STOP_REASONS.has(incomplete.toLowerCase())
+    ? raw
+    : undefined
+}
+
+/**
+ * Machine-formatted refusal diagnoses: a gateway's named refusal stage, or
+ * pi-ai's projection of a provider finish reason it mapped to an error. These
+ * name the refusal explicitly rather than mentioning it in ordinary prose.
+ */
+const STRUCTURED_REFUSAL_TEXT: readonly RegExp[] = [
+  // The incident's gateway diagnosis: `claude refusal (reasoning_extraction):
+  // This request was blocked ...`. A named refusal stage starts the failure.
+  /^[\w .-]{0,64}\brefusal\s*\([^)\n]{1,80}\)\s*:/i,
+  // pi-ai's own projections of a provider finish reason or refusal stop.
+  /^(?:the\s+)?(?:model|provider)\s+refused\s+(?:the\s+request|this\s+request|to\s+complete\s+the\s+request)\b/i,
+  /^provider\s+finish_reason:\s*content_filter\b/i,
+  /^response\s+incomplete:\s*content_filter\b/i,
+  new RegExp(String.raw`^provider\s+stopped\s+with:\s*(?:safety|recitation|blocklist|prohibited_content|spii|image_safety|`
+    + String.raw`image_prohibited_content|image_recitation|guardrail_intervened|content_filtered)\b`, 'i'),
+  /^content[_ -]?filter(?:ed)?\b/i,
+]
+
+/**
+ * Provider policy wording in ordinary prose. Every pattern is anchored to the
+ * start of the failure text so quoted user text inside a validation error
+ * ("the prompt asks why models refuse ...") never selects this class.
+ */
+const PROSE_REFUSAL_TEXT: readonly RegExp[] = [
+  new RegExp(String.raw`^(?:input|output)\s+(?:was\s+)?(?:blocked|filtered|rejected)\s+(?:by|due\s+to|because\s+of)`
+    + String.raw`\b[^\n]{0,120}\b(?:content|safety|polic(?:y|ies)|moderation|guardrail|filter)\b`, 'i'),
+  new RegExp(String.raw`^(?:this|your|the)\s+(?:request|prompt|response|message|content|input|output|completion)`
+    + String.raw`\s+(?:was|is|has\s+been|got)\s+(?:blocked|rejected|filtered|flagged|denied)\b[^\n]{0,160}`
+    + String.raw`\b(?:safety|content|polic(?:y|ies)|moderation|guardrail|terms|prohibited|restricted|filter)\b`, 'i'),
+  new RegExp(String.raw`^(?:your|the)\s+(?:request|prompt|content|input|message)\s+(?:was\s+)?rejected`
+    + String.raw`\s+as\s+a\s+result\s+of\s+(?:our|the)\s+safety\s+system\b`, 'i'),
+  new RegExp(String.raw`^(?:the\s+)?(?:response|content|output)\s+was\s+filtered\s+(?:due\s+to|because|by)\b`
+    + String.raw`[^\n]{0,160}\b(?:content|safety|polic(?:y|ies)|moderation|filter)\b`, 'i'),
+  new RegExp(String.raw`^(?:this\s+|your\s+)?(?:request|prompt|content|message|input|output)\b`
+    + String.raw`[^\n]{0,100}\bviolat(?:e|es|ed|ing)\b[^\n]{0,100}\b(?:usage|content|safety|acceptable\s+use)\s+polic(?:y|ies)\b`, 'i'),
+  new RegExp(String.raw`^(?:blocked|rejected|filtered|flagged|denied)\s+(?:by|due\s+to|because\s+of)\b`
+    + String.raw`[^\n]{0,120}\b(?:safety|content|polic(?:y|ies)|moderation|guardrail|terms|prohibited|filter)\b`, 'i'),
+]
+
+/**
+ * Classify refusal wording at the start of a flattened provider failure.
+ * @param text - the failure text pi-ai built from a status, body, or event.
+ * @returns whether the text names a policy refusal.
+ */
+function refusalText(text: string): boolean {
+  // A flattened HTTP failure is `<status>: <body>`; the body starts the prose.
+  const leading = text.replace(/^\s*\d{3}:\s*/, '')
+  return STRUCTURED_REFUSAL_TEXT.some(pattern => pattern.test(leading))
+    || PROSE_REFUSAL_TEXT.some(pattern => pattern.test(leading))
 }
 
 // XXX(pi-ai upstream): pi-ai flattens the caught error to `error.message`
@@ -173,6 +276,35 @@ function textField(record: Record<string, unknown> | undefined, field: string): 
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
+/** Machine error codes providers use for a content-policy rejection. */
+const REFUSAL_ERROR_CODES: ReadonlySet<string> = new Set([
+  'content_filter',
+  'content_filtered',
+  'content_policy_violation',
+  'responsible_ai_policy',
+  'moderation_blocked',
+  'safety',
+  'refusal',
+])
+
+/**
+ * Read refusal evidence from the JSON error envelope pi-ai flattens into its
+ * text. A gateway's machine code names the refusal directly; its human message
+ * is checked with the same leading-text rules as a bare failure.
+ * @param text - the flattened pi-ai error message.
+ * @returns whether the envelope names a policy refusal.
+ */
+function envelopeRefusal(text: string): boolean {
+  const envelope = providerErrorEnvelope(text)
+  if (envelope === undefined) return false
+  const code = textField(envelope.inner, 'code') ?? textField(envelope.inner, 'type')
+    ?? textField(envelope.outer, 'code') ?? textField(envelope.outer, 'type')
+  const normalized = code?.toLowerCase().replace(/[\s-]+/g, '_')
+  if (normalized !== undefined && REFUSAL_ERROR_CODES.has(normalized)) return true
+  const detail = textField(envelope.inner, 'message') ?? textField(envelope.outer, 'message')
+  return detail !== undefined && refusalText(detail)
+}
+
 /**
  * Resolve the provider reset hint for one terminal error.
  *
@@ -194,7 +326,9 @@ function providerResetMs(text: string, facts: HttpResponseFacts | undefined): nu
  * @param responseFacts - HTTP facts captured before pi-ai flattened a pre-stream
  *   failure into error text; absent for in-stream errors and stream protocols
  *   that cannot accept a custom fetch.
- * @returns the mapped harness reason. Recognized error text, `stop` usage above
+ * @returns the mapped harness reason. A provider content-policy stop or a
+ *   recognized refusal text maps to `POLICY_REFUSAL` before any overflow
+ *   signal is considered. Otherwise recognized error text, `stop` usage above
  *   `contextWindow`, and zero-output `length` usage that fills the window map
  *   to `CONTEXT_WINDOW_EXCEEDED`; a completed `stop` with no non-empty text
  *   block and no tool call maps to an `EMPTY_RESPONSE` error, while terminal
@@ -209,6 +343,44 @@ export function mapStopReason(
   const harnessOverflow = message.stopReason === 'error'
     && message.errorMessage !== undefined
     && isContextWindowExceededError(message.errorMessage)
+  // A completed response is successful only when it carries something a
+  // consumer can retain: non-empty text or a tool call. Reasoning and usage
+  // do not count, so a gateway that answers 200 with an empty text block (the
+  // Kilo free route) or reasoning only is an EMPTY_RESPONSE, not a silent
+  // successful turn. Tool-call-only and text-only steps stay successful.
+  const hasAnswer = message.content.some(block =>
+    block.type === 'toolCall' || (block.type === 'text' && block.text.length > 0))
+  const refusalFailure = (fallback: string): FinishReason => ({
+    kind: 'error',
+    failure: {
+      message: message.errorMessage !== undefined && message.errorMessage.length > 0
+        ? message.errorMessage
+        : fallback,
+      code: POLICY_REFUSAL_CODE,
+      ...responseFacts?.status === undefined ? {} : { status: responseFacts.status },
+    },
+  })
+
+  // A provider content-policy stop is the provider's own terminal answer, so
+  // it is decided before every overflow signal: an overflow pattern may appear
+  // in the refusal's explanation, while that pattern does not make the policy
+  // stop a window overflow. The same holds for the gateway's named refusal
+  // diagnosis and a provider's content-filter finish reason flattened into the
+  // error text. pi-ai preserves the provider's raw value on `rawStopReason`.
+  const refusedBy = policyStopReason(message)
+  if (refusedBy !== undefined) {
+    return refusalFailure(`model "${message.model}" was refused by the provider's content policy (${refusedBy})`)
+  }
+  // A successful stop with an answer is a real completion; a stale
+  // `errorMessage` left beside it must not turn it into a refusal. A structured
+  // policy stop above still wins, because pi-ai preserved it as the provider's
+  // terminal reason.
+  const staleErrorBesideAnswer = message.stopReason === 'stop' && hasAnswer
+  if (!staleErrorBesideAnswer && message.stopReason !== 'aborted' && message.errorMessage !== undefined
+    && (refusalText(message.errorMessage) || envelopeRefusal(message.errorMessage))) {
+    return refusalFailure(`model "${message.model}" was refused by the provider's content policy`)
+  }
+
   if (piAiOverflow || harnessOverflow) {
     return {
       kind: 'error',
@@ -219,13 +391,6 @@ export function mapStopReason(
     }
   }
 
-  // A completed response is successful only when it carries something a
-  // consumer can retain: non-empty text or a tool call. Reasoning and usage
-  // do not count, so a gateway that answers 200 with an empty text block (the
-  // Kilo free route) or reasoning only is an EMPTY_RESPONSE, not a silent
-  // successful turn. Tool-call-only and text-only steps stay successful.
-  const hasAnswer = message.content.some(block =>
-    block.type === 'toolCall' || (block.type === 'text' && block.text.length > 0))
   const emptyResponse = (): FinishReason => ({
     kind: 'error',
     failure: {

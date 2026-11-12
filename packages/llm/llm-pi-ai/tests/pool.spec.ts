@@ -175,6 +175,61 @@ describe('classifyFailure', () => {
     expect(classifyFailure('401 Unauthorized: invalid api key on the free tier route')).toBe('AUTH')
   })
 
+  it('trusts a structured POLICY_REFUSAL over misleading prose and status', () => {
+    // The stream mapper preserves the provider's own explanation and HTTP
+    // status beside a content-policy stop. That text may contain transient,
+    // auth, capacity, or quota vocabulary, and the status may be 500, but the
+    // refusal is still the request's answer: no rotation and no cooldown.
+    const misleading = [
+      '500 Internal Server Error',
+      '401 Unauthorized: invalid api key',
+      '403 Forbidden',
+      '429 rate limit exceeded, too many requests',
+      '503 overloaded, server is busy',
+      'RESOURCE_EXHAUSTED quota exhausted for project',
+      'network socket terminated',
+    ]
+    for (const message of misleading) {
+      for (const status of [500, 401, 429, 503, undefined]) {
+        const facts = status === undefined ? { code: 'POLICY_REFUSAL' } : { code: 'POLICY_REFUSAL', status }
+        expect(classifyFailure(message, facts)).toBe('REFUSAL')
+      }
+    }
+    expect(ROTATING_CLASSES.has('REFUSAL')).toBe(false)
+    expect(CLASS_COOLDOWN_MS.REFUSAL).toBe(0)
+  })
+
+  it('records a structured POLICY_REFUSAL without cooling the identity', () => {
+    const e = engine()
+    const message = '429 rate limit exceeded, too many requests'
+    const failureClass = classifyFailure(message, { code: 'POLICY_REFUSAL', status: 500 })
+    expect(e.recordFailure('p', 'k', 'm', failureClass, message, 500))
+      .toEqual({ failureClass: 'REFUSAL', cooldownUntil: 0 })
+    // The identity stays healthy, so it is still offered in priority order.
+    expect(e.cooldownRemaining('p', 'k', 'm')).toBe(0)
+    expect(e.orderFor('p', [{ id: 'a', priority: 1 }, { id: 'b', priority: 2 }], 'm').map(i => i.id))
+      .toEqual(['a', 'b'])
+  })
+
+  it('leaves message-only and non-refusal structured classification unchanged', () => {
+    expect(classifyFailure('429 rate limit exceeded, too many requests')).toBe('QUOTA')
+    expect(classifyFailure('429 rate limit exceeded, too many requests', {})).toBe('QUOTA')
+    expect(classifyFailure('503 overloaded')).toBe('CAPACITY')
+    expect(classifyFailure('401 Unauthorized: invalid api key')).toBe('AUTH')
+    expect(classifyFailure('prompt is too long for this model')).toBe('INVALID_REQUEST')
+    expect(classifyFailure('model is unavailable after 429')).toBe('GATEWAY_OUTAGE')
+    // Status alone never decides a class, and unrelated structured codes do
+    // not override the prose ordering.
+    expect(classifyFailure('unknown failure', { status: 401 })).toBe('UPSTREAM')
+    expect(classifyFailure('unknown failure', { status: 503 })).toBe('UPSTREAM')
+    expect(classifyFailure('429 rate limit exceeded', { code: 'SERVER', status: 500 })).toBe('QUOTA')
+    expect(classifyFailure('403 An active OpenCode Go subscription is required to use Go models.',
+      { code: 'ENTITLEMENT_GATED', status: 403 })).toBe('ENTITLEMENT')
+    expect(classifyFailure('400 invalid_request_error: max_tokens above limit',
+      { code: 'INVALID_REQUEST', status: 400 })).toBe('INVALID_REQUEST')
+    expect(classifyFailure('free tier can only be used from within OpenCode', { status: 403 })).toBe('POLICY')
+  })
+
   it('classifies subscription/entitlement gates as a rotating ENTITLEMENT class', () => {
     // The live OpenCode Go message that previously churned a healthy identity.
     const observed = '403 An active OpenCode Go subscription is required to use Go models.'

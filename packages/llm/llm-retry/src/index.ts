@@ -10,11 +10,39 @@ import type { Context, Events } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { z as zod } from 'zod'
 import type { Agent, RequestErrorAction } from '@deepseek-ai/dsh-agent'
-import { LlmError } from '@deepseek-ai/dsh-llm'
+import {
+  DEFAULT_RETRY_GUARD_MAX_ELAPSED_MS,
+  DEFAULT_RETRY_GUARD_MAX_NO_WORK_ELAPSED_MS,
+  LlmError,
+  MODEL_CHAIN_EXHAUSTED_CODE,
+  POLICY_REFUSAL_CODE,
+} from '@deepseek-ai/dsh-llm'
 import type { LlmFailure, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
+import type { Session } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import { RetryId } from './brand.ts'
+import {
+  applyRetryGuardEvent,
+  applyRetryGuardLiveEvent,
+  emptyRetryGuardState,
+  retryGuardTrip,
+  retryGuardUsage,
+} from './guard.ts'
+import type {
+  RetryGuardLive,
+  RetryGuardState,
+  RetryGuardTrip,
+  RetryGuardUsage,
+} from './guard.ts'
 import type { LlmRetryEventData } from './types.ts'
+
+export type {
+  RetryGuardLimit,
+  RetryGuardLive,
+  RetryGuardState,
+  RetryGuardTrip,
+  RetryGuardUsage,
+} from './guard.ts'
 
 export type { LlmRetryEventData, LlmRetryStartedEventData } from './types.ts'
 export { RetryId } from './brand.ts'
@@ -41,6 +69,8 @@ function validateConfig(config: Config): void {
 export interface RetryInternals {
   /** Random sample in the inclusive zero-to-one range used for jitter. */
   random?: () => number
+  /** Monotonic millisecond clock used for live quota accounting. */
+  now?: () => number
 }
 
 type DownstreamOutcome =
@@ -59,6 +89,16 @@ async function settleDownstream(
 
 /** Stable code whose provider reset hint takes precedence over local backoff. */
 const RATE_LIMIT_CODE = 'RATE_LIMIT'
+
+/**
+ * Failures that terminate before any policy or downstream recovery. A refusal
+ * describes the request, and an exhausted chain already traversed every
+ * eligible link; reissuing either spends quota without a different outcome.
+ */
+const MANDATORY_TERMINAL_CODES: ReadonlySet<string> = new Set([
+  POLICY_REFUSAL_CODE,
+  MODEL_CHAIN_EXHAUSTED_CODE,
+])
 
 function localDelay(config: ResolvedRetryPolicy, retry: number, random: () => number): number {
   const exponent = Math.min(retry - 1, 1024)
@@ -139,21 +179,75 @@ function providerWaitError(failure: LlmFailure, hintMs: number): LlmError {
   })
 }
 
+/**
+ * Stable identity for one provider-policy retry chain. A non-default guard
+ * appends its tuple so changing a quota limit starts a fresh chain; the
+ * default tuple is omitted so a log recorded before the guard existed keeps
+ * its chain across an upgrade.
+ */
 function retryPolicyKey(policy: ResolvedRetryPolicy): string {
-  return policy.mode === 'always'
-    ? JSON.stringify([policy.mode, policy.initialDelayMs, policy.maxDelayMs, policy.jitterRatio])
-    : JSON.stringify([
+  const base: (string | number | readonly string[])[] = policy.mode === 'always'
+    ? [policy.mode, policy.initialDelayMs, policy.maxDelayMs, policy.jitterRatio]
+    : [
       policy.mode,
       policy.maxRetries,
       [...policy.retryableCodes].sort(),
       policy.initialDelayMs,
       policy.maxDelayMs,
       policy.jitterRatio,
-    ])
+    ]
+  const guard: (number | readonly string[])[] = [
+    policy.guard.maxElapsedMs,
+    policy.guard.maxNoWorkElapsedMs,
+    [...policy.guard.terminalCodes].sort(),
+  ]
+  const defaultGuard = guard[0] === DEFAULT_RETRY_GUARD_MAX_ELAPSED_MS
+    && guard[1] === DEFAULT_RETRY_GUARD_MAX_NO_WORK_ELAPSED_MS
+    && (guard[2] as readonly string[]).length === 0
+  return JSON.stringify(defaultGuard ? base : [...base, guard])
 }
 
 function retryStateKey(provider: string, policyKey: string): string {
   return JSON.stringify([provider, policyKey])
+}
+
+/**
+ * Render the terminal failure a guard trip leaves in place of another request.
+ * The provider's original code, status, reset hint, request id, provider, and
+ * model stay attached; the message adds why automatic retries stopped.
+ */
+function retryGuardError(
+  failure: LlmFailure,
+  provider: string,
+  model: string,
+  trip: RetryGuardTrip,
+  usage: RetryGuardUsage,
+): LlmError {
+  const delay = trip.proposedDelayMs > 0
+    ? ` plus the next ${Math.ceil(trip.proposedDelayMs)} ms retry delay`
+    : ''
+  const detail = trip.limit === 'maxElapsedMs'
+    ? `${Math.ceil(usage.elapsedMs)} ms of attempts and waits${delay} reaches `
+      + `the ${trip.limitMs} ms total limit`
+    : `${Math.ceil(trip.observedMs)} ms of failed attempts produced no model output `
+      + `since the last token (${trip.limitMs} ms limit)`
+  const attempts = usage.failedAttempts === 1 ? 'attempt' : 'attempts'
+  return new LlmError(
+    `auto-retry stopped to protect quota after ${usage.failedAttempts} failed ${attempts}: `
+    + `${detail}; raise retryPolicy.guard.${trip.limit} to allow a longer window. `
+    + `Last failure (${failure.code}): ${failure.message}`,
+    failure.code,
+    {
+      cause: failure,
+      ...failure.status === undefined ? {} : { status: failure.status },
+      ...failure.providerRetryAfterMs === undefined
+        ? {}
+        : { providerRetryAfterMs: failure.providerRetryAfterMs },
+      ...failure.requestId === undefined ? {} : { requestId: failure.requestId },
+      provider: failure.provider ?? provider,
+      model: failure.model ?? model,
+    },
+  )
 }
 
 function cancellableDelay(delayMs: number, signal: AbortSignal): Promise<boolean> {
@@ -189,10 +283,23 @@ const llmRetryStateSchema: zod.ZodType<LlmRetryState> = zod.record(zod.string(),
   retry: zod.number().int().nonnegative(),
   retryId: zod.string(),
 })) as unknown as zod.ZodType<LlmRetryState>
+const retryGuardStateSchema: zod.ZodType<RetryGuardState> = zod.object({
+  turn: zod.number().int().nonnegative().optional(),
+  step: zod.number().int().nonnegative().optional(),
+  stepStartedAt: zod.number().nonnegative().optional(),
+  attemptStartedAt: zod.number().nonnegative().optional(),
+  lastAttemptEndTime: zod.number().nonnegative().optional(),
+  lastAttemptMs: zod.number().nonnegative(),
+  lastAttemptContent: zod.boolean(),
+  noWorkMs: zod.number().nonnegative(),
+  failedAttempts: zod.number().int().nonnegative(),
+})
 declare module '@deepseek-ai/dsh-session-projection/types' {
   interface SessionProjectionStateMap {
     /** Retry state for the current step by provider and policy. */
     llmRetry: LlmRetryState
+    /** Attempt timing and failed no-work accounting for the open step's quota guard. */
+    llmRetryGuard: RetryGuardState
   }
 }
 
@@ -212,9 +319,23 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
       return { ...state, [key]: { retry: event.data.retry, retryId: event.data.retryId } }
     },
   })
+  ctx.sessionProjections.register({
+    key: 'llmRetryGuard',
+    stateVersion: 1,
+    stateSchema: retryGuardStateSchema,
+    init: () => emptyRetryGuardState(),
+    apply: applyRetryGuardEvent,
+  })
   const random = internals.random ?? Math.random
+  const monotonicNow = internals.now ?? (() => performance.now())
   const lifetime = new AbortController()
   const active = new Set<Promise<RequestErrorAction>>()
+  const liveTimings = new WeakMap<Session, RetryGuardLive>()
+  const disposeLive = ctx.on('session/event', (session, event) => {
+    const next = applyRetryGuardLiveEvent(liveTimings.get(session), event, monotonicNow())
+    if (next === undefined) liveTimings.delete(session)
+    else liveTimings.set(session, next)
+  })
 
   function track(operation: Promise<RequestErrorAction>): Promise<RequestErrorAction> {
     const tracked = operation.finally(() => active.delete(tracked))
@@ -267,13 +388,42 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
     return { kind: 'retry' }
   }
 
+  function assertGuardAllows(
+    agent: Agent,
+    failure: LlmFailure,
+    provider: string,
+    model: string,
+    policy: ResolvedRetryPolicy,
+    proposedDelayMs: number,
+    signal: AbortSignal,
+  ): void {
+    // Cancellation and disposal own the outcome; the guard must not turn them
+    // into a quota error or spend another request.
+    if (signal.aborted || lifetime.signal.aborted) return
+    const state = ctx.sessionProjections.stateOf(agent.session, 'llmRetryGuard')
+    const usage = retryGuardUsage(
+      state ?? emptyRetryGuardState(),
+      liveTimings.get(agent.session),
+      monotonicNow(),
+    )
+    const trip = retryGuardTrip(policy.guard, usage, proposedDelayMs)
+    if (trip !== undefined) throw retryGuardError(failure, provider, model, trip, usage)
+  }
+
   async function recover(
-    { agent, turn, step, provider, failure, retryPolicy: policy, signal }: Parameters<Events['agent/request-error']>[0],
+    { agent, turn, step, provider, model, failure, retryPolicy: policy, signal }: Parameters<Events['agent/request-error']>[0],
     next: () => Promise<RequestErrorAction>,
   ): Promise<RequestErrorAction> {
+    // A refusal or an already-exhausted chain must terminate in every mode and
+    // before any downstream recovery, without a retry event.
+    if (MANDATORY_TERMINAL_CODES.has(failure.code)) return undefined
     if (policy === undefined) return next()
+    if (policy.guard.terminalCodes.includes(failure.code)) return undefined
     if (policy.mode === 'always') {
       if (signal.aborted || lifetime.signal.aborted) return
+      // The guard owns the step's quota before any downstream recovery can
+      // accept another request.
+      assertGuardAllows(agent, failure, provider, model, policy, 0, signal)
       const fusedSignal = AbortSignal.any([signal, lifetime.signal])
       // The loop and plugin lifetime stay open until delegated recovery settles.
       // An abort then wins before the decision or fallback can mutate later state.
@@ -286,10 +436,15 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
         )
       }
       if (downstream.type === 'decision' && downstream.decision?.kind === 'retry') {
+        assertGuardAllows(agent, failure, provider, model, policy, 0, signal)
         return downstream.decision
       }
     } else if (!policy.retryableCodes.includes(failure.code)) {
-      return next()
+      // This policy will not reissue, so a downstream decision owns the failure;
+      // the guard still blocks a downstream retry that would exceed the quota.
+      const action = await next()
+      if (action?.kind === 'retry') assertGuardAllows(agent, failure, provider, model, policy, 0, signal)
+      return action
     }
 
     const policyKey = retryPolicyKey(policy)
@@ -306,13 +461,18 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
       && (hintMs > policy.maxDelayMs || budgetExhausted)) {
       throw providerWaitError(failure, hintMs)
     }
-    if (budgetExhausted) return next()
+    if (budgetExhausted) {
+      const action = await next()
+      if (action?.kind === 'retry') assertGuardAllows(agent, failure, provider, model, policy, 0, signal)
+      return action
+    }
     const retry = previousRetry + 1
     const retryId = previous?.retryId ?? RetryId(randomUUID())
     const delayMs = hintMs !== undefined && hintMs <= policy.maxDelayMs
       ? hintedDelay(policy, retry, hintMs, random)
       // An over-cap hint under always mode keeps the unbounded-retry guarantee.
       : localDelay(policy, retry, random)
+    assertGuardAllows(agent, failure, provider, model, policy, delayMs, signal)
 
     return backoff(agent, turn, step, failure, provider, policy, policyKey, retry, retryId, delayMs, signal)
   }
@@ -330,6 +490,7 @@ export function apply(ctx: Context, config: Config = {}, internals: RetryInterna
 
   ctx.effect(() => async () => {
     disposeListener()
+    disposeLive()
     lifetime.abort(new Error('llm-retry plugin disposed'))
     await Promise.allSettled([...active])
   }, 'llm-retry: abort and drain active recovery')

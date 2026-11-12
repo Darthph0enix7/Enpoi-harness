@@ -8,7 +8,7 @@ import { transformMessages } from '@earendil-works/pi-ai/api/transform-messages'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
 import { toPiContext } from '../src/context.ts'
 import { toPiReplayState } from '../src/replay.ts'
-import { mapStopReason, mapUsage, providerErrorDetail, toStreamChunks } from '../src/stream.ts'
+import { mapStopReason, mapUsage, providerErrorDetail, POLICY_REFUSAL_CODE, toStreamChunks } from '../src/stream.ts'
 
 function usage(input = 0, output = 0, cacheRead = 0, cacheWrite = 0): Usage {
   return {
@@ -1251,6 +1251,191 @@ describe('mapStopReason / mapUsage', () => {
       cacheWriteTokens: 2,
     })
     expect(mapUsage(usage(10, 5))).toEqual({ inputTokens: 10, outputTokens: 5, totalTokens: 15 })
+  })
+})
+
+describe('policy refusal classification', () => {
+  // The live gateway refusal recorded by the incident: the provider blocked
+  // the request for a terms violation, and the turn retried it as PI_AI_ERROR.
+  const incident = 'claude refusal (reasoning_extraction): This request was blocked as it seems to violate'
+    + " Anthropic's Terms of Service restrictions on reverse engineering or duplicating model outputs."
+    + ' To learn more, visit https://www.anthropic.com/legal/commercial-terms.'
+
+  it('maps the live gateway refusal through a fake stream and preserves message and usage', async () => {
+    const error = assistant({
+      stopReason: 'error',
+      errorMessage: incident,
+      usage: usage(4, 957, 0, 361209),
+    })
+    const chunks = await collect(toStreamChunks(feed({ type: 'error', reason: 'error', error })))
+    expect(chunks).toEqual([
+      { type: 'usage', usage: { inputTokens: 4, outputTokens: 957, totalTokens: 362170, cacheWriteTokens: 361209 } },
+      { type: 'finish', reason: { kind: 'error', failure: { message: incident, code: POLICY_REFUSAL_CODE } } },
+    ])
+  })
+
+  it('classifies a no-text structured refusal and keeps its usage', async () => {
+    const error = assistant({
+      stopReason: 'error',
+      content: [],
+      rawStopReason: 'refusal',
+      errorMessage: 'The model refused to complete the request',
+      usage: usage(12, 3),
+    })
+    const chunks = await collect(toStreamChunks(feed({ type: 'error', reason: 'error', error })))
+    expect(chunks).toEqual([
+      { type: 'usage', usage: { inputTokens: 12, outputTokens: 3, totalTokens: 15 } },
+      {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: { message: 'The model refused to complete the request', code: POLICY_REFUSAL_CODE },
+        },
+      },
+    ])
+  })
+
+  it('uses the provider stop reasons pi-ai preserves, including the Responses form', () => {
+    for (const rawStopReason of [
+      'content_filter',
+      'sensitive',
+      'SAFETY',
+      'incomplete.content_filter',
+      'guardrail_intervened',
+      'content_filtered',
+    ]) {
+      expect(mapStopReason(assistant({ stopReason: 'error', rawStopReason, errorMessage: 'refused' })))
+        .toMatchObject({ kind: 'error', failure: { message: 'refused', code: POLICY_REFUSAL_CODE } })
+    }
+  })
+
+  it('names the preserved stop reason when the provider left no message', () => {
+    expect(mapStopReason(assistant({ stopReason: 'error', rawStopReason: 'content_filter' }))).toEqual({
+      kind: 'error',
+      failure: {
+        message: 'model "deepseek-v4-flash" was refused by the provider\'s content policy (content_filter)',
+        code: POLICY_REFUSAL_CODE,
+      },
+    })
+  })
+
+  it('classifies refusal evidence even when the message mentions a timeout or a 500', () => {
+    const prose = 'This request was blocked by our content policy after a timeout in the safety service'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: prose })))
+      .toEqual({ kind: 'error', failure: { message: prose, code: POLICY_REFUSAL_CODE } })
+    const marked = 'claude refusal (reasoning_extraction): This request was blocked by a 500 in the safety classifier'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: marked })))
+      .toEqual({ kind: 'error', failure: { message: marked, code: POLICY_REFUSAL_CODE } })
+  })
+
+  it('keeps a normal empty completion as EMPTY_RESPONSE, not a refusal', () => {
+    expect(mapStopReason(assistant({ stopReason: 'stop', rawStopReason: 'end_turn' }))).toEqual({
+      kind: 'error',
+      failure: {
+        message: 'model "deepseek-v4-flash" returned a completed response with no content',
+        code: EMPTY_RESPONSE_CODE,
+      },
+    })
+    expect(mapStopReason(assistant({
+      stopReason: 'stop',
+      content: [{ type: 'text', text: 'answer' }],
+      rawStopReason: 'STOP',
+    }))).toEqual({ kind: 'stop' })
+  })
+
+  it('does not read a refusal word in ordinary error prose as a policy refusal', () => {
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: 'upstream connection refused while reading the response',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'TRANSPORT' } })
+    // Quoted prose inside a validation error stays a validation error.
+    expect(mapStopReason(assistant({
+      stopReason: 'error',
+      errorMessage: '400: {"error":{"message":"invalid request: the user prompt quotes a refusal policy fragment"}}',
+    }))).toMatchObject({ kind: 'error', failure: { code: 'INVALID_REQUEST' } })
+  })
+
+  it('only accepts known raw stop reasons and the documented incomplete form', () => {
+    for (const rawStopReason of ['foo.safety', 'incomplete.other', 'error.refusal']) {
+      expect(mapStopReason(assistant({ stopReason: 'error', rawStopReason, errorMessage: 'provider failed' })))
+        .toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
+    }
+  })
+
+  it('keeps a successful stop with an answer when a stale error message reads as refusal prose', () => {
+    expect(mapStopReason(assistant({
+      stopReason: 'stop',
+      content: [{ type: 'text', text: 'answer' }],
+      errorMessage: 'This request was blocked by our content policy',
+    }))).toEqual({ kind: 'stop' })
+    // A structured policy stop is the provider's authoritative terminal reason
+    // even when the message also carries content.
+    expect(mapStopReason(assistant({
+      stopReason: 'stop',
+      content: [{ type: 'text', text: 'answer' }],
+      rawStopReason: 'refusal',
+      errorMessage: 'The model refused to complete the request',
+    }))).toMatchObject({ kind: 'error', failure: { code: POLICY_REFUSAL_CODE } })
+  })
+
+  it('does not let a captured transient status mask a policy refusal', () => {
+    const prose = 'This request was blocked by our content policy'
+    for (const status of [400, 408, 429, 500, 503]) {
+      expect(mapStopReason(
+        assistant({ stopReason: 'error', errorMessage: prose }),
+        undefined,
+        { status },
+      )).toEqual({ kind: 'error', failure: { message: prose, code: POLICY_REFUSAL_CODE, status } })
+    }
+  })
+
+  it('keeps a refusal when its explanation contains overflow wording', () => {
+    const errorMessage = 'This request was blocked by our content policy: context length exceeded'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage }), 100))
+      .toEqual({ kind: 'error', failure: { message: errorMessage, code: POLICY_REFUSAL_CODE } })
+    expect(mapStopReason(
+      assistant({ stopReason: 'error', errorMessage: 'prompt is too long: 213462 tokens > 200000 maximum' }),
+      100,
+    )).toMatchObject({ kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE } })
+  })
+
+  it('keeps caller cancellation when the in-flight error text names a refusal', () => {
+    expect(mapStopReason(assistant({
+      stopReason: 'aborted',
+      errorMessage: incident,
+      rawStopReason: 'refusal',
+    }))).toEqual({ kind: 'aborted', failure: { message: incident, code: 'ABORTED' } })
+  })
+
+  it('keeps the structured refusal diagnosis when the response status is transient', () => {
+    expect(mapStopReason(
+      assistant({ stopReason: 'error', errorMessage: incident }),
+      undefined,
+      { status: 500 },
+    )).toEqual({
+      kind: 'error',
+      failure: { message: incident, code: POLICY_REFUSAL_CODE, status: 500 },
+    })
+  })
+
+  it('reads a structured content_filter machine code from an error envelope', () => {
+    const body = '400: {"error":{"code":"content_filter","message":"The request was rejected by the safety system."}}'
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: body }))).toEqual({
+      kind: 'error',
+      failure: { message: body, code: POLICY_REFUSAL_CODE },
+    })
+  })
+
+  it.each([
+    '400: {"type":"error","error":{"type":"invalid_request_error","message":"Output blocked by content filtering policy"}}',
+    '403: {"error":{"type":"invalid_request_error","message":"Input blocked by content filtering policy"}}',
+    'Input blocked by content filtering policy',
+    'Output blocked by content filtering policy',
+  ])('treats an input/output content-filter block as terminal: %s', (errorMessage) => {
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage }))).toEqual({
+      kind: 'error',
+      failure: { message: errorMessage, code: POLICY_REFUSAL_CODE },
+    })
   })
 })
 

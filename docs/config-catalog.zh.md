@@ -219,12 +219,15 @@ export interface Config {
   /**
    * Milliseconds since the last Pong or inbound message after which the Host
    * terminates a socket. Decoupled from the Ping cadence so a bursty or
-   * high-RTT link is not killed for answering late. @default 30000
+   * high-RTT link is not killed for answering late; when the heartbeat
+   * interval is enabled this must exceed it. @default 30000
    */
   readonly websocketMissedHeartbeatTimeoutMs?: number
   /**
-   * Per-socket `bufferedAmount` ceiling in bytes. Above it the carrier closes
-   * with 1011 instead of growing Host memory. @default 16777216
+   * Per-socket `bufferedAmount` ceiling in bytes. When the backlog plus the
+   * next frame would exceed it the carrier closes with 1011 instead of growing
+   * Host memory; a single frame larger than the ceiling fails only its logical
+   * stream. @default 16777216
    */
   readonly websocketMaxBufferedBytes?: number
   /** Buffered uplink frame bytes one logical stream may hold before it fails with `gateway/uplink-overflow`. @default 262144 */
@@ -232,13 +235,15 @@ export interface Config {
   /**
    * Frames retained in one Client's forwarded-event queue before the oldest
    * plain `emit` frames are dropped; waterfall and cancellation frames are
-   * never dropped. @default 4096
+   * never dropped, and a queue that cannot fit them ends that Client's event
+   * stream. @default 4096
    */
   readonly remoteEventQueueMaxFrames?: number
   /**
    * Approximate JSON bytes retained in one Client's forwarded-event queue
    * before the oldest plain `emit` frames are dropped; waterfall and
-   * cancellation frames are never dropped. @default 8388608
+   * cancellation frames are never dropped, and a queue that cannot fit them
+   * ends that Client's event stream. @default 8388608
    */
   readonly remoteEventQueueMaxBytes?: number
   /**
@@ -1810,7 +1815,7 @@ export interface Config {
 
 ## `@deepseek-ai/dsh-llm`
 
-- `source`: [`packages/llm/llm/src/index.ts:221`](../packages/llm/llm/src/index.ts)
+- `source`: [`packages/llm/llm/src/index.ts:224`](../packages/llm/llm/src/index.ts)
 
 ```ts config-catalog
 /**
@@ -2024,7 +2029,7 @@ export interface PiAiProviderProfile {
   timeoutMs?: number
   /** WebSocket connection timeout in milliseconds. */
   websocketConnectTimeoutMs?: number
-  /** Maximum provider idle time while one stream read is outstanding. */
+  /** Maximum provider silence while one stream read is outstanding; response-body bytes, including SSE keepalives, reset it. */
   streamIdleTimeoutMs?: number
   /**
    * Maximum base64-encoded image payload per request. When a request's
@@ -2371,7 +2376,7 @@ export interface ReplayModelConfig {
 ## `@deepseek-ai/dsh-llm-retry`
 
 - `inject`: `agents` · `sessionProjections`
-- `source`: [`packages/llm/llm-retry/src/index.ts:26`](../packages/llm/llm-retry/src/index.ts)
+- `source`: [`packages/llm/llm-retry/src/index.ts:54`](../packages/llm/llm-retry/src/index.ts)
 
 ```ts config-catalog
 /** This policy executor has no config; providers own `retryPolicy`. */

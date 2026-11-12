@@ -37,6 +37,20 @@ export async function mockServer(script: {
   rawEvents?: string[]
   body?: string
   delayMs?: number
+  /** Delay before the response head; the accepted request stays silent until then. */
+  headersDelayMs?: number
+  /** Delay before the first SSE frame, after the response head was written. */
+  firstEventDelayMs?: number
+  /** Interval between SSE comment frames that carry no event data. */
+  keepAliveMs?: number
+  /** Comment frame written at each keepalive interval; `: keepalive` when omitted. */
+  keepAlive?: string
+  /**
+   * Raw byte fragments written one per `delayMs` before the event script. The
+   * sequence need not form a complete SSE frame: it proves liveness from
+   * transport bytes the SDK cannot yet dispatch.
+   */
+  fragments?: string[]
   headers?: Record<string, string>
 }[]): Promise<MockServer> {
   const paths: string[] = []
@@ -56,37 +70,76 @@ export async function mockServer(script: {
       requests.push(body.length === 0 ? undefined : JSON.parse(body))
       headers.push(request.headers)
       const behavior = script.shift() ?? { status: 500, body: 'script exhausted' }
-      const status = behavior.status
-      if (status !== undefined && status !== 200) {
-        // A delayed rejection keeps two concurrent callers in flight together.
-        const reject = (): void => {
-          response.writeHead(status, { 'content-type': 'application/json', ...behavior.headers })
-          response.end(behavior.body ?? '{}')
+      const start = (): void => {
+        // A caller that timed out before the delayed head arrived is gone; no
+        // script bytes were promised to it.
+        if (response.destroyed) return
+        const status = behavior.status
+        if (status !== undefined && status !== 200) {
+          // A delayed rejection keeps two concurrent callers in flight together.
+          const reject = (): void => {
+            response.writeHead(status, { 'content-type': 'application/json', ...behavior.headers })
+            response.end(behavior.body ?? '{}')
+          }
+          if (behavior.delayMs === undefined) reject()
+          else setTimeout(reject, behavior.delayMs)
+          return
         }
-        if (behavior.delayMs === undefined) reject()
-        else setTimeout(reject, behavior.delayMs)
-        return
+        if (behavior.body !== undefined) {
+          response.writeHead(200, { 'content-type': 'application/json', ...behavior.headers })
+          response.end(behavior.body)
+          return
+        }
+        response.writeHead(200, { 'content-type': 'text/event-stream', ...behavior.headers })
+        if (behavior.rawEvents !== undefined) {
+          for (const raw of behavior.rawEvents) response.write(raw)
+          response.end()
+          return
+        }
+        // A keepalive is a complete SSE comment frame: transport bytes that
+        // carry no event data, matching gateways that ping an otherwise idle
+        // stream.
+        let keepAlive: ReturnType<typeof setInterval> | undefined
+        const stopKeepAlive = (): void => {
+          if (keepAlive === undefined) return
+          clearInterval(keepAlive)
+          keepAlive = undefined
+        }
+        if (behavior.keepAliveMs !== undefined) {
+          keepAlive = setInterval(() => {
+            if (!response.destroyed) response.write(`${behavior.keepAlive ?? ': keepalive'}\n\n`)
+          }, behavior.keepAliveMs)
+          response.on('close', stopKeepAlive)
+        }
+        const writeEvents = (): void => {
+          let index = 0
+          const writeNext = (): void => {
+            if (response.destroyed) { stopKeepAlive(); return }
+            const event = behavior.events?.[index++]
+            if (event === undefined) { stopKeepAlive(); response.end(); return }
+            response.write(`data: ${event}\n\n`)
+            if (behavior.delayMs === undefined) writeNext()
+            else setTimeout(writeNext, behavior.delayMs)
+          }
+          if (behavior.firstEventDelayMs === undefined) writeNext()
+          else setTimeout(writeNext, behavior.firstEventDelayMs)
+        }
+        if (behavior.fragments !== undefined) {
+          let fragmentIndex = 0
+          const writeFragment = (): void => {
+            if (response.destroyed) return
+            const fragment = behavior.fragments?.[fragmentIndex++]
+            if (fragment === undefined) { writeEvents(); return }
+            response.write(fragment)
+            setTimeout(writeFragment, behavior.delayMs ?? 0)
+          }
+          writeFragment()
+          return
+        }
+        writeEvents()
       }
-      if (behavior.body !== undefined) {
-        response.writeHead(200, { 'content-type': 'application/json', ...behavior.headers })
-        response.end(behavior.body)
-        return
-      }
-      response.writeHead(200, { 'content-type': 'text/event-stream', ...behavior.headers })
-      if (behavior.rawEvents !== undefined) {
-        for (const raw of behavior.rawEvents) response.write(raw)
-        response.end()
-        return
-      }
-      let index = 0
-      const writeNext = (): void => {
-        const event = behavior.events?.[index++]
-        if (event === undefined) { response.end(); return }
-        response.write(`data: ${event}\n\n`)
-        if (behavior.delayMs === undefined) writeNext()
-        else setTimeout(writeNext, behavior.delayMs)
-      }
-      writeNext()
+      if (behavior.headersDelayMs === undefined) start()
+      else setTimeout(start, behavior.headersDelayMs)
     })
   })
   servers.push(server)

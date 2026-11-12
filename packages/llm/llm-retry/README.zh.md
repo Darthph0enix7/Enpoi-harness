@@ -49,11 +49,17 @@ kind: "package-reference"
 
 省略 `retryPolicy` 时使用 normal mode：对 `EMPTY_RESPONSE`、`RATE_LIMIT`、`SERVER`、`TIMEOUT` 与 `TRANSPORT` 最多重试五次，退避从 500 毫秒到 10 秒、带 10% 抖动。normal mode 可以更改其有界预算、合格 code 与退避；always mode 先询问下游恢复，然后无尝试上限地重试每个模型请求失败，只在成功、取消或插件释放时停止。
 
+每个策略还携带一个 quota guard。在失败触发的重发之前，它检查尝试与等待合计 600,000 毫秒以及失败且无产出累计 300,000 毫秒；任一上限设为 0 即禁用。guard 只针对失败——它绝不是健康生成的截止时间。触发上限时，步骤会以原始失败的 code、status、request id、重置提示、提供方与模型结束，并附加说明所达上限的消息。上限通过 `retryPolicy.guard.maxElapsedMs` 与 `retryPolicy.guard.maxNoWorkElapsedMs` 配置；`retryPolicy.guard.terminalCodes` 可追加与两个强制终态 code 同等终止的失败 code。
+
 ### 你可以观察到什么
+
+guard 从打开步骤既有的 `step/start`、`llm/retry-started` 与 `assistant/attempt` 事件派生记账，因此恢复的日志无需新事件或新格式就能得到同一决定。elapsed 统计该步骤中每个提供方与策略的每次尝试及重试等待；no-work 统计自上次有内容尝试以来的失败尝试时间。取消或插件释放拥有结果，绝不会被转换成配额错误。
 
 每次计划的重试在等待前就是持久的：插件会先追加携带重试 id、提供方、模式、策略键、失败与计划延迟的非表层 `llm/retry` 事件，然后在重试开始前立即追加 `llm/retry-started` 事件。携带提供方重置（`Retry-After` 或 `providerRetryAfterMs`）的 `RATE_LIMIT` 失败会至少等待该重置时长——向上抖动并以 `maxDelayMs` 为上限——因此重试绝不会在提供方指定的窗口内开始。若重置超过该上限，或轮次的剩余尝试预算无法覆盖，轮次会立即以 `RATE_LIMIT` 失败结束并给出等待时长，而不是消耗尝试。等待完成后，loop 会在同一个打开的轮次内重跑失败步骤，仍基于同一份持久历史，因此重试请求与原始请求一样可以从会话日志重建。取消或插件释放会中止进行中的退避、等待活跃的委派恢复结算，并使释放前捕获的回调只能以失败结束。
 
 ### 失败与恢复
+
+`POLICY_REFUSAL` 与 `MODEL_CHAIN_EXHAUSTED` 会在任何模式或下游恢复之前终止，且不追加重试事件：前者描述请求本身，后者已经尝试过所有合格链路。恢复按实际服务该失败的提供方所捕获的策略计价；经过模型链或预筛选改道后，该提供方可能与已准备路由不同，而不再注册的提供方会让失败保持终态，而不是借用其他路由的预算。
 
 在任何最终适配器被选中之前发生的失败没有提供方策略，原样委派下游。normal mode 中，不在合格集合内的失败 code 会委派；预算耗尽也会委派，但携带提供方重置的 `RATE_LIMIT` 会直接给出等待时长。超过 `maxDelayMs` 的提供方重置同样会立即给出该等待，而不是消耗尝试。always mode 中，超上限的提供方延迟使用配置的本地退避，因此策略不会因该指令终止。其他 code 上的提示会被忽略，因为重置语义属于限流。这里没有任何模型可见内容：重试事件、延迟、提供方错误或失败的部分输出都不会到达模型或派生消息。
 
@@ -76,13 +82,14 @@ kind: "package-reference"
 | 文件 | 职责 |
 |---|---|
 | [`src/index.ts`](src/index.ts) | 函数插件：waterfall 监听器、策略查找、退避、持久事件追加 |
+| [`src/guard.ts`](src/guard.ts) | quota guard 的持久步骤时钟与失败无产出记账，从既有会话事件折叠得出 |
 | [`src/history.ts`](src/history.ts) | 从会话日志查找持久重试历史 |
 | [`src/types.ts`](src/types.ts) | 浏览器安全的 `llm/retry` 与 `llm/retry-started` 事件载荷类型 |
 | [`src/brand.ts`](src/brand.ts) | 事件载荷共享的 `RetryId` 品牌 |
 
 ### 恢复流程
 
-失败步骤连同其提供方与解析后的策略一起到达 waterfall。always mode 先结算下游恢复，并遵循下游的 `retry` 决定；normal mode 先检查失败 code 是否合格、预算是否未耗尽。插件计算延迟——对 `RATE_LIMIT`，在未超上限时使用提供方重置并向上抖动；否则使用带对称抖动的本地有界指数退避——追加 `llm/retry` 事件，在可取消定时器上等待，追加 `llm/retry-started`，然后返回 `{ kind: 'retry' }`。loop 随后在同一个打开的轮次内重跑失败步骤（仍基于同一份持久历史）。
+失败步骤连同实际服务它的提供方与策略一起到达 waterfall。强制终态 code 会立即结束。always mode 先结算下游恢复，并遵循下游的 `retry` 决定；normal mode 先检查失败 code 是否合格、预算是否未耗尽。调度之前，guard 合并持久折叠与本进程单调计时，评估 elapsed、失败无产出时间以及拟议延迟；达到上限时抛出终态失败，而不是再发请求。插件计算延迟——对 `RATE_LIMIT`，在未超上限时使用提供方重置并向上抖动；否则使用带对称抖动的本地有界指数退避——追加 `llm/retry` 事件，在可取消定时器上等待，追加 `llm/retry-started`，然后返回 `{ kind: 'retry' }`。loop 随后在同一个打开的轮次内重跑失败步骤（仍基于同一份持久历史）。
 
 ### Waterfall 组合
 
@@ -130,7 +137,9 @@ kind: "package-reference"
 这些限制说明执行器在哪里停止、由未来工作接续。它们是当前包约束，不是通用重试对比或任务积压。
 
 - **agent 轮次是唯一重试边界**——直接 `ctx.llm.stream()` 消费方仍是单次尝试，因为原始流无法持久地区分已发出的分片。
-- **always mode 会重试永久性失败**——认证、配额、无效请求、协议与不可恢复的上下文错误会持续到成功、取消或释放；部署方负责提供方专属的成本与延迟控制。
+- **always mode 会重试永久性失败，但终态 code 除外**——认证、配额、无效请求、协议与不可恢复的上下文错误会持续到成功、取消或释放；`POLICY_REFUSAL` 与 `MODEL_CHAIN_EXHAUSTED` 仍会立即终止，部署方负责提供方专属的成本与延迟控制。
+- **quota guard 不是生成截止时间**——它只在失败触发的重发前检查；持续产出内容的健康流绝不会被其 elapsed 或 no-work 上限切断。
+- **恢复使用实际失败路由的策略**——模型链或预筛选改道后，重试按实际服务失败的提供方计价，而不是已准备路由；不再注册的提供方没有策略，失败保持终态。
 - **有界插件预算相加**——normal mode 只统计其配置的 code 与精确提供方策略，而上下文溢出压缩（compaction）拥有独立预算。任何重叠策略都必须定义注册顺序行为。
 - **恢复策略按 waterfall 顺序组合**——always mode 先接受下游重试，再应用其回退。之后忽略取消且永不结算的策略也会阻止回退、轮次完全停稳与插件释放完成。
 - **`llm/retry` 记录调度，而非完成**——后续步骤与轮次事件才确立成功、耗尽或取消。

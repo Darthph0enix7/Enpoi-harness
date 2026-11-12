@@ -131,7 +131,7 @@ const handle = await ctx.agents.create({
 
 `turn/end` 声明的类型是 `TurnEndCancelCause`；取消时，循环在其中记录一份新的 `AgentCancelCause`，保留调用方的 `kind` 和 hook 的 `reason` 文本。实时 `AbortSignal.reason` 仍是调用方的那个对象，传输层可能向其添加属性——Node 的 fetch 会给它赋一个 `stack`——因此这份拷贝既让该调用栈不进入日志，也让结束事件保持可追加。对于用户停止，它还会保留可选的 `participant`、`intent` 和 `revertFromSeq` 字段，让 peer 身份与停止的作用范围一并留存到 `turn/end`。
 
-最终适配器选择、分发与迭代失败以终止结束的形式到达并进入 `agent/request-error`；处理该失败的监听器返回 `{ kind: 'retry' }` 且不调用 `next()`，未被处理的失败则是终态。Middleware、结果处理、工具及其他扩展失败仍会抛出并直接关闭轮次——插件失败结束的是轮次，不是循环。取消后未分发的模型工具调用会收到合成的 `tool/call` 加 `ABORTED_BEFORE_DISPATCH` 结果对。[显式取消决策](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.zh.md)拥有信号生命周期。
+最终适配器选择、分发与迭代失败以终止结束的形式到达并进入 `agent/request-error`；处理该失败的监听器返回 `{ kind: 'retry' }` 且不调用 `next()`，未被处理的失败则是终态。payload 点名实际服务该失败的提供方、模型与重试策略：LLM seam 会给每个适配器失败盖上其路由，因此模型链或预筛选改道会按自身路由计价恢复。仍使用已准备提供方的失败会保留已准备的捕获策略；不再注册的路由没有策略，失败保持终态，而不会借用其他路由的预算。Middleware、结果处理、工具及其他扩展失败仍会抛出并直接关闭轮次——插件失败结束的是轮次，不是循环。取消后未分发的模型工具调用会收到合成的 `tool/call` 加 `ABORTED_BEFORE_DISPATCH` 结果对。[显式取消决策](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.zh.md)拥有信号生命周期。
 
 </details>
 
@@ -195,6 +195,20 @@ const handle = await ctx.agents.create({
 #### KV Cache 影响
 
 仅追加；每个合成结果都位于可复用请求前缀之后，不会使现有 KV Cache 条目失效。
+
+### 轮次边界处未答复的工具调用
+
+#### 模型看到什么
+
+已提交带工具调用的 assistant 消息，随后在仍有调用未答复时失败、中止或被取消的步骤，会为每个调用以一条合成错误结果关闭，使用崩溃修复措辞与 code。已记录 `tool/call` 的调用得到 `TOOL_OUTCOME_UNKNOWN`（`"The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly."`）；没有开始记录的调用得到 `TOOL_NOT_STARTED`（`"The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed."`）。结果按调用顺序跟在批次之后。仍持有孤立调用的历史——较旧的日志或内部轮次——只在组装后的请求上收到 `TOOL_OUTCOME_UNKNOWN` 结果，绝不会写入持久日志。
+
+#### Token 影响
+
+完整会话中为零 token；每个持久修复的调用都会在之后每次请求中加上一次错误文本。临时修复的调用会在每次请求中加上该文本，直到日志记录真实结果。
+
+#### KV Cache 影响
+
+仅追加；合成结果跟在可复用请求前缀之后，不会使现有 KV Cache 条目失效。
 
 ## 已知限制与延期工作
 

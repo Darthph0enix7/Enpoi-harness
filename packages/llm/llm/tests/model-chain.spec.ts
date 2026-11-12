@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, {
+  BlockAssembler,
   CONTEXT_WINDOW_EXCEEDED_CODE,
   createUserMessage,
   EMPTY_RESPONSE_CODE,
@@ -14,10 +15,14 @@ import LlmRuntime, {
   LlmAdapter,
   LlmError,
   MODEL_CHAIN_EXHAUSTED_CODE,
+  POLICY_REFUSAL_CODE,
   ProviderRequestId,
   ReasoningEffortId,
+  reportAttemptActivity,
   resolveRetryPolicy,
   STREAM_CLOSED_CODE,
+  STREAM_CUT_CODE,
+  ToolCallId,
   type GenerateOptions,
   type LlmAttemptFailedEventData,
   type LlmModelContext,
@@ -25,6 +30,7 @@ import LlmRuntime, {
   type ResolvedModelChain,
   type ResolvedRetryPolicy,
   type StreamChunk,
+  type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
 
 const SCRIPT: StreamChunk[] = [
@@ -32,6 +38,13 @@ const SCRIPT: StreamChunk[] = [
   { type: 'text-delta', index: 0, text: 'answered by the fallback link' },
   { type: 'block-end', index: 0, block: { type: 'text', text: 'answered by the fallback link' } },
   { type: 'finish', reason: { kind: 'stop' } },
+]
+
+/** {@link SCRIPT} carrying the answer link's own usage report. */
+const SCRIPT_WITH_USAGE: StreamChunk[] = [
+  ...SCRIPT.slice(0, -1),
+  { type: 'usage', usage: { inputTokens: 5, outputTokens: 2, totalTokens: 7 } },
+  SCRIPT[SCRIPT.length - 1]!,
 ]
 
 /** A completed `stop` whose only text block is empty. */
@@ -58,9 +71,16 @@ function answeredBy(provider: string, model: string): StreamChunk[] {
 
 class ScriptedAdapter extends LlmAdapter {
   readonly calls: GenerateOptions[] = []
+  private script: StreamChunk[]
 
-  constructor(private readonly script: StreamChunk[]) {
+  constructor(script: StreamChunk[]) {
     super()
+    this.script = script
+  }
+
+  /** Replace what every later call plays. */
+  setScript(script: StreamChunk[]): void {
+    this.script = script
   }
 
   async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -97,6 +117,16 @@ function effortReasoning(): NonNullable<LlmResolvedModelInfo['reasoning']> {
 class EffortScriptedAdapter extends ScriptedAdapter {
   override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     return Promise.resolve({ provider, id: model, name: model, reasoning: effortReasoning() })
+  }
+}
+
+/** {@link EffortScriptedAdapter} that counts adapter preparation generations. */
+class CountingEffortAdapter extends EffortScriptedAdapter {
+  prepares = 0
+
+  override async prepareCall(provider: string, model: string, signal?: AbortSignal) {
+    this.prepares += 1
+    return super.prepareCall(provider, model, signal)
   }
 }
 
@@ -183,10 +213,349 @@ class HangingAdapter extends LlmAdapter {
   }
 }
 
+/**
+ * Wait for `ms` on the attempt clock; without a delay, settle only when the
+ * attempt aborts. An abort rejects with the signal's reason so the adapter
+ * stream fails exactly as a real provider read does.
+ */
+function waitForAttempt(signal: AbortSignal | undefined, ms?: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const stop = (): void => {
+      clearTimeout(timer)
+      reject(signal?.reason instanceof Error ? signal.reason : new Error('attempt aborted'))
+    }
+    if (signal?.aborted === true) {
+      stop()
+      return
+    }
+    if (ms !== undefined) {
+      timer = setTimeout(() => {
+        signal?.removeEventListener('abort', stop)
+        resolve()
+      }, ms)
+    }
+    signal?.addEventListener('abort', stop, { once: true })
+  })
+}
+
+/** Reports raw provider activity that never becomes a {@link StreamChunk}. */
+class PulsingAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  constructor(private readonly pulses: number, private readonly paceMs: number) {
+    super()
+  }
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    const signal = options.signal
+    const pulses = this.pulses
+    const paceMs = this.paceMs
+    return (async function* () {
+      for (let pulse = 0; pulse < pulses; pulse += 1) {
+        await waitForAttempt(signal, paceMs)
+        reportAttemptActivity(signal)
+      }
+      yield* SCRIPT
+    })()
+  }
+}
+
+/** Pulses raw activity for a while, then fails the link before any answer. */
+class PulsingFailAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  constructor(private readonly pulses: number, private readonly paceMs: number) {
+    super()
+  }
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    const signal = options.signal
+    const pulses = this.pulses
+    const paceMs = this.paceMs
+    return (async function* () {
+      for (let pulse = 0; pulse < pulses; pulse += 1) {
+        await waitForAttempt(signal, paceMs)
+        reportAttemptActivity(signal)
+      }
+      yield {
+        type: 'finish',
+        reason: { kind: 'error', failure: { message: 'late route failure', code: 'SERVER' } },
+      }
+    })()
+  }
+}
+
+/** Starts a reasoning block and goes silent before closing it. */
+class OpenReasoningThenSilentAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    const signal = options.signal
+    return (async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+      yield { type: 'reasoning-delta', index: 0, text: 'unfinished thought' }
+      await waitForAttempt(signal)
+    })()
+  }
+}
+
+/** Streams an open reasoning block, then fails the link before any answer. */
+class OpenReasoningThenFailsAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    return (async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+      yield { type: 'reasoning-delta', index: 0, text: 'unfinished thought' }
+      throw new LlmError('reasoning stream failed', 'SERVER')
+    })()
+  }
+}
+
+/** Closes a reasoning block at index 0, then fails the link before any answer. */
+class ClosedReasoningThenFailsAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    return (async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+      yield { type: 'reasoning-delta', index: 0, text: 'finished thought' }
+      yield { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'finished thought' } }
+      throw new LlmError('reasoning stream failed', 'SERVER')
+    })()
+  }
+}
+
+/** Reports usage, then fails before any semantic chunk. */
+class UsageThenFailAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  constructor(private readonly usage: TokenUsage) {
+    super()
+  }
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    const usage = this.usage
+    return (async function* () {
+      yield { type: 'usage', usage }
+      throw new LlmError('link failed after reporting usage', 'RATE_LIMIT')
+    })()
+  }
+}
+
+/** Opens a tool-call identity, then fails before any arguments arrive. */
+class ToolStartThenFailAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    return (async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      throw new LlmError('tool call stream failed', 'SERVER')
+    })()
+  }
+}
+
+/** Waits for the attempt signal inside its finally, exercising early-close cleanup. */
+class AbortAwareFinallyAdapter extends LlmAdapter {
+  cleaned = false
+  readonly calls: GenerateOptions[] = []
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    const signal = options.signal
+    const markCleaned = (): void => { this.cleaned = true }
+    return (async function* () {
+      try {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'partial answer' }
+      } finally {
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted === true) {
+            resolve()
+            return
+          }
+          signal?.addEventListener('abort', () => { resolve() }, { once: true })
+        })
+        markCleaned()
+      }
+    })()
+  }
+}
+
+/** Ends after an answer chunk, without its terminal finish. */
+class SilentEndAnswerAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  constructor(private readonly usage?: TokenUsage) {
+    super()
+  }
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    const usage = this.usage
+    return (async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'partial answer' }
+      if (usage !== undefined) yield { type: 'usage', usage }
+    })()
+  }
+}
+
+/** Holds reasoning, then ends normally once cancellation arrives. */
+class AbortEndAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    const signal = options.signal
+    return (async function* () {
+      yield { type: 'usage', usage: { inputTokens: 6, outputTokens: 1 } }
+      yield { type: 'block-start', index: 0, blockType: 'reasoning' }
+      yield { type: 'reasoning-delta', index: 0, text: 'unfinished thought' }
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted === true) {
+          resolve()
+          return
+        }
+        signal?.addEventListener('abort', () => { resolve() }, { once: true })
+      })
+    })()
+  }
+}
+
+/** Emits nothing and ends, ignoring an already-aborted caller. */
+class SilentEmptyAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+  }
+}
+
+/** Reports usage and ends without a semantic chunk or terminal finish. */
+class SilentUsageEndAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    return (async function* () {
+      yield { type: 'usage', usage: { inputTokens: 2, outputTokens: 1 } }
+    })()
+  }
+}
+
+/** Commits a complete tool call in one block-end, then truncates the stream. */
+class ToolBlockEndThenCutAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    return (async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield {
+        type: 'block-end',
+        index: 0,
+        block: { type: 'tool-call', id: ToolCallId('call-complete'), name: 'danger', arguments: '{}' },
+      }
+      throw new LlmError('the model stream ended with incomplete tool-call arguments', STREAM_CUT_CODE)
+    })()
+  }
+}
+
+/** Exposes a named tool-call prefix, then truncates like a provider stream cut. */
+class PartialToolThenCutAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    return (async function* () {
+      yield { type: 'usage', usage: { inputTokens: 2, outputTokens: 1 } }
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield {
+        type: 'tool-call-delta',
+        index: 0,
+        id: ToolCallId('call-partial'),
+        name: 'danger',
+        argumentsDelta: '{"path":',
+      }
+      throw new LlmError(
+        'the model stream ended with incomplete tool-call arguments',
+        STREAM_CUT_CODE,
+      )
+    })()
+  }
+}
+
+/** Commits one answer delta, then stays silent before its terminal chunk. */
+class CommitThenSilentAdapter extends LlmAdapter {
+  readonly calls: GenerateOptions[] = []
+
+  constructor(private readonly silenceMs: number) {
+    super()
+  }
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    const signal = options.signal
+    const silenceMs = this.silenceMs
+    return (async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'partial answer' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'partial answer' } }
+      // Progress after the commit is still not an answer; the clock must stay
+      // stopped rather than re-arm, and a later transport pulse must not revive it.
+      yield { type: 'block-start', index: 1, blockType: 'reasoning' }
+      reportAttemptActivity(signal)
+      await waitForAttempt(signal, silenceMs)
+      yield { type: 'block-end', index: 1, block: { type: 'reasoning', text: '' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })()
+  }
+}
+
+/** Yields one delta and records when its in-flight generator is closed. */
+class ClosingAdapter extends LlmAdapter {
+  closed = false
+  readonly calls: GenerateOptions[] = []
+
+  stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls.push(options)
+    const markClosed = (): void => { this.closed = true }
+    return (async function* () {
+      try {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'never consumed' }
+        yield { type: 'text-delta', index: 0, text: 'also never consumed' }
+      } finally {
+        markClosed()
+      }
+    })()
+  }
+}
+
 async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[]> {
   const chunks: StreamChunk[] = []
   for await (const chunk of stream) chunks.push(chunk)
   return chunks
+}
+
+/**
+ * Assemble a consumed stream exactly as the agent loop does. The shared Vitest
+ * invariant host also mounts `@deepseek-ai/dsh-llm/invariant` for this suite,
+ * so every stream below is grammar-checked in addition to these assertions.
+ */
+function assemble(chunks: readonly StreamChunk[]): BlockAssembler {
+  const assembler = new BlockAssembler()
+  for (const chunk of chunks) assembler.push(chunk)
+  return assembler
 }
 
 function captureStderr(): { text: () => string } {
@@ -362,6 +731,65 @@ describe('model-group failover', () => {
     // carries its declared effort too.
     expect(failing.calls[0]?.reasoningEffort).toBe('high')
     expect(answering.calls[0]?.reasoningEffort).toBe('max')
+  })
+
+  it('dispatches a chain link fresh when a prepared call config differs', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new CountingEffortAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], adapter)
+    provideChains(ctx, id => id === 'prepared-effort' ? {
+      id,
+      links: [{ provider: 'chain-a', model: 'm-a', effort: 'high' }],
+    } : undefined)
+    captureStderr()
+
+    // Preparation proposed "low"; the link declares "high". The prepared
+    // dispatch must not serve the link under the wrong effort.
+    const prepared = await ctx.llm.prepareCall({
+      provider: 'chain-a',
+      model: 'm-a',
+      reasoningEffort: ReasoningEffortId('low'),
+    })
+    const chunks = await collect(prepared.stream({
+      ...prepared.config,
+      chain: 'prepared-effort',
+      messages: [],
+    }))
+
+    expect(chunks).toStrictEqual(SCRIPT)
+    expect(adapter.calls).toHaveLength(1)
+    expect(adapter.calls[0]?.reasoningEffort).toBe('high')
+    // One preparation for the caller, one fresh preparation for the link.
+    expect(adapter.prepares).toBe(2)
+  })
+
+  it('reuses a prepared dispatch when the chain link config is identical', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new CountingEffortAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], adapter)
+    provideChains(ctx, id => id === 'prepared-match' ? {
+      id,
+      links: [{ provider: 'chain-a', model: 'm-a', effort: 'high' }],
+    } : undefined)
+    captureStderr()
+
+    const prepared = await ctx.llm.prepareCall({
+      provider: 'chain-a',
+      model: 'm-a',
+      reasoningEffort: ReasoningEffortId('high'),
+    })
+    const chunks = await collect(prepared.stream({
+      ...prepared.config,
+      chain: 'prepared-match',
+      messages: [],
+    }))
+
+    expect(chunks).toStrictEqual(SCRIPT)
+    expect(adapter.calls).toHaveLength(1)
+    expect(adapter.calls[0]?.reasoningEffort).toBe('high')
+    expect(adapter.prepares).toBe(1)
   })
 
   it('runs a fallback link on its own default when it declares no effort and cannot accept the request effort', async () => {
@@ -543,6 +971,807 @@ describe('model-group failover', () => {
     expect(chunks).toEqual(answeredBy('chain-b', 'm-b'))
     expect(hanging.calls).toHaveLength(1)
     expect(stderr.text()).toContain('link 1 chain-a/m-a → RETRYABLE (TIMEOUT) → link 2 chain-b/m-b')
+  })
+
+  it('keeps an idle-looking link alive past the pre-commit budget on raw provider activity', async () => {
+    vi.useFakeTimers()
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const pulsing = new PulsingAdapter(4, 5_000)
+    const fallback = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], pulsing)
+    ctx.llm.registerAdapter(['chain-b'], fallback)
+    provideChains(ctx, id => id === 'paced' ? group('paced', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    const stderr = captureStderr()
+
+    const draining = collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'paced',
+      messages: [],
+    }))
+    // Four keepalives keep the attempt alive for 20s, past the 15s budget;
+    // only then does it answer.
+    await vi.advanceTimersByTimeAsync(20_000)
+    const chunks = await draining
+
+    expect(chunks).toStrictEqual(SCRIPT)
+    expect(pulsing.calls).toHaveLength(1)
+    expect(fallback.calls).toHaveLength(0)
+    expect(stderr.text()).not.toContain('[model-chain] paced')
+  })
+
+  it('streams reasoning to the consumer before any answer arrives', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const reasoning = new OpenReasoningThenSilentAdapter()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], reasoning)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'live-reasoning' ? group('live-reasoning', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const iterator = ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'live-reasoning',
+      messages: [],
+    })[Symbol.asyncIterator]()
+    // Both reasoning chunks arrive while the link is still generating; the
+    // answering link has not even been dispatched.
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: { type: 'block-start', index: 0, blockType: 'reasoning' },
+    })
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: { type: 'reasoning-delta', index: 0, text: 'unfinished thought' },
+    })
+    expect(answering.calls).toHaveLength(0)
+    await iterator.return?.(undefined)
+    expect(reasoning.calls).toHaveLength(1)
+  })
+
+  it('keeps an open reasoning-only link terminal instead of reissuing it', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const reasoning = new OpenReasoningThenFailsAdapter()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], reasoning)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'open-reasoning' ? group('open-reasoning', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    const stderr = captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'open-reasoning',
+      messages: [],
+    }))
+
+    // The reasoning block committed the link at its first semantic chunk, so it
+    // stays live and the failure is terminal rather than reissued.
+    expect(chunks.slice(0, 2)).toEqual([
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'reasoning-delta', index: 0, text: 'unfinished thought' },
+    ])
+    const finish = chunks.at(-1)
+    if (finish?.type !== 'finish' || finish.reason.kind !== 'error') throw new Error('expected an error finish')
+    expect(finish.reason.failure).toMatchObject({
+      message: 'reasoning stream failed',
+      code: 'SERVER',
+      provider: 'chain-a',
+      model: 'm-a',
+    })
+    expect(answering.calls).toHaveLength(0)
+    expect(assemble(chunks).blocks()).toEqual([{ type: 'reasoning', text: 'unfinished thought' }])
+    expect(stderr.text()).not.toContain('[model-chain] open-reasoning')
+  })
+
+  it('keeps a closed reasoning block live at index 0 without reissuing', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const reasoning = new ClosedReasoningThenFailsAdapter()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], reasoning)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'closed-reasoning' ? group('closed-reasoning', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'closed-reasoning',
+      messages: [],
+    }))
+
+    expect(chunks.slice(0, 3)).toEqual([
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'reasoning-delta', index: 0, text: 'finished thought' },
+      { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'finished thought' } },
+    ])
+    const finish = chunks.at(-1)
+    if (finish?.type !== 'finish') throw new Error('expected a finish chunk')
+    expect(finish.reason).toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
+    expect(answering.calls).toHaveLength(0)
+    const assembler = assemble(chunks)
+    expect(assembler.blocks()).toEqual([{ type: 'reasoning', text: 'finished thought' }])
+  })
+
+  it('never reissues a stream that already committed a partial tool call', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const records: CapturedRecord[] = []
+    provideSessions(ctx, records)
+    const partial = new PartialToolThenCutAdapter()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], partial)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'partial-tool' ? group('partial-tool', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream(request({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'partial-tool',
+      messages: [],
+    })))
+
+    // A tool-call delta commits the link before it fails,
+    // so its truncation is terminal and never replayed on another model.
+    expect(answering.calls).toHaveLength(0)
+    expect(records).toHaveLength(0)
+    const assembler = assemble(chunks)
+    expect(assembler.finish).toMatchObject({ kind: 'error', failure: { code: STREAM_CUT_CODE } })
+    // The reported usage survives once, immediately before the terminal chunk.
+    expect(chunks.at(-2)).toEqual({ type: 'usage', usage: { inputTokens: 2, outputTokens: 1 } })
+    expect(assembler.usage).toEqual({ inputTokens: 2, outputTokens: 1 })
+    // The stream-cut assembly rule keeps the incomplete tool call out of any
+    // executable message, so holding it back never invents a tool effect.
+    expect(assembler.blocks()).toEqual([])
+  })
+
+  it('never reissues a tool call committed by its block-end', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const toolCall = new ToolBlockEndThenCutAdapter()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], toolCall)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'block-end-tool' ? group('block-end-tool', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'block-end-tool',
+      messages: [],
+    }))
+
+    expect(answering.calls).toHaveLength(0)
+    const assembler = assemble(chunks)
+    expect(assembler.finish).toMatchObject({ kind: 'error', failure: { code: STREAM_CUT_CODE } })
+    expect(assembler.blocks()).toEqual([])
+  })
+
+  it('escalates a pre-answer stream that ends without a terminal finish', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const silentEnd = new SilentEmptyAdapter()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], silentEnd)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'silent-end' ? group('silent-end', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    const stderr = captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'silent-end',
+      messages: [],
+    }))
+
+    // Nothing from the unterminated link committed, so the next link's
+    // index-0 stream is the whole consumer-visible attempt.
+    expect(chunks).toStrictEqual(answeredBy('chain-b', 'm-b'))
+    expect(answering.calls).toHaveLength(1)
+    expect(stderr.text()).toContain('link 1 chain-a/m-a → RETRYABLE (STREAM_CUT) → link 2 chain-b/m-b')
+  })
+
+  it('carries a silent link usage into the answering link report', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const silent = new SilentUsageEndAdapter()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], silent)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'silent-usage' ? group('silent-usage', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    const stderr = captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'silent-usage',
+      messages: [],
+    }))
+
+    const answered = answeredBy('chain-b', 'm-b')
+    expect(chunks).toEqual([
+      ...answered.slice(0, -1),
+      { type: 'usage', usage: { inputTokens: 2, outputTokens: 1 } },
+      answered[answered.length - 1]!,
+    ])
+    expect(assemble(chunks).usage).toEqual({ inputTokens: 2, outputTokens: 1 })
+    expect(stderr.text()).toContain('link 1 chain-a/m-a → RETRYABLE (STREAM_CUT) → link 2 chain-b/m-b')
+  })
+
+  it('terminates a committed answer that ends without a terminal finish', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const silentEnd = new SilentEndAnswerAdapter({ inputTokens: 7, outputTokens: 3, totalTokens: 10 })
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], silentEnd)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'silent-answer' ? group('silent-answer', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'silent-answer',
+      messages: [],
+    }))
+
+    // The answer content committed, so the truncation is terminal and the
+    // stream still closes with one honest error instead of a dangling answer.
+    expect(answering.calls).toHaveLength(0)
+    const finish = chunks.at(-1)
+    if (finish?.type !== 'finish') throw new Error('expected a finish chunk')
+    expect(finish.reason).toMatchObject({ kind: 'error', failure: { code: STREAM_CUT_CODE } })
+    // Usage reported before the missing terminal event is retained once, in
+    // stream order, instead of being dropped or duplicated.
+    expect(chunks.at(-2)).toEqual({
+      type: 'usage',
+      usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+    })
+    const assembler = assemble(chunks)
+    expect(assembler.blocks()).toEqual([{ type: 'text', text: 'partial answer' }])
+    expect(assembler.usage).toEqual({ inputTokens: 7, outputTokens: 3, totalTokens: 10 })
+  })
+
+  it('terminates a committed answer without usage as STREAM_CUT', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['chain-a'], new SilentEndAnswerAdapter())
+    ctx.llm.registerAdapter(['chain-b'], new ScriptedAdapter(SCRIPT))
+    provideChains(ctx, id => id === 'silent-no-usage' ? group('silent-no-usage', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'silent-no-usage',
+      messages: [],
+    }))
+
+    expect(chunks.some(chunk => chunk.type === 'usage')).toBe(false)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error', failure: { code: STREAM_CUT_CODE } } })
+  })
+
+  it('keeps reasoning visible when a cancelled adapter ends silently', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const buffered = new AbortEndAdapter()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], buffered)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'silent-abort' ? group('silent-abort', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+    const controller = new AbortController()
+
+    const draining = collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'silent-abort',
+      messages: [],
+      signal: controller.signal,
+    }))
+    await vi.waitFor(() => { expect(buffered.calls).toHaveLength(1) })
+    controller.abort(new LlmError('user cancelled', 'ABORTED'))
+    const chunks = await draining
+
+    const finish = chunks.at(-1)
+    if (finish?.type !== 'finish') throw new Error('expected a finish chunk')
+    expect(finish.reason).toMatchObject({
+      kind: 'aborted',
+      failure: { message: 'user cancelled', code: 'ABORTED' },
+    })
+    expect(answering.calls).toHaveLength(0)
+    const assembler = assemble(chunks)
+    expect(assembler.usage).toEqual({ inputTokens: 6, outputTokens: 1 })
+    expect(assembler.interruptedBlocks()).toEqual([
+      { type: 'reasoning', text: 'unfinished thought' },
+    ])
+  })
+
+  it('normalizes an ignored pre-aborted caller into an aborted terminal', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const silent = new SilentEmptyAdapter()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], silent)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'pre-aborted' ? group('pre-aborted', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+    const controller = new AbortController()
+    controller.abort()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'pre-aborted',
+      messages: [],
+      signal: controller.signal,
+    }))
+
+    const finish = chunks.at(-1)
+    if (finish?.type !== 'finish') throw new Error('expected a finish chunk')
+    // A reason-less abort still surfaces the runtime's own abort text, never a
+    // fabricated STREAM_CUT.
+    expect(finish.reason).toMatchObject({
+      kind: 'aborted',
+      failure: { message: 'This operation was aborted', code: 'ABORTED' },
+    })
+    expect(answering.calls).toHaveLength(0)
+  })
+
+  it('emits one cumulative usage report from failed and answering links', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const failed = new UsageThenFailAdapter({ inputTokens: 9_000, outputTokens: 1_000 })
+    const answering = new ScriptedAdapter(SCRIPT_WITH_USAGE)
+    ctx.llm.registerAdapter(['chain-a'], failed)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'dead-usage' ? group('dead-usage', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    const stderr = captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'dead-usage',
+      messages: [],
+    }))
+
+    // The dead link's tokens are neither hidden nor emitted as a second usage
+    // chunk: one cumulative report precedes the answering finish.
+    const answered = answeredBy('chain-b', 'm-b')
+    expect(chunks).toEqual([
+      ...answered.slice(0, -1),
+      { type: 'usage', usage: { inputTokens: 9_005, outputTokens: 1_002 } },
+      answered[answered.length - 1]!,
+    ])
+    expect(chunks.filter(chunk => chunk.type === 'usage')).toHaveLength(1)
+    expect(assemble(chunks).usage).toEqual({ inputTokens: 9_005, outputTokens: 1_002 })
+    expect(stderr.text()).toContain('link 1 chain-a/m-a → RETRYABLE (RATE_LIMIT) → link 2 chain-b/m-b')
+  })
+
+  it('emits one cumulative usage report before an exhausted chain failure', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['chain-a'], new UsageThenFailAdapter({
+      inputTokens: 3,
+      outputTokens: 4,
+      totalTokens: 7,
+      cacheReadTokens: 1,
+      cacheWriteTokens: 2,
+      reasoningTokens: 5,
+    }))
+    ctx.llm.registerAdapter(['chain-b'], new UsageThenFailAdapter({
+      inputTokens: 5,
+      outputTokens: 6,
+      totalTokens: 11,
+      cacheReadTokens: 3,
+      cacheWriteTokens: 4,
+      reasoningTokens: 7,
+    }))
+    provideChains(ctx, id => id === 'dead-chain' ? group('dead-chain', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'dead-chain',
+      messages: [],
+    }))
+
+    expect(chunks).toHaveLength(2)
+    expect(chunks[0]).toEqual({
+      type: 'usage',
+      usage: {
+        inputTokens: 8,
+        outputTokens: 10,
+        totalTokens: 18,
+        cacheReadTokens: 4,
+        cacheWriteTokens: 6,
+        reasoningTokens: 12,
+      },
+    })
+    const finish = chunks[1]
+    if (finish?.type !== 'finish' || finish.reason.kind !== 'error') throw new Error('expected an error finish')
+    expect(finish.reason.failure.code).toBe(MODEL_CHAIN_EXHAUSTED_CODE)
+    expect(assemble(chunks).usage).toEqual({
+      inputTokens: 8,
+      outputTokens: 10,
+      totalTokens: 18,
+      cacheReadTokens: 4,
+      cacheWriteTokens: 6,
+      reasoningTokens: 12,
+    })
+  })
+
+  it('streams a max-tokens reasoning-only attempt with its usage in order', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const script: StreamChunk[] = [
+      { type: 'block-start', index: 0, blockType: 'reasoning' },
+      { type: 'reasoning-delta', index: 0, text: 'thinking' },
+      { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'thinking' } },
+      { type: 'usage', usage: { inputTokens: 4, outputTokens: 2, totalTokens: 6 } },
+      { type: 'finish', reason: { kind: 'max-tokens' } },
+    ]
+    ctx.llm.registerAdapter(['chain-a'], new ScriptedAdapter(script))
+    provideChains(ctx, id => id === 'max-tokens' ? group('max-tokens', ['chain-a', 'm-a']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'max-tokens',
+      messages: [],
+    }))
+
+    // Reasoning stays live, usage is retained in stream order, and max-tokens
+    // keeps its own finish kind instead of becoming an EMPTY_RESPONSE.
+    expect(chunks).toEqual(script)
+    const assembler = assemble(chunks)
+    expect(assembler.blocks()).toEqual([{ type: 'reasoning', text: 'thinking' }])
+    expect(assembler.usage).toEqual({ inputTokens: 4, outputTokens: 2, totalTokens: 6 })
+    expect(assembler.finish).toEqual({ kind: 'max-tokens' })
+  })
+
+  it('commits conservatively on a tool-call start and never fails over', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const toolStart = new ToolStartThenFailAdapter()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], toolStart)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'tool-start' ? group('tool-start', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'tool-start',
+      messages: [],
+    }))
+
+    // The structural tool-call start is a binding commitment even before a
+    // name or arguments arrive, so the failure is terminal.
+    expect(chunks[0]).toEqual({ type: 'block-start', index: 0, blockType: 'tool-call' })
+    const finish = chunks.at(-1)
+    if (finish?.type !== 'finish' || finish.reason.kind !== 'error') throw new Error('expected an error finish')
+    expect(finish.reason.failure).toMatchObject({ code: 'SERVER', provider: 'chain-a', model: 'm-a' })
+    expect(answering.calls).toHaveLength(0)
+  })
+
+  it('keeps reasoning visible on a caller abort and never fails over', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const reasoning = new OpenReasoningThenSilentAdapter()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], reasoning)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'abort-open' ? group('abort-open', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+    const controller = new AbortController()
+
+    const draining = collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'abort-open',
+      messages: [],
+      signal: controller.signal,
+    }))
+    await vi.waitFor(() => { expect(reasoning.calls).toHaveLength(1) })
+    controller.abort(new Error('user cancelled'))
+    const chunks = await draining
+
+    const finish = chunks.at(-1)
+    if (finish?.type !== 'finish') throw new Error('expected a finish chunk')
+    expect(finish.reason.kind).toBe('aborted')
+    expect(answering.calls).toHaveLength(0)
+    // A cancelled link is terminal: its already-streamed reasoning stays visible
+    // so interruption preserves it.
+    expect(assemble(chunks).interruptedBlocks()).toEqual([
+      { type: 'reasoning', text: 'unfinished thought' },
+    ])
+  })
+
+  it('reports a caller abort without escalating to the next link', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const hanging = new HangingAdapter()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], hanging)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'cancelled' ? group('cancelled', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+    const controller = new AbortController()
+
+    const draining = collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'cancelled',
+      messages: [],
+      signal: controller.signal,
+    }))
+    // Abort while the link is live, so the caller bridge has already forwarded
+    // its signal into the attempt.
+    await vi.waitFor(() => { expect(hanging.calls).toHaveLength(1) })
+    controller.abort(new Error('user cancelled'))
+    const chunks = await draining
+
+    const finish = chunks.at(-1)
+    if (finish?.type !== 'finish') throw new Error('expected a finish chunk')
+    expect(finish.reason.kind).toBe('aborted')
+    expect(hanging.calls).toHaveLength(1)
+    expect(answering.calls).toHaveLength(0)
+  })
+
+  it('closes the active link adapter stream when the consumer stops early', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const closing = new ClosingAdapter()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], closing)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'early-stop' ? group('early-stop', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const iterator = ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'early-stop',
+      messages: [],
+    })[Symbol.asyncIterator]()
+    const first = await iterator.next()
+    expect(first.done).toBe(false)
+    const second = await iterator.next()
+    expect(second.done).toBe(false)
+    if (second.done) throw new Error('expected a delta chunk')
+    expect(second.value).toEqual({ type: 'text-delta', index: 0, text: 'never consumed' })
+    await iterator.return?.(undefined)
+
+    // Returning through the chain must close the child generator, releasing its
+    // in-flight adapter work instead of leaving it suspended.
+    expect(closing.closed).toBe(true)
+    expect(closing.calls).toHaveLength(1)
+    expect(answering.calls).toHaveLength(0)
+  })
+
+  it('aborts a link before closing it when the consumer stops early', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new AbortAwareFinallyAdapter()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], adapter)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'early-abort' ? group('early-abort', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const iterator = ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'early-abort',
+      messages: [],
+    })[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: { type: 'block-start', index: 0, blockType: 'text' },
+    })
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: { type: 'text-delta', index: 0, text: 'partial answer' },
+    })
+    await iterator.return?.(undefined)
+
+    // The adapter awaits its attempt signal inside finally. Closing the link
+    // without aborting first would deadlock this return; the chain aborts before
+    // awaiting cleanup.
+    expect(adapter.cleaned).toBe(true)
+    expect(adapter.calls).toHaveLength(1)
+    expect(answering.calls).toHaveLength(0)
+  })
+
+  it('retains route success when the consumer stops right after the terminal chunk', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const adapter = new ScriptedAdapter([
+      { type: 'finish', reason: { kind: 'error', failure: { message: 'route down', code: 'SERVER' } } },
+    ])
+    ctx.llm.registerAdapter(['chain-a'], adapter)
+    provideChains(ctx, id => id === 'settled-route' ? group('settled-route', ['chain-a', 'm-a']) : undefined)
+    captureStderr()
+    const request: GenerateOptions = {
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'settled-route',
+      messages: [],
+    }
+
+    // The failed attempt cools the route for the next request.
+    await collect(ctx.llm.stream(request))
+    expect(ctx.llm.routeHealth()).toHaveLength(1)
+
+    adapter.setScript(SCRIPT)
+    const iterator = ctx.llm.stream(request)[Symbol.asyncIterator]()
+    let finish: StreamChunk | undefined
+    while (finish === undefined) {
+      const step = await iterator.next()
+      if (step.done === true) break
+      if (step.value.type === 'finish') finish = step.value
+    }
+    expect(finish).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    await iterator.return?.(undefined)
+
+    // The terminal chunk is yielded only after the link settled, so route
+    // success is retained even though the consumer broke immediately after it.
+    expect(ctx.llm.routeHealth()).toEqual([])
+  })
+
+  it('lets a committed generation outlive the pre-commit budget', async () => {
+    vi.useFakeTimers()
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const committed = new CommitThenSilentAdapter(20_000)
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], committed)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'committed-slow' ? group('committed-slow', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    const stderr = captureStderr()
+
+    const draining = collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'committed-slow',
+      messages: [],
+    }))
+    await vi.advanceTimersByTimeAsync(20_000)
+    const chunks = await draining
+
+    // The answer committed before the 15s budget elapsed, so the silence clock
+    // is off for good and a healthy generation is never cut or escalated.
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+    expect(committed.calls).toHaveLength(1)
+    expect(answering.calls).toHaveLength(0)
+    expect(stderr.text()).not.toContain('[model-chain] committed-slow')
+  })
+
+  it('starts a late link with its full silence budget instead of the chain remainder', async () => {
+    vi.useFakeTimers()
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    // The first link stays alive for 55s on raw activity, leaving only 5s of
+    // the chain budget before the next attempt starts.
+    const slowFailure = new PulsingFailAdapter(11, 5_000)
+    // Its first keepalive arrives 8s in: past the chain remainder, well inside
+    // the link's own 15s silence budget.
+    const lateButActive = new PulsingAdapter(2, 8_000)
+    ctx.llm.registerAdapter(['chain-a'], slowFailure)
+    ctx.llm.registerAdapter(['chain-b'], lateButActive)
+    provideChains(ctx, id => id === 'late-start' ? group('late-start', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    const stderr = captureStderr()
+
+    const draining = collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'late-start',
+      messages: [],
+    }))
+    await vi.advanceTimersByTimeAsync(71_000)
+    const chunks = await draining
+
+    // The chain budget gates starting a link only; the started link keeps its
+    // own silence budget and answers past the overall 60s mark.
+    expect(chunks).toStrictEqual(answeredBy('chain-b', 'm-b'))
+    expect(slowFailure.calls).toHaveLength(1)
+    expect(lateButActive.calls).toHaveLength(1)
+    expect(stderr.text()).toContain(
+      'link 1 chain-a/m-a → RETRYABLE (SERVER) → link 2 chain-b/m-b',
+    )
+  })
+
+  it('never escalates or cools a policy refusal even when a route policy lists it', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const records: CapturedRecord[] = []
+    provideSessions(ctx, records)
+    const refused = new class extends FailingAdapter {
+      override providerRetryPolicy(): ResolvedRetryPolicy {
+        const base = resolveRetryPolicy({ mode: 'normal', retryableCodes: ['RATE_LIMIT'] }, 'refusal policy')
+        if (base.mode !== 'normal') throw new Error('expected the normal policy fixture')
+        // A downstream lane listing the code cannot make the refusal retryable.
+        return { ...base, retryableCodes: [POLICY_REFUSAL_CODE] }
+      }
+    }(new LlmError(
+      '429: the request was refused by the provider policy',
+      POLICY_REFUSAL_CODE,
+      { status: 429 },
+    ))
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], refused)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'refused' ? group('refused', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    const stderr = captureStderr()
+
+    const chunks = await collect(ctx.llm.stream(request({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'refused',
+      messages: [],
+    })))
+
+    const finish = chunks.at(-1)
+    if (finish?.type !== 'finish' || finish.reason.kind !== 'error') throw new Error('expected an error finish')
+    expect(finish.reason.failure).toMatchObject({
+      code: POLICY_REFUSAL_CODE,
+      status: 429,
+      provider: 'chain-a',
+      model: 'm-a',
+    })
+    // A refusal is a property of the request, not the route: no sibling link,
+    // no durable attempt record, and no route cooldown.
+    expect(answering.calls).toHaveLength(0)
+    expect(records).toHaveLength(0)
+    expect(ctx.llm.routeHealth()).toEqual([])
+    expect(stderr.text()).not.toContain('[model-chain] refused')
+  })
+
+  it('never escalates a refusal even when its finish is classified as aborted', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const refusing = new class extends LlmAdapter {
+      override async * stream(): AsyncIterable<StreamChunk> {
+        yield {
+          type: 'finish',
+          reason: { kind: 'aborted', failure: { message: 'aborted refusal', code: POLICY_REFUSAL_CODE } },
+        }
+      }
+    }()
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-a'], refusing)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'aborted-refusal' ? group('aborted-refusal', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    const chunks = await collect(ctx.llm.stream({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'aborted-refusal',
+      messages: [],
+    }))
+
+    const finish = chunks.at(-1)
+    if (finish?.type !== 'finish') throw new Error('expected a finish chunk')
+    expect(finish.reason.kind).toBe('aborted')
+    if (finish.reason.kind !== 'aborted') throw new Error('expected an aborted finish')
+    expect(finish.reason.failure).toMatchObject({
+      code: POLICY_REFUSAL_CODE,
+      provider: 'chain-a',
+      model: 'm-a',
+    })
+    expect(answering.calls).toHaveLength(0)
   })
 
   it('stops after the overall chain budget and names every attempted link', async () => {
@@ -818,6 +2047,44 @@ describe('model-group failover', () => {
     ])
   })
 
+  it('carries status, request id, and reset hints on an escalated attempt record', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    const records: CapturedRecord[] = []
+    provideSessions(ctx, records)
+    ctx.llm.registerAdapter(['chain-a'], new FailingAdapter(new LlmError(
+      'a is overloaded',
+      'SERVER',
+      {
+        status: 503,
+        requestId: ProviderRequestId('req_escalated'),
+        providerRetryAfterMs: 7_000,
+      },
+    )))
+    const answering = new ScriptedAdapter(SCRIPT)
+    ctx.llm.registerAdapter(['chain-b'], answering)
+    provideChains(ctx, id => id === 'recorded' ? group('recorded', ['chain-a', 'm-a'], ['chain-b', 'm-b']) : undefined)
+    captureStderr()
+
+    await collect(ctx.llm.stream(request({
+      provider: 'chain-a',
+      model: 'm-a',
+      chain: 'recorded',
+      messages: [],
+    })))
+
+    expect(records).toHaveLength(1)
+    expect(attemptRecord(records[0]!)).toMatchObject({
+      provider: 'chain-a',
+      model: 'm-a',
+      code: 'SERVER',
+      status: 503,
+      requestId: 'req_escalated',
+      providerRetryAfterMs: 7_000,
+      next: { provider: 'chain-b', model: 'm-b' },
+    })
+  })
+
   it('writes no attempt record for a committed generation that then failed', async () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
@@ -939,7 +2206,7 @@ describe('model-group failover', () => {
   it.each([
     ['an empty text block', EMPTY_TEXT_SCRIPT],
     ['reasoning-only content', REASONING_ONLY_SCRIPT],
-  ] as const)('escalates %s on a completed stop as EMPTY_RESPONSE', async (_label, emptyScript) => {
+  ] as const)('streams %s live and ends as EMPTY_RESPONSE without reissuing', async (_label, emptyScript) => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     const empty = new ScriptedAdapter(emptyScript)
@@ -956,14 +2223,26 @@ describe('model-group failover', () => {
       messages: [],
     }))
 
-    // Pre-commit chunks from the empty link may already have reached the
-    // consumer; the answering link still supplies the complete terminal answer.
-    const expected = answeredBy('chain-b', 'm-b')
-    expect(chunks.slice(-expected.length)).toEqual(expected)
-    expect(answering.calls).toHaveLength(1)
-    expect(stderr.text()).toContain(
-      '[model-chain] empty-stop: link 1 chain-a/m-a → RETRYABLE (EMPTY_RESPONSE) → link 2 chain-b/m-b',
-    )
+    // The first semantic chunk committed the link, so its streamed prefix stays
+    // live and the empty completion is terminal instead of being reissued.
+    const expected: StreamChunk[] = [
+      ...emptyScript.slice(0, -1),
+      {
+        type: 'finish',
+        reason: {
+          kind: 'error',
+          failure: {
+            message: 'model "m-a" returned a completed response with no content',
+            code: EMPTY_RESPONSE_CODE,
+            provider: 'chain-a',
+            model: 'm-a',
+          },
+        },
+      },
+    ]
+    expect(chunks).toEqual(expected)
+    expect(answering.calls).toHaveLength(0)
+    expect(stderr.text()).not.toContain('[model-chain] empty-stop')
   })
 
   it('classifies a sign-in wall as AUTH and skips the rest of that provider', async () => {

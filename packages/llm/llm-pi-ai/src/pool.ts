@@ -19,7 +19,12 @@
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { isContextWindowExceededError, isEntitlementGatedError, isFreeTierGatedError } from '@deepseek-ai/dsh-llm'
+import {
+  isContextWindowExceededError,
+  isEntitlementGatedError,
+  isFreeTierGatedError,
+  POLICY_REFUSAL_CODE,
+} from '@deepseek-ai/dsh-llm'
 import type { LlmPoolIdentityStatus } from '@deepseek-ai/dsh-llm'
 import type { PiAiPoolIdentity, PoolStrategy } from './config.ts'
 
@@ -32,6 +37,7 @@ export type PoolFailureClass =
   | 'GATEWAY_OUTAGE'
   | 'INVALID_REQUEST'
   | 'POLICY'
+  | 'REFUSAL'
   | 'UPSTREAM'
 
 /**
@@ -65,6 +71,10 @@ export const CLASS_COOLDOWN_MS: Readonly<Record<PoolFailureClass, number>> = {
   // property of the route itself, not of this credential: rotating or cooling
   // cannot help, so it terminates instead of rotating.
   POLICY: 0,
+  // A structured POLICY_REFUSAL is the terminal provider's own content/safety
+  // answer to the request. Rotation, cooling, and retries cannot change it,
+  // and the identity is healthy, so it never rotates or cools.
+  REFUSAL: 0,
   UPSTREAM: 30_000,
 }
 
@@ -147,15 +157,34 @@ export function parseResetMs(message: string): number | undefined {
 }
 
 /**
- * Classify a flattened upstream failure. Order matters: the transient-model
- * check wins over everything (its messages embed 400s), 503/529 status codes
- * win over quota vocabulary, and bare status-code words are checked before
- * vocabulary. This ensures 429 → QUOTA wins over "capacity" vocabulary and
- * 503/529 → CAPACITY wins over quota.
+ * Structured facts accompanying a flattened provider failure. `code` is the
+ * provider-neutral machine code from the terminal failure; `status` is the
+ * provider HTTP status when the failing callsite has one.
+ */
+export interface PoolFailureFacts {
+  code?: string | undefined
+  status?: number | undefined
+}
+
+/**
+ * Classify a flattened upstream failure. A structured
+ * {@link POLICY_REFUSAL_CODE} wins over every prose and status signal: the
+ * refusal is the provider's answer to the request, so rotating identities or
+ * cooling a healthy key cannot change it. Every other failure keeps the text
+ * ordering: the transient-model check wins over everything (its messages
+ * embed 400s), 503/529 status codes win over quota vocabulary, and bare
+ * status-code words are checked before vocabulary. This ensures 429 → QUOTA
+ * wins over "capacity" vocabulary and 503/529 → CAPACITY wins over quota.
  * @param message - the failure text (pi-ai flattens status + body into it).
+ * @param facts - optional structured code/status from the terminal failure.
+ *   Only `POLICY_REFUSAL` is authoritative; `status` is carried for callsites
+ *   but deliberately not consulted, because numeric status precedence would
+ *   override the body-derived request/entitlement classes (both arrive as
+ *   403) that the text ordering already resolves.
  * @returns the failure class driving rotation/cooldown decisions.
  */
-export function classifyFailure(message: string): PoolFailureClass {
+export function classifyFailure(message: string, facts?: PoolFailureFacts): PoolFailureClass {
+  if (facts?.code === POLICY_REFUSAL_CODE) return 'REFUSAL'
   if (TRANSIENT_MODEL_RE.test(message)) return 'GATEWAY_OUTAGE'
   // OpenCode's free tier is gated server-side to OpenCode's own clients
   // ("You cannot use the free tier in other harnesses", anomalyco/opencode#49621).

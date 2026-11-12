@@ -17,8 +17,15 @@ describe('provider retry policy', () => {
       initialDelayMs: 500,
       maxDelayMs: 10_000,
       jitterRatio: 0.1,
+      guard: {
+        maxElapsedMs: 600_000,
+        maxNoWorkElapsedMs: 300_000,
+        terminalCodes: [],
+      },
     })
     expect(Object.isFrozen(policy)).toBe(true)
+    expect(Object.isFrozen(policy.guard)).toBe(true)
+    expect(Object.isFrozen(policy.guard.terminalCodes)).toBe(true)
     if (policy.mode !== 'normal') throw new Error('expected normal policy')
     expect(Object.isFrozen(policy.retryableCodes)).toBe(true)
   })
@@ -46,6 +53,11 @@ describe('provider retry policy', () => {
       initialDelayMs: 25,
       maxDelayMs: 100,
       jitterRatio: 0,
+      guard: {
+        maxElapsedMs: 600_000,
+        maxNoWorkElapsedMs: 300_000,
+        terminalCodes: [],
+      },
     })
   })
 
@@ -55,6 +67,11 @@ describe('provider retry policy', () => {
       initialDelayMs: 500,
       maxDelayMs: 10_000,
       jitterRatio: 0.1,
+      guard: {
+        maxElapsedMs: 600_000,
+        maxNoWorkElapsedMs: 300_000,
+        terminalCodes: [],
+      },
     })
     expect(RetryPolicySchema).toBeDefined()
   })
@@ -71,7 +88,70 @@ describe('provider retry policy', () => {
       initialDelayMs: 500,
       maxDelayMs: 10_000,
       jitterRatio: 0.1,
+      guard: {
+        maxElapsedMs: 600_000,
+        maxNoWorkElapsedMs: 300_000,
+        terminalCodes: [],
+      },
     })
+  })
+
+  it('resolves and detaches a configured guard', () => {
+    const terminalCodes = ['AUTH']
+    const policy = resolveRetryPolicy({
+      mode: 'normal',
+      guard: { maxElapsedMs: 0, maxNoWorkElapsedMs: 60_000, terminalCodes },
+    }, 'provider.retryPolicy')
+    terminalCodes.push('LATE')
+
+    expect(policy.guard).toEqual({
+      maxElapsedMs: 0,
+      maxNoWorkElapsedMs: 60_000,
+      terminalCodes: ['AUTH'],
+    })
+    expect(Object.isFrozen(policy.guard)).toBe(true)
+    expect(Object.isFrozen(policy.guard.terminalCodes)).toBe(true)
+  })
+
+  it('accepts and defaults a guard through the config schema', () => {
+    expect(RetryPolicySchema({
+      mode: 'normal',
+      guard: { maxNoWorkElapsedMs: 0, terminalCodes: ['AUTH'] },
+    })).toMatchObject({
+      mode: 'normal',
+      guard: {
+        maxElapsedMs: 600_000,
+        maxNoWorkElapsedMs: 0,
+        terminalCodes: ['AUTH'],
+      },
+    })
+  })
+
+  it('resolves always mode with a configured guard', () => {
+    expect(resolveRetryPolicy({
+      mode: 'always',
+      guard: { maxElapsedMs: 1_000, maxNoWorkElapsedMs: 0 },
+    }, 'provider.retryPolicy').guard).toEqual({
+      maxElapsedMs: 1_000,
+      maxNoWorkElapsedMs: 0,
+      terminalCodes: [],
+    })
+  })
+
+  it('rejects a custom retryable code that the guard makes terminal', () => {
+    expect(() => resolveRetryPolicy({
+      mode: 'normal',
+      retryableCodes: ['POLICY_REFUSAL'],
+    }, 'provider.retryPolicy')).toThrow(/terminal code "POLICY_REFUSAL"/)
+    expect(() => resolveRetryPolicy({
+      mode: 'normal',
+      retryableCodes: ['MODEL_CHAIN_EXHAUSTED'],
+    }, 'provider.retryPolicy')).toThrow(/terminal code "MODEL_CHAIN_EXHAUSTED"/)
+    expect(() => resolveRetryPolicy({
+      mode: 'normal',
+      retryableCodes: ['SERVER', 'AUTH'],
+      guard: { terminalCodes: ['AUTH'] },
+    }, 'provider.retryPolicy')).toThrow(/terminal code "AUTH"/)
   })
 
   it.each([
@@ -91,6 +171,14 @@ describe('provider retry policy', () => {
     [{ mode: 'normal', maxRetires: 1 }, /unknown key "maxRetires"/],
     [{ mode: 'always', backoff: { initialDelay: 1 } }, /unknown key "initialDelay"/],
     [{ mode: 'sometimes' }, /mode must be "normal" or "always"/],
+    [{ mode: 'normal', guard: { maxElapsedMs: -1 } }, /maxElapsedMs/],
+    [{ mode: 'always', guard: { maxElapsedMs: 1.5 } }, /maxElapsedMs/],
+    [{ mode: 'normal', guard: { maxElapsedMs: MAX_TIMER_DELAY_MS + 1 } }, /maxElapsedMs/],
+    [{ mode: 'normal', guard: { maxNoWorkElapsedMs: -1 } }, /maxNoWorkElapsedMs/],
+    [{ mode: 'always', guard: { maxNoWorkElapsedMs: Number.POSITIVE_INFINITY } }, /maxNoWorkElapsedMs/],
+    [{ mode: 'normal', guard: { terminalCodes: ['AUTH', 'AUTH'] } }, /terminalCodes must not contain duplicates/],
+    [{ mode: 'normal', guard: { terminalCodes: [''] } }, /terminalCodes must contain only non-empty strings/],
+    [{ mode: 'normal', guard: { terminalCode: ['AUTH'] } }, /unknown key "terminalCode"/],
   ] as const)('rejects invalid policy %#', (config, message) => {
     expect(() => {
       resolveRetryPolicy(config as unknown as RetryPolicyConfig, 'provider.retryPolicy')

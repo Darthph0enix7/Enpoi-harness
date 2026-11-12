@@ -6,6 +6,13 @@ Sources: release names, dates, and per-release change lines come from the `beta.
 
 No `0.1.7-enpoi.2.84` or `0.1.7-enpoi.2.89` release exists (no tag, no catalog entry) — the run numbers between builds are not contiguous by design.
 
+## Unreleased
+
+- Model-request recovery: provider policies gain a failure-only quota guard (600,000 ms attempt-plus-wait and 300,000 ms failed no-work by default; 0 disables either), `POLICY_REFUSAL` and `MODEL_CHAIN_EXHAUSTED` terminate in every mode, and the retry payload names the provider, model, and policy that actually served the failure.
+- Stream liveness: an idle watchdog bounds provider silence rather than total generation time and response-body bytes reset it; both adapters report raw response-body activity to the chain's pre-commit clock without persisting or forwarding those bytes.
+- Chain failover commits at the first semantic chunk — text, reasoning, a block start, or a tool identity — streams it live, then never reissues; a chain reports one cumulative usage across every attempted link. Structured provider refusals are terminal in the credential pool: no rotation, cooldown, or identity-counter change, and in-band refusal usage is retained.
+- Cache audit: the incident session's failed attempt reported 366,487 cache-read tokens; this wave made no configuration or prompt changes and does not attribute that reuse to the fix. It does not claim that quota was never charged; provider-side accounting remains authoritative.
+
 ## Shipped releases
 
 | Release | Published (UTC) | Shipped change (condensed catalog entry) |

@@ -648,6 +648,11 @@ describe('provider profile lifecycle', () => {
       initialDelayMs: 25,
       maxDelayMs: 100,
       jitterRatio: 0.2,
+      guard: {
+        maxElapsedMs: 600_000,
+        maxNoWorkElapsedMs: 300_000,
+        terminalCodes: [],
+      },
     })
     expect(ctx.llm.providerRetryPolicy('anthropic')).toMatchObject({
       mode: 'normal',

@@ -32,13 +32,15 @@ import type {
   ResolvedModelChain,
   StreamChunk,
   SystemPromptUpdate,
+  TokenUsage,
   ToolSchema,
   ToolUpdate,
 } from './types.ts'
 import { validateLlmNativeFileInputs } from './types.ts'
 import { freezeMessage } from './message.ts'
-import { resolveRetryPolicy } from './retry-policy.ts'
+import { MODEL_CHAIN_EXHAUSTED_CODE, POLICY_REFUSAL_CODE, resolveRetryPolicy } from './retry-policy.ts'
 import type { ResolvedRetryPolicy } from './retry-policy.ts'
+import { onAttemptActivity } from './attempt-activity.ts'
 import type { ProviderRequestId, ReasoningEffortId } from './brand.ts'
 import { callConfigEquals, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
 import type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
@@ -82,6 +84,7 @@ export * from './wire-sessions.ts'
 export * from './provider-retry.ts'
 export * from './tool-batch.ts'
 export { BlockAssembler, STREAM_CUT_CODE } from './assembler.ts'
+export { onAttemptActivity, reportAttemptActivity } from './attempt-activity.ts'
 export { callConfigEquals, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
 export type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
 
@@ -238,14 +241,19 @@ export const Config: Schema<Config> = Schema.object({
 })
 
 /**
- * Wall-clock budget for one chain link's pre-commit phase: the time its
- * identity pool may spend rotating keys before the chain escalates. The budget
- * stops applying at the first non-usage chunk, so a live generation runs to
- * its own end. Mirrors llm-pi-ai's `poolDeadlineMs` default.
+ * Silence budget for one chain link's pre-commit phase: the longest the link
+ * may make no progress before the chain escalates. Adapter-reported raw
+ * activity restarts it. The first semantic non-usage chunk commits the attempt,
+ * streams live, and stops the clock for good; silence after that belongs to the
+ * adapter's own watchdog.
  */
 const CHAIN_LINK_BUDGET_MS = 15_000
 
-/** Overall pre-commit wall-clock budget across one request's chain links. */
+/**
+ * Wall-clock budget for starting another link in one request's chain. Reaching
+ * it never cancels a link already started: that link keeps its own silence
+ * budget and a committed generation runs to its end.
+ */
 const CHAIN_BUDGET_MS = 60_000
 
 /**
@@ -295,8 +303,13 @@ const CHAIN_PROVIDER_SKIP_CODES: ReadonlySet<string> = new Set([
   FREE_TIER_GATED_CODE,
 ])
 
-/** Terminal failure code for a chain whose links all failed. */
-export const MODEL_CHAIN_EXHAUSTED_CODE = 'MODEL_CHAIN_EXHAUSTED'
+/**
+ * Failures that never move a chain or cool a route. A policy refusal is a
+ * property of the request, so the runtime does not reissue it on another
+ * link or attribute it to route health. Recognition uses this code
+ * alone; an HTTP status or provider prose never classifies a refusal here.
+ */
+const CHAIN_TERMINAL_CODES: ReadonlySet<string> = new Set([POLICY_REFUSAL_CODE])
 
 /**
  * Durable record appended when a request attempt fails before commit and is
@@ -548,12 +561,59 @@ function isAnswerContent(chunk: StreamChunk): boolean {
   }
 }
 
+/**
+ * Sum one link's reported usage into the chain's single cumulative report.
+ *
+ * Token counts are disjoint, so input, output, and cache fields add across
+ * links. An optional counter survives only when every contributing report
+ * carries it: an aggregate cannot recover a missing per-link component, and
+ * omitting it is honest where inventing zero would hide usage. Per-link costs
+ * therefore remain a provider bill's facts, not derivable from this aggregate.
+ * @param total - cumulative usage so far, or undefined before the first report.
+ * @param next - usage reported by one link, when it reported any.
+ * @returns the cumulative usage, or undefined when neither side has a report.
+ */
+function addReportedUsage(total: TokenUsage | undefined, next: TokenUsage | undefined): TokenUsage | undefined {
+  if (next === undefined) return total
+  if (total === undefined) return next
+  const sum = (a: number | undefined, b: number | undefined): number | undefined =>
+    a === undefined || b === undefined ? undefined : a + b
+  const totalTokens = sum(total.totalTokens, next.totalTokens)
+  const cacheReadTokens = sum(total.cacheReadTokens, next.cacheReadTokens)
+  const cacheWriteTokens = sum(total.cacheWriteTokens, next.cacheWriteTokens)
+  const reasoningTokens = sum(total.reasoningTokens, next.reasoningTokens)
+  return {
+    inputTokens: total.inputTokens + next.inputTokens,
+    outputTokens: total.outputTokens + next.outputTokens,
+    ...totalTokens === undefined ? {} : { totalTokens },
+    ...cacheReadTokens === undefined ? {} : { cacheReadTokens },
+    ...cacheWriteTokens === undefined ? {} : { cacheWriteTokens },
+    ...reasoningTokens === undefined ? {} : { reasoningTokens },
+  }
+}
+
 /** One link's terminal outcome inside the chain loop. */
 type ChainLinkOutcome =
-  /** A terminal chunk (or clean end) already reached the consumer. */
-  | { readonly kind: 'answered' }
+  /** The link is terminal; its finish has not reached the consumer yet. */
+  | {
+    readonly kind: 'answered'
+    readonly finish: Extract<StreamChunk, { type: 'finish' }>
+    readonly usage?: TokenUsage
+  }
   /** Nothing reached the consumer; the chain may move on or report the failure. */
-  | { readonly kind: 'failed'; readonly failure: LlmFailure; readonly retryable: boolean }
+  | {
+    readonly kind: 'failed'
+    readonly failure: LlmFailure
+    readonly retryable: boolean
+    readonly usage?: TokenUsage
+  }
+
+/** Return value used only to close a link whose consumer stopped early. */
+const CHAIN_LINK_CLOSED: ChainLinkOutcome = Object.freeze({
+  kind: 'failed',
+  failure: Object.freeze({ message: 'chain link closed by the consumer', code: 'ABORTED' }),
+  retryable: false,
+})
 
 /** One model call whose config and adapter registration were resolved together. */
 export interface PreparedLlmCall {
@@ -1868,6 +1928,9 @@ export class LlmRuntime extends TypertRemoteService {
    * exists, so a sessionless request still demotes a dead route.
    */
   private noteRouteFailure(link: ModelChainLink, failure: LlmFailure): void {
+    // A refusal describes the request, not the route, so it carries no
+    // cooldown. Only the canonical code opts out; status and prose do not.
+    if (CHAIN_TERMINAL_CODES.has(failure.code)) return
     if (this.health.recordFailure(link.provider, link.model, failure.code, failure.providerRetryAfterMs)) {
       this.publishRouteHealth()
     }
@@ -1983,6 +2046,8 @@ export class LlmRuntime extends TypertRemoteService {
     // adjustment while links are being tried.
     const budgetEnd = performance.now() + CHAIN_BUDGET_MS
     let budgetElapsed = false
+    /** One cumulative report across links; per-link costs stay provider facts. */
+    let reportedUsage: TokenUsage | undefined
     const attempted: { link: ModelChainLink; failure: LlmFailure }[] = []
     // A provider condemned by AUTH or the free-tier gate stays condemned for
     // the rest of this request, even if a later different provider also fails.
@@ -1999,15 +2064,42 @@ export class LlmRuntime extends TypertRemoteService {
       // Manual iteration instead of an assignment from `yield*`: the packed
       // webworker deployment transform only accepts `yield*` in statement
       // position, and an expression here broke that build.
-      const linkStream = this.chainLink(options, prepared, link, Math.min(CHAIN_LINK_BUDGET_MS, remaining))
-      let linkStep = await linkStream.next()
-      while (linkStep.done !== true) {
-        yield linkStep.value
-        linkStep = await linkStream.next()
+      // The chain budget gates whether this link starts; a started link owns
+      // its full silence budget.
+      const controller = new AbortController()
+      const linkStream = this.chainLink(options, prepared, link, CHAIN_LINK_BUDGET_MS, controller)
+      let outcome: ChainLinkOutcome | undefined
+      try {
+        let linkStep = await linkStream.next()
+        while (linkStep.done !== true) {
+          yield linkStep.value
+          linkStep = await linkStream.next()
+        }
+        outcome = linkStep.value
+      } finally {
+        // A consumer that stops before the terminal chunk returns through this
+        // generator: abort first, then close. An adapter's finally can await
+        // the attempt signal, and awaiting its close before aborting deadlocks.
+        if (outcome === undefined) {
+          controller.abort(new LlmError('chain link closed by the consumer', 'ABORTED'))
+          await linkStream.return(CHAIN_LINK_CLOSED)
+        }
       }
-      const outcome = linkStep.value as ChainLinkOutcome | undefined
-      if (outcome === undefined) return
-      if (outcome.kind === 'answered') return
+      reportedUsage = addReportedUsage(reportedUsage, outcome.usage)
+      if (outcome.kind === 'answered') {
+        // A committed attempt that still ended in a failure (an empty answer,
+        // a cut, a provider error) is terminal here, but its route is no less
+        // unhealthy for later requests.
+        const terminal = outcome.finish.reason
+        if (terminal.kind === 'error' || terminal.kind === 'aborted') {
+          this.noteRouteFailure(link, withRoute(terminal.failure, linkRoute(link)))
+        }
+        // One cumulative report precedes the single terminal finish; the held
+        // per-link usage chunks never reach the consumer on their own.
+        if (reportedUsage !== undefined) yield { type: 'usage', usage: reportedUsage }
+        yield outcome.finish
+        return
+      }
       const failure = withRoute(outcome.failure, linkRoute(link))
       attempted.push({ link, failure })
       this.noteRouteFailure(link, failure)
@@ -2020,6 +2112,7 @@ export class LlmRuntime extends TypertRemoteService {
         if (outcome.retryable && nextCandidate !== undefined && budgetEnd - performance.now() <= 0) {
           budgetElapsed = true
         }
+        if (reportedUsage !== undefined) yield { type: 'usage', usage: reportedUsage }
         yield chainFailureChunk(chain.id, attempted, budgetElapsed)
         return
       }
@@ -2031,6 +2124,7 @@ export class LlmRuntime extends TypertRemoteService {
       writeChainEscalation(chain.id, candidate.position, link, nextCandidate.position, next, failure)
       step = nextStep - 1
     }
+    if (reportedUsage !== undefined) yield { type: 'usage', usage: reportedUsage }
     yield chainFailureChunk(chain.id, attempted, budgetElapsed)
   }
 
@@ -2118,59 +2212,119 @@ export class LlmRuntime extends TypertRemoteService {
 
   /**
    * Run one link through the normal dispatch path under its own pre-commit
-   * budget. A retryable failure that arrives before the first non-usage chunk
-   * is returned instead of yielded, so the consumer only ever sees the link
-   * that answered.
+   * silence budget. Adapter-reported raw activity restarts the clock. The first
+   * semantic non-usage chunk — including a block-start or a tool-call identity —
+   * commits the link, streams to the consumer immediately, stops the clock for
+   * good, and ends internal failover: reissuing after that output would
+   * duplicate a live generation or merge two models' blocks. Only a link that
+   * produced no semantic chunk may escalate.
+   *
+   * Usage chunks are held and returned so the chain emits one cumulative
+   * report immediately before its single terminal finish. A terminal finish is
+   * returned rather than yielded for the same ordering reason.
    */
   private async * chainLink(
     options: GenerateOptions,
     prepared: PreparedDispatch | undefined,
     link: ModelChainLink,
     budgetMs: number,
+    controller: AbortController,
   ): AsyncGenerator<StreamChunk, ChainLinkOutcome, void> {
     const caller = options.signal
-    const controller = new AbortController()
     const abortFromCaller = (): void => { controller.abort(caller?.reason) }
-    const timer = setTimeout(() => { controller.abort(new LlmError('chain link budget elapsed', 'TIMEOUT')) }, budgetMs)
+    let committed = false
+    let usage: TokenUsage | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    /** Start or restart the silence clock; only raw activity reaches this. */
+    const arm = (): void => {
+      clearTimeout(timer)
+      timer = setTimeout(() => {
+        controller.abort(new LlmError('chain link budget elapsed', 'TIMEOUT'))
+      }, budgetMs)
+    }
+    /** Stop the silence clock permanently at the first semantic chunk. */
+    const stopClock = (): void => {
+      clearTimeout(timer)
+    }
+    // A pulse arrives from the adapter on this attempt's exact signal, so a
+    // torn-down attempt's late bytes never restart a later attempt's clock.
+    const unsubscribe = onAttemptActivity(controller.signal, () => {
+      if (!committed) arm()
+    })
+    /** Release the clock, the caller bridge, and the activity subscription once. */
+    const disarm = (): void => {
+      clearTimeout(timer)
+      caller?.removeEventListener('abort', abortFromCaller)
+      unsubscribe()
+    }
+    arm()
     if (caller?.aborted === true) controller.abort(caller.reason)
     else caller?.addEventListener('abort', abortFromCaller, { once: true })
-    const usePrepared = prepared !== undefined
-      && prepared.registration.provider.id === link.provider
-      && prepared.config.model === link.model
-    let committed = false
+    const linkRequest = this.linkRequest(options, link, controller.signal)
+    // A prepared dispatch serves only the exact config it prepared. A link can
+    // change effort or sampling, so any mismatch dispatches fresh.
+    const usePrepared = prepared !== undefined && callConfigEquals(linkRequest, prepared.config)
     try {
-      for await (const chunk of this.adapterStream(
-        this.linkRequest(options, link, controller.signal),
-        usePrepared ? prepared : undefined,
-      )) {
+      for await (const chunk of this.adapterStream(linkRequest, usePrepared ? prepared : undefined)) {
         if (chunk.type === 'finish') {
-          if (chunk.reason.kind !== 'error' && chunk.reason.kind !== 'aborted') {
-            yield this.answeringFinish(chunk, options, link)
-            return { kind: 'answered' }
+          const finishChunk: Extract<StreamChunk, { type: 'finish' }> = chunk
+          if (finishChunk.reason.kind !== 'error' && finishChunk.reason.kind !== 'aborted') {
+            return {
+              kind: 'answered',
+              finish: this.answeringFinish(finishChunk, options, link),
+              ...usage === undefined ? {} : { usage },
+            }
           }
           // The link that ran names the failure, whether the chain leaves it
           // behind or the consumer sees it.
-          const failure = withRoute(chunk.reason.failure, linkRoute(link))
+          const failure = withRoute(finishChunk.reason.failure, linkRoute(link))
           const retryable = caller?.aborted !== true
             && !committed
-            && (chunk.reason.kind === 'aborted' || this.escalates(link, failure))
-          if (retryable) return { kind: 'failed', failure, retryable: true }
-          yield failure === chunk.reason.failure
-            ? chunk
-            : { ...chunk, reason: { ...chunk.reason, failure } }
-          return { kind: 'answered' }
+            && !CHAIN_TERMINAL_CODES.has(failure.code)
+            && (finishChunk.reason.kind === 'aborted' || this.escalates(link, failure))
+          // No semantic chunk reached the consumer: the next link starts from
+          // its own index 0 with the assembler untouched.
+          if (retryable) {
+            return { kind: 'failed', failure, retryable: true, ...usage === undefined ? {} : { usage } }
+          }
+          return {
+            kind: 'answered',
+            finish: failure === finishChunk.reason.failure
+              ? finishChunk
+              : { ...finishChunk, reason: { ...finishChunk.reason, failure } },
+            ...usage === undefined ? {} : { usage },
+          }
         }
-        if (chunk.type !== 'usage') {
-          // Only an actual answer commits a link: reasoning-only or empty text
-          // output must remain eligible for the next member. The timer still
-          // stops at the first activity, because a live generation owns its own
-          // clock even when it later turns out to be empty.
-          if (isAnswerContent(chunk)) committed = true
-          clearTimeout(timer)
+        if (chunk.type === 'usage') {
+          // Last report wins: an adapter's authoritative usage precedes its
+          // terminal event.
+          usage = chunk.usage
+          continue
+        }
+        // The first semantic non-usage chunk is a binding commitment: it
+        // streams immediately and ends internal failover.
+        if (!committed) {
+          committed = true
+          stopClock()
         }
         yield chunk
       }
-      if (!committed && caller?.aborted !== true) {
+      // The adapter ended without a terminal event.
+      if (caller?.aborted === true) {
+        // Cancellation is a terminal reason of its own, not a truncated
+        // provider stream: preserve the caller's reason text.
+        const normalized = normalizeLlmFailure(caller.reason)
+        const failure = withRoute(
+          normalized.code === 'UNKNOWN' ? { ...normalized, code: 'ABORTED' } : normalized,
+          linkRoute(link),
+        )
+        return {
+          kind: 'answered',
+          finish: { type: 'finish', reason: { kind: 'aborted', failure } },
+          ...usage === undefined ? {} : { usage },
+        }
+      }
+      if (!committed) {
         return {
           kind: 'failed',
           failure: withRoute({
@@ -2178,12 +2332,27 @@ export class LlmRuntime extends TypertRemoteService {
             code: STREAM_CUT_CODE,
           }, linkRoute(link)),
           retryable: true,
+          ...usage === undefined ? {} : { usage },
         }
       }
-      return { kind: 'answered' }
+      // A committed stream still needs one terminal chunk; STREAM_CUT keeps
+      // incomplete tool calls out of the message.
+      return {
+        kind: 'answered',
+        finish: {
+          type: 'finish',
+          reason: {
+            kind: 'error',
+            failure: withRoute({
+              message: `link ${link.provider}/${link.model} ended without a terminal finish`,
+              code: STREAM_CUT_CODE,
+            }, linkRoute(link)),
+          },
+        },
+        ...usage === undefined ? {} : { usage },
+      }
     } finally {
-      clearTimeout(timer)
-      caller?.removeEventListener('abort', abortFromCaller)
+      disarm()
     }
   }
 
@@ -2198,7 +2367,7 @@ export class LlmRuntime extends TypertRemoteService {
     chunk: Extract<StreamChunk, { type: 'finish' }>,
     options: GenerateOptions,
     link: ModelChainLink,
-  ): StreamChunk {
+  ): Extract<StreamChunk, { type: 'finish' }> {
     if (link.provider === options.provider && link.model === options.model) return chunk
     return { ...chunk, answeringLink: Object.freeze(linkRoute(link)) }
   }
@@ -2263,6 +2432,9 @@ export class LlmRuntime extends TypertRemoteService {
 
   /** Whether one link's pre-commit failure should move the chain to its next link. */
   private escalates(link: ModelChainLink, failure: LlmFailure): boolean {
+    // A refusal is terminal for this request in every policy mode, including
+    // `always`: another link would receive the same unchanged request.
+    if (CHAIN_TERMINAL_CODES.has(failure.code)) return false
     if (CHAIN_ESCALATION_CODES.has(failure.code)) return true
     const policy = this.adapters.get(link.provider)?.retryPolicy
     return policy?.mode === 'normal' && policy.retryableCodes.includes(failure.code)

@@ -20,6 +20,11 @@ const EMPTY_SCRIPT: StreamChunk[] = [
   { type: 'finish', reason: { kind: 'stop' } },
 ]
 
+/** A terminal failure before any semantic chunk: the chain may escalate. */
+const FAIL_SCRIPT: StreamChunk[] = [
+  { type: 'finish', reason: { kind: 'error', failure: { message: 'route down', code: 'SERVER' } } },
+]
+
 /** A completed `stop` carrying a real answer. */
 const ANSWER_SCRIPT: StreamChunk[] = [
   { type: 'block-start', index: 0, blockType: 'text' },
@@ -260,11 +265,11 @@ describe('route health in the model-group runtime', () => {
 
   it('tries every member in declared order while all are cooling', async () => {
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
-    const mounted = await mount({ a: EMPTY_SCRIPT, b: EMPTY_SCRIPT })
+    // Pre-commit failures may still escalate, so one request cools both members.
+    const mounted = await mount({ a: FAIL_SCRIPT, b: FAIL_SCRIPT })
     await drain(mounted.ctx.llm.stream(mounted.request()))
-    // The first request cooled both members, so the next is fully cooling; it
-    // still attempts them in the group's declared order.
     expect(mounted.ctx.llm.routeHealth().map(entry => entry.provider)).toEqual(['chain-a', 'chain-b'])
+    // A fully cooling group still attempts them in the group's declared order.
     await drain(mounted.ctx.llm.stream(mounted.request()))
     expect(mounted.a.calls).toHaveLength(2)
     expect(mounted.b.calls).toHaveLength(2)
@@ -281,14 +286,14 @@ describe('route health in the model-group runtime', () => {
     // Cooling primary demoted: the next request goes straight to the fallback.
     await drain(mounted.ctx.llm.stream(mounted.request()))
     expect(mounted.a.calls).toHaveLength(1)
-    expect(mounted.b.calls).toHaveLength(2)
+    expect(mounted.b.calls).toHaveLength(1)
 
     // A restart-equivalent clock move expires the cooldown; the primary leads again.
     vi.setSystemTime(DEFAULT_ROUTE_HEALTH_POLICY.emptyResponseCooldownMs + 1)
     expect(mounted.ctx.llm.routeHealth()).toEqual([])
     await drain(mounted.ctx.llm.stream(mounted.request()))
     expect(mounted.a.calls).toHaveLength(2)
-    expect(mounted.b.calls).toHaveLength(3)
+    expect(mounted.b.calls).toHaveLength(1)
   })
 
   it('announces a health change to status observers', async () => {
