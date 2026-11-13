@@ -23,6 +23,7 @@ function makeSession(id: string, events: Array<{ type: string; seq: number; data
     get seq() { return log.length },
     log,
     snapshotEvents: (from: unknown = 0, to?: number) => log.slice(Number(from) || 0, to ?? log.length),
+    eventAt: (seq: number) => log[Number(seq)],
     requestContext: () => undefined,
     surface: { nodes: [] as number[] },
     append: vi.fn((...args: unknown[]) => {
@@ -36,7 +37,7 @@ function makeSession(id: string, events: Array<{ type: string; seq: number; data
 /** Append N turns (2 structural events each) to a mock session. */
 function grow(session: ReturnType<typeof makeSession>, turns: number): void {
   for (let i = 0; i < turns; i++) {
-    session.log.push({ type: 'user/message', seq: session.log.length, data: { content: `query ${i}`, source: { kind: 'user' } } })
+    session.log.push({ type: 'user/message', seq: session.log.length, data: { content: `query ${i}`, source: { kind: 'user', participant: { kind: 'human', name: 'operator' } } } })
     session.log.push({ type: 'turn/end', seq: session.log.length, data: { reason: { kind: 'stop' }, turn: i + 1 } })
   }
 }

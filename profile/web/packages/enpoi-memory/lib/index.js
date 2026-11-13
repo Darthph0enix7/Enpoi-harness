@@ -208,7 +208,7 @@ function registerCompactionFacts(ctx, db, pipeline, config) {
         shadowedRange: { start: record.shadowedRange.start, end: record.shadowedRange.end },
         summaryRoute: `${record.provider}/${record.model}`
       });
-      const options = { origin: "compaction", trust: "verified_execution", provenance };
+      const options = { origin: "compaction", trust: "untrusted_external", provenance };
       await pipeline.intake(accepted, options);
     } catch (error) {
       warnOnce(key, error);
@@ -421,9 +421,16 @@ function makePipeline(db) {
     });
   }
   async function confirm(id) {
-    const row = get(id);
-    if (row === void 0) return null;
-    return graduate(id);
+    return mutex.run(() => {
+      let out = null;
+      txn(() => {
+        const row = get(id);
+        if (row === void 0 || row.state !== "tentative") return;
+        db.prepare(`UPDATE claims SET state = 'committed', source_trust = 'operator', committed_at = ? WHERE id = ?`).run(Date.now(), id);
+        out = get(id) ?? null;
+      });
+      return out;
+    });
   }
   async function rescind(id, reason) {
     return mutex.run(() => {
@@ -441,7 +448,44 @@ function makePipeline(db) {
     return mutex.run(() => {
       let n = 0;
       txn(() => {
-        const res = db.prepare(`UPDATE claims SET state = 'orphaned_cancelled' WHERE state = 'tentative'`).run();
+        const res = db.prepare(`
+          UPDATE claims SET state = 'orphaned_cancelled'
+          WHERE state = 'tentative'
+            AND CASE
+              WHEN json_valid(provenance) THEN
+                COALESCE(
+                  json_type(provenance) = 'object'
+                  AND (
+                    (
+                      origin = 'compaction'
+                      AND json_type(provenance, '$.source') = 'text'
+                      AND json_extract(provenance, '$.source') = 'compaction'
+                      AND json_type(provenance, '$.compactionId') = 'text'
+                      AND length(trim(
+                        json_extract(provenance, '$.compactionId'),
+                        char(9) || char(10) || char(11) || char(12) || char(13) || ' '
+                      )) > 0
+                    )
+                    OR
+                    (
+                      origin = 'keeper'
+                      AND json_type(provenance, '$.source') = 'text'
+                      AND json_extract(provenance, '$.source') = 'keeper'
+                      AND json_type(provenance, '$.sessionId') = 'text'
+                      AND length(trim(
+                        json_extract(provenance, '$.sessionId'),
+                        char(9) || char(10) || char(11) || char(12) || char(13) || ' '
+                      )) > 0
+                      AND json_type(provenance, '$.batchBasedOnSeq') = 'integer'
+                      AND json_extract(provenance, '$.batchBasedOnSeq') >= 0
+                      AND json_type(provenance, '$.settled') = 'true'
+                    )
+                  ),
+                  0
+                )
+              ELSE 0
+            END = 0
+        `).run();
         n = Number(res?.changes ?? 0);
       });
       return n;
@@ -467,6 +511,9 @@ function savedAt(claim) {
   const stamp = claim.committed_at ?? claim.created_at;
   const date = new Date(stamp);
   return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
+}
+function renderFact(fact) {
+  return /[\r\n]/.test(fact) ? JSON.stringify(fact) : fact;
 }
 function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(void 0)) {
   ctx.tools.register({
@@ -522,7 +569,8 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
     description: [
       "Search cross-session memory. Call it when starting a task, returning to a subsystem,",
       "or before re-deriving a decision: it returns saved facts plus the durable facts each compaction extracted,",
-      "each with id, category, origin (memory_save | compaction | keeper) and save date so you can weigh them.",
+      "each with id, category, origin (memory_save | compaction | keeper), save date, state, and trust so you can weigh them.",
+      "Tentative claims are unconfirmed; verify before relying on them.",
       "Nothing is injected \u2014 this is the only way memory reaches you. Compaction facts are scoped to the caller's workspace."
     ].join(" "),
     parameters: {
@@ -559,12 +607,12 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
         },
         required: ["facts"]
       },
-      // C4: `• <id> <category> [<origin> <savedAt>] — <fact>`.
+      // C4: `• <id> <category> [<origin> <savedAt>] state=<state> trust=<trust> — <fact>`.
       render: (_a, raw) => {
         const v = raw;
         return [{
           type: "text",
-          text: (Array.isArray(v.facts) ? v.facts.map((f) => `\u2022 ${f.id} ${f.category} [${f.origin} ${f.savedAt}] \u2014 ${f.fact}`) : []).join("\n") || "No matching memory."
+          text: (Array.isArray(v.facts) ? v.facts.map((f) => `\u2022 ${f.id} ${f.category} [${f.origin} ${f.savedAt}] state=${f.state} trust=${f.trust} \u2014 ${renderFact(f.fact)}`) : []).join("\n") || "No matching memory."
         }];
       }
     },
@@ -619,7 +667,7 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
   });
   ctx.tools.register({
     name: "memory_confirm",
-    description: "Explicitly confirm/graduate a tentative (untrusted) memory fact after verifying it. Operator action \u2014 use only on facts you or the operator verified. Facts saved with memory_save are already committed; confirmation applies to tentative chat-sourced claims.",
+    description: "Explicitly confirm a tentative (untrusted) memory fact. Commits it with the operator trust label and a fresh commit time; use only after verifying the fact. Facts saved with memory_save are already committed; confirmation applies to tentative claims.",
     parameters: {
       type: "object",
       properties: {

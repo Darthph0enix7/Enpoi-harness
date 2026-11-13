@@ -931,6 +931,31 @@ workspaceDesktop(): { name: string; available: boolean; fileManager: 'finder' | 
 @Remote('repairLog') repairLog(request: SessionRepairLogRequest): Promise<SessionRepairLogValue>
 
 /**
+ * Preview one single-line correction inside an active generated context
+ * message (compaction or Enpoi keeper checkpoint). Read-only: it validates a
+ * detached Session replay, captures the current head, and reveals the
+ * before/after derived-context hashes and minimal line diff only to the
+ * authenticated operator.
+ * @param request - Session, exact block/line hashes, replacement line, and optional expected head.
+ * @returns the one-use preview id, plan fingerprint, and detached before/after projections.
+ * @throws RemoteError `session/context-repair-invalid` for an ineligible target,
+ *   `session/context-repair-stale` when an expected head does not match.
+ */
+@Remote('contextRepairPreview') contextRepairPreview(request: SessionContextRepairPreviewRequest): Promise<SessionContextRepairPreviewValue>
+
+/**
+ * Apply one prepared context-repair preview under `Agent.runMaintenance` on
+ * an idle live root Session. The API returns an `applied` receipt only after
+ * the append and its durability barrier succeed; a committed append whose
+ * barrier or final receipt write fails is reported as a guarded `partial`
+ * with the prepared receipt path for explicit operator rollback.
+ * @param request - Session, one-use preview id, and stored plan fingerprint.
+ * @returns the applied or partial receipt and the derived context after the append.
+ * @throws RemoteError for invalid, stale, busy, unsupported-persistence, backup, or failed applies.
+ */
+@Remote('contextRepairApply') contextRepairApply(request: SessionContextRepairApplyRequest): Promise<SessionContextRepairApplyValue>
+
+/**
  * Resolve a file revert conflict (bridged to the enpoi-file-revert plugin).
  * @param request - session, conflictId, and the chosen resolution.
  * @returns acknowledgement that the resolution was accepted.
@@ -1315,6 +1340,27 @@ Source: [`packages/api/session-controller/src/types.ts`](../../packages/api/sess
 <a id="session-events"></a>
 
 ### `session/*` events
+
+<a id="sessioncontext-repaircommitted--emit"></a>
+
+#### `session/context-repair/committed` — emit
+
+One operator context-repair append committed under Agent maintenance. Fired synchronously before the repair durability barrier. This is optional process-local coordination, not a Session event. The current keeper does not need it: repair continuity reads the authoritative active keeper surface.
+
+```ts cordis-catalog
+/**
+ * One operator context-repair append committed under Agent maintenance.
+ * Fired synchronously before the repair durability barrier. This is
+ * optional process-local coordination, not a Session event. The current
+ * keeper does not need it: repair continuity reads the authoritative active
+ * keeper surface.
+ * @mode emit
+ * @param event - committed repair identity and exact replacement text.
+ */
+'session/context-repair/committed'(event: SessionContextRepairCommittedEvent): void
+```
+
+Source: [`packages/api/session-controller/src/types.ts`](../../packages/api/session-controller/src/types.ts)
 
 <a id="sessioncreated--emit"></a>
 

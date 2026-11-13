@@ -1,4 +1,6 @@
-# Proactive compaction with a bounded message budget.
+# Proactive compaction with a bounded message budget. The summary seat uses a
+# larger-context model so its 1,800-token cap still leaves input budget for the
+# source index instruction and the current tool schemas.
 
 - id: llm-deepseek
   config:
@@ -6,9 +8,14 @@
       - id: deepseek-v4-flash
         contextWindow: 8382
         maxTokens: 1000
+      - id: deepseek-v4-summary
+        contextWindow: 20000
 
 - id: compaction-basic
   config:
     thresholdRatio: 0.8
-    headroomTokens: 1800
+    headroomTokens: 1100
     retainTokens: 20
+    maxTokens: 1800
+    summarizationProvider: deepseek-official
+    summarizationModel: deepseek-v4-summary

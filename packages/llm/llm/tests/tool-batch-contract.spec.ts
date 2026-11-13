@@ -74,6 +74,7 @@ const adapters: readonly ContractAdapter[] = [
     extras: 0,
     convert: () => toPiContext(
       { provider: 'openai', model: 'gpt-4.1', messages: history },
+      { provider: 'openai', api: 'openai-responses', model: 'gpt-4.1' },
       {
         attachments: {
           readImageRequest: async (ref: Parameters<typeof requestImage>[0]) => requestImage(ref),

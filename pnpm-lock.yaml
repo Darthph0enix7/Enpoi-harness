@@ -1366,6 +1366,9 @@ importers:
       '@deepseek-ai/dsh-deque':
         specifier: workspace:*
         version: link:../../util/deque
+      '@deepseek-ai/dsh-home-paths':
+        specifier: workspace:*
+        version: link:../../util/home-paths
       '@deepseek-ai/schemastery':
         specifier: link:../../../vendor/schemastery
         version: link:../../../vendor/schemastery
@@ -1415,6 +1418,9 @@ importers:
       '@deepseek-ai/dsh-commands':
         specifier: workspace:*
         version: link:../../interaction/commands
+      '@deepseek-ai/dsh-compaction':
+        specifier: workspace:*
+        version: link:../../compaction/compaction
       '@deepseek-ai/dsh-credentials':
         specifier: workspace:*
         version: link:../../credentials/credentials
@@ -1448,6 +1454,9 @@ importers:
       '@deepseek-ai/dsh-session-persistence':
         specifier: workspace:*
         version: link:../../session/session-persistence
+      '@deepseek-ai/dsh-session-persistence-jsonl':
+        specifier: workspace:*
+        version: link:../../session/session-persistence-jsonl
       '@deepseek-ai/dsh-session-projection':
         specifier: workspace:*
         version: link:../../session/session-projection
@@ -1484,6 +1493,9 @@ importers:
       '@deepseek-ai/dsh-typert-registry':
         specifier: workspace:*
         version: link:../../typert/registry
+      '@deepseek-ai/dsh-user-approval':
+        specifier: workspace:*
+        version: link:../../interaction/user-approval
       '@deepseek-ai/dsh-util-crypto':
         specifier: workspace:*
         version: link:../../util/crypto

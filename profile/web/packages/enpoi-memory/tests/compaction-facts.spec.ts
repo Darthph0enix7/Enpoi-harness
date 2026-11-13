@@ -4,6 +4,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { openMemoryDb } from '../src/db'
 import { makePipeline, type Pipeline } from '../src/pipeline'
 import { registerCompactionFacts } from '../src/compaction-facts'
+import { searchMemory } from '../src/retriever'
 import { MEMORY_CONFIG_DEFAULTS, resolveMemoryConfig, type MemoryConfig } from '../src/config'
 
 let db: DatabaseSync
@@ -126,8 +127,9 @@ describe('compaction facts subscriber — C2 trigger matrix', () => {
     })
     for (const row of rows) {
       expect(row.origin).toBe('compaction')
-      expect(row.source_trust).toBe('verified_execution')
-      expect(row.state).toBe('committed')
+      expect(row.source_trust).toBe('untrusted_external')
+      expect(row.state).toBe('tentative')
+      expect(row.committed_at).toBeNull()
     }
     const decision = rows.find(row => row.fact.startsWith('Use SQLite'))!
     expect(decision.category).toBe('ARCHITECTURE')
@@ -244,6 +246,175 @@ describe('compaction facts subscriber — C2 trigger matrix', () => {
     emit('session/event', session('s2'), endEvent('c2'))
     await settle()
     expect(pipeline.list()).toHaveLength(0)
+  })
+})
+
+describe('compaction facts subscriber — conservative trust', () => {
+  it('keeps model-extracted claims tentative even when the fact quotes operator text', async () => {
+    register()
+    emit('session/event', session(), summaryEvent('c1', [
+      '## Durable Facts',
+      '- [fact] Operator said: "restart the collector with systemctl restart collector"',
+      '- [requirement] keep the memory tools enabled',
+    ].join('\n')))
+    emit('session/event', session(), endEvent())
+    await settle()
+
+    const rows = pipeline.list()
+    expect(rows).toHaveLength(2)
+    for (const row of rows) {
+      expect(row.source_trust).toBe('untrusted_external')
+      expect(row.state).toBe('tentative')
+    }
+    expect(rows.some(row => row.source_trust === 'verified_execution')).toBe(false)
+  })
+
+  it('keeps compaction rows visible to scoped search and operator intake authoritative', async () => {
+    register()
+    emit('session/event', session(), summaryEvent())
+    emit('session/event', session(), endEvent())
+    await settle()
+
+    const compactionRow = pipeline.list().find(row => row.fact.startsWith('Use SQLite'))!
+    expect(compactionRow.state).toBe('tentative')
+    const hits = searchMemory(db, 'SQLite WAL', 10, { cwd: '/work/ws', scopeCompaction: true })
+    expect(hits.map(hit => hit.id)).toContain(compactionRow.id)
+
+    const operatorRows = await pipeline.intake(
+      [{ fact: 'operator approved the restart window', category: 'ARCHITECTURE' }],
+      { origin: 'orchestrator', trust: 'operator' },
+    )
+    expect(operatorRows[0]!.state).toBe('committed')
+    expect(operatorRows[0]!.source_trust).toBe('operator')
+
+    const confirmed = await pipeline.confirm(compactionRow.id)
+    expect(confirmed?.state).toBe('committed')
+  })
+
+  it('does not replace or modify a verified_execution row persisted before this rule', async () => {
+    const legacySourceRecord = JSON.stringify({ source: 'compaction', sessionId: 'old', compactionId: 'old-c', cwd: '/work/ws' })
+    const before = await pipeline.intake(
+      [{ fact: 'The archive bucket is eu-central-3', category: 'PROJECT', tags: 'compaction fact' }],
+      { origin: 'compaction', trust: 'verified_execution', provenance: legacySourceRecord },
+    )
+    const original = before[0]!
+
+    register()
+    emit('session/event', session(), summaryEvent('c1', [
+      '## Durable Facts',
+      '- [fact] The archive bucket is eu-central-3',
+    ].join('\n')))
+    emit('session/event', session(), endEvent())
+    await settle()
+
+    const rows = pipeline.list()
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      id: original.id,
+      state: 'committed',
+      source_trust: 'verified_execution',
+      origin: 'compaction',
+      provenance: legacySourceRecord,
+      tags: 'compaction fact',
+      committed_at: original.committed_at,
+    })
+  })
+})
+
+describe('compaction facts subscriber — SQLite reopen durability', () => {
+  it('keeps a clean-end batch tentative and searchable across two boot reconciles, then confirms it', async () => {
+    register()
+    emit('session/event', session(), summaryEvent('c1'))
+    emit('session/event', session(), endEvent('c1'))
+    await settle()
+    const original = pipeline.list()
+    expect(original).toHaveLength(3)
+    expect(original.every(row => row.state === 'tentative' && row.source_trust === 'untrusted_external')).toBe(true)
+    const decision = original.find(row => row.fact.startsWith('Use SQLite'))!
+
+    db.close()
+    db = openMemoryDb()
+    pipeline = makePipeline(db)
+
+    expect(await pipeline.reconcileBoot()).toBe(0)
+    expect(await pipeline.reconcileBoot()).toBe(0)
+
+    const persisted = pipeline.get(decision.id)!
+    expect(persisted).toMatchObject({
+      state: 'tentative',
+      source_trust: 'untrusted_external',
+      committed_at: null,
+    })
+    const hits = searchMemory(db, 'SQLite WAL', 10, { cwd: '/work/ws', scopeCompaction: true })
+    expect(hits.map(hit => hit.id)).toContain(decision.id)
+
+    const confirmed = await pipeline.confirm(decision.id)
+    expect(confirmed).toMatchObject({
+      state: 'committed',
+      source_trust: 'operator',
+      origin: 'compaction',
+    })
+    expect(confirmed?.committed_at).not.toBeNull()
+  })
+
+  it('orphans unfinished work across a reopen while clean-end, operator, and tombstoned rows stay stable', async () => {
+    register()
+    emit('session/event', session(), summaryEvent('c1'))
+    emit('session/event', session(), endEvent('c1'))
+    await settle()
+    const settled = pipeline.list().find(row => row.fact.startsWith('Use SQLite'))!
+
+    // An aborted compaction drops its held batch: nothing to reconcile.
+    emit('session/event', session(), summaryEvent('c2', '## Durable Facts\n- [fact] aborted compaction unique fact'))
+    emit('session/event', session(), endEvent('c2', 'summarizer returned empty output'))
+    await settle()
+    expect(pipeline.list().some(row => row.fact === 'aborted compaction unique fact')).toBe(false)
+
+    const worker = await pipeline.intake(
+      [{ fact: 'unfinished worker fact', category: 'PROJECT' }],
+      { origin: 'worker:fixer', trust: 'untrusted_external' },
+    )
+    const operator = await pipeline.intake(
+      [{ fact: 'operator fact across reopen', category: 'ARCHITECTURE' }],
+      { origin: 'orchestrator', trust: 'operator' },
+    )
+    const doomed = await pipeline.intake(
+      [{ fact: 'tombstoned compaction fact', category: 'PROJECT' }],
+      {
+        origin: 'compaction',
+        trust: 'untrusted_external',
+        provenance: JSON.stringify({ source: 'compaction', sessionId: 's1', compactionId: 'c3', cwd: '/work/ws' }),
+      },
+    )
+    await pipeline.rescind(doomed[0]!.id, 'test')
+
+    db.close()
+    db = openMemoryDb()
+    pipeline = makePipeline(db)
+
+    expect(await pipeline.reconcileBoot()).toBe(1)
+    expect(await pipeline.reconcileBoot()).toBe(0)
+    expect(pipeline.get(settled.id)!.state).toBe('tentative')
+    expect(pipeline.get(worker[0]!.id)!.state).toBe('orphaned_cancelled')
+    expect(pipeline.get(operator[0]!.id)).toMatchObject({ state: 'committed', source_trust: 'operator' })
+    expect(pipeline.get(doomed[0]!.id)!.state).toBe('rescinded')
+  })
+
+  it('does not revive a clean settled batch already orphaned by an earlier boot (documented limitation)', async () => {
+    register()
+    emit('session/event', session(), summaryEvent('c1'))
+    emit('session/event', session(), endEvent('c1'))
+    await settle()
+    const row = pipeline.list().find(row => row.fact.startsWith('Use SQLite'))!
+
+    // Simulates a row orphaned by the pre-fix boot reconcile, then replayed.
+    db.prepare(`UPDATE claims SET state = 'orphaned_cancelled' WHERE id = ?`).run(row.id)
+    emit('session/event', session(), summaryEvent('c1'))
+    emit('session/event', session(), endEvent('c1'))
+    await settle()
+
+    expect(pipeline.get(row.id)!.state).toBe('orphaned_cancelled')
+    expect(pipeline.list()).toHaveLength(3)
   })
 })
 

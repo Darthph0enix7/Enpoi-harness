@@ -2,12 +2,14 @@ import { describe, expect, it, vi } from 'vitest'
 import { AttachmentId, ImageVariantId } from '@deepseek-ai/dsh-attachment'
 import type { AttachmentStore, ImageAttachmentRef, ImageRequestTarget, RequestImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { createToolResultMessage, createUserMessage, ToolCallId, CONTEXT_WINDOW_EXCEEDED_CODE, EMPTY_RESPONSE_CODE, ENTITLEMENT_GATED_CODE, ENTITLEMENT_GATED_EXPLANATION, FREE_TIER_GATED_CODE, FREE_TIER_GATED_EXPLANATION, createMessage } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm'
-import type { AssistantMessage, AssistantMessageEvent, Usage } from '@earendil-works/pi-ai'
+import type { ContentBlock, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { AssistantMessage, AssistantMessageEvent, Context as PiContext, Usage } from '@earendil-works/pi-ai'
 import { transformMessages } from '@earendil-works/pi-ai/api/transform-messages'
 import { getBuiltinModels } from '@earendil-works/pi-ai/providers/all'
-import { toPiContext } from '../src/context.ts'
+import { toPiContext as convertContext } from '../src/context.ts'
+import type { PiImageRequestContext } from '../src/context.ts'
 import { toPiReplayState } from '../src/replay.ts'
+import type { PiReplayTarget } from '../src/replay.ts'
 import { mapStopReason, mapUsage, providerErrorDetail, POLICY_REFUSAL_CODE, toStreamChunks } from '../src/stream.ts'
 
 function usage(input = 0, output = 0, cacheRead = 0, cacheWrite = 0): Usage {
@@ -43,6 +45,35 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
   const out: StreamChunk[] = []
   for await (const chunk of stream) out.push(chunk)
   return out
+}
+
+/** Test-only concrete target for the conversion cases in this spec. */
+function targetOf(options: GenerateOptions): PiReplayTarget {
+  return {
+    provider: options.provider,
+    api: options.provider === 'anthropic' ? 'anthropic-messages' : 'openai-completions',
+    model: options.model,
+  }
+}
+
+function toPiContext(
+  options: GenerateOptions,
+  images?: undefined,
+  onReplayDegrade?: (reason: string) => void,
+): PiContext
+function toPiContext(
+  options: GenerateOptions,
+  images: PiImageRequestContext,
+  onReplayDegrade?: (reason: string) => void,
+): Promise<PiContext>
+function toPiContext(
+  options: GenerateOptions,
+  images?: PiImageRequestContext,
+  onReplayDegrade?: (reason: string) => void,
+): PiContext | Promise<PiContext> {
+  return images === undefined
+    ? convertContext(options, targetOf(options), undefined, onReplayDegrade)
+    : convertContext(options, targetOf(options), images, onReplayDegrade)
 }
 
 function requestVersion(ref: ImageAttachmentRef): RequestImageAttachment {
@@ -208,8 +239,9 @@ describe('toPiContext', () => {
     const message = context.messages[0] as AssistantMessage
     expect(message.role).toBe('assistant')
     expect(message.stopReason).toBe('toolUse')
+    // No replay state proves a signature scope, so reasoning stays out of the
+    // request projection instead of becoming ordinary assistant text.
     expect(message.content).toEqual([
-      { type: 'thinking', thinking: 'hmm' },
       { type: 'text', text: 'calling' },
       { type: 'toolCall', id: 'c1', name: 'f', arguments: { a: 1 } },
     ])
@@ -357,7 +389,7 @@ describe('toPiContext', () => {
     expect((context.messages[0] as AssistantMessage).content).toEqual([{ type: 'text', text: 'visible' }])
   })
 
-  it('recombines durable content with pi-ai replay metadata across target providers and models', () => {
+  it('projects replay metadata across target providers and models as provider-neutral history', () => {
     const state = toPiReplayState(assistant({
       api: 'openai-responses',
       provider: 'openai',
@@ -390,18 +422,17 @@ describe('toPiContext', () => {
 
     expect(context.messages[0]).toMatchObject({
       role: 'assistant',
-      api: 'openai-responses',
+      api: 'dsh-foreign',
       provider: 'openai',
       model: 'gpt-5',
-      responseModel: 'gpt-5-2026-01-01',
-      responseId: 'resp_123',
       stopReason: 'toolUse',
       content: [
-        { type: 'thinking', thinking: 'private reasoning', thinkingSignature: 'think-sig', redacted: true },
-        { type: 'text', text: 'calling', textSignature: 'text-sig' },
-        { type: 'toolCall', id: 'c1', name: 'f', arguments: { a: 1 }, thoughtSignature: 'tool-sig' },
+        { type: 'text', text: 'calling' },
+        { type: 'toolCall', id: 'c1', name: 'f', arguments: { a: 1 } },
       ],
     })
+    expect(context.messages[0]).not.toHaveProperty('responseModel')
+    expect(context.messages[0]).not.toHaveProperty('responseId')
   })
 
   it.each(['high', ''])('preserves provider thinking level %j through durable projection and replay', (providerThinkingLevel) => {
@@ -470,8 +501,8 @@ describe('toPiContext', () => {
 
     expect(context.messages[0]).toMatchObject({
       role: 'assistant',
+      api: 'dsh-foreign',
       content: [
-        { type: 'thinking', thinking: 'private reasoning' },
         { type: 'text', text: 'calling' },
         { type: 'toolCall', id: 'c1', name: 'f', arguments: { a: 1 } },
       ],
@@ -558,7 +589,7 @@ describe('toPiContext', () => {
     expect(context.messages[0]).toMatchObject({
       role: 'assistant',
       api: 'dsh-foreign',
-      content: [{ type: 'thinking', thinking: 'done' }],
+      content: [],
     })
     expect(onDegrade).toHaveBeenCalledWith(expect.stringContaining('block 0 does not match assistant content'))
   })
@@ -687,15 +718,18 @@ describe('toStreamChunks', () => {
     }, undefined, onDegrade)
     expect(onDegrade).not.toHaveBeenCalled()
     expect(context.messages[0]).toMatchObject({
-      api: 'anthropic-messages', model: returnedModel, providerThinkingLevel: 'high',
+      api: 'anthropic-messages', model: requestedModel, providerThinkingLevel: 'high',
       content: native.content,
     })
     const catalog = getBuiltinModels('anthropic')
     const requested = catalog.find(model => model.id === requestedModel)
     const returned = catalog.find(model => model.id === returnedModel)
     if (requested === undefined || returned === undefined) throw new Error('missing Anthropic catalog model')
-    expect(transformMessages(context.messages, returned)[0]).toMatchObject({ content: native.content })
-    expect(transformMessages(context.messages, requested)[0]).toMatchObject({
+    // The request targets the requested id; the native response model remains
+    // metadata. A request against the actual target keeps the signatures,
+    // while pi-ai still applies cross-model conversion for the native id.
+    expect(transformMessages(context.messages, requested)[0]).toMatchObject({ content: native.content })
+    expect(transformMessages(context.messages, returned)[0]).toMatchObject({
       content: requestedModel === returnedModel ? native.content : [{ type: 'text', text: 'reason' }],
     })
   })

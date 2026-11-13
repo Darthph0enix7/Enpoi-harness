@@ -70,7 +70,7 @@ type MockSession = ReturnType<typeof makeSession>
 /** Seed the preamble every scenario shares: a user turn and an assistant call. */
 function seedTurn(session: MockSession): void {
   session.append('turn/start', { turn: 1 })
-  session.append('user/message', { content: 'run the batch', source: { kind: 'user' } }, { surfaceOp: 'append' })
+  session.append('user/message', { content: 'run the batch', source: { kind: 'user', participant: { kind: 'human', name: 'operator' } } }, { surfaceOp: 'append' })
   session.append('assistant/message', { turn: 1, step: 1, message: { content: [{ type: 'text', text: 'Running a tool.' }] } }, { surfaceOp: 'append' })
 }
 
@@ -131,8 +131,8 @@ const baseConfig: Config = {
   checkpointStaleHours: 24,
 }
 
-const BRIEF_A = '🎯 ACTIVE GOAL: first refresh\n- a checkpoint rendered while the tool batch is open'
-const BRIEF_B = '🎯 ACTIVE GOAL: second refresh\n- the newest deferred checkpoint text must win'
+const BRIEF_A = JSON.stringify({ items: [{ kind: 'operator_goal', text: 'first refresh', quote: 'run the batch', sourceSeq: 1 }] })
+const BRIEF_B = JSON.stringify({ items: [{ kind: 'operator_goal', text: 'second refresh', quote: 'run the batch', sourceSeq: 1 }] })
 
 /** ctx mock: a keeper-enabled settings reader, a scripted llm, and hooks. */
 function makeCtx(briefs: string[] = []) {
@@ -372,7 +372,7 @@ describe('enpoi-context-keeper deferred checkpoint commit (tool-batch producer f
       session.append('turn/start', { turn: 1 })
       session.append(
         'user/message',
-        createUserMessage({ content: [{ type: 'text', text: 'run the live batch' }], source: { kind: 'user' } }),
+        createUserMessage({ content: [{ type: 'text', text: 'run the live batch' }], source: { kind: 'user', participant: { kind: 'human', name: 'operator' } } }),
         { surfaceOp: 'append' },
       )
       const callSeq = session.append('tool/call', {

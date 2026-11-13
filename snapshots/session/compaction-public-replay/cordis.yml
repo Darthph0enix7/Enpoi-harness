@@ -1,0 +1,11 @@
+# Context-overflow composition used by the public-replay integrity session.
+
+- id: compaction-basic
+  name: '@deepseek-ai/dsh-compaction-basic'
+  config:
+    thresholdRatio: 0.99
+    retainTokens: 20
+    maxTokens: 32
+
+- insert:
+    - name: './assert-public-replay.mjs'

@@ -95,6 +95,7 @@ import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import type { PiAiModelCatalogFacts } from './catalog.ts'
 import type { ResolvedPiAiProviderProfile } from './config.ts'
 import { toPiContext } from './context.ts'
+import type { PiReplayTarget } from './replay.ts'
 import { createModels, getSupportedThinkingLevels } from './models.ts'
 import { captureResponse } from './response-capture.ts'
 import { toStreamChunks } from './stream.ts'
@@ -502,9 +503,13 @@ export class PiAiAdapter extends LlmAdapter {
     })
   }
 
-  private modelInfo(snapshot: PiAiSnapshot, provider: string, model: string): LlmResolvedModelInfo {
+  private modelInfo(
+    snapshot: PiAiSnapshot,
+    provider: string,
+    model: string,
+    resolvedModel: Model<Api> = this.modelOf(snapshot, provider, model),
+  ): LlmResolvedModelInfo {
     const profile = this.profileOf(snapshot, provider)
-    const resolvedModel = this.modelOf(snapshot, provider, model)
     const defaultLevel = describableReasoningLevel(resolvedModel, profile.reasoning)
     const facts = profile.catalogFacts.get(model) ?? defaultFacts([...resolvedModel.input])
     // Only a cap the deployment configured is a request default; the
@@ -540,9 +545,13 @@ export class PiAiAdapter extends LlmAdapter {
 
   override prepareCall(provider: string, model: string, _signal?: AbortSignal): Promise<PreparedAdapterCall> {
     const snapshot = this.current()
+    // Capture the exact resolved model with the prepared generation. The
+    // stream closure reuses it instead of resolving through a later snapshot,
+    // so replay identity and the SDK model cannot diverge.
+    const resolvedModel = this.modelOf(snapshot, provider, model)
     return Promise.resolve({
-      model: this.modelInfo(snapshot, provider, model),
-      stream: options => this.streamWithSnapshot(options, snapshot),
+      model: this.modelInfo(snapshot, provider, model, resolvedModel),
+      stream: options => this.streamWithSnapshot(options, snapshot, resolvedModel),
     })
   }
 
@@ -553,9 +562,14 @@ export class PiAiAdapter extends LlmAdapter {
   private async * streamWithSnapshot(
     options: GenerateOptions,
     snapshot: PiAiSnapshot,
+    preparedModel?: Model<Api>,
   ): AsyncIterable<StreamChunk> {
     if (options.stop !== undefined) {
       throw new LlmError('llm-pi-ai does not support GenerateOptions.stop', 'UNSUPPORTED_OPTION')
+    }
+    if (preparedModel !== undefined
+      && (preparedModel.provider !== options.provider || preparedModel.id !== options.model)) {
+      throw new LlmError('prepared pi-ai call was dispatched for a different provider or model', 'INVALID_PREPARED_CALL')
     }
     // One capture per stream call, taken before any await: the profile, the
     // model descriptor, and the collection all come from the same immutable
@@ -563,7 +577,16 @@ export class PiAiAdapter extends LlmAdapter {
     // mid-request builds a separate snapshot, so this request finishes under
     // the one it started with and the next call picks up the new one.
     const profile = this.profileOf(snapshot, options.provider)
-    const model = this.modelOf(snapshot, options.provider, options.model)
+    const model = preparedModel ?? this.modelOf(snapshot, options.provider, options.model)
+    // The SDK compares replay identity against this exact resolved Model, not
+    // the route key or request id. Capture it before any await so both the
+    // single-route and pooled paths use the same snapshot the prepared call
+    // captured.
+    const replayTarget: PiReplayTarget = {
+      provider: model.provider,
+      api: model.api,
+      model: model.id,
+    }
     const reasoning = resolveReasoningLevel(
       model,
       options.reasoningEffort ?? profile.reasoning,
@@ -628,8 +651,8 @@ export class PiAiAdapter extends LlmAdapter {
         this.config.onReplayDegrade?.({ provider: options.provider, model: options.model, reason })
       }
       const context = attachments === undefined
-        ? toPiContext(routedOptions, undefined, onReplayDegrade)
-        : await toPiContext({ ...routedOptions, signal: watchdog.signal }, {
+        ? toPiContext(routedOptions, replayTarget, undefined, onReplayDegrade)
+        : await toPiContext({ ...routedOptions, signal: watchdog.signal }, replayTarget, {
           attachments,
           resolveImageAccess: ref => this.config.resolveImageAccess?.(attachments, ref),
           maxRequestImageBytes: profile.maxRequestImageBytes,
@@ -725,7 +748,7 @@ export class PiAiAdapter extends LlmAdapter {
         return toStreamChunks(snapshot.models.streamSimple(model, context, {
           ...attemptOptions(apiKeyOverride, identityId, capture.fetch),
           signal,
-        }), model.contextWindow, signal, undefined, capture.facts)[Symbol.asyncIterator]()
+        }), model.contextWindow, signal, model.id, capture.facts)[Symbol.asyncIterator]()
       }
 
       // Pooled route: rotate across identities until one commits. The

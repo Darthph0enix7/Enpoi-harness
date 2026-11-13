@@ -71,7 +71,7 @@ The seam is built on one split and three commitments:
 - **Abstract contract, concrete backends.** The interface states what condensation does; providers own policy, retention, and summarization so each role evolves and swaps independently.
 - **Session and LLM vocabulary are part of the contract.** The operations act on a `Session` and the summary uses `ContentBlock`, so the Service Definition depends on `dsh-session` and `dsh-llm` despite the general Cordis-only guidance — a deliberate deviation recorded in the [compaction capability-seam Agent Note](../../../.agents/notes/implemented/feature/2026-06-18-compaction-capability-seam.md).
 - **The log-recorded bracket is the lock.** `compaction/start` is appended before summarization yields and `compaction/end` releases; every failure makes exactly one close attempt, and a failed close leaves the unmatched start as the intentional busy signal.
-- **The surface is mutated exactly once.** The summary rides on a `user/message` replacement inside the bracket; all `compaction/*` events stay log-only.
+- **A normal compaction run mutates the surface exactly once.** The summary rides on a `user/message` replacement inside the bracket; all `compaction/*` events stay log-only. A bounded checkpoint amendment is the only non-bracket surface write, and it is not a compaction run.
 
 ### Service API
 
@@ -95,6 +95,8 @@ The Service Definition exports `toolPairingBalancedBefore(session, seq)` and `to
 `SurfaceEventType` is a closed union — `user/message`, `assistant/message`, and `tool/result` require `surfaceOp`, and other events forbid it, so a `compaction/*` event cannot appear on the surface. A successful backend run instead brackets the operation in the log: it appends `compaction/start` (log-only) to acquire the lock, summarizes the range, appends the log-only `compaction/summary` record, replaces the selected span with one `user/message` carrying the summary — the only surface mutation — and appends `compaction/end` (log-only) to release the lock.
 
 The replacement sits inside the lock bracket, so a crash between `compaction/start` and `compaction/end` leaves a detectable orphaned lock rather than a `compaction/end` that falsely claims success. `deriveMessages()` renders the summary as a user-role message followed by the retained nodes; the shadowed events stay in the raw log, so replay is deterministic. The per-event payloads are enumerated in the [compaction subsystem reference](../../../docs/subsystems/compaction.md).
+
+A between-turn operator repair may amend exactly the one current checkpoint node without opening a compaction bracket. The amendment must cite its target in `sourceEventSeqs`, preserve that target's `compactionId` and `sourceCommandId`, and run with no open turn; the original checkpoint and its bracket history stay in the log. Preview planning replays the complete planned stream through `validateCompactionEvents` before any append. This reuses `user/message` with a `compact-checkpoint` source, adds no new event, schema field, or format version, and is not a fresh checkpoint: a new checkpoint still requires the full bracket. The runtime invariant and the released V4/V5 relationship parser enforce the same rule and must change together.
 
 ### Source map
 
@@ -160,6 +162,7 @@ These limits describe what condensation cannot do, regardless of which backend i
 - **Human command, not a model tool** — condensation is triggered by the `/compact` command and by automatic pressure; no model-facing compaction tool is registered.
 - **Some single-unit overflow is out of contract** — balanced summary compaction cannot split one indivisible unit. The optional pruning companion can still repair a closed tool pair when text-bearing tool-result bulk is removable; a large non-tool node or a tool unit whose non-prunable remainder is oversized cannot be compacted.
 - **An envelope that alone approaches the window is not surface-compaction work** — compaction shrinks derived history, never the system prompt, tools, or session prefix.
+- **An amended checkpoint log needs the amendment-aware reader** — older V4/V5 readers reject a checkpoint replacement with no open compaction as missing a matching `compaction/start`. Reopen such a log with a reader that includes the amendment rule; the [V3-to-V4 relationship contract](../../session/session-format-v3-to-v4/README.md#known-limitations-and-deferred-work) owns the compatibility note. No format bump or new acknowledgement is involved.
 
 <a id="dev-note"></a>
 ### Dev Note

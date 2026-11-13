@@ -3,17 +3,23 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write profile/web/packages/enpoi-context-keeper/README.md
 /dsh-enpoi-context-keeper:
-  en: 423014940c919cd1
-  zh: 9d26a5cbf44b3d19
+  en: 1d3556a55494cb27
+  zh: 6f366927c2524b11
 /dsh-enpoi-context-keeper/living-brief:
-  en: babd5226ad5641fb
-  zh: f5206f1db4f2a082
+  en: d8343de966047415
+  zh: 1cce695e536a5e1e
 /dsh-enpoi-context-keeper/state-checkpoints:
-  en: c8ace5481c6145b9
-  zh: 25f67aca7fcd615f
+  en: 6c5cf5a57b3dcc11
+  zh: 9edd35e46175fb93
+/dsh-enpoi-context-keeper/claims:
+  en: 68465549b7cf6703
+  zh: 2d12a7ee0beb7c89
 /dsh-enpoi-context-keeper/configuration:
-  en: ddfb3180a37e7969
-  zh: 1e4a22b80447af0b
+  en: 7d732367a9a52202
+  zh: fb0370c7045bf4a6
+/dsh-enpoi-context-keeper/known-limitations:
+  en: 0ae80d38a015c186
+  zh: 8fd892c053805213
 /dsh-enpoi-context-keeper/tests:
   en: 8b1a2bca483ccee0
   zh: 8b1a2bca483ccee0

@@ -27,8 +27,11 @@
   en: 751c5f2903fa8357
   zh: c632a898e73bbf0b
 /deepseek-ai-dsh-compaction-basic/use-this-package/what-happens-when-condensation-runs:
-  en: 49942ed4829048d0
-  zh: 08130ee0fba03adc
+  en: c6fbf906232820d2
+  zh: 81435af76a5be148
+/deepseek-ai-dsh-compaction-basic/use-this-package/public-only-summariser-replay:
+  en: cb2c73e867d736e8
+  zh: 4d1066bd02e2a6dc
 /deepseek-ai-dsh-compaction-basic/use-this-package/on-demand-condensation-with-compact:
   en: 4c5067e4c57ca708
   zh: 1c0e70319b9b2112
@@ -45,8 +48,8 @@
   en: 905a8b69485e553c
   zh: db9a7a002219640e
 /deepseek-ai-dsh-compaction-basic/understand-the-implementation/summarization-mechanics:
-  en: 63eb4b23588537f6
-  zh: 04872f6781ea9223
+  en: d7500414ab560373
+  zh: 2f6be8d652304846
 /deepseek-ai-dsh-compaction-basic/understand-the-implementation/the-region-transaction:
   en: f4330f6bff22d400
   zh: 46e16c51bb66a0f7
@@ -66,8 +69,8 @@
   en: 2e1148dd0f39a281
   zh: cd68c9fff63534af
 /deepseek-ai-dsh-compaction-basic/model-experience/conversation-history/what-the-model-sees:
-  en: 8d4325e6659bc314
-  zh: f80e69305b39f4a3
+  en: 67cd0190a20af3ba
+  zh: 9d27109199ec69c5
 /deepseek-ai-dsh-compaction-basic/model-experience/conversation-history/what-the-model-sees/conversation-checkpoint-preamble:
   en: 129d1eaba2519330
   zh: 3ec517bdc6cb5ae3
@@ -81,8 +84,8 @@
   en: 7169bd02a7a6c396
   zh: 7c62e3d4a97c73f7
 /deepseek-ai-dsh-compaction-basic/model-experience/auxiliary-summarizer-request/what-the-model-sees:
-  en: b7afcf1cc1c85c40
-  zh: a112c5b3984c31dc
+  en: 23cb949a766be780
+  zh: 816e93d9d3365a80
 /deepseek-ai-dsh-compaction-basic/model-experience/auxiliary-summarizer-request/what-the-model-sees/compaction-instruction-final-user-message:
   en: 39a362ee4890dbdb
   zh: 3b98699120b1548e
@@ -90,14 +93,14 @@
   en: 55aeb700e1ed1bbb
   zh: c9df8ebc526b05d9
 /deepseek-ai-dsh-compaction-basic/model-experience/auxiliary-summarizer-request/kv-cache-effect:
-  en: 2beeba6d64412935
-  zh: c0919ebe9fa98fe0
+  en: 9b5378855b60ea30
+  zh: 9edc4f9fa0600110
 /deepseek-ai-dsh-compaction-basic/model-experience/pinned-leading-messages-and-the-recall-footer:
   en: b588533901fff665
   zh: ba67cf36a391e006
 /deepseek-ai-dsh-compaction-basic/known-limitations-and-deferred-work:
-  en: 8d15881588e2cf67
-  zh: f2eae976e6f159c8
+  en: f00da5364672197e
+  zh: 140edac01be6bb8e
 /deepseek-ai-dsh-compaction-basic/known-limitations-and-deferred-work/dev-note:
   en: 61da31cddf63645b
   zh: da27fd65faca0505

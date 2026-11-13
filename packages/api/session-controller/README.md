@@ -16,6 +16,7 @@ English | [中文](README.zh.md)
 - [Client references](#client-references)
 - [Session media references](#session-media-references)
 - [Session projection backfill](#session-projection-backfill)
+- [Operator context repair](#operator-context-repair)
 - [Configuration](#configuration)
 - [Model Experience](#model-experience)
 - [Known Limitations and Deferred Work](#known-limitations-and-deferred-work)
@@ -94,6 +95,29 @@ A successful `selectModel` response acknowledges the Session-local selection wit
 
 -----
 
+<a id="operator-context-repair"></a>
+## Operator context repair
+
+`contextRepairPreview` and `contextRepairApply` let the authenticated operator correct one line inside an active model-generated context message without rewriting durable history, appending a generic event, or exposing a model tool. Eligible targets are active surface `user/message` nodes whose source is a compaction checkpoint or an Enpoi keeper checkpoint. Every preview and apply addresses the Session through the Gateway's authenticated operator surface; neither operation calls a model. The wire contracts are `SessionContextRepairTarget`, `SessionContextRepairPreviewRequest`/`Value`, `SessionContextRepairApplyRequest`/`Value`, `SessionContextRepairReceipt`, and the process-local `SessionContextRepairCommittedEvent`; the opaque `ContextRepairPreviewId` and `ContextRepairFingerprint` bind one apply to its preview.
+
+A compaction-checkpoint repair is a bounded amendment, not generic mutation: it runs between turns, replaces exactly the one current checkpoint node, preserves that node's `compactionId` and `sourceCommandId`, and cites it in `sourceEventSeqs`. It opens no compaction bracket and creates no fresh checkpoint; a new checkpoint still requires the full `compaction/start` → summary → replacement → `compaction/end` transaction. The amendment reuses the existing `user/message` and `compact-checkpoint` vocabulary, adds no event type, schema field, or format version, and the original events remain in the log.
+
+### Preview the exact change
+
+`contextRepairPreview` is read-only. It takes the Session id, the target surface seq, a zero-based text-block index, SHA-256 digests of the complete block and the unique old line, and one replacement line. The target must be the active surface node, its block text must match the supplied digest, the old line must occur exactly once and be non-empty, and the replacement must be one non-empty line without CR, LF, NEL, or a Unicode line separator. The default replacement bound is 16,384 code units.
+
+The preview replays the log into a detached Session and validates that the replacement lands in the same surface position without moving any other node. It also replays the complete current log plus the proposed event through `validateCompactionEvents` with the Session's message projections, so a planned compaction stream that violates its invariants is refused before an append or preview token exists. It returns an opaque one-use preview id, a plan fingerprint, the captured head seq and SHA-256, before/after derived-context projections (active seqs plus role, source kind, and content digest per message, never message bodies), and the minimal old/replacement line diff. A supplied `expectedHeadSeq`/`expectedHeadSha256` pair must match the current head; they are required together. The plan lives in process memory for 5 minutes by default, with at most 32 retained plans, and any unknown, expired, or already consumed preview is refused before a write.
+
+### Apply under Agent maintenance
+
+`contextRepairApply` accepts only the Session, preview id, and fingerprint; the replacement text comes from the stored plan. The token is consumed before any write, one apply per Session may be in flight, and the live root Agent must be idle with no pending inbox work, approval, or running descendant. A subagent Session is refused. Apply runs under `Agent.runMaintenance`, revalidates the same head, target block, target source, and active surface, and rechecks all of those after the pre-repair flush.
+
+Before the append, the controller resolves the canonical persistence artifact, verifies the provider-decoded head seq and SHA-256 against the preview, and copies the artifact into a private owner-only backup directory. The backup root defaults to `$DSH_HOME/backups/context-repair`; it must be absolute or `~/`-prefixed, must not be the harness home itself, and must not overlap the Session log tree. The copy uses a no-follow source descriptor, a 256 MiB default byte bound, and before/after device, inode, size, and modification-time checks. A `prepared` receipt records the old and replacement text plus the artifact identity before the append.
+
+The append is one `user/message` with `surfaceOp: { op: 'replace', startSeq: target, endSeq: target }`, so exactly one generated node is replaced and the cited source chain stays in `sourceEventSeqs`. After the append, the controller emits an optional process-local `session/context-repair/committed` notification. It is not a Session event and adds no log record; the current keeper does not require it because every wake and cache hit reads the authoritative active keeper message. The controller then verifies the model surface is unchanged, performs the post-append durability flush, and writes an `applied` receipt. A committed append whose durability barrier fails returns status `partial` with the reason and the prepared receipt path for explicit operator rollback; a failed `applied` receipt write returns `applied` with a warning. The response never claims atomicity across the append, flush, and receipt writes.
+
+Failures use stable codes: `session/context-repair-invalid` for an ineligible target or consumed preview, `session/context-repair-stale` when the expected or decoded head changed, `session/context-repair-busy` while another apply or the Agent owns the Session, `session/context-repair-unsupported-persistence` when the mounted backend cannot expose a canonical artifact, `session/context-repair-backup-failed` before any append, and `session/context-repair-failed` after an accepted plan. Request-snapshot semantics do not change: `requestSnapshot` still reports the last main model request, and a repair affects derived context only after a later request is sent.
+
 <a id="configuration"></a>
 ## Configuration
 
@@ -104,6 +128,12 @@ A successful `selectModel` response acknowledges the Session-local selection wit
 | `sessionFollowBufferMaxBytes` | 8 MiB | Estimated retained bytes one follow generation accepts before a resync |
 | `sessionFollowResume` | true | Whether a Client-held follow cursor may be answered with a durable suffix instead of the full snapshot |
 | `sessionFollowResumeMaxEvents` | 2048 | Dense durable events one resumed follow opening may carry before falling back to the full snapshot |
+| `contextRepairBackupRoot` | `$DSH_HOME/backups/context-repair` | Private backup and receipt directory; absolute or `~/` only, never the harness home itself, and never overlapping a Session log tree |
+| `contextRepairPreviewTtlMs` | 300000 | Lifetime of one prepared context-repair preview plan |
+| `contextRepairPreviewMaxPlans` | 32 | Maximum prepared context-repair plans retained per controller |
+| `contextRepairMaxArtifactBytes` | 268435456 | Maximum canonical artifact bytes one repair backup copies |
+| `contextRepairMaxReplacementChars` | 16384 | Maximum code units in one replacement line |
+| `contextRepairMaxPreviewBytes` | 524288 | Maximum serialized preview bytes returned to the operator |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-api-session-controller) is the exhaustive source for accepted fields and their JSDoc.
 
@@ -135,6 +165,9 @@ No direct effect; model requests remain owned by the Agent and LLM packages.
 - Iteration restore (`revertIterationRestore`) requires a live Agent; cold restore without one is deferred. The ◀ x/y ▶ preview carries text only — media stays referenced by attachment id.
 - Log rotation/GC is not implemented. Any future trim, rotation, or prune must compute `computeRetentionPins` over the durable log and route every candidate removal through `assertRemovalSafe` / `retentionGuardOf`; the guard refuses pinned `revert/iteration` and `revert/branch` fields, every live surface node's `sourceEventSeqs`, every `image/offload` decision and its targets, every `compaction/summary.shadowedSeqs`, every compaction checkpoint citation, and every `revert/state` boundary target. No cleanup ships without routing through it (DESIGN §4.10/§1.4 I1).
 - `verifyLog` and `repairLog` operate on the derived view: repair rebuilds folds and neutralizes dangling references there, but durable events are never rewritten, so a repaired Session still reports its original corruption to the next `verifyLog`.
+- Context repair supports one generated-context line in one active surface node. It requires a live idle root Agent and a persistence provider that exposes a canonical artifact (`resolveCurrentLog`); a backend without that method reports `session/context-repair-unsupported-persistence`.
+- Context-repair apply fencing, preview plans, and the committed notification are process-local. A second process writing the same Session is caught by the head checks, not by a shared repair lock. The notification is optional and unused by the current keeper: repair continuity comes from the authoritative active keeper surface, so no listener or version bump is required. A raw `state/checkpoint` display such as Watchtower State can lag until the next genuine refresh; that is display lag only.
+- An amended compaction-checkpoint log needs a reader with the matching amendment rule. Older V4/V5 readers reject it as a checkpoint replacement without a matching `compaction/start`; reopen with the current reader. The [V3-to-V4 relationship contract](../../session/session-format-v3-to-v4/README.md#known-limitations-and-deferred-work) owns the compatibility note.
 
 
 <a id="dev-note"></a>

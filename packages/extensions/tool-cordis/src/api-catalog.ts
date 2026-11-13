@@ -2161,6 +2161,20 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the repair receipt and verification of the repaired view.',
       },
       {
+        signature: '@Remote(\'contextRepairPreview\') contextRepairPreview(request: SessionContextRepairPreviewRequest): Promise<SessionContextRepairPreviewValue>',
+        description: 'Preview one single-line correction inside an active generated context message (compaction or Enpoi keeper checkpoint). Read-only: it validates a detached Session replay, captures the current head, and reveals the before/after derived-context hashes and minimal line diff only to the authenticated operator.',
+        parameters: [{ name: 'request', description: 'Session, exact block/line hashes, replacement line, and optional expected head.' }],
+        returns: 'the one-use preview id, plan fingerprint, and detached before/after projections.',
+        throws: ['RemoteError `session/context-repair-invalid` for an ineligible target, `session/context-repair-stale` when an expected head does not match.'],
+      },
+      {
+        signature: '@Remote(\'contextRepairApply\') contextRepairApply(request: SessionContextRepairApplyRequest): Promise<SessionContextRepairApplyValue>',
+        description: 'Apply one prepared context-repair preview under `Agent.runMaintenance` on an idle live root Session. The API returns an `applied` receipt only after the append and its durability barrier succeed; a committed append whose barrier or final receipt write fails is reported as a guarded `partial` with the prepared receipt path for explicit operator rollback.',
+        parameters: [{ name: 'request', description: 'Session, one-use preview id, and stored plan fingerprint.' }],
+        returns: 'the applied or partial receipt and the derived context after the append.',
+        throws: ['RemoteError for invalid, stale, busy, unsupported-persistence, backup, or failed applies.'],
+      },
+      {
         signature: '@Remote(\'resolveFileConflict\') resolveFileConflict(request: SessionResolveFileConflictRequest): Promise<SessionResolveFileConflictValue>',
         description: 'Resolve a file revert conflict (bridged to the enpoi-file-revert plugin).',
         parameters: [{ name: 'request', description: 'session, conflictId, and the chosen resolution.' }],
@@ -4455,6 +4469,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'record', description: 'the candidate record, already the coordinator\'s own deep copy; listeners return a (possibly new) record and must not mutate it.' }],
   },
   {
+    name: 'session/context-repair/committed',
+    mode: 'emit',
+    signature: '\'session/context-repair/committed\'(event: SessionContextRepairCommittedEvent): void',
+    summary: 'One operator context-repair append committed under Agent maintenance.',
+    description: 'One operator context-repair append committed under Agent maintenance. Fired synchronously before the repair durability barrier. This is optional process-local coordination, not a Session event. The current keeper does not need it: repair continuity reads the authoritative active keeper surface.',
+    parameters: [{ name: 'event', description: 'committed repair identity and exact replacement text.' }],
+  },
+  {
     name: 'session/created',
     mode: 'emit',
     signature: '\'session/created\'(this: Scoped<Session>, session: Session): void',
@@ -5137,6 +5159,22 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ContentBlockType',
     declaration: 'export type ContentBlockType = keyof ContentBlockMap;',
+  },
+  {
+    name: 'ContextRepairFingerprint',
+    declaration: 'export type ContextRepairFingerprint = Branded<\'context-repair-fingerprint\'>;',
+  },
+  {
+    name: 'ContextRepairPreviewId',
+    declaration: 'export type ContextRepairPreviewId = Branded<\'context-repair-preview-id\'>;',
+  },
+  {
+    name: 'ContextRepairProjection',
+    declaration: 'export interface ContextRepairProjection {\n    readonly headSeq: number;\n    readonly activeSeqs: readonly number[];\n    readonly messages: readonly ContextRepairProjectionMessage[];\n    readonly sha256: string;\n}',
+  },
+  {
+    name: 'ContextRepairProjectionMessage',
+    declaration: 'export interface ContextRepairProjectionMessage {\n    readonly seq: number;\n    readonly role: string;\n    readonly sourceKind: string;\n    readonly sha256: string;\n}',
   },
   {
     name: 'ContinuableCreateRequest',
@@ -7053,6 +7091,34 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'SessionCancelValue',
     declaration: 'export interface SessionCancelValue {\n    readonly accepted: true;\n}',
+  },
+  {
+    name: 'SessionContextRepairApplyRequest',
+    declaration: 'export interface SessionContextRepairApplyRequest {\n    readonly sessionId: SessionId;\n    readonly previewId: ContextRepairPreviewId;\n    readonly fingerprint: ContextRepairFingerprint;\n}',
+  },
+  {
+    name: 'SessionContextRepairApplyValue',
+    declaration: 'export interface SessionContextRepairApplyValue {\n    readonly status: \'applied\' | \'partial\';\n    readonly receipt: SessionContextRepairReceipt;\n    readonly next: ContextRepairProjection;\n}',
+  },
+  {
+    name: 'SessionContextRepairCommittedEvent',
+    declaration: 'export interface SessionContextRepairCommittedEvent {\n    readonly sessionId: SessionId;\n    readonly targetSeq: number;\n    readonly sourceKind: \'compact-checkpoint\' | \'enpoi-keeper\';\n    readonly oldLine: string;\n    readonly replacementLine: string;\n    readonly oldBlockText: string;\n    readonly newBlockText: string;\n    readonly preparedReceiptPath: string;\n    readonly appendedSeq: number;\n    readonly headAfter: {\n        readonly seq: number;\n        readonly sha256: string;\n    };\n}',
+  },
+  {
+    name: 'SessionContextRepairPreviewRequest',
+    declaration: 'export interface SessionContextRepairPreviewRequest {\n    readonly sessionId: SessionId;\n    readonly target: SessionContextRepairTarget;\n    readonly expectedHeadSeq?: number;\n    readonly expectedHeadSha256?: string;\n}',
+  },
+  {
+    name: 'SessionContextRepairPreviewValue',
+    declaration: 'export interface SessionContextRepairPreviewValue {\n    readonly previewId: ContextRepairPreviewId;\n    readonly fingerprint: ContextRepairFingerprint;\n    readonly sessionId: SessionId;\n    readonly head: {\n        readonly seq: number;\n        readonly sha256: string;\n    };\n    readonly target: {\n        readonly seq: number;\n        readonly sourceKind: \'compact-checkpoint\' | \'enpoi-keeper\';\n        readonly blockIndex: number;\n        readonly blockSha256: string;\n        readonly oldLineSha256: string;\n    };\n    readonly before: ContextRepairProjection;\n    readonly after: ContextRepairProjection;\n    readonly diff: {\n        readonly targetSeq: number;\n        readonly blockIndex: number;\n        readonly oldLine: string;\n        readonly replacementLine: string;\n        readonly oldBlockSha256: string;\n        readonly newBlockSha256: string;\n        readonly surfaceOp: {\n            readonly op: \'replace\';\n            readonly startSeq: number;\n            readonly endSeq: number;\n        };\n        readonly sourceEventSeqs: readonly number[];\n    };\n}',
+  },
+  {
+    name: 'SessionContextRepairReceipt',
+    declaration: 'export interface SessionContextRepairReceipt {\n    readonly status: \'applied\' | \'partial\';\n    readonly directory: string;\n    readonly preparedPath: string;\n    readonly finalPath?: string;\n    readonly backupPath: string;\n    readonly backupSha256: string;\n    readonly artifactPath: string;\n    readonly artifactSha256: string;\n    readonly artifactSizeBytes: number;\n    readonly artifactDev: number;\n    readonly artifactIno: number;\n    readonly artifactMtimeMs: number;\n    readonly artifactMode: number;\n    readonly logicalHead: {\n        readonly seq: number;\n        readonly sha256: string;\n    };\n    readonly headBefore: {\n        readonly seq: number;\n        readonly sha256: string;\n    };\n    readonly appendedSeq: number;\n    readonly headAfter: {\n        readonly seq: number;\n        readonly sha256: string;\n    };\n    readonly reason?: string;\n    readonly warning?: string;\n}',
+  },
+  {
+    name: 'SessionContextRepairTarget',
+    declaration: 'export interface SessionContextRepairTarget {\n    readonly seq: number;\n    readonly blockIndex: number;\n    readonly expectedBlockSha256: string;\n    readonly expectedOldLineSha256: string;\n    readonly replacementLine: string;\n}',
   },
   {
     name: 'SessionControlBaseline',

@@ -16,6 +16,7 @@ import type {
 } from '@deepseek-ai/dsh-attachment'
 import type { Context as PiContext, ImageContent, Message as PiMessage, TextContent, Tool as PiTool } from '@earendil-works/pi-ai'
 import { toPiAssistant } from './replay.ts'
+import type { PiReplayTarget } from './replay.ts'
 import { requestImageDimensions } from '@deepseek-ai/dsh-attachment'
 import { DEFAULT_REQUEST_IMAGE_MAX_BYTES, DEFAULT_REQUEST_IMAGE_PIXEL_BUDGET } from './config.ts'
 
@@ -270,9 +271,10 @@ function appendAssistant(
   message: Extract<Message, { role: 'assistant' }>,
   messages: PiMessage[],
   toolNames: Map<ToolCallId, string>,
+  target: PiReplayTarget,
   onReplayDegrade?: (reason: string) => void,
 ): void {
-  const assistant = toPiAssistant(message, onReplayDegrade)
+  const assistant = toPiAssistant(message, target, onReplayDegrade)
   for (const block of assistant.content) {
     if (block.type === 'toolCall') toolNames.set(brandString<ToolCallId>(block.id), block.name)
   }
@@ -284,6 +286,7 @@ function appendSystemOrAssistant(
   message: RequestMessage,
   messages: PiMessage[],
   toolNames: Map<ToolCallId, string>,
+  target: PiReplayTarget,
   onReplayDegrade?: (reason: string) => void,
 ): boolean {
   if (message.role === 'system') {
@@ -293,13 +296,17 @@ function appendSystemOrAssistant(
     return true
   }
   if (message.role === 'assistant') {
-    appendAssistant(message, messages, toolNames, onReplayDegrade)
+    appendAssistant(message, messages, toolNames, target, onReplayDegrade)
     return true
   }
   return false
 }
 
-function textOnlyContext(options: GenerateOptions, onReplayDegrade?: (reason: string) => void): PiContext {
+function textOnlyContext(
+  options: GenerateOptions,
+  target: PiReplayTarget,
+  onReplayDegrade?: (reason: string) => void,
+): PiContext {
   assertSupportedHistory(options.messages)
   const split = splitSystemPrompt(options)
   const toolNames = new Map<ToolCallId, string>()
@@ -311,7 +318,7 @@ function textOnlyContext(options: GenerateOptions, onReplayDegrade?: (reason: st
     if (contentHasFile(message.content)) {
       throw new LlmError('pi-ai file conversion requires the durable attachment service', 'UNSUPPORTED_CONTENT')
     }
-    if (appendSystemOrAssistant(message, messages, toolNames, onReplayDegrade)) continue
+    if (appendSystemOrAssistant(message, messages, toolNames, target, onReplayDegrade)) continue
     if (message.role === 'tool') {
       messages.push(toolResultOf(message, toolNames, flattenText(message)))
       continue
@@ -352,6 +359,7 @@ function requestImageTarget(ref: ImageAttachmentRef, budget: PiImageRequestBudge
  * Convert text-only harness history to a synchronous pi-ai Context. Tool
  * result names are recovered from preceding assistant tool calls.
  * @param options - the harness request; `options.system`, else a leading `system` message, maps to pi-ai's single `systemPrompt` slot.
+ * @param target - exact provider/API/model the SDK will receive.
  * @param images - absent; selects the synchronous conversion.
  * @param onReplayDegrade - forwarded to {@link toPiAssistant} for each assistant message.
  * @returns the pi-ai context; `tools` is omitted when the request declares none.
@@ -359,6 +367,7 @@ function requestImageTarget(ref: ImageAttachmentRef, budget: PiImageRequestBudge
  */
 export function toPiContext(
   options: GenerateOptions,
+  target: PiReplayTarget,
   images?: undefined,
   onReplayDegrade?: (reason: string) => void,
 ): PiContext
@@ -370,28 +379,32 @@ export function toPiContext(
  * `maxRequestImageBytes`, the call fails with `IMAGE_OFFLOAD_REQUIRED` naming
  * how many more oldest occurrences must be offloaded.
  * @param options - the harness request; `options.system`, else a leading `system` message, maps to pi-ai's single `systemPrompt` slot.
+ * @param target - exact provider/API/model the SDK will receive.
  * @param images - attachment provider, current path resolver, and request limits.
  * @param onReplayDegrade - forwarded to {@link toPiAssistant} for each assistant message.
  * @returns the asynchronously resolved pi-ai context.
  */
 export function toPiContext(
   options: GenerateOptions,
+  target: PiReplayTarget,
   images: PiImageRequestContext,
   onReplayDegrade?: (reason: string) => void,
 ): Promise<PiContext>
 export function toPiContext(
   options: GenerateOptions,
+  target: PiReplayTarget,
   images?: PiImageRequestContext,
   onReplayDegrade?: (reason: string) => void,
 ): PiContext | Promise<PiContext> {
   return images === undefined
-    ? textOnlyContext(options, onReplayDegrade)
-    : toPiContextWithImages(options, images, onReplayDegrade)
+    ? textOnlyContext(options, target, onReplayDegrade)
+    : toPiContextWithImages(options, images, target, onReplayDegrade)
 }
 
 async function toPiContextWithImages(
   options: GenerateOptions,
   images: PiImageRequestContext,
+  target: PiReplayTarget,
   onReplayDegrade?: (reason: string) => void,
 ): Promise<PiContext> {
   const { attachments, resolveImageAccess, maxRequestImageBytes } = images
@@ -426,7 +439,7 @@ async function toPiContextWithImages(
   const messages: PiMessage[] = []
 
   for (const message of exactMessages) {
-    if (appendSystemOrAssistant(message, messages, toolNames, onReplayDegrade)) continue
+    if (appendSystemOrAssistant(message, messages, toolNames, target, onReplayDegrade)) continue
     if (message.role === 'tool') {
       messages.push(toolResultOf(message, toolNames, userContent(message.content, requestImages, resolveImageAccess, nativeTokens)))
       continue

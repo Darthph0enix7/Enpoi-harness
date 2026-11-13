@@ -10,9 +10,10 @@
  * reports no route but no failure still persists, because a clean end proves
  * its checkpoint committed.
  *
- * Claims land with `origin: 'compaction'` and `trust: 'verified_execution'`
- * (C3): a checkpoint that committed is executed evidence, but it is not
- * operator authority and must not outrank `memory_save`. Provenance records the
+ * Claims land with `origin: 'compaction'` and `trust: 'untrusted_external'`
+ * (C3): a committed checkpoint proves the summarization ran, not that the
+ * model-extracted claims are true. They stay `tentative` until an operator
+ * confirms them, and they never outrank `memory_save`. The source record stores the
  * workspace cwd so `memory_search` can scope these rows to the caller's
  * workspace, and each fact passes the secret guard plus a FTS/Jaccard
  * near-duplicate filter so three consecutive consolidated compactions cannot
@@ -105,7 +106,7 @@ export function registerCompactionFacts(
     }
   }
 
-  /** One batch write: secret guard → near-duplicate filter → intake (C3). */
+  /** One batch write: secret guard → near-duplicate filter → tentative intake (C3). */
   const write = async (record: HeldCompaction): Promise<void> => {
     const key = keyOf(record.sessionId, record.compactionId)
     try {
@@ -131,7 +132,9 @@ export function registerCompactionFacts(
         shadowedRange: { start: record.shadowedRange.start, end: record.shadowedRange.end },
         summaryRoute: `${record.provider}/${record.model}`,
       })
-      const options: IntakeOptions = { origin: 'compaction', trust: 'verified_execution', provenance }
+      // The summary is model-extracted text, not execution evidence: the
+      // pipeline records untrusted_external claims as tentative for review.
+      const options: IntakeOptions = { origin: 'compaction', trust: 'untrusted_external', provenance }
       await pipeline.intake(accepted, options)
     } catch (error: unknown) {
       warnOnce(key, error)

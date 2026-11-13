@@ -35,6 +35,10 @@ import SessionController from '../src/index.ts'
 import type {
   ModelCatalog,
   SessionAttachmentRequest,
+  SessionContextRepairApplyRequest,
+  SessionContextRepairApplyValue,
+  SessionContextRepairPreviewRequest,
+  SessionContextRepairPreviewValue,
   SessionAttachmentValue,
   SessionCancelRequest,
   SessionCancelValue,
@@ -88,6 +92,12 @@ export interface TestSessionRemote {
   digest(request: SessionDigestRequest): Promise<RemoteResult<SessionDigestValue>>
   selectModel(request: SessionSelectModelRequest): Promise<RemoteResult<SessionSelectModelValue>>
   modelCatalog(): Promise<RemoteResult<ModelCatalog>>
+  contextRepairPreview(
+    request: SessionContextRepairPreviewRequest,
+  ): Promise<RemoteResult<SessionContextRepairPreviewValue>>
+  contextRepairApply(
+    request: SessionContextRepairApplyRequest,
+  ): Promise<RemoteResult<SessionContextRepairApplyValue>>
   rename(request: SessionRenameRequest): Promise<RemoteResult<SessionRenameValue>>
   fork(request: SessionForkRequest): Promise<RemoteResult<SessionForkValue>>
   prompt(request: SessionPromptRequest, signal?: AbortSignal): Promise<RemoteResult<SessionPromptValue>>
@@ -114,6 +124,12 @@ export interface TestSessionRemoteDefaults {
   readonly sessionFollowBufferMaxBytes?: number
   readonly sessionFollowResume?: boolean
   readonly sessionFollowResumeMaxEvents?: number
+  readonly contextRepairBackupRoot?: string
+  readonly contextRepairPreviewTtlMs?: number
+  readonly contextRepairPreviewMaxPlans?: number
+  readonly contextRepairMaxArtifactBytes?: number
+  readonly contextRepairMaxReplacementChars?: number
+  readonly contextRepairMaxPreviewBytes?: number
   readonly saveDefaultModelSelection?: (selection: AgentModelSelection) => void | Promise<void>
   readonly openPath?: (path: string, signal: AbortSignal) => Promise<void>
   readonly fileApplications?: SessionControllerInternals['fileApplications']
@@ -327,6 +343,24 @@ function installControllers(
         ...defaults.sessionFollowResumeMaxEvents === undefined
           ? {}
           : { sessionFollowResumeMaxEvents: defaults.sessionFollowResumeMaxEvents },
+        ...defaults.contextRepairBackupRoot === undefined
+          ? {}
+          : { contextRepairBackupRoot: defaults.contextRepairBackupRoot },
+        ...defaults.contextRepairPreviewTtlMs === undefined
+          ? {}
+          : { contextRepairPreviewTtlMs: defaults.contextRepairPreviewTtlMs },
+        ...defaults.contextRepairPreviewMaxPlans === undefined
+          ? {}
+          : { contextRepairPreviewMaxPlans: defaults.contextRepairPreviewMaxPlans },
+        ...defaults.contextRepairMaxArtifactBytes === undefined
+          ? {}
+          : { contextRepairMaxArtifactBytes: defaults.contextRepairMaxArtifactBytes },
+        ...defaults.contextRepairMaxReplacementChars === undefined
+          ? {}
+          : { contextRepairMaxReplacementChars: defaults.contextRepairMaxReplacementChars },
+        ...defaults.contextRepairMaxPreviewBytes === undefined
+          ? {}
+          : { contextRepairMaxPreviewBytes: defaults.contextRepairMaxPreviewBytes },
       },
       {
         ...defaults.openPath === undefined ? {} : { openPath: defaults.openPath },
@@ -400,6 +434,8 @@ export function createSessionTestRemote(
     digest: request => remoteResult(() => direct.digest(request)),
     selectModel: request => remoteResult(() => direct.selectModel(request)),
     modelCatalog: () => remoteResult(() => direct.modelCatalog()),
+    contextRepairPreview: request => remoteResult(() => direct.contextRepairPreview(request)),
+    contextRepairApply: request => remoteResult(() => direct.contextRepairApply(request)),
     rename: request => remoteResult(() => direct.rename(request)),
     fork: request => remoteResult(() => direct.fork(request)),
     prompt: (request, signal = new AbortController().signal) => remoteResult(

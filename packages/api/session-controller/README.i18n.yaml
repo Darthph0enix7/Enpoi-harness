@@ -12,8 +12,8 @@
   en: 4914824c347fdab5
   zh: 684a7b7fa970c39f
 /session-controller/table-of-contents:
-  en: 10023254f9cfb851
-  zh: 1f638c7af80b9269
+  en: d10ca1395dd09764
+  zh: 8825f31b382c0e22
 /session-controller/use-this-package:
   en: 9bf52e9a6f05a8da
   zh: b6eb847ccfc7fb73
@@ -24,11 +24,20 @@
   en: f8d89d54161cdb06
   zh: 35798eab30ebcd26
 /session-controller/session-projection-backfill:
-  en: bc89f23556b72b3e
-  zh: fe4c0eda13718b63
+  en: 92521882ffd10d0e
+  zh: 97a6b7934b15ca91
+/session-controller/operator-context-repair:
+  en: ee65c21fa2b17c1c
+  zh: 26e7334689a8bbb8
+/session-controller/operator-context-repair/preview-the-exact-change:
+  en: a39d6414e36e6933
+  zh: 816123e6da774a5f
+/session-controller/operator-context-repair/apply-under-agent-maintenance:
+  en: a4c5bf8bee002bb6
+  zh: 63635447229fa358
 /session-controller/configuration:
-  en: a2eaf4bcd96efb73
-  zh: 349995572c14c571
+  en: ccaf6da7d8a4686d
+  zh: 10ffde68cf8435e8
 /session-controller/model-experience:
   en: 30b917bf822bb4df
   zh: b0b023b5b526c317
@@ -36,8 +45,8 @@
   en: 22fc0c9dbedd3bb6
   zh: fad040ca55fd0e0a
 /session-controller/known-limitations-and-deferred-work:
-  en: 5b52417fa83b7cd2
-  zh: 626fa81b5dcd7efa
+  en: 7ecb76a88758f1fe
+  zh: 999f63add8887710
 /session-controller/known-limitations-and-deferred-work/dev-note:
   en: 68e0dfe4588c5b88
   zh: db51b435611bded1

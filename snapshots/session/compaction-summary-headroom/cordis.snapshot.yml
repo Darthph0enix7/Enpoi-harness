@@ -1,5 +1,7 @@
-# The summary output cap inherits the 1,800-token headroom. A 1,000-token
-# request output reservation lowers the proactive trigger to 5,582 tokens.
+# The summary seat uses a larger-context model so its 1,800-token cap still
+# leaves input budget for the source index instruction and current tool schemas.
+# With 1,100 tokens of headroom on the routed model, a 1,000-token request
+# output reservation lowers the proactive trigger to 6,282 tokens.
 
 - id: llm-deepseek
   name: '@deepseek-ai/dsh-llm-deepseek-api-key'
@@ -15,8 +17,11 @@
   name: '@deepseek-ai/dsh-compaction-basic'
   config:
     thresholdRatio: 0.8
-    headroomTokens: 1800
+    headroomTokens: 1100
     retainTokens: 20
+    maxTokens: 1800
+    summarizationProvider: deepseek-official
+    summarizationModel: deepseek-v4-summary
 
 - insert:
     - id: llm-replay
@@ -29,3 +34,5 @@
               - id: deepseek-v4-flash
                 contextWindow: 8382
                 defaultMaxTokens: 1000
+              - id: deepseek-v4-summary
+                contextWindow: 20000

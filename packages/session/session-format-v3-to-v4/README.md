@@ -244,7 +244,7 @@ Current common admission does not validate each user/tool/developer content bloc
 | `command/run`, `command/done` | Run ids are unique; completion has a prior run. A present completion `sourceEventSeq` names an earlier non-command event and accompanies success. |
 | `compaction/start`, `compaction/summary`, `compaction/end` | Match compaction id, source command, and the active turn context. Summary spans name exact current-surface nodes and exclude the protected head; successful completion has one summary. Inherited unfinished compactions expire at the end-seed marker. |
 | `compaction/prune` | Its span names exact current-surface nodes and excludes the protected head; it does not require a compaction transaction or its owner fields. |
-| Compact checkpoint replacement | Its `compact-checkpoint` source identifies the active compaction. |
+| Compact checkpoint replacement | Inside a compaction bracket, its `compact-checkpoint` source identifies the active compaction. Outside one, it is a between-turn amendment of exactly the current surface checkpoint node, preserving that node's `compactionId` and `sourceCommandId` and citing it. |
 | Native `subagent/catalog` | Check own version-0/version-1 payload fields and unique child ids after the inherited cut. Native reads neither collect child logs nor compare their physical facts; inherited entries do not establish own membership. |
 | Inherited cut and delivery | Apply the marker, coordinate, and generation-ownership rules stated above. |
 
@@ -338,6 +338,7 @@ The edge preserves the recorded request prefix. Provider cache availability and 
 - **Retained child logs required** — a parent alone cannot recover unrecorded child ids, creation times, or descriptors. Deleted children cannot be reconstructed from tool arguments; existing parent catalog records remain.
 - **Unknown historical modes** — without exactly one supported own descriptor, a missing parent entry records unknown mode. Current reads do not rewrite that entry; opening the child resolves available descriptor information or reports its own error.
 - **Storage scope** — facts cover recognizable children within the same persistence root. Cross-root import and corrupt-log repair are outside this migration.
+- **Checkpoint amendment readers** — a compact checkpoint replacement outside an open compaction is accepted as a between-turn amendment: it replaces exactly the current surface checkpoint, preserves its `compactionId` and `sourceCommandId`, and cites that node. The V5 reader delegates V5 lifecycle and compaction relationships to this V4 validator, so this checkout reads amended V5 logs. An older reader rejects them as missing a matching `compaction/start`; reopen the log with an amendment-aware reader. The amendment reuses `user/message` with a `compact-checkpoint` source, adds no event type, schema field, format version, acknowledgement, or root digest, and the runtime compaction invariant duplicates the rule, so both validators must change together.
 
 <a id="dev-note"></a>
 ### Dev Note

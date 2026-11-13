@@ -45,6 +45,17 @@ const compact = (): Row[] => [
   row('compaction/end', { compactionId: 'c', sourceCommandId: 'cmd', turn: 1 }),
   row('turn/end', { turn: 1, reason: { kind: 'completed' } }),
 ]
+const amendment = (
+  source: Record<string, unknown> = { kind: 'compact-checkpoint', compactionId: 'c', sourceCommandId: 'cmd' },
+  startSeq = 4,
+  endSeq = 4,
+  sourceEventSeqs: number[] = [4, 1],
+): Row => ({
+  type: 'user/message',
+  data: { ...user('compact-checkpoint'), id: 'amended', source },
+  surfaceOp: { op: 'replace', startSeq, endSeq },
+  sourceEventSeqs,
+})
 const change = (rows: Row[], index: number, data: Record<string, unknown>): Row[] =>
   rows.map((candidate, i) => i === index ? { ...candidate, data: { ...candidate.data, ...data } } : candidate)
 const retry = (changes: Record<string, unknown> = {}) => row('llm/retry', { ...step, retryId: 'retry', retry: 1, provider: 'mock', policyKey: 'policy', ...changes })
@@ -113,6 +124,22 @@ describe('mandatory V4 compaction restoration', () => {
     expect(() => reopen(inherited, 5, true)).not.toThrow()
     expect(() => reopen([row('compaction/start', { compactionId: 'c', turn: null }), row('compaction/end', { compactionId: 'c', turn: null, error: 'cancelled' })])).not.toThrow()
     expect(() => reopen(compact().slice(0, 5))).not.toThrow()
+  })
+
+  it('accepts a between-turn corrective checkpoint amendment', () => {
+    const restored = reopen([...compact(), amendment()])
+    expect(restored.messages[0]?.source).toEqual({ kind: 'compact-checkpoint', compactionId: 'c', sourceCommandId: 'cmd' })
+  })
+
+  it('rejects checkpoint amendments that change identity or replace more than one node', () => {
+    expect(() => reopen([...compact(), amendment({ kind: 'compact-checkpoint', compactionId: 'WRONG', sourceCommandId: 'cmd' })])).toThrow()
+    expect(() => reopen([...compact(), amendment({ kind: 'compact-checkpoint', compactionId: 'c', sourceCommandId: 'WRONG' })])).toThrow()
+    expect(() => reopen([...compact(), amendment({ kind: 'compact-checkpoint', compactionId: 'c' })])).toThrow()
+    expect(() => reopen([...compact(), input(), amendment(undefined, 4, 7, [4, 7, 1])])).toThrow()
+    expect(() => reopen([...compact(), input(), amendment(undefined, 7, 7, [7, 1])])).toThrow()
+    const open = compact()
+    open.splice(6, 0, amendment())
+    expect(() => reopen(open)).toThrow()
   })
 
   it.each([

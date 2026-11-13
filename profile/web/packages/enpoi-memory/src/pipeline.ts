@@ -150,11 +150,23 @@ export function makePipeline(db: DatabaseSync) {
     })
   }
 
-  /** Explicit operator confirmation of a tentative/untrusted claim. */
+  /**
+   * Explicit confirmation of a tentative claim. The state transition and the
+   * `operator` trust label commit in one transaction; non-tentative rows are
+   * left untouched, including committed untrusted history.
+   */
   async function confirm(id: string): Promise<ClaimRow | null> {
-    const row = get(id)
-    if (row === undefined) return null
-    return graduate(id)
+    return mutex.run(() => {
+      let out: ClaimRow | null = null
+      txn(() => {
+        const row = get(id)
+        if (row === undefined || row.state !== 'tentative') return
+        db.prepare(`UPDATE claims SET state = 'committed', source_trust = 'operator', committed_at = ? WHERE id = ?`)
+          .run(Date.now(), id)
+        out = get(id) ?? null
+      })
+      return out
+    })
   }
 
   /** Any → rescinded (tombstone, absorbing). Future injections blocked. */
@@ -172,12 +184,60 @@ export function makePipeline(db: DatabaseSync) {
     })
   }
 
-  /** Boot reconciliation (A4.1/doc 35): leftover tentative → orphaned_cancelled. */
+  /**
+   * Boot/HMR reconciliation (A4.1/doc 35): leftover tentative claims from an
+   * unfinished run become orphaned_cancelled. A tentative claim survives only
+   * when its source record carries a producer-settlement proof:
+   * - compaction: `source: 'compaction'` plus a non-empty `compactionId`,
+   *   written after the matching clean `compaction/end`;
+   * - keeper: `source: 'keeper'`, non-blank `sessionId`, non-negative integer
+   *   `batchBasedOnSeq`, and JSON `settled: true`, written after model
+   *   settlement and the live ownership check.
+   * This is a structural source-record check, not authentication. Rescinded and
+   * already-orphaned rows are never touched.
+   */
   async function reconcileBoot(): Promise<number> {
     return mutex.run(() => {
       let n = 0
       txn(() => {
-        const res = db.prepare(`UPDATE claims SET state = 'orphaned_cancelled' WHERE state = 'tentative'`).run()
+        const res = db.prepare(`
+          UPDATE claims SET state = 'orphaned_cancelled'
+          WHERE state = 'tentative'
+            AND CASE
+              WHEN json_valid(provenance) THEN
+                COALESCE(
+                  json_type(provenance) = 'object'
+                  AND (
+                    (
+                      origin = 'compaction'
+                      AND json_type(provenance, '$.source') = 'text'
+                      AND json_extract(provenance, '$.source') = 'compaction'
+                      AND json_type(provenance, '$.compactionId') = 'text'
+                      AND length(trim(
+                        json_extract(provenance, '$.compactionId'),
+                        char(9) || char(10) || char(11) || char(12) || char(13) || ' '
+                      )) > 0
+                    )
+                    OR
+                    (
+                      origin = 'keeper'
+                      AND json_type(provenance, '$.source') = 'text'
+                      AND json_extract(provenance, '$.source') = 'keeper'
+                      AND json_type(provenance, '$.sessionId') = 'text'
+                      AND length(trim(
+                        json_extract(provenance, '$.sessionId'),
+                        char(9) || char(10) || char(11) || char(12) || char(13) || ' '
+                      )) > 0
+                      AND json_type(provenance, '$.batchBasedOnSeq') = 'integer'
+                      AND json_extract(provenance, '$.batchBasedOnSeq') >= 0
+                      AND json_type(provenance, '$.settled') = 'true'
+                    )
+                  ),
+                  0
+                )
+              ELSE 0
+            END = 0
+        `).run()
         n = Number(res?.changes ?? 0)
       })
       return n

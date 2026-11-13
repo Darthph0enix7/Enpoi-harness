@@ -17,7 +17,7 @@ import {
 import type { CompactionResult } from '@deepseek-ai/dsh-compaction'
 import type { CommandId } from '@deepseek-ai/dsh-commands/brand'
 import { createUserMessage, errorChain, isRequestSizeFailure } from '@deepseek-ai/dsh-llm'
-import type { Message, UserMessage } from '@deepseek-ai/dsh-llm'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { TokenMeasurement, TokenMeter } from '@deepseek-ai/dsh-token-meter'
 import { SessionSeq, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -29,6 +29,7 @@ import {
   summarizationFailureCause,
 } from './summarizer.ts'
 import type { SummarizationFailure, SummarizationInput, SummaryResult } from './summarizer.ts'
+import { projectSummarizationReplay, SummarizationReplayProjectionError } from './replay.ts'
 interface RegionDependencies {
   readonly meter: TokenMeter
   summarize(input: SummarizationInput, agent: Agent, signal?: AbortSignal): Promise<SummaryResult>
@@ -89,7 +90,14 @@ interface PreparedCompaction extends SurfaceSelection {
   readonly shadowedRouteTokenCount: number
   /** Surface seqs replayed as leading context before the region, in order. */
   readonly replayLeadingSeqs: readonly SessionSeq[]
-  readonly input: SummarizationInput
+  /**
+   * The public replay input, or `undefined` when the projection rejected a
+   * surface node. The rejection is thrown inside the summarization attempt so
+   * the automatic transaction can still land its mechanical omission.
+   */
+  readonly input?: SummarizationInput
+  /** The projection failure that prevents a model call for this selection. */
+  readonly inputError?: Error
 }
 
 type SummarizedCompaction = PreparedCompaction & SummaryResult & {
@@ -390,7 +398,7 @@ export function selectCompactableRange(
     // oxlint-disable-next-line typescript/no-non-null-assertion
     if (pricedNodes[index]!.tokens > pin.maxTokens) break
     leading += 1
-    if (isHumanUserMessage(event.data)) pinned += 1
+    if (isPinnableUserMessage(event.data)) pinned += 1
   }
   const firstCompactableIdx = firstIdx + leading
 
@@ -424,13 +432,15 @@ function isCheckpointMessage(data: { readonly source?: { readonly kind?: string 
 }
 
 /**
- * Whether one user message was authored by a person rather than synthesized by
- * a runtime context provider. Peer-addressed messages remain agent input, so
- * only the `user` producer without a peer participant counts as human.
+ * Whether one user message may consume a leading pin slot. A legacy session
+ * recorded human prompts without a participant, so a `user` producer without a
+ * peer participant stays pinnable; an upgrade must never silently unpin the
+ * original instruction. Authority classification is stricter and requires an
+ * authenticated human participant.
  * @param data - the user message's durable data.
- * @returns whether the message is a real human prompt.
+ * @returns whether the message keeps the existing leading-pin behavior.
  */
-function isHumanUserMessage(data: {
+function isPinnableUserMessage(data: {
   readonly source: { readonly kind: string; readonly participant?: { readonly kind: 'human' | 'peer' } }
 }): boolean {
   return data.source.kind === 'user' && data.source.participant?.kind !== 'peer'
@@ -667,6 +677,16 @@ function prepareCompaction(
   // oxlint-disable-next-line typescript/no-non-null-assertion
   const headIdx = systemHead(session, surfaceNodes[0]!) === undefined ? 0 : 1
   const leadingSeqs = replayLeadingSeqs ?? surfaceNodes.slice(headIdx, selection.startIdx)
+  let input: SummarizationInput | undefined
+  let inputError: Error | undefined
+  try {
+    input = buildSummarizationInput(session, leadingSeqs, selection.shadowedSeqs)
+  } catch (error: unknown) {
+    // Only a projection rejection is a known framing failure; a programming
+    // fault must stay loud instead of being hidden by the mechanical fallback.
+    if (!(error instanceof SummarizationReplayProjectionError)) throw error
+    inputError = error
+  }
   return {
     ...selection,
     measurement,
@@ -678,7 +698,8 @@ function prepareCompaction(
     shadowedTokenCount: selectedNodes.reduce((total, node) => total + node.heuristicTokens, 0),
     shadowedRouteTokenCount: selectedNodes.reduce((total, node) => total + node.tokens, 0),
     replayLeadingSeqs: leadingSeqs,
-    input: buildSummarizationInput(session, leadingSeqs, selection.shadowedSeqs),
+    ...input === undefined ? {} : { input },
+    ...inputError === undefined ? {} : { inputError },
   }
 }
 
@@ -704,6 +725,10 @@ async function summarizeCompaction(
   for (;;) {
     signal?.throwIfAborted()
     try {
+      if (prepared.input === undefined) {
+        /* v8 ignore next -- every projection failure records an Error. */
+        throw prepared.inputError ?? new Error('compaction: the public replay input could not be built')
+      }
       const summaryResult = await dependencies.summarize(prepared.input, agent, signal)
       return frameSummarizedCompaction(
         dependencies,
@@ -813,7 +838,12 @@ function frameSummarizedCompaction(
       : `${clippedCause}, so only its newest messages were condensed; seqs ${prepared.start}–${prepared.end}. The complete transcript is preserved in the session log.`
     : undefined
   const checkpointMessage = createUserMessage({
-    content: frameSummary(summaryResult.summary, coverageNote, framing.footer),
+    content: frameSummary(summaryResult.summary, coverageNote, framing.footer, {
+      start: prepared.start,
+      end: prepared.end,
+      count: prepared.shadowedSeqs.length,
+      searchRead: framing.searchRead,
+    }),
     source: compactCheckpointSource(compactionId, sourceCommandId),
   })
   // The checkpoint is text-only, so its fixed-heuristic price IS its route
@@ -1150,33 +1180,13 @@ function buildSummarizationInput(
   shadowedSeqs: readonly SessionSeq[],
 ): SummarizationInput {
   const header = session.requestHeader()
-  // shadowedSeqs are current surface seqs, so the surface has a node 0.
-  // oxlint-disable-next-line typescript/no-non-null-assertion
-  const head = systemHead(session, session.surface.nodes[0]!)
-  const system = head === undefined ? null : session.deriveEventMessage(head)
-  const derived = (seq: SessionSeq): Message | null => {
-    // Surface seqs are current log indexes; a missing event means a stale
-    // selection, which the surface-stability check already rejects earlier.
-    // Existing Session history read; migration deferred.
-    // oxlint-disable-next-line typescript/no-deprecated
-    const event = session.eventAt(seq)
-    return event === undefined ? null : session.deriveEventMessage(event)
-  }
-  const leading = leadingSeqs
-    .map(seq => ({ seq, message: derived(seq) }))
-    .filter((entry): entry is { seq: SessionSeq; message: Message } => entry.message !== null)
-  const region = shadowedSeqs
-    .map(seq => ({ seq, message: derived(seq) }))
-    .filter((entry): entry is { seq: SessionSeq; message: Message } => entry.message !== null)
+  const replay = projectSummarizationReplay(session, leadingSeqs, shadowedSeqs)
   return {
     ...header?.tools === undefined ? {} : { tools: header.tools },
-    messages: [
-      ...(system === null ? [] : [system]),
-      ...leading.map(entry => entry.message),
-      ...region.map(entry => entry.message),
-    ],
-    ...leading.length === 0 ? {} : { leadingCount: leading.length },
-    regionSeqs: region.map(entry => entry.seq),
+    messages: replay.messages,
+    ...replay.leadingCount === undefined ? {} : { leadingCount: replay.leadingCount },
+    regionSeqs: replay.regionSeqs,
+    ...replay.sourceIndex === undefined ? {} : { sourceIndex: replay.sourceIndex },
   }
 }
 

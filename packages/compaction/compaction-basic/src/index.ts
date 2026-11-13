@@ -40,6 +40,7 @@ import { readCompactionSettings, resolveCompactionSeat } from './settings.ts'
 import {
   resolveSummarizationTarget,
   SUMMARIZER_NO_REGION_CONTENT_CODE,
+  SUMMARIZER_PRIVATE_REASONING_CODE,
   summarizationFailureCause,
   summarizeWithLlm,
 } from './summarizer.ts'
@@ -68,19 +69,23 @@ export type {
  */
 export const SUMMARIZER_CIRCUIT_OPEN_CODE = 'SUMMARIZER_CIRCUIT_OPEN'
 
-/** Re-exported framing failure code; see {@link SUMMARIZER_NO_REGION_CONTENT_CODE} in the summariser. */
-export { SUMMARIZER_NO_REGION_CONTENT_CODE }
+/** Re-exported framing failure codes; see the summariser for their exact conditions. */
+export { SUMMARIZER_NO_REGION_CONTENT_CODE, SUMMARIZER_PRIVATE_REASONING_CODE }
 
 /**
  * Whether one thrown summarisation failure is a framing decision rather than a
- * route fault: no region content means the next identical compaction would fail
- * the same way, so counting it toward escalation or the circuit would only mask
- * the real reason on later checkpoints.
+ * route fault: a request with no region content or with private reasoning in
+ * its replay would fail the same way on the next identical compaction, so
+ * counting it toward escalation or the circuit would only mask the real reason
+ * on later checkpoints.
  * @param error - value thrown by the summariser call.
- * @returns true when the request carried no shadowed-span content.
+ * @returns true when the request carried no shadowed-span content or still
+ *   carried private reasoning.
  */
 function isFramingFailure(error: unknown): boolean {
-  return error instanceof LlmError && error.code === SUMMARIZER_NO_REGION_CONTENT_CODE
+  return error instanceof LlmError
+    && (error.code === SUMMARIZER_NO_REGION_CONTENT_CODE
+      || error.code === SUMMARIZER_PRIVATE_REASONING_CODE)
 }
 
 /** Consecutive failures counted against one summariser route in one session. */

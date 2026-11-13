@@ -24,16 +24,24 @@ function makeSession(id: string, events: Array<{ type: string; seq: number; data
   return {
     id,
     header: { createdAt: Date.UTC(2026, 8, 20) },
-    get seq() { return nextSeq },
+    get seq() { return Math.max(nextSeq, log.length) },
     events: log,
     snapshotEvents: (from: unknown = 0, to?: number) => log.slice(Number(from) || 0, to ?? log.length),
+    eventAt: (seq: number) => log.find((event) => event.seq === Number(seq)),
     requestContext: () => undefined,
-    surface: { nodes: [] as number[] },
+    surface: {
+      get nodes() {
+        return log
+          .filter((event) => event.type === 'user/message' || event.type === 'assistant/message' || event.type === 'tool/result')
+          .map((event) => event.seq)
+      },
+    },
     append: vi.fn((...args: unknown[]) => {
       const [type, data] = args as [string, unknown]
-      log.push({ type, seq: nextSeq, data })
-      nextSeq += 1
-      return { type, seq: nextSeq - 1, data }
+      const seq = Math.max(nextSeq, log.length)
+      log.push({ type, seq, data })
+      nextSeq = seq + 1
+      return { type, seq, data }
     }),
   }
 }
@@ -41,7 +49,7 @@ function makeSession(id: string, events: Array<{ type: string; seq: number; data
 /** Append N turns (structural events) to a mock session. */
 function withTurns(session: ReturnType<typeof makeSession>, turns: number): void {
   for (let i = 0; i < turns; i++) {
-    session.events.push({ type: 'user/message', seq: session.seq, data: { content: `query ${i}`, source: { kind: 'user' } } })
+    session.events.push({ type: 'user/message', seq: session.seq, data: { content: `query ${i}`, source: { kind: 'user', participant: { kind: 'human', name: 'operator' } } } })
     session.events.push({ type: 'assistant/message', seq: session.seq, data: { text: `answer ${i}` } })
     session.events.push({ type: 'turn/end', seq: session.seq, data: { reason: { kind: 'stop' }, turn: i + 1 } })
   }

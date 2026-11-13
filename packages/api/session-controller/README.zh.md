@@ -16,6 +16,7 @@ kind: "package-reference"
 - [Client 引用](#client-references)
 - [会话媒体引用](#session-media-references)
 - [会话投影回填](#session-projection-backfill)
+- [操作员上下文修复](#operator-context-repair)
 - [配置](#configuration)
 - [模型体验](#model-experience)
 - [已知限制与延期工作](#known-limitations-and-deferred-work)
@@ -92,6 +93,29 @@ Client 的首次 `follow`、重连首屏与 `loadOlder()` 至少请求 50 条以
 
 -----
 
+<a id="operator-context-repair"></a>
+## 操作员上下文修复
+
+`contextRepairPreview` 与 `contextRepairApply` 让已认证操作员修正一条活动模型生成上下文消息中的一行，而不重写持久历史、不追加通用事件，也不暴露模型工具。可修复目标是 source 为 compaction 检查点或 Enpoi keeper 检查点的活动 surface `user/message` 节点。每次 preview 与 apply 都通过 Gateway 的已认证操作员面寻址 Session；两者都不调用模型。wire 契约是 `SessionContextRepairTarget`、`SessionContextRepairPreviewRequest`/`Value`、`SessionContextRepairApplyRequest`/`Value`、`SessionContextRepairReceipt` 与进程内 `SessionContextRepairCommittedEvent`；不透明的 `ContextRepairPreviewId` 与 `ContextRepairFingerprint` 把一个 apply 绑定到其 preview。
+
+compaction 检查点修复是有界修正，不是通用变更：它在轮次之间运行，只替换恰好一个当前检查点节点，保留该节点的 `compactionId` 与 `sourceCommandId`，并在 `sourceEventSeqs` 中引用它。它不打开 compaction 标记对，也不创建新检查点；新检查点仍需要完整的 `compaction/start` → summary → replacement → `compaction/end` 事务。该修正复用既有 `user/message` 与 `compact-checkpoint` 词汇，不新增事件类型、schema 字段或格式版本，原始事件仍保留在日志中。
+
+### 预览精确变更
+
+`contextRepairPreview` 是只读操作。它接收 Session id、目标 surface seq、从零开始的文本块索引、完整块与唯一旧行的 SHA-256 摘要，以及一条替换行。目标必须是活动 surface 节点，块文本必须匹配给定摘要，旧行必须恰好出现一次且非空，替换内容必须是一条不含 CR、LF、NEL 或 Unicode 行分隔符的非空行。替换文本默认上限为 16,384 个码元。
+
+预览会把日志重放到一个 detached Session，并验证替换落在同一 surface 位置且不移动任何其他节点。它还会带 Session 的消息投影，通过 `validateCompactionEvents` 重放完整当前日志加拟议事件，因此违反不变式的拟议 compaction 流会在任何追加或 preview token 存在之前被拒绝。它返回不透明的一次性 preview id、计划指纹、捕获的 head seq 与 SHA-256、前后派生上下文投影（活动 seq，以及每条消息的 role、source kind 与内容摘要，绝不含消息正文），以及最小旧行/替换行 diff。提供的 `expectedHeadSeq`/`expectedHeadSha256` 对必须匹配当前 head，且必须成对给出。计划默认在进程内存中保留 5 分钟，最多保留 32 个；未知、过期或已消费的 preview 都会在任何写入前被拒绝。
+
+### 在 Agent maintenance 下应用
+
+`contextRepairApply` 只接受 Session、preview id 与指纹；替换文本来自已保存的计划。token 会在任何写入前被消费，每个 Session 同时最多一个 apply 在途，且 live 根 Agent 必须空闲、没有待处理 inbox 工作、审批或运行中的后代。subagent Session 会被拒绝。apply 在 `Agent.runMaintenance` 下运行，重新校验同一 head、目标块、目标 source 与活动 surface，并在修复前 flush 之后再次检查这些条件。
+
+追加之前，控制器解析规范持久化制品，核对提供方解码 head 的 seq 与 SHA-256 是否匹配预览，并把制品复制到仅所有者可访问的私有备份目录。备份根默认是 `$DSH_HOME/backups/context-repair`；它必须是绝对路径或 `~/` 前缀，不能是 harness home 本身，也不能与 Session 日志树重叠。复制使用不跟随符号链接的源描述符、默认 256 MiB 字节上限，以及前后 device、inode、size 与修改时间检查。`prepared` 回执在追加前记录旧行、替换行与制品身份。
+
+追加是一条 `user/message`，携带 `surfaceOp: { op: 'replace', startSeq: target, endSeq: target }`，因此只替换一个生成节点，被引用的 source 链保留在 `sourceEventSeqs`。追加后，控制器发出可选的进程内 `session/context-repair/committed` 通知。它不是 Session 事件，不新增日志记录；当前 keeper 不需要它，因为每次唤醒与缓存命中都会读取权威的 active keeper 消息。控制器随后验证模型 surface 未改变，执行追加后的持久化 flush，并写入 `applied` 回执。追加已提交但持久化屏障失败时，返回状态 `partial`、原因以及用于显式操作员回滚的 prepared 回执路径；`applied` 回执写入失败时返回 `applied` 并附带 warning。响应绝不断言追加、flush 与回执写入之间的原子性。
+
+失败使用稳定代码：目标不合格或 preview 已消费返回 `session/context-repair-invalid`；预期或解码 head 变化返回 `session/context-repair-stale`；另一个 apply 或 Agent 正持有 Session 时返回 `session/context-repair-busy`；挂载的后端无法暴露规范制品时返回 `session/context-repair-unsupported-persistence`；任何追加前的备份失败返回 `session/context-repair-backup-failed`；计划被接受后的失败返回 `session/context-repair-failed`。请求快照语义不变：`requestSnapshot` 仍报告最近一次主模型请求，修复只在后续请求发送后影响派生上下文。
+
 <a id="configuration"></a>
 ## 配置
 
@@ -102,6 +126,12 @@ Client 的首次 `follow`、重连首屏与 `loadOlder()` 至少请求 50 条以
 | `sessionFollowBufferMaxBytes` | 8 MiB | 单次 follow 生成在接受新快照前可保留的估算字节数 |
 | `sessionFollowResume` | true | 是否允许用持久后缀回答客户端持有的 follow cursor，而不是完整快照 |
 | `sessionFollowResumeMaxEvents` | 2048 | 单次 resume 的 follow opening 最多携带的密集持久事件数，超出则回退完整快照 |
+| `contextRepairBackupRoot` | `$DSH_HOME/backups/context-repair` | 私有备份与回执目录；只接受绝对路径或 `~/`，不能是 harness home 本身，也不能与任何 Session 日志树重叠 |
+| `contextRepairPreviewTtlMs` | 300000 | 单个已准备上下文修复 preview 计划的生存期 |
+| `contextRepairPreviewMaxPlans` | 32 | 每个控制器保留的已准备上下文修复计划上限 |
+| `contextRepairMaxArtifactBytes` | 268435456 | 单次修复备份复制的规范制品字节上限 |
+| `contextRepairMaxReplacementChars` | 16384 | 单条替换行的码元上限 |
+| `contextRepairMaxPreviewBytes` | 524288 | 返回给操作员的序列化 preview 字节上限 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-api-session-controller)是所有受支持字段及其 JSDoc 的完整来源。
 
@@ -133,6 +163,9 @@ follow opening 会把客户端最后接受的持久 seq 作为可选的 `afterSe
 - 迭代恢复（`revertIterationRestore`）需要 live Agent；无 Agent 的冷恢复被延期。◀ x/y ▶ 预览只携带文本——媒体仍以附件 id 引用。
 - 日志轮转/GC 尚未实现。未来任何裁剪、轮转或清理都必须在持久日志上计算 `computeRetentionPins`，并让每个候选删除经过 `assertRemovalSafe` / `retentionGuardOf`；该守卫拒绝被固定的 `revert/iteration` 与 `revert/branch` 字段、每个 live surface 节点的 `sourceEventSeqs`、每个 `image/offload` 决策及其目标、每个 `compaction/summary.shadowedSeqs`、每个压缩检查点引用，以及每个 `revert/state` 边界目标。未经该守卫的清理不得发布（DESIGN §4.10/§1.4 I1）。
 - `verifyLog` 与 `repairLog` 作用于派生视图：修复会在那里重建折叠并中和悬空引用，但持久事件永不重写，因此修复后的 Session 在下一次 `verifyLog` 中仍会报告其原始损坏。
+- 上下文修复只支持一个活动 surface 节点内的一条生成上下文行。它需要 live 空闲根 Agent，以及能暴露规范制品的持久化提供方（`resolveCurrentLog`）；没有该方法的后端返回 `session/context-repair-unsupported-persistence`。
+- 上下文修复的 apply fencing、preview 计划与 committed 通知都是进程内的。写入同一 Session 的第二个进程由 head 检查发现，而不是共享修复锁。该通知是可选的，当前 keeper 并不使用：修复连续性来自权威的 active keeper surface，因此不需要监听器或 version 提升。原始 `state/checkpoint` 展示（例如 Watchtower State）可能落后到下一次真实刷新；这只是展示延迟。
+- 修正后的 compaction 检查点日志需要具备匹配修正规则的读取器。较旧 V4/V5 读取器会把它当作缺少匹配 `compaction/start` 的检查点替换而拒绝；请用当前读取器重开。兼容性说明由 [V3-to-V4 关系契约](../../session/session-format-v3-to-v4/README.zh.md#known-limitations-and-deferred-work) 拥有。
 
 
 <a id="dev-note"></a>

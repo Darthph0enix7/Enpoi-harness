@@ -2,6 +2,7 @@
 
 import { modelAvailable } from './catalog.ts'
 import { randomUUID } from 'node:crypto'
+import { dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { Agent, ModelSelection as AgentModelSelection } from '@deepseek-ai/dsh-agent'
@@ -71,6 +72,12 @@ import type {
   SessionUpdateQueueRequest,
   SessionUpdateQueueValue,
   SessionRequestId,
+  ContextRepairPreviewId,
+  SessionContextRepairApplyRequest,
+  SessionContextRepairApplyValue,
+  SessionContextRepairPreviewRequest,
+  SessionContextRepairPreviewValue,
+  SessionContextRepairReceipt,
 } from './types.ts'
 import { SessionCommandIndex, referencedImage } from './session-command-index.ts'
 import { truncateUnicodeCodePoints } from './list.ts'
@@ -83,6 +90,30 @@ import {
 } from './iteration-fold.ts'
 import { foldSurfaceNodes } from './surface-view.ts'
 import { repairSessionLog, verifySessionLog } from './session-verify.ts'
+import {
+  ContextRepairRefusal,
+  DEFAULT_CONTEXT_REPAIR_LIMITS,
+  DEFAULT_CONTEXT_REPAIR_PREVIEW_MAX_PLANS,
+  DEFAULT_CONTEXT_REPAIR_PREVIEW_TTL_MS,
+  assertContextRepairBackupLocation,
+  canonicalEventHead,
+  copyContextRepairArtifact,
+  createContextRepairBackupDirectory,
+  isWithinDirectory,
+  planContextRepair,
+  projectSessionContext,
+  resolveContextRepairBackupRoot,
+  revalidateContextRepairPlan,
+  sessionHead,
+  writeContextRepairReceipt,
+  type ContextRepairArtifactSnapshot,
+  type ContextRepairBackupSnapshot,
+  type ContextRepairLimits,
+  type ContextRepairPlan,
+  type ContextRepairPlanResult,
+  type ContextRepairReceiptStatus,
+} from './context-repair.ts'
+import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
 
 /** Default and maximum groups/variants listed by `revertIterations`. */
 const ITERATION_LIST_LIMIT_DEFAULT = 50
@@ -97,9 +128,32 @@ const ITERATION_PREVIEW_MAX_CODE_POINTS = 2000
  */
 const ITERATION_RESTORE_IDLE_TIMEOUT_MS = 5_000
 
+/** Deployment policy for the operator context-repair preview cache and backup root. */
+export interface ContextRepairCommandOptions {
+  /** Private directory for backups and receipts; defaults under the harness home. */
+  readonly backupRoot?: string
+  /** Lifetime of one prepared preview plan. */
+  readonly previewTtlMs?: number
+  /** Maximum retained prepared preview plans. */
+  readonly previewMaxPlans?: number
+  /** Maximum canonical artifact bytes copied by one backup. */
+  readonly maxArtifactBytes?: number
+  /** Maximum replacement code units. */
+  readonly maxReplacementChars?: number
+  /** Maximum serialized preview bytes returned to the operator. */
+  readonly maxPreviewBytes?: number
+}
+
+/** One prepared preview retained until apply, expiry, or eviction. */
+interface PreparedContextRepair {
+  readonly plan: ContextRepairPlan
+  readonly expiresAt: number
+}
+
 interface SessionReadState {
   readonly id: SessionId
   readonly header: SessionHeader
+  readonly inheritedEventCount: SessionLogOffset
   readonly events: readonly SessionEvent[]
 }
 
@@ -144,24 +198,64 @@ export class SessionCommandController {
    * it; a transport retry of the same request id returns the first receipt.
    */
   private readonly iterationRestoreRequests = new Map<SessionId, Set<string>>()
+  /** Bounded, disposable preview plans; apply consumes its token before any write. */
+  private readonly contextRepairPreviews = new Map<ContextRepairPreviewId, PreparedContextRepair>()
+  /** One in-flight apply per Session; a second request is a retryable busy failure. */
+  private readonly contextRepairApplying = new Set<SessionId>()
+  private readonly contextRepairBackupRoot: string
+  private readonly contextRepairPreviewTtlMs: number
+  private readonly contextRepairPreviewMaxPlans: number
+  private readonly contextRepairLimits: ContextRepairLimits
+  private readonly contextRepairDshHome: string
 
   /**
    * @param ctx - Host context carrying Agent, model, attachment, title, and Workspace services.
    * @param agents - sole owner of create, resume, and Session-local model selection.
    * @param defaultCwd - project directory used when create names neither a Workspace nor a cwd.
+   * @param contextRepair - preview-cache and private-backup policy.
    */
   constructor(
     private readonly ctx: Context,
     private readonly agents: ApiSessionAgentController,
     private readonly defaultCwd: string,
+    contextRepair: ContextRepairCommandOptions = {},
   ) {
+    this.contextRepairBackupRoot = resolveContextRepairBackupRoot(contextRepair.backupRoot)
+    this.contextRepairDshHome = resolveDshHome()
+    if (this.contextRepairBackupRoot === this.contextRepairDshHome
+      || isWithinDirectory(this.contextRepairDshHome, this.contextRepairBackupRoot)) {
+      throw new ContextRepairRefusal(
+        'backup-root-invalid',
+        'the shared harness home cannot be the context-repair backup root',
+      )
+    }
+    this.contextRepairPreviewTtlMs = contextRepair.previewTtlMs ?? DEFAULT_CONTEXT_REPAIR_PREVIEW_TTL_MS
+    this.contextRepairPreviewMaxPlans = contextRepair.previewMaxPlans ?? DEFAULT_CONTEXT_REPAIR_PREVIEW_MAX_PLANS
+    this.contextRepairLimits = {
+      maxArtifactBytes: contextRepair.maxArtifactBytes ?? DEFAULT_CONTEXT_REPAIR_LIMITS.maxArtifactBytes,
+      maxReplacementChars: contextRepair.maxReplacementChars ?? DEFAULT_CONTEXT_REPAIR_LIMITS.maxReplacementChars,
+      maxPreviewBytes: contextRepair.maxPreviewBytes ?? DEFAULT_CONTEXT_REPAIR_LIMITS.maxPreviewBytes,
+    }
+    this.contextRepairDshHome = resolveDshHome()
     ctx.on('session/event', (session, event) => {
       this.commandIndexes.get(session.id)?.ingest(event)
     }, { global: true })
     ctx.on('agent/disposed', ({ agent }) => {
       this.commandIndexes.delete(agent.session.id)
       this.iterationRestoreRequests.delete(agent.session.id)
+      this.clearContextRepairPreviews(agent.session.id)
     }, { global: true })
+    ctx.effect(() => () => {
+      this.contextRepairPreviews.clear()
+      this.contextRepairApplying.clear()
+    }, 'session-controller: context repair previews')
+  }
+
+  /** Drop every prepared plan for one Session. */
+  private clearContextRepairPreviews(sessionId: SessionId): void {
+    for (const [previewId, prepared] of this.contextRepairPreviews) {
+      if (prepared.plan.sessionId === sessionId) this.contextRepairPreviews.delete(previewId)
+    }
   }
 
   /**
@@ -272,7 +366,7 @@ export class SessionCommandController {
         }
         this.agents.selectForNextRequest(agent, selected)
         if (request.persistDefault !== false) {
-          void this.ctx.agentDefaultModel.saveSelection(selected).catch((error) => {
+          void this.ctx.agentDefaultModel.saveSelection(selected).catch((error: unknown) => {
             this.ctx.logger.warn(
               `session-controller: model selection changed for the Session but the default was not saved: ${String(error)}`,
             )
@@ -1106,6 +1200,700 @@ export class SessionCommandController {
   }
 
   /**
+   * Preview one single-line correction to an active generated context message
+   * without writing the Session or calling a model. The target must be a
+   * `user/message` whose source is a compaction checkpoint or Enpoi keeper
+   * checkpoint; the plan is validated through a detached Session replay.
+   * @param request - Session, target block hashes, replacement line, and optional expected head.
+   * @returns the one-use preview id, fingerprint, and detached before/after context metadata.
+   * @throws RemoteError `session/context-repair-invalid` or `session/context-repair-stale`.
+   */
+  async contextRepairPreview(request: SessionContextRepairPreviewRequest): Promise<SessionContextRepairPreviewValue> {
+    const sessionId = request.sessionId
+    const state = await this.readSessionStateOrNotFound(sessionId)
+    const live = this.ctx.agents.get(sessionId)
+    if (state.header.origin === 'subagent'
+      || (live !== undefined && hasApiSessionSubagentOwner(this.ctx, live.session, live))) {
+      throw new RemoteError('session/context-repair-invalid', 'a subagent Session cannot be repaired by the operator surface', {
+        sessionId,
+        reason: 'subagent-owned',
+      })
+    }
+    const currentHead = sessionHead(state.events)
+    if (request.expectedHeadSeq !== undefined || request.expectedHeadSha256 !== undefined) {
+      if (request.expectedHeadSeq !== currentHead.seq
+        || request.expectedHeadSha256?.toLowerCase() !== currentHead.sha256) {
+        throw new RemoteError('session/context-repair-stale',
+          'the Session head no longer matches the expected seq and hash', {
+            sessionId,
+            expectedHeadSeq: request.expectedHeadSeq ?? -1,
+            actualHeadSeq: currentHead.seq,
+          })
+      }
+    }
+    let result: ContextRepairPlanResult
+    try {
+      result = planContextRepair({
+        sessionId,
+        header: state.header,
+        inheritedEventCount: state.inheritedEventCount,
+        events: state.events,
+        projections: this.ctx.sessions.messageProjections,
+        target: request.target,
+        limits: this.contextRepairLimits,
+        ...(request.expectedHeadSeq === undefined ? {} : { expectedHeadSeq: request.expectedHeadSeq }),
+        ...(request.expectedHeadSha256 === undefined ? {} : { expectedHeadSha256: request.expectedHeadSha256 }),
+      })
+    } catch (error: unknown) {
+      this.rejectContextRepair(sessionId, error, currentHead.seq, request.expectedHeadSeq ?? -1)
+    }
+    this.rememberContextRepairPreview(result.plan)
+    return result.preview
+  }
+
+  /**
+   * Apply one prepared context-repair preview under `Agent.runMaintenance`.
+   * The replacement text comes only from the stored plan. The API reports a
+   * guarded `partial` receipt when the append commits but its durability
+   * barrier or final receipt write fails; it never claims atomicity across
+   * those independent writes.
+   * @param request - Session, one-use preview id, and plan fingerprint.
+   * @returns the applied or partial receipt and the derived context after the append.
+   * @throws RemoteError for invalid, stale, busy, unsupported-persistence, backup, or failed applies.
+   */
+  async contextRepairApply(request: SessionContextRepairApplyRequest): Promise<SessionContextRepairApplyValue> {
+    const sessionId = request.sessionId
+    if (this.contextRepairApplying.has(sessionId)) {
+      throw new RemoteError('session/context-repair-busy', 'another context repair is already applying', {
+        sessionId,
+        reason: 'apply-in-flight',
+      })
+    }
+    const plan = this.takeContextRepairPreview(sessionId, request.previewId, request.fingerprint)
+    this.contextRepairApplying.add(sessionId)
+    try {
+      const agent = this.ctx.agents.get(sessionId)
+      if (agent === undefined) {
+        throw new RemoteError('session/context-repair-busy', 'the Session has no live Agent to fence', {
+          sessionId,
+          reason: 'not-attached',
+        })
+      }
+      this.assertContextRepairOwner(agent)
+      this.assertContextRepairIdle(agent)
+      let maintenance: Promise<SessionContextRepairApplyValue>
+      try {
+        maintenance = agent.runMaintenance(async signal =>
+          await this.applyContextRepairUnderMaintenance(agent, plan, signal))
+      } catch (error: unknown) {
+        throw new RemoteError('session/context-repair-busy', 'the Agent is already running or maintaining work', {
+          sessionId,
+          reason: error instanceof Error ? error.message : String(error),
+        })
+      }
+      try {
+        return await maintenance
+      } catch (error: unknown) {
+        if (error instanceof ContextRepairRefusal) {
+          // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+          this.rejectContextRepair(sessionId, error, sessionHead(agent.session.snapshotEvents()).seq, plan.headSeq)
+        }
+        if (remoteErrorOf(error) !== undefined) throw error
+        throw new RemoteError(
+          'session/context-repair-failed',
+          `context repair failed for session "${sessionId}": ${error instanceof Error ? error.message : String(error)}`,
+          { sessionId, reason: error instanceof Error ? error.message : String(error) },
+        )
+      }
+    } finally {
+      this.contextRepairApplying.delete(sessionId)
+    }
+  }
+
+  /** Retain one prepared preview under the configured bounds. */
+  private rememberContextRepairPreview(plan: ContextRepairPlan): void {
+    const now = Date.now()
+    for (const [previewId, prepared] of this.contextRepairPreviews) {
+      if (prepared.expiresAt <= now) this.contextRepairPreviews.delete(previewId)
+    }
+    while (this.contextRepairPreviews.size >= this.contextRepairPreviewMaxPlans) {
+      const oldest = this.contextRepairPreviews.keys().next().value
+      if (oldest === undefined) break
+      this.contextRepairPreviews.delete(oldest)
+    }
+    this.contextRepairPreviews.set(plan.previewId, {
+      plan,
+      expiresAt: now + this.contextRepairPreviewTtlMs,
+    })
+  }
+
+  /** Consume one preview token; any replay or fingerprint mismatch is refused before a write. */
+  private takeContextRepairPreview(
+    sessionId: SessionId,
+    previewId: ContextRepairPreviewId,
+    fingerprint: SessionContextRepairApplyRequest['fingerprint'],
+  ): ContextRepairPlan {
+    const prepared = this.contextRepairPreviews.get(previewId)
+    if (prepared === undefined) {
+      throw new RemoteError('session/context-repair-invalid',
+        'the context-repair preview is unknown, expired, or already consumed', {
+          sessionId,
+          reason: 'preview-unavailable',
+        })
+    }
+    if (prepared.plan.sessionId !== sessionId || prepared.plan.fingerprint !== fingerprint) {
+      throw new RemoteError('session/context-repair-invalid',
+        'the context-repair preview does not match this Session and fingerprint', {
+          sessionId,
+          reason: 'fingerprint-mismatch',
+        })
+    }
+    this.contextRepairPreviews.delete(previewId)
+    if (prepared.expiresAt <= Date.now()) {
+      throw new RemoteError('session/context-repair-invalid', 'the context-repair preview expired', {
+        sessionId,
+        reason: 'preview-expired',
+      })
+    }
+    return prepared.plan
+  }
+
+  /** Reject a subagent-owned or non-root Session before any apply work. */
+  private assertContextRepairOwner(agent: Agent): void {
+    if (hasApiSessionSubagentOwner(this.ctx, agent.session, agent)
+      || agent.session.header.origin === 'subagent') {
+      throw new RemoteError('session/context-repair-invalid',
+        'a subagent Session cannot be repaired by the operator surface', {
+          sessionId: agent.session.id,
+          reason: 'subagent-owned',
+        })
+    }
+    if (this.hasActiveDescendants(agent.session.id)) {
+      throw new RemoteError('session/context-repair-busy',
+        'the Session has active descendant work', {
+          sessionId: agent.session.id,
+          reason: 'active-descendants',
+        })
+    }
+  }
+
+  /** Require an idle Agent with no queued inbox work or pending approval ask. */
+  private assertContextRepairIdle(agent: Agent): void {
+    if (agent.status !== 'idle') {
+      throw new RemoteError('session/context-repair-busy', 'the Agent is not idle', {
+        sessionId: agent.session.id,
+        reason: 'agent-running',
+      })
+    }
+    if (agent.inbox.nextTurn.length > 0 || agent.inbox.nextStep.length > 0) {
+      throw new RemoteError('session/context-repair-busy', 'the Agent has pending inbox work', {
+        sessionId: agent.session.id,
+        reason: 'pending-inbox',
+      })
+    }
+    const state = this.ctx.sessionProjections.stateOf(agent.session, 'executionState')
+    if (state === undefined) {
+      throw new RemoteError('session/context-repair-busy', 'the execution-state projection is unavailable', {
+        sessionId: agent.session.id,
+        reason: 'execution-state-unavailable',
+      })
+    }
+    if (state.pendingApprovals.length > 0) {
+      throw new RemoteError('session/context-repair-busy', 'the Agent has a pending approval ask', {
+        sessionId: agent.session.id,
+        reason: 'pending-approval',
+      })
+    }
+    if (this.hasActiveDescendants(agent.session.id)) {
+      throw new RemoteError('session/context-repair-busy', 'the Session has active descendant work', {
+        sessionId: agent.session.id,
+        reason: 'active-descendants',
+      })
+    }
+  }
+
+  /** Whether any running live Agent descends from this Session through durable parent links. */
+  private hasActiveDescendants(sessionId: SessionId): boolean {
+    for (const candidate of this.ctx.agents.list()) {
+      if (candidate.id === sessionId || candidate.status !== 'running') continue
+      let current = candidate.session.header.parentSession
+      const seen = new Set<SessionId>()
+      while (current !== undefined) {
+        if (current === sessionId) return true
+        if (seen.has(current)) break
+        seen.add(current)
+        const parent = this.ctx.agents.get(current)?.session ?? this.ctx.sessions.get(current)
+        if (parent === undefined) break
+        current = parent.header.parentSession
+      }
+    }
+    return false
+  }
+
+  /** Flush, verify, back up, append, and record one guarded repair. */
+  private async applyContextRepairUnderMaintenance(
+    agent: Agent,
+    plan: ContextRepairPlan,
+    signal: AbortSignal,
+  ): Promise<SessionContextRepairApplyValue> {
+    const session = agent.session
+    const sessionId = session.id
+    const assertCurrent = (): void => {
+      if (signal.aborted) throw new ContextRepairRefusal('cancelled', 'the context repair was cancelled before commit')
+      this.assertContextRepairIdle(agent)
+      try {
+        revalidateContextRepairPlan(session, plan)
+      } catch (error: unknown) {
+        // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+        this.rejectContextRepair(sessionId, error, sessionHead(session.snapshotEvents()).seq, plan.headSeq)
+      }
+    }
+    try {
+      assertCurrent()
+      let flushed: boolean
+      try {
+        flushed = await this.ctx.sessions.flush(session)
+      } catch (error: unknown) {
+        throw this.contextRepairBackupFailure(error, signal, 'the pre-repair durability barrier failed')
+      }
+      if (!flushed) {
+        throw new ContextRepairRefusal('unsupported-persistence', 'no persistence backend accepted the Session flush')
+      }
+      assertCurrent()
+      const artifactPath = await this.contextRepairArtifactPath(sessionId, signal)
+      const decodedBefore = await this.verifyContextRepairHead(sessionId, plan, signal)
+      const canonical = await assertContextRepairBackupLocation({
+        backupRoot: this.contextRepairBackupRoot,
+        sessionLogRoot: artifactPath.sessionLogRoot,
+        artifactPath: artifactPath.path,
+        dshHome: this.contextRepairDshHome,
+      })
+      let directory: string
+      try {
+        directory = await createContextRepairBackupDirectory(this.contextRepairBackupRoot)
+      } catch (error: unknown) {
+        throw this.contextRepairBackupFailure(error, signal, 'the repair backup directory failed')
+      }
+      let copied: { readonly artifact: ContextRepairArtifactSnapshot; readonly backup: ContextRepairBackupSnapshot }
+      try {
+        copied = await copyContextRepairArtifact({
+          sourcePath: canonical.artifactPath,
+          directory,
+          maxBytes: this.contextRepairLimits.maxArtifactBytes,
+          signal,
+        })
+      } catch (error: unknown) {
+        throw this.contextRepairBackupFailure(error, signal, 'the canonical artifact backup failed')
+      }
+      const decodedAfter = await this.verifyContextRepairHead(sessionId, plan, signal)
+      if (decodedAfter.seq !== decodedBefore.seq || decodedAfter.sha256 !== decodedBefore.sha256) {
+        throw new ContextRepairRefusal('artifact-changed', 'the decoded canonical head changed during backup')
+      }
+
+      const prepared = this.contextRepairReceiptData('prepared', plan, copied.artifact, copied.backup, decodedAfter)
+      let preparedPath: string
+      try {
+        preparedPath = await writeContextRepairReceipt(directory, 'prepared', prepared)
+        assertCurrent()
+      } catch (error: unknown) {
+        // Close the attempt explicitly when the prepared receipt exists; an
+        // orphaned prepared status would hide why no append happened.
+        const reason = error instanceof Error ? error.message : String(error)
+        await writeContextRepairReceipt(directory, 'failed', {
+          ...prepared,
+          status: 'failed',
+          reason,
+        }).catch(() => undefined)
+        if (error instanceof ContextRepairRefusal || remoteErrorOf(error) !== undefined) throw error
+        throw this.contextRepairBackupFailure(error, signal, 'the prepared repair receipt failed')
+      }
+
+      let appendedSeq: number
+      let headAfter: { readonly seq: number; readonly sha256: string }
+      let next: ReturnType<typeof projectSessionContext>
+      try {
+        const appended = session.append('user/message', plan.repairedMessage, {
+          surfaceOp: { op: 'replace', startSeq: SessionSeq(plan.targetSeq), endSeq: SessionSeq(plan.targetSeq) },
+          sourceEventSeqs: plan.sourceEventSeqs.map(seq => SessionSeq(seq)),
+        })
+        appendedSeq = appended.seq
+        headAfter = canonicalEventHead(appended)
+        next = projectSessionContext(session, headAfter.seq)
+      } catch (error: unknown) {
+        const reason = error instanceof Error ? error.message : String(error)
+        const failedPath = await writeContextRepairReceipt(directory, 'failed', {
+          ...prepared,
+          status: 'failed',
+          reason,
+        }).catch(() => undefined)
+        throw new RemoteError('session/context-repair-failed',
+          `the context-repair append failed: ${reason}`, {
+            sessionId,
+            reason,
+            ...(failedPath === undefined ? {} : { receiptPath: failedPath }),
+          })
+      }
+
+      let warning: string | undefined
+      try {
+        this.ctx.emit('session/context-repair/committed', {
+          sessionId,
+          targetSeq: plan.targetSeq,
+          sourceKind: plan.sourceKind,
+          oldLine: plan.oldLine,
+          replacementLine: plan.replacementLine,
+          oldBlockText: plan.oldBlockText,
+          newBlockText: plan.newBlockText,
+          preparedReceiptPath: preparedPath,
+          appendedSeq,
+          headAfter,
+        })
+      } catch (error: unknown) {
+        warning = `keeper context-repair hook failed after commit: ${error instanceof Error ? error.message : String(error)}`
+      }
+      const surfaceAfterHook = session.surface.nodes
+      if (surfaceAfterHook.length !== next.activeSeqs.length
+        || surfaceAfterHook.some((seq, index) => seq !== next.activeSeqs[index])) {
+        warning = warning === undefined
+          ? 'a context-repair hook changed the model surface after commit'
+          : `${warning}; a context-repair hook changed the model surface after commit`
+      }
+
+      try {
+        const postFlush = await this.ctx.sessions.flush(session)
+        if (!postFlush) throw new Error('no persistence backend accepted the post-repair flush')
+      } catch (error: unknown) {
+        const reason = error instanceof Error ? error.message : String(error)
+        return await this.partialContextRepairResult({
+          directory,
+          preparedPath,
+          plan,
+          artifact: copied.artifact,
+          backup: copied.backup,
+          decodedHead: decodedAfter,
+          appendedSeq,
+          headAfter,
+          next,
+          reason,
+          ...(warning === undefined ? {} : { warning }),
+        })
+      }
+
+      const baseReceipt = {
+        ...prepared,
+        status: 'applied' as const,
+        appendedSeq,
+        headAfter,
+        ...(warning === undefined ? {} : { warning }),
+      }
+      let finalPath: string | undefined
+      try {
+        finalPath = await writeContextRepairReceipt(directory, 'applied', baseReceipt)
+      } catch (error: unknown) {
+        warning = warning === undefined
+          ? `applied receipt write failed after commit: ${error instanceof Error ? error.message : String(error)}`
+          : `${warning}; applied receipt write failed after commit: ${error instanceof Error ? error.message : String(error)}`
+      }
+      return {
+        status: 'applied',
+        receipt: this.contextRepairReceiptValue({
+          status: 'applied',
+          directory,
+          preparedPath,
+          ...(finalPath === undefined ? {} : { finalPath }),
+          plan,
+          artifact: copied.artifact,
+          backup: copied.backup,
+          decodedHead: decodedAfter,
+          appendedSeq,
+          headAfter,
+          ...(warning === undefined ? {} : { warning }),
+        }),
+        next,
+      }
+    } catch (error: unknown) {
+      if (error instanceof ContextRepairRefusal) throw error
+      if (signal.aborted) throw new ContextRepairRefusal('cancelled', 'the context repair was cancelled before commit')
+      throw error
+    }
+  }
+
+  /** Record and return a post-append partial result without pretending durability. */
+  private async partialContextRepairResult(input: {
+    readonly directory: string
+    readonly preparedPath: string
+    readonly plan: ContextRepairPlan
+    readonly artifact: ContextRepairArtifactSnapshot
+    readonly backup: ContextRepairBackupSnapshot
+    readonly decodedHead: { readonly seq: number; readonly sha256: string }
+    readonly appendedSeq: number
+    readonly headAfter: { readonly seq: number; readonly sha256: string }
+    readonly next: ReturnType<typeof projectSessionContext>
+    readonly reason: string
+    readonly warning?: string
+  }): Promise<SessionContextRepairApplyValue> {
+    let finalPath: string | undefined
+    try {
+      finalPath = await writeContextRepairReceipt(input.directory, 'partial', {
+        ...this.contextRepairReceiptData('partial', input.plan, input.artifact, input.backup, input.decodedHead, input.reason),
+        status: 'partial',
+        appendedSeq: input.appendedSeq,
+        headAfter: input.headAfter,
+        ...(input.warning === undefined ? {} : { warning: input.warning }),
+      })
+    } catch {
+      // The prepared receipt remains the rollback source even when the
+      // partial-status receipt cannot be written.
+    }
+    return {
+      status: 'partial',
+      receipt: this.contextRepairReceiptValue({
+        status: 'partial',
+        directory: input.directory,
+        preparedPath: input.preparedPath,
+        ...(finalPath === undefined ? {} : { finalPath }),
+        plan: input.plan,
+        artifact: input.artifact,
+        backup: input.backup,
+        decodedHead: input.decodedHead,
+        appendedSeq: input.appendedSeq,
+        headAfter: input.headAfter,
+        reason: input.reason,
+        ...(input.warning === undefined ? {} : { warning: input.warning }),
+      }),
+      next: input.next,
+    }
+  }
+
+  /** Resolve the provider artifact path plus its canonical Session log tree root. */
+  private async contextRepairArtifactPath(
+    sessionId: SessionId,
+    signal: AbortSignal,
+  ): Promise<{ readonly path: string; readonly sessionLogRoot: string }> {
+    const persistence = this.ctx.get('sessionPersistence') as {
+      readonly resolveCurrentLog?: (id: SessionId, signal?: AbortSignal) => Promise<string | undefined>
+      readonly config?: { readonly root?: unknown }
+    } | undefined
+    const resolveCurrentLog = persistence?.resolveCurrentLog
+    if (persistence === undefined || typeof resolveCurrentLog !== 'function') {
+      throw new ContextRepairRefusal('unsupported-persistence',
+        'the mounted persistence provider exposes no canonical artifact location')
+    }
+    let path: string | undefined
+    try {
+      path = await resolveCurrentLog.call(persistence, sessionId, signal)
+    } catch (error: unknown) {
+      if (signal.aborted) throw new ContextRepairRefusal('cancelled', 'the context repair was cancelled before commit')
+      if (error instanceof ContextRepairRefusal) throw error
+      throw this.contextRepairBackupFailure(error, signal, 'the persistence provider could not locate the canonical artifact')
+    }
+    if (path === undefined) {
+      throw new ContextRepairRefusal('unsupported-persistence',
+        'the persistence provider has no current-generation artifact for this Session')
+    }
+    const configuredRoot = persistence.config?.root
+    return {
+      path,
+      sessionLogRoot: typeof configuredRoot === 'string' ? configuredRoot : dirname(path),
+    }
+  }
+
+  /** Verify the provider-decoded canonical head and exact log length before append. */
+  private async verifyContextRepairHead(
+    sessionId: SessionId,
+    plan: ContextRepairPlan,
+    signal: AbortSignal,
+  ): Promise<{ readonly seq: number; readonly sha256: string }> {
+    const persistence = this.ctx.get('sessionPersistence')
+    if (persistence === undefined) {
+      throw new ContextRepairRefusal('unsupported-persistence', 'no persistence backend is mounted')
+    }
+    let handle
+    try {
+      handle = await persistence.open(sessionId, 'read', { signal })
+    } catch (error: unknown) {
+      if (signal.aborted) throw new ContextRepairRefusal('cancelled', 'the context repair was cancelled before commit')
+      throw this.contextRepairBackupFailure(error, signal, 'the canonical Session artifact could not be opened')
+    }
+    try {
+      if (handle.header.id !== sessionId) {
+        throw new ContextRepairRefusal('logical-head-mismatch', 'the canonical artifact belongs to another Session')
+      }
+      const slice = await handle.read(plan.headSeq, 2, { signal })
+      const first = slice.events[0]
+      if (first === undefined || first.seq !== plan.headSeq || slice.events.length !== 1) {
+        throw new ContextRepairRefusal(
+          'logical-head-mismatch',
+          'the decoded canonical log does not end at the previewed head',
+        )
+      }
+      const head = canonicalEventHead(first)
+      if (head.sha256 !== plan.headSha256) {
+        throw new ContextRepairRefusal(
+          'logical-head-mismatch',
+          'the decoded canonical head does not match the previewed head hash',
+          head,
+        )
+      }
+      return head
+    } catch (error: unknown) {
+      if (signal.aborted) throw new ContextRepairRefusal('cancelled', 'the context repair was cancelled before commit')
+      if (error instanceof ContextRepairRefusal) throw error
+      throw this.contextRepairBackupFailure(error, signal, 'the canonical Session artifact could not be decoded')
+    } finally {
+      await handle.close().catch(() => undefined)
+    }
+  }
+
+  /** Classify one pre-append backup failure without masking cancellation. */
+  private contextRepairBackupFailure(error: unknown, signal: AbortSignal, context: string): ContextRepairRefusal {
+    if (signal.aborted) return new ContextRepairRefusal('cancelled', 'the context repair was cancelled before commit')
+    if (error instanceof ContextRepairRefusal) return error
+    const code = (error as NodeJS.ErrnoException | null)?.code
+    if (code === 'ENOSPC' || code === 'EACCES' || code === 'EPERM' || code === 'EROFS') {
+      return new ContextRepairRefusal('backup-failed', `${context}: ${code}`, undefined)
+    }
+    return new ContextRepairRefusal(
+      'backup-failed',
+      `${context}: ${error instanceof Error ? error.message : String(error)}`,
+    )
+  }
+
+  /** Build the immutable receipt payload shared by prepared, applied, partial, and failed files. */
+  private contextRepairReceiptData(
+    status: ContextRepairReceiptStatus,
+    plan: ContextRepairPlan,
+    artifact: ContextRepairArtifactSnapshot,
+    backup: ContextRepairBackupSnapshot,
+    decodedHead: { readonly seq: number; readonly sha256: string },
+    reason?: string,
+  ): Readonly<Record<string, unknown>> {
+    return {
+      schema: 'dsh-context-repair-receipt/1',
+      status,
+      createdAt: Date.now(),
+      sessionId: plan.sessionId,
+      previewId: plan.previewId,
+      fingerprint: plan.fingerprint,
+      headBefore: { seq: plan.headSeq, sha256: plan.headSha256 },
+      logicalHead: decodedHead,
+      target: {
+        seq: plan.targetSeq,
+        sourceKind: plan.sourceKind,
+        blockIndex: plan.blockIndex,
+        blockSha256: plan.blockSha256,
+        oldLineSha256: plan.oldLineSha256,
+        oldLine: plan.oldLine,
+        oldBlockText: plan.oldBlockText,
+        newBlockText: plan.newBlockText,
+        replacementLine: plan.replacementLine,
+        previousSourceEventSeqs: [...plan.previousSourceEventSeqs],
+      },
+      surfaceOp: { op: 'replace', startSeq: plan.targetSeq, endSeq: plan.targetSeq },
+      sourceEventSeqs: [...plan.sourceEventSeqs],
+      artifact: {
+        path: artifact.path,
+        sha256: artifact.sha256,
+        sizeBytes: artifact.sizeBytes,
+        mode: artifact.mode,
+        dev: artifact.dev,
+        ino: artifact.ino,
+        mtimeMs: artifact.mtimeMs,
+      },
+      backup,
+      ...(reason === undefined ? {} : { reason }),
+    }
+  }
+
+  /** Narrow one receipt for the wire without exposing private text bodies. */
+  private contextRepairReceiptValue(input: {
+    readonly status: 'applied' | 'partial'
+    readonly directory: string
+    readonly preparedPath: string
+    readonly finalPath?: string
+    readonly plan: ContextRepairPlan
+    readonly artifact: ContextRepairArtifactSnapshot
+    readonly backup: ContextRepairBackupSnapshot
+    readonly decodedHead: { readonly seq: number; readonly sha256: string }
+    readonly appendedSeq: number
+    readonly headAfter: { readonly seq: number; readonly sha256: string }
+    readonly reason?: string
+    readonly warning?: string
+  }): SessionContextRepairReceipt {
+    return {
+      status: input.status,
+      directory: input.directory,
+      preparedPath: input.preparedPath,
+      ...(input.finalPath === undefined ? {} : { finalPath: input.finalPath }),
+      backupPath: input.backup.path,
+      backupSha256: input.backup.sha256,
+      artifactPath: input.artifact.path,
+      artifactSha256: input.artifact.sha256,
+      artifactSizeBytes: input.artifact.sizeBytes,
+      artifactDev: input.artifact.dev,
+      artifactIno: input.artifact.ino,
+      artifactMtimeMs: input.artifact.mtimeMs,
+      artifactMode: input.artifact.mode,
+      logicalHead: input.decodedHead,
+      headBefore: { seq: input.plan.headSeq, sha256: input.plan.headSha256 },
+      appendedSeq: input.appendedSeq,
+      headAfter: input.headAfter,
+      ...(input.reason === undefined ? {} : { reason: input.reason }),
+      ...(input.warning === undefined ? {} : { warning: input.warning }),
+    }
+  }
+
+  /** Map one helper refusal onto its stable operator failure. */
+  private rejectContextRepair(
+    sessionId: SessionId,
+    error: unknown,
+    actualHeadSeq?: number,
+    expectedHeadSeq?: number,
+  ): never {
+    if (!(error instanceof ContextRepairRefusal)) {
+      if (remoteErrorOf(error) !== undefined) throw error
+      throw new RemoteError('session/context-repair-invalid',
+        error instanceof Error ? error.message : String(error), {
+          sessionId,
+          reason: 'unexpected',
+        })
+    }
+    switch (error.reason) {
+      case 'stale-head':
+      case 'logical-head-mismatch':
+        throw new RemoteError('session/context-repair-stale', error.message, {
+          sessionId,
+          expectedHeadSeq: expectedHeadSeq ?? -1,
+          actualHeadSeq: error.head?.seq ?? actualHeadSeq ?? -1,
+        })
+      case 'busy':
+        throw new RemoteError('session/context-repair-busy', error.message, { sessionId, reason: error.reason })
+      case 'unsupported-persistence':
+        throw new RemoteError('session/context-repair-unsupported-persistence', error.message, {
+          sessionId,
+          reason: error.reason,
+        })
+      case 'backup-failed':
+      case 'backup-root-invalid':
+      case 'invalid-artifact':
+      case 'artifact-changed':
+      case 'artifact-too-large':
+      case 'backup-corrupt':
+        throw new RemoteError('session/context-repair-backup-failed', error.message, {
+          sessionId,
+          reason: error.reason,
+        })
+      case 'cancelled':
+        throw new RemoteError('gateway/cancelled', error.message, {})
+      default:
+        throw new RemoteError('session/context-repair-invalid', error.message, {
+          sessionId,
+          reason: error.reason,
+        })
+    }
+  }
+
+  /**
    * Apply the operator's resolution for one pending file-revert conflict
    * (surfaced via `revert/file-conflict` log events by the `enpoi-file-revert`
    * plugin). The host bridges to the plugin through the `file-revert/resolve`
@@ -1232,11 +2020,21 @@ export class SessionCommandController {
   private async readSessionState(sessionId: SessionId): Promise<SessionReadState> {
     const attached = this.ctx.sessions.get(sessionId)
     if (attached !== undefined) {
-      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-      return { id: attached.id, header: attached.header, events: attached.snapshotEvents() }
+      return {
+        id: attached.id,
+        header: attached.header,
+        inheritedEventCount: attached.inheritedEventCount,
+        // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+        events: attached.snapshotEvents(),
+      }
     }
     const inspected = await inspectApiSession(this.ctx, sessionId)
-    return { id: inspected.meta.id, header: inspected.meta, events: inspected.events }
+    return {
+      id: inspected.meta.id,
+      header: inspected.meta,
+      inheritedEventCount: inspected.inheritedEventCount,
+      events: inspected.events,
+    }
   }
 
   private async forkWorkspace(source: SessionHeader): Promise<Workspace | undefined> {

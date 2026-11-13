@@ -1,4 +1,8 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll, beforeAll } from 'vitest'
+import { openMemoryDb } from 'dsh-enpoi-memory'
 import {
   DEFAULT_KEEPER_ROUTE,
   resolveKeeperRoute,
@@ -10,6 +14,21 @@ import {
   apply,
   type Config,
 } from '../src/index'
+
+let memoryDir = ''
+let previousMemoryDb: string | undefined
+
+beforeAll(() => {
+  memoryDir = mkdtempSync(join(tmpdir(), 'enpoi-keeper-memory-'))
+  previousMemoryDb = process.env.DSH_MEMORY_DB
+  process.env.DSH_MEMORY_DB = join(memoryDir, 'memory.db')
+})
+
+afterAll(() => {
+  if (previousMemoryDb === undefined) delete process.env.DSH_MEMORY_DB
+  else process.env.DSH_MEMORY_DB = previousMemoryDb
+  rmSync(memoryDir, { recursive: true, force: true })
+})
 
 beforeEach(() => { resetKeeperRouteHealth() })
 
@@ -26,6 +45,7 @@ function makeSession(events: Array<{ type: string; seq: number; data: unknown }>
     get seq() { return log.length },
     events: log,
     snapshotEvents: (from = 0, to = log.length): Array<{ type: string; seq: number; data: unknown }> => log.slice(from, to),
+    eventAt: (seq: number) => log[Number(seq)],
     append: vi.fn((event: { type: string; seq: number; data: unknown }) => { log.push(event) }),
   }
 }
@@ -80,7 +100,7 @@ function sessionWithTurns(n: number) {
   // seq i; `session.seq` is the next number, i.e. the log length).
   let seq = 0
   for (let i = 0; i < n; i++) {
-    events.push({ type: 'user/message', seq: seq++, data: { content: `query ${i}`, source: { kind: 'user' } } })
+    events.push({ type: 'user/message', seq: seq++, data: { content: `query ${i}`, source: { kind: 'user', participant: { kind: 'human', name: 'operator' } } } })
     events.push({ type: 'assistant/message', seq: seq++, data: { text: `answer ${i}` } })
     events.push({ type: 'turn/end', seq: seq++, data: { reason: { kind: 'stop' }, turn: i + 1 } })
   }
@@ -349,7 +369,7 @@ describe('enpoi-context-keeper BriefService (demand-driven)', () => {
     expect(session.append).toHaveBeenCalledTimes(1)
   })
 
-  it('supersedes a stale-window pass: exactly 2 distillations, in-flight preserved (Oracle defect 1)', async () => {
+  it('lets the newer basedOnSeq pass win and abandons the older out-of-order result (Oracle defect 1)', async () => {
     let releaseFirst!: () => void
     const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
     let streamCalls = 0
@@ -375,16 +395,99 @@ describe('enpoi-context-keeper BriefService (demand-driven)', () => {
     const pB = service.ensureFreshBrief(grown as never)
     vi.restoreAllMocks()
 
-    // Release A — its success path must NOT erase B's in-flight registration.
-    releaseFirst()
-    const rA = await pA
-    expect(rA.reason).toBe('distilled')
-
-    // B completes as its own distillation.
+    // B (newer basedOnSeq) completes first. Release A afterwards: its older
+    // result must not overwrite B or append a late prose event.
     const rB = await pB
     expect(rB.reason).toBe('distilled')
+    releaseFirst()
+    const rA = await pA
+    expect(rA.reason).toBe('failed')
+    expect(session.append).not.toHaveBeenCalled()
     expect(streamCalls).toBe(2) // exactly two distillations
     expect(grown.append).toHaveBeenCalledTimes(1)
+  })
+
+  it('cannot publish after forget during an in-flight pass', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const stream = async function* () {
+      await gate
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: '🎯 ACTIVE GOAL: late\n- forgotten' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '🎯 ACTIVE GOAL: late\n- forgotten' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const ctx = makeCtx({ stream })
+    const service = createBriefService(ctx as never, baseConfig)
+    const session = sessionWithTurns(1)
+    const pending = service.ensureFreshBrief(session as never)
+    await vi.waitFor(() => expect(ctx.llm.stream).toHaveBeenCalledTimes(1))
+    service.forget(session.id)
+    release()
+    const result = await pending
+    expect(result.reason).toBe('failed')
+    expect(session.append).not.toHaveBeenCalled()
+    expect(service.cacheSize).toBe(0)
+  })
+
+  it('cannot publish after service disposal during an in-flight pass', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const stream = async function* () {
+      await gate
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: '🎯 ACTIVE GOAL: late\n- disposed' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '🎯 ACTIVE GOAL: late\n- disposed' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const ctx = makeCtx({ stream })
+    const service = createBriefService(ctx as never, baseConfig)
+    const session = sessionWithTurns(1)
+    const pending = service.ensureFreshBrief(session as never)
+    await vi.waitFor(() => expect(ctx.llm.stream).toHaveBeenCalledTimes(1))
+    service.dispose()
+    release()
+    const result = await pending
+    expect(result.reason).toBe('failed')
+    expect(session.append).not.toHaveBeenCalled()
+    expect(service.cacheSize).toBe(0)
+  })
+
+  it('does not negative-cache an older failure after a newer pass succeeded', async () => {
+    let releaseA!: () => void
+    const gateA = new Promise<void>((resolve) => { releaseA = resolve })
+    let calls = 0
+    const stream = async function* () {
+      calls += 1
+      if (calls === 1) {
+        await gateA
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'finish', reason: { kind: 'error', failure: { message: 'older failure', code: 'UPSTREAM' } } }
+        return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: '🎯 ACTIVE GOAL: newer\n- newer bullet with enough text to pass the keeper brief floor' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '🎯 ACTIVE GOAL: newer\n- newer bullet with enough text to pass the keeper brief floor' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const ctx = makeCtx({ stream })
+    const service = createBriefService(ctx as never, baseConfig)
+    const older = sessionWithTurns(1)
+    const newer = sessionWithTurns(14)
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2 * 60_000)
+    const pA = service.ensureFreshBrief(older as never)
+    await vi.waitFor(() => expect(calls).toBe(1))
+    const pB = service.ensureFreshBrief(newer as never)
+    const rB = await pB
+    expect(rB.reason).toBe('distilled')
+    releaseA()
+    const rA = await pA
+    vi.restoreAllMocks()
+    expect(rA.reason).toBe('failed')
+    expect(older.append).not.toHaveBeenCalled()
+    const again = await service.ensureFreshBrief(newer as never)
+    expect(again.reason).toBe('cache-hit')
+    expect(again.prose).toContain('newer')
   })
 
   it('isolates a joiner from the originator\'s abort rejection (Oracle defect 2)', async () => {
@@ -426,32 +529,96 @@ describe('enpoi-context-keeper claims batched listener', () => {
     vi.useRealTimers()
   })
 
-  it('runs a claims pass when the batch size is reached (every 8th turn/end)', async () => {
+  it('files every model-extracted claim as tentative/untrusted with settlement proof', async () => {
+    const claimsText = 'CLAIMS: ['
+      + '{"fact":"operator-stated fact","category":"PROJECT","source":"operator","quote":"query 0","sourceSeq":0},'
+      + '{"fact":"tool-observed fact","category":"CONFIG_VALUES","source":"tool"}'
+      + ']'
     const claimsStream = async function* () {
       yield { type: 'block-start', index: 0, blockType: 'text' }
-      yield { type: 'text-delta', index: 0, text: 'CLAIMS: [{"fact":"backup runs at 3am","category":"CONFIG_VALUES","source":"chat"}]' }
-      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'CLAIMS: [{"fact":"backup runs at 3am","category":"CONFIG_VALUES","source":"chat"}]' } }
+      yield { type: 'text-delta', index: 0, text: claimsText }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: claimsText } }
       yield { type: 'finish', reason: { kind: 'stop' } }
     }
     const ctx = makeCtx({ stream: claimsStream })
     apply(ctx as never, baseConfig)
 
-    // Capture the session/event handler registered by apply().
-    const handler = (ctx.on as unknown as ReturnType<typeof vi.fn>).mock.calls.find(
-      (c: unknown[]) => c[0] === 'session/event',
-    )?.[1] as (session: unknown, event: { type: string; data: { reason: { kind: string } } }) => void
+    const handlers = (ctx.on as unknown as ReturnType<typeof vi.fn>).mock.calls
+    const handler = handlers.find((c: unknown[]) => c[0] === 'session/event')?.[1] as
+      (session: unknown, event: { type: string; data: { reason: { kind: string } } }) => void
     expect(handler).toBeDefined()
 
     const session = sessionWithTurns(1)
-    // 8 non-aborted turn/ends → batch fires.
     for (let i = 0; i < 8; i++) {
       handler(session, { type: 'turn/end', data: { reason: { kind: 'stop' } } })
     }
-    await vi.advanceTimersByTimeAsync(0)
+    await vi.waitFor(() => {
+      const db = openMemoryDb()
+      try {
+        const rows = db.prepare('SELECT fact, state, source_trust, origin, provenance FROM claims ORDER BY fact').all() as Array<{
+          fact: string; state: string; source_trust: string; origin: string; provenance: string
+        }>
+        expect(rows.length).toBe(2)
+      } finally {
+        db.close()
+      }
+    })
 
-    // The claims pass ran (LLM stream called) — the intake path is exercised
-    // via the pipeline; here we assert the pass was triggered without errors.
-    expect(ctx.llm.stream).toHaveBeenCalled()
+    const db = openMemoryDb()
+    try {
+      const rows = db.prepare('SELECT fact, state, source_trust, origin, provenance FROM claims ORDER BY fact').all() as Array<{
+        fact: string; state: string; source_trust: string; origin: string; provenance: string
+      }>
+      expect(rows.map((row) => row.fact)).toEqual(['operator-stated fact', 'tool-observed fact'])
+      for (const row of rows) {
+        expect(row.state).toBe('tentative')
+        expect(row.source_trust).toBe('untrusted_external')
+        expect(row.origin).toBe('keeper')
+        const proof = JSON.parse(row.provenance) as Record<string, unknown>
+        expect(proof['source']).toBe('keeper')
+        expect(proof['sessionId']).toBe('test-session')
+        expect(proof['settled']).toBe(true)
+        expect(Number.isInteger(proof['batchBasedOnSeq'])).toBe(true)
+        expect(proof['batchBasedOnSeq'] as number).toBeGreaterThanOrEqual(0)
+      }
+    } finally {
+      db.close()
+    }
+  })
+
+  it('does not open or write the memory DB when claims dispose mid-pass', async () => {
+    vi.useRealTimers()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let calls = 0
+    const claimsStream = async function* () {
+      calls += 1
+      await gate
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'CLAIMS: [{"fact":"late","category":"PROJECT","source":"tool"}]' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'CLAIMS: [{"fact":"late","category":"PROJECT","source":"tool"}]' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    const ctx = makeCtx({ stream: claimsStream })
+    apply(ctx as never, { ...baseConfig, claimsBatchSize: 1, checkpointStaleEvents: 500 })
+    const callsList = (ctx.on as unknown as ReturnType<typeof vi.fn>).mock.calls
+    const handler = callsList.find((c: unknown[]) => c[0] === 'session/event')?.[1] as
+      (session: unknown, event: { type: string; data: { reason: { kind: string } } }) => void
+    const dispose = callsList.find((c: unknown[]) => c[0] === 'dispose')?.[1] as () => void
+    const session = sessionWithTurns(1)
+    handler(session, { type: 'turn/end', data: { reason: { kind: 'stop' } } })
+    await vi.waitFor(() => expect(calls).toBe(1))
+    dispose()
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(calls).toBe(1)
+    const db = openMemoryDb()
+    try {
+      const row = db.prepare('SELECT COUNT(*) AS n FROM claims WHERE fact = ?').get('late') as { n: number }
+      expect(row.n).toBe(0)
+    } finally {
+      db.close()
+    }
   })
 
   it('skips aborted turns', async () => {

@@ -13,6 +13,11 @@ No `0.1.7-enpoi.2.84` or `0.1.7-enpoi.2.89` release exists (no tag, no catalog e
 - Chain failover commits at the first semantic chunk — text, reasoning, a block start, or a tool identity — streams it live, then never reissues; a chain reports one cumulative usage across every attempted link. Structured provider refusals are terminal in the credential pool: no rotation, cooldown, or identity-counter change, and in-band refusal usage is retained.
 - Cache audit: the incident session's failed attempt reported 366,487 cache-read tokens; this wave made no configuration or prompt changes and does not attribute that reuse to the fix. It does not claim that quota was never charged; provider-side accounting remains authoritative.
 
+- Context integrity wave: the summariser receives a public-only replay with private reasoning omitted, generated/evidence messages labelled, and a bounded authority index; Enpoi memory files compaction and keeper claims as tentative until operator confirmation; pi-ai replay requires the exact provider/API/model target and keeps response aliases as metadata.
+- Operator context repair: authenticated preview/apply for one generated-context line, with head-hash fencing, private backup artifacts, and `applied`/`partial` receipts that state the durability boundary; `requestSnapshot` still reports the last main request.
+- Compaction checkpoint amendment fix: a between-turn operator line repair can replace exactly one current checkpoint without a fake compaction bracket; preview validates the planned event stream through the compaction invariant before append. The change adds no event, schema field, or format version. An older V4/V5 reader rejects an amended log as missing a matching `compaction/start`, so reopening requires the amendment-aware reader.
+- Process-local `session/context-repair/committed` coordination is optional and adds no Session event; the keeper does not need it because repair continuity reads the authoritative active keeper surface. A raw `state/checkpoint` display can lag until the next genuine refresh; that is display lag, not a functional gap.
+
 ## Shipped releases
 
 | Release | Published (UTC) | Shipped change (condensed catalog entry) |

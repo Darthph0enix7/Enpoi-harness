@@ -46,6 +46,67 @@ function startTurn(session: ReturnType<Context['sessions']['create']>, turn = 1)
   session.append('turn/start', { turn })
 }
 
+/** Build one completed compaction whose checkpoint remains the current surface node. */
+function checkpointedSession(ctx: Context) {
+  const session = ctx.sessions.create()
+  session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: 'original' }],
+    source: { kind: 'user' },
+  }), { surfaceOp: 'append' })
+  startTurn(session)
+  session.append('compaction/start', {
+    compactionId: TEST_COMPACTION_ID,
+    sourceCommandId: TEST_COMMAND_ID,
+    turn: 1,
+  })
+  const summaryData = summary(session, { sourceCommandId: TEST_COMMAND_ID })
+  session.append('compaction/summary', summaryData)
+  const checkpoint = session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: 'checkpoint' }],
+    source: compactCheckpointSource(TEST_COMPACTION_ID, TEST_COMMAND_ID),
+  }), {
+    surfaceOp: {
+      op: 'replace',
+      startSeq: summaryData.shadowedRange.start,
+      endSeq: summaryData.shadowedRange.end,
+    },
+    sourceEventSeqs: summaryData.shadowedSeqs,
+  })
+  session.append('compaction/end', {
+    compactionId: TEST_COMPACTION_ID,
+    sourceCommandId: TEST_COMMAND_ID,
+    turn: 1,
+  })
+  session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  return { session, checkpoint, shadowedSeqs: summaryData.shadowedSeqs }
+}
+
+function amendCheckpoint(
+  session: ReturnType<Context['sessions']['create']>,
+  checkpoint: { seq: SessionSeq },
+  shadowedSeqs: readonly SessionSeq[],
+  overrides: {
+    source?: ReturnType<typeof compactCheckpointSource>
+    startSeq?: SessionSeq
+    endSeq?: SessionSeq
+    sourceEventSeqs?: SessionSeq[]
+    openTurn?: boolean
+  } = {},
+) {
+  if (overrides.openTurn === true) startTurn(session, 2)
+  return session.append('user/message', createUserMessage({
+    content: [{ type: 'text', text: 'amended checkpoint' }],
+    source: overrides.source ?? compactCheckpointSource(TEST_COMPACTION_ID, TEST_COMMAND_ID),
+  }), {
+    surfaceOp: {
+      op: 'replace',
+      startSeq: overrides.startSeq ?? checkpoint.seq,
+      endSeq: overrides.endSeq ?? checkpoint.seq,
+    },
+    sourceEventSeqs: overrides.sourceEventSeqs ?? [checkpoint.seq, ...shadowedSeqs],
+  })
+}
+
 describe('compaction invariants', () => {
   it('accepts successful and failed compaction lifecycles', async () => {
     const ctx = await setup()
@@ -71,6 +132,68 @@ describe('compaction invariants', () => {
     startTurn(failed, 2)
     failed.append('compaction/start', { compactionId: TEST_COMPACTION_ID, turn: 2 })
     failed.append('compaction/end', { compactionId: TEST_COMPACTION_ID, turn: 2, error: 'provider failed' })
+  })
+
+  it('accepts a corrective checkpoint amendment that replaces its current checkpoint between turns', async () => {
+    const ctx = await setup()
+    const { session, checkpoint, shadowedSeqs } = checkpointedSession(ctx)
+    const amendment = amendCheckpoint(session, checkpoint, shadowedSeqs)
+    expect(session.surface.nodes).toContain(amendment.seq)
+    expect(session.surface.nodes).not.toContain(checkpoint.seq)
+  })
+
+  it('rejects checkpoint amendments with foreign or changed source identity', async () => {
+    const ctx = await setup()
+    const foreign = checkpointedSession(ctx)
+    expect(() => amendCheckpoint(foreign.session, foreign.checkpoint, foreign.shadowedSeqs, {
+      source: compactCheckpointSource(NEXT_COMPACTION_ID, TEST_COMMAND_ID),
+    })).toThrow(/amendment id .* does not match amended checkpoint id/)
+
+    const changedCommand = checkpointedSession(ctx)
+    expect(() => amendCheckpoint(changedCommand.session, changedCommand.checkpoint, changedCommand.shadowedSeqs, {
+      source: compactCheckpointSource(TEST_COMPACTION_ID, NEXT_COMMAND_ID),
+    })).toThrow(/amendment sourceCommandId .* does not match amended checkpoint sourceCommandId/)
+
+    const missingCommand = checkpointedSession(ctx)
+    expect(() => amendCheckpoint(missingCommand.session, missingCommand.checkpoint, missingCommand.shadowedSeqs, {
+      source: compactCheckpointSource(TEST_COMPACTION_ID),
+    })).toThrow(/amendment sourceCommandId .* does not match amended checkpoint sourceCommandId/)
+  })
+
+  it('rejects checkpoint amendments that are not one current checkpoint node', async () => {
+    const ctx = await setup()
+    const multinode = checkpointedSession(ctx)
+    const appended = multinode.session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'later' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    expect(() => amendCheckpoint(multinode.session, multinode.checkpoint, multinode.shadowedSeqs, {
+      startSeq: multinode.checkpoint.seq,
+      endSeq: appended.seq,
+      sourceEventSeqs: [multinode.checkpoint.seq, appended.seq, ...multinode.shadowedSeqs],
+    })).toThrow(/must replace exactly one current checkpoint node/)
+
+    const plain = ctx.sessions.create()
+    const original = plain.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'plain' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    expect(() => amendCheckpoint(plain, original, [original.seq], {
+      sourceEventSeqs: [original.seq],
+    })).toThrow(/no matching compaction\/start/)
+  })
+
+  it('rejects checkpoint amendments that omit their target citation or run inside a turn', async () => {
+    const ctx = await setup()
+    const uncited = checkpointedSession(ctx)
+    expect(() => amendCheckpoint(uncited.session, uncited.checkpoint, uncited.shadowedSeqs, {
+      sourceEventSeqs: [...uncited.shadowedSeqs],
+    })).toThrow(/sourceEventSeqs must include every shadowed surface node/)
+
+    const openTurn = checkpointedSession(ctx)
+    expect(() => amendCheckpoint(openTurn.session, openTurn.checkpoint, openTurn.shadowedSeqs, {
+      openTurn: true,
+    })).toThrow(/amendment is only allowed between turns/)
   })
 
   it('rejects shadow identities outside the exact earlier surface span', async () => {

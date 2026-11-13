@@ -267,6 +267,8 @@ export class FakeApiClient {
         initializeDefaultModel: () => Promise.resolve(ok(undefined)),
         verifyLog: () => Promise.resolve(ok({ ok: true, committedEventCount: 0, issues: [] })),
         repairLog: () => Promise.resolve(ok({ ok: true, committedEventCount: 0, repairs: [], issues: [] })),
+        contextRepairPreview: () => Promise.reject(new Error('context repair preview is unavailable in the fake API')),
+        contextRepairApply: () => Promise.reject(new Error('context repair apply is unavailable in the fake API')),
         list: payload => this.record('session.list', payload, this.onList(payload)),
         modelCatalog: () => Promise.resolve({
           ok: true,

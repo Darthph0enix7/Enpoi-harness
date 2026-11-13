@@ -34,6 +34,11 @@ import { SessionSkillCatalog } from './skill-catalog.ts'
 import { SessionMediaReferences } from './media-references.ts'
 import { SessionProjectionBackfill } from './projection-backfill.ts'
 import { readSessionRequestSnapshot } from './request-snapshot.ts'
+import {
+  DEFAULT_CONTEXT_REPAIR_LIMITS,
+  DEFAULT_CONTEXT_REPAIR_PREVIEW_MAX_PLANS,
+  DEFAULT_CONTEXT_REPAIR_PREVIEW_TTL_MS,
+} from './context-repair.ts'
 import { ArchivedSessionGate } from './archived-session-gate.ts'
 import type {
   ModelCatalog,
@@ -65,6 +70,10 @@ import type {
   SessionVerifyLogValue,
   SessionRepairLogRequest,
   SessionRepairLogValue,
+  SessionContextRepairPreviewRequest,
+  SessionContextRepairPreviewValue,
+  SessionContextRepairApplyRequest,
+  SessionContextRepairApplyValue,
   SessionFollowFrame,
   SessionFollowRequest,
   SessionForkRequest,
@@ -144,6 +153,23 @@ export interface Config {
   readonly sessionFollowResume?: boolean
   /** Dense durable events one resumed follow opening may carry before a full snapshot; default 2048. */
   readonly sessionFollowResumeMaxEvents?: number
+  /**
+   * Private directory for operator context-repair backup artifacts and
+   * receipts; created with owner-only mode outside every Session log tree.
+   * Defaults to `$DSH_HOME/backups/context-repair`. A relative path or an
+   * unsupported tilde prefix refuses at load; `~/` expands to the OS home.
+   */
+  readonly contextRepairBackupRoot?: string
+  /** Lifetime of one prepared context-repair preview plan; default 5 minutes. */
+  readonly contextRepairPreviewTtlMs?: number
+  /** Maximum prepared context-repair plans retained per controller; default 32. */
+  readonly contextRepairPreviewMaxPlans?: number
+  /** Maximum canonical artifact bytes copied by one context-repair backup; default 256 MiB. */
+  readonly contextRepairMaxArtifactBytes?: number
+  /** Maximum replacement code units accepted by one context repair; default 16384. */
+  readonly contextRepairMaxReplacementChars?: number
+  /** Maximum serialized context-repair preview bytes; default 512 KiB. */
+  readonly contextRepairMaxPreviewBytes?: number
 }
 
 /** Host integrations replaceable by direct unit tests. */
@@ -185,6 +211,12 @@ export class SessionController extends TypertRemoteService {
     sessionFollowBufferMaxBytes: z.number().step(1).min(1).default(DEFAULT_SESSION_FOLLOW_BUFFER_LIMITS.maxBytes),
     sessionFollowResume: z.boolean().default(true),
     sessionFollowResumeMaxEvents: z.number().step(1).min(1).default(DEFAULT_SESSION_FOLLOW_RESUME_MAX_EVENTS),
+    contextRepairBackupRoot: z.string(),
+    contextRepairPreviewTtlMs: z.number().step(1).min(1).default(DEFAULT_CONTEXT_REPAIR_PREVIEW_TTL_MS),
+    contextRepairPreviewMaxPlans: z.number().step(1).min(1).default(DEFAULT_CONTEXT_REPAIR_PREVIEW_MAX_PLANS),
+    contextRepairMaxArtifactBytes: z.number().step(1).min(1).default(DEFAULT_CONTEXT_REPAIR_LIMITS.maxArtifactBytes),
+    contextRepairMaxReplacementChars: z.number().step(1).min(1).default(DEFAULT_CONTEXT_REPAIR_LIMITS.maxReplacementChars),
+    contextRepairMaxPreviewBytes: z.number().step(1).min(1).default(DEFAULT_CONTEXT_REPAIR_LIMITS.maxPreviewBytes),
   })
 
   private readonly agents: ApiSessionAgentController
@@ -211,7 +243,16 @@ export class SessionController extends TypertRemoteService {
     installModelSelectionProjection(ctx)
     installExecutionStateProjection(ctx)
     this.agents = new ApiSessionAgentController(ctx)
-    this.commands = new SessionCommandController(ctx, this.agents, process.cwd())
+    this.commands = new SessionCommandController(ctx, this.agents, process.cwd(), {
+      ...(config.contextRepairBackupRoot === undefined
+        ? {}
+        : { backupRoot: config.contextRepairBackupRoot }),
+      previewTtlMs: config.contextRepairPreviewTtlMs ?? DEFAULT_CONTEXT_REPAIR_PREVIEW_TTL_MS,
+      previewMaxPlans: config.contextRepairPreviewMaxPlans ?? DEFAULT_CONTEXT_REPAIR_PREVIEW_MAX_PLANS,
+      maxArtifactBytes: config.contextRepairMaxArtifactBytes ?? DEFAULT_CONTEXT_REPAIR_LIMITS.maxArtifactBytes,
+      maxReplacementChars: config.contextRepairMaxReplacementChars ?? DEFAULT_CONTEXT_REPAIR_LIMITS.maxReplacementChars,
+      maxPreviewBytes: config.contextRepairMaxPreviewBytes ?? DEFAULT_CONTEXT_REPAIR_LIMITS.maxPreviewBytes,
+    })
     this.execution = new SessionExecutionStateReader(ctx)
     ctx.effect(() => ctx.fileUploads.registerAgentResolver(async (sessionId) => {
       const result = await this.agents.resolveAgent(sessionId)
@@ -563,6 +604,37 @@ export class SessionController extends TypertRemoteService {
   @Remote('repairLog')
   repairLog(request: SessionRepairLogRequest): Promise<SessionRepairLogValue> {
     return this.commands.repairLog(request)
+  }
+
+  /**
+   * Preview one single-line correction inside an active generated context
+   * message (compaction or Enpoi keeper checkpoint). Read-only: it validates a
+   * detached Session replay, captures the current head, and reveals the
+   * before/after derived-context hashes and minimal line diff only to the
+   * authenticated operator.
+   * @param request - Session, exact block/line hashes, replacement line, and optional expected head.
+   * @returns the one-use preview id, plan fingerprint, and detached before/after projections.
+   * @throws RemoteError `session/context-repair-invalid` for an ineligible target,
+   *   `session/context-repair-stale` when an expected head does not match.
+   */
+  @Remote('contextRepairPreview')
+  contextRepairPreview(request: SessionContextRepairPreviewRequest): Promise<SessionContextRepairPreviewValue> {
+    return this.commands.contextRepairPreview(request)
+  }
+
+  /**
+   * Apply one prepared context-repair preview under `Agent.runMaintenance` on
+   * an idle live root Session. The API returns an `applied` receipt only after
+   * the append and its durability barrier succeed; a committed append whose
+   * barrier or final receipt write fails is reported as a guarded `partial`
+   * with the prepared receipt path for explicit operator rollback.
+   * @param request - Session, one-use preview id, and stored plan fingerprint.
+   * @returns the applied or partial receipt and the derived context after the append.
+   * @throws RemoteError for invalid, stale, busy, unsupported-persistence, backup, or failed applies.
+   */
+  @Remote('contextRepairApply')
+  contextRepairApply(request: SessionContextRepairApplyRequest): Promise<SessionContextRepairApplyValue> {
+    return this.commands.contextRepairApply(request)
   }
 
   /**

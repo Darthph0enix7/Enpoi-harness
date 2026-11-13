@@ -373,6 +373,29 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     'file-revert-unavailable': { readonly sessionId: SessionId }
     /** The bridge plugin refused the resolution: the conflict id names no actionable card. */
     'file-revert-invalid': { readonly sessionId: SessionId; readonly conflictId: string; readonly reason: string }
+    /** An operator context repair request is malformed or targets an ineligible event. */
+    'session/context-repair-invalid': { readonly sessionId: SessionId; readonly reason: string }
+    /** The previewed Session head or target changed before apply. */
+    'session/context-repair-stale': {
+      readonly sessionId: SessionId
+      readonly expectedHeadSeq: number
+      readonly actualHeadSeq: number
+    }
+    /** A repair requires an idle, quiescent live Session with no active descendants. */
+    'session/context-repair-busy': { readonly sessionId: SessionId; readonly reason: string }
+    /** The mounted persistence provider cannot expose a supported physical artifact. */
+    'session/context-repair-unsupported-persistence': {
+      readonly sessionId: SessionId
+      readonly reason: string
+    }
+    /** The canonical artifact could not be backed up; no Session write was attempted. */
+    'session/context-repair-backup-failed': { readonly sessionId: SessionId; readonly reason: string }
+    /** The append or its post-append durability barrier failed after the plan was accepted. */
+    'session/context-repair-failed': {
+      readonly sessionId: SessionId
+      readonly reason: string
+      readonly receiptPath?: string
+    }
   }
 }
 
@@ -937,6 +960,156 @@ export interface SessionRepairLogValue {
   readonly issues: readonly SessionVerifyIssue[]
 }
 
+/** Opaque one-use identity of a prepared context-repair preview. */
+export type ContextRepairPreviewId = Branded<'context-repair-preview-id'>
+
+/** Digest binding one apply to the exact previewed plan. */
+export type ContextRepairFingerprint = Branded<'context-repair-fingerprint'>
+
+/** One single-line correction inside a generated context message. */
+export interface SessionContextRepairTarget {
+  /** Seq of the active generated `user/message` surface node. */
+  readonly seq: number
+  /** Zero-based index of the existing text block to correct. */
+  readonly blockIndex: number
+  /** SHA-256 of the complete existing block text. */
+  readonly expectedBlockSha256: string
+  /** SHA-256 of the unique existing line the replacement addresses. */
+  readonly expectedOldLineSha256: string
+  /** One non-empty replacement line; it must not contain a line break. */
+  readonly replacementLine: string
+}
+
+/**
+ * Read-only preview request. The caller may bind the preview to a head it
+ * already observed; when omitted, preview captures the current head and apply
+ * is fenced to it anyway.
+ */
+export interface SessionContextRepairPreviewRequest {
+  readonly sessionId: SessionId
+  readonly target: SessionContextRepairTarget
+  /** Inclusive current head seq the caller expects; requires the hash as a pair. */
+  readonly expectedHeadSeq?: number
+  /** SHA-256 of the canonical head event the caller expects. */
+  readonly expectedHeadSha256?: string
+}
+
+/** One derived model message label in a detached context projection. */
+export interface ContextRepairProjectionMessage {
+  readonly seq: number
+  readonly role: string
+  readonly sourceKind: string
+  /** SHA-256 of the derived role, source, and content. */
+  readonly sha256: string
+}
+
+/** Deterministic derived-context view; bodies stay out of this metadata. */
+export interface ContextRepairProjection {
+  /** Inclusive log head this view covers. */
+  readonly headSeq: number
+  /** Active model-surface event seqs in model order. */
+  readonly activeSeqs: readonly number[]
+  readonly messages: readonly ContextRepairProjectionMessage[]
+  /** SHA-256 of the ordered labels, seqs, and per-message digests. */
+  readonly sha256: string
+}
+
+/** Read-only preview value returned to the authorized operator. */
+export interface SessionContextRepairPreviewValue {
+  readonly previewId: ContextRepairPreviewId
+  readonly fingerprint: ContextRepairFingerprint
+  readonly sessionId: SessionId
+  readonly head: { readonly seq: number; readonly sha256: string }
+  readonly target: {
+    readonly seq: number
+    readonly sourceKind: 'compact-checkpoint' | 'enpoi-keeper'
+    readonly blockIndex: number
+    readonly blockSha256: string
+    readonly oldLineSha256: string
+  }
+  readonly before: ContextRepairProjection
+  readonly after: ContextRepairProjection
+  /** Minimal exact change; the old and replacement lines are operator-only content. */
+  readonly diff: {
+    readonly targetSeq: number
+    readonly blockIndex: number
+    readonly oldLine: string
+    readonly replacementLine: string
+    readonly oldBlockSha256: string
+    readonly newBlockSha256: string
+    readonly surfaceOp: { readonly op: 'replace'; readonly startSeq: number; readonly endSeq: number }
+    readonly sourceEventSeqs: readonly number[]
+  }
+}
+
+/** One-use apply request. The replacement text is the stored preview plan's text. */
+export interface SessionContextRepairApplyRequest {
+  readonly sessionId: SessionId
+  readonly previewId: ContextRepairPreviewId
+  readonly fingerprint: ContextRepairFingerprint
+}
+
+/** Durable receipt metadata for one apply attempt. */
+export interface SessionContextRepairReceipt {
+  /** `applied` means the append and its durability barrier committed; `partial` means only the append did. */
+  readonly status: 'applied' | 'partial'
+  /** Private receipt directory under the configured backup root. */
+  readonly directory: string
+  /** Immutable prepared receipt with the old and replacement text for explicit rollback. */
+  readonly preparedPath: string
+  /** Immutable final receipt, when it was written. */
+  readonly finalPath?: string
+  /** Private copy of the canonical persistence artifact. */
+  readonly backupPath: string
+  readonly backupSha256: string
+  readonly artifactPath: string
+  readonly artifactSha256: string
+  readonly artifactSizeBytes: number
+  readonly artifactDev: number
+  readonly artifactIno: number
+  readonly artifactMtimeMs: number
+  readonly artifactMode: number
+  /** Provider-decoded canonical head verified from the flushed artifact before the append. */
+  readonly logicalHead: { readonly seq: number; readonly sha256: string }
+  readonly headBefore: { readonly seq: number; readonly sha256: string }
+  /** Assigned seq of the replacement event. */
+  readonly appendedSeq: number
+  /** Head immediately after the replacement append; paired with {@link next}. */
+  readonly headAfter: { readonly seq: number; readonly sha256: string }
+  /** Present only for a partial outcome. */
+  readonly reason?: string
+  /** Present when a committed repair could not write its final receipt or a keeper hook failed. */
+  readonly warning?: string
+}
+
+/** Apply value: a committed repair, or a guarded partial that names its receipt. */
+export interface SessionContextRepairApplyValue {
+  readonly status: 'applied' | 'partial'
+  readonly receipt: SessionContextRepairReceipt
+  /** Derived model context after the append, or the unchanged context for a partial failure. */
+  readonly next: ContextRepairProjection
+}
+
+/**
+ * Process-local notification fired synchronously immediately after a committed
+ * context-repair append and before its durability barrier. No Session event is
+ * added by this hook: coordination is optional and process-local. The current
+ * keeper does not require it because repair continuity reads the authoritative
+ * active keeper surface.
+ */
+export interface SessionContextRepairCommittedEvent {
+  readonly sessionId: SessionId
+  readonly targetSeq: number
+  readonly sourceKind: 'compact-checkpoint' | 'enpoi-keeper'
+  readonly oldLine: string
+  readonly replacementLine: string
+  readonly oldBlockText: string
+  readonly newBlockText: string
+  readonly preparedReceiptPath: string
+  readonly appendedSeq: number
+  readonly headAfter: { readonly seq: number; readonly sha256: string }
+}
+
 /** File-revert conflict resolution request (bridged to enpoi-file-revert). */
 export interface SessionResolveFileConflictRequest {
   readonly sessionId: SessionId
@@ -1240,6 +1413,16 @@ declare module '@deepseek-ai/cordis' {
      * @param message - user-safe failure chain.
      */
     'api-session/error'(sessionId: SessionId, message: string): void
+    /**
+     * One operator context-repair append committed under Agent maintenance.
+     * Fired synchronously before the repair durability barrier. This is
+     * optional process-local coordination, not a Session event. The current
+     * keeper does not need it: repair continuity reads the authoritative active
+     * keeper surface.
+     * @mode emit
+     * @param event - committed repair identity and exact replacement text.
+     */
+    'session/context-repair/committed'(event: SessionContextRepairCommittedEvent): void
   }
 }
 

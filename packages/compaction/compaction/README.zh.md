@@ -71,7 +71,7 @@ kind: "package-reference"
 - **抽象约定，具体后端。** 接口规定压缩做什么；提供方拥有策略、保留与摘要，因此各角色可独立演进、独立替换。
 - **会话与 LLM（大语言模型）词汇是约定的一部分。** 操作作用于 `Session`，摘要使用 `ContentBlock`，因此尽管有通用的 Cordis-only 指引，Service Definition 仍依赖 `dsh-session` 与 `dsh-llm`——这是一项有意的偏离，记录在[压缩能力 seam Agent Note](../../../.agents/notes/implemented/feature/2026-06-18-compaction-capability-seam.zh.md) 中。
 - **日志记录的标记对就是锁。** `compaction/start` 在摘要让出控制权之前追加，`compaction/end` 释放；每次失败都恰好进行一次闭合尝试，闭合失败会留下未匹配 start 作为有意的 busy 信号。
-- **表层只变更一次。** 摘要承载在标记对内的一条 `user/message` 替换上；所有 `compaction/*` 事件仅写入日志。
+- **正常压缩运行只变更一次表层。** 摘要承载在标记对内的一条 `user/message` 替换上；所有 `compaction/*` 事件仅写入日志。有界检查点修正标记对之外的唯一表层写入，且它不是一次压缩运行。
 
 ### 服务 API
 
@@ -95,6 +95,8 @@ kind: "package-reference"
 `SurfaceEventType` 是封闭联合——`user/message`、`assistant/message` 与 `tool/result` 必须携带 `surfaceOp`，其他事件禁止携带该字段，因此 `compaction/*` 事件不能出现在表层上。成功的后端运行改为在日志中包围整个操作：先追加 `compaction/start`（仅日志）获取锁，摘要该范围，追加仅日志的 `compaction/summary` 记录，用一条承载摘要的 `user/message` 替换所选范围——这是唯一的表层变更——最后追加 `compaction/end`（仅日志）释放锁。
 
 替换位于锁的起止范围**内**，因此 `compaction/start` 与 `compaction/end` 之间崩溃会留下可检测的遗留锁，而不是虚假声称成功的 `compaction/end`。`deriveMessages()` 将摘要渲染为 user 角色消息，后面跟随已保留节点；已遮蔽事件仍保留在原始日志中，因此回放具有确定性。每个事件的具体 payload 见[压缩子系统参考](../../../docs/subsystems/compaction.zh.md)。
+
+轮次之间的操作员修复可以修正恰好一个当前检查点节点，而不打开 compaction 标记对。修正必须在 `sourceEventSeqs` 中引用其目标，保留目标的 `compactionId` 与 `sourceCommandId`，并在没有打开轮次时运行；原始检查点及其标记对历史仍保留在日志中。预览计划会在任何追加之前通过 `validateCompactionEvents` 重放完整计划事件流。它复用带 `compact-checkpoint` 来源的 `user/message`，不新增事件、schema 字段或格式版本，也不是新检查点：新检查点仍需要完整标记对。运行时不变式与已发布的 V4/V5 关系解析器实现同一规则，必须一起修改。
 
 ### 源码地图
 
@@ -160,6 +162,7 @@ kind: "package-reference"
 - **面向用户的命令，而非模型工具**——压缩由 `/compact` 命令与自动压力触发；不会注册面向模型的压缩工具。
 - **部分单元溢出不在约定内**——平衡摘要压缩无法拆分一个不可分单元。当闭合工具对中可移除的主要部分是承载文本的工具结果时，可选剪枝配套服务仍可修复该工具对；无法压缩大型非工具节点，或不可剪枝剩余部分过大的工具单元。
 - **单独接近窗口大小的 envelope 不属于表层压缩工作**——压缩缩减派生历史，绝不缩减系统提示词、工具或会话前缀。
+- **修正后的检查点日志需要能识别修正的读取器**——没有打开 compaction 时，较旧的 V4/V5 读取器会把检查点替换当作缺少匹配 `compaction/start` 而拒绝。请用包含该修正规则的读取器重开此类日志；兼容性说明由 [V3-to-V4 关系约定](../../session/session-format-v3-to-v4/README.zh.md#known-limitations-and-deferred-work) 拥有。不涉及格式提升或新确认。
 
 <a id="dev-note"></a>
 ### 开发备注

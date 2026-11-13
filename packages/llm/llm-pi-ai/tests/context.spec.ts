@@ -9,9 +9,11 @@ import type {
 import { createDeveloperMessage, ToolCallId, createAssistantMessage, createMessage, createToolResultMessage, createUserMessage, offloadedImageText, requiredImageOffload } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, Message, RequestUserInput } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
-import { toPiContext } from '../src/context.ts'
+import type { Context as PiContext } from '@earendil-works/pi-ai'
+import { toPiContext as convertContext } from '../src/context.ts'
 import type { PiImageRequestContext } from '../src/context.ts'
 import { toPiAssistant } from '../src/replay.ts'
+import type { PiReplayTarget } from '../src/replay.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -71,6 +73,31 @@ function request(messages: GenerateOptions['messages']): GenerateOptions {
     tools: [{ name: 'lookup', description: 'look up', parameters: { type: 'object' } }],
     messages,
   }
+}
+
+/** This spec has no replay state; a concrete target keeps the conversion contract explicit. */
+function targetOf(options: GenerateOptions): PiReplayTarget {
+  return { provider: options.provider, api: 'openai-completions', model: options.model }
+}
+
+function toPiContext(
+  options: GenerateOptions,
+  images?: undefined,
+  onReplayDegrade?: (reason: string) => void,
+): PiContext
+function toPiContext(
+  options: GenerateOptions,
+  images: PiImageRequestContext,
+  onReplayDegrade?: (reason: string) => void,
+): Promise<PiContext>
+function toPiContext(
+  options: GenerateOptions,
+  images?: PiImageRequestContext,
+  onReplayDegrade?: (reason: string) => void,
+): PiContext | Promise<PiContext> {
+  return images === undefined
+    ? convertContext(options, targetOf(options), undefined, onReplayDegrade)
+    : convertContext(options, targetOf(options), images, onReplayDegrade)
 }
 
 function user(content: ContentBlock[]): Message {
@@ -586,6 +613,7 @@ describe('pi-ai request context conversion', () => {
         content: [{ type: 'image', attachment: ref }],
         source: { provider: 'openai', model: 'gpt-4.1' },
       }),
+      { provider: 'openai', api: 'openai-completions', model: 'gpt-4.1' },
     )).toThrow(/assistant image output/)
   })
 

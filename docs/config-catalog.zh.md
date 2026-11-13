@@ -282,7 +282,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-session-controller`
 
 - `inject`: `agentDefaultModel` · `agents` · `attachments` · `fileUploads` · `fs` · `llm` · `sessions` · `sessionProjections` · `sessionQuery` · `typert` · `workspaceRegistry`
-- `source`: [`packages/api/session-controller/src/index.ts:134`](../packages/api/session-controller/src/index.ts)
+- `source`: [`packages/api/session-controller/src/index.ts:143`](../packages/api/session-controller/src/index.ts)
 
 ```ts config-catalog
 /** Session Controller deployment policy. */
@@ -299,6 +299,23 @@ export interface Config {
   readonly sessionFollowResume?: boolean
   /** Dense durable events one resumed follow opening may carry before a full snapshot; default 2048. */
   readonly sessionFollowResumeMaxEvents?: number
+  /**
+   * Private directory for operator context-repair backup artifacts and
+   * receipts; created with owner-only mode outside every Session log tree.
+   * Defaults to `$DSH_HOME/backups/context-repair`. A relative path or an
+   * unsupported tilde prefix refuses at load; `~/` expands to the OS home.
+   */
+  readonly contextRepairBackupRoot?: string
+  /** Lifetime of one prepared context-repair preview plan; default 5 minutes. */
+  readonly contextRepairPreviewTtlMs?: number
+  /** Maximum prepared context-repair plans retained per controller; default 32. */
+  readonly contextRepairPreviewMaxPlans?: number
+  /** Maximum canonical artifact bytes copied by one context-repair backup; default 256 MiB. */
+  readonly contextRepairMaxArtifactBytes?: number
+  /** Maximum replacement code units accepted by one context repair; default 16384. */
+  readonly contextRepairMaxReplacementChars?: number
+  /** Maximum serialized context-repair preview bytes; default 512 KiB. */
+  readonly contextRepairMaxPreviewBytes?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-session-controller -->

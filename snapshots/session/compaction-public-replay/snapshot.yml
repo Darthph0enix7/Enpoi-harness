@@ -1,0 +1,11 @@
+version: 1
+scenario: compaction-public-replay
+profile: headless
+composition: compaction-public-replay
+recording: authored
+header:
+  class: compaction-public-replay
+  pin: true
+  systemPromptSource: compaction-recovery
+  toolSchemasSource: compaction-recovery
+  changes: 1

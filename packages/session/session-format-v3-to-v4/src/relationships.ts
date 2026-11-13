@@ -252,6 +252,28 @@ class Relationships {
     return this.compaction
   }
 
+  /** Validate one checkpoint replacement against its open compaction or its current checkpoint amendment target. */
+  checkpoint(event: SessionFormatEvent, source: SessionFormatJsonObject): void {
+    if (this.compaction !== undefined) {
+      this.compactionOwner(source, 'compaction checkpoint')
+      return
+    }
+    if (this.turn !== null) throw new SessionFormatError('compaction checkpoint amendment is only allowed between turns')
+    const operation = record(event['surfaceOp'], 'compaction checkpoint surfaceOp')
+    const start = earlier(operation['startSeq'], event.seq, 'compaction checkpoint amendment target')
+    const end = earlier(operation['endSeq'], event.seq, 'compaction checkpoint amendment target')
+    if (start !== end) throw new SessionFormatError('compaction checkpoint amendment must replace exactly one current checkpoint node')
+    const target = this.artifact.events[start]
+    const missing = 'compaction checkpoint has no matching compaction/start and no existing checkpoint to amend'
+    if (target?.type !== 'user/message' || target['surfaceOp'] === 'append') throw new SessionFormatError(missing)
+    const targetSource = record(record(target.data, 'amended checkpoint data')['source'], 'amended checkpoint source')
+    if (targetSource['kind'] !== 'compact-checkpoint') throw new SessionFormatError(missing)
+    const id = text(targetSource['compactionId'], 'amended checkpoint compactionId')
+    if (source['compactionId'] !== id || source['sourceCommandId'] !== targetSource['sourceCommandId']) {
+      throw new SessionFormatError('compaction checkpoint amendment changes its source identity')
+    }
+  }
+
   span(event: SessionFormatEvent, data: SessionFormatJsonObject): void {
     const range = record(data['shadowedRange'], 'compaction shadowedRange')
     const start = this.surface.indexOf(earlier(range['start'], event.seq, 'compaction range start'))
@@ -321,7 +343,7 @@ class Relationships {
       case 'compaction/start': case 'compaction/summary': case 'compaction/end': case 'compaction/prune': this.compact(event, data); break
       case 'user/message': {
         const source = record(data['source'], 'user message source')
-        if (event['surfaceOp'] !== 'append' && source['kind'] === 'compact-checkpoint') this.compactionOwner(source, 'compaction checkpoint')
+        if (event['surfaceOp'] !== 'append' && source['kind'] === 'compact-checkpoint') this.checkpoint(event, source)
         break
       }
       case 'session/end-seed': this.compaction = undefined; break

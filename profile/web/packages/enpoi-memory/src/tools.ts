@@ -3,7 +3,8 @@
  *
  * Memory is tool-driven (standing rule #615): nothing is injected; the model
  * calls `memory_search` when it needs earlier decisions. Search scopes
- * compaction-derived rows to the caller's workspace (C3/C4).
+ * compaction-derived rows to the caller's workspace (C3/C4), and results
+ * render state and trust so tentative claims are visibly unconfirmed.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -18,6 +19,11 @@ function savedAt(claim: { committed_at: number | null; created_at: number }): st
   const stamp = claim.committed_at ?? claim.created_at
   const date = new Date(stamp)
   return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10)
+}
+
+/** Quote a fact containing a line break so it cannot spoof a second result row. */
+function renderFact(fact: string): string {
+  return /[\r\n]/.test(fact) ? JSON.stringify(fact) : fact
 }
 
 /** Loose JSON value shape accepted by a tool render callback. */
@@ -72,7 +78,7 @@ export function registerMemoryTools(
     },
     isConcurrencySafe: () => true,
     async execute(args: Record<string, unknown>, exec?: ToolRunContext) {
-      // Provenance is audit-only for operator saves: it never scopes retrieval.
+      // The source record is audit-only for operator saves: it never scopes retrieval.
       const session = exec?.agent?.session
       const provenance = JSON.stringify({
         source: 'memory_save',
@@ -94,7 +100,8 @@ export function registerMemoryTools(
     description: [
       'Search cross-session memory. Call it when starting a task, returning to a subsystem,',
       'or before re-deriving a decision: it returns saved facts plus the durable facts each compaction extracted,',
-      'each with id, category, origin (memory_save | compaction | keeper) and save date so you can weigh them.',
+      'each with id, category, origin (memory_save | compaction | keeper), save date, state, and trust so you can weigh them.',
+      'Tentative claims are unconfirmed; verify before relying on them.',
       'Nothing is injected — this is the only way memory reaches you. Compaction facts are scoped to the caller\'s workspace.',
     ].join(' '),
     parameters: {
@@ -129,12 +136,12 @@ export function registerMemoryTools(
         },
         required: ['facts'],
       },
-      // C4: `• <id> <category> [<origin> <savedAt>] — <fact>`.
+      // C4: `• <id> <category> [<origin> <savedAt>] state=<state> trust=<trust> — <fact>`.
       render: (_a, raw) => {
         const v = raw as { facts?: MemoryFactRow[] }
         return [{
           type: 'text',
-          text: (Array.isArray(v.facts) ? v.facts.map(f => `• ${f.id} ${f.category} [${f.origin} ${f.savedAt}] — ${f.fact}`) : []).join('\n')
+          text: (Array.isArray(v.facts) ? v.facts.map(f => `• ${f.id} ${f.category} [${f.origin} ${f.savedAt}] state=${f.state} trust=${f.trust} — ${renderFact(f.fact)}`) : []).join('\n')
             || 'No matching memory.',
         }]
       },
@@ -193,7 +200,7 @@ export function registerMemoryTools(
 
   ctx.tools.register({
     name: 'memory_confirm',
-    description: 'Explicitly confirm/graduate a tentative (untrusted) memory fact after verifying it. Operator action — use only on facts you or the operator verified. Facts saved with memory_save are already committed; confirmation applies to tentative chat-sourced claims.',
+    description: 'Explicitly confirm a tentative (untrusted) memory fact. Commits it with the operator trust label and a fresh commit time; use only after verifying the fact. Facts saved with memory_save are already committed; confirmation applies to tentative claims.',
     parameters: {
       type: 'object',
       properties: {

@@ -1,4 +1,6 @@
-# Proactive compaction with a bounded message budget.
+# Proactive compaction with a bounded message budget. The 1,100-token
+# headroom keeps the trigger between the history and the larger derived
+# checkpoint so the replacement actually relieves pressure.
 
 - id: llm-deepseek
   config:
@@ -10,6 +12,6 @@
 - id: compaction-basic
   config:
     thresholdRatio: 0.8
-    headroomTokens: 1800
+    headroomTokens: 1100
     retainTokens: 20
     maxTokens: 32

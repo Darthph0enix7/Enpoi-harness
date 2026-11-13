@@ -26,7 +26,7 @@ export interface PiAiReplayResponse {
   provider: string
   /** Requested model identity, matching the durable assistant source. */
   model: string
-  /** Provider-reported model; only Anthropic replays it as the native model (reported in `message.model`, not `message.responseModel`). */
+  /** Provider-reported model, retained as replay metadata; it never replaces the target model used for same-model signature handling. */
   responseModel?: string
   responseId?: string
   /** Provider-native effort for historical replay; absence is preserved. */
@@ -38,6 +38,18 @@ export interface PiAiReplayResponse {
 interface PiAiReplayState {
   response: PiAiReplayResponse
   blocks: PiAiReplayBlock[]
+}
+
+/**
+ * The exact route a request will reach. Replay is native only when all three
+ * identities match the stored response: pi-ai applies cross-model signature
+ * rules per provider, API, and model, and a mismatch would turn a thinking
+ * block into ordinary assistant text on the wire.
+ */
+export interface PiReplayTarget {
+  provider: string
+  api: Api
+  model: string
 }
 
 /** Parse tool-call argument JSON; tolerate model malformations with {}. */
@@ -149,14 +161,21 @@ function readReplayState(value: unknown): PiAiReplayState {
   }
 }
 
-/** Convert provider-neutral blocks without trusting them as same-model replay. */
+/**
+ * Convert provider-neutral blocks without trusting them as same-model replay.
+ *
+ * Reasoning is intentionally absent: pi-ai converts a thinking block it does
+ * not recognize as same-model replay into ordinary assistant text, which would
+ * place provider-private reasoning in the public answer history. Durable
+ * reasoning remains in the Session log; only this request projection drops it.
+ */
 function foreignAssistant(message: HarnessAssistantMessage): AssistantMessage {
   const source = message.source
   const content: AssistantMessage['content'] = []
   for (const block of message.content) {
     switch (block.type) {
       case 'text': content.push({ type: 'text', text: block.text }); break
-      case 'reasoning': content.push({ type: 'thinking', thinking: block.text }); break
+      case 'reasoning': break
       case 'tool-call': content.push({
         type: 'toolCall',
         id: block.id,
@@ -184,15 +203,34 @@ function foreignAssistant(message: HarnessAssistantMessage): AssistantMessage {
   }
 }
 
-/** Recombine durable Harness content with validated pi-ai replay metadata. */
-function replayedAssistant(message: HarnessAssistantMessage, source: ModelMessageSource, rawState: unknown): AssistantMessage {
+/**
+ * Recombine durable Harness content with validated pi-ai replay metadata.
+ * @returns the native assistant message, or undefined when the replay belongs
+ *   to a different provider, API, or model than this request targets.
+ */
+function replayedAssistant(
+  message: HarnessAssistantMessage,
+  source: ModelMessageSource,
+  rawState: unknown,
+  target: PiReplayTarget,
+): AssistantMessage | undefined {
   const state = readReplayState(rawState)
   if (state.response.provider !== source.provider) return invalidReplay('provider does not match assistant source')
   if (state.response.model !== source.model) return invalidReplay('model does not match assistant source')
+  // Validate alignment before the target check: corrupt stored state deserves
+  // the same diagnostic whether or not this request could have used it.
   if (state.blocks.length !== message.content.length) return invalidReplay('block count does not match assistant content')
+  for (const [index, block] of message.content.entries()) {
+    if (state.blocks[index]?.type !== block.type) return invalidReplay(`block ${index} does not match assistant content`)
+  }
+  // Replay signatures are native to the exact route that produced them. A
+  // target mismatch is not corrupt state; it is provider-neutral history.
+  if (state.response.provider !== target.provider
+    || state.response.api !== target.api
+    || state.response.model !== target.model) return undefined
   const content: AssistantMessage['content'] = message.content.map((block, index) => {
     const replay = state.blocks[index]
-    if (replay === undefined || replay.type !== block.type) return invalidReplay(`block ${index} does not match assistant content`)
+    if (replay === undefined) return invalidReplay(`block ${index} does not match assistant content`)
     switch (block.type) {
       case 'text': return {
         type: 'text',
@@ -219,11 +257,13 @@ function replayedAssistant(message: HarnessAssistantMessage, source: ModelMessag
   return {
     role: 'assistant',
     content,
-    api: state.response.api,
-    provider: state.response.provider,
-    // Anthropic reports aliases and fallbacks as model, unlike Completions' informational responseModel.
-    model: state.response.api === 'anthropic-messages'
-      ? state.response.responseModel ?? state.response.model : state.response.model,
+    // The target identity, not the provider-reported alias: pi-ai decides
+    // same-model signature handling from this message, so restoring a native
+    // alias here would make an otherwise compatible replay cross-model and
+    // convert its thinking to plain text. The native model stays in responseModel.
+    api: target.api,
+    provider: target.provider,
+    model: target.model,
     ...state.response.responseModel === undefined ? {} : { responseModel: state.response.responseModel },
     ...state.response.responseId === undefined ? {} : { responseId: state.response.responseId },
     ...state.response.providerThinkingLevel === undefined ? {} : { providerThinkingLevel: state.response.providerThinkingLevel },
@@ -242,15 +282,20 @@ function replayedAssistant(message: HarnessAssistantMessage, source: ModelMessag
  * no longer matches the content — therefore degrades the one message to
  * provider-neutral history instead of failing the request.
  * @param message - model-produced assistant content with provider, model, and optional adapter-owned replay metadata.
+ * @param target - the exact provider/API/model the SDK will receive.
  * @param onDegrade - called with the diagnostic reason when an unusable replay
  *   state falls back to provider-neutral conversion.
  * @returns a native pi-ai assistant message reconstructed from durable content.
  */
-export function toPiAssistant(message: HarnessAssistantMessage, onDegrade?: (reason: string) => void): AssistantMessage {
+export function toPiAssistant(
+  message: HarnessAssistantMessage,
+  target: PiReplayTarget,
+  onDegrade?: (reason: string) => void,
+): AssistantMessage {
   const source = message.source
   if (source.replayState === undefined) return foreignAssistant(message)
   try {
-    return replayedAssistant(message, source, source.replayState)
+    return replayedAssistant(message, source, source.replayState, target) ?? foreignAssistant(message)
   } catch (error: unknown) {
     /* v8 ignore next -- replayedAssistant throws only INVALID_REPLAY_STATE LlmErrors; the
        guard keeps a future non-replay failure loud instead of silently degrading it */

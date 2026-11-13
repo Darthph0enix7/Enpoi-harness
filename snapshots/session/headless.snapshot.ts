@@ -845,6 +845,63 @@ describe('headless recorded-session snapshots', () => {
     }
   })
 
+  it('keeps human prompts and generated compaction checkpoints typed with aligned source refs', async () => {
+    for (const scenario of scenarios.filter(candidate => candidate.name.startsWith('compaction-'))) {
+      const fixture = await readFile(join(scenario.dir, await primaryFixtureFile(scenario.dir)), 'utf8')
+      const rows = records(fixture)
+      const human = rows.filter((row) => {
+        const source = (row.data as JsonObject | undefined)?.source as JsonObject | undefined
+        return row.type === 'user/message' && source?.kind === 'user'
+      })
+      expect(human.length, `${scenario.name}: human operator prompt remains typed`).toBeGreaterThan(0)
+      const summaries = rows.filter(row => row.type === 'compaction/summary')
+      const checkpoints = rows.filter((row) => {
+        const source = (row.data as JsonObject | undefined)?.source as JsonObject | undefined
+        return row.type === 'user/message' && source?.kind === 'compact-checkpoint'
+      })
+      expect(checkpoints.length, `${scenario.name}: generated checkpoint source`).toBeGreaterThan(0)
+      for (const checkpoint of checkpoints) {
+        const data = checkpoint.data as JsonObject
+        const source = data.source as JsonObject
+        const op = checkpoint.surfaceOp as JsonObject
+        expect(op.op, `${scenario.name}: checkpoint replaces its span`).toBe('replace')
+        const summary = summaries.find(row =>
+          (row.data as JsonObject | undefined)?.compactionId === source.compactionId)
+        expect(summary, `${scenario.name}: checkpoint names its compaction/summary`).toBeDefined()
+        const summaryData = summary!.data as JsonObject
+        const range = summaryData.shadowedRange as JsonObject
+        const shadowedSeqs = summaryData.shadowedSeqs as number[]
+        expect(op.startSeq, `${scenario.name}: checkpoint span start`).toBe(range.start)
+        expect(op.endSeq, `${scenario.name}: checkpoint span end`).toBe(range.end)
+        const refs = checkpoint.sourceEventSeqs as number[]
+        for (const seq of shadowedSeqs) {
+          expect(refs, `${scenario.name}: checkpoint references shadowed seq ${seq}`).toContain(seq)
+        }
+        const content = data.content as JsonObject[]
+        expect(content.some(block => block.type === 'reasoning'),
+          `${scenario.name}: a generated checkpoint carries no private reasoning`).toBe(false)
+        if (summaryData.rawOutput !== undefined) {
+          const text = content.flatMap(block => block.type === 'text' ? [block.text as string] : []).join('\n')
+          expect(text).toContain(
+            `[source span] Surface seqs ${String(range.start)}–${String(range.end)} `
+            + `(${String(shadowedSeqs.length)} messages).`,
+          )
+        }
+      }
+    }
+    // The authored integrity scenario keeps its private reasoning only as
+    // durable session evidence, while public human/assistant/tool markers stay
+    // in the record that the generated checkpoint shadows.
+    const integrity = scenarioByName.get('compaction-public-replay')
+    expect(integrity).toBeDefined()
+    const fixture = await readFile(join(integrity!.dir, await primaryFixtureFile(integrity!.dir)), 'utf8')
+    expect(fixture).toContain('PRIVATE_REASONING_MARKER')
+    expect(fixture).toContain('HUMAN_PUBLIC_MARKER')
+    expect(fixture).toContain('ASSISTANT_PUBLIC_MARKER')
+    expect(fixture).toContain('TOOL_CALL_PUBLIC_MARKER')
+    expect(fixture).toContain('TOOL_RESULT_PUBLIC_MARKER')
+  })
+
   it('keeps packed chunk rows logically equal to their unpacked recording', async () => {
     const packedDir = join(snapshotsRoot, 'packed-chunks')
     const packed = await readFile(join(packedDir, await primaryFixtureFile(packedDir)), 'utf8')

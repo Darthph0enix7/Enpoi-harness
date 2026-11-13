@@ -13,6 +13,7 @@
     "src/assistant-stream.ts",
     "src/catalog.ts",
     "src/commands.ts",
+    "src/context-repair.ts",
     "src/control.ts",
     "src/execution-state.ts",
     "src/file-references.ts",
@@ -35,6 +36,7 @@
   "references": [
     { "path": "../../../vendor/cordis" },
     { "path": "../../../vendor/schemastery" },
+    { "path": "../../compaction/compaction" },
     { "path": "../../core/agent" },
     { "path": "../../core/agent-default-model" },
     { "path": "../../core/scope" },
@@ -48,6 +50,7 @@
     { "path": "../../fs/fs" },
     { "path": "../../llm/llm" },
     { "path": "../../util/deque" },
+    { "path": "../../util/home-paths" },
     { "path": "../../util/native-command" },
     { "path": "../../preset/agent-preset-registry" },
     { "path": "../../session/session-persistence" },

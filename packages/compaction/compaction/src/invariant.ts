@@ -2,8 +2,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { isReplacementSurfaceEvent, SessionSeq } from '@deepseek-ai/dsh-session'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import { SurfaceManager } from '@deepseek-ai/dsh-session/surface'
+import type { Session, SessionEvent, SurfaceOp } from '@deepseek-ai/dsh-session'
+import { SurfaceManager, type SessionMessageProjection } from '@deepseek-ai/dsh-session/surface'
 import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 import type { CompactionId } from './brand.ts'
 import { isCompactCheckpointSource } from './checkpoint.ts'
@@ -94,9 +94,58 @@ function validateSourceCommandId(
   }
 }
 
-/** Validate one replacement checkpoint against its open compaction transaction. */
+type CheckpointReplacementEvent = SessionEvent<'user/message'> & {
+  surfaceOp: Extract<SurfaceOp, { op: 'replace' }>
+}
+
+/**
+ * Validate one corrective checkpoint amendment between turns. An amendment may
+ * only replace the single current surface checkpoint node it cites, and it
+ * must preserve that node's exact compaction identity and command identity.
+ */
+function validateCheckpointAmendment(
+  trace: SessionTrace,
+  event: CheckpointReplacementEvent,
+  source: CompactionCheckpointSource,
+  fail: InvariantFailure,
+): void {
+  if (trace.openTurn !== null) {
+    fail('compaction checkpoint amendment is only allowed between turns')
+  }
+  const { startSeq, endSeq } = event.surfaceOp
+  if (startSeq !== endSeq) {
+    fail('compaction checkpoint amendment must replace exactly one current checkpoint node')
+  }
+  const targetSeq = startSeq
+  const target = trace.surfaceEvents[targetSeq]
+  if (target === undefined || target.seq !== targetSeq || !trace.surface.nodes.includes(targetSeq)) {
+    fail('compaction checkpoint has no matching compaction/start and no current surface target to amend')
+  }
+  if (target.type !== 'user/message'
+    || !isReplacementSurfaceEvent(target)
+    || !isCompactCheckpointSource(target.data.source)) {
+    fail('compaction checkpoint has no matching compaction/start and no existing checkpoint to amend')
+  }
+  validateId(target.data.source.compactionId, 'amended compaction checkpoint compactionId', fail)
+  if (target.data.source.sourceCommandId !== undefined) {
+    validateId(target.data.source.sourceCommandId, 'amended compaction checkpoint sourceCommandId', fail)
+  }
+  if (source.compactionId !== target.data.source.compactionId) {
+    fail(`compaction checkpoint amendment id ${source.compactionId} does not match amended checkpoint id ${target.data.source.compactionId}`)
+  }
+  if (source.sourceCommandId !== target.data.source.sourceCommandId) {
+    fail(`compaction checkpoint amendment sourceCommandId ${String(source.sourceCommandId)} does not match amended checkpoint sourceCommandId ${String(target.data.source.sourceCommandId)}`)
+  }
+  /* v8 ignore next 3 -- surface append/seed validation already requires every shadowed node citation. */
+  if (event.sourceEventSeqs === undefined || !event.sourceEventSeqs.includes(targetSeq)) {
+    fail('compaction checkpoint amendment must cite the amended checkpoint in sourceEventSeqs')
+  }
+}
+
+/** Validate one replacement checkpoint against its open compaction transaction or a current amendment target. */
 function validateCheckpoint(
   trace: SessionTrace,
+  event: CheckpointReplacementEvent,
   source: CompactionCheckpointSource,
   fail: InvariantFailure,
 ): void {
@@ -105,7 +154,10 @@ function validateCheckpoint(
     validateId(source.sourceCommandId, 'compaction checkpoint sourceCommandId', fail)
   }
   const open = trace.compaction
-  if (open === undefined) fail('compaction checkpoint has no matching compaction/start')
+  if (open === undefined) {
+    validateCheckpointAmendment(trace, event, source, fail)
+    return
+  }
   if (source.compactionId !== open.compactionId) {
     fail(`compaction checkpoint id ${source.compactionId} does not match compaction/start id ${open.compactionId}`)
   }
@@ -189,7 +241,7 @@ function validateCompactionEvent(
   if (event.type === 'user/message'
     && isReplacementSurfaceEvent(event)
     && isCompactCheckpointSource(event.data.source)) {
-    validateCheckpoint(trace, event.data.source, fail)
+    validateCheckpoint(trace, event, event.data.source, fail)
     return undefined
   }
   if (event.type !== 'compaction/start' && event.type !== 'compaction/summary' && event.type !== 'compaction/end') {
@@ -282,6 +334,57 @@ function applyCompactionTransition(
   return undefined
 }
 
+/** Create an empty trace over one replay event window. */
+function createTrace(projections: readonly SessionMessageProjection[]): SessionTrace {
+  const surfaceEvents: SessionEvent[] = []
+  return {
+    openTurn: null,
+    compaction: undefined,
+    surfaceEvents,
+    surface: new SurfaceManager(surfaceEvents, undefined, projections),
+  }
+}
+
+/** Replay one complete event stream through the compaction checks, advancing the trace. */
+function replayEvents(
+  trace: SessionTrace,
+  events: readonly SessionEvent[],
+  fail: InvariantFailure,
+): void {
+  const staleOrphanStartSeqs = inheritedOrphanStartSeqs(events)
+  for (const event of events) {
+    // Constructor-seed repair boundaries can precede the end-seed marker
+    // that proves an inherited orphan stale. Replay that inherited prefix
+    // without letting the soon-to-be-cleared bracket veto its repair.
+    if (
+      trace.compaction === undefined
+      || !staleOrphanStartSeqs.has(trace.compaction.startSeq)
+    ) {
+      validateTurnBoundary(trace, event, fail)
+    }
+    const transition = validateCompactionEvent(trace, event, fail)
+    if (transition !== undefined) trace.compaction = applyCompactionTransition(transition)
+    applyTurnBoundary(trace, event)
+    trace.surfaceEvents.push(event)
+  }
+}
+
+/**
+ * Validate one complete event stream without installing live listeners.
+ * Callers planning a durable append use this to reject an invalid planned
+ * stream before any event is committed.
+ * @param events - contiguous Session events to replay from seq 0.
+ * @param projections - message projections the replay's surface fold requires.
+ * @param fail - package-attributed reporter that must throw.
+ */
+export function validateCompactionEvents(
+  events: readonly SessionEvent[],
+  projections: readonly SessionMessageProjection[],
+  fail: InvariantFailure,
+): void {
+  replayEvents(createTrace(projections), events, fail)
+}
+
 /** Install compaction start/summary/end checks. */
 // Event owners keep precommit staging local so their vocabularies never move into a central helper.
 /* jscpd:ignore-start */
@@ -289,32 +392,10 @@ const install: InvariantInstaller = Object.assign((ctx: Context, fail: Invariant
   const traces = new WeakMap<Session, SessionTrace>()
   const staged = new WeakMap<SessionEvent, { session: Session; transition: CompactionTransition }>()
   const seed = (session: Session): SessionTrace => {
-    const surfaceEvents: SessionEvent[] = []
-    const trace: SessionTrace = {
-      openTurn: null,
-      compaction: undefined,
-      surfaceEvents,
-      surface: new SurfaceManager(surfaceEvents, undefined, ctx.sessions.messageProjections),
-    }
+    const trace = createTrace(ctx.sessions.messageProjections)
     traces.set(session, trace)
     // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-    const events = session.snapshotEvents()
-    const staleOrphanStartSeqs = inheritedOrphanStartSeqs(events)
-    for (const event of events) {
-      // Constructor-seed repair boundaries can precede the end-seed marker
-      // that proves an inherited orphan stale. Replay that inherited prefix
-      // without letting the soon-to-be-cleared bracket veto its repair.
-      if (
-        trace.compaction === undefined
-        || !staleOrphanStartSeqs.has(trace.compaction.startSeq)
-      ) {
-        validateTurnBoundary(trace, event, fail)
-      }
-      const transition = validateCompactionEvent(trace, event, fail)
-      if (transition !== undefined) trace.compaction = applyCompactionTransition(transition)
-      applyTurnBoundary(trace, event)
-      trace.surfaceEvents.push(event)
-    }
+    replayEvents(trace, session.snapshotEvents(), fail)
     return trace
   }
   const traceFor = (session: Session): SessionTrace => traces.get(session) ?? seed(session)

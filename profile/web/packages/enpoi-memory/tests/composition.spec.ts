@@ -2,7 +2,7 @@
  * Real-composition boot (L2 acceptance): the shipped
  * `@deepseek-ai/dsh-compaction-basic` backend, the real tool runtime, and this
  * plugin mounted in one Cordis composition. A scripted adapter writes one
- * model summary with a `## Durable Facts` section; the run must land committed
+ * model summary with a `## Durable Facts` section; the run must land tentative
  * `origin = 'compaction'` rows and `memory_search` must find them in the
  * session's cwd and not from another workspace.
  *
@@ -170,7 +170,7 @@ describe('real composition: compaction-basic + enpoi-memory', () => {
     }
     await settle()
 
-    // Rows exist, committed, with compaction provenance.
+    // Rows exist, tentative, with a compaction source record.
     const inspect = new DatabaseSync(dbPath)
     try {
       const rows = inspect.prepare(`SELECT fact, category, state, origin, source_trust, provenance FROM claims ORDER BY created_at`).all()
@@ -178,9 +178,9 @@ describe('real composition: compaction-basic + enpoi-memory', () => {
       const decision = rows.find(row => String(row.fact).startsWith('Loader composition')) as Record<string, unknown>
       expect(decision).toMatchObject({
         category: 'ARCHITECTURE',
-        state: 'committed',
+        state: 'tentative',
         origin: 'compaction',
-        source_trust: 'verified_execution',
+        source_trust: 'untrusted_external',
       })
       expect(JSON.parse(String(decision.provenance))).toMatchObject({
         source: 'compaction',
@@ -198,9 +198,10 @@ describe('real composition: compaction-basic + enpoi-memory', () => {
     const sameScope = await search.execute(
       { query: 'durable facts loader composition' },
       { agent: { session: { id: 'probe-same', header: { cwd: '/work/loader-a' } } }, signal: SIGNAL },
-    ) as { facts: Array<{ origin: string; savedAt: string }> }
+    ) as { facts: Array<{ origin: string; savedAt: string; state: string; trust: string }> }
     expect(sameScope.facts.length).toBeGreaterThan(0)
     expect(sameScope.facts.every(fact => fact.origin === 'compaction')).toBe(true)
+    expect(sameScope.facts.every(fact => fact.state === 'tentative' && fact.trust === 'untrusted_external')).toBe(true)
     expect(sameScope.facts[0]!.savedAt).toMatch(/^\d{4}-\d{2}-\d{2}$/)
 
     // …and not from another workspace.

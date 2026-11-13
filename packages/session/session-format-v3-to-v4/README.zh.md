@@ -244,7 +244,7 @@ System image 接纳要求非空 attachment id、PNG／JPEG／WebP／GIF MIME 类
 | `command/run`、`command/done` | Run id 唯一；完成记录对应先前 run。存在的完成 `sourceEventSeq` 引用更早的非 command 事件，并伴随 success。 |
 | `compaction/start`、`compaction/summary`、`compaction/end` | 匹配 compaction id、源 command 和活动 turn 上下文。Summary 区间引用精确的当前表面节点且排除 protected head；成功完成需要一个 summary。继承的未完成 compaction 在 end-seed marker 处过期。 |
 | `compaction/prune` | 其区间引用精确的当前表面节点且排除 protected head；它不要求存在 compaction 事务或其所有者字段。 |
-| Compact checkpoint 替换 | 其 `compact-checkpoint` 来源标识活动 compaction。 |
+| Compact checkpoint 替换 | 在 compaction 标记对内时，其 `compact-checkpoint` 来源标识活动 compaction。在标记对之外时，它是对恰好一个当前表层检查点节点的轮次间修正，必须保留该节点的 `compactionId` 与 `sourceCommandId` 并引用它。 |
 | 原生 `subagent/catalog` | 检查继承截点之后的自身 version-0/version-1 载荷字段与 child id 唯一性。原生读取既不收集子日志，也不比较其物理事实；继承项不建立自身成员关系。 |
 | 继承截点与 delivery | 应用上文的 marker、坐标及代际归属规则。 |
 
@@ -338,6 +338,7 @@ Fork 种子构造归核心 Session 所有，不属于此迁移。原生 V4 接�
 - **依赖保留的子日志**——仅凭父日志无法恢复未记录的子 id、创建时间或 descriptor。删除的子 Session 无法从工具参数恢复；已存在的父目录记录仍保留。
 - **历史模式未知**——没有恰好一个受支持的自身 descriptor 时，缺失的父目录项记录未知模式。当前读取不重写该项；打开子会话时解析可用的 descriptor 信息，或报告该子会话的错误。
 - **存储范围**——事实只覆盖同一持久化根目录内可识别的子 Session。跨根目录导入和损坏日志修复不属于此迁移。
+- **检查点修正读取器**——没有打开 compaction 时，compact checkpoint 替换会被接纳为轮次间修正：它替换恰好一个当前表层检查点，保留其 `compactionId` 与 `sourceCommandId`，并引用该节点。V5 读取器把 V5 生命周期与 compaction 关系委托给此 V4 校验器，因此当前检出可读取修正后的 V5 日志。较旧读取器会以缺少匹配 `compaction/start` 拒绝；请用能识别修正的读取器重开日志。该修正复用带 `compact-checkpoint` 来源的 `user/message`，不新增事件类型、schema 字段、格式版本、确认或 root digest；运行时 compaction 不变式复制了该规则，两个校验器必须一起修改。
 
 <a id="dev-note"></a>
 ### 开发备注

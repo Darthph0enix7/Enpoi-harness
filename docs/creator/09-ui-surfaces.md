@@ -107,7 +107,7 @@ Trigger and modal: `ui-settings-general/src/client/SettingsRoot.tsx` (Escape, ma
 
 ## Watchtower
 
-Full-canvas session cockpit (`conversation.view` @30): keeper freshness + as-of seq, Living Brief sections, whiteboard, and Live Debug (digest, pending ask, tool/injection/subagent counts, incident tail). Refresh: debug 10s + live facts, whiteboard 10s (`WatchtowerView.tsx:130-134,153-220`); Emergency Halt posts `session.cancel` (`:296-304`). Projection-only — it invents nothing.
+Full-canvas session cockpit (`conversation.view` @30): keeper freshness + as-of seq, Living Brief sections, whiteboard, and Live Debug (digest, pending ask, tool/injection/subagent counts, incident tail). Refresh: debug 10s + live facts, whiteboard 10s (`WatchtowerView.tsx:130-134,153-220`); Emergency Halt posts `session.cancel` (`:296-304`). Projection-only — it invents nothing. Its State display reads the raw `state/checkpoint` event, so after an active-surface context repair it can show the pre-repair text until the next genuine keeper refresh. That is display lag only; the model-visible active keeper message is authoritative, and no listener or version bump is implied.
 
 ## Context surfaces (dsh-context)
 

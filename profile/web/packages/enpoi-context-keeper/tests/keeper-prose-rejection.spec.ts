@@ -46,8 +46,15 @@ function makeSession(events: Array<{ type: string; seq: number; data: unknown }>
     get seq() { return log.length },
     events: log,
     snapshotEvents: (from = 0, to = log.length): Array<{ type: string; seq: number; data: unknown }> => log.slice(from, to),
+    eventAt: (seq: number) => log[Number(seq)],
     requestContext: () => undefined,
-    surface: { nodes: [] as number[] },
+    surface: {
+      get nodes() {
+        return log
+          .filter((event) => event.type === 'user/message' || event.type === 'assistant/message' || event.type === 'tool/result')
+          .map((event) => event.seq)
+      },
+    },
     append: vi.fn((...args: unknown[]) => {
       const [type, data] = args as [string, unknown]
       log.push({ type, seq: log.length, data })
@@ -61,7 +68,7 @@ function sessionWithTurns(n: number) {
   const events: Array<{ type: string; seq: number; data: unknown }> = []
   let seq = 0
   for (let i = 0; i < n; i++) {
-    events.push({ type: 'user/message', seq: seq++, data: { content: `query ${i}`, source: { kind: 'user' } } })
+    events.push({ type: 'user/message', seq: seq++, data: { content: `query ${i}`, source: { kind: 'user', participant: { kind: 'human', name: 'operator' } } } })
     events.push({ type: 'assistant/message', seq: seq++, data: { text: `answer ${i}` } })
     events.push({ type: 'turn/end', seq: seq++, data: { reason: { kind: 'stop' }, turn: i + 1 } })
   }
