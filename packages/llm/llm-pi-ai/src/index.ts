@@ -87,13 +87,17 @@ export { PiAiAdapter } from './adapter.ts'
 export type { PiAiAdapterOptions } from './adapter.ts'
 export { Config, DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_TOKENS } from './config.ts'
 export type { PiAiModelCatalogFacts, PiAiModelFactSource, RouteCatalog } from './catalog.ts'
-export { THINKING_LEVELS } from './catalog.ts'
+export { PI_AI_MANUAL_MODEL_FIELDS, THINKING_LEVELS } from './catalog.ts'
 export type {
   Options,
   PiAiCompatProfile,
+  PiAiManualModelField,
   PiAiModality,
+  PiAiModelCost,
+  PiAiModelCostTier,
   PiAiModelOverride,
   PiAiModelProfile,
+  PiAiModelSource,
   PiAiNativeFileInputs,
   PiAiProviderProfile,
   PiAiReasoningEfforts,

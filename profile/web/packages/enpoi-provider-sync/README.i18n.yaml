@@ -9,8 +9,11 @@
   en: e13bcdd7e59ddf36
   zh: 9006168711b162ef
 /dsh-enpoi-provider-sync/precedence:
-  en: 43d9e709f4b0fd91
-  zh: f56a06bfeab075e2
+  en: e34dbaf9630b6278
+  zh: d868efa54ad9bd35
+/dsh-enpoi-provider-sync/model-metadata-and-prices:
+  en: 9386acca74c62a84
+  zh: a587ef97bddde92b
 /dsh-enpoi-provider-sync/registry-metadata:
   en: 60f4ace09e607b03
   zh: 2048ecdbc1d65a24
@@ -18,8 +21,8 @@
   en: 3857c5add048da1e
   zh: efcd91d4a391c294
 /dsh-enpoi-provider-sync/capability-honesty:
-  en: 33b7a11581488e58
-  zh: 221acab094ee7fc3
+  en: d237df9c98102383
+  zh: a468ea66c8813a2d
 /dsh-enpoi-provider-sync/capacity-and-enrichment-sources:
   en: 97cfceda564bde34
   zh: 93e7e741e7c2e7f3
@@ -27,5 +30,5 @@
   en: 8b1a2bca483ccee0
   zh: 7b9fc215b23c8d37
 /dsh-enpoi-provider-sync/known-gaps:
-  en: 06da9b8cfaa9e584
-  zh: 98cdde4d0d4f481c
+  en: bfc0d1fea05a08c4
+  zh: 7b86fb898dd1026e

@@ -28,6 +28,7 @@ import {
   MAX_TOKENS_FIELDS,
   MODALITIES,
   NO_MODELS_MARKER,
+  PI_AI_MANUAL_MODEL_FIELDS,
   PiAiCatalogError,
   resolveRouteModels,
   SUPPORTED_THINKING_FORMATS,
@@ -96,9 +97,13 @@ const ANONYMOUS_CAPABLE_APIS: ReadonlySet<string> = new Set(['anthropic-messages
 
 export type {
   PiAiCompatProfile,
+  PiAiManualModelField,
   PiAiModality,
+  PiAiModelCost,
+  PiAiModelCostTier,
   PiAiModelOverride,
   PiAiModelProfile,
+  PiAiModelSource,
   PiAiNativeFileInputs,
   PiAiReasoningEfforts,
   PiAiThinkingFormat,
@@ -420,8 +425,59 @@ const nativeFileInputs: z<PiAiNativeFileInputs> = z.object({
   }),
 })
 
+/**
+ * A finite non-negative price in USD per million tokens. Schemastery's number
+ * resolver compares `min`/`max` with `<`/`>`, which NaN and Infinity slip
+ * through, so finiteness is its own gate here; zero stays a valid price (a
+ * disclosed free model).
+ */
+const modelPrice: z<number> = z.transform(
+  z.number().min(0),
+  (value) => {
+    // The transform callback receives no validation path, so the diagnostic
+    // names the rule rather than a nested path.
+    if (!Number.isFinite(value)) throw new z.ValidationError('expected a finite price', {})
+    return value
+  },
+)
+
+/**
+ * A positive safe-integer token count. The step check rejects fractions; the
+ * transform makes the NaN/Infinity rejection explicit instead of relying on
+ * modulo arithmetic.
+ */
+const tokenCount: z<number> = z.transform(
+  z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+  (value) => {
+    if (!Number.isSafeInteger(value)) throw new z.ValidationError('expected a safe integer', {})
+    return value
+  },
+)
+
+/**
+ * A real `YYYY-MM-DD` calendar date. The pattern rejects the wrong spelling;
+ * the transform rejects a day that normalizes to another one (`2026-02-30`).
+ */
+const releaseDate: z<string> = z.transform(
+  z.string().pattern(/^\d{4}-\d{2}-\d{2}$/),
+  (value) => {
+    const parsed = new Date(`${value}T00:00:00Z`)
+    if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+      throw new z.ValidationError(`expected a real YYYY-MM-DD calendar date but got ${value}`, {})
+    }
+    return value
+  },
+)
+
 /** The fields a `models` entry and a `modelOverrides` value share; only the id's home differs. */
 const modelFields = {
+  source: z.union(['configured', 'manual', 'discovered', 'pinned-in-use']),
+  // Schemastery gives every array `[]` and every object `{}` as its implicit
+  // default, so a bare `z.array` would turn an absent freeze list into an
+  // explicit "freeze nothing" after validation. A union without a default
+  // keeps absence absent: the settings form and the sync can still tell the
+  // legacy seven from an explicit empty list. Present-and-empty stays empty.
+  manualFields: z.union([z.const(undefined), z.array(z.union(PI_AI_MANUAL_MODEL_FIELDS))]),
   name: z.string(),
   contextWindow: z.number().step(1).min(1),
   maxInputTokens: z.number().step(1).min(1),
@@ -432,10 +488,30 @@ const modelFields = {
   // materializes `[]` for an absent array, and resolution reads that as "no
   // answer here" so the catalog entry below still applies.
   input: z.array(z.union(MODALITIES)),
+  // Output modalities are catalogue metadata (pi-ai has no request-side
+  // output field); resolution never reads them into a capability. Absence
+  // must stay absent, so it is not persisted as a synthetic empty list.
+  output: z.union([z.const(undefined), z.array(z.union(MODALITIES))]),
   // The union, not a bare dict: schemastery materializes an absent dict as
   // `{}`, and absent must stay distinguishable — it means "inherit the
   // installed catalog's capability", while `false` disables reasoning.
   reasoningEfforts: z.union([z.const(false), reasoningEfforts]),
+  // Catalogue price metadata, USD per million tokens. Zero is a disclosed
+  // price (a free model), so the floor is 0 rather than 1. Nothing reads this
+  // at execution time: materialized pi-ai models keep the zero NO_COST. The
+  // union keeps an absent cost object absent rather than `{}`.
+  cost: z.union([z.const(undefined), z.object({
+    input: modelPrice,
+    output: modelPrice,
+    cache_read: modelPrice,
+    cache_write: modelPrice,
+  })]),
+  costTiers: z.union([z.const(undefined), z.array(z.object({
+    inputTokensAbove: tokenCount,
+    input: modelPrice,
+    output: modelPrice,
+  }))]),
+  releaseDate,
   compat: compatProfile,
   // Omission is native media off. Every shipped route and discovered model
   // keeps it unset; an exact model opts in by declaring the encoder it knows

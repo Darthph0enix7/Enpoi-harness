@@ -68,6 +68,18 @@ describe('applyFenced', () => {
     expect(mutate.mock.calls[0]).toEqual(['llm-pi-ai', [{ op: 'set', path: ['a'], value: 1 }], 7])
   })
 
+  it('returns the committed namespace view for the shared mirror fold', async () => {
+    const view = namespace(8, { value: 'written' })
+    const describe = vi.fn(async () => ok({ writable: true, hasDocument: false, namespaces: [view] }))
+    const mutate = vi.fn(async () => ok(view))
+
+    const outcome = await applyFenced(face(describe, mutate), 'llm-pi-ai', () => ({
+      ops: [{ op: 'set', path: ['value'], value: 'written' }],
+    }))
+
+    expect(outcome).toEqual({ error: null, labels: [], view })
+  })
+
   it('re-reads and replans after each conflict, writing the fresh revision', async () => {
     const describe = movingDescribe()
     const mutate = vi.fn()

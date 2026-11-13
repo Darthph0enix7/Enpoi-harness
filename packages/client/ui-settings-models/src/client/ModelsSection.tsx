@@ -675,7 +675,7 @@ function Loaded({ injected, renderSlot }: { injected: ModelsSectionFace; renderS
               t={t}
               readOnly={!state.writable}
               onDelete={() => { setHeavyUninstall(false); setDeleteTarget(selectedRow) }}
-              onSaved={() => void controller.load()}
+              onSaved={(view) => { void controller.applyWritten(view) }}
             />
           ) : (
             <div className={styles['emptyDetail']}>

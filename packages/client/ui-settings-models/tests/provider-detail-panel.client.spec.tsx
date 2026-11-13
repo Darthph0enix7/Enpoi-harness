@@ -1179,7 +1179,12 @@ function movingConflictWire(
 }
 
 /** Render the detail panel for one route over an explicit wire. */
-function renderPanel(provider: string, ns: SettingsNamespaceView, api: ModelsWire): ReturnType<typeof render> {
+function renderPanel(
+  provider: string,
+  ns: SettingsNamespaceView,
+  api: ModelsWire,
+  onSaved: (view?: SettingsNamespaceView) => void = vi.fn(),
+): ReturnType<typeof render> {
   return render(
     <ProviderDetailPanel
       row={row(provider)}
@@ -1189,7 +1194,7 @@ function renderPanel(provider: string, ns: SettingsNamespaceView, api: ModelsWir
       t={t}
       readOnly={false}
       onDelete={vi.fn()}
-      onSaved={vi.fn()}
+      onSaved={onSaved}
     />,
   )
 }
@@ -1557,4 +1562,810 @@ it('Refresh reports an installed-catalog fallback and still merges its rows', as
     expect(screen.getByText(/HTTP 401 unauthorized/)).toBeTruthy()
   })
   await waitFor(() => { expect(mutate).toHaveBeenCalled() })
+})
+
+it('opens one model metadata dialog per row and writes only after Save', async () => {
+  const ns = namespace('openai', MODELS)
+  const base = wire(ns)
+  const mutate = vi.fn<ModelsWire['settings']['mutate']>(async () => ({ ok: true as const, value: ns }))
+  const wireFace = { ...base, settings: { ...base.settings, mutate } } as ModelsWire
+  const onSaved = vi.fn()
+  render(
+    <ProviderDetailPanel
+      row={row('openai')}
+      namespace={ns}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={onSaved}
+    />,
+  )
+
+  fireEvent.click(screen.getByLabelText(en.editModelMetadata.replace('{id}', 'free-a')))
+  const dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  expect(dialog.getByRole<HTMLButtonElement>('button', { name: en.save }).disabled).toBe(true)
+  expect(mutate).not.toHaveBeenCalled()
+
+  fireEvent.click(dialog.getByRole('button', { name: en.cancel }))
+  expect(screen.queryByRole('dialog', { name: en.metadataDialogTitle })).toBeNull()
+  expect(mutate).not.toHaveBeenCalled()
+
+  fireEvent.click(screen.getByLabelText(en.editModelMetadata.replace('{id}', 'free-a')))
+  const reopened = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  fireEvent.change(reopened.getByLabelText(en.modelName), { target: { value: 'Free A Renamed' } })
+  fireEvent.click(reopened.getByRole('button', { name: en.save }))
+
+  await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(1) })
+  expect(base.settings.describe).toHaveBeenCalled()
+  expect(mutate.mock.calls[0]?.[0]).toBe('llm-pi-ai')
+  expect(mutate.mock.calls[0]?.[2]).toBe(0)
+  await waitFor(() => { expect(onSaved).toHaveBeenCalledTimes(1) })
+})
+
+it('loads the installed catalog on demand and edits its rows as overrides', async () => {
+  const ns = namespace('openai', [])
+  const base = wire(ns)
+  const discoverModels = vi.fn(async () => ({
+    ok: true as const,
+    value: [{ id: 'catalog-a', name: 'Catalog A', contextWindow: 64_000, maxTokens: 4_096 }],
+  }))
+  const mutate = vi.fn<ModelsWire['settings']['mutate']>(async () => ({ ok: true as const, value: ns }))
+  const wireFace = {
+    ...base,
+    settings: { ...base.settings, mutate },
+    llm: { ...base.llm, discoverModels },
+  } as unknown as ModelsWire
+  const onSaved = vi.fn()
+  render(
+    <ProviderDetailPanel
+      row={row('openai')}
+      namespace={ns}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={onSaved}
+    />,
+  )
+
+  // Opening the card never probes on its own; the operator asks for the
+  // installed catalog.
+  expect(discoverModels).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: en.metadataLoadCatalog }))
+  await waitFor(() => { expect(discoverModels).toHaveBeenCalledTimes(1) })
+  expect(discoverModels).toHaveBeenCalledWith('llm-pi-ai', { provider: 'openai' })
+  const rowButton = await screen.findByLabelText(en.editModelMetadata.replace('{id}', 'catalog-a'))
+  fireEvent.click(rowButton)
+
+  expect(screen.getByText(en.metadataCatalogNotice)).toBeTruthy()
+  const dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  expect(dialog.getByLabelText<HTMLInputElement>(en.modelId).readOnly).toBe(true)
+  // Inherited catalog facts are placeholders, not submitted values: a blank
+  // field means "keep the catalog answer", so saving one edit cannot
+  // materialize the whole model into an override.
+  const context = dialog.getByLabelText<HTMLInputElement>(en.metadataContextWindow)
+  expect(context.value).toBe('')
+  expect(context.placeholder).toBe('64000')
+  fireEvent.change(dialog.getByLabelText(en.modelName), { target: { value: 'Catalog A Renamed' } })
+  fireEvent.click(dialog.getByRole('button', { name: en.save }))
+  await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(1) })
+  expect(mutate.mock.calls[0]?.[1]).toEqual([{
+    op: 'set',
+    path: ['providers', 'openai', 'modelOverrides', 'catalog-a', 'name'],
+    value: 'Catalog A Renamed',
+  }])
+  expect(onSaved).toHaveBeenCalledWith(ns)
+})
+
+it('disables metadata editing with an explanation for an unknown provider family', async () => {
+  const ns = { ...namespace('mystery', MODELS), ns: 'llm-unknown' }
+  const unknownRow = row('mystery')
+  render(
+    <ProviderDetailPanel
+      row={{ ...unknownRow, entry: { ...unknownRow.entry, settingsNs: 'llm-unknown' } }}
+      namespace={ns}
+      schema={settingsSchema}
+      api={wire(ns)}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+
+  const edit = screen.getByLabelText<HTMLButtonElement>(en.editModelMetadata.replace('{id}', 'free-a'))
+  expect(edit.disabled).toBe(true)
+  expect(edit.title).toBe(en.metadataEditingUnavailable)
+  fireEvent.click(edit)
+  expect(screen.queryByRole('dialog', { name: en.metadataDialogTitle })).toBeNull()
+})
+
+it('reports a fenced metadata conflict and keeps the dialog open', async () => {
+  const ns = namespace('openai', MODELS)
+  const base = wire(ns)
+  const mutate = vi.fn<ModelsWire['settings']['mutate']>(async () => ({
+    ok: false as const,
+    error: new RemoteError('settings/conflict', 'stale revision', {
+      ns: 'llm-pi-ai', expected: 0, actual: 1,
+    }),
+  }))
+  const wireFace = { ...base, settings: { ...base.settings, mutate } } as ModelsWire
+  const onSaved = vi.fn()
+  render(
+    <ProviderDetailPanel
+      row={row('openai')}
+      namespace={ns}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={onSaved}
+    />,
+  )
+
+  fireEvent.click(screen.getByLabelText(en.editModelMetadata.replace('{id}', 'free-a')))
+  const dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  fireEvent.change(dialog.getByLabelText(en.modelName), { target: { value: 'Contended' } })
+  fireEvent.click(dialog.getByRole('button', { name: en.save }))
+
+  await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(4) })
+  const alert = await dialog.findByRole('alert')
+  expect(alert.textContent).toContain(en.cleanupConflict)
+  expect(onSaved).not.toHaveBeenCalled()
+  expect(screen.getByRole('dialog', { name: en.metadataDialogTitle })).toBeTruthy()
+})
+
+it('appends a separate entry when a model ID changes instead of renaming the old row', async () => {
+  const ns = namespace('openai', MODELS)
+  const base = wire(ns)
+  const mutate = vi.fn<ModelsWire['settings']['mutate']>(async () => ({ ok: true as const, value: ns }))
+  const wireFace = { ...base, settings: { ...base.settings, mutate } } as ModelsWire
+  render(
+    <ProviderDetailPanel
+      row={row('openai')}
+      namespace={ns}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+
+  fireEvent.click(screen.getByLabelText(en.editModelMetadata.replace('{id}', 'free-a')))
+  const dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  fireEvent.change(dialog.getByLabelText(en.modelId), { target: { value: 'free-a-copy' } })
+  fireEvent.click(dialog.getByRole('button', { name: en.save }))
+
+  await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(1) })
+  const ops = mutate.mock.calls[0]?.[1] as Array<{ op: string; path: string[]; value?: { id?: string } }>
+  // Save-as: one appended row, no operation that rewrites row 0 or any
+  // session/reference that named the old id.
+  expect(ops).toHaveLength(1)
+  expect(ops[0]?.op).toBe('set')
+  expect(ops[0]?.path).toEqual(['providers', 'openai', 'models', String(MODELS.length)])
+  expect(ops[0]?.value?.id).toBe('free-a-copy')
+})
+
+it('previews the inherited catalog value after resetting a catalog override', async () => {
+  const baseNs = namespace('openai', [])
+  const profile = {
+    displayName: 'openai', baseURL: 'https://proxy', api: 'openai-completions', models: [],
+    modelOverrides: { 'catalog-a': { name: 'Catalog Override' } },
+  }
+  const ns = {
+    ...baseNs,
+    value: { providers: { openai: profile } },
+    user: { providers: { openai: profile } },
+  }
+  const base = wire(ns)
+  const discoverModels = vi.fn(async () => ({
+    ok: true as const,
+    value: [{ id: 'catalog-a', name: 'Catalog A', contextWindow: 64_000 }],
+  }))
+  const wireFace = { ...base, llm: { ...base.llm, discoverModels } } as unknown as ModelsWire
+  render(
+    <ProviderDetailPanel
+      row={row('openai')}
+      namespace={ns}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+
+  fireEvent.click(screen.getByRole('button', { name: en.metadataLoadCatalog }))
+  await waitFor(() => { expect(discoverModels).toHaveBeenCalledTimes(1) })
+  expect(screen.getByText('Catalog Override')).toBeTruthy()
+
+  fireEvent.click(await screen.findByLabelText(en.editModelMetadata.replace('{id}', 'catalog-a')))
+  const dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  const name = dialog.getByLabelText<HTMLInputElement>(en.modelName)
+  expect(name.value).toBe('Catalog Override')
+  fireEvent.click(dialog.getByRole('button', {
+    name: en.metadataResetField.replace('{field}', en.modelName),
+  }))
+  expect(name.value).toBe('')
+  expect(name.placeholder).toBe('Catalog A')
+})
+
+it('shows effective base models read-only until the user section stores its list', () => {
+  const baseNs = namespace('openai', [])
+  const ns = {
+    ...baseNs,
+    value: {
+      providers: {
+        openai: {
+          displayName: 'openai', baseURL: 'https://proxy', api: 'openai-completions',
+          models: [{ id: 'shipped-model', name: 'Shipped Model', contextWindow: 32_000 }],
+        },
+      },
+    },
+    user: { providers: { openai: { displayName: 'My OpenAI' } } },
+  }
+  render(
+    <ProviderDetailPanel
+      row={row('openai')}
+      namespace={ns}
+      schema={settingsSchema}
+      api={wire(ns)}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+
+  expect(screen.getByText('Shipped Model')).toBeTruthy()
+  expect(screen.getByText(en.metadataPiAiInheritedModelsHint)).toBeTruthy()
+  const edit = screen.getByLabelText<HTMLButtonElement>(en.editModelMetadata.replace('{id}', 'shipped-model'))
+  expect(edit.disabled).toBe(true)
+  expect(edit.title).toBe(en.metadataPiAiInheritedModelsHint)
+  fireEvent.click(edit)
+  expect(screen.queryByRole('dialog', { name: en.metadataDialogTitle })).toBeNull()
+})
+
+it('retries a metadata conflict with only the fields the operator changed', async () => {
+  const initial = namespace('openai', [{
+    id: 'free-a', name: 'Free A', contextWindow: 128_000, maxTokens: 4_096,
+    cost: { input: 0.27, output: 1.1 },
+  }])
+  const revisedModels = [{
+    id: 'free-a', name: 'Free A', contextWindow: 256_000, maxTokens: 4_096,
+    cost: { input: 0.27, output: 9.9 },
+  }]
+  const revised = { ...namespace('openai', revisedModels), revision: 1 }
+  const base = wire(initial)
+  const describe = vi.fn()
+    .mockResolvedValueOnce({
+      ok: true as const,
+      value: { writable: true, hasDocument: false, namespaces: [initial] },
+    })
+    .mockResolvedValueOnce({
+      ok: true as const,
+      value: { writable: true, hasDocument: false, namespaces: [revised] },
+    })
+  const mutate = vi.fn<ModelsWire['settings']['mutate']>()
+    .mockResolvedValueOnce({
+      ok: false as const,
+      error: new RemoteError('settings/conflict', 'stale', {
+        ns: 'llm-pi-ai', expected: 0, actual: 1,
+      }),
+    })
+    .mockResolvedValueOnce({ ok: true as const, value: revised })
+  const wireFace = { ...base, settings: { ...base.settings, describe, mutate } } as ModelsWire
+  render(
+    <ProviderDetailPanel
+      row={row('openai')}
+      namespace={initial}
+      schema={settingsSchema}
+      api={wireFace}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+
+  fireEvent.click(screen.getByLabelText(en.editModelMetadata.replace('{id}', 'free-a')))
+  const dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  fireEvent.change(dialog.getByLabelText(en.modelName), { target: { value: 'Free A Mine' } })
+  fireEvent.click(dialog.getByText(en.metadataDetails))
+  fireEvent.change(dialog.getByLabelText(en.metadataInputPrice), { target: { value: '0.5' } })
+  fireEvent.click(dialog.getByRole('button', { name: en.save }))
+
+  await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(2) })
+  expect(describe).toHaveBeenCalledTimes(2)
+  expect(mutate.mock.calls[1]?.[2]).toBe(1)
+  const ops = mutate.mock.calls[1]?.[1] as Array<{ op: string; path: string[]; value?: unknown }>
+  const paths = ops.map(op => op.path.join('.'))
+  expect(paths).toContain('providers.openai.models.0.name')
+  expect(paths).toContain('providers.openai.models.0.cost.input')
+  // The concurrent writer's untouched context window and output price survive.
+  expect(paths.some(path => path.endsWith('.contextWindow'))).toBe(false)
+  expect(paths.some(path => path.endsWith('.cost.output'))).toBe(false)
+})
+
+it('disables DeepSeek metadata editing when only adapter-default models resolve', () => {
+  const baseNs = namespace('openai', [])
+  const ns = {
+    ...baseNs,
+    ns: 'llm-deepseek',
+    value: {
+      displayName: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat', contextWindow: 128_000 }],
+    },
+    user: { displayName: 'DeepSeek' },
+  }
+  const baseRow = row('deepseek')
+  render(
+    <ProviderDetailPanel
+      row={{ ...baseRow, entry: { ...baseRow.entry, settingsNs: 'llm-deepseek', settingsPath: [] } }}
+      namespace={ns}
+      schema={settingsSchema}
+      api={wire(ns)}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+
+  expect(screen.getByText('DeepSeek Chat')).toBeTruthy()
+  expect(screen.getByText(en.metadataDeepseekUnavailable)).toBeTruthy()
+  const edit = screen.getByLabelText<HTMLButtonElement>(en.editModelMetadata.replace('{id}', 'deepseek-chat'))
+  expect(edit.disabled).toBe(true)
+  expect(edit.title).toBe(en.metadataDeepseekUnavailable)
+})
+
+it('keeps an open metadata draft across a settings echo', () => {
+  const initial = namespace('openai', MODELS)
+  const element = (ns: SettingsNamespaceView): ReactElement => (
+    <ProviderDetailPanel
+      row={row('openai')}
+      namespace={ns}
+      schema={settingsSchema}
+      api={wire(ns)}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />
+  )
+  const view = render(element(initial))
+  fireEvent.click(screen.getByLabelText(en.editModelMetadata.replace('{id}', 'free-a')))
+  const dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  fireEvent.change(dialog.getByLabelText(en.modelName), { target: { value: 'Draft Name' } })
+
+  view.rerender(element(namespace('openai', [
+    { id: 'free-a', name: 'Free A', contextWindow: 256_000 },
+    { id: 'free-b', name: 'Free B' },
+  ])))
+
+  const reopened = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  expect(reopened.getByLabelText<HTMLInputElement>(en.modelName).value).toBe('Draft Name')
+})
+
+it('enables DeepSeek metadata when the route stores its model list', () => {
+  const baseNs = namespace('openai', [])
+  const profile = {
+    displayName: 'DeepSeek',
+    models: [{ id: 'deepseek-chat', name: 'DeepSeek Chat', contextWindow: 128_000, maxTokens: 8_192 }],
+  }
+  const ns = { ...baseNs, ns: 'llm-deepseek', value: profile, user: profile }
+  const baseRow = row('deepseek')
+  render(
+    <ProviderDetailPanel
+      row={{ ...baseRow, entry: { ...baseRow.entry, settingsNs: 'llm-deepseek', settingsPath: [] } }}
+      namespace={ns}
+      schema={settingsSchema}
+      api={wire(ns)}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+
+  const edit = screen.getByLabelText<HTMLButtonElement>(en.editModelMetadata.replace('{id}', 'deepseek-chat'))
+  expect(edit.disabled).toBe(false)
+  fireEvent.click(edit)
+  const dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  expect(dialog.getByLabelText<HTMLInputElement>(en.modelName).value).toBe('DeepSeek Chat')
+})
+
+it('disables catalog editing for a pi-ai route under endpoint authority', () => {
+  const baseNs = namespace('openai', [])
+  const profile = {
+    displayName: 'openai', models: [], catalogAuthority: 'endpoint',
+  }
+  const ns = {
+    ...baseNs,
+    value: { providers: { openai: profile } },
+    user: { providers: { openai: profile } },
+  }
+  render(
+    <ProviderDetailPanel
+      row={row('openai')}
+      namespace={ns}
+      schema={settingsSchema}
+      api={wire(ns)}
+      t={t}
+      readOnly={false}
+      onDelete={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  )
+
+  expect(screen.queryByRole('button', { name: en.metadataLoadCatalog })).toBeNull()
+  expect(screen.getByText(en.noModelsFound)).toBeTruthy()
+})
+
+describe('catalog refresh with model overrides', () => {
+  it('refuses before any network call while overrides are already configured', async () => {
+    const ns = namespace('openai', [])
+    const profile = {
+      displayName: 'openai', baseURL: 'https://proxy', api: 'openai-completions', models: [],
+      modelOverrides: { 'catalog-a': { name: 'Pinned' } },
+    }
+    const view = {
+      ...ns,
+      value: { providers: { openai: profile } },
+      user: { providers: { openai: profile } },
+    }
+    const base = wire(view)
+    const discoverModels = vi.fn()
+    const mutate = vi.fn()
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const wireFace = {
+      ...base,
+      settings: { ...base.settings, mutate },
+      llm: { ...base.llm, discoverModels },
+    } as unknown as ModelsWire
+    render(
+      <ProviderDetailPanel
+        row={row('openai')} namespace={view} schema={settingsSchema} api={wireFace} t={t}
+        readOnly={false} onDelete={vi.fn()} onSaved={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByTitle(en.refreshCatalogTitle))
+    expect(await screen.findByText(en.refreshBlockedModelOverrides)).toBeTruthy()
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(discoverModels).not.toHaveBeenCalled()
+    expect(mutate).not.toHaveBeenCalled()
+  })
+
+  it('refuses a hosted refresh when a concurrent override appears before the fenced write', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        result: {
+          ok: true,
+          value: {
+            route: 'gateway', models: [{ id: 'server-fresh' }], removed: [], deprecated: [],
+            degraded: false, source: 'live', authority: 'catalog', fetchedAt: 5,
+          },
+        },
+      }),
+    } as unknown as Response)))
+    const first = namespace('gateway', MODELS)
+    const second = namespace('gateway', MODELS)
+    const secondProfile = {
+      displayName: 'gateway', baseURL: 'https://proxy', api: 'openai-completions', models: MODELS,
+      modelOverrides: { 'free-a': { name: 'Pinned' } },
+    }
+    second.value = { providers: { gateway: secondProfile } }
+    second.user = { providers: { gateway: secondProfile } }
+    second.revision = 1
+    const mutate = vi.fn()
+      .mockResolvedValueOnce(conflictRefusal('llm-pi-ai'))
+      .mockResolvedValue({ ok: true as const, value: second })
+    const api = movingConflictWire(first, second, mutate)
+    renderPanel('gateway', first, api)
+
+    fireEvent.click(screen.getByTitle(en.refreshCatalogTitle))
+    expect(await screen.findByText(en.refreshBlockedModelOverrides)).toBeTruthy()
+    // The refusal happens inside the retry planner: no accepted write follows
+    // the conflicting attempt, and the new overrides stay untouched.
+    expect(mutate).toHaveBeenCalledTimes(1)
+    expect(secondProfile.modelOverrides).toEqual({ 'free-a': { name: 'Pinned' } })
+  })
+
+  it('refuses a fallback discovery write against a fresher profile with overrides', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) } as unknown as Response)))
+    const first = namespace('gateway', MODELS)
+    const fresh = namespace('gateway', MODELS)
+    const freshProfile = {
+      displayName: 'gateway', baseURL: 'https://proxy', api: 'openai-completions', models: MODELS,
+      modelOverrides: { 'free-a': { name: 'Fresh Override' } },
+    }
+    fresh.value = { providers: { gateway: freshProfile } }
+    fresh.user = { providers: { gateway: freshProfile } }
+    fresh.revision = 1
+    const base = wire(first)
+    const describe = vi.fn(async () => ({
+      ok: true as const,
+      value: { writable: true, hasDocument: false, namespaces: [fresh] },
+    }))
+    const discoverModels = vi.fn(async () => ({
+      ok: true as const,
+      value: [{ id: 'server-fresh', name: 'Server Fresh' }],
+    }))
+    const mutate = vi.fn()
+    const wireFace = {
+      ...base,
+      settings: { ...base.settings, describe, mutate },
+      llm: { ...base.llm, discoverModels },
+    } as unknown as ModelsWire
+    renderPanel('gateway', first, wireFace)
+
+    fireEvent.click(screen.getByTitle(en.refreshCatalogTitle))
+    expect(await screen.findByText(en.refreshBlockedModelOverrides)).toBeTruthy()
+    expect(discoverModels).toHaveBeenCalledTimes(1)
+    expect(mutate).not.toHaveBeenCalled()
+    expect(freshProfile.modelOverrides).toEqual({ 'free-a': { name: 'Fresh Override' } })
+  })
+})
+
+it('offers legacy manual-field resets and writes the proper unset plan', async () => {
+  const models = [{
+    id: 'legacy', name: 'Legacy', contextWindow: 128_000, source: 'manual', cost: { input: 0.2 },
+  }]
+  const ns = namespace('gateway', models)
+  const base = wire(ns)
+  const mutate = vi.fn<ModelsWire['settings']['mutate']>(async () => ({ ok: true as const, value: ns }))
+  const wireFace = { ...base, settings: { ...base.settings, mutate } } as ModelsWire
+  renderPanel('gateway', ns, wireFace)
+
+  fireEvent.click(screen.getByLabelText(en.editModelMetadata.replace('{id}', 'legacy')))
+  let dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  expect(dialog.getByRole('button', {
+    name: en.metadataResetField.replace('{field}', en.modelName),
+  })).toBeTruthy()
+  expect(dialog.getByRole('button', {
+    name: en.metadataResetField.replace('{field}', en.metadataContextWindow),
+  })).toBeTruthy()
+  expect(dialog.queryByRole('button', {
+    name: en.metadataResetField.replace('{field}', en.metadataPricing),
+  })).toBeNull()
+  fireEvent.click(dialog.getByRole('button', {
+    name: en.metadataResetField.replace('{field}', en.modelName),
+  }))
+  fireEvent.click(dialog.getByRole('button', { name: en.save }))
+  await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(1) })
+  const firstOps = mutate.mock.calls[0]?.[1] as Array<{ op: string; path: string[]; value?: unknown }>
+  expect(firstOps).toContainEqual({ op: 'unset', path: ['providers', 'gateway', 'models', '0', 'name'] })
+  expect(firstOps).toContainEqual({
+    op: 'set', path: ['providers', 'gateway', 'models', '0', 'manualFields'], value: ['contextWindow'],
+  })
+  expect(firstOps.some(op => op.path.includes('cost'))).toBe(false)
+
+  fireEvent.click(screen.getByLabelText(en.editModelMetadata.replace('{id}', 'legacy')))
+  dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  fireEvent.click(dialog.getByRole('button', { name: en.metadataResetAll }))
+  fireEvent.click(dialog.getByRole('button', { name: en.save }))
+  await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(2) })
+  const secondOps = mutate.mock.calls[1]?.[1] as Array<{ op: string; path: string[] }>
+  expect(secondOps).toContainEqual({ op: 'unset', path: ['providers', 'gateway', 'models', '0', 'name'] })
+  expect(secondOps).toContainEqual({ op: 'unset', path: ['providers', 'gateway', 'models', '0', 'contextWindow'] })
+  expect(secondOps).toContainEqual({ op: 'unset', path: ['providers', 'gateway', 'models', '0', 'source'] })
+})
+
+it('does not offer the load-catalog action on a search miss', () => {
+  const discoverModels = vi.fn()
+  const ns = namespace('openai', MODELS)
+  const base = wire(ns)
+  const wireFace = { ...base, llm: { ...base.llm, discoverModels } } as unknown as ModelsWire
+  renderPanel('openai', ns, wireFace)
+
+  fireEvent.change(screen.getByPlaceholderText(`Search ${MODELS.length} models...`), {
+    target: { value: 'no-such-model' },
+  })
+  expect(screen.getByText(en.noModelsMatching.replace('{query}', 'no-such-model'))).toBeTruthy()
+  expect(screen.queryByRole('button', { name: en.metadataLoadCatalog })).toBeNull()
+  expect(discoverModels).not.toHaveBeenCalled()
+})
+
+it('refuses a metadata save when the user model list disappears before the fresh read', async () => {
+  const initial = namespace('openai', MODELS)
+  const removedProfile = {
+    displayName: 'openai', baseURL: 'https://proxy', api: 'openai-completions',
+  }
+  const removed = {
+    ...namespace('openai', MODELS),
+    user: { providers: { openai: removedProfile } },
+    revision: 1,
+  }
+  const base = wire(initial)
+  const describe = vi.fn(async () => ({
+    ok: true as const,
+    value: { writable: true, hasDocument: false, namespaces: [removed] },
+  }))
+  const mutate = vi.fn()
+  const wireFace = {
+    ...base,
+    settings: { ...base.settings, describe, mutate },
+  } as unknown as ModelsWire
+  renderPanel('openai', initial, wireFace)
+
+  fireEvent.click(screen.getByLabelText(en.editModelMetadata.replace('{id}', 'free-a')))
+  const dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  fireEvent.change(dialog.getByLabelText(en.modelName), { target: { value: 'Renamed' } })
+  fireEvent.click(dialog.getByRole('button', { name: en.save }))
+
+  expect((await dialog.findByRole('alert')).textContent).toContain(en.metadataPiAiInheritedModelsHint)
+  expect(mutate).not.toHaveBeenCalled()
+})
+
+it('reports a duplicate model ID from the fenced plan without writing', async () => {
+  const ns = namespace('gateway', MODELS)
+  const base = wire(ns)
+  const mutate = vi.fn()
+  const wireFace = { ...base, settings: { ...base.settings, mutate } } as ModelsWire
+  renderPanel('gateway', ns, wireFace)
+
+  fireEvent.click(screen.getByLabelText(en.editModelMetadata.replace('{id}', 'free-a')))
+  const dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  fireEvent.change(dialog.getByLabelText(en.modelId), { target: { value: 'free-b' } })
+  fireEvent.click(dialog.getByRole('button', { name: en.save }))
+
+  expect((await dialog.findByRole('alert')).textContent).toBe(en.metadataOpsDuplicateId)
+  expect(mutate).not.toHaveBeenCalled()
+  expect(screen.getByRole('dialog', { name: en.metadataDialogTitle })).toBeTruthy()
+})
+
+it('refuses a catalog metadata save when the fresh profile now stores models', async () => {
+  const ns = namespace('openai', [])
+  const base = wire(ns)
+  const discoverModels = vi.fn(async () => ({
+    ok: true as const,
+    value: [{ id: 'catalog-a', name: 'Catalog A' }],
+  }))
+  const materialized = namespace('openai', [{ id: 'catalog-a', name: 'Catalog A' }])
+  const describe = vi.fn(async () => ({
+    ok: true as const,
+    value: { writable: true, hasDocument: false, namespaces: [materialized] },
+  }))
+  const mutate = vi.fn()
+  const wireFace = {
+    ...base,
+    settings: { ...base.settings, describe, mutate },
+    llm: { ...base.llm, discoverModels },
+  } as unknown as ModelsWire
+  renderPanel('openai', ns, wireFace)
+
+  fireEvent.click(screen.getByRole('button', { name: en.metadataLoadCatalog }))
+  fireEvent.click(await screen.findByLabelText(en.editModelMetadata.replace('{id}', 'catalog-a')))
+  const dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  fireEvent.change(dialog.getByLabelText(en.modelName), { target: { value: 'Draft Catalog' } })
+  fireEvent.click(dialog.getByRole('button', { name: en.save }))
+
+  expect((await dialog.findByRole('alert')).textContent).toBe(en.metadataCatalogChanged)
+  expect(mutate).not.toHaveBeenCalled()
+  expect(dialog.getByLabelText<HTMLInputElement>(en.modelName).value).toBe('Draft Catalog')
+  expect(screen.getByRole('dialog', { name: en.metadataDialogTitle })).toBeTruthy()
+})
+
+it('refuses a catalog metadata retry when a conflict reveals materialized models', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) } as unknown as Response)))
+  const initial = namespace('openai', [])
+  const materialized = { ...namespace('openai', [{ id: 'catalog-a', name: 'Catalog A' }]), revision: 1 }
+  const base = wire(initial)
+  const discoverModels = vi.fn(async () => ({
+    ok: true as const,
+    value: [{ id: 'catalog-a', name: 'Catalog A' }],
+  }))
+  const describe = vi.fn()
+    .mockResolvedValueOnce({
+      ok: true as const,
+      value: { writable: true, hasDocument: false, namespaces: [initial] },
+    })
+    .mockResolvedValue({
+      ok: true as const,
+      value: { writable: true, hasDocument: false, namespaces: [materialized] },
+    })
+  const mutate = vi.fn()
+    .mockResolvedValueOnce(conflictRefusal('llm-pi-ai'))
+    .mockResolvedValue({ ok: true as const, value: materialized })
+  const wireFace = {
+    ...base,
+    settings: { ...base.settings, describe, mutate },
+    llm: { ...base.llm, discoverModels },
+  } as unknown as ModelsWire
+  renderPanel('openai', initial, wireFace)
+
+  fireEvent.click(screen.getByRole('button', { name: en.metadataLoadCatalog }))
+  fireEvent.click(await screen.findByLabelText(en.editModelMetadata.replace('{id}', 'catalog-a')))
+  const dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  fireEvent.change(dialog.getByLabelText(en.modelName), { target: { value: 'Draft Catalog' } })
+  fireEvent.click(dialog.getByRole('button', { name: en.save }))
+
+  expect((await dialog.findByRole('alert')).textContent).toBe(en.metadataCatalogChanged)
+  // Only the conflicting attempt ran; the retry refused before planning.
+  expect(mutate).toHaveBeenCalledTimes(1)
+  expect(dialog.getByLabelText<HTMLInputElement>(en.modelName).value).toBe('Draft Catalog')
+})
+
+it('refuses a catalog metadata save when the fresh profile switched to endpoint authority', async () => {
+  const ns = namespace('openai', [])
+  const endpointNs = namespace('openai', [])
+  const profile = {
+    displayName: 'openai', baseURL: 'https://proxy', api: 'openai-completions',
+    models: [], catalogAuthority: 'endpoint',
+  }
+  const describe = vi.fn(async () => ({
+    ok: true as const,
+    value: {
+      writable: true,
+      hasDocument: false,
+      namespaces: [{
+        ...endpointNs,
+        value: { providers: { openai: profile } },
+        user: { providers: { openai: profile } },
+      }],
+    },
+  }))
+  const base = wire(ns)
+  const discoverModels = vi.fn(async () => ({
+    ok: true as const,
+    value: [{ id: 'catalog-a', name: 'Catalog A' }],
+  }))
+  const mutate = vi.fn()
+  const wireFace = {
+    ...base,
+    settings: { ...base.settings, describe, mutate },
+    llm: { ...base.llm, discoverModels },
+  } as unknown as ModelsWire
+  renderPanel('openai', ns, wireFace)
+
+  fireEvent.click(screen.getByRole('button', { name: en.metadataLoadCatalog }))
+  fireEvent.click(await screen.findByLabelText(en.editModelMetadata.replace('{id}', 'catalog-a')))
+  const dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+  fireEvent.change(dialog.getByLabelText(en.modelName), { target: { value: 'Draft Catalog' } })
+  fireEvent.click(dialog.getByRole('button', { name: en.save }))
+
+  expect((await dialog.findByRole('alert')).textContent).toBe(en.metadataCatalogChanged)
+  expect(mutate).not.toHaveBeenCalled()
+})
+
+it('refreshes against inherited base models instead of treating the user overlay as empty', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      result: {
+        ok: true,
+        value: {
+          route: 'gateway', models: [{ id: 'server-b', name: 'Server B' }],
+          removed: [], deprecated: [], degraded: false, source: 'live',
+          authority: 'catalog', fetchedAt: 5,
+        },
+      },
+    }),
+  } as unknown as Response)))
+  const baseNs = namespace('gateway', [{ id: 'base-a', name: 'Base A' }])
+  const ns = {
+    ...baseNs,
+    value: { providers: { gateway: { displayName: 'gateway', baseURL: 'https://proxy', api: 'openai-completions', models: [{ id: 'base-a', name: 'Base A' }] } } },
+    user: { providers: { gateway: { displayName: 'gateway' } } },
+  }
+  const base = wire(ns)
+  const mutate = vi.fn<ModelsWire['settings']['mutate']>(async () => ({ ok: true as const, value: ns }))
+  const wireFace = { ...base, settings: { ...base.settings, mutate } } as ModelsWire
+  renderPanel('gateway', ns, wireFace)
+
+  fireEvent.click(screen.getByTitle(en.refreshCatalogTitle))
+  await waitFor(() => { expect(mutate).toHaveBeenCalledTimes(1) })
+  const ops = mutate.mock.calls[0]?.[1] as Array<{ op: string; path: string[]; value: Array<{ id: string }> }>
+  expect(ops[0]?.value.map(model => model.id)).toEqual(['server-b', 'base-a'])
 })

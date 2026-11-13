@@ -323,6 +323,20 @@ export class ModelsSettingsStore {
     })
   }
 
+  /**
+   * Fold one committed settings write into the shared mirror, then rebuild the
+   * page snapshot from it. The write answer carries the authoritative namespace
+   * revision and value, so the held document moves without a second describe;
+   * an older in-flight describe is invalidated by the mirror's generation.
+   * @param view - the namespace view the settings write answered with, or
+   * undefined for a caller that has no committed view.
+   * @returns nothing; the next snapshot carries the committed values.
+   */
+  async applyWritten(view: SettingsNamespaceView | undefined): Promise<void> {
+    if (view !== undefined) this.describeFace.acceptView(view)
+    await this.load()
+  }
+
   /** Publish one load's failure text, unless a newer load already took over. */
   private failLoad(generation: number, message: string): void {
     if (generation !== this.generation) return

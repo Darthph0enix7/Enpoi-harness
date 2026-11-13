@@ -358,6 +358,50 @@ describe('ModelsSection', () => {
     expect(detailMain?.className).toContain(styles.providerDetailMain)
   })
 
+  it('applies a committed model-metadata write to the mounted page without another describe', async () => {
+    const scripted = scriptedFace()
+    const initialNamespaces = wireNamespaces()
+    const piIndex = initialNamespaces.findIndex(namespace => namespace.ns === 'llm-pi-ai')
+    const profile = {
+      apiKeyEnv: 'OPENAI_API_KEY',
+      baseURL: 'https://proxy',
+      models: [{ id: 'm', name: 'Old', contextWindow: 128_000 }],
+    }
+    const committedProfile = {
+      ...profile,
+      models: [{ id: 'm', name: 'New', contextWindow: 128_000 }],
+    }
+    const initial = initialNamespaces.map((namespace, index) => index === piIndex
+      ? { ...namespace, value: { providers: { openai: profile } }, user: { providers: { openai: profile } } }
+      : namespace)
+    const committed = {
+      ...initial[piIndex]!,
+      revision: 1,
+      value: { providers: { openai: committedProfile } },
+      user: { providers: { openai: committedProfile } },
+    }
+    scripted.face.settings.describe.mockResolvedValue(remoteOk({
+      writable: true,
+      hasDocument: false,
+      namespaces: initial,
+    }))
+    scripted.mutate.mockResolvedValue(remoteOk(committed))
+
+    const { face } = await mountFace(scripted)
+    fireEvent.click(providerRow('openai'))
+    fireEvent.click(await screen.findByLabelText(en.editModelMetadata.replace('{id}', 'm')))
+    const dialog = within(screen.getByRole('dialog', { name: en.metadataDialogTitle }))
+    fireEvent.change(dialog.getByLabelText(en.modelName), { target: { value: 'New' } })
+    fireEvent.click(dialog.getByRole('button', { name: en.save }))
+
+    // The write answer folds into the held mirror; the mounted page re-renders
+    // from it and does not need a reload or a post-write describe. The two
+    // reads are the initial mount and the fenced write's own fresh document.
+    expect(await screen.findByText('New')).toBeTruthy()
+    expect(face.settings.describe).toHaveBeenCalledTimes(2)
+    expect(scripted.mutate).toHaveBeenCalledTimes(1)
+  })
+
   it('renders nothing before the slot injects its dependencies', () => {
     const uninjected = {} as ModelsSectionProps
     render(<ModelsSection {...uninjected} />)

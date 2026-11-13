@@ -2595,7 +2595,14 @@ function analyzeModel(route, model, hints, routeProviderMap = DEFAULT_ROUTE_PROV
   const tools = typeof model.tools === "boolean" ? model.tools : mDev?.tool_call;
   const costInput = typeof mDev?.cost?.input === "number" && Number.isFinite(mDev.cost.input) ? mDev.cost.input : void 0;
   const costOutput = typeof mDev?.cost?.output === "number" && Number.isFinite(mDev.cost.output) ? mDev.cost.output : void 0;
-  const cost = costInput !== void 0 || costOutput !== void 0 ? { ...costInput !== void 0 ? { input: costInput } : {}, ...costOutput !== void 0 ? { output: costOutput } : {} } : void 0;
+  const costCacheRead = typeof mDev?.cost?.cache_read === "number" && Number.isFinite(mDev.cost.cache_read) ? mDev.cost.cache_read : void 0;
+  const costCacheWrite = typeof mDev?.cost?.cache_write === "number" && Number.isFinite(mDev.cost.cache_write) ? mDev.cost.cache_write : void 0;
+  const cost = costInput !== void 0 || costOutput !== void 0 || costCacheRead !== void 0 || costCacheWrite !== void 0 ? {
+    ...costInput !== void 0 ? { input: costInput } : {},
+    ...costOutput !== void 0 ? { output: costOutput } : {},
+    ...costCacheRead !== void 0 ? { cache_read: costCacheRead } : {},
+    ...costCacheWrite !== void 0 ? { cache_write: costCacheWrite } : {}
+  } : void 0;
   const releaseDate = modelsDevReleaseDate(mDev?.release_date);
   const costTiers = modelsDevCostTiers(mDev?.cost);
   const gated = model.gated === true || model.isFree === false;
@@ -2627,6 +2634,10 @@ function analyzeModel(route, model, hints, routeProviderMap = DEFAULT_ROUTE_PROV
       ...gate,
       ...unverified ? { unverified: true } : {}
     },
+    facts: {
+      input: modalityDisclosed,
+      reasoning: reasoningDisclosed
+    },
     discovered: {
       id: model.id,
       name: name2,
@@ -2647,26 +2658,108 @@ function analyzeModel(route, model, hints, routeProviderMap = DEFAULT_ROUTE_PROV
     }
   };
 }
+var MANUAL_MODEL_FIELDS = [
+  "name",
+  "contextWindow",
+  "maxInputTokens",
+  "maxTokens",
+  "input",
+  "output",
+  "tools",
+  "reasoning",
+  "reasoningEfforts",
+  "cost",
+  "costTiers",
+  "releaseDate"
+];
+var MANUAL_MODEL_FIELD_GATE = {
+  name: true,
+  contextWindow: true,
+  maxInputTokens: true,
+  maxTokens: true,
+  input: true,
+  output: true,
+  tools: true,
+  reasoning: true,
+  reasoningEfforts: true,
+  cost: true,
+  costTiers: true,
+  releaseDate: true
+};
+var LEGACY_MANUAL_MODEL_FIELDS = [
+  "name",
+  "contextWindow",
+  "maxInputTokens",
+  "maxTokens",
+  "input",
+  "reasoning",
+  "reasoningEfforts"
+];
+function manualFieldsOf(entry) {
+  const raw = entry.manualFields;
+  if (raw === void 0) return void 0;
+  const id = typeof entry.id === "string" && entry.id.length > 0 ? entry.id : "<unknown>";
+  if (!Array.isArray(raw)) {
+    throw new Error(`provider-sync: model "${id}" manualFields must be a list of field names`);
+  }
+  const fields = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const candidate of raw) {
+    if (typeof candidate !== "string" || !Object.hasOwn(MANUAL_MODEL_FIELD_GATE, candidate)) {
+      throw new Error(
+        `provider-sync: model "${id}" manualFields names unknown field ${JSON.stringify(candidate)}; expected one of ${MANUAL_MODEL_FIELDS.join(", ")}`
+      );
+    }
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+    fields.push(candidate);
+  }
+  return fields;
+}
+function manualFieldValue(field, entry) {
+  const value2 = entry[field];
+  switch (field) {
+    case "name":
+      return typeof value2 === "string" ? value2 : void 0;
+    case "contextWindow":
+    case "maxInputTokens":
+    case "maxTokens":
+      return typeof value2 === "number" && Number.isFinite(value2) ? value2 : void 0;
+    case "input":
+    case "output":
+      return Array.isArray(value2) ? [...value2] : void 0;
+    case "tools":
+    case "reasoning":
+      return typeof value2 === "boolean" ? value2 : void 0;
+    case "reasoningEfforts":
+      return value2 !== null && typeof value2 === "object" && !Array.isArray(value2) && Object.keys(value2).length > 0 ? { ...value2 } : void 0;
+    case "cost":
+      return value2 !== null && typeof value2 === "object" && !Array.isArray(value2) ? { ...value2 } : void 0;
+    case "costTiers":
+      return Array.isArray(value2) ? value2.map((tier) => tier !== null && typeof tier === "object" && !Array.isArray(tier) ? { ...tier } : tier) : void 0;
+    case "releaseDate":
+      return typeof value2 === "string" ? value2 : void 0;
+  }
+}
 function preservedManualFields(entry) {
-  if (entry.source !== "manual") return {};
+  const manual = entry.source === "manual";
+  const explicit = manualFieldsOf(entry);
+  if (!manual && explicit === void 0) return {};
   const preserved = {
     ...preservedOperatorFields(entry)
   };
-  if (typeof entry.name === "string") preserved.name = entry.name;
-  if (typeof entry.contextWindow === "number" && Number.isFinite(entry.contextWindow)) {
-    preserved.contextWindow = entry.contextWindow;
-  }
-  if (typeof entry.maxInputTokens === "number" && Number.isFinite(entry.maxInputTokens)) {
-    preserved.maxInputTokens = entry.maxInputTokens;
-  }
-  if (typeof entry.maxTokens === "number" && Number.isFinite(entry.maxTokens)) {
-    preserved.maxTokens = entry.maxTokens;
-  }
-  if (Array.isArray(entry.input)) preserved.input = [...entry.input];
-  if (typeof entry.reasoning === "boolean") preserved.reasoning = entry.reasoning;
-  const ladder = entry.reasoningEfforts;
-  if (ladder !== null && typeof ladder === "object" && !Array.isArray(ladder) && Object.keys(ladder).length > 0) {
-    preserved.reasoningEfforts = { ...ladder };
+  if (manual) preserved.source = "manual";
+  if (explicit !== void 0) preserved.manualFields = [...explicit];
+  const fields = explicit ?? LEGACY_MANUAL_MODEL_FIELDS;
+  for (const field of fields) {
+    const value2 = manualFieldValue(field, entry);
+    if (value2 !== void 0) {
+      preserved[field] = value2;
+      continue;
+    }
+    if (explicit !== void 0 && field === "reasoningEfforts" && entry.reasoningEfforts === false) {
+      preserved.reasoningEfforts = false;
+    }
   }
   return preserved;
 }
@@ -2694,28 +2787,31 @@ var MONOTONIC_FACT_FIELDS = [
   "releaseDate",
   "costTiers"
 ];
-function preservedKnownFacts(entry, fresh) {
+function preservedKnownFacts(entry, fresh, facts) {
   const preserved = {};
   const entryUnverified = entry.unverified === true;
+  const freshRefusal = facts?.reasoning === true && fresh.reasoning === false;
   for (const field of MONOTONIC_FACT_FIELDS) {
     if (fresh[field] === void 0 && entry[field] !== void 0) preserved[field] = entry[field];
   }
-  if (fresh.reasoningEfforts === void 0 && entry.reasoningEfforts !== void 0) {
+  if (!freshRefusal && fresh.reasoningEfforts === void 0 && entry.reasoningEfforts !== void 0) {
     preserved.reasoningEfforts = entry.reasoningEfforts;
   }
   if (!entryUnverified) {
     const freshInput = Array.isArray(fresh.input) ? liveModalities(fresh.input) : [];
-    const entryInput = Array.isArray(entry.input) ? liveModalities(entry.input) : [];
-    const union = [.../* @__PURE__ */ new Set([...freshInput, ...entryInput])];
-    if (union.length > freshInput.length && entryInput.some((modality) => modality !== "text")) {
-      preserved.input = ["text", ...union.filter((modality) => modality !== "text")];
+    if (facts?.input !== true) {
+      const entryInput = Array.isArray(entry.input) ? liveModalities(entry.input) : [];
+      const union = [.../* @__PURE__ */ new Set([...freshInput, ...entryInput])];
+      if (union.length > freshInput.length && entryInput.some((modality) => modality !== "text")) {
+        preserved.input = ["text", ...union.filter((modality) => modality !== "text")];
+      }
     }
-    if (fresh.reasoning !== true && entry.reasoning === true) preserved.reasoning = true;
+    if (!freshRefusal && fresh.reasoning !== true && entry.reasoning === true) preserved.reasoning = true;
   }
   return preserved;
 }
-function mergedRefreshFields(entry, fresh) {
-  const known = preservedKnownFacts(entry, fresh);
+function mergedRefreshFields(entry, fresh, facts) {
+  const known = preservedKnownFacts(entry, fresh, facts);
   const merged = { ...known, ...preservedConfiguredFields(entry) };
   if (fresh.unverified === true && Object.keys(known).length > 0) delete merged.unverified;
   return merged;
@@ -2724,7 +2820,8 @@ function mergeConfiguredModels(route, configured, live2, hints = { table: loadCa
   const advertised = /* @__PURE__ */ new Map();
   for (const model of live2) {
     if (advertised.has(model.id)) continue;
-    advertised.set(model.id, analyzeModel(route, model, hints, routeProviderMap, registryContext).settings);
+    const analyzed = analyzeModel(route, model, hints, routeProviderMap, registryContext);
+    advertised.set(model.id, { settings: analyzed.settings, facts: analyzed.facts });
   }
   const models = [];
   const unadvertised = [];
@@ -2739,7 +2836,7 @@ function mergeConfiguredModels(route, configured, live2, hints = { table: loadCa
     seen.add(id);
     const fresh = advertised.get(id);
     if (fresh !== void 0) {
-      models.push(entry.source === "manual" ? { ...fresh, ...mergedRefreshFields(entry, fresh), source: "manual" } : { ...fresh, ...mergedRefreshFields(entry, fresh) });
+      models.push(entry.source === "manual" ? { ...fresh.settings, ...mergedRefreshFields(entry, fresh.settings, fresh.facts), source: "manual" } : { ...fresh.settings, ...mergedRefreshFields(entry, fresh.settings, fresh.facts) });
       continue;
     }
     const keptSource = entry.source === "manual" || entry.source === "pinned-in-use" ? entry.source : "configured";
@@ -2749,7 +2846,7 @@ function mergeConfiguredModels(route, configured, live2, hints = { table: loadCa
   for (const [id, entry] of advertised) {
     if (seen.has(id)) continue;
     seen.add(id);
-    models.push(entry);
+    models.push(entry.settings);
   }
   return { models, unadvertised };
 }
@@ -2862,7 +2959,8 @@ function planRouteModels(input) {
   const advertised = /* @__PURE__ */ new Map();
   for (const model of live2 ?? []) {
     if (advertised.has(model.id)) continue;
-    advertised.set(model.id, analyzeModel(input.route, model, hints, routeProviderMap, input.metadata).settings);
+    const analyzed = analyzeModel(input.route, model, hints, routeProviderMap, input.metadata);
+    advertised.set(model.id, { settings: analyzed.settings, facts: analyzed.facts });
   }
   const endpointAuthority = input.endpointAuthority === true;
   const catalogIds = !endpointAuthority && input.catalogRoute && input.catalogProviderKey !== void 0 ? modelsDevProviderModelIds(input.catalogProviderKey) : void 0;
@@ -2965,14 +3063,15 @@ function planRouteModels(input) {
       }
       if (fresh !== void 0) {
         models.push({
-          ...fresh,
-          // The healthy pass refreshes the record too; a manual entry's own
-          // ladder is the operator's claim and survives it, every entry keeps
-          // the operator-only declarations (`nativeFileInputs`, `compat`) no
+          ...fresh.settings,
+          // The healthy pass refreshes the record too; a manual entry's
+          // explicit `manualFields` list (or the legacy seven when absent) is
+          // the operator's claim and survives it, every entry keeps the
+          // operator-only declarations (`nativeFileInputs`, `compat`) no
           // disclosure can restate, and a fact an earlier pass disclosed
           // survives a sparser pass (a missed sibling probe never erases a
-          // known capacity).
-          ...mergedRefreshFields(entry, fresh),
+          // known capacity) while an explicit fresh refusal clears it.
+          ...mergedRefreshFields(entry, fresh.settings, fresh.facts),
           ...entry.source === "manual" ? { source: "manual" } : {},
           ...isGrace ? { firstSeenAt: firstSeenAtOf(entry) ?? input.now } : {}
         });
@@ -2986,7 +3085,7 @@ function planRouteModels(input) {
       if (seen.has(id)) continue;
       seen.add(id);
       if (!isMember(id)) continue;
-      models.push(grace.has(id) ? { ...fresh, firstSeenAt: input.now } : fresh);
+      models.push(grace.has(id) ? { ...fresh.settings, firstSeenAt: input.now } : fresh.settings);
     }
   }
   const overlaid = applyCatalogOverlay(models, input.overlay, {
@@ -3009,6 +3108,7 @@ function stringifyComparable(models) {
       maxInputTokens: m.maxInputTokens,
       maxTokens: m.maxTokens,
       input: m.input ?? null,
+      output: m.output ?? null,
       reasoning: m.reasoning ?? null,
       // The ladder's wire spellings are part of the record: a provider that
       // renames a level's wire value (or changes which levels exist) must be
@@ -3020,6 +3120,10 @@ function stringifyComparable(models) {
       // refresh that would drop them) must be written, not treated as equal.
       nativeFileInputs: m.nativeFileInputs ?? null,
       compat: m.compat ?? null,
+      // The explicit manual freeze list is operator configuration too: adding,
+      // removing, or emptying it must trigger a write even when every
+      // capability field is byte-identical.
+      manualFields: m.manualFields ?? null,
       cost: m.cost ?? null,
       releaseDate: m.releaseDate ?? null,
       costTiers: m.costTiers ?? null,
@@ -3682,6 +3786,7 @@ export {
   DEFAULT_ROUTE_METADATA_SOURCES,
   DEFAULT_ROUTE_PROVIDER_MAP,
   ENDPOINT_ONLY_GRACE_MS,
+  MANUAL_MODEL_FIELDS,
   MAX_MODEL_LISTING_BYTES,
   apply,
   applyCatalogOverlay,

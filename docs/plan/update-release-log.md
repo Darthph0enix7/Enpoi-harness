@@ -18,6 +18,8 @@ No `0.1.7-enpoi.2.84` or `0.1.7-enpoi.2.89` release exists (no tag, no catalog e
 - Compaction checkpoint amendment fix: a between-turn operator line repair can replace exactly one current checkpoint without a fake compaction bracket; preview validates the planned event stream through the compaction invariant before append. The change adds no event, schema field, or format version. An older V4/V5 reader rejects an amended log as missing a matching `compaction/start`, so reopening requires the amendment-aware reader.
 - Process-local `session/context-repair/committed` coordination is optional and adds no Session event; the keeper does not need it because repair continuity reads the authoritative active keeper surface. A raw `state/checkpoint` display can lag until the next genuine refresh; that is display lag, not a functional gap.
 
+- Model metadata editor (unreleased): the Models page edits one model's ID/name/capacities/input types/tools/reasoning/release date and USD-per-million catalogue prices with optional tiers through a compact **Model details** dialog; only changed leaves and reported overrides are written, an ID change is a save-as clone, and installed catalog rows stay read-only by ID. Catalogue prices are not a provider bill or runtime cost. Release `0.1.7-enpoi.2.126` is the first safe published baseline for these instructions; `2.124` and `2.125` predate it, and the release workflow assigns this feature's number rather than this note hardcoding one.
+
 ## Shipped releases
 
 | Release | Published (UTC) | Shipped change (condensed catalog entry) |

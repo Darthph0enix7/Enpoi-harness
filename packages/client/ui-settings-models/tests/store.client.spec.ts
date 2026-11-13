@@ -1,7 +1,7 @@
 /** Page-store join: directory × namespaces × credentials, with last-good rows on failure. */
 import { describe, expect, it } from 'vitest'
 import Schema from '@deepseek-ai/schemastery'
-import type { RpcResponse } from '@deepseek-ai/dsh-api-remotes/client'
+import type { RpcResponse, SettingsNamespaceView } from '@deepseek-ai/dsh-api-remotes/client'
 import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
 import { SettingsDescribeMirror } from '@deepseek-ai/dsh-client-ui-settings/src/client/settings-mirror.ts'
 import { settingsSchema } from './settings-schema.client.ts'
@@ -53,7 +53,7 @@ const DIRECTORY = [
   { provider: 'ghost', displayName: 'Ghost', settingsNs: '', settingsPath: [], active: true },
 ]
 
-const NAMESPACES = [
+const NAMESPACES: SettingsNamespaceView[] = [
   {
     ns: 'llm-deepseek',
     schema: {},
@@ -241,6 +241,77 @@ describe('ModelsSettingsStore', () => {
 
     expect(store.store.getSnapshot()).toMatchObject({
       status: 'error', error: 'configuration directory down',
+    })
+  })
+
+  it('folds a committed settings view into the held snapshot without another describe', async () => {
+    let describeCalls = 0
+    const { ctx, mirror } = api({
+      describeSettings: () => {
+        describeCalls += 1
+        return Promise.resolve(remoteOk({ writable: true, hasDocument: false, namespaces: NAMESPACES }))
+      },
+    })
+    const store = new ModelsSettingsStore(ctx, settingsSchema, mirror)
+    await store.load()
+    expect(describeCalls).toBe(1)
+
+    const written: SettingsNamespaceView = {
+      ...NAMESPACES[2]!,
+      revision: 5,
+      value: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY', name: 'Committed' } } },
+      user: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY', name: 'Committed' } } },
+    }
+    await store.applyWritten(written)
+
+    expect(describeCalls).toBe(1)
+    expect(mirror.namespace('llm-pi-ai')?.revision).toBe(5)
+    expect(store.store.getSnapshot().namespaces.get('llm-pi-ai')).toMatchObject({
+      revision: 5,
+      value: { providers: { openai: { name: 'Committed' } } },
+    })
+
+    // A caller without a committed view still refreshes from the held mirror.
+    await store.applyWritten(undefined)
+    expect(describeCalls).toBe(1)
+    expect(store.store.getSnapshot().namespaces.get('llm-pi-ai')?.revision).toBe(5)
+  })
+
+  it('lets its write fold invalidate an older in-flight describe', async () => {
+    let releaseOld: ((answer: RemoteAnswer<{ writable: boolean; hasDocument: boolean; namespaces: typeof NAMESPACES }>) => void) | undefined
+    let describeCalls = 0
+    const written: SettingsNamespaceView = {
+      ...NAMESPACES[2]!,
+      revision: 1,
+      value: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY', name: 'Fresh' } } },
+      user: { providers: { openai: { apiKeyEnv: 'OPENAI_API_KEY', name: 'Fresh' } } },
+    }
+    const { ctx, mirror } = api({
+      describeSettings: () => {
+        describeCalls += 1
+        if (describeCalls === 1) {
+          return new Promise((resolve) => { releaseOld = resolve })
+        }
+        return Promise.resolve(remoteOk({
+          writable: true, hasDocument: false,
+          namespaces: NAMESPACES.map((row, index) => index === 2 ? written : row),
+        }))
+      },
+    })
+    const store = new ModelsSettingsStore(ctx, settingsSchema, mirror)
+    const firstLoad = store.load()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(describeCalls).toBe(1)
+
+    const applied = store.applyWritten(written)
+    releaseOld?.(remoteOk({ writable: true, hasDocument: false, namespaces: NAMESPACES }))
+    await Promise.all([firstLoad, applied])
+
+    expect(describeCalls).toBe(2)
+    expect(store.store.getSnapshot().namespaces.get('llm-pi-ai')?.revision).toBe(1)
+    expect(store.store.getSnapshot().namespaces.get('llm-pi-ai')).toMatchObject({
+      value: { providers: { openai: { name: 'Fresh' } } },
     })
   })
 

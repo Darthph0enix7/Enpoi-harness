@@ -2718,3 +2718,274 @@ select.input {
   border-color: var(--dsw-alias-button-primary-fill);
   color: var(--dsw-alias-label-primary);
 }
+
+/* ========================================================================= */
+/* MODEL METADATA DIALOG                                                    */
+/* ========================================================================= */
+
+.metadataDialog {
+  max-width: 640px;
+  width: min(640px, calc(100vw - 32px));
+}
+
+.metadataBody {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: min(62vh, 560px);
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.metadataSection {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.metadataGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.metadataField {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.metadataFieldWide {
+  grid-column: 1 / -1;
+}
+
+.metadataFieldHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.metadataFieldLabel {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.metadataIdInput {
+  font-family: var(--ds-font-family-code, monospace);
+}
+
+.metadataInputRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.metadataInputRow .metadataIdInput {
+  flex: 1;
+  min-width: 0;
+}
+
+.metadataCopyBtn,
+.metadataResetBtn {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--dsw-radius-sm);
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.metadataCopyBtn:hover:not(:disabled),
+.metadataResetBtn:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.metadataCopyBtn:disabled,
+.metadataResetBtn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.metadataHint {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.metadataWarning {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.metadataError {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.metadataNotice {
+  margin: 0;
+  padding: 5px 8px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.metadataEmptyText {
+  margin: 0 0 6px;
+}
+
+.metadataDetails {
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+  padding-top: 10px;
+}
+
+.metadataDetailsSummary {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+
+.metadataTextarea {
+  resize: vertical;
+  min-height: 56px;
+  font-family: var(--ds-font-family-code, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.metadataPriceGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.metadataTierRow {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.metadataTierField {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1;
+  min-width: 0;
+}
+
+.metadataTierRemove {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--dsw-radius-sm);
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  background: transparent;
+  color: var(--dsw-alias-label-tertiary);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.metadataTierRemove:hover:not(:disabled) {
+  color: var(--dsw-alias-state-error-primary);
+  background: var(--dsw-alias-interactive-bg-hover-danger);
+}
+
+.metadataTierRemove:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.metadataAdvanced {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 10px;
+  padding: 8px;
+  border: 1px dashed var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+}
+
+.metadataResetAll {
+  background: transparent;
+  border: none;
+  color: var(--dsw-alias-link);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 2px 4px;
+  margin-right: auto;
+}
+
+.metadataResetAll:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.metadataResetAll:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.modelEditBtn {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-tertiary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 120ms ease, background-color 120ms ease, border-color 120ms ease;
+  padding: 0;
+}
+
+.modelEditBtn:hover:not(:disabled) {
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-border-l3);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.modelEditBtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+@media (max-width: 640px) {
+  .metadataGrid,
+  .metadataPriceGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .metadataPriceGrid {
+    gap: 6px;
+  }
+
+  .metadataTierRow {
+    flex-wrap: wrap;
+  }
+}

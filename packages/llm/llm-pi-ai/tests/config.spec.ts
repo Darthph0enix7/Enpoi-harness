@@ -291,3 +291,78 @@ describe('native-file declaration boundary', () => {
       .toThrow(/unknown field "encder"/)
   })
 })
+
+describe('manual model record metadata', () => {
+  it('accepts the closed manual field vocabulary and refuses an unknown or mistyped entry', () => {
+    expect(configWith({
+      manualFields: [
+        'name', 'contextWindow', 'maxInputTokens', 'maxTokens', 'input', 'output',
+        'tools', 'reasoning', 'reasoningEfforts', 'cost', 'costTiers', 'releaseDate',
+      ],
+    })).not.toThrow()
+    // An empty list is a real declaration: the operator froze no field.
+    expect(configWith({ manualFields: [] })).not.toThrow()
+    expect(configWith({ manualFields: ['cost', 'bogus'] })).toThrow(/manualFields/)
+    expect(configWith({ manualFields: 'cost' })).toThrow()
+    // A number is never a field name; the parser must not coerce one.
+    expect(configWith({ manualFields: [1_000_000] })).toThrow()
+    // Absence stays legacy-compatible: the sync reads the frozen seven.
+    expect(configWith({})).not.toThrow()
+  })
+
+  it('declares output modalities as catalogue metadata without a request capability', () => {
+    expect(configWith({ output: ['text', 'image'] })).not.toThrow()
+    expect(configWith({ output: 'text' })).toThrow()
+    expect(configWith({ output: ['hologram'] })).toThrow()
+  })
+
+  it('accepts the stored origin labels and refuses an unknown source', () => {
+    for (const source of ['configured', 'manual', 'discovered', 'pinned-in-use']) {
+      expect(configWith({ source })).not.toThrow()
+    }
+    // A missing source is a legacy row, never a validation failure.
+    expect(configWith({})).not.toThrow()
+    expect(configWith({ source: 'somewhere-else' })).toThrow()
+  })
+
+  it('accepts canonical USD-per-million prices, zero included, and request-wide tiers', () => {
+    expect(configWith({
+      cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+      costTiers: [
+        { inputTokensAbove: 200_000, input: 0, output: 0 },
+        { inputTokensAbove: 1_000_000, input: 4, output: 18 },
+      ],
+      releaseDate: '2026-01-01',
+    })).not.toThrow()
+    expect(configWith({ cost: { input: 2, output: 8 } })).not.toThrow()
+    expect(configWith({ costTiers: [{ inputTokensAbove: 200_000 }] })).not.toThrow()
+  })
+
+  it('rejects a negative, non-finite, or non-numeric price', () => {
+    expect(configWith({ cost: { input: -1 } })).toThrow()
+    expect(configWith({ cost: { input: Number.NaN } })).toThrow()
+    expect(configWith({ cost: { output: Number.POSITIVE_INFINITY } })).toThrow()
+    expect(configWith({ cost: { cache_read: Number.NEGATIVE_INFINITY } })).toThrow()
+    expect(configWith({ costTiers: [{ inputTokensAbove: 200_000, input: Number.NaN }] })).toThrow()
+    expect(configWith({ costTiers: [{ inputTokensAbove: 200_000, output: Number.POSITIVE_INFINITY }] }))
+      .toThrow()
+    expect(configWith({ cost: { cache_read: '0.9' } })).toThrow()
+  })
+
+  it('rejects a non-positive, fractional, non-finite, or unsafe tier threshold', () => {
+    expect(configWith({ costTiers: [{ inputTokensAbove: 0, input: 0 }] })).toThrow()
+    expect(configWith({ costTiers: [{ inputTokensAbove: 1.5, input: 0 }] })).toThrow()
+    expect(configWith({ costTiers: [{ inputTokensAbove: Number.NaN, input: 0 }] })).toThrow()
+    expect(configWith({ costTiers: [{ inputTokensAbove: Number.POSITIVE_INFINITY, input: 0 }] })).toThrow()
+    expect(configWith({ costTiers: [{ inputTokensAbove: 2 ** 53, input: 0 }] })).toThrow()
+  })
+
+  it('accepts only a real YYYY-MM-DD calendar release date', () => {
+    expect(configWith({ releaseDate: '2026-01-01' })).not.toThrow()
+    expect(configWith({ releaseDate: '2024-02-29' })).not.toThrow()
+    expect(configWith({ releaseDate: '2026-02-30' })).toThrow(/real YYYY-MM-DD/)
+    expect(configWith({ releaseDate: '2026-1-1' })).toThrow()
+    expect(configWith({ releaseDate: 'yesterday' })).toThrow()
+    expect(configWith({ releaseDate: 2026 })).toThrow()
+  })
+})

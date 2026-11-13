@@ -126,6 +126,12 @@ pi-ai 提供登录的提供方可以通过 harness 授权 seam 登录：流程�
 
 profile 的 `models` 列表会替换而非扩展路由的已安装目录；每个条目从同 id 已安装模型取未设置字段的默认值，因此把路由收窄到两个模型、修正一个容量或添加比已安装目录更新的模型都是一行编辑。`modelOverrides` 无需该代价即可重塑个别已安装目录模型——修正一个模型，保留其余三十七个——当它与 `models` 列表并存、位于手工声明路由上、或点名目录未描述的模型时会被拒绝，因为静默不变的模型会成为别人日后寻找的拼写错误。
 
+存储的模型可以携带 `source` 标签：`configured`、`manual`、`discovered` 或 `pinned-in-use`。缺少标签表示较旧的配置行，不是错误。`manualFields` 精确列出同步刷新不得覆盖的字段；缺失表示历史七项（`name`、`contextWindow`、`maxInputTokens`、`maxTokens`、`input`、`reasoning`、`reasoningEfforts`），显式空列表表示不冻结任何字段。闭集词表之外的名称会在写入记录时被拒绝。此字段出现前写入的模型行保持旧行为，不会发生迁移写入。
+
+`cost` 以美元/百万 token 携带 `input`、`output`、`cache_read` 与 `cache_write` 目录价格；`costTiers` 增加超过输入 token 阈值后适用的整请求价格；`releaseDate` 是 `YYYY-MM-DD` 目录日期。价格只是元数据：harness 不据此计费，自定义价格不会改变提供方账单，物化后的 pi-ai 模型仍使用运行时的零成本对象。零是已披露价格。`output` 把输出模态存为目录元数据；pi-ai 没有请求侧输出字段，因此它会被保留但绝不会成为请求能力。显式 `maxTokens` 也会成为该模型的每请求输出默认值，Models 页面会提示这一后果。
+
+值在持久化前校验：价格必须有限且非负，阶梯阈值必须为正安全整数，发布日期必须是真实日历日，容量必须为正安全整数。Models 页面对话框编辑这些目录字段；`nativeFileInputs` 与 `compat` 等部署专用开关只读展示并原样保留，不提供自由 JSON 编辑器。手动值优先于较低的披露来源，因此显式容量可能超过实际宿主档位；提供方仍是最终权威，可能拒绝该请求。
+
 ### 带推理（reasoning）与协议兼容运行
 
 `reasoningEfforts` 声明模型可选择的 thinking 等级：每个键都是选择器提供的等级，其值是分派时在协议中发送的拼写，因此 `max: ultra` 可以为拥有自有词汇的网关重命名等级。省略该字段时保留已安装目录条目的能力；`false` 声明非推理模型。模型条目、发现记录或已安装目录条目若声明 `reasoning: true` 却没有非空的映射等级，则保留该支持但不提供可选 effort：缺少 `thinkingLevelMap`，或映射仅禁用 `off`，都视为没有档位；模型信息不带 `reasoning` 控件，请求发送提供方默认值，指定 effort 会以 `UNSUPPORTED_REASONING_EFFORT` 失败；显式 `reasoning: false` 会覆盖已安装目录。配置的等级会把所有未声明等级固定为 `null`，因此只有声明的拼写可选。对于 pi-ai 无法识别的端点，`compat` 开关重塑请求——哪个角色携带系统提示词、哪个字段限制输出、thinking 等级如何传递——可逐路由、逐模型配置。条目与已安装目录都没有尺寸的模型，会采用路由的 `defaultContextWindow` 与 `defaultMaxTokens` 回退值。端点权威仅依据配置与该列表解析每个发现行，绝不会继承同一 id 的已安装条目；发现得到的 `maxTokens` 只作为模型能力，不会成为每请求上限。
@@ -270,6 +276,7 @@ pi-ai 事件变成 harness 的推理、文本、工具调用、用量与 finish 
 - **传输字节级活性需要可捕获的 fetch**——响应体观察与预流式 HTTP 事实共用每尝试的 `fetch` 包装；拒绝或忽略自定义 fetch 的协议（Google、Bedrock）与 WebSocket 传输仍只有语义 chunk 级活性，只发 keepalive 的流在那里仍可能超时。
 - **QUOTA 冷却下限从 60 分钟降到 30 秒**——`CLASS_COOLDOWN_MS.QUOTA` 从 `60*60_000` 改为 `30_000`，`parseResetMs` 现在以替换而非 `Math.max` 的方式夹取到 `[30s,24h]`；没有 `Resets in` 提示的月度耗尽密钥每 30 秒被重新探测一次，在每个请求周期烧掉一次 `429` 尝试，直到出现提示或 `recordSuccess` 清除状态。这对滚动窗口是有意为之，但会打击月度配额——滚动与月度窗口的区分被延期。
 - **重试策略由提供方自有，而非 SDK 重试**——pi-ai SDK 重试保持禁用，因此持久 agent（智能体）步骤与 `llm/retry` 事件拥有每个可见尝试，直接 `ctx.llm.stream()` 调用仍是单次尝试。
+- **目录价格不参与计费，也不约束预算**——`cost` 与 `costTiers` 只是美元/百万 token 的目录元数据。它们不会改变请求预算、提供方收费或物化进 pi-ai 的零成本对象。
 - **流式工具调用参数只在调用结束时解析一次**——安装的 pi-ai 带有 [`patches/@earendil-works__pi-ai@0.85.1.patch`](../../../patches/@earendil-works__pi-ai@0.85.1.patch)，它移除了每个流适配器中对整段累计参数 JSON 的逐 delta 重新解析（上游 [earendil-works/pi#9265](https://github.com/earendil-works/pi/issues/9265)）；未打补丁时，数 MB 的参数流会在事件循环上消耗 O(n²) CPU，并使进程内所有会话停滞。在 `toolcall_end` 之前，pi-ai partial 的工具调用 `arguments` 保持为 `{}`；本适配器只读取 delta 字符串与最终参数。每次升级 pi-ai 时都要重新应用或撤销该补丁。
 
 <a id="dev-note"></a>

@@ -519,6 +519,10 @@ interface ModelsDevModel {
   cost?: {
     input?: number
     output?: number
+    /** Cached-input price per million tokens, as models.dev names it. */
+    cache_read?: number
+    /** Cache-write price per million tokens, as models.dev names it. */
+    cache_write?: number
     /** Request-wide price tiers above an input-token threshold. */
     tiers?: Array<{
       input?: number
@@ -1345,10 +1349,11 @@ export interface CatalogOverlayProtection {
 /**
  * Apply one route's overlay to its merged settings-model list: removal wins
  * over the listing, an upsert replaces the entry's named fields, and an id
- * neither the listing nor the configuration carries is appended. A
- * `source: 'manual'` entry keeps its operator-declared name, input, limits,
- * and ladder over an upsert too. The input is returned unchanged when the
- * route has no overlay, so routes the file does not name are untouched.
+ * neither the listing nor the configuration carries is appended. A record
+ * with an explicit `manualFields` list keeps exactly those fields over an
+ * upsert too; a `source: 'manual'` record without one keeps the legacy seven.
+ * The input is returned unchanged when the route has no overlay, so routes
+ * the file does not name are untouched.
  * @param models - the merged settings records, in endpoint/configuration order.
  * @param overlay - the route's overlay, `undefined` when the file names none.
  * @param protection - ids an overlay removal keeps (operator records) or keeps deprecated (references).
@@ -1879,6 +1884,19 @@ function registryReasoningLadder(effort: NonNullable<RegistryResolvedModel['effo
   return thinking ? ladder : undefined
 }
 
+/**
+ * Which capability answers this analysis actually stated from a source, as
+ * opposed to a schema floor or a shared-table hint. It is an internal merge
+ * trace, never persisted: it lets a merge tell an explicit refusal (a stated
+ * `false` or a stated text-only list) from a source that simply said nothing.
+ */
+interface AnalyzedModelFacts {
+  /** A source stated the input modality list; false means the `text` floor or a hint answered. */
+  input: boolean
+  /** A source stated reasoning support (either boolean); false means the schema floor answered. */
+  reasoning: boolean
+}
+
 /** One model's two renderings: what settings stores and what the discovery cache keeps. */
 interface AnalyzedModel {
   /**
@@ -1891,6 +1909,8 @@ interface AnalyzedModel {
   settings: Record<string, unknown>
   /** The discovered-cache record, minus the provenance stamps the writer adds. */
   discovered: Omit<DiscoveredFileModel, 'source' | 'discoveredAt'>
+  /** Which freshness facts were actually stated, for the monotonic merge. */
+  facts: AnalyzedModelFacts
 }
 
 /**
@@ -2069,8 +2089,20 @@ function analyzeModel(
     : mDev?.tool_call
   const costInput = typeof mDev?.cost?.input === 'number' && Number.isFinite(mDev.cost.input) ? mDev.cost.input : undefined
   const costOutput = typeof mDev?.cost?.output === 'number' && Number.isFinite(mDev.cost.output) ? mDev.cost.output : undefined
+  const costCacheRead = typeof mDev?.cost?.cache_read === 'number' && Number.isFinite(mDev.cost.cache_read)
+    ? mDev.cost.cache_read
+    : undefined
+  const costCacheWrite = typeof mDev?.cost?.cache_write === 'number' && Number.isFinite(mDev.cost.cache_write)
+    ? mDev.cost.cache_write
+    : undefined
   const cost = costInput !== undefined || costOutput !== undefined
-    ? { ...(costInput !== undefined ? { input: costInput } : {}), ...(costOutput !== undefined ? { output: costOutput } : {}) }
+    || costCacheRead !== undefined || costCacheWrite !== undefined
+    ? {
+        ...(costInput !== undefined ? { input: costInput } : {}),
+        ...(costOutput !== undefined ? { output: costOutput } : {}),
+        ...(costCacheRead !== undefined ? { cache_read: costCacheRead } : {}),
+        ...(costCacheWrite !== undefined ? { cache_write: costCacheWrite } : {}),
+      }
     : undefined
 
   // 5b. Display tags models.dev carries beyond scalar facts: the release date
@@ -2124,6 +2156,10 @@ function analyzeModel(
       ...gate,
       ...(unverified ? { unverified: true } : {}),
     },
+    facts: {
+      input: modalityDisclosed,
+      reasoning: reasoningDisclosed,
+    },
     discovered: {
       id: model.id,
       name,
@@ -2146,34 +2182,179 @@ function analyzeModel(
 }
 
 /**
+ * Every per-model field the Models page can mark manual. A `source: 'manual'`
+ * record with an explicit `manualFields` list keeps exactly the listed fields
+ * through a refresh; an empty list keeps none. The list is closed: a
+ * configuration write naming anything else is refused, so no typo silently
+ * freezes nothing.
+ */
+export const MANUAL_MODEL_FIELDS = [
+  'name',
+  'contextWindow',
+  'maxInputTokens',
+  'maxTokens',
+  'input',
+  'output',
+  'tools',
+  'reasoning',
+  'reasoningEfforts',
+  'cost',
+  'costTiers',
+  'releaseDate',
+] as const
+
+/** One model field a manual record can freeze across a refresh. */
+export type ManualModelField = (typeof MANUAL_MODEL_FIELDS)[number]
+
+/** The closed field vocabulary, as a key gate for narrowing stored JSON. */
+const MANUAL_MODEL_FIELD_GATE: Record<ManualModelField, true> = {
+  name: true,
+  contextWindow: true,
+  maxInputTokens: true,
+  maxTokens: true,
+  input: true,
+  output: true,
+  tools: true,
+  reasoning: true,
+  reasoningEfforts: true,
+  cost: true,
+  costTiers: true,
+  releaseDate: true,
+}
+
+/**
+ * The seven fields a `source: 'manual'` record preserved before explicit
+ * field lists existed. A stored record without `manualFields` keeps exactly
+ * this behavior; nothing migrates it to a list.
+ */
+const LEGACY_MANUAL_MODEL_FIELDS: readonly ManualModelField[] = [
+  'name',
+  'contextWindow',
+  'maxInputTokens',
+  'maxTokens',
+  'input',
+  'reasoning',
+  'reasoningEfforts',
+]
+
+/**
+ * The operator's explicit freeze list, narrowed to known field names.
+ * `undefined` means the record predates the list (legacy seven); `[]` means
+ * the operator froze none. A present list naming an unknown field is invalid
+ * stored configuration, not a typo to hide: it throws so the route's refresh
+ * fails loud instead of silently freezing nothing. New writes are already
+ * refused by the `llm-pi-ai` schema; this is the retrospective guard for a
+ * hand-edited settings file.
+ * @param entry - the stored model record.
+ * @returns the sanitized list, or `undefined` when none is declared.
+ * @throws When a present list is not an array or names a field outside the vocabulary.
+ */
+function manualFieldsOf(entry: Record<string, unknown>): ManualModelField[] | undefined {
+  const raw = entry.manualFields
+  if (raw === undefined) return undefined
+  const id = typeof entry.id === 'string' && entry.id.length > 0 ? entry.id : '<unknown>'
+  if (!Array.isArray(raw)) {
+    throw new Error(`provider-sync: model "${id}" manualFields must be a list of field names`)
+  }
+  const fields: ManualModelField[] = []
+  const seen = new Set<string>()
+  for (const candidate of raw) {
+    if (typeof candidate !== 'string' || !Object.hasOwn(MANUAL_MODEL_FIELD_GATE, candidate)) {
+      throw new Error(
+        `provider-sync: model "${id}" manualFields names unknown field ${JSON.stringify(candidate)};`
+        + ` expected one of ${MANUAL_MODEL_FIELDS.join(', ')}`,
+      )
+    }
+    if (seen.has(candidate)) continue
+    seen.add(candidate)
+    fields.push(candidate as ManualModelField)
+  }
+  return fields
+}
+
+/**
+ * One field's value from a stored record, copied so a refresh cannot alias a
+ * mutable stored object. `undefined` means the record does not state the
+ * field — a field the operator reset must let the next disclosure through
+ * instead of resurrecting a stale value.
+ * @param field - the editable field to read.
+ * @param entry - the stored model record.
+ * @returns the value to preserve, or `undefined` when the record states none.
+ */
+function manualFieldValue(field: ManualModelField, entry: Record<string, unknown>): unknown {
+  const value = entry[field]
+  switch (field) {
+    case 'name':
+      return typeof value === 'string' ? value : undefined
+    case 'contextWindow':
+    case 'maxInputTokens':
+    case 'maxTokens':
+      return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+    case 'input':
+    case 'output':
+      return Array.isArray(value) ? [...value] : undefined
+    case 'tools':
+    case 'reasoning':
+      return typeof value === 'boolean' ? value : undefined
+    case 'reasoningEfforts':
+      return value !== null && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0
+        ? { ...value as Record<string, unknown> }
+        : undefined
+    case 'cost':
+      return value !== null && typeof value === 'object' && !Array.isArray(value)
+        ? { ...value as Record<string, unknown> }
+        : undefined
+    case 'costTiers':
+      return Array.isArray(value)
+        ? value.map(tier => tier !== null && typeof tier === 'object' && !Array.isArray(tier)
+          ? { ...tier as Record<string, unknown> }
+          : tier)
+        : undefined
+    case 'releaseDate':
+      return typeof value === 'string' ? value : undefined
+  }
+}
+
+/**
  * The fields one configured entry keeps through a refresh because they are the
- * operator's own claim: a `source: 'manual'` model's name, input modalities,
- * capacities, reasoning flag, and reasoning ladder. Every field the operator
- * left unfilled still refreshes from the listing or the overlay. The settings
- * record is stored JSON, so each value is narrowed here.
+ * operator's own claim. A record's explicit `manualFields` list freezes
+ * exactly the named fields; without one a `source: 'manual'` record keeps the
+ * legacy seven (`name`, `contextWindow`, `maxInputTokens`, `maxTokens`,
+ * `input`, `reasoning`, `reasoningEfforts`). The explicit list is honored even
+ * when the source label is missing; only membership protection requires
+ * `source: 'manual'`. Every field the operator left unfilled still refreshes
+ * from the listing or the overlay, and a field deleted from the record is not
+ * resurrected from this path. The operator-only transport declarations
+ * (`nativeFileInputs`, `compat`) always ride along, and the manual marker
+ * itself is carried so a refresh cannot drop it. The settings record is
+ * stored JSON, so each value is narrowed here.
  * @param entry - the configured model record.
- * @returns the fields a refresh must not overwrite; `{}` for a non-manual entry.
+ * @returns the fields a refresh must not overwrite; `{}` when the entry declares none.
  */
 function preservedManualFields(entry: Record<string, unknown>): Record<string, unknown> {
-  if (entry.source !== 'manual') return {}
+  const manual = entry.source === 'manual'
+  const explicit = manualFieldsOf(entry)
+  // A non-manual record without an explicit list has no operator capability
+  // claims to keep; preservedConfiguredFields adds the transport declarations.
+  if (!manual && explicit === undefined) return {}
   const preserved: Record<string, unknown> = {
     ...preservedOperatorFields(entry),
   }
-  if (typeof entry.name === 'string') preserved.name = entry.name
-  if (typeof entry.contextWindow === 'number' && Number.isFinite(entry.contextWindow)) {
-    preserved.contextWindow = entry.contextWindow
-  }
-  if (typeof entry.maxInputTokens === 'number' && Number.isFinite(entry.maxInputTokens)) {
-    preserved.maxInputTokens = entry.maxInputTokens
-  }
-  if (typeof entry.maxTokens === 'number' && Number.isFinite(entry.maxTokens)) {
-    preserved.maxTokens = entry.maxTokens
-  }
-  if (Array.isArray(entry.input)) preserved.input = [...entry.input]
-  if (typeof entry.reasoning === 'boolean') preserved.reasoning = entry.reasoning
-  const ladder = entry.reasoningEfforts
-  if (ladder !== null && typeof ladder === 'object' && !Array.isArray(ladder) && Object.keys(ladder).length > 0) {
-    preserved.reasoningEfforts = { ...ladder as Record<string, unknown> }
+  if (manual) preserved.source = 'manual'
+  if (explicit !== undefined) preserved.manualFields = [...explicit]
+  const fields = explicit ?? LEGACY_MANUAL_MODEL_FIELDS
+  for (const field of fields) {
+    const value = manualFieldValue(field, entry)
+    if (value !== undefined) {
+      preserved[field] = value
+      continue
+    }
+    // `false` is a real reasoning declaration (a non-reasoning model), so an
+    // explicit freeze preserves it; the legacy path keeps its historical
+    // behavior of letting the refresh answer instead.
+    if (explicit !== undefined && field === 'reasoningEfforts' && entry.reasoningEfforts === false) {
+      preserved.reasoningEfforts = false
+    }
   }
   return preserved
 }
@@ -2230,33 +2411,47 @@ const MONOTONIC_FACT_FIELDS = [
  * metadata probe can miss, a model can answer a listing without its limits,
  * and a registry refresh can be unavailable — none of that makes a previously
  * disclosed capacity or capability untrue. Capacity and tool facts are always
- * carried over; modalities and reasoning are carried over only from a record
- * that was itself disclosed (never from a hint-only `unverified` row, which
- * would promote a guess into a fact).
+ * carried over when the fresh pass is silent. Modalities and reasoning are
+ * carried over only while this pass is silent too: a source that states
+ * `reasoning: false` or a text-only modality list is making a real statement,
+ * and it must clear the old claim instead of losing to the monotonic
+ * safeguard. A record that was itself hint-only (`unverified`) never promotes
+ * a guess into a fact.
  * @param entry - the stored model record.
  * @param fresh - this pass's analyzed record for the same id.
+ * @param facts - which fresh capability answers a source actually stated.
  * @returns the disclosed fields this pass did not restate; `{}` when none.
  */
 function preservedKnownFacts(
   entry: Record<string, unknown>,
   fresh: Record<string, unknown>,
+  facts: AnalyzedModelFacts | undefined,
 ): Record<string, unknown> {
   const preserved: Record<string, unknown> = {}
   const entryUnverified = entry.unverified === true
+  // An explicit fresh refusal wins over every older claim; a field the
+  // operator froze is re-added later by preservedConfiguredFields.
+  const freshRefusal = facts?.reasoning === true && fresh.reasoning === false
   for (const field of MONOTONIC_FACT_FIELDS) {
     if (fresh[field] === undefined && entry[field] !== undefined) preserved[field] = entry[field]
   }
-  if (fresh.reasoningEfforts === undefined && entry.reasoningEfforts !== undefined) {
+  if (!freshRefusal
+    && fresh.reasoningEfforts === undefined && entry.reasoningEfforts !== undefined) {
     preserved.reasoningEfforts = entry.reasoningEfforts
   }
   if (!entryUnverified) {
     const freshInput = Array.isArray(fresh.input) ? liveModalities(fresh.input) : []
-    const entryInput = Array.isArray(entry.input) ? liveModalities(entry.input) : []
-    const union = [...new Set([...freshInput, ...entryInput])]
-    if (union.length > freshInput.length && entryInput.some(modality => modality !== 'text')) {
-      preserved.input = ['text', ...union.filter(modality => modality !== 'text')]
+    // A stated list (even text-only) replaces the old modalities outright.
+    // Only an undisclosed input falls back to the union that keeps a known
+    // vision claim through a sparser pass.
+    if (facts?.input !== true) {
+      const entryInput = Array.isArray(entry.input) ? liveModalities(entry.input) : []
+      const union = [...new Set([...freshInput, ...entryInput])]
+      if (union.length > freshInput.length && entryInput.some(modality => modality !== 'text')) {
+        preserved.input = ['text', ...union.filter(modality => modality !== 'text')]
+      }
     }
-    if (fresh.reasoning !== true && entry.reasoning === true) preserved.reasoning = true
+    if (!freshRefusal && fresh.reasoning !== true && entry.reasoning === true) preserved.reasoning = true
   }
   return preserved
 }
@@ -2266,13 +2461,15 @@ function preservedKnownFacts(
  * passes disclosed, and the operator-only declarations configuration owns.
  * @param entry - the stored model record.
  * @param fresh - this pass's analyzed record.
+ * @param facts - which fresh capability answers a source actually stated.
  * @returns the fields to layer over `fresh`.
  */
 function mergedRefreshFields(
   entry: Record<string, unknown>,
   fresh: Record<string, unknown>,
+  facts: AnalyzedModelFacts | undefined,
 ): Record<string, unknown> {
-  const known = preservedKnownFacts(entry, fresh)
+  const known = preservedKnownFacts(entry, fresh, facts)
   const merged: Record<string, unknown> = { ...known, ...preservedConfiguredFields(entry) }
   // A restated disclosure clears the hint-era stamp: the row is described now.
   if (fresh.unverified === true && Object.keys(known).length > 0) delete merged.unverified
@@ -2316,10 +2513,11 @@ export function mergeConfiguredModels(
   routeProviderMap: RouteProviderMap = DEFAULT_ROUTE_PROVIDER_MAP,
   registryContext: RegistryMetadataContext | undefined = undefined,
 ): ConfiguredMerge {
-  const advertised = new Map<string, Record<string, unknown>>()
+  const advertised = new Map<string, { settings: Record<string, unknown>, facts: AnalyzedModelFacts }>()
   for (const model of live) {
     if (advertised.has(model.id)) continue
-    advertised.set(model.id, analyzeModel(route, model, hints, routeProviderMap, registryContext).settings)
+    const analyzed = analyzeModel(route, model, hints, routeProviderMap, registryContext)
+    advertised.set(model.id, { settings: analyzed.settings, facts: analyzed.facts })
   }
   const models: Array<Record<string, unknown>> = []
   const unadvertised: string[] = []
@@ -2341,8 +2539,8 @@ export function mergeConfiguredModels(
       // merge that dropped them would silently disable media or wire
       // behavior the operator configured.
       models.push(entry.source === 'manual'
-        ? { ...fresh, ...mergedRefreshFields(entry, fresh), source: 'manual' }
-        : { ...fresh, ...mergedRefreshFields(entry, fresh) })
+        ? { ...fresh.settings, ...mergedRefreshFields(entry, fresh.settings, fresh.facts), source: 'manual' }
+        : { ...fresh.settings, ...mergedRefreshFields(entry, fresh.settings, fresh.facts) })
       continue
     }
     const keptSource = entry.source === 'manual' || entry.source === 'pinned-in-use' ? entry.source : 'configured'
@@ -2352,7 +2550,7 @@ export function mergeConfiguredModels(
   for (const [id, entry] of advertised) {
     if (seen.has(id)) continue
     seen.add(id)
-    models.push(entry)
+    models.push(entry.settings)
   }
   return { models, unadvertised }
 }
@@ -2658,10 +2856,11 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
   const endpointGraceMs = input.endpointGraceMs ?? ENDPOINT_ONLY_GRACE_MS
   const hints = input.hints ?? { table: loadCapabilityHints(), override: {} }
   const routeProviderMap = input.routeProviderMap ?? DEFAULT_ROUTE_PROVIDER_MAP
-  const advertised = new Map<string, Record<string, unknown>>()
+  const advertised = new Map<string, { settings: Record<string, unknown>, facts: AnalyzedModelFacts }>()
   for (const model of live ?? []) {
     if (advertised.has(model.id)) continue
-    advertised.set(model.id, analyzeModel(input.route, model, hints, routeProviderMap, input.metadata).settings)
+    const analyzed = analyzeModel(input.route, model, hints, routeProviderMap, input.metadata)
+    advertised.set(model.id, { settings: analyzed.settings, facts: analyzed.facts })
   }
 
   const endpointAuthority = input.endpointAuthority === true
@@ -2803,14 +3002,15 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
       }
       if (fresh !== undefined) {
         models.push({
-          ...fresh,
-          // The healthy pass refreshes the record too; a manual entry's own
-          // ladder is the operator's claim and survives it, every entry keeps
-          // the operator-only declarations (`nativeFileInputs`, `compat`) no
+          ...fresh.settings,
+          // The healthy pass refreshes the record too; a manual entry's
+          // explicit `manualFields` list (or the legacy seven when absent) is
+          // the operator's claim and survives it, every entry keeps the
+          // operator-only declarations (`nativeFileInputs`, `compat`) no
           // disclosure can restate, and a fact an earlier pass disclosed
           // survives a sparser pass (a missed sibling probe never erases a
-          // known capacity).
-          ...mergedRefreshFields(entry, fresh),
+          // known capacity) while an explicit fresh refusal clears it.
+          ...mergedRefreshFields(entry, fresh.settings, fresh.facts),
           ...entry.source === 'manual' ? { source: 'manual' } : {},
           ...isGrace ? { firstSeenAt: firstSeenAtOf(entry) ?? input.now } : {},
         })
@@ -2824,7 +3024,7 @@ export function planRouteModels(input: PlanRouteInput): PlannedRouteModels {
       if (seen.has(id)) continue
       seen.add(id)
       if (!isMember(id)) continue
-      models.push(grace.has(id) ? { ...fresh, firstSeenAt: input.now } : fresh)
+      models.push(grace.has(id) ? { ...fresh.settings, firstSeenAt: input.now } : fresh.settings)
     }
   }
   // An overlay removal never deletes an operator record or a live reference.
@@ -2925,6 +3125,7 @@ function stringifyComparable(models: Array<Record<string, unknown>> | undefined)
       maxInputTokens: m.maxInputTokens,
       maxTokens: m.maxTokens,
       input: m.input ?? null,
+      output: m.output ?? null,
       reasoning: m.reasoning ?? null,
       // The ladder's wire spellings are part of the record: a provider that
       // renames a level's wire value (or changes which levels exist) must be
@@ -2939,6 +3140,10 @@ function stringifyComparable(models: Array<Record<string, unknown>> | undefined)
       // refresh that would drop them) must be written, not treated as equal.
       nativeFileInputs: m.nativeFileInputs ?? null,
       compat: m.compat ?? null,
+      // The explicit manual freeze list is operator configuration too: adding,
+      // removing, or emptying it must trigger a write even when every
+      // capability field is byte-identical.
+      manualFields: m.manualFields ?? null,
       cost: m.cost ?? null,
       releaseDate: m.releaseDate ?? null,
       costTiers: m.costTiers ?? null,

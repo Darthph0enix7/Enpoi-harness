@@ -26,12 +26,18 @@ export interface FencedPlan {
   labels?: readonly string[]
 }
 
-/** One fenced namespace outcome: the failure, and the labels of the committed plan. */
+/** One fenced namespace outcome: the failure, the committed labels, and the written view. */
 export interface FencedOutcome {
   /** The refusing cause, or null once the plan committed (or was empty). */
   error: GroupWriteFailure | null
   /** Labels of the plan that committed; empty for an empty plan or a failure. */
   labels: readonly string[]
+  /**
+   * The namespace view a committed write answered with, when the wire supplies
+   * one. Callers fold this into the shared settings mirror so a held document
+   * reflects the write without a second describe.
+   */
+  view?: SettingsNamespaceView
 }
 
 /**
@@ -60,7 +66,7 @@ export async function applyFenced(
       const planned = plan(view)
       if (planned.ops.length === 0) return { error: null, labels: [] }
       const written = await api.settings.mutate(ns, [...planned.ops], view?.revision)
-      if (written.ok) return { error: null, labels: planned.labels ?? [] }
+      if (written.ok) return { error: null, labels: planned.labels ?? [], view: written.value }
       if (written.error.code !== 'settings/conflict') {
         return { error: { code: 'rejected', ...messageOf(written.error.message) }, labels: [] }
       }

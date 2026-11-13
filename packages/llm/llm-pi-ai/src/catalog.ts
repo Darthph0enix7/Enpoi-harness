@@ -593,10 +593,89 @@ function resolveNativeFileInputs(
   }
 }
 
+/**
+ * Origin labels a stored model record may carry. The sync writes `configured`
+ * for a retained record and `pinned-in-use` for one kept only because a
+ * route-local reference still names it; the Models page writes `manual` for a
+ * hand-added record. A record without the label predates source stamping
+ * and is read as configuration, never rejected. `discovered` names the
+ * sibling discovered-cache origin, accepted here so a record copied from that
+ * cache is not refused.
+ */
+export type PiAiModelSource = 'configured' | 'manual' | 'discovered' | 'pinned-in-use'
+
+/**
+ * Every per-model field the Models page lets an operator mark manual. A
+ * `source: 'manual'` record with an explicit `manualFields` list keeps exactly
+ * the listed fields through a sync refresh; an absent list keeps the seven
+ * fields that were always preserved (see the field's own documentation).
+ */
+export const PI_AI_MANUAL_MODEL_FIELDS = [
+  'name',
+  'contextWindow',
+  'maxInputTokens',
+  'maxTokens',
+  'input',
+  'output',
+  'tools',
+  'reasoning',
+  'reasoningEfforts',
+  'cost',
+  'costTiers',
+  'releaseDate',
+] as const
+
+/** One field a manual model record can freeze across a sync refresh. */
+export type PiAiManualModelField = (typeof PI_AI_MANUAL_MODEL_FIELDS)[number]
+
+/**
+ * Published price dimensions for one model, in USD per million tokens — the
+ * same vocabulary and units models.dev publishes. This is catalogue metadata:
+ * the harness does not bill from it (`replay.ts` reports zero cost), and
+ * declaring a price never changes a request budget. When known, the input and
+ * output pair lets the catalogue's zero-price predicate see a free row; a zero
+ * price is a disclosed price, not an absence.
+ */
+export interface PiAiModelCost {
+  /** Input-token price per million tokens, when known. */
+  input?: number
+  /** Output-token price per million tokens, when known. */
+  output?: number
+  /** Cached-input-token price per million tokens, when known. */
+  cache_read?: number
+  /** Cache-write-token price per million tokens, when known. */
+  cache_write?: number
+}
+
+/** One request-wide price tier above an input-token threshold, USD per million tokens. */
+export interface PiAiModelCostTier {
+  /** Input tokens above which this tier prices the whole request. */
+  inputTokensAbove: number
+  /** Tier input price per million tokens, when known. */
+  input?: number
+  /** Tier output price per million tokens, when known. */
+  output?: number
+}
+
 /** One configured model entry: an id plus the catalog fields it overrides. */
 export interface PiAiModelProfile {
   /** Model id sent to the provider and accepted by {@link GenerateOptions.model}. */
   id: string
+  /**
+   * Source label for a stored record. Absent on records written before
+   * source stamping and on rows that are plain configuration; both read
+   * the same. `manual` is the operator's own record and keeps whatever its
+   * {@link manualFields} list names.
+   */
+  source?: PiAiModelSource
+  /**
+   * The editable fields this record's operator froze. Present means exactly
+   * these fields survive a sync refresh — an empty list freezes none; absent
+   * keeps the legacy seven (`name`, `contextWindow`, `maxInputTokens`,
+   * `maxTokens`, `input`, `reasoning`, `reasoningEfforts`). A name outside
+   * {@link PI_AI_MANUAL_MODEL_FIELDS} is refused at the configuration write.
+   */
+  manualFields?: PiAiManualModelField[] | undefined
   /** Display name for selectors; defaults to the catalog name, then the id. */
   name?: string
   /** Maximum combined request and response context in tokens. */
@@ -630,6 +709,13 @@ export interface PiAiModelProfile {
    * endpoint refuses is refused by the provider instead, mid-turn.
    */
   input?: PiAiModality[]
+  /**
+   * Output modalities a source disclosed, when it states them separately.
+   * Catalogue metadata like the input list: pi-ai's request type has no
+   * output-side field, so this is stored and preserved but never materialized
+   * into a request capability. Absent keeps the next source's answer.
+   */
+  output?: PiAiModality[] | undefined
   /** Whether reasoning is supported; a true flag alone discloses no selectable effort levels. */
   reasoning?: boolean
   /**
@@ -646,6 +732,16 @@ export interface PiAiModelProfile {
    * declares the offered levels and their wire spellings.
    */
   reasoningEfforts?: false | PiAiReasoningEfforts
+  /**
+   * Published price dimensions, USD per million tokens. Catalogue metadata
+   * only: the harness reads no billing from it, and it never changes a request
+   * budget or a materialized pi-ai cost (that stays {@link NO_COST}).
+   */
+  cost?: PiAiModelCost | undefined
+  /** Request-wide price tiers above an input-token threshold, when a source published any. */
+  costTiers?: PiAiModelCostTier[] | undefined
+  /** ISO `YYYY-MM-DD` release date a source published, shown as catalogue metadata. */
+  releaseDate?: string
   /** pi-ai wire-compatibility switches for this model, winning over the route's per field; one its protocol does not declare is refused. */
   compat?: PiAiCompatProfile
   /**

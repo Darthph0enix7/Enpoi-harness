@@ -4,7 +4,8 @@ import type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { CredentialInfo } from '@deepseek-ai/dsh-credentials/types'
 import type { LlmPoolIdentityStatus } from '@deepseek-ai/dsh-llm/types'
-import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconEditOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { LlmDiscoveredModel } from '@deepseek-ai/dsh-api-remotes/client'
 import {
   IconEye, IconEyeOff, IconTools, IconBrain, IconVision, IconAudio, IconVideo, IconFile,
   IconKey, IconBolt, IconTrash, IconCheck, IconSearch, IconServer,
@@ -26,6 +27,9 @@ import { resolveHeavyManifest } from './heavy-manifest-source.ts'
 import { providerDashboardUrls } from './provider-templates.ts'
 import { OPENAI_BASE_URL_EXAMPLE } from './endpoint-defaults.ts'
 import type { SettingsSchemaOperations } from './schema-operations.ts'
+import type { ModelMetadataDraft, ModelMetadataKind } from './model-metadata.ts'
+import { buildModelMetadataOps, metadataKindOf, ModelMetadataOpsError } from './model-metadata.ts'
+import { ModelMetadataDialog } from './ModelMetadataDialog.tsx'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
 
@@ -40,7 +44,11 @@ export interface ProviderDetailPanelProps {
   t: (key: keyof typeof en, params?: Record<string, unknown>) => string
   readOnly: boolean
   onDelete: () => void
-  onSaved: () => void
+  /**
+   * Refresh the page after a write. A committed settings view lets the page
+   * fold the authoritative revision instead of waiting for a pushed echo.
+   */
+  onSaved: (view?: SettingsNamespaceView) => void
 }
 
 type ModelItem = {
@@ -82,6 +90,10 @@ type ModelItem = {
   files?: boolean
   /** The listing's own price fields, when the row still carries discovery fields. */
   cost?: unknown
+  /** Catalog release date, when the source disclosed one. */
+  releaseDate?: string
+  /** Request-wide price tiers, when the source disclosed them. */
+  costTiers?: readonly { inputTokensAbove?: number; input?: number; output?: number }[]
   /** Provider sync marked this model sign-in/paid-only; the eye renders off. */
   gated?: boolean
   /** The listing's own free marker, when the row still carries discovery fields. */
@@ -103,8 +115,13 @@ type ModelItem = {
    * than a disclosure.
    */
   unverified?: boolean
-  /** The sync's provenance stamp (`manual` survives catalog removal). */
+  /** The sync's source stamp (`manual` survives catalog removal). */
   source?: string
+  /**
+   * Fields the operator explicitly overrode on this row. A field absent here
+   * is inherited, so the metadata dialog offers no reset for it.
+   */
+  manualFields?: string[]
   /** The sync kept this row only because something references it; upstream retired it. */
   deprecated?: boolean
   /** When the sync first saw an endpoint-only id, for the 14-day grace. */
@@ -232,6 +249,198 @@ export function mergeRefreshedModels(
     })
   }
   return merged
+}
+
+/** Narrow one stored JSON node to a record, or undefined for a non-record. */
+function recordAt(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined
+}
+
+/** Whether one route profile carries any per-model catalog overrides. */
+function hasModelOverrides(profile: Record<string, unknown> | undefined): boolean {
+  const overrides = profile === undefined ? undefined : recordAt(profile.modelOverrides)
+  return overrides !== undefined && Object.keys(overrides).length > 0
+}
+
+/** A refresh refusal that must keep its localized message verbatim. */
+class CatalogOverrideRefreshRefused extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'CatalogOverrideRefreshRefused'
+  }
+}
+
+/** A metadata save refusal raised by the fresh-document guard. */
+class ModelListNotStoredError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ModelListNotStoredError'
+  }
+}
+
+/** Fields a legacy `source: manual` row froze before `manualFields` existed. */
+const LEGACY_MANUAL_DRAFT_FIELDS = [
+  'name', 'contextWindow', 'maxInputTokens', 'maxTokens', 'input', 'reasoning', 'reasoningEfforts',
+] as const
+
+/** Whether a stored value round-trips to a non-empty value. */
+function hasStoredValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false
+  if (Array.isArray(value)) return value.length > 0
+  const record = recordAt(value)
+  if (record !== undefined) return Object.keys(record).length > 0
+  if (typeof value === 'string') return value.length > 0
+  return typeof value === 'number' || typeof value === 'boolean'
+}
+
+/**
+ * The legacy manual-field list for a row written before `manualFields`
+ * existed. The helper still seeds these fields, so the dialog must offer the
+ * same resets instead of leaving an operator unable to express the intent.
+ * @param model - the stored row.
+ * @param kind - the row's layout.
+ * @returns the stored legacy field names.
+ */
+function legacyManualFieldsOf(model: ModelItem, kind: ModelMetadataKind): readonly string[] {
+  const fields: string[] = []
+  for (const field of LEGACY_MANUAL_DRAFT_FIELDS) {
+    if (kind === 'deepseek'
+      && (field === 'maxInputTokens' || field === 'reasoning' || field === 'reasoningEfforts')) continue
+    const storage = field === 'input' ? kind === 'deepseek' ? 'inputModalities' : 'input' : field
+    if (hasStoredValue(model[storage])) fields.push(storage)
+  }
+  return fields
+}
+
+/**
+ * One installed-catalog discovery row as the panel renders it. The catalog
+ * wire names input modalities directly; a stored pi-ai row names them under
+ * `input`, so the two vocabularies meet here, before the dialog reads the row.
+ * @param model - one discovery row.
+ * @returns the panel's model row.
+ */
+function catalogRowOf(model: LlmDiscoveredModel): ModelItem {
+  const row: ModelItem = {
+    id: model.id,
+    ...model.name === undefined ? {} : { name: model.name },
+    ...model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow },
+    ...model.maxInputTokens === undefined ? {} : { maxInputTokens: model.maxInputTokens },
+    ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
+    ...model.inputModalities === undefined ? {} : { input: [...model.inputModalities] },
+    ...model.tools === undefined ? {} : { tools: model.tools },
+    ...model.reasoning === undefined ? {} : { reasoning: model.reasoning },
+    ...model.reasoningEfforts === undefined ? {} : { reasoningEfforts: { ...model.reasoningEfforts } },
+    ...model.source === undefined ? {} : { source: model.source },
+  }
+  // A discovery answer from the installed catalog can carry the richer record
+  // the catalog analysis retained even though the shared wire type names only
+  // the request-facing fields.
+  const retained = recordAt(model)
+  if (retained?.cost !== undefined) row.cost = retained.cost
+  if (typeof retained?.releaseDate === 'string') row.releaseDate = retained.releaseDate
+  if (Array.isArray(retained?.costTiers)) {
+    row.costTiers = retained.costTiers
+      .map(recordAt)
+      .filter((tier): tier is Record<string, unknown> => tier !== undefined)
+      .map(tier => ({
+        ...typeof tier.inputTokensAbove === 'number' ? { inputTokensAbove: tier.inputTokensAbove } : {},
+        ...typeof tier.input === 'number' ? { input: tier.input } : {},
+        ...typeof tier.output === 'number' ? { output: tier.output } : {},
+      }))
+  }
+  return row
+}
+
+/**
+ * The fields an operator overrode on one row. The provider sync stamps them
+ * on the row; a catalog edit stores the same facts as the `modelOverrides`
+ * entry keyed by the model id, so the override fields are that entry's keys.
+ * @param model - the effective row.
+ * @param profile - the route profile.
+ * @param kind - the row's adapter/ownership kind.
+ * @returns the explicitly overridden field names.
+ */
+function manualFieldsOf(
+  model: ModelItem,
+  profile: Record<string, unknown>,
+  kind: ModelMetadataKind,
+  modelId: string,
+): readonly string[] {
+  if (Array.isArray(model.manualFields)) {
+    return model.manualFields.filter((field): field is string => typeof field === 'string')
+  }
+  if (model.source === 'manual') return legacyManualFieldsOf(model, kind)
+  if (kind !== 'pi-ai-catalog') return []
+  const overrides = recordAt(profile.modelOverrides)
+  const entry = overrides === undefined ? undefined : recordAt(overrides[modelId])
+  return entry === undefined ? [] : Object.keys(entry)
+}
+
+/**
+ * Localize a metadata plan refusal. The dialog already validates the draft, so
+ * a refusal here is a race the fresh document reports: the row vanished, an id
+ * collision appeared, or a catalog override tried to move its dictionary key.
+ * @param t - the panel translate.
+ * @param error - the thrown planning error.
+ * @returns the text the dialog shows and keeps open.
+ */
+function modelMetadataFailureText(
+  t: (key: keyof typeof en, params?: Record<string, unknown>) => string,
+  error: unknown,
+): string {
+  if (error instanceof ModelMetadataOpsError) {
+    switch (error.code) {
+      case 'invalid-draft': return t('metadataOpsInvalidDraft')
+      case 'model-not-found': return t('metadataOpsModelNotFound')
+      case 'duplicate-id': return t('metadataOpsDuplicateId')
+      case 'id-change-not-allowed': return t('metadataOpsIdChange')
+    }
+  }
+  return t('metadataSaveFailed', { message: messageOf(error) })
+}
+
+/**
+ * Merge the route's per-model catalog overrides onto one installed row so the
+ * panel and its dialog show what the adapter would serve, not the raw catalog
+ * defaults an override replaced.
+ * @param model - one installed-catalog row.
+ * @param profile - the route profile carrying `modelOverrides`.
+ * @returns the effective row, with its catalog id unchanged.
+ */
+function catalogRowWithOverrides(model: ModelItem, profile: Record<string, unknown>): ModelItem {
+  const overrides = recordAt(profile.modelOverrides)
+  const entry = overrides === undefined ? undefined : recordAt(overrides[model.id])
+  if (entry === undefined) return model
+  const next: ModelItem = { ...model }
+  if (typeof entry.name === 'string') next.name = entry.name
+  if (typeof entry.contextWindow === 'number') next.contextWindow = entry.contextWindow
+  if (typeof entry.maxInputTokens === 'number') next.maxInputTokens = entry.maxInputTokens
+  if (typeof entry.maxTokens === 'number') next.maxTokens = entry.maxTokens
+  if (Array.isArray(entry.input)) {
+    next.input = entry.input.filter((value): value is string => typeof value === 'string')
+  }
+  if (typeof entry.tools === 'boolean') next.tools = entry.tools
+  if (typeof entry.reasoning === 'boolean') next.reasoning = entry.reasoning
+  if (entry.reasoningEfforts === false) next.reasoningEfforts = false
+  else {
+    const efforts = recordAt(entry.reasoningEfforts)
+    if (efforts !== undefined) next.reasoningEfforts = efforts
+  }
+  if (entry.cost !== undefined) next.cost = entry.cost
+  if (typeof entry.releaseDate === 'string') next.releaseDate = entry.releaseDate
+  if (Array.isArray(entry.costTiers)) {
+    next.costTiers = entry.costTiers
+      .map(recordAt)
+      .filter((tier): tier is Record<string, unknown> => tier !== undefined)
+      .map(tier => ({
+        ...typeof tier.inputTokensAbove === 'number' ? { inputTokensAbove: tier.inputTokensAbove } : {},
+        ...typeof tier.input === 'number' ? { input: tier.input } : {},
+        ...typeof tier.output === 'number' ? { output: tier.output } : {},
+      }))
+  }
+  return next
 }
 
 /**
@@ -495,6 +704,16 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       {}) as Record<string, unknown>
   }, [namespace, row.entry.settingsPath, schema])
 
+  // The resolved effective profile: schema defaults and the composition base
+  // below the user layer. The models list and its metadata read this so a
+  // route that configures nothing still exposes the adapter's catalog rows.
+  const effectiveProfile = useMemo(() => {
+    return (schema.getPath(namespace.value, row.entry.settingsPath) ?? {}) as Record<string, unknown>
+  }, [namespace.value, row.entry.settingsPath, schema])
+  const userProfile = useMemo(() => {
+    return recordAt(schema.getPath(namespace.user, row.entry.settingsPath))
+  }, [namespace.user, row.entry.settingsPath, schema])
+
   // The fenced write plans re-read the live document per attempt: these read
   // one fresh described view with the same precedence as the render's own
   // snapshot, so each retry re-applies the operator's draft onto current data.
@@ -503,16 +722,24 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       schema.getPath(view?.value, row.entry.settingsPath) ??
       {}) as Record<string, unknown>
   }, [row.entry.settingsPath, schema])
+  /** The effective profile out of one fresh described view, for a row lookup. */
+  const effectiveProfileAt = useCallback((view: SettingsNamespaceView | undefined): Record<string, unknown> => {
+    return (schema.getPath(view?.value, row.entry.settingsPath) ?? {}) as Record<string, unknown>
+  }, [row.entry.settingsPath, schema])
   /** The canonical pool out of one fresh profile, matching the serverPool read. */
   const poolAt = useCallback((view: SettingsNamespaceView | undefined): PoolShape => {
     const p = profileAt(view)['pool'] as PoolShape
     return p && Array.isArray(p.identities) ? p : undefined
   }, [profileAt])
-  /** The models list out of one fresh profile, matching the modelsList read. */
+  /**
+   * The models list out of one fresh effective profile. Reading `value`
+   * rather than the raw user overlay keeps base-inherited rows in a refresh
+   * merge instead of treating an absent user `models` key as an empty list.
+   */
   const modelsAt = useCallback((view: SettingsNamespaceView | undefined): ModelItem[] => {
-    const list = profileAt(view)['models']
+    const list = effectiveProfileAt(view)['models']
     return Array.isArray(list) ? list as ModelItem[] : []
-  }, [profileAt])
+  }, [effectiveProfileAt])
 
   // State
   const [displayName, setDisplayName] = useState<string>(
@@ -655,6 +882,11 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
     setTestStatus({ state: 'idle' })
     setSaveSuccess(false)
     setModelSearch('')
+    setEditingModel(undefined)
+    setCatalogState(undefined)
+    setCatalogError(undefined)
+    setCatalogBusy(false)
+    catalogRequest.current += 1
   }, [providerId])
 
   // The page re-joins credentials on every load; the badge must follow the
@@ -686,12 +918,81 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
 
   // Models list
   const modelsList = useMemo<ModelItem[]>(() => {
-    const list = rawProfile.models
+    const list = effectiveProfile.models
     if (Array.isArray(list) && list.length > 0) {
       return list as ModelItem[]
     }
     return []
-  }, [rawProfile.models])
+  }, [effectiveProfile.models])
+
+  // The adapter family and ownership form decide what an edit may write. An
+  // unrecognized provider gets no edit action rather than a guessed write.
+  const metadataKind = useMemo(
+    () => metadataKindOf(namespace.ns, effectiveProfile),
+    [namespace.ns, effectiveProfile],
+  )
+  // A model array inherited from the composition base or adapter defaults has
+  // no writable leaf to address; materializing the whole list belongs to the
+  // catalog editor, so these rows stay read-only rather than fabricating a
+  // save into an array the user layer does not own.
+  const modelsMaterialized = Array.isArray(userProfile?.models) && userProfile.models.length > 0
+  const inheritedModelsBlocked = (metadataKind === 'deepseek' || metadataKind === 'pi-ai-models')
+    && !modelsMaterialized
+
+  // Installed-catalog rows are read only on demand: a route that configures no
+  // models still serves the adapter's catalog, and an operator edits that
+  // catalog one model at a time. Reading it is a discovery call, not a write,
+  // so it stays behind an explicit action instead of firing on every card
+  // render (a heavy route's automatic populate owns its own pass).
+  const [catalogState, setCatalogState] = useState<{
+    provider: string
+    models: readonly ModelItem[]
+  } | undefined>(undefined)
+  const [catalogBusy, setCatalogBusy] = useState(false)
+  const [catalogError, setCatalogError] = useState<string | undefined>(undefined)
+  const catalogRequest = useRef(0)
+  const [editingModel, setEditingModel] = useState<{
+    modelId: string
+    kind: ModelMetadataKind
+    /** Immutable row the dialog opens with; never the retry's fresh profile. */
+    baseline: Record<string, unknown>
+    /** Untouched installed-catalog row behind a per-model override. */
+    inherited?: Record<string, unknown>
+    manualFields: readonly string[]
+  } | undefined>(undefined)
+
+  const catalogShown = modelsList.length === 0 && catalogState?.provider === providerId
+  const catalogModels = useMemo(() => {
+    if (catalogState?.provider !== providerId) return []
+    return catalogState.models.map(model => catalogRowWithOverrides(model, effectiveProfile))
+  }, [catalogState, providerId, effectiveProfile])
+  const displayedModels = modelsList.length > 0 ? modelsList : catalogShown ? catalogModels : []
+  const canLoadCatalog = modelsList.length === 0
+    && modelSearch.trim() === ''
+    && metadataKind !== undefined
+    && metadataKind !== 'deepseek'
+    && !catalogShown
+
+  const loadCatalogModels = async (): Promise<void> => {
+    if (catalogBusy) return
+    const request = catalogRequest.current + 1
+    catalogRequest.current = request
+    setCatalogBusy(true)
+    setCatalogError(undefined)
+    try {
+      const answer = await api.llm.discoverModels(namespace.ns, { provider: providerId })
+      if (catalogRequest.current !== request) return
+      if (answer.ok) {
+        setCatalogState({ provider: providerId, models: answer.value.map(catalogRowOf) })
+      } else {
+        setCatalogError(answer.error.message)
+      }
+    } catch (error) {
+      if (catalogRequest.current === request) setCatalogError(messageOf(error))
+    } finally {
+      if (catalogRequest.current === request) setCatalogBusy(false)
+    }
+  }
 
   // The route's model ids, stable across unrelated renders: the heavy card's
   // automatic-population decision watches this list.
@@ -700,13 +1001,13 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   // Filtered models
   const filteredModels = useMemo(() => {
     const q = modelSearch.toLowerCase().trim()
-    if (!q) return modelsList
-    return modelsList.filter((m) => {
+    if (!q) return displayedModels
+    return displayedModels.filter((m) => {
       const name = (m.name || '').toLowerCase()
       const id = (m.id || '').toLowerCase()
       return name.includes(q) || id.includes(q)
     })
-  }, [modelSearch, modelsList])
+  }, [modelSearch, displayedModels])
 
   // 0ms: enrich once per filtered list; caps cached via WeakMap so 500× string scans O(1) on re-switch
   const enrichedFilteredModels = useMemo(() => {
@@ -729,13 +1030,13 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
 
   // Bulk hide/show
   const handleHideAll = () => {
-    const allIds = modelsList.map(m => m.id)
+    const allIds = displayedModels.map(m => m.id)
     hideAllModels(providerId, allIds)
     setPrefsVersion(v => v + 1)
   }
 
   const handleShowAll = () => {
-    showAllModels(providerId, modelsList.map(m => m.id))
+    showAllModels(providerId, displayedModels.map(m => m.id))
     setPrefsVersion(v => v + 1)
   }
 
@@ -816,11 +1117,25 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
    */
   const runCatalogRefresh = useCallback(async (options: { silent?: boolean } = {}): Promise<boolean> => {
     if (catalogRefreshInFlight.current || readOnly) return false
+    // The host pipeline and the fallback both persist a `models` array, which
+    // cannot coexist with `modelOverrides`. Refuse before any network call so
+    // a route that already has overrides never loses them to a refresh.
+    if (hasModelOverrides(effectiveProfile)) {
+      if (options.silent !== true) {
+        setRefreshState({
+          isRefreshing: false,
+          message: t('refreshBlockedModelOverrides'),
+          isError: true,
+        })
+        scheduleRefreshClear(6000)
+      }
+      return false
+    }
     catalogRefreshInFlight.current = true
     if (options.silent !== true) setRefreshState({ isRefreshing: true })
     try {
       // The removal-aware host pipeline is preferred even for the automatic
-      // (silent) pass: it owns membership, protections, and provenance. Only
+      // (silent) pass: it owns membership, protections, and source tags. Only
       // an unavailable/refused RPC falls back to plain discovery, which then
       // merges disclosed values only.
       const hosted = await refreshRouteViaPlugin(providerId)
@@ -828,6 +1143,11 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         const report = hosted.value
         let count = 0
         const outcome = await applyFenced(api, namespace.ns, (view) => {
+          // A concurrent writer may add an override while the host call is in
+          // flight; re-check the fresh document before planning any array write.
+          if (hasModelOverrides(effectiveProfileAt(view))) {
+            throw new CatalogOverrideRefreshRefused(t('refreshBlockedModelOverrides'))
+          }
           // The host answer is the canonical membership, but a degraded or
           // older sync may still hand back an empty ladder the settings schema
           // refuses; the shared normalization keeps the persisted route valid.
@@ -853,6 +1173,11 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         const discovered = (res.value as DiscoveredModel[] | undefined) || []
         let count = 0
         const outcome = await applyFenced(api, namespace.ns, (view) => {
+          // The fallback planner carries the same fresh-document refusal: a
+          // concurrent override must survive even when the host RPC is absent.
+          if (hasModelOverrides(effectiveProfileAt(view))) {
+            throw new CatalogOverrideRefreshRefused(t('refreshBlockedModelOverrides'))
+          }
           // Merge, never replace: a Refresh may add and update models, but
           // deleting one is the operator's decision, not a listing's. Only
           // disclosed fields land; route defaults stay virtual.
@@ -880,18 +1205,20 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
       if (options.silent !== true) {
         setRefreshState({
           isRefreshing: false,
-          message: t('refreshFailed', { message: messageOf(err) }),
+          message: err instanceof CatalogOverrideRefreshRefused
+            ? err.message
+            : t('refreshFailed', { message: messageOf(err) }),
           isError: true,
         })
-        scheduleRefreshClear(5000)
+        scheduleRefreshClear(err instanceof CatalogOverrideRefreshRefused ? 6000 : 5000)
       }
       return false
     } finally {
       catalogRefreshInFlight.current = false
     }
   }, [
-    api, baseURL, keyInput, modelsAt, namespace.ns, onSaved,
-    providerId, protocol, readOnly, row.entry.settingsPath, scheduleRefreshClear, t,
+    api, baseURL, effectiveProfile, effectiveProfileAt, keyInput, modelsAt, namespace.ns,
+    onSaved, providerId, protocol, readOnly, row.entry.settingsPath, scheduleRefreshClear, t,
   ])
 
   const handleRefreshModels = (): void => { void runCatalogRefresh() }
@@ -899,6 +1226,93 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
   // The heavy card's automatic pass: silent on failure, success still reports
   // the count and reloads the settings view.
   const autoPopulate = useCallback(() => runCatalogRefresh({ silent: true }), [runCatalogRefresh])
+
+  // One row's write form. A catalog row keeps its installed id and writes a
+  // per-model override; a materialized row may change its id, which adds a
+  // separate entry instead of renaming the one sessions already reference.
+  const rowKindOf = useCallback((fromCatalog: boolean): ModelMetadataKind | undefined => {
+    if (metadataKind === undefined) return undefined
+    if (metadataKind === 'deepseek' || metadataKind === 'pi-ai-models') {
+      return modelsMaterialized ? metadataKind : undefined
+    }
+    return fromCatalog ? 'pi-ai-catalog' : 'pi-ai-models'
+  }, [metadataKind, modelsMaterialized])
+
+  /** Whether the fresh document still stores a model array this save may index. */
+  const hasStoredModelList = useCallback((view: SettingsNamespaceView | undefined): boolean => {
+    const profile = recordAt(schema.getPath(view?.user, row.entry.settingsPath))
+    return Array.isArray(profile?.models) && profile.models.length > 0
+  }, [row.entry.settingsPath, schema])
+
+  /** Snapshot one row at open time so a settings echo cannot move its baseline. */
+  const openModelMetadata = (model: ModelItem, kind: ModelMetadataKind): void => {
+    const fromCatalog = kind === 'pi-ai-catalog'
+    const inherited = fromCatalog
+      ? catalogState?.models.find(candidate => candidate.id === model.id)
+      : undefined
+    const override = fromCatalog
+      ? recordAt(recordAt(effectiveProfile.modelOverrides)?.[model.id])
+      : undefined
+    const baseline: Record<string, unknown> = fromCatalog
+      ? { id: model.id, ...(override ?? {}) }
+      : { ...model }
+    const manualFields = fromCatalog
+      ? override === undefined ? [] : Object.keys(override)
+      : manualFieldsOf(model, effectiveProfile, kind, model.id)
+    setEditingModel({
+      modelId: model.id,
+      kind,
+      baseline,
+      ...inherited === undefined ? {} : { inherited: { ...inherited } },
+      manualFields,
+    })
+  }
+
+  /**
+   * Persist one metadata draft with revision fencing. The fresh document is
+   * re-read on every attempt and the helper locates the original row by id,
+   * so a concurrent catalog/model refresh is never replayed from this render.
+   */
+  const saveModelMetadata = useCallback(async (
+    modelId: string,
+    kind: ModelMetadataKind,
+    draft: ModelMetadataDraft,
+    baselineDraft: ModelMetadataDraft,
+    resetFields: readonly string[],
+  ): Promise<string | undefined> => {
+    try {
+      const outcome = await applyFenced(api, namespace.ns, (view) => {
+        if ((kind === 'pi-ai-models' || kind === 'deepseek') && !hasStoredModelList(view)) {
+          throw new ModelListNotStoredError(t(kind === 'deepseek'
+            ? 'metadataDeepseekUnavailable'
+            : 'metadataPiAiInheritedModelsHint'))
+        }
+        const freshProfile = effectiveProfileAt(view)
+        if (kind === 'pi-ai-catalog'
+          && ((Array.isArray(freshProfile.models) && freshProfile.models.length > 0)
+            || freshProfile.catalogAuthority === 'endpoint')) {
+          throw new ModelListNotStoredError(t('metadataCatalogChanged'))
+        }
+        return {
+          ops: buildModelMetadataOps({
+            kind,
+            providerId,
+            modelId,
+            profile: freshProfile,
+            draft,
+            baselineDraft,
+            resetFields,
+          }),
+        }
+      })
+      if (outcome.error !== null) return fencedFailureText(t, outcome.error)
+      onSaved(outcome.view)
+      return undefined
+    } catch (error) {
+      if (error instanceof ModelListNotStoredError) return error.message
+      return modelMetadataFailureText(t, error)
+    }
+  }, [api, effectiveProfileAt, hasStoredModelList, namespace.ns, onSaved, providerId, t])
 
   // Save Settings / API Key
   const handleSave = async () => {
@@ -1757,7 +2171,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
         <div className={styles['modelsHead']}>
           <div className={styles['modelsTitleRow']}>
             <h3 className={styles['cardTitle']}>{t('models')}</h3>
-            <span className={styles['modelCountBadge']}>{modelsList.length}</span>
+            <span className={styles['modelCountBadge']}>{displayedModels.length}</span>
           </div>
 
           <div className={styles['modelsHeadActions']}>
@@ -1803,7 +2217,7 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           <input
             className={styles['searchInput']}
             type="text"
-            placeholder={t('providerModelsSearchPlaceholder', { count: modelsList.length })}
+            placeholder={t('providerModelsSearchPlaceholder', { count: displayedModels.length })}
             value={modelSearch}
             onChange={e => setModelSearch(e.target.value)}
           />
@@ -1818,15 +2232,49 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           )}
         </div>
 
+        {/* An installed catalog is edited through per-model overrides, so the
+            route keeps serving every other catalog entry and no explicit
+            `models` array is materialized behind the operator. */}
+        {catalogShown && (
+          <p className={styles['metadataNotice']}>{t('metadataCatalogNotice')}</p>
+        )}
+        {inheritedModelsBlocked && (
+          <p className={styles['metadataNotice']}>
+            {metadataKind === 'deepseek'
+              ? t('metadataDeepseekUnavailable')
+              : t('metadataPiAiInheritedModelsHint')}
+          </p>
+        )}
+
         {/* Models List / Grid — 0ms enriched (caps/tokens/hidden precomputed) */}
         <div className={styles['modelsGrid']}>
           {enrichedFilteredModels.length === 0 ? (
             <div className={styles['emptyModels']}>
-              {modelSearch ? t('noModelsMatching', { query: modelSearch }) : t('noModelsFound')}
+              <p className={styles['metadataEmptyText']}>
+                {modelSearch
+                  ? t('noModelsMatching', { query: modelSearch })
+                  : catalogShown ? t('metadataCatalogEmpty') : t('noModelsFound')}
+              </p>
+              {canLoadCatalog && (
+                <button
+                  type="button"
+                  className={styles['textActionBtn']}
+                  disabled={catalogBusy}
+                  onClick={() => { void loadCatalogModels() }}
+                >
+                  {catalogBusy ? t('metadataLoadingCatalog') : t('metadataLoadCatalog')}
+                </button>
+              )}
+              {catalogError !== undefined && (
+                <p className={styles['metadataError']} role="alert">
+                  {t('metadataCatalogFailed', { message: catalogError })}
+                </p>
+              )}
             </div>
           ) : (
             enrichedFilteredModels.map(({ model: m, visibility, caps, contextStr, maxTokStr }) => {
-
+              const rowKind = rowKindOf(catalogShown)
+              const editDisabled = readOnly || rowKind === undefined
               return (
                 <div
                   key={m.id}
@@ -1960,6 +2408,29 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
                     </div>
                   </div>
 
+                  {/* One compact metadata action per row: basics and pricing
+                      live behind it instead of expanding every row into a
+                      card wall. */}
+                  <button
+                    type="button"
+                    className={styles['modelEditBtn']}
+                    disabled={editDisabled}
+                    onClick={() => {
+                      if (rowKind === undefined) return
+                      openModelMetadata(m, rowKind)
+                    }}
+                    title={rowKind === undefined
+                      ? inheritedModelsBlocked
+                        ? metadataKind === 'deepseek'
+                          ? t('metadataDeepseekUnavailable')
+                          : t('metadataPiAiInheritedModelsHint')
+                        : t('metadataEditingUnavailable')
+                      : readOnly ? t('readOnly') : t('editModelMetadata', { id: m.id })}
+                    aria-label={t('editModelMetadata', { id: m.id })}
+                  >
+                    <IconEditOutlineRegular size={13} />
+                  </button>
+
                   {/* Eye Toggle: reflects the picker's verdict; the operator can
                       always override it — clicking a rule/gate-hidden model pins
                       it shown (the shown map beats every hiding source). */}
@@ -1981,6 +2452,28 @@ export function ProviderDetailPanel(props: ProviderDetailPanelProps): ReactNode 
           )}
         </div>
       </div>
+
+      {editingModel !== undefined && (
+        <ModelMetadataDialog
+          key={`${editingModel.kind}:${editingModel.modelId}`}
+          providerId={providerId}
+          modelId={editingModel.modelId}
+          kind={editingModel.kind}
+          model={editingModel.baseline}
+          {...editingModel.inherited === undefined ? {} : { inherited: editingModel.inherited }}
+          manualFields={editingModel.manualFields}
+          readOnly={readOnly}
+          t={t}
+          onClose={() => { setEditingModel(undefined) }}
+          onSave={({ draft, baselineDraft, resetFields }) => saveModelMetadata(
+            editingModel.modelId,
+            editingModel.kind,
+            draft,
+            baselineDraft,
+            resetFields,
+          )}
+        />
+      )}
     </div>
   )
 }
