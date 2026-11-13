@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-11-12T18:33:36.502Z",
+  "generatedAt": "2026-11-13T19:38:28.097Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.126",
+      "commit": "d16fd56",
+      "releasedAt": "2026-11-13T19:07:46.000Z",
+      "notes": [
+        "fix(context): preserve public history and support durable checkpoint repairs"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.125",
       "commit": "e1afeb6",
@@ -391,17 +399,6 @@
       "releasedAt": "2026-10-13T10:28:03.000Z",
       "notes": [
         "fix(release): declare the feedback services in the base bundle; gate mounted-package resolution"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.78",
-      "commit": "7e69176",
-      "releasedAt": "2026-10-13T08:47:24.000Z",
-      "notes": [
-        "feat(feedback): move the collector to a serverless Cloudflare Worker",
-        "feat(feedback): non-blocking dialog submit with a bottom-right pipeline chip; robust dialog layout",
-        "fix(feedback): triage preset + reply capture — the pipeline now returns real analyses",
-        "feat(feedback): end-to-end feedback pipeline — dialog checkboxes, collection, triage, live submission"
       ]
     }
   ]
