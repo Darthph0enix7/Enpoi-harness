@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-11-13T19:38:28.097Z",
+  "generatedAt": "2026-11-13T23:20:01.204Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.127",
+      "commit": "b6c25d7",
+      "releasedAt": "2026-11-13T23:02:03.000Z",
+      "notes": [
+        "feat(models): add safe per-model metadata editing and refresh-stable overrides"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.126",
       "commit": "d16fd56",
@@ -391,14 +399,6 @@
       "releasedAt": "2026-10-13T11:34:50.000Z",
       "notes": [
         "fix(feedback): triage leaves no trace — delete the session artifacts after dispose"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.79",
-      "commit": "8b3f41c",
-      "releasedAt": "2026-10-13T10:28:03.000Z",
-      "notes": [
-        "fix(release): declare the feedback services in the base bundle; gate mounted-package resolution"
       ]
     }
   ]
