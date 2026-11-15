@@ -59,13 +59,14 @@ type FeedRow = {
   origin?: 'subagent'
   running?: boolean
   blank?: boolean
+  updatedAt?: number
   projections?: import('../src/types.ts').SessionProjectionValues
 }
 
 async function feedList(b: Bench, rows: FeedRow[]): Promise<void> {
   b.mock.remote.session.list.mockResolvedValue(ok({
     items: rows.map(r => ({ agentAvailable: true,
-      sessionId: sid(r.id), updatedAt: 1, running: r.running ?? false, blank: r.blank ?? false,
+      sessionId: sid(r.id), updatedAt: r.updatedAt ?? 1, running: r.running ?? false, blank: r.blank ?? false,
       ...(r.cwd !== undefined ? { cwd: r.cwd } : {}),
       ...(r.parentId !== undefined ? { parentSessionId: sid(r.parentId) } : {}),
       ...(r.origin !== undefined ? { origin: r.origin } : {}),
@@ -96,6 +97,79 @@ describe('list store projection', () => {
     })
     expect(state.byId[sid('s2')]?.title).toBeUndefined()
   }, COLD_BOOT_TIMEOUT_MS)
+
+  it('seeds catalog-only child rows with durable creation time and catalog ancestry', async ({ bench }) => {
+    const b = bench()
+    await feedList(b, [{
+      id: 'root',
+      projections: { subagentCatalog: [
+        { id: sid('child'), createdAt: 42, seq: SessionSeq(0), mode: 'one-shot' },
+      ] },
+    }])
+
+    expect(b.svc.list.getSnapshot().byId[sid('child')]).toMatchObject({
+      parentId: sid('root'), origin: 'subagent', updatedAt: 42,
+    })
+  })
+
+  it('backfills only missing catalog ancestry and never overrides an authoritative parent', async ({ bench }) => {
+    const b = bench()
+    await feedList(b, [
+      {
+        id: 'root',
+        projections: { subagentCatalog: [
+          { id: sid('known-parent'), createdAt: 9, seq: SessionSeq(0), mode: 'one-shot' },
+          { id: sid('missing-parent'), createdAt: 10, seq: SessionSeq(1), mode: 'one-shot' },
+        ] },
+      },
+      {
+        id: 'known-parent', parentId: 'authoritative', origin: 'subagent', updatedAt: 7,
+      },
+      {
+        id: 'missing-parent', updatedAt: 8,
+      },
+    ])
+
+    expect(b.svc.list.getSnapshot().byId[sid('known-parent')]).toMatchObject({
+      parentId: sid('authoritative'), origin: 'subagent', updatedAt: 7,
+    })
+    expect(b.svc.list.getSnapshot().byId[sid('missing-parent')]).toMatchObject({
+      parentId: sid('root'), origin: 'subagent', updatedAt: 8,
+    })
+  })
+
+  it('does not invent ancestry when competing catalogs claim the same child', async ({ bench }) => {
+    const b = bench()
+    const catalog = (parent: string) => ({ subagentCatalog: [
+      { id: sid('child'), createdAt: 11, seq: SessionSeq(0), mode: 'one-shot' as const, label: parent },
+    ] })
+    await feedList(b, [
+      { id: 'root-a', projections: catalog('a') },
+      { id: 'root-b', projections: catalog('b') },
+      { id: 'child', updatedAt: 12 },
+    ])
+
+    expect(b.svc.list.getSnapshot().byId[sid('child')]).toMatchObject({
+      origin: 'subagent', updatedAt: 12,
+    })
+    expect(b.svc.list.getSnapshot().byId[sid('child')]?.parentId).toBeUndefined()
+  })
+
+  it('keeps a catalog-only child rootless when competing catalogs claim it', async ({ bench }) => {
+    const b = bench()
+    const catalog = (label: string, createdAt: number) => ({ subagentCatalog: [
+      { id: sid('child'), createdAt, seq: SessionSeq(0), mode: 'one-shot' as const, label },
+    ] })
+    await feedList(b, [
+      { id: 'root-a', projections: catalog('a', 21) },
+      { id: 'root-b', projections: catalog('b', 22) },
+    ])
+
+    const child = b.svc.list.getSnapshot().byId[sid('child')]
+    expect(child).toMatchObject({ origin: 'subagent' })
+    expect(child?.parentId).toBeUndefined()
+    expect(child?.updatedAt).toBe(21)
+  })
 
   it('reprojects a blank session from the generic agent-preset projection', async ({ bench }) => {
     const b = bench()

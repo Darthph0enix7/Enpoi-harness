@@ -6,8 +6,8 @@
  * forwarder's `askRoot` to `ctx.approval.request`, and derives the idle probe
  * from the harness's own exported `hasOpenTurn`. A child ask is forwarded
  * while the root session sits between turns; the ask must park, then resolve
- * at the root's next `turn/start` (operator card, or the Full-access parent
- * judgement with no card), expire with the named denial when the root never
+ * at the root's next `turn/start` (operator card, or the Full-access root
+ * consent with no card), expire with the named denial when the root never
  * returns, survive a restart by expiring restored records, and replay two
  * parked asks in FIFO order. Set `APPROVAL_PARK_EVIDENCE_DIR` to write the
  * machine-readable transcript for `~/dsh-migration/evidence/approval-park/`.
@@ -78,6 +78,7 @@ async function sandbox(options: {
   mode: 'interactive' | 'full-access' | 'unattended'
   outcomes?: string[]
   recommendation?: ForwardingDeps['recommendation']
+  parentAllowsAsk?: boolean
   parkTtlMs?: number
   parkJournal?: ForwardingDeps['parkJournal']
   rootSeed?: FakeEvent[]
@@ -95,6 +96,7 @@ async function sandbox(options: {
     findRoot: () => rootHandle,
     modeOf: () => options.mode,
     parentAllowsRail: () => false,
+    parentAllowsAsk: () => options.parentAllowsAsk ?? false,
     askRoot: (query) => {
       askQueries.push(query)
       return ctx.approval.request({
@@ -149,11 +151,8 @@ describe('idle-parent park-and-replay sandbox (real ApprovalService)', () => {
     box.stop()
   })
 
-  it('full access: parks while idle, then applies the parent judgement with an audit line and no card', async () => {
-    const box = await sandbox({
-      mode: 'full-access',
-      recommendation: () => Promise.resolve({ text: 'clean edit inside the workspace', suggestion: 'allow-once' }),
-    })
+  it('full access: parks while idle, then matches the root consent with an audit line and no card', async () => {
+    const box = await sandbox({ mode: 'full-access', parentAllowsAsk: true })
     const waiting = box.forwarder.forward({
       agent: childAgent(), toolName: 'str_replace_editor', args: { file_path: '/ws/a.txt' }, decision: askOf('str_replace_editor'),
     })
@@ -167,7 +166,7 @@ describe('idle-parent park-and-replay sandbox (real ApprovalService)', () => {
     // No card and no audit pair in the root log: the mode is the consent.
     expect(box.root.types()).toEqual(['turn/start'])
     expect(box.askQueries).toHaveLength(0)
-    expect(box.reports.some(line => line.includes('audit: parent approved') && line.includes('Full access'))).toBe(true)
+    expect(box.reports.some(line => line.includes('audit: parent Full access allows') && line.includes('effective decision'))).toBe(true)
     expect(box.reports.some(line => line.startsWith('resolve:') && line.includes('Full access, no card'))).toBe(true)
     record('full-access-yolo', { result, rootEvents: box.root.types(), reports: box.reports.filter(line => line.startsWith('resolve:')) })
     box.stop()

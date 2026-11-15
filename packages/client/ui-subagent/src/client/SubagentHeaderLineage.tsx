@@ -17,6 +17,8 @@ import css from './SubagentHeaderLineage.module.css'
 
 type SubagentCatalogSnapshot = Omit<SessionProjectionSnapshot, 'values' | 'state'> & {
   state: 'loading' | 'ready' | 'error'
+  /** True when the entries are retained cached values rather than an explicit read. */
+  stale: boolean
   entries: (SessionProjectionMap['subagentCatalog'][number] & { activity: 'running' | 'inactive' })[]
 }
 type Catalogs = Readonly<Record<SessionId, SubagentCatalogSnapshot>>
@@ -34,6 +36,8 @@ export type SubagentHeaderLineageProps =
 
 interface CatalogRowsProps {
   parentSessionId: SessionId
+  /** Identities already opened above this level; guards catalog cycles and duplicates. */
+  ancestors: ReadonlySet<SessionId>
   currentSessionId: SessionId | undefined
   catalog: SubagentCatalogSnapshot
   catalogs: Catalogs
@@ -192,25 +196,63 @@ function CatalogLoadingRows({ t }: { t: TranslateNS<typeof NS> }) {
   return <div className={css.notice}>{t('loading.label')}</div>
 }
 
-/** A child becomes a known leaf only after its own authoritative catalog loads empty. */
-function isKnownLeaf(catalog: SubagentCatalogSnapshot | undefined): boolean {
-  return catalog?.state === 'ready' && catalog.entries.length === 0
+/** How a child's own catalog state maps to one disclosure affordance. */
+type CatalogDisclosure = 'unknown' | 'loading' | 'error' | 'leaf' | 'branch'
+
+/**
+ * Classify one child's catalog without treating an unloaded, loading, or
+ * failed read as a known leaf or as an expandable branch.
+ * @param catalog - the child's catalog snapshot, absent before any projection.
+ * @returns the disclosure kind the row must render.
+ */
+function catalogDisclosure(catalog: SubagentCatalogSnapshot | undefined): CatalogDisclosure {
+  if (catalog === undefined) return 'unknown'
+  if (catalog.state === 'error') return 'error'
+  if (catalog.entries.length > 0) return 'branch'
+  return catalog.state === 'ready' ? 'leaf' : 'loading'
+}
+
+/**
+ * Order one catalog level: running children first, then latest durable update
+ * (direct-child creation time when the list row has none), then stable id.
+ * @param entries - raw direct children in parent event order.
+ * @param summaries - Session rows supplying the latest update time.
+ * @returns deduplicated children in display order.
+ */
+function orderedCatalogEntries(
+  entries: readonly SubagentCatalogSnapshot['entries'][number][],
+  summaries: Readonly<Record<SessionId, SessionSummary>>,
+): SubagentCatalogSnapshot['entries'] {
+  const unique = new Map<SessionId, SubagentCatalogSnapshot['entries'][number]>()
+  for (const entry of entries) {
+    if (!unique.has(entry.id)) unique.set(entry.id, entry)
+  }
+  const updatedAt = (entry: SubagentCatalogSnapshot['entries'][number]): number => {
+    const updated = summaries[entry.id]?.updatedAt ?? 0
+    return updated > 0 ? updated : entry.createdAt
+  }
+  return [...unique.values()].sort((left, right) =>
+    Number(right.activity === 'running') - Number(left.activity === 'running')
+    || updatedAt(right) - updatedAt(left)
+    || (left.id < right.id ? -1 : 1))
 }
 
 /** Render one catalog level and recurse only through explicitly expanded rows. */
 function CatalogRows({
-  parentSessionId, currentSessionId, catalog, catalogs, summaries, expanded, level,
+  parentSessionId, ancestors, currentSessionId, catalog, catalogs, summaries, expanded, level,
   openChild, openChildAside, refreshProjection, toggleBranch, closeCatalog, t,
 }: CatalogRowsProps & { t: TranslateNS<typeof NS> }) {
   const [now, setNow] = useState(() => Date.now())
-  const running = catalog.entries.some(entry => entry.activity === 'running')
+  const entries = orderedCatalogEntries(catalog.entries, summaries)
+    .filter(entry => !ancestors.has(entry.id))
+  const running = entries.some(entry => entry.activity === 'running')
   useEffect(() => {
     if (!running) return
     const timer = setInterval(() => { setNow(Date.now()) }, 1_000)
     return () => { clearInterval(timer) }
   }, [running])
-  const emptyLoading = catalog.state === 'loading' && catalog.entries.length === 0
-  const reserveDisclosure = catalog.entries.some(entry => !isKnownLeaf(catalogs[entry.id]))
+  const emptyLoading = catalog.state === 'loading' && entries.length === 0
+  const reserveDisclosure = entries.some(entry => catalogDisclosure(catalogs[entry.id]) !== 'leaf')
   return (
     <>
       {emptyLoading && (
@@ -229,13 +271,15 @@ function CatalogRows({
           </button>
         </div>
       )}
-      {catalog.entries.map((entry) => {
+      {entries.map((entry) => {
         const childCatalog = catalogs[entry.id]
+        const disclosure = catalogDisclosure(childCatalog)
         const isCurrent = entry.id === currentSessionId
         const isExpanded = expanded.has(entry.id)
-        const knownLeaf = isKnownLeaf(childCatalog)
-        const childLoading = childCatalog === undefined
-          || (childCatalog.state === 'loading' && childCatalog.entries.length === 0)
+        const knownLeaf = disclosure === 'leaf'
+        const childLoading = disclosure === 'unknown' || disclosure === 'loading'
+        const canExpand = disclosure === 'branch' || disclosure === 'error'
+        const childAncestors = new Set([...ancestors, entry.id])
         const summary = summaries[entry.id]
         const label = entry.label ?? entry.id
         const mode = entry.mode === 'unknown' ? t('mode.unknown')
@@ -311,24 +355,37 @@ function CatalogRows({
               aria-level={level}
               aria-current={isCurrent || undefined}
               aria-label={[label, secondary, metrics].filter(value => value !== '').join(' ')}
-              {...knownLeaf ? {} : { 'aria-expanded': isExpanded }}
+              {...(canExpand || (isExpanded && !knownLeaf)) ? { 'aria-expanded': isExpanded } : {}}
               className={css.row}
               onClick={open}
               onKeyDown={handleKey}
             >
               {knownLeaf
                 ? reserveDisclosure && <span className={css.disclosureSpace} />
-                : (
-                  <button
-                    type="button"
-                    tabIndex={-1}
-                    className={`${css.disclosure} ${isExpanded ? css.disclosureOpen : ''}`}
-                    aria-label={t(isExpanded ? 'branch.collapse' : 'branch.expand', { label })}
-                    onClick={toggle}
-                  >
-                    <IconChevronRightOutlineRegular />
-                  </button>
-                )}
+                : canExpand
+                  ? (
+                    <button
+                      type="button"
+                      tabIndex={-1}
+                      className={`${css.disclosure} ${isExpanded ? css.disclosureOpen : ''}`}
+                      aria-label={t(isExpanded ? 'branch.collapse' : 'branch.expand', { label })}
+                      onClick={toggle}
+                    >
+                      <IconChevronRightOutlineRegular />
+                    </button>
+                  )
+                  : (
+                    <button
+                      type="button"
+                      tabIndex={-1}
+                      className={css.disclosure}
+                      aria-label={t('branch.load', { label })}
+                      title={t('branch.load', { label })}
+                      onClick={toggle}
+                    >
+                      <StateDot state="ongoing" size={10} />
+                    </button>
+                  )}
               <div className={css.clickarea}>
                 <span className={css.rowActivitySlot}>
                   <StateDot state={entry.activity === 'running' ? 'ongoing' : completed ? 'done' : 'idle'} />
@@ -376,6 +433,7 @@ function CatalogRows({
                   : (
                     <CatalogRows
                       parentSessionId={entry.id}
+                      ancestors={childAncestors}
                       currentSessionId={currentSessionId}
                       catalog={childCatalog}
                       catalogs={catalogs}
@@ -451,15 +509,21 @@ function CatalogDropdown({
   const projections = useSessions(state => state.projectionsBySession)
   const summaries = useSessions(state => state.byId)
   const statuses = useSessionStatus(value => value)
-  const catalogs = useMemo<Catalogs>(() => Object.fromEntries(Object.entries(projections).map(([id, snapshot]) => [id, {
-    state: snapshot.state === 'idle'
-      ? snapshot.values.subagentCatalog === undefined ? 'loading' : 'ready'
-      : snapshot.state,
-    error: snapshot.error,
-    entries: (snapshot.values.subagentCatalog ?? []).map(entry => ({
+  const catalogs = useMemo<Catalogs>(() => Object.fromEntries(Object.entries(projections).map(([id, snapshot]) => {
+    const cached = snapshot.state === 'idle'
+    const entries = (snapshot.values.subagentCatalog ?? []).map(entry => ({
       ...entry, activity: (statuses.get(entry.id)?.running ?? summaries[entry.id]?.running) === true ? 'running' as const : 'inactive' as const,
-    })),
-  }])), [projections, summaries, statuses])
+    }))
+    return [id, {
+      // An idle empty catalog is not authoritative evidence of a leaf: it may
+      // be a cold cache that predates later dispatches. A cached nonempty
+      // branch stays visible but keeps `stale` explicit.
+      state: cached ? entries.length > 0 ? 'ready' : 'loading' : snapshot.state,
+      stale: cached,
+      error: snapshot.error,
+      entries,
+    }]
+  })), [projections, summaries, statuses])
   const catalog = catalogs[rootSessionId]
   const [open, setOpen] = useState(false)
   const [menuPosition, setMenuPosition] = useState<CSSProperties>()
@@ -483,8 +547,24 @@ function CatalogDropdown({
   const totalCountKey = directCount === 1 ? 'count.total.one' : 'count.total.other'
   const runningCountKey = runningCount === 1 ? 'count.running.one' : 'count.running.other'
   const presentedCatalog: SubagentCatalogSnapshot | undefined = catalog ?? (variant === 'switcher'
-    ? { entries: [], state: 'loading', error: null }
+    ? { entries: [], state: 'loading', stale: true, error: null }
     : undefined)
+  const openedRefresh = useRef<SessionId | undefined>(undefined)
+
+  // Opening a switcher over an unloaded/empty-loading parent catalog starts one
+  // guarded read instead of promising an expandable tree that never arrives.
+  useEffect(() => {
+    if (!open) {
+      openedRefresh.current = undefined
+      return
+    }
+    if (openedRefresh.current === rootSessionId) return
+    if (presentedCatalog === undefined
+      || presentedCatalog.entries.length > 0
+      || presentedCatalog.state !== 'loading') return
+    openedRefresh.current = rootSessionId
+    refreshProjection(rootSessionId)
+  }, [open, rootSessionId, presentedCatalog, refreshProjection])
 
   const cancelHoverClose = (): void => {
     if (hoverCloseTimer.current === undefined) return
@@ -709,6 +789,7 @@ function CatalogDropdown({
           <div className={css.menuBody} role="tree" aria-label={t('tree.aria')}>
             <CatalogRows
               parentSessionId={rootSessionId}
+              ancestors={new Set([rootSessionId])}
               currentSessionId={currentSessionId}
               catalog={presentedCatalog}
               catalogs={catalogs}
@@ -773,10 +854,19 @@ export function SubagentHeaderLineage({
   const address = useSession(session => session.subagent?.address)
   const parentId = useSessions((state) => {
     if (address?.childSessionId === lineageSessionId) return address.parentSessionId
-    for (const [parentId, snapshot] of Object.entries(state.projectionsBySession)) {
-      if (snapshot.values.subagentCatalog?.some(entry => entry.id === lineageSessionId)) return parentId as SessionId
+    const row = state.byId[lineageSessionId]
+    const listed = row?.origin === 'subagent' ? row.parentId : undefined
+    if (listed !== undefined && listed !== lineageSessionId) return listed
+    // Without a list parent, accept only one catalog claim; competing claims
+    // name no authoritative ancestry.
+    let claimed: SessionId | undefined
+    for (const [candidate, snapshot] of Object.entries(state.projectionsBySession)) {
+      if (candidate === lineageSessionId) continue
+      if (!snapshot.values.subagentCatalog?.some(entry => entry.id === lineageSessionId)) continue
+      if (claimed !== undefined && claimed !== candidate) return undefined
+      claimed = candidate as SessionId
     }
-    return undefined
+    return claimed
   })
   const shared = { useSessions, useSessionStatus, openChild, openChildAside, refreshProjection, t }
   // Root sessions carry no breadcrumb; their descendant count lives in the
@@ -785,7 +875,7 @@ export function SubagentHeaderLineage({
   return (
     <>
       <CatalogDropdown
-        key={lineageSessionId}
+        key={`${lineageSessionId}:switcher`}
         rootSessionId={parentId}
         currentSessionId={lineageSessionId}
         variant="switcher"
@@ -795,7 +885,7 @@ export function SubagentHeaderLineage({
       />
       {openTitle === undefined && (
         <CatalogDropdown
-          key={lineageSessionId}
+          key={`${lineageSessionId}:count`}
           rootSessionId={lineageSessionId}
           variant="count"
           {...shared}

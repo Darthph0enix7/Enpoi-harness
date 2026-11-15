@@ -10,10 +10,11 @@ import type { MainPanelId, RightbarOwnerProps, SidebarOwnerProps } from '../src/
 import { createLayoutStore } from '../src/client/stores.ts'
 import type { WorkspaceSnapshot } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import { getLayoutModeRuntime } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { DeviceSnapshot } from '@deepseek-ai/dsh-client-ui-primitives'
 
 const desktopDevice: DeviceSnapshot = {
-  device: 'desktop', pointer: 'fine', width: 1920, keyboardOpen: false, keyboardInset: 0,
+  device: 'desktop', pointer: 'fine', width: 1920, restingHeight: 900, keyboardOpen: false, keyboardInset: 0,
 }
 
 const useResource = (() => ({ status: 'none' as const, value: undefined, failure: undefined })) as GlobalStandardProps['useResource']
@@ -72,6 +73,9 @@ function mountFrame(windowWidth = frameWidth, sidebarWidth = 280) {
   const slotCalls: { key: string; props: object; options: RenderOpts | undefined }[] = []
   const renderSlot: AppFrameProps['renderSlot'] = (key, owner, options) => {
     slotCalls.push({ key, props: owner, options })
+    // The settings surface is a body portal and renders no frame child while
+    // closed; keep the synthetic frame grid geometry unchanged.
+    if (key === 'settings.surface') return null
     return <div data-testid={`${key}-content`} data-entry-key={options?.entryKey} />
   }
   const useSessions: AppFrameProps['useSessions'] = sel => sel({
@@ -179,6 +183,9 @@ beforeEach(() => {
 afterEach(() => {
   try {
     cleanup()
+    // The provider is browser-wide; settle it on desktop after the frame
+    // releases it so a compact reading cannot leak into the next case.
+    getLayoutModeRuntime().setFrameWidth(1920)
   } finally {
     for (const restore of restoreProperties.splice(0).reverse()) restore()
     document.title = originalTitle
@@ -307,36 +314,48 @@ describe('AppFrame normal width concessions', () => {
     expect(frame.querySelector('[data-side="rightbar"]')).toBeNull()
     expect(instance.getSnapshot().layoutInfo).toMatchObject({ rightbarShown: true, rightbar: null })
     act(() => { instance.actions.closeRightbar() })
-    resize(455)
+    resize(950)
     expect(tracks(frame)).toEqual([56, 0])
     resize(1920)
     expect(tracks(frame)).toEqual([420, 0])
   })
 
-  it('uses the post-collapse left rail to permit a narrow first opening', () => {
+  it('uses the compact chrome below 900px instead of squeezing desktop columns', () => {
     frameWidth = 800
-    const { frame, instance, rightOwner } = mountFrame()
-    act(() => { instance.actions.toggleSidebar() })
-    expect(tracks(frame)).toEqual([280, 0])
-    expect(rightOwner()).toEqual({ width: 344, viewportWidth: 800, canShow: true, mobile: false })
-    act(() => { instance.actions.openRightbar(true, false) })
-    expect(tracks(frame)).toEqual([56, 344])
-    expect(instance.getSnapshot().layoutInfo).toMatchObject({ narrowExpanded: false, rightbar: null })
-    expect(rightOwner().canShow).toBe(true)
+    const { frame, rightOwner, queryByTestId } = mountFrame()
+    expect(document.documentElement.dataset.layout).toBe('compact')
+    expect(frame.hasAttribute('data-mobile-frame')).toBe(true)
+    expect(frame.querySelector('[data-mobile-bar]')).toBeTruthy()
+    expect(frame.querySelector('[data-mobile-content]')).toBeTruthy()
+    expect(frame.querySelector('[data-side="sidebar"]')).toBeNull()
+    expect(queryByTestId('sidebar-content')).toBeNull()
+    expect(rightOwner()).toEqual({ width: 800, viewportWidth: 800, canShow: true, mobile: true })
   })
 
-  it.each([[756, 300, true], [755, 0, false]] as const)('reports eligibility at %ipx', (width, rightbar, canShow) => {
+  it('keeps the main and rightbar DOM identity across a live layout-mode switch', () => {
+    const { frame, getByTestId, rightOwner } = mountFrame()
+    const main = getByTestId('main-content')
+    const rightbar = getByTestId('rightbar-content')
+    expect(document.documentElement.dataset.layout).toBe('desktop')
+    resize(800)
+    expect(document.documentElement.dataset.layout).toBe('compact')
+    expect(frame.hasAttribute('data-mobile-frame')).toBe(true)
+    expect(getByTestId('main-content')).toBe(main)
+    expect(getByTestId('rightbar-content')).toBe(rightbar)
+    expect(rightOwner().mobile).toBe(true)
+    resize(1920)
+    expect(document.documentElement.dataset.layout).toBe('desktop')
+    expect(getByTestId('main-content')).toBe(main)
+    expect(getByTestId('rightbar-content')).toBe(rightbar)
+    expect(rightOwner().mobile).toBe(false)
+  })
+
+  it.each([[899, 'compact'], [900, 'desktop']] as const)('reports %s as %s', (width, mode) => {
     frameWidth = width
-    const { instance, rightOwner } = mountFrame()
-    act(() => { instance.actions.toggleSidebar() })
-    expect(rightOwner()).toEqual({ width: rightbar, viewportWidth: width, canShow, mobile: false })
-  })
-
-  it('does not anticipate another left collapse after the right panel is already shown', () => {
-    frameWidth = 800
-    const { instance, rightOwner } = mountFrame()
-    act(() => { instance.actions.openRightbar(true, false); instance.actions.toggleSidebar() })
-    expect(rightOwner().canShow).toBe(false)
+    const { frame, rightOwner } = mountFrame()
+    expect(document.documentElement.dataset.layout).toBe(mode)
+    expect(frame.hasAttribute('data-mobile-frame')).toBe(mode === 'compact')
+    expect(rightOwner().mobile).toBe(mode === 'compact')
   })
 
   it('auto-collapses only below 1024px and preserves the wide sidebar preference', () => {
@@ -448,12 +467,12 @@ describe('AppFrame right panel presentation', () => {
     expect(frame.dataset.rightbarFullscreen).toBeUndefined()
   })
 
-  it('retains fullscreen without a track when normal columns cannot fit', () => {
-    frameWidth = 700
+  it('keeps the compact right panel fullscreen without a desktop track', () => {
+    frameWidth = 800
     const { frame, instance, rightOwner } = mountFrame()
     act(() => { instance.actions.openRightbar(false, true) })
-    expect(tracks(frame)).toEqual([56, 0])
-    expect(rightOwner()).toEqual({ width: 0, viewportWidth: 700, canShow: false, mobile: false })
+    expect(document.documentElement.dataset.layout).toBe('compact')
+    expect(rightOwner()).toEqual({ width: 800, viewportWidth: 800, canShow: true, mobile: true })
     expect(instance.getSnapshot().layoutInfo.rightbarShown).toBe(true)
     expect(frame.querySelector('[data-side="rightbar"]')).toBeNull()
   })

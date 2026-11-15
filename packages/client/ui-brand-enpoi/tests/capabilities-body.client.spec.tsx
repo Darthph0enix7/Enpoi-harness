@@ -587,9 +587,11 @@ describe('CapabilitiesBody — defaults vs session overrides', () => {
     const fetchMock = scopingFetch()
     vi.stubGlobal('fetch', fetchMock)
     await mountBody({ blank: true })
-    expect(await screen.findByText('Editing defaults')).toBeTruthy()
+    expect(await screen.findByText('Defaults')).toBeTruthy()
     expect(screen.getByText(/every future session inherits/)).toBeTruthy()
     expect(screen.queryByText('session')).toBeNull()
+    fireEvent.click(screen.getByText('How scope works'))
+    expect(screen.getByText(/existing sessions keep their own overrides/)).toBeTruthy()
 
     fireEvent.click(screen.getByLabelText('Disable Tier1 Workflow'))
     await waitFor(() => { expect(mutateBodies(fetchMock)).toHaveLength(1) })

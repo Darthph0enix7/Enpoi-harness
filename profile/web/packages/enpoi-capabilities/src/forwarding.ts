@@ -16,19 +16,14 @@
  *      the parent's own effective policy: an `allow` there passes, anything else
  *      denies with the rail named. The child asking nicely can never lift them.
  *   2. Subtree grants answered earlier on a forwarded card (this session only).
- *   3. FULL ACCESS = PARENT JUDGEMENT (doc 82 item 8): when the ROOT
- *      session runs in Full access / no-restrictions mode (sandbox
- *      `danger-full-access` + approval `never`), the parent's own bounded
- *      reasoner judges each forwarded ask and the judgement is APPLIED in the
- *      operator's place: an allow resolves `allowed-once` with the parent's
- *      reason; a reject returns the corrective denial carrying that reason. A
- *      missed judgement (absent seam, error, timeout, unparseable, no
- *      suggestion) falls back to the derived risk check ({@link derivedRiskOf})
- *      — a clean ask allows with a named reason, a found risk signal denies with
- *      the signal named. There is no card in this mode and never a silent allow;
- *      one judgement per ask, batched, and capped per root turn.
- *      In EVERY other mode the human card appears (interactive) or the ask fails
- *      closed (unattended approval `never` without full access).
+ *   3. FULL ACCESS = MATCH PARENT: when the ROOT session runs in Full access
+ *      (sandbox `danger-full-access` + approval `never`), the root's own
+ *      standing consent is the child's authority. An ordinary ask resolves
+ *      allow with no card and NO model judgement or quota; an explicit root
+ *      deny still wins. Rails use the same effective root decision. The child
+ *      never exceeds the root's actual authority. In EVERY other mode the
+ *      human card appears (interactive) or the ask fails closed (unattended
+ *      approval `never` without full access).
  *   4. Interactive: the ask is forwarded into the ROOT session as the existing
  *      approval card (`ctx.approval.request` on the root agent), carrying
  *      provenance (origin session, agent label, depth, matched rule) plus a
@@ -39,9 +34,8 @@
  *      reason about. The reply routes back by request id and the waiting child
  *      suspends on it; only the human card may answer. On the card the model's
  *      suggestion is advisory presentation — this module never reads it into a
- *      resolution, so no agent's words can approve a child's ask. The SAME
- *      judgement seam IS applied in Full access (item 3): the operator's mode
- *      delegates the answer to the parent agent rather than to a human.
+ *      resolution, so no agent's words can approve a child's ask. Full access
+ *      does not use this seam (item 3).
  *
  * Failure semantics: a rejection is a corrective tool error the child adapts to,
  * never its death. An unanswered/undeliverable ask fails closed with a quiet
@@ -65,6 +59,9 @@
 
 import { isAbsolute, relative, resolve as resolvePath } from 'node:path'
 import {
+  analyzeHeredocs,
+  credentialOperandOf,
+  credentialPathOf,
   dangerVerbInText,
   effectiveCommandText,
   grantProposalFor,
@@ -111,6 +108,8 @@ export type RailClass =
   | 'depth'
   | 'privilege-escalation'
   | 'recursive-delete'
+  | 'force-delete'
+  | 'directory-delete'
   | 'history-rewrite'
   | 'exfiltration'
   | 'pipe-to-shell'
@@ -154,9 +153,9 @@ export type RecommendationSuggestion = 'allow' | 'reject' | 'allow-once'
 
 /** One recommendation answer: a short sentence plus an advisory suggestion. */
 export interface ModelRecommendation {
-  /** The one short sentence the card shows / the judgement carries. */
+  /** The one short sentence the card shows. */
   readonly text: string
-  /** The model's suggestion: advisory on the card, APPLIED in Full access. */
+  /** The model's suggestion: advisory on the card only. */
   readonly suggestion?: RecommendationSuggestion
 }
 
@@ -180,6 +179,8 @@ export interface RecommendationQuery {
    */
   readonly rail?: RailHit | undefined
   readonly decision: AskDecision
+  /** The captured command for the actual execution, when the tool has one. */
+  readonly command?: string | undefined
   readonly signal?: AbortSignal | undefined
   /**
    * Routing-affinity session identity for the model call (opencode Zen Go
@@ -188,11 +189,6 @@ export interface RecommendationQuery {
    * provider can route all of a session's calls together.
    */
   readonly sessionId?: string | undefined
-  /**
-   * True when this answer is APPLIED as the decision (the Full-access parent
-   * judgement), not rendered as card advice; the prompt says so explicitly.
-   */
-  readonly applied?: boolean | undefined
 }
 
 /** One card dispatch on the root agent. */
@@ -201,6 +197,8 @@ export interface RootAskQuery {
   readonly toolName: string
   readonly reason: string
   readonly displayReason: { readonly en: string; readonly [locale: string]: string }
+  /** The captured execution command, when one exists. */
+  readonly command?: string
   readonly broadAllow?: { readonly label: string }
   /** True for the second card that confirms a broad standing grant. */
   readonly secondConfirmation?: boolean
@@ -222,6 +220,17 @@ export interface ParentRailQuery {
   readonly rail: RailClass
 }
 
+/**
+ * One effective-parent-decision query for an ordinary Full-access ask. The
+ * root's actual decision (explicit deny, else its Full-access standing
+ * consent) is the child's authority; no model judgement is involved.
+ */
+export interface ParentAskQuery {
+  readonly root: RootHandle
+  readonly toolName: string
+  readonly command?: string
+}
+
 /** Host seams the forwarder consumes; every one is owned by index.ts. */
 export interface ForwardingDeps {
   /** Nearest live root ancestor of a child session, or undefined when none is live. */
@@ -230,25 +239,23 @@ export interface ForwardingDeps {
   modeOf(root: RootHandle): RootMode | undefined
   /** Whether the parent's own effective policy allows a rail class outright. */
   parentAllowsRail(query: ParentRailQuery): boolean
+  /**
+   * Whether the root's actual effective decision allows one ordinary ask.
+   * Under Full access this is the root's standing consent (explicit deny
+   * still wins); no model judgement is involved.
+   */
+  parentAllowsAsk(query: ParentAskQuery): boolean
   /** Dispatch one approval card on the root agent and await its outcome. */
   askRoot(query: RootAskQuery): Promise<ApprovalOutcome>
   /**
-   * ONE bounded root-side model judgement for a forwarded ask (the
-   * keeper/oracle one-shot seam family; the host owns the model, route,
-   * timeout, and parsing). On the card the answer is rendered as advice and can
-   * never resolve the ask; in Full access the returned suggestion IS applied as
-   * the parent's decision (see {@link ForwardingDeps.turnOf} for the cap).
-   * Absent, throwing, slow, or empty calls keep the derived
-   * {@link recommendationOf} / {@link derivedRiskOf} path, so an ask never
-   * blocks and is never silently allowed.
+   * ONE bounded root-side model call for an INTERACTIVE card's advisory line
+   * (the keeper/oracle one-shot seam family; the host owns the model, route,
+   * timeout, and parsing). The answer is rendered as advice and can never
+   * resolve the ask. Full access does not call it. Absent, throwing, slow, or
+   * empty calls keep the derived {@link recommendationOf} line, so the card
+   * never blocks and is never silently allowed.
    */
   recommendation?(query: RecommendationQuery): Promise<ModelRecommendation | undefined>
-  /**
-   * The root's current turn identity, for the per-turn parent-judgement budget.
-   * Resets when the root starts a new turn; absent means the budget stays
-   * per-root-session (still capped, never unlimited).
-   */
-  turnOf?(root: RootHandle): string | undefined
   /** Quiet audit/notification line; never wakes the root. */
   report(line: string): void
   /** The deployment's delegation depth cap (`ctx.subagents.resolveMaxDepth`). */
@@ -270,6 +277,13 @@ export interface ChildAskInput {
   readonly agent: ChildAgentLike | undefined
   readonly toolName: string
   readonly args?: Record<string, unknown>
+  /**
+   * The exact command captured once by the pre-execute resolver. For bash this
+   * is the call's command; for a custom tool it is the rendered command that
+   * was actually classified. Every rail, card, recommendation, park record,
+   * and parent-ceiling check uses this value, never a fresh render.
+   */
+  readonly command?: string
   readonly decision: AskDecision
   /** The child's call identity; an allowed ask is recorded against it as final. */
   readonly callId?: string | number | undefined
@@ -305,13 +319,6 @@ type CardResolution = ChildAskResolution | typeof REPARK
  * scoped to the requester's session and written by the forwarder itself.
  */
 export const FORWARDED_ASK_MARKER = '[forwarded child ask]'
-
-/**
- * Most parent judgements one root turn may spend in Full access. Identical
- * concurrent asks share one judgement; beyond the cap the forwarder denies
- * with a named reason instead of queueing judgements forever.
- */
-export const PARENT_JUDGEMENT_BUDGET_PER_TURN = 8
 
 /**
  * Default window one forwarded ask may stay parked while its root session sits
@@ -386,8 +393,6 @@ const PATH_ARG_KEYS: readonly string[] = [
   'file_path', 'filePath', 'path', 'paths', 'target', 'destination', 'source', 'file', 'dir', 'directory',
 ]
 
-/** Credential-bearing paths that are never card-approvable for a child. */
-const CREDENTIAL_PATH = /(?:^|[\s/'"=@])\.env(?:\.|$|\s)|(?:^|[\s/'"=])\.ssh(?:\/|[\s'"]|$)|id_(?:rsa|ed25519|ecdsa)\b|\.pem\b|(?:^|[\s/'"=])\.netrc\b|(?:^|[\s/'"=])\.aws(?:\/|[\s'"]|$)|(?:^|[\s/'"=])\.git-credentials\b|(?:^|[\s/'"=])known_hosts\b|(?:^|[\s/'"=])credentials(?:\.json)?(?:\s|$)|\/\.config\/gcloud\/|\/\.kube\/config\b|\/\.docker\/config\.json\b|\/\.npmrc\b/i
 
 /** Commands that escalate privilege outright. */
 const PRIVILEGE_ESCALATORS: ReadonlySet<string> = new Set(['sudo', 'su', 'doas', 'pkexec'])
@@ -450,6 +455,12 @@ export function delegatedChildOf(agent: ChildAgentLike | undefined): {
   }
 }
 
+/** The captured command for one ask: custom render first, then bash args. */
+function commandOf(input: ChildAskInput): string | undefined {
+  if (input.command !== undefined && input.command.trim() !== '') return input.command
+  return input.toolName === 'bash' && typeof input.args?.command === 'string' ? input.args.command : undefined
+}
+
 /** Collect every declared path argument of one tool call. */
 function pathArguments(args: Record<string, unknown> | undefined): string[] {
   if (args === undefined) return []
@@ -477,15 +488,28 @@ function baseName(word: string): string {
   return word.slice(word.lastIndexOf('/') + 1)
 }
 
-/** Whether one `rm`/`rmdir` invocation is recursive or forced. */
-function isRecursiveDelete(argv: readonly string[]): boolean {
+/**
+ * Distinguish the delete shape without pretending force is recursion:
+ * `rm -r/-R/--recursive` is recursive, `rm -f/--force` is a force delete, and
+ * `rmdir` is a directory delete. All keep their existing policy decision; the
+ * rail name is the evidence, not a new allow.
+ */
+function deleteRailOf(argv: readonly string[]): 'recursive-delete' | 'force-delete' | 'directory-delete' | undefined {
   const argv0 = baseName(argv[0] ?? '')
-  if (argv0 === 'rmdir') return true
-  return argv.slice(1).some((token) => {
-    if (token === '--') return false
-    if (token.startsWith('--')) return token === '--recursive' || token === '--force'
-    return token.startsWith('-') && /[rRf]/.test(token.slice(1))
-  })
+  if (argv0 === 'rmdir') return 'directory-delete'
+  if (argv0 !== 'rm') return undefined
+  let recursive = false
+  let force = false
+  for (const token of argv.slice(1)) {
+    if (token === '--') break
+    if (token === '--recursive') recursive = true
+    else if (token === '--force') force = true
+    else if (token.startsWith('-') && !token.startsWith('--')) {
+      if (/[rR]/.test(token.slice(1))) recursive = true
+      if (/f/.test(token.slice(1))) force = true
+    }
+  }
+  return recursive ? 'recursive-delete' : force ? 'force-delete' : undefined
 }
 
 /** Whether one `git` sub-command rewrites history or force-pushes. */
@@ -514,10 +538,17 @@ function isPipeToShell(command: string): boolean {
 }
 
 /** Classify one bash command against the never-card-approvable classes. */
-function railOfBash(command: string): RailHit | undefined {
-  if (isPipeToShell(command)) return { rail: 'pipe-to-shell', evidence: command.trim() }
-  const credential = CREDENTIAL_PATH.exec(command)
-  if (credential !== null) return { rail: 'credentials', evidence: credential[0] }
+function railOfBash(command: string, depth = 0): RailHit | undefined {
+  if (depth > 3) return undefined
+  const analyzed = analyzeHeredocs(command)
+  // Unquoted heredoc substitutions execute; classify the same effects.
+  for (const expanded of analyzed.expandedCommands) {
+    const hit = railOfBash(expanded, depth + 1)
+    if (hit !== undefined) return hit
+  }
+  if (isPipeToShell(analyzed.command)) return { rail: 'pipe-to-shell', evidence: command.trim() }
+  const credential = credentialOperandOf(command)
+  if (credential !== undefined) return { rail: 'credentials', evidence: credential }
   for (const rawSub of splitCompoundCommand(command)) {
     const sub = stripEnvPrefixes(rawSub).trim()
     if (sub === '') continue
@@ -532,7 +563,8 @@ function railOfBash(command: string): RailHit | undefined {
     if (argv.length > 0) argv[0] = baseName(argv[0] ?? '')
     const argv0 = argv[0] ?? ''
     if (PRIVILEGE_ESCALATORS.has(argv0)) return { rail: 'privilege-escalation', evidence: sub }
-    if ((argv0 === 'rm' || argv0 === 'rmdir') && isRecursiveDelete(argv)) return { rail: 'recursive-delete', evidence: sub }
+    const deleteRail = deleteRailOf(argv)
+    if (deleteRail !== undefined) return { rail: deleteRail, evidence: sub }
     if (argv0 === 'find' && /(?:^|\s)(?:-delete|-exec(?:dir)?\s+rm\b)/.test(effective)) return { rail: 'recursive-delete', evidence: sub }
     if (argv0 === 'rsync' && /(?:^|\s)--delete\b/.test(effective)) return { rail: 'recursive-delete', evidence: sub }
     if (argv0 === 'git' && isHistoryRewrite(argv)) return { rail: 'history-rewrite', evidence: sub }
@@ -561,14 +593,20 @@ export function railHitOf(input: {
   toolName: string
   args?: Record<string, unknown> | undefined
   cwd?: string | undefined
+  /** The captured rendered command (custom tools and bash when supplied). */
+  command?: string | undefined
 }): RailHit | undefined {
-  if (input.toolName === 'bash') {
-    const command = typeof input.args?.command === 'string' ? input.args.command : undefined
-    return command === undefined || command.trim() === '' ? undefined : railOfBash(command)
+  const command = input.command
+    ?? (input.toolName === 'bash' && typeof input.args?.command === 'string' ? input.args.command : undefined)
+  if (command !== undefined && command.trim() !== '') {
+    const commandRail = railOfBash(command)
+    if (commandRail !== undefined) return commandRail
   }
+  if (input.toolName === 'bash') return undefined
   if (!FS_PATH_TOOLS.has(input.toolName)) return undefined
   for (const path of pathArguments(input.args)) {
-    if (CREDENTIAL_PATH.test(path)) return { rail: 'credentials', evidence: path }
+    const credential = credentialPathOf(path)
+    if (credential !== undefined) return { rail: 'credentials', evidence: credential }
     if (isOutsideWorkspace(path, input.cwd)) return { rail: 'boundary', evidence: path }
   }
   return undefined
@@ -592,43 +630,6 @@ export function recommendationOf(input: {
   const paths = input.toolName === 'bash' ? [] : pathArguments(input.args)
   if (paths.length === 0) return 'no filesystem path named'
   return 'inside the workspace, looks safe'
-}
-
-/**
- * The derived RISK check the Full-access fallback applies when the parent
- * judgement misses. It reads the same raw facts {@link recommendationOf}
- * renders for the card, but for risk instead of presentation: a rail that
- * slipped through, a bash command adjacent to a never-approvable class, a path
- * outside the child workspace, or any filesystem path named is a signal; an
- * ask with none of those is clean. The result is never silent: the caller names
- * this string in the denial (or allows with the named "no risk signal" reason).
- * @param input - tool name, call arguments, and the child's workspace root.
- * @returns the named risk signal, or undefined when the derived check finds none.
- */
-export function derivedRiskOf(input: {
-  toolName: string
-  args?: Record<string, unknown> | undefined
-  cwd?: string | undefined
-}): string | undefined {
-  // Defense in depth: rails resolve before the mode, so a hit here means the
-  // ask reached the fallback with an unhandled class. Treat it as a signal.
-  const rail = railHitOf(input)
-  if (rail !== undefined) return `rail ${rail.rail} (${rail.evidence})`
-  if (input.toolName === 'bash') {
-    const command = typeof input.args?.command === 'string' ? input.args.command : ''
-    const adjacent = dangerVerbInText(command)
-    if (adjacent !== undefined) return `bash command is adjacent to a never-approvable class (${adjacent})`
-    for (const token of command.split(/\s+/)) {
-      if (!token.startsWith('/') || token.startsWith('//')) continue
-      if (isOutsideWorkspace(token, input.cwd)) return `path ${token} outside the child workspace`
-    }
-    return undefined
-  }
-  const paths = pathArguments(input.args)
-  for (const path of paths) {
-    if (isOutsideWorkspace(path, input.cwd)) return `path ${path} outside the child workspace`
-  }
-  return paths.length === 0 ? undefined : `filesystem path ${paths[0]} named`
 }
 
 /**
@@ -709,6 +710,7 @@ export function forwardedAskReason(
   origin: ForwardingOrigin,
   decision: AskDecision,
   recommendation: CardRecommendation,
+  command?: string,
 ): string {
   const label = recommendation.source === 'model'
     ? `Root model recommendation (advisory${recommendation.suggestion !== undefined ? `: ${recommendation.suggestion}` : ''})`
@@ -718,6 +720,7 @@ export function forwardedAskReason(
   return `${FORWARDED_ASK_MARKER} ${decision.reason}. Origin session ${shortId(origin.childSessionId)}, `
     + `agent ${origin.label}, depth ${origin.depth}, matched rule ${decision.source}. `
     + `${label}: ${text}.`
+    + (command !== undefined && command.trim() !== '' ? ` Command: ${command}` : '')
 }
 
 /**
@@ -728,10 +731,13 @@ export function forwardedAskReason(
 export function forwardedAskDisplayReason(
   origin: ForwardingOrigin,
   decision: AskDecision,
+  command?: string,
 ): { readonly en: string; readonly zh: string } {
+  const commandLine = command !== undefined && command.trim() !== '' ? ` Command: ${command}` : ''
+  const commandLineZh = command !== undefined && command.trim() !== '' ? ` 命令：${command}` : ''
   return {
-    en: `Forwarded from ${origin.label} (depth ${origin.depth}): ${decision.reason}.`,
-    zh: `来自 ${origin.label} 的转发请求（深度 ${origin.depth}）：${decision.reason}。`,
+    en: `Forwarded from ${origin.label} (depth ${origin.depth}): ${decision.reason}.${commandLine}`,
+    zh: `来自 ${origin.label} 的转发请求（深度 ${origin.depth}）：${decision.reason}。${commandLineZh}`,
   }
 }
 
@@ -751,8 +757,6 @@ export class ChildApprovalForwarder {
   private readonly pending = new Map<string, Promise<ChildAskResolution>>()
   /** Calls an allow resolution made final: child session id → call id → tool name. */
   private readonly allowedCalls = new Map<string, Map<string, string>>()
-  /** Per-root judgement budget: the turn it counts against and how much it spent. */
-  private readonly judgementBudget = new Map<string, { turn: string; count: number }>()
   /** Parked asks by park id; Map order is park order. */
   private readonly parked = new Map<string, ParkedEntry>()
   /** Park order counter; restored records advance it past their own seq. */
@@ -769,13 +773,14 @@ export class ChildApprovalForwarder {
   /**
    * Resolve one child ask through the parent. Rails run first and are never
    * card-approvable; then an existing subtree grant; then the root's mode:
-   * interactive dispatches the human card, Full access applies one bounded
-   * parent judgement (allow / corrective denial), unattended mode fails closed.
+   * interactive dispatches the human card, Full access matches the root's
+   * effective decision (standing consent unless an explicit deny wins), and
+   * unattended mode fails closed.
    * A rejection is returned as a corrective deny; nothing here kills the child.
    * An allow is final for the exact call identity: {@link resolvesFinalCall}
    * reports it so no later ask or reviewer denial can re-open what the human
-   * (or the parent's Full-access judgement) already allowed, and a call already
-   * on record resolves allow here without another judgement.
+   * (or the parent's Full-access consent) already allowed, and a call already
+   * on record resolves allow here without another decision.
    * @param input - the child agent, tool call, and the ask the child's policy produced.
    * @returns the allow/deny resolution for the pre-execute listener.
    */
@@ -835,10 +840,15 @@ export class ChildApprovalForwarder {
       }
     }
 
-    const command = input.toolName === 'bash' && typeof input.args?.command === 'string' ? input.args.command : undefined
-    const rail = railHitOf({ toolName: input.toolName, args: input.args, cwd: child.cwd })
+    const command = commandOf(input)
+    const rail = railHitOf({ toolName: input.toolName, args: input.args, cwd: child.cwd, ...command !== undefined ? { command } : {} })
     if (rail !== undefined) {
-      const allowed = this.deps.parentAllowsRail({ root, toolName: input.toolName, ...command !== undefined ? { command } : {}, rail: rail.rail })
+      const allowed = this.deps.parentAllowsRail({
+        root,
+        toolName: input.toolName,
+        ...command !== undefined ? { command } : {},
+        rail: rail.rail,
+      })
       this.deps.report(
         `${allowed ? 'allow' : 'deny'}: rail ${rail.rail} (${rail.evidence}) from child ${shortId(child.childSessionId)} `
         + `resolved through the parent's own policy`,
@@ -866,8 +876,9 @@ export class ChildApprovalForwarder {
       )
     }
 
-    // Identical concurrent asks share ONE judgement (Full access) or ONE card
-    // (interactive); the batch key is per child session, tool, and call shape.
+    // Identical concurrent asks share ONE card (interactive) or one parent
+    // decision (Full access); the batch key is per child session, tool, and
+    // call shape.
     const batchKey = `${child.childSessionId}\u0000${input.toolName}\u0000${command ?? stableJson(input.args)}`
     const inFlight = this.pending.get(batchKey)
     if (inFlight !== undefined) return await inFlight
@@ -878,7 +889,7 @@ export class ChildApprovalForwarder {
     const run = (this.deps.isRootIdle?.(root) ?? false)
       ? this.parkAsk(input, root, origin, mode, proposal, rail)
       : mode === 'full-access'
-        ? this.fullAccessDecision(input, root, origin, rail)
+        ? this.fullAccessDecision(input, root, origin)
         : this.askThroughCard(input, root, origin, proposal, rail)
     // The immediate paths can never return REPARK (only replay asks for it);
     // normalize defensively so the pending map stays a closed resolution type.
@@ -893,17 +904,12 @@ export class ChildApprovalForwarder {
     }
   }
 
-  /**
-   * The shared recommendation query both the card's advisory line and the
-   * Full-access judgement are built from, so the reasoner sees identical facts
-   * either way (`applied` is the only difference: it is the decision there).
-   */
+  /** The shared recommendation query for the card's advisory line. */
   private recommendationQuery(
     input: ChildAskInput,
     root: RootHandle,
     origin: ForwardingOrigin,
     rail: RailHit | undefined,
-    applied?: boolean,
   ): RecommendationQuery {
     return {
       toolName: input.toolName,
@@ -912,135 +918,38 @@ export class ChildApprovalForwarder {
       workspaceRelation: workspaceRelationOf(origin.cwd, root.cwd),
       ...rail !== undefined ? { rail } : {},
       decision: input.decision,
+      ...commandOf(input) !== undefined ? { command: commandOf(input) } : {},
       sessionId: recommendationSessionId(input, origin),
       ...input.signal !== undefined ? { signal: input.signal } : {},
-      ...applied === true ? { applied: true } : {},
     }
   }
 
   /**
-   * FULL ACCESS = PARENT JUDGEMENT (doc 82 item 8). The operator's
-   * Full-access mode delegates the answer to the parent agent: the SAME bounded
-   * root-side one-shot the card path uses judges this ask and its suggestion is
-   * APPLIED in the operator's place — an allow resolves `allowed-once` with the
-   * parent's reason, a reject returns the corrective denial carrying that
-   * reason. A missed judgement falls back to {@link derivedRiskOf}: clean asks
-   * allow with a named reason, risk signals deny with the signal named — never
-   * a silent allow. Rails never reach here (they resolve above, through the
-   * parent's own policy). One judgement per ask (identical concurrent asks
-   * share it) and at most {@link PARENT_JUDGEMENT_BUDGET_PER_TURN} per root turn.
+   * FULL ACCESS = MATCH PARENT. The root's own Full-access mode is the
+   * operator's standing consent for the child's ask, so no model judgement or
+   * quota is spent. Explicit denies still win in `parentAllowsAsk`; the child
+   * cannot exceed the root's actual effective authority.
    */
   private async fullAccessDecision(
     input: ChildAskInput,
     root: RootHandle,
     origin: ForwardingOrigin,
-    rail: RailHit | undefined,
   ): Promise<ChildAskResolution> {
-    const child = shortId(origin.childSessionId)
-    if (!this.consumeJudgementBudget(root)) {
-      this.deps.report(
-        `audit: parent refused ${input.toolName} for child ${child} (${origin.label}) because parent judgement `
-        + 'budget exhausted this turn — Full access',
-      )
-      return {
-        kind: 'deny',
-        reason: `approval for ${input.toolName} was denied: parent judgement budget exhausted this turn `
-          + `(${PARENT_JUDGEMENT_BUDGET_PER_TURN} per root turn). Adapt the task or report the limitation instead of retrying.`,
-      }
-    }
-    const judgement = await this.fullAccessJudgement(input, root, origin, rail)
-    if (judgement !== undefined && (judgement.suggestion === 'allow' || judgement.suggestion === 'allow-once')) {
-      const text = judgement.text.trim()
-      this.deps.report(
-        `audit: parent approved ${input.toolName} for child ${child} (${origin.label}) because ${text} — Full access (model judgement)`,
-      )
-      return { kind: 'allow', reason: `parent approved (Full access): ${text}` }
-    }
-    if (judgement !== undefined && judgement.suggestion === 'reject') {
-      const text = judgement.text.trim()
-      this.deps.report(
-        `audit: parent refused ${input.toolName} for child ${child} (${origin.label}) because ${text} — Full access (model judgement)`,
-      )
-      // The answer is a sentence of its own; join it with exactly one period.
-      return {
-        kind: 'deny',
-        reason: `the parent (Full access) refused ${input.toolName}: ${text.replace(/[.\s]+$/, '')}. It required approval because: `
-          + `${input.decision.reason}. Adapt the task or report the limitation instead of retrying.`,
-      }
-    }
-    const risk = derivedRiskOf({
+    const command = commandOf(input)
+    const allowed = this.deps.parentAllowsAsk({
+      root,
       toolName: input.toolName,
-      ...input.args !== undefined ? { args: input.args } : {},
-      cwd: origin.cwd,
+      ...command !== undefined ? { command } : {},
     })
-    if (risk === undefined) {
-      this.deps.report(
-        `audit: parent approved ${input.toolName} for child ${child} (${origin.label}) because the derived check `
-        + 'found no risk signal — Full access (derived fallback)',
-      )
-      return { kind: 'allow', reason: 'derived: no risk signal (Full access)' }
+    if (allowed) {
+      this.deps.report(`audit: parent Full access allows ${input.toolName} for child ${shortId(origin.childSessionId)} (${origin.label}) — the root's effective decision`)
+      return { kind: 'allow', reason: 'parent Full access consent: the root would allow this action' }
     }
-    this.deps.report(
-      `audit: parent refused ${input.toolName} for child ${child} (${origin.label}) because the derived check `
-      + `found a risk signal: ${risk} — Full access (derived fallback)`,
-    )
+    this.deps.report(`audit: parent Full access denied ${input.toolName} for child ${shortId(origin.childSessionId)} (${origin.label}) — the root's effective policy denies it`)
     return {
       kind: 'deny',
-      reason: `the parent (Full access) could not judge ${input.toolName}; the derived check found a risk signal: `
-        + `${risk}. Adapt the task or report the limitation instead of retrying.`,
+      reason: `[PARENT_EQUIVALENT_DENIED] the parent Full access cannot allow ${input.toolName}: the root's effective policy denies it explicitly`,
     }
-  }
-
-  /**
-   * ONE bounded root-side judgement for a Full-access ask. Unlike the card's
-   * advisory line it is not skipped for a bare ask: here the judgement IS the
-   * decision. A miss (absent seam, throw, undefined answer, empty text) returns
-   * undefined; an answer without a usable suggestion falls through to the same
-   * fallback in the caller. The caller then applies the derived risk check
-   * rather than any default.
-   */
-  private async fullAccessJudgement(
-    input: ChildAskInput,
-    root: RootHandle,
-    origin: ForwardingOrigin,
-    rail: RailHit | undefined,
-  ): Promise<ModelRecommendation | undefined> {
-    if (this.deps.recommendation === undefined) {
-      this.deps.report(`judgement: no root-side reasoner is wired for ${input.toolName}; applying the derived check (Full access)`)
-      return undefined
-    }
-    try {
-      const answer = await this.deps.recommendation(this.recommendationQuery(input, root, origin, rail, true))
-      if (answer === undefined || answer.text.trim() === '') {
-        this.deps.report(`judgement: root reasoner produced nothing for ${input.toolName}; applying the derived check (Full access)`)
-        return undefined
-      }
-      return answer
-    } catch (error) {
-      this.deps.report(
-        `judgement: root reasoner failed for ${input.toolName} `
-        + `(${error instanceof Error ? error.message : String(error)}); applying the derived check (Full access)`,
-      )
-      return undefined
-    }
-  }
-
-  /**
-   * Whether this root may spend another parent judgement in its current turn.
-   * The turn identity comes from the host ({@link ForwardingDeps.turnOf}); when
-   * the host provides none the budget stays per-root-session, so the cap holds
-   * rather than being lifted.
-   */
-  private consumeJudgementBudget(root: RootHandle): boolean {
-    const turn = this.deps.turnOf?.(root) ?? 'current'
-    const record = this.judgementBudget.get(root.id)
-    if (record === undefined || record.turn !== turn) {
-      this.judgementBudget.set(root.id, { turn, count: 1 })
-      return true
-    }
-    if (record.count >= PARENT_JUDGEMENT_BUDGET_PER_TURN) return false
-    record.count += 1
-    return true
   }
 
   /**
@@ -1096,14 +1005,15 @@ export class ChildApprovalForwarder {
     reparkOnIdle = false,
   ): Promise<CardResolution> {
     const recommendation = await this.cardRecommendation(input, root, origin, rail)
-    const reason = forwardedAskReason(origin, input.decision, recommendation)
+    const reason = forwardedAskReason(origin, input.decision, recommendation, commandOf(input))
     let outcome: ApprovalOutcome
     try {
       outcome = await this.deps.askRoot({
         root,
         toolName: input.toolName,
         reason,
-        displayReason: forwardedAskDisplayReason(origin, input.decision),
+        displayReason: forwardedAskDisplayReason(origin, input.decision, commandOf(input)),
+        ...commandOf(input) !== undefined ? { command: commandOf(input) } : {},
         ...input.decision.broadAllow !== undefined ? { broadAllow: input.decision.broadAllow } : {},
         ...input.signal !== undefined ? { signal: input.signal } : {},
         recommendation,
@@ -1251,7 +1161,7 @@ export class ChildApprovalForwarder {
     const now = Date.now()
     const ttl = this.parkTtlMs()
     this.parkSeq += 1
-    const command = input.toolName === 'bash' && typeof input.args?.command === 'string' ? input.args.command : undefined
+    const command = commandOf(input)
     const record: ParkedAskRecord = {
       id: `park-${now.toString(36)}-${this.parkSeq.toString(36)}`,
       seq: this.parkSeq,
@@ -1274,7 +1184,7 @@ export class ChildApprovalForwarder {
     this.deps.report(
       `park: ${input.toolName} from child ${shortId(origin.childSessionId)} (${origin.label}, depth ${origin.depth}) for root `
       + `${shortId(root.id)} while it sits between turns — ${input.decision.reason} (replays at the root's next turn as `
-      + `${mode === 'full-access' ? 'a parent judgement, no card' : "the operator's card"}, expires in ${windowText(ttl)})`,
+      + `${mode === 'full-access' ? 'the root consent, no card' : "the operator's card"}, expires in ${windowText(ttl)})`,
     )
     entry.timer = setTimeout(() => { this.expireParked(entry) }, ttl)
     ;(entry.timer as { unref?: () => void }).unref?.()
@@ -1301,8 +1211,8 @@ export class ChildApprovalForwarder {
 
   /**
    * Resolve every ask parked for one root at its turn start, in FIFO park
-   * order, one at a time. Full access applies the parent judgement (audit
-   * line, no card); every other resolvable mode dispatches the operator's
+   * order, one at a time. Full access matches the root consent (audit line,
+   * no card); every other resolvable mode dispatches the operator's
    * card. A replay that races the turn's end re-parks and stops; the remaining
    * asks stay parked for the next turn start.
    * @param rootSessionId - the root session whose turn just opened.
@@ -1356,7 +1266,7 @@ export class ChildApprovalForwarder {
       const mode = this.deps.modeOf(root)
       let resolution: CardResolution
       if (mode === 'full-access') {
-        resolution = await this.fullAccessDecision(entry.input, root, entry.origin, entry.rail)
+        resolution = await this.fullAccessDecision(entry.input, root, entry.origin)
       } else if (mode === 'interactive') {
         resolution = await this.askThroughCard(entry.input, root, entry.origin, entry.proposal, entry.rail, true)
       } else {

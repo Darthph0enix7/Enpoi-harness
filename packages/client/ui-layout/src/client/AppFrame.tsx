@@ -1,11 +1,10 @@
 /**
- * Three-column shell frame, registered into the built-in 'root' slot (the web
- * shell renders only 'root'). Owns the grid tracks (sidebar | center |
- * rightbar), the drag handles (pointer capture + rAF throttle), the column
- * solve (columns.ts), and the child-slot render decisions: the sidebar slot
- * receives live parameters from that solve. The root-scoped main slot selects
- * the Conversation or a global panel. Each column occupant owns its Session
- * binding and reports the geometry it needs.
+ * Shell frame, registered into the built-in 'root' slot (the web shell renders
+ * only 'root'). Owns the grid tracks (sidebar | center | rightbar), the drag
+ * handles (pointer capture + rAF throttle), the column solve (columns.ts), the
+ * compact/desktop chrome choice, and the child-slot render decisions. The main
+ * and rightbar slots stay in the same DOM position across a live layout-mode
+ * switch so the conversation, composer, and right panel do not remount.
  *
  * The right column is a track, not a box: its occupant draws its panel anchored
  * to the frame's right edge at the resolved normal width, and the
@@ -15,23 +14,26 @@
  * shares — zero cordis or framework imports, zero self-made hooks.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, ReactNode } from 'react'
+import type { CSSProperties } from 'react'
 import type {
   InjectFace, HostObservable, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore,
 } from '@deepseek-ai/dsh-client-ui-slots'
 import type { DeviceSnapshot } from '@deepseek-ai/dsh-client-ui-primitives'
+import { getLayoutModeRuntime, startLayoutModeRuntime, useLayoutMode } from '@deepseek-ai/dsh-client-ui-primitives'
 import { computeColumns, resolveRightbarWidth, SIDEBAR_AUTO_COLLAPSE, SIDEBAR_COLLAPSED, SIDEBAR_DEFAULT } from './columns.ts'
 import { DocumentTitle } from './DocumentTitle.tsx'
 import { MobileFrame } from './MobileFrame.tsx'
 import { publishShellInsets } from './overlay-insets.ts'
 import type { createLayoutStore } from './stores.ts'
 import css from './AppFrame.module.css'
+import mobileCss from './MobileFrame.module.css'
 
 /** What the root entry injects beyond the framework shares. */
 export interface AppFrameInjected {
   /**
-   * The shared device classifier. The frame branches on it: a touch device
-   * mounts the mobile container, everything else the three-column solver.
+   * The shared input-capability classifier. The frame no longer branches on
+   * it; shell chrome follows `useLayoutMode`, while this hook remains the
+   * source for pointer and touch-target behavior.
    */
   readonly hooks: { readonly device: HostObservable<DeviceSnapshot> }
   /** Dismiss the top registered surface through the shared stack. */
@@ -42,7 +44,7 @@ export interface AppFrameInjected {
 export type AppFrameProps =
   & PropsRuntime<'root'>
   & PropsRenderSlots<
-    'sidebar' | 'main' | 'rightbar' | 'shell.overlay'
+    'sidebar' | 'main' | 'rightbar' | 'shell.overlay' | 'settings.surface'
     | 'shell.mobile.header' | 'shell.mobile.bar' | 'shell.mobile.more'
   >
   & PropsStore<ReturnType<typeof createLayoutStore>>
@@ -59,24 +61,10 @@ export type AppFrameProps =
  */
 const TRACK_SETTLE_GRACE_MS = 250
 
-/** Center column grid item (session-body building block). */
-function CenterColumn(props: { children?: ReactNode }) {
-  return <div className={css.centerCol}>{props.children}</div>
-}
-
 /** Subscribe to the main key without subscribing the column frame to each panel id. */
 function MainPanel({ usePanelInfo, renderSlot }: Pick<PropsRuntime<'root'>, 'usePanelInfo'> & PropsRenderSlots<'main'>) {
   const panelId = usePanelInfo(info => info.activePanelId)
   return renderSlot('main', {}, { entryKey: panelId ?? 'conversation' })
-}
-
-/**
- * Right column grid item. Zero-width unless the occupant asked for a track; the
- * occupant's panel is positioned against the column's right edge, which never
- * moves, so it can hang over the centre when there is no track.
- */
-function RightbarColumn(props: { children?: ReactNode }) {
-  return <div className={css.rightbarCol} data-rightbar-col>{props.children}</div>
 }
 
 /**
@@ -150,7 +138,6 @@ export function AppFrame({
   useStore,
   useSessions,
   usePanelInfo,
-  useDevice,
   dismissBack,
   actions,
   renderSlot,
@@ -159,13 +146,14 @@ export function AppFrame({
   const layoutInfo = useStore(state => state.layoutInfo)
   const frameRef = useRef<HTMLDivElement | null>(null)
   const viewport = layoutInfo.viewportWidth
-  const device = useDevice(snapshot => snapshot)
-  const mobile = device.device !== 'desktop'
+  const layoutMode = useLayoutMode()
+  const compact = layoutMode === 'compact'
 
   // Track the frame's own box (not the window): rAF-throttled ResizeObserver.
-  // The mode dependency re-attaches the observer when the branch swaps the
-  // measured element (a phone rotated past the tablet ceiling and back).
+  // The same frame is measured for both the width store and the shared layout
+  // mode, so feature consumers never guess a viewport width of their own.
   useLayoutEffect(() => {
+    const stopLayoutMode = startLayoutModeRuntime()
     const el = frameRef.current
     /* v8 ignore next -- the ref is always attached by effect time: the frame div renders unconditionally. */
     if (el === null) return
@@ -173,7 +161,10 @@ export function AppFrame({
     let disposed = false
     const measure = () => {
       const width = el.getBoundingClientRect().width
-      if (width > 0) actions.setViewportWidth(width)
+      if (width > 0) {
+        actions.setViewportWidth(width)
+        getLayoutModeRuntime().setFrameWidth(width)
+      }
     }
     measure()
     const observer = new ResizeObserver(() => {
@@ -188,8 +179,9 @@ export function AppFrame({
       disposed = true
       observer.disconnect()
       if (raf !== null) cancelAnimationFrame(raf)
+      stopLayoutMode()
     }
-  }, [actions, mobile])
+  }, [actions])
 
   const narrow = viewport < SIDEBAR_AUTO_COLLAPSE
   const sidebarCollapsed = narrow ? !layoutInfo.narrowExpanded : layoutInfo.sidebar === 0
@@ -220,14 +212,14 @@ export function AppFrame({
   const overlayRightInset = layoutInfo.rightbarFullscreen ? viewport : layoutInfo.rightbarShown ? normal.rightbar : 0
   const overlayCovered = layoutInfo.rightbarFullscreen
   useEffect(() => {
-    if (mobile) return undefined
+    if (compact) return undefined
     return publishShellInsets(document.documentElement, {
       left: cols.sidebar,
       right: overlayRightInset,
       bottom: '0px',
       covered: overlayCovered,
     })
-  }, [mobile, cols.sidebar, overlayRightInset, overlayCovered])
+  }, [compact, cols.sidebar, overlayRightInset, overlayCovered])
 
   // The drag base is the rendered width captured at drag start (grabbing a
   // concession-clamped panel must not jump back to the stored preference);
@@ -271,7 +263,7 @@ export function AppFrame({
     // frames.
     const trackProperties = new Set(['grid-template-columns', 'padding-right', '--dsh-sidebar-track', '--dsh-rightbar-progress'])
     const stillRunning = () => {
-      const centre = frame.children[1] ?? null
+      const centre = frame.querySelector('[data-main-column]')
       for (const element of [frame, centre]) {
         if (element === null || typeof element.getAnimations !== 'function') continue
         for (const animation of element.getAnimations()) {
@@ -298,7 +290,7 @@ export function AppFrame({
       settleTimer = setTimeout(settleIfDone, TRACK_SETTLE_GRACE_MS)
     }
     const onTransitionEnd = (event: TransitionEvent) => {
-      if (event.target !== frame && event.target !== frame.children[1]) return
+      if (event.target !== frame && event.target !== frame.querySelector('[data-main-column]')) return
       if (!trackProperties.has(event.propertyName)) return
       scheduleSettle()
     }
@@ -320,38 +312,15 @@ export function AppFrame({
     actions.setRightbar(rightbarBase.current - dx)
   }, [actions])
   const productTitle = process.env.DSH_CLIENT_TITLE ?? t('brand.localBuild')
-  const sidebar = useMemo(() => (mobile ? null : renderSlot('sidebar', {
+  const sidebar = useMemo(() => (compact ? null : renderSlot('sidebar', {
     collapsed: sidebarCollapsed,
     width: cols.sidebar,
-  })), [renderSlot, mobile, sidebarCollapsed, cols.sidebar])
+  })), [renderSlot, compact, sidebarCollapsed, cols.sidebar])
   const main = useMemo(() => (
     <MainPanel usePanelInfo={usePanelInfo} renderSlot={renderSlot} />
   ), [usePanelInfo, renderSlot])
-  const overlays = useMemo(() => (mobile ? null : renderSlot('shell.overlay', {})), [renderSlot, mobile])
-
-  if (mobile) {
-    return (
-      <>
-        <DocumentTitle
-          productTitle={productTitle}
-          useSessions={useSessions}
-          usePanelInfo={usePanelInfo}
-        />
-        <MobileFrame
-          frameRef={frameRef}
-          productTitle={productTitle}
-          main={main}
-          renderSlot={renderSlot}
-          useSessions={useSessions}
-          usePanelInfo={usePanelInfo}
-          useStore={useStore}
-          dismissBack={dismissBack}
-          t={t}
-          viewport={viewport}
-        />
-      </>
-    )
-  }
+  const overlays = useMemo(() => (compact ? null : renderSlot('shell.overlay', {})), [renderSlot, compact])
+  const settingsSurface = useMemo(() => renderSlot('settings.surface', {}), [renderSlot])
 
   // One animated value per side: the registered track variables are what the
   // frame transitions, and the grid, the centre's rail reservation
@@ -373,40 +342,73 @@ export function AppFrame({
       'var(--dsh-sidebar-track) minmax(0, 1fr) calc(var(--dsh-rightbar-width) * var(--dsh-rightbar-progress))',
   }
 
+  const rightbarOwner = compact
+    ? { width: viewport, viewportWidth: viewport, canShow: true, mobile: true }
+    : { width: normal.rightbar, viewportWidth: viewport, canShow: normal.rightbar > 0, mobile: false }
+
   return (
     <div
       ref={frameRef}
-      className={css.frame}
-      style={frameStyle}
-      data-sidebar-collapsed={sidebarCollapsed || undefined}
-      data-rightbar-collapsed={cols.rightbar === 0 || undefined}
-      data-rightbar-fullscreen={layoutInfo.rightbarFullscreen || undefined}
-      data-rightbar-instant={layoutInfo.rightbarInstant || undefined}
-      data-dragging={dragging || undefined}
-      data-animating={animating > 0 || undefined}
+      className={compact ? mobileCss.frame : css.frame}
+      style={compact ? undefined : frameStyle}
+      data-mobile-frame={compact ? '' : undefined}
+      data-sidebar-collapsed={!compact && sidebarCollapsed ? true : undefined}
+      data-rightbar-collapsed={!compact && cols.rightbar === 0 ? true : undefined}
+      data-rightbar-fullscreen={!compact && layoutInfo.rightbarFullscreen ? true : undefined}
+      data-rightbar-instant={!compact && layoutInfo.rightbarInstant ? true : undefined}
+      data-dragging={!compact && dragging ? true : undefined}
+      data-animating={!compact && animating > 0 ? true : undefined}
     >
       <DocumentTitle
         productTitle={productTitle}
         useSessions={useSessions}
         usePanelInfo={usePanelInfo}
       />
-      <div className={css.sidebarCol}>
-        {sidebar}
+      {/* Stable settings host: rendered once at the frame root, outside the
+          desktop sidebar / compact drawer swap. The sidebar keeps only the
+          trigger; the dialog and mounted section survive layout-mode changes. */}
+      {settingsSurface}
+      {!compact && (
+        <div key="sidebar" className={css.sidebarCol}>
+          {sidebar}
+        </div>
+      )}
+      {compact && (
+        <MobileFrame
+          frameRef={frameRef}
+          productTitle={productTitle}
+          renderSlot={renderSlot}
+          useSessions={useSessions}
+          usePanelInfo={usePanelInfo}
+          useStore={useStore}
+          dismissBack={dismissBack}
+          t={t}
+          viewport={viewport}
+        />
+      )}
+      <div
+        key="main"
+        className={compact ? mobileCss.content : css.centerCol}
+        data-main-column=""
+        data-mobile-content={compact ? '' : undefined}
+      >
+        {main}
       </div>
-      <>
-        <CenterColumn>{main}</CenterColumn>
-        <RightbarColumn>
-          {renderSlot('rightbar', {
-            width: normal.rightbar, viewportWidth: viewport, canShow: normal.rightbar > 0, mobile: false,
-          })}
-        </RightbarColumn>
-      </>
-      <div className={css.overlayLayer} data-shell-overlay>
-        {overlays}
+      <div
+        key="rightbar"
+        className={compact ? mobileCss.rightbarHost : css.rightbarCol}
+        data-rightbar-col={compact ? undefined : ''}
+      >
+        {renderSlot('rightbar', rightbarOwner)}
       </div>
+      {!compact && (
+        <div className={css.overlayLayer} data-shell-overlay>
+          {overlays}
+        </div>
+      )}
       {/* The collapsed rail is fixed-width: no resize handle while closed. */}
-      {!sidebarCollapsed && <DragHandle side="sidebar" left={cols.sidebar} onStart={onSidebarStart} onDrag={onSidebarDrag} onEnd={onDragEnd} />}
-      {layoutInfo.rightbarShown && !layoutInfo.rightbarFullscreen && normal.rightbar > 0 && (
+      {!compact && !sidebarCollapsed && <DragHandle side="sidebar" left={cols.sidebar} onStart={onSidebarStart} onDrag={onSidebarDrag} onEnd={onDragEnd} />}
+      {!compact && layoutInfo.rightbarShown && !layoutInfo.rightbarFullscreen && normal.rightbar > 0 && (
         <DragHandle side="rightbar" left={viewport - normal.rightbar} onStart={onRightbarStart} onDrag={onRightbarDrag} onEnd={onDragEnd} />
       )}
     </div>

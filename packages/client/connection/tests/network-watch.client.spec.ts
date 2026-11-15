@@ -81,7 +81,7 @@ describe('browser network watch', () => {
     dispose()
   })
 
-  it('coalesces a burst of network flaps into no recovery transition', () => {
+  it('coalesces a burst of network flaps into one recovery', () => {
     vi.useFakeTimers()
     const win = new WindowProbe()
     vi.stubGlobal('window', win)
@@ -96,7 +96,7 @@ describe('browser network watch', () => {
     }
     vi.advanceTimersByTime(2_000)
     expect(controller.setNetworkAvailable.mock.calls).toEqual([[true]])
-    expect(controller.reconnect).not.toHaveBeenCalled()
+    expect(controller.reconnect).toHaveBeenCalledOnce()
     dispose()
   })
 
@@ -280,22 +280,119 @@ describe('browser network watch', () => {
     dispose()
   })
 
-  it('does not schedule a wake while the browser reports offline', () => {
+  it('retains an offline wake and recovers once the hint returns online', () => {
     vi.useFakeTimers()
     const win = new WindowProbe()
-    win.navigator.onLine = false
     vi.stubGlobal('window', win)
     const controller = createController()
     const dispose = watchBrowserNetwork(controller, () => 'disconnected')
 
+    // A missed offline transition: the debounced model still says available.
+    win.navigator.onLine = false
     win.dispatchEvent(new Event('pageshow'))
     vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS * 2)
     expect(controller.reconnect).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(1)
+
+    win.setOnline(true)
+    vi.advanceTimersByTime(1_000 + WAKE_RECONNECT_DEBOUNCE_MS)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
     dispose()
   })
 
-  it('cancels a pending wake when the browser goes offline', () => {
+  it('recovers on online when the debounced availability never moved', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    vi.stubGlobal('window', win)
+    const controller = createController(true)
+    const dispose = watchBrowserNetwork(controller, () => 'connected')
+
+    // The sleep/wake case: no offline transition reached the debounced model,
+    // so reportedAvailable is still true when the browser says online again.
+    win.dispatchEvent(new Event('online'))
+    vi.advanceTimersByTime(1_000 + WAKE_RECONNECT_DEBOUNCE_MS - 1)
+    expect(controller.reconnect).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
+    expect(controller.setNetworkAvailable.mock.calls).toEqual([[true]])
+    dispose()
+  })
+
+  it('keeps a real offline-to-online transition on the controller path without a second reconnect', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    vi.stubGlobal('window', win)
+    const controller = createController()
+    const dispose = watchBrowserNetwork(controller, () => 'disconnected')
+
+    win.setOnline(false)
+    vi.advanceTimersByTime(1_000)
+    expect(controller.setNetworkAvailable).toHaveBeenLastCalledWith(false)
+    expect(controller.reconnect).not.toHaveBeenCalled()
+
+    win.setOnline(true)
+    vi.advanceTimersByTime(1_000 + WAKE_RECONNECT_DEBOUNCE_MS * 2)
+    expect(controller.setNetworkAvailable.mock.calls).toEqual([[true], [false], [true]])
+    expect(controller.reconnect).not.toHaveBeenCalled()
+    dispose()
+  })
+
+  it('coalesces pageshow, visibility, resume, and online into one recovery', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    const doc = Object.assign(new EventTarget(), { visibilityState: 'visible' })
+    vi.stubGlobal('window', win)
+    vi.stubGlobal('document', doc)
+    const controller = createController(true)
+    const dispose = watchBrowserNetwork(controller, () => 'connected')
+
+    for (let cycle = 0; cycle < 3; cycle++) {
+      win.dispatchEvent(new Event('pageshow'))
+      doc.dispatchEvent(new Event('visibilitychange'))
+      doc.dispatchEvent(new Event('resume'))
+      win.dispatchEvent(new Event('online'))
+    }
+    vi.advanceTimersByTime(1_000 + WAKE_RECONNECT_DEBOUNCE_MS)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
+    dispose()
+  })
+
+  it('does not stack a delayed online recovery on top of a wake reconnect', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    vi.stubGlobal('window', win)
+    const controller = createController(true)
+    const dispose = watchBrowserNetwork(controller, () => 'connected')
+
+    win.dispatchEvent(new Event('pageshow'))
+    vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
+
+    // The browser often delivers `online` after `pageshow`; that delayed hint
+    // belongs to the same wake burst and must not replace the fresh generation.
+    vi.advanceTimersByTime(500)
+    win.dispatchEvent(new Event('online'))
+    vi.advanceTimersByTime(1_000)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
+    dispose()
+  })
+
+  it('rechecks a stale generation on Page Lifecycle resume', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    const doc = Object.assign(new EventTarget(), { visibilityState: 'hidden' })
+    vi.stubGlobal('window', win)
+    vi.stubGlobal('document', doc)
+    const controller = createController(true)
+    const dispose = watchBrowserNetwork(controller, () => 'connected')
+
+    doc.dispatchEvent(new Event('resume'))
+    vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
+    dispose()
+  })
+
+  it('cancels a pending wake while offline but retains it for the next online', () => {
     vi.useFakeTimers()
     const win = new WindowProbe()
     vi.stubGlobal('window', win)
@@ -309,11 +406,15 @@ describe('browser network watch', () => {
     expect(controller.setNetworkAvailable).toHaveBeenLastCalledWith(true)
     vi.advanceTimersByTime(1_000)
     expect(controller.setNetworkAvailable).toHaveBeenLastCalledWith(false)
-    expect(vi.getTimerCount()).toBe(1)
+
+    win.setOnline(true)
+    vi.advanceTimersByTime(1_000 + WAKE_RECONNECT_DEBOUNCE_MS)
+    expect(controller.setNetworkAvailable.mock.calls).toEqual([[true], [false], [true]])
+    expect(controller.reconnect).not.toHaveBeenCalled()
     dispose()
   })
 
-  it('drops a scheduled wake that fires after the browser reports offline', () => {
+  it('retains a scheduled wake that fires while the hint says offline', () => {
     vi.useFakeTimers()
     const win = new WindowProbe()
     vi.stubGlobal('window', win)
@@ -324,6 +425,67 @@ describe('browser network watch', () => {
     win.navigator.onLine = false
     vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS)
     expect(controller.reconnect).not.toHaveBeenCalled()
+
+    win.setOnline(true)
+    vi.advanceTimersByTime(1_000 + WAKE_RECONNECT_DEBOUNCE_MS)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
+    dispose()
+  })
+
+  it('upgrades a pending wake when online is applied before its debounce', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    vi.stubGlobal('window', win)
+    const controller = createController()
+    const dispose = watchBrowserNetwork(controller, () => 'disconnected', {
+      networkDebounceMs: 1,
+      wakeReconnectDebounceMs: 100,
+    })
+
+    win.dispatchEvent(new Event('pageshow'))
+    expect(controller.reconnect).not.toHaveBeenCalled()
+    win.dispatchEvent(new Event('online'))
+    vi.advanceTimersByTime(1)
+    expect(controller.reconnect).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(100)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
+    dispose()
+  })
+
+  it('retains a forced recovery across an unchanged offline apply and defaults missing jitter', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    win.navigator.onLine = false
+    vi.stubGlobal('window', win)
+    const { wakeJitterMs: _jitter, ...rest } = createController()
+    const controller = rest
+    const dispose = watchBrowserNetwork(controller, () => 'disconnected')
+
+    win.dispatchEvent(new Event('online'))
+    vi.advanceTimersByTime(1_000)
+    expect(controller.reconnect).not.toHaveBeenCalled()
+
+    win.setOnline(true)
+    vi.advanceTimersByTime(1_000 + WAKE_RECONNECT_DEBOUNCE_MS)
+    expect(controller.setNetworkAvailable.mock.calls).toEqual([[false], [true]])
+    expect(controller.reconnect).not.toHaveBeenCalled()
+    dispose()
+  })
+
+  it('settles a repeated offline report without scheduling recovery', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    vi.stubGlobal('window', win)
+    const controller = createController()
+    const dispose = watchBrowserNetwork(controller, () => 'disconnected')
+
+    win.setOnline(false)
+    vi.advanceTimersByTime(1_000)
+    expect(controller.setNetworkAvailable).toHaveBeenLastCalledWith(false)
+    win.dispatchEvent(new Event('offline'))
+    vi.advanceTimersByTime(1_000)
+    expect(controller.reconnect).not.toHaveBeenCalled()
+    expect(controller.setNetworkAvailable.mock.calls).toEqual([[true], [false]])
     dispose()
   })
 
@@ -338,11 +500,13 @@ describe('browser network watch', () => {
 
     win.dispatchEvent(new Event('pageshow'))
     doc.dispatchEvent(new Event('visibilitychange'))
+    win.dispatchEvent(new Event('offline'))
     dispose()
     expect(vi.getTimerCount()).toBe(0)
 
     win.dispatchEvent(new Event('pageshow'))
     doc.dispatchEvent(new Event('visibilitychange'))
+    doc.dispatchEvent(new Event('resume'))
     win.setOnline(false)
     vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS * 2)
     expect(controller.reconnect).not.toHaveBeenCalled()
@@ -419,6 +583,22 @@ describe('browser network watch', () => {
     vi.advanceTimersByTime(5_000)
     expect(controller.reconnect).toHaveBeenCalledOnce()
     vi.advanceTimersByTime(295_000)
+    expect(controller.reconnect).toHaveBeenCalledOnce()
+    dispose()
+  })
+
+  it('schedules a wake without a per-tab jitter provider', () => {
+    vi.useFakeTimers()
+    const win = new WindowProbe()
+    vi.stubGlobal('window', win)
+    const { wakeJitterMs: _jitter, ...rest } = createController()
+    const controller = rest
+    const dispose = watchBrowserNetwork(controller, () => 'disconnected')
+
+    win.dispatchEvent(new Event('pageshow'))
+    vi.advanceTimersByTime(WAKE_RECONNECT_DEBOUNCE_MS - 1)
+    expect(controller.reconnect).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
     expect(controller.reconnect).toHaveBeenCalledOnce()
     dispose()
   })

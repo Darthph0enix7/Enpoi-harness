@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { getDeviceSnapshot } from './device.ts'
+import { useLayoutMode } from './layout-mode.ts'
 
 /**
  * Centralized dismissal stack for browser history. Every dismissible surface
@@ -158,19 +159,25 @@ export function registerBackSurface(id: string, dismiss: () => void): () => void
 }
 
 /**
- * Register a dismissal handler for as long as `active` holds, on touch devices
- * only — desktop keeps its own Escape/close affordances and normal browser
- * history, exactly as before the mobile foundation.
+ * Register a dismissal handler for as long as `active` holds in the compact
+ * shell, plus the legacy phone/tablet classifier for touch frames that still
+ * render the wide shell. A fine-pointer 800px compact frame now gets browser
+ * back; a wide fine-pointer desktop keeps its own Escape/close affordances and
+ * normal browser history. The effect follows layout-mode and device changes, so
+ * a resize across the compact boundary registers or releases exactly one
+ * history record.
  * @param id - stable surface id, for diagnostics and entry pairing.
  * @param dismiss - closes the surface; the latest closure is always invoked.
  * @param active - whether the surface is currently open (default true).
  */
 export function useBackHandler(id: string, dismiss: () => void, active = true): void {
+  const compact = useLayoutMode() === 'compact'
   const latest = useRef(dismiss)
   latest.current = dismiss
   useEffect(() => {
     if (!active) return undefined
-    if (getDeviceSnapshot().device === 'desktop') return undefined
+    const legacyTouch = getDeviceSnapshot().device !== 'desktop'
+    if (!compact && !legacyTouch) return undefined
     return backStack.register(id, () => { latest.current() })
-  }, [active, id])
+  }, [active, compact, id])
 }

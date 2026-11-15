@@ -412,7 +412,7 @@ describe('subagent descriptors', () => {
       agentModel: 'chat',
       agentReasoningEffort: ReasoningEffortId('high'),
       persona: 'reviewer',
-      toolFilter: { allow: ['read'], deny: ['bash'] },
+      toolFilter: { allow: ['read'], deny: ['bash', 'run_code'] },
       quiet: true,
     }
     expect(snapshotSubagentDescriptor({
@@ -450,9 +450,9 @@ describe('subagent descriptors', () => {
         mode: 'continuable',
         provider: 'spawn',
         label: 'l',
-        toolFilter: { deny: ['bash'] },
+        toolFilter: { deny: ['bash', 'run_code'] },
       }),
-    ])).toMatchObject({ toolFilter: { deny: ['bash'] } })
+    ])).toMatchObject({ toolFilter: { deny: ['bash', 'run_code'] } })
     expect(foldSubagentDescriptor([
       event({ version: SUBAGENT_DESCRIPTOR_VERSION + 1, provider: 'spawn' }),
     ])).toBeUndefined()

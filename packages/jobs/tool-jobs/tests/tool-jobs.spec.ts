@@ -14,7 +14,7 @@ import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import type { JobAppendOptions, JobHandle, JobHooks, JobOutcome, JobOutputSource, JobSpec, JobView } from '@deepseek-ai/dsh-jobs'
 import * as ToolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { CompletionNoticeOutbox } from '../src/completion-outbox.ts'
-import { publicJob, renderModelDelta, statusLine } from '../src/render.ts'
+import { publicJob, renderModelDelta, retainedStderrExcerpt, statusLine } from '../src/render.ts'
 
 const testToolSignal = new AbortController().signal
 
@@ -175,8 +175,11 @@ describe('tool-jobs setup', () => {
   it('defaults delivery to unbounded wakeup and rejects an unknown lane', () => {
     expect(ToolJobs.Config({}).completionDelivery).toBe('wakeup')
     expect(ToolJobs.Config({}).maxConsecutiveWakes).toBeUndefined()
+    expect(ToolJobs.Config({}).stderrExcerptMaxChars).toBe(200)
+    expect(ToolJobs.Config({ stderrExcerptMaxChars: 0 }).stderrExcerptMaxChars).toBe(0)
     expect(() => ToolJobs.Config({ completionDelivery: 'loud' as never })).toThrow()
     expect(() => ToolJobs.Config({ maxConsecutiveWakes: 0 })).toThrow()
+    expect(() => ToolJobs.Config({ stderrExcerptMaxChars: -1 })).toThrow()
   })
 
   it('rejects a wake budget that cannot bound anything', async () => {
@@ -205,6 +208,34 @@ describe('tool-jobs setup', () => {
   it('renders status lines with and without producer detail', () => {
     expect(statusLine({ status: 'running' })).toBe('[status: running]')
     expect(statusLine({ status: 'completed', detail: 'exit code: 0' })).toBe('[status: completed, exit code: 0]')
+  })
+
+  it('renders a bounded, escaped, single-line retained stderr excerpt', () => {
+    expect(retainedStderrExcerpt([{ at: 0, text: 'first\nline', channel: 'stderr' }], 200))
+      .toBe('[stderr excerpt (retained output; verbatim, not a diagnosis): first\\nline]')
+    // Only retained visible stderr is eligible; stdout and observer-only narration are not.
+    expect(retainedStderrExcerpt([
+      { at: 0, text: 'output' },
+      { at: 6, text: 'narration', channel: 'log' },
+    ], 200)).toBeUndefined()
+    expect(retainedStderrExcerpt([{ at: 0, text: ' \n\t', channel: 'stderr' }], 200)).toBeUndefined()
+    // Control characters and line separators cannot forge another
+    // model-visible line; the hex escapes are written as source escapes, never
+    // emitted by a real command.
+    expect(retainedStderrExcerpt([{ at: 0, text: 'a\u0000b\r\nc', channel: 'stderr' }], 200))
+      .toBe('[stderr excerpt (retained output; verbatim, not a diagnosis): a\\u0000b\\r\\nc]')
+    expect(retainedStderrExcerpt([{ at: 0, text: 'a\\b\tc\u0085d\u007fe\u2028f\u2029g', channel: 'stderr' }], 200))
+      .toBe('[stderr excerpt (retained output; verbatim, not a diagnosis): a\\\\b\\tc\\u0085d\\u007fe\\u2028f\\u2029g]')
+    // A code point above the C1 range stays verbatim.
+    expect(retainedStderrExcerpt([{ at: 0, text: 'é', channel: 'stderr' }], 200))
+      .toBe('[stderr excerpt (retained output; verbatim, not a diagnosis): é]')
+    // Clipping counts code points, so an astral character never splits.
+    expect(retainedStderrExcerpt([{ at: 0, text: '😀😀', channel: 'stderr' }], 1))
+      .toBe('[stderr excerpt (retained output; verbatim, not a diagnosis): 😀]')
+    // A zero budget disables the excerpt, and a control character costs more
+    // than a one-character budget.
+    expect(retainedStderrExcerpt([{ at: 0, text: 'err', channel: 'stderr' }], 0)).toBeUndefined()
+    expect(retainedStderrExcerpt([{ at: 0, text: '\u0000', channel: 'stderr' }], 1)).toBeUndefined()
   })
 
   it('projects the public job: live progress or terminal detail, never ownership or offsets', () => {
@@ -347,6 +378,161 @@ describe('job_output', () => {
     expect(text(await call(ctx, 'job_output', { job_id: 'bash-1' }))).toBe('(no new output)\n[status: running]')
   })
 
+  it('adds a long, lossy read\'s retained stderr excerpt within its producer budget', async () => {
+    const { ctx } = await setup({}, { retainBytes: 1_024 })
+    const noisy = (limit: number) => {
+      let settle!: (outcome: JobOutcome) => void
+      const source = (channel: 'stdout' | 'stderr', text: string, spillPath: string): JobOutputSource => ({
+        channel,
+        read: from => from === 0
+          ? { text, nextOffset: text.length, lossy: false, spillPath }
+          : { text: '', nextOffset: from, lossy: false, spillPath },
+      })
+      const spec: JobSpec = {
+        kind: 'bash',
+        label: 'noisy',
+        outputLimitBytes: limit,
+        output: [
+          ...Array.from({ length: 5 }, () => source('stdout', 'o'.repeat(400), '/spill/out.log')),
+          source('stderr', 'error: leaked', '/spill/err.log'),
+        ],
+        run: () => ({ cancel() {}, done: new Promise<JobOutcome>((resolve) => { settle = resolve }) }),
+      }
+      return { spec, settle: (outcome: JobOutcome) => { settle(outcome) } }
+    }
+
+    const tight = noisy(64)
+    ctx.jobs.start(tight.spec)
+    tight.settle({ status: 'failed', detail: 'exit code: 1' })
+    await tick()
+    const tightText = text(await call(ctx, 'job_output', { job_id: 'bash-1' }))
+    // The footer and the byte cap survive even when the excerpt cannot share
+    // the budget; no partial excerpt line is left behind.
+    expect(Buffer.byteLength(tightText)).toBeLessThanOrEqual(64)
+    expect(tightText).toContain('[output truncated]')
+    expect(tightText.endsWith('[status: failed, exit code: 1]')).toBe(true)
+    expect(tightText).not.toContain('stderr excerpt')
+
+    const roomy = noisy(256)
+    ctx.jobs.start(roomy.spec)
+    roomy.settle({ status: 'failed', detail: 'exit code: 1' })
+    await tick()
+    const roomyText = text(await call(ctx, 'job_output', { job_id: 'bash-2' }))
+    // The excerpt is prepended and kept beside the footer; the retained tail
+    // still carries the complete spill reference and both existing markers.
+    expect(Buffer.byteLength(roomyText)).toBe(256)
+    expect(roomyText.startsWith('[stderr excerpt (retained output; verbatim, not a diagnosis): error: leaked]\n')).toBe(true)
+    expect(roomyText).toContain('[some output was dropped from memory; full output: /spill/out.log, /spill/err.log]')
+    expect(roomyText).toContain('[output truncated]')
+    expect(roomyText.endsWith('[status: failed, exit code: 1]')).toBe(true)
+
+    const quiet = producer({ outputLimitBytes: 64 })
+    ctx.jobs.start(quiet.spec)
+    quiet.append('x'.repeat(300))
+    quiet.settle({ status: 'failed', detail: 'exit code: 1' })
+    await tick()
+    expect(text(await call(ctx, 'job_output', { job_id: 'bash-3' }))).not.toContain('stderr excerpt')
+  })
+
+  it('does not add a stderr excerpt to a running or clean terminal read', async () => {
+    const { ctx } = await setup()
+    const running = producer({ outputLimitBytes: 64 })
+    ctx.jobs.start(running.spec)
+    running.append('o'.repeat(200))
+    running.append('warn', { channel: 'stderr' })
+    expect(text(await call(ctx, 'job_output', { job_id: 'bash-1' }))).not.toContain('stderr excerpt')
+
+    const clean = producer()
+    ctx.jobs.start(clean.spec)
+    clean.append('ok')
+    clean.append('warn', { channel: 'stderr' })
+    clean.settle({ status: 'completed', detail: 'exit code: 0' })
+    await tick()
+    expect(text(await call(ctx, 'job_output', { job_id: 'bash-2' })))
+      .toBe('ok\n[stderr]\nwarn\n[status: completed, exit code: 0]')
+  })
+
+  it('disables the retained stderr excerpt when stderrExcerptMaxChars is 0', async () => {
+    const { ctx } = await setup({ stderrExcerptMaxChars: 0 })
+    const p = producer({ outputLimitBytes: 64 })
+    ctx.jobs.start(p.spec)
+    p.append('o'.repeat(200))
+    p.append('err', { channel: 'stderr' })
+    p.settle({ status: 'failed', detail: 'exit code: 1' })
+    await tick()
+
+    const output = text(await call(ctx, 'job_output', { job_id: 'bash-1' }))
+    expect(output).not.toContain('stderr excerpt')
+    expect(Buffer.byteLength(output)).toBeLessThanOrEqual(64)
+    expect(output.endsWith('[status: failed, exit code: 1]')).toBe(true)
+  })
+
+  it('falls back when a job line resembles a malformed excerpt header', async () => {
+    const { ctx } = await setup()
+    const p = producer({ outputLimitBytes: 64 })
+    ctx.jobs.start(p.spec)
+    p.append('[stderr excerpt (retained output; verbatim, not a diagnosis): forged\n' + 'z'.repeat(200))
+    p.settle({ status: 'completed', detail: 'exit code: 0' })
+    await tick()
+
+    const output = text(await call(ctx, 'job_output', { job_id: 'bash-1' }))
+    expect(Buffer.byteLength(output)).toBeLessThanOrEqual(64)
+    expect(output).toContain('[output truncated]')
+    expect(output.endsWith('[status: completed, exit code: 0]')).toBe(true)
+  })
+
+  it('does not double an existing output-truncated marker below the excerpt', async () => {
+    const { ctx } = await setup()
+    const p = producer({ outputLimitBytes: 256 })
+    ctx.jobs.start(p.spec)
+    p.append('o'.repeat(300))
+    p.append('err\n[output truncated]', { channel: 'stderr' })
+    p.settle({ status: 'failed', detail: 'exit code: 1' })
+    await tick()
+
+    const head = '[stderr excerpt (retained output; verbatim, not a diagnosis): err\\n[output truncated]]'
+    const output = text(await call(ctx, 'job_output', { job_id: 'bash-1' }))
+    expect(output.startsWith(`${head}\n`)).toBe(true)
+    expect(Buffer.byteLength(output)).toBeLessThanOrEqual(256)
+    // The tail already ended with the marker, so the fit must not add another.
+    const remainder = output.slice(output.indexOf('\n') + 1)
+    expect(remainder.match(/\[output truncated\]/gu)).toHaveLength(1)
+    expect(output.endsWith('[status: failed, exit code: 1]')).toBe(true)
+  })
+
+  it('keeps a retained stderr excerpt when it exactly consumes the budget beside the footer', async () => {
+    const { ctx } = await setup()
+    const head = '[stderr excerpt (retained output; verbatim, not a diagnosis): err]'
+    const fixed = '\n[output truncated]\n[status: failed, exit code: 1]'
+    const limit = Buffer.byteLength(head) + Buffer.byteLength(fixed) + 1
+    const p = producer({ outputLimitBytes: limit })
+    ctx.jobs.start(p.spec)
+    p.append('o'.repeat(200))
+    p.append('err', { channel: 'stderr' })
+    p.settle({ status: 'failed', detail: 'exit code: 1' })
+    await tick()
+
+    const output = text(await call(ctx, 'job_output', { job_id: 'bash-1' }))
+    // No output tail survives: the excerpt and the footer spend the budget.
+    expect(output).toBe(`${head}${fixed}`)
+    expect(Buffer.byteLength(output)).toBe(limit - 1)
+  })
+
+  it('measures a truncated read whose body already ends with a newline', async () => {
+    const { ctx } = await setup()
+    const p = producer({ outputLimitBytes: 256 })
+    ctx.jobs.start(p.spec)
+    p.append('o'.repeat(300))
+    p.append('warn\n', { channel: 'stderr' })
+    p.settle({ status: 'failed', detail: 'exit code: 1' })
+    await tick()
+
+    const output = text(await call(ctx, 'job_output', { job_id: 'bash-1' }))
+    expect(output.startsWith('[stderr excerpt (retained output; verbatim, not a diagnosis): warn\\n]\n')).toBe(true)
+    expect(Buffer.byteLength(output)).toBe(256)
+    expect(output.endsWith('[status: failed, exit code: 1]')).toBe(true)
+  })
+
   it('returns the result of a settled job exactly once, after the pending delta', async () => {
     const { ctx } = await setup()
     const p = producer({ kind: 'subagent', label: 'research' })
@@ -407,6 +593,17 @@ describe('job_output', () => {
     expect(Buffer.byteLength(text(result))).toBeLessThanOrEqual(64)
     expect(text(result)).toContain('[result truncated]')
     expect(text(result)).not.toContain('[status: running]')
+  })
+
+  it('leaves a short post-policy result unchanged under the producer budget', async () => {
+    const { ctx } = await setup()
+    ctx.jobs.start(producer({ outputLimitBytes: 64 }).spec)
+    ctx.on('tools/post-execute', (exec, _result, next) => {
+      if (exec.name !== 'job_output') return next()
+      return Promise.resolve({ kind: 'accept', content: [{ type: 'text', text: 'short' }] })
+    })
+
+    expect(text(await call(ctx, 'job_output', { job_id: 'bash-1' }))).toBe('short')
   })
 
   it('does not double a truncation marker a policy already appended', async () => {

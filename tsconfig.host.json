@@ -10,6 +10,8 @@
   "include": [
     "apps/web/product-isolation.ts",
     "apps/web/tests/connection-recovery.e2e.ts",
+    "apps/web/tests/keyless-tool-inventory-bootstrap.ts",
+    "apps/web/tests/keyless-tool-inventory.e2e.ts",
     "apps/web/tests/server-restart.e2e.ts",
     "apps/web/tests/shortcuts.e2e.ts",
     "apps/web/tests/shortcuts-desktop.e2e.ts",
@@ -177,6 +179,8 @@
     "benchmarks/**/*.ts",
     "packages/*/*/tests/**/*.ts",
     "scripts/**/*.ts",
+    "scripts/tool-inventory/keyless-inventory-runner.mts",
+    "vitest.shared.ts",
     "website/**/*.ts",
     "website/.vitepress/**/*.ts"
   ],

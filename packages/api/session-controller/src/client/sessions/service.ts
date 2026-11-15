@@ -771,7 +771,17 @@ export class ClientSessions implements ISessions {
         ...(entry.origin !== undefined ? { origin: entry.origin } : {}),
       }
     }
+    // One catalog claim is unambiguous ancestry; competing parents are a
+    // corrupt projection and must never overwrite an authoritative row parent.
+    const catalogParents = new Map<SessionId, SessionId | null>()
     for (const [parentId, projection] of Object.entries(projectionsBySession)) {
+      for (const child of projection.values.subagentCatalog ?? []) {
+        const claimed = catalogParents.get(child.id)
+        if (claimed === undefined) catalogParents.set(child.id, parentId as SessionId)
+        else if (claimed !== parentId) catalogParents.set(child.id, null)
+      }
+    }
+    for (const projection of Object.values(projectionsBySession)) {
       for (const child of projection.values.subagentCatalog ?? []) {
         const childId = child.id
         const summary = byId[childId]
@@ -780,18 +790,36 @@ export class ClientSessions implements ISessions {
         const title = typeof projectedTitle === 'string' && projectedTitle !== '' ? projectedTitle : undefined
         const displayTitle = title ?? child.label ?? childId
         if (summary === undefined) {
+          const claimedParent = catalogParents.get(childId)
           byId[childId] = {
-            id: childId, displayTitle, parentId: parentId as SessionId,
-            origin: 'subagent', running: this.scopes.get(childId)?.session.getSnapshot().running ?? false, blank: false, updatedAt: 0,
+            id: childId, displayTitle,
+            ...(claimedParent === undefined || claimedParent === null ? {} : { parentId: claimedParent }),
+            origin: 'subagent', running: this.scopes.get(childId)?.session.getSnapshot().running ?? false, blank: false, updatedAt: child.createdAt,
             retainedBy: this.retentionSnapshot(childId).retainedBy,
             ...(projectionValues === undefined ? {} : { projectionValues }),
             ...(title === undefined ? {} : { title }),
           }
-        } else if (summary.displayTitle !== displayTitle || summary.projectionValues !== projectionValues) {
-          byId[childId] = {
-            ...summary,
-            displayTitle,
-            ...(projectionValues === undefined ? {} : { projectionValues }),
+        } else {
+          const catalogParent = catalogParents.get(childId)
+          const backfilledParent = summary.parentId === undefined
+            && catalogParent !== null && catalogParent !== undefined
+            ? catalogParent
+            : undefined
+          const backfilledOrigin = summary.origin === undefined ? 'subagent' as const : undefined
+          const backfilledUpdatedAt = summary.updatedAt === 0 && child.createdAt > 0 ? child.createdAt : undefined
+          if (summary.displayTitle !== displayTitle
+            || summary.projectionValues !== projectionValues
+            || backfilledParent !== undefined
+            || backfilledOrigin !== undefined
+            || backfilledUpdatedAt !== undefined) {
+            byId[childId] = {
+              ...summary,
+              displayTitle,
+              ...(projectionValues === undefined ? {} : { projectionValues }),
+              ...(backfilledParent === undefined ? {} : { parentId: backfilledParent }),
+              ...(backfilledOrigin === undefined ? {} : { origin: backfilledOrigin }),
+              ...(backfilledUpdatedAt === undefined ? {} : { updatedAt: backfilledUpdatedAt }),
+            }
           }
         }
       }

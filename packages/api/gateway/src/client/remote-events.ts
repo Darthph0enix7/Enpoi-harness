@@ -17,6 +17,7 @@ import {
   REMOTE_EVENT_RESULT_ENDPOINT,
   REMOTE_EVENT_STREAM_ENDPOINT,
   REMOTE_EVENT_STREAM_PAYLOAD,
+  type RemoteEventClientLimits,
   isRemoteEventAgentId,
   isRemoteEventClientId,
   isRemoteEventId,
@@ -59,10 +60,75 @@ type RemoteEventReplyOutcome =
 /** Private end-of-chain marker that cannot collide with a JSON listener result. */
 const REMOTE_EVENT_NEXT = Symbol('api-gateway.remote-event.next')
 
+/**
+ * Cross-bundle marker Connection uses to stop automatic recovery. The
+ * registered symbol is the shared protocol contract, so this bundle does not
+ * import Connection's runtime value.
+ */
+const TERMINAL_CONNECTION_FAILURE = Symbol.for('dsh.connection.terminal-failure')
+
+/**
+ * Build one terminal generation failure carrying Connection's shared marker.
+ * @param message - actionable diagnosis surfaced through the Connection state.
+ * @returns an Error that Connection treats as non-retryable across bundles.
+ */
+function terminalConnectionError(message: string): Error {
+  const error = new Error(message)
+  error.name = 'ConnectionTerminalError'
+  Object.defineProperty(error, TERMINAL_CONNECTION_FAILURE, { value: true })
+  return error
+}
+
+/** Default concurrent listener tasks (answers plus emits) one generation may launch. */
+export const DEFAULT_REMOTE_EVENT_MAX_ACTIVE_TASKS = 64
+
+/** Default retirement threshold: a new generation is refused once this many abandoned listener tasks remain. */
+export const DEFAULT_REMOTE_EVENT_MAX_RETIRED_TASKS = 4
+
+/**
+ * Resolve validated forwarded-event client limits from the Host's page
+ * bootstrap. Missing values keep the bounded defaults; malformed values fail
+ * activation instead of silently disabling the resource bound.
+ * @param input - page-global limit object.
+ * @returns complete listener-task budgets.
+ */
+export function resolveRemoteEventLimits(input: unknown = {}): RemoteEventClientLimits {
+  if (input !== undefined && (typeof input !== 'object' || input === null)) {
+    throw new RangeError('client api: forwarded Remote event limits must be an object')
+  }
+  const record = input as Record<string, unknown>
+  return {
+    maxActiveTasks: limitBound(record.maxActiveTasks, DEFAULT_REMOTE_EVENT_MAX_ACTIVE_TASKS, 'maxActiveTasks'),
+    maxRetiredTasks: limitBound(record.maxRetiredTasks, DEFAULT_REMOTE_EVENT_MAX_RETIRED_TASKS, 'maxRetiredTasks'),
+  }
+}
+
+/** Resolve one positive integer listener-task bound, failing loud on a bad bootstrap value. */
+function limitBound(value: unknown, fallback: number, name: string): number {
+  if (value === undefined) return fallback
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError(`client api: forwarded Remote event ${name} must be a positive integer`)
+  }
+  return value
+}
+
+/** Per-generation capability; revoked before teardown so late work cannot answer or write. */
+interface DeliveryCapability {
+  active: boolean
+}
+
+/** Read through a call so TypeScript's narrowing cannot outlive an await. */
+function deliveryCurrent(capability: DeliveryCapability, signal: AbortSignal): boolean {
+  return capability.active && !signal.aborted
+}
+
 /** Own Cordis registrations, generation pumping, waterfall dispatch, and HTTP replies. */
 export class ClientRemoteEvents {
   private readonly eventPrefix = `internal/api-gateway/remote-event/${randomUUID()}/`
   private readonly unregisterGeneration: () => void
+  private readonly retiredTasks = new Set<Promise<void>>()
+  private readonly maxActiveTasks: number
+  private readonly maxRetiredTasks: number
   private activeGeneration: Promise<void> | undefined
   private generationActivity: (() => void) | undefined
   private generationHeartbeat: (() => void) | undefined
@@ -76,7 +142,10 @@ export class ClientRemoteEvents {
     private readonly ownerCtx: Context,
     private readonly connection: ConnectionHandle,
     private readonly openStream: RemoteEventStreamOpener,
+    limits: RemoteEventClientLimits = resolveRemoteEventLimits(),
   ) {
+    this.maxActiveTasks = limits.maxActiveTasks
+    this.maxRetiredTasks = limits.maxRetiredTasks
     this.unregisterGeneration = connection.registerGenerationSource(this.runGeneration)
   }
 
@@ -124,6 +193,11 @@ export class ClientRemoteEvents {
 
   /** Track the current generation so plugin disposal waits for listener work to stop. */
   private readonly runGeneration: ConnectionGenerationSource = (signal, ready, activity, heartbeat) => {
+    if (this.retiredTasks.size >= this.maxRetiredTasks) {
+      return Promise.reject(terminalConnectionError(
+        `client api: forwarded Remote event resources are exhausted (${String(this.retiredTasks.size)} abandoned listener tasks, threshold ${String(this.maxRetiredTasks)}); reload the page to reset recovery`,
+      ))
+    }
     this.generationActivity = activity
     this.generationHeartbeat = heartbeat
     const tracked = this.pumpEvents(signal, ready, activity).finally(() => {
@@ -137,8 +211,8 @@ export class ClientRemoteEvents {
   }
 
   /** Deliver one notification through Cordis while containing listener failures. */
-  private deliver(frame: RemoteEventEmitFrame): void {
-    void privateEvents(this.ownerCtx)
+  private deliver(frame: RemoteEventEmitFrame): Promise<void> {
+    return privateEvents(this.ownerCtx)
       .parallel(this.eventKey(frame.event), ...frame.args)
       .catch((error: unknown) => { this.reportError(frame.event, error) })
   }
@@ -150,19 +224,26 @@ export class ClientRemoteEvents {
     activity: () => void,
   ): Promise<void> {
     let clientId: RemoteEventClientId | undefined
+    const capability: DeliveryCapability = { active: true }
     const failed = new AbortController()
     const generationSignal = AbortSignal.any([signal, failed.signal])
     const active = new Map<string, AbortController>()
     const tasks = new Set<Promise<void>>()
+    const activeTasks = new Set<Promise<void>>()
     const source = this.openStream(
       REMOTE_EVENT_STREAM_ENDPOINT,
       REMOTE_EVENT_STREAM_PAYLOAD,
       generationSignal,
     )
+    const iterator = source[Symbol.asyncIterator]()
     let streamFailed = false
     let streamError: unknown
     try {
-      for await (const value of source) {
+      while (true) {
+        const step = await raceIteratorNext(iterator, generationSignal)
+        if (step.kind === 'aborted') break
+        if (step.result.done === true) break
+        const value = step.result.value
         activity()
         if (clientId === undefined) {
           const opening = parseRemoteEventReady(value)
@@ -175,29 +256,49 @@ export class ClientRemoteEvents {
           active.get(frame.eventId)?.abort(new Error('client api: Remote event was cancelled by the Host'))
           continue
         }
+        this.admitListenerTask(activeTasks)
         if (frame.type === 'emit') {
-          this.deliver(frame)
+          this.trackListenerTask(this.deliver(frame), activeTasks)
           continue
         }
         const controller = new AbortController()
         active.set(frame.eventId, controller)
         const deliverySignal = AbortSignal.any([generationSignal, controller.signal])
-        const task = this.answer(frame, clientId, deliverySignal)
+        const delivery = this.answer(frame, clientId, deliverySignal, capability)
           .catch((error: unknown) => {
             if (!deliverySignal.aborted) failed.abort(error)
           })
           .finally(() => {
             active.delete(frame.eventId)
-            tasks.delete(task)
+            activeTasks.delete(delivery)
+            this.retiredTasks.delete(delivery)
           })
+        this.trackListenerTask(delivery, activeTasks)
+        // The generation owns the forward-event task through its signal, not
+        // the listener's cooperation: the tracked promise settles on abort so
+        // teardown cannot hang on an ignored cancellation.
+        const task = raceDeliveryWithAbort(delivery, deliverySignal)
         tasks.add(task)
+        const forget = (): void => { tasks.delete(task) }
+        void task.then(forget, forget)
       }
     } catch (error) {
       streamFailed = true
       streamError = error
     } finally {
+      capability.active = false
       for (const controller of active.values()) {
         controller.abort(new Error('client api: Remote event generation ended'))
+      }
+      // Only tasks still unresolved after cancellation become retired work;
+      // settled cooperative tasks never consume the abandoned budget.
+      for (const task of activeTasks) this.retireListenerTask(task)
+      try {
+        const returned = iterator.return?.()
+        /* v8 ignore next -- a stream opener's optional return may reject after the consumer stopped waiting; containment is deliberate */
+        void Promise.resolve(returned).catch(() => undefined)
+      } catch {
+        // A synchronous iterator return failure is already terminal work.
       }
       await Promise.allSettled(tasks)
     }
@@ -209,10 +310,33 @@ export class ClientRemoteEvents {
     throw new Error('client api: forwarded Remote event stream ended unexpectedly')
   }
 
+  /** Reject one frame before it launches work when the active-task budget is full. */
+  private admitListenerTask(activeTasks: ReadonlySet<Promise<void>>): void {
+    if (activeTasks.size < this.maxActiveTasks) return
+    throw terminalConnectionError(
+      `client api: forwarded Remote event listener capacity reached (${String(this.maxActiveTasks)} active tasks); reload the page to reset recovery`,
+    )
+  }
+
+  /** Track one in-flight emit or answer for the current generation. */
+  private trackListenerTask(task: Promise<void>, activeTasks: Set<Promise<void>>): void {
+    activeTasks.add(task)
+    const forget = (): void => { activeTasks.delete(task) }
+    void task.then(forget, forget)
+  }
+
+  /** Retire one task that stayed unresolved after its generation was aborted. */
+  private retireListenerTask(task: Promise<void>): void {
+    this.retiredTasks.add(task)
+    const forget = (): void => { this.retiredTasks.delete(task) }
+    void task.then(forget, forget)
+  }
+
   private async answer(
     frame: RemoteEventInvocationFrame,
     clientId: RemoteEventClientId,
     signal: AbortSignal,
+    capability: DeliveryCapability,
   ): Promise<void> {
     const adapter = this.ownerCtx.typert.contexts.getClient('agent')
     let resolved: Context | TypertOwnedValue<Context> | undefined
@@ -229,11 +353,13 @@ export class ClientRemoteEvents {
         try {
           outcome = await this.dispatchWaterfall(target, frame, signal)
         } catch (error) {
-          if (signal.aborted) return
+          if (!deliveryCurrent(capability, signal)) return
           outcome = { kind: 'rejected', error: projectRemoteEventRejection(error) }
         }
       }
-      if (signal.aborted) return
+      // A retired generation never answers, even if its listener eventually
+      // resolves; that late result must not overwrite the replacement's Host state.
+      if (!deliveryCurrent(capability, signal)) return
       const result: RemoteEventResult = {
         clientId,
         eventId: frame.eventId,
@@ -247,6 +373,7 @@ export class ClientRemoteEvents {
         { args: result },
         signal,
       )
+      if (!deliveryCurrent(capability, signal)) return
       if (!response.ok) throw new Error(response.error.message)
     } finally {
       owned?.[Symbol.dispose]()
@@ -364,4 +491,78 @@ function privateEvents(ctx: Context): PrivateEventContext {
 
 function toError(reason: unknown, message: string): Error {
   return reason instanceof Error ? reason : new Error(message, { cause: reason })
+}
+
+/** One source pull outcome: a real iterator result or generation cancellation. */
+type IteratorStep =
+  | { readonly kind: 'next'; readonly result: IteratorResult<unknown> }
+  | { readonly kind: 'aborted' }
+
+/**
+ * Race one asynchronous operation with a cancellation signal. The tracked
+ * promise settles on abort even when the operation ignores it; a late
+ * settlement is handled, never leaked as an unhandled rejection.
+ * @param operation - work to start now.
+ * @param signal - cancellation signal.
+ * @param aborted - value returned when cancellation wins.
+ * @param rejectionMessage - fallback description for a non-Error rejection.
+ * @returns the operation result or the abort value.
+ */
+function raceWithAbort<T>(
+  operation: () => Promise<T>,
+  signal: AbortSignal,
+  aborted: T,
+  rejectionMessage: string,
+): Promise<T> {
+  if (signal.aborted) return Promise.resolve(aborted)
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const finish = (settle: () => void): void => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      settle()
+    }
+    const onAbort = (): void => { finish(() => { resolve(aborted) }) }
+    signal.addEventListener('abort', onAbort, { once: true })
+    void Promise.resolve().then(operation).then(
+      (value) => { finish(() => { resolve(value) }) },
+      (error: unknown) => { finish(() => { reject(toError(error, rejectionMessage)) }) },
+    )
+  })
+}
+
+/**
+ * Race one source pull with generation cancellation. A stream opener that
+ * ignores abort can leave `next()` pending forever; the tracked step still
+ * settles on abort so teardown and disposal stay bounded.
+ * @param iterator - opened forwarded-event stream.
+ * @param signal - generation cancellation.
+ * @returns the next item or an abort settlement.
+ */
+function raceIteratorNext(iterator: AsyncIterator<unknown>, signal: AbortSignal): Promise<IteratorStep> {
+  return raceWithAbort<IteratorStep>(
+    async () => ({ kind: 'next', result: await iterator.next() }),
+    signal,
+    { kind: 'aborted' as const },
+    'client api: forwarded Remote event stream read failed',
+  )
+}
+
+/**
+ * Race one owned listener task with its delivery cancellation. The returned
+ * promise always settles when the signal aborts, so generation teardown waits
+ * only for cooperative work; a listener that never observes the signal stays
+ * retired and cannot answer or mutate the current generation.
+ * @param delivery - listener task with its own error containment.
+ * @param signal - generation or per-invocation cancellation signal.
+ * @returns settlement or prompt cancellation of the tracked task.
+ */
+export function raceDeliveryWithAbort(delivery: Promise<void>, signal: AbortSignal): Promise<void> {
+  return raceWithAbort(
+    () => delivery,
+    signal,
+    undefined,
+    'client api: Remote event listener task failed',
+  )
 }

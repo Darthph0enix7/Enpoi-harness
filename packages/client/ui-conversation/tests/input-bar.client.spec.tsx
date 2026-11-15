@@ -11,7 +11,7 @@
 import './control-row-dom.ts'
 import type { InboxState } from '@deepseek-ai/dsh-agent/types'
 import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
-import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { $getRoot, $isTextNode } from 'lexical'
 import {
@@ -32,6 +32,7 @@ import type {
   ComposerAttachment, ComposerAttachmentsOwnerProps, DraftFileUploads, InputActivityOwnerProps,
 } from '../src/client/contract/slots.ts'
 import type { DraftAttachmentId } from '../src/client/contract/input.ts'
+import { getLayoutModeRuntime } from '@deepseek-ai/dsh-client-ui-primitives'
 import { InputBar } from '../src/client/skeleton/InputBar.tsx'
 import type { InputBarProps } from '../src/client/skeleton/InputBar.tsx'
 import { en, zh } from '../src/client/locales.ts'
@@ -39,7 +40,14 @@ import { en, zh } from '../src/client/locales.ts'
 // Every fixture carries the resource hook the resources plugin merges into GlobalStandardProps.
 const useResource = (() => ({ status: 'none' as const, value: undefined, failure: undefined })) as GlobalStandardProps['useResource']
 
-afterEach(cleanup)
+beforeEach(() => {
+  getLayoutModeRuntime().setFrameWidth(1920)
+})
+
+afterEach(() => {
+  cleanup()
+  getLayoutModeRuntime().setFrameWidth(1920)
+})
 
 // jsdom implements no Range geometry at all — `Range.prototype.getBoundingClientRect`
 // is absent — and the composer measures the caret with one when it restores the
@@ -300,6 +308,240 @@ function editableOf(input: HTMLElement): boolean {
 function writeDraft(shell: SessionInputShell, text: string): void {
   act(() => { shell.setDraft(text) })
 }
+
+/** Let the compact blur's portal-settle task run. */
+async function flushCollapse(): Promise<void> {
+  await act(async () => { await new Promise((resolve) => { setTimeout(resolve, 5) }) })
+}
+
+function compactCard(view: ReturnType<typeof bench>['view']): HTMLElement {
+  return view.container.querySelector<HTMLElement>('[data-composer-card]')!
+}
+
+describe('compact composer', () => {
+  it('starts as one quiet row without stealing editor focus', () => {
+    act(() => { getLayoutModeRuntime().setFrameWidth(390) })
+    const { view, textarea } = bench()
+    expect(compactCard(view).getAttribute('data-composer-compact')).toBe('')
+    expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('false')
+    expect(document.activeElement).not.toBe(textarea)
+  })
+
+  it('expands on focus, typing, attachments, and an open command menu', async () => {
+    act(() => { getLayoutModeRuntime().setFrameWidth(390) })
+    const focused = bench()
+    fireEvent.focus(focused.textarea)
+    expect(compactCard(focused.view).getAttribute('data-composer-expanded')).toBe('true')
+
+    const typed = bench()
+    act(() => { typed.shell.setDraft('hello') })
+    expect(compactCard(typed.view).getAttribute('data-composer-expanded')).toBe('true')
+
+    const held = new File(['x'], 'x.png', { type: 'image/png' })
+    const attached = bench({ attachments: [{ kind: 'image', id: 'draft-1' as DraftAttachmentId, file: held, previewUrl: 'blob:held' }] })
+    expect(compactCard(attached.view).getAttribute('data-composer-expanded')).toBe('true')
+
+    const menu = bench({ commandMenuOpen: true })
+    expect(compactCard(menu.view).getAttribute('data-composer-expanded')).toBe('true')
+  })
+
+  it('collapses only when empty and idle after focus leaves the composer', async () => {
+    act(() => { getLayoutModeRuntime().setFrameWidth(390) })
+    const { view, textarea } = bench()
+    fireEvent.focus(textarea)
+    expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('true')
+    fireEvent.blur(textarea)
+    await flushCollapse()
+    expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('false')
+
+    const typed = bench({ draft: 'keep this' })
+    fireEvent.focus(typed.textarea)
+    fireEvent.blur(typed.textarea)
+    await flushCollapse()
+    expect(compactCard(typed.view).getAttribute('data-composer-expanded')).toBe('true')
+  })
+
+  it('does not let unrelated dialog/menu/listbox surfaces hold an empty composer open', async () => {
+    act(() => { getLayoutModeRuntime().setFrameWidth(390) })
+    const { view, textarea } = bench()
+    for (const role of ['dialog', 'menu', 'listbox']) {
+      fireEvent.focus(textarea)
+      const unrelated = document.createElement('div')
+      unrelated.setAttribute('role', role)
+      document.body.append(unrelated)
+      try {
+        fireEvent.blur(textarea)
+        await flushCollapse()
+        expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('false')
+      } finally {
+        unrelated.remove()
+      }
+    }
+  })
+
+  it('stays open for its own agent picker and closes when that picker closes', async () => {
+    act(() => { getLayoutModeRuntime().setFrameWidth(390) })
+    const { view, textarea } = bench()
+    fireEvent.focus(textarea)
+    const picker = document.createElement('button')
+    picker.setAttribute('data-agent-trigger', '')
+    picker.setAttribute('aria-expanded', 'true')
+    compactCard(view).append(picker)
+    try {
+      fireEvent.focus(picker)
+      fireEvent.blur(picker)
+      await flushCollapse()
+      expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('true')
+      picker.setAttribute('aria-expanded', 'false')
+      await flushCollapse()
+      expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('false')
+    } finally {
+      picker.remove()
+    }
+  })
+
+  it('records a model popover opened by its own trigger and forgets it on removal', async () => {
+    act(() => { getLayoutModeRuntime().setFrameWidth(390) })
+    const { view, textarea } = bench()
+    fireEvent.focus(textarea)
+    const trigger = document.createElement('button')
+    trigger.setAttribute('data-model-trigger', '')
+    compactCard(view).append(trigger)
+    const popover = document.createElement('div')
+    popover.setAttribute('data-model-popover', '')
+    try {
+      fireEvent.click(trigger)
+      document.body.append(popover)
+      await flushCollapse()
+      fireEvent.focus(trigger)
+      fireEvent.blur(trigger)
+      await flushCollapse()
+      expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('true')
+      popover.remove()
+      fireEvent.pointerDown(document.body)
+      await flushCollapse()
+      expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('false')
+    } finally {
+      popover.remove()
+      trigger.remove()
+    }
+  })
+
+  it('records a composer model trigger sheet as its own overlay', async () => {
+    act(() => { getLayoutModeRuntime().setFrameWidth(390) })
+    const { view, textarea } = bench()
+    fireEvent.focus(textarea)
+    const trigger = document.createElement('button')
+    trigger.setAttribute('data-model-trigger', '')
+    compactCard(view).append(trigger)
+    const sheet = document.createElement('div')
+    sheet.setAttribute('data-dsh-list-surface', '')
+    sheet.setAttribute('role', 'dialog')
+    try {
+      fireEvent.click(trigger)
+      document.body.append(sheet)
+      await flushCollapse()
+      fireEvent.focus(trigger)
+      fireEvent.blur(trigger)
+      await flushCollapse()
+      expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('true')
+      sheet.remove()
+      fireEvent.pointerDown(document.body)
+      await flushCollapse()
+      expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('false')
+    } finally {
+      sheet.remove()
+      trigger.remove()
+    }
+  })
+
+  it('does not hide a focused toolbar control or collapse a composed IME Escape', () => {
+    act(() => { getLayoutModeRuntime().setFrameWidth(390) })
+    const { view, textarea } = bench()
+    fireEvent.focus(textarea)
+    const toolbar = document.createElement('button')
+    compactCard(view).append(toolbar)
+    try {
+      fireEvent.focus(toolbar)
+      fireEvent.keyDown(toolbar, { key: 'Escape' })
+      expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('true')
+      fireEvent.focus(textarea)
+      fireEvent.keyDown(textarea, { key: 'Escape', isComposing: true })
+      expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('true')
+    } finally {
+      toolbar.remove()
+    }
+  })
+
+  it('keeps a focused compact editor open across a session change', () => {
+    act(() => { getLayoutModeRuntime().setFrameWidth(390) })
+    const { view, textarea, props } = bench()
+    act(() => { textarea.focus() })
+    expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('true')
+    act(() => { view.rerender(<InputBar {...props} sessionId={'s2' as SessionId} />) })
+    expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('true')
+    expect(document.activeElement).toBe(textarea)
+  })
+
+  it('keeps Stop in the collapsed compact row while a turn runs', () => {
+    act(() => { getLayoutModeRuntime().setFrameWidth(390) })
+    const { view } = bench({ running: true })
+    expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('false')
+    expect(view.getByRole('button', { name: /停止生成|Stop/ })).toBeTruthy()
+  })
+
+  it('keeps Stop and stop-all in the collapsed row while descendants run', () => {
+    act(() => { getLayoutModeRuntime().setFrameWidth(390) })
+    const rows = [childRow('child-a', SID, true)]
+    const sessions: SessionListState = {
+      ids: rows.map(row => row.id),
+      phase: 'ready',
+      projectionsBySession: {},
+      byId: Object.fromEntries(rows.map(row => [row.id, row])),
+    }
+    const { view } = bench({ running: true, sessions })
+    expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('false')
+    expect(view.getByRole('button', { name: /停止生成|Stop/ })).toBeTruthy()
+    expect(view.getByRole('button', { name: /停止全部|stop all/i })).toBeTruthy()
+  })
+
+  it('keeps the expanded composer while a running turn is active', async () => {
+    act(() => { getLayoutModeRuntime().setFrameWidth(390) })
+    const { view, textarea } = bench({ running: true })
+    fireEvent.focus(textarea)
+    fireEvent.blur(textarea)
+    await flushCollapse()
+    expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('true')
+    // Stop remains present in the compact row even when collapsed.
+    fireEvent.keyDown(textarea, { key: 'Escape' })
+    expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('true')
+  })
+
+  it('collapses an empty idle composer with Escape without remounting the editor', () => {
+    act(() => { getLayoutModeRuntime().setFrameWidth(390) })
+    const { view, textarea } = bench()
+    fireEvent.focus(textarea)
+    expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('true')
+    fireEvent.keyDown(textarea, { key: 'Escape' })
+    expect(compactCard(view).getAttribute('data-composer-expanded')).toBe('false')
+    expect(view.getByRole('textbox')).toBe(textarea)
+  })
+
+  it('keeps the same editor and draft across a desktop/compact mode switch', () => {
+    const { view, textarea } = bench({ draft: 'preserve me' })
+    const card = compactCard(view)
+    expect(card.hasAttribute('data-composer-compact')).toBe(false)
+    act(() => { getLayoutModeRuntime().setFrameWidth(800) })
+    expect(card.hasAttribute('data-composer-compact')).toBe(true)
+    expect(card.getAttribute('data-composer-expanded')).toBe('true')
+    expect(view.getByRole('textbox')).toBe(textarea)
+    expect(textarea.textContent).toBe('preserve me')
+    act(() => { getLayoutModeRuntime().setFrameWidth(1440) })
+    expect(card.hasAttribute('data-composer-compact')).toBe(false)
+    expect(view.getByRole('textbox')).toBe(textarea)
+    expect(textarea.textContent).toBe('preserve me')
+  })
+})
 
 describe('composer focus handoff', () => {
   it('focus() returns the keyboard to the editor through Lexical, not a bare DOM focus', () => {

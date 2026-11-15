@@ -17,6 +17,15 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     'settings.launcher': { kind: 'single'; scope: 'root'; owner: SettingsLauncherOwnerProps }
 
     /**
+     * Stable root-level mount for the settings surface. The shell renders this
+     * once, outside the sidebar column and the compact drawer, so the dialog,
+     * section content, and input/view state survive a live layout-mode switch.
+     * It owns the header/action/close/section/onboarding children; the sidebar
+     * keeps only the launcher and trigger seats.
+     */
+    'settings.surface': { kind: 'single'; scope: 'root'; owner: SettingsSurfaceOwnerProps }
+
+    /**
      * The sidebar-foot trigger row content: icon + label, supplied as slot
      * content (the accessible name comes from the content — rail state
      * renders the label visually hidden). The shell renders the button
@@ -108,6 +117,12 @@ export interface SettingsPluginsTabOwnerProps {
 export interface SettingsTriggerOwnerProps {
   /** Whether the sidebar renders wide content (false = 56px rail, icon only). */
   wide: boolean
+}
+
+/** Root surface has no owner data; the shell store owns open/active state. */
+export interface SettingsSurfaceOwnerProps {
+  /** Marker field: the surface owner supplies no data. */
+  children?: never
 }
 
 /** Owner share of the header title seat (the shell supplies nothing). */

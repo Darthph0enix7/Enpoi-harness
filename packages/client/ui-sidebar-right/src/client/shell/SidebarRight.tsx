@@ -3,8 +3,9 @@
  *
  * The frame owns the right column's geometry; this package owns one content
  * tree at the column width or fixed across the viewport. A shown wide panel
- * retains its track in fullscreen, preserving the conversation width. Below
- * 768px fullscreen is derived from viewport width, without changing manual mode.
+ * retains its track in fullscreen, preserving the conversation width. The
+ * compact shell passes mobile:true; a desktop push that cannot claim its
+ * column falls back to the fullscreen overlay without changing manual mode.
  *
  * The panel stays mounted while collapsed, translated off the frame's right
  * edge, so opening and closing are one gesture in both presentations: a slide
@@ -13,14 +14,16 @@
  * the panel covers the frame, without animating those hidden columns.
  *
  * The editor pane and its divider live inside the panel box, as one flex row:
- * the pane keeps its width, the seam its 5px divider, and the docked surface
- * fills the rest, so a panel slide carries the preview with it, a frame drag
- * resizes the one box the row splits, and opening a file grows the pane while
- * the tree gives up exactly the same width. The pane keeps a zero-width state
- * to land on — it is mounted while the files page is lit (its first open has a
- * pane to grow from) or an editor tab exists (its close has one to shrink to).
- * A drag marks the body so the stylesheet can pause those eased widths while
- * the pointer writes them.
+ * the pane keeps its preferred width, the seam its 5px divider, and the docked
+ * surface fills the rest, so a panel slide carries the preview with it and a
+ * frame drag resizes the one box the row splits. The tree keeps its minimum
+ * when the box can supply it; a narrower normal box, and every fullscreen
+ * panel, gives the preview the whole box as a single pane instead of widening
+ * the outer column or letting the tree go negative. The pane keeps a
+ * zero-width state to land on — it is mounted while the files page is lit (its
+ * first open has a pane to grow from) or an editor tab exists (its close has
+ * one to shrink to). A drag marks the body so the stylesheet can pause those
+ * eased widths while the pointer writes them.
  *
  * The panel has one control, the presentation switch, riding the docking kit's
  * chrome seat at the end of the top-right pane's tab strip. The way to collapse
@@ -109,6 +112,7 @@ export interface SidebarRightInjected {
     closeWithFocus: (paneId: PaneId, close: () => void) => void
     /** Commit a page operation and focus the pane it selects. */
     openWithFocus: (open: () => PaneId | undefined) => void
+    /** Fullscreen is forced by the compact shell or room fallback; toggling it collapses instead of switching mode. */
     autoFullscreen?: boolean
   }) => () => void
   /**
@@ -128,7 +132,14 @@ export interface SidebarRightInjected {
   readonly selectKind: (kind: string) => void
   /** Record the editor pane's width after a drag. */
   readonly setEditorWidth: (px: number) => void
-  /** Set the rightbar column width preference in the frame layout. */
+  /** Record the rail's explicit open intent; a forced fullscreen close clears it. */
+  readonly setOpen: (open: boolean) => void
+  /**
+   * Set the rightbar column width preference in the frame layout.
+   *
+   * The preview lifecycle does not call this: opening a document fits the
+   * editor and tree inside the column the operator already chose.
+   */
   readonly setRightbarWidth?: (px: number) => void
   /** Close through the resource owner's cleanup handler. */
   readonly closeTab: (tabId: TabId) => void
@@ -172,12 +183,9 @@ interface PanelProps {
   readonly useStore: Store['useStore']
   readonly occurrence: SidebarRightInjected['occurrence']
   readonly fullscreen: boolean
-  readonly autoFullscreen: boolean
   /** This seat's view is the selected Conversation. */
   readonly active: boolean
   readonly retainTab: RightbarSeatProps['retainTab']
-  /** The mobile container owns the viewport: the panel draws the file push. */
-  readonly mobile: boolean
   /** Receives the kit's room-rule readings for the service's `split`. */
   readonly reportRoom: (fits: ReadonlyMap<PaneId, HalvesFit>) => void
 }
@@ -336,12 +344,13 @@ function BottomTerminalGlyph(): ReactNode {
  * collapse control and the panel has no header of its own.
  */
 function PanelChrome({
-  fullscreen, autoFullscreen, actions, sessionId, t,
+  fullscreen, autoFullscreen, actions, sessionId, onCloseForced, t,
 }: {
   readonly fullscreen: boolean
   readonly autoFullscreen: boolean
   readonly actions: Store['actions']
   readonly sessionId: SessionId
+  readonly onCloseForced: (() => void) | undefined
   readonly t: RightbarSeatProps['t']
 }): ReactNode {
   const next: DockMode = fullscreen ? 'push' : 'fullscreen'
@@ -354,7 +363,10 @@ function PanelChrome({
         aria-label={modeLabel}
         data-sidebar-right-mode={next}
         onClick={() => {
-          if (fullscreen && autoFullscreen) actions.setExpanded(sessionId, false)
+          if (fullscreen && autoFullscreen) {
+            if (onCloseForced !== undefined) onCloseForced()
+            else actions.setExpanded(sessionId, false)
+          }
           actions.setMode(sessionId, next)
         }}
       >
@@ -372,7 +384,7 @@ function PanelChrome({
  * never hides, with or without the panel.
  */
 export function Rail({
-  items, active, fullscreen, autoFullscreen, actions, sessionId, onSelect, t,
+  items, active, fullscreen, autoFullscreen, actions, sessionId, onSelect, onCloseForced, t,
 }: {
   readonly items: readonly SidebarRightRailItem[]
   readonly active: string | undefined
@@ -383,6 +395,8 @@ export function Rail({
   /** The mounted session; absent while no session surface exists. */
   readonly sessionId?: SessionId | undefined
   readonly onSelect: (kind: string) => void
+  /** A forced fullscreen close clears the rail intent as well as collapsing. */
+  readonly onCloseForced?: (() => void) | undefined
   readonly t: RightbarSeatProps['t']
 }): ReactNode {
   // enpoi: the rail's stylesheet reserves its 44px strip on the centre column
@@ -440,6 +454,7 @@ export function Rail({
             autoFullscreen={autoFullscreen}
             actions={actions}
             sessionId={sessionId}
+            onCloseForced={onCloseForced}
             t={t}
           />
         )}
@@ -457,6 +472,8 @@ interface EditorSplit {
   readonly open: boolean
   /** The pane's divider is grabbable: open and on screen. */
   readonly live: boolean
+  /** The preview owns the whole panel box; the dock waits behind the back control. */
+  readonly single: boolean
   readonly width: number
   readonly onPreview: (width: number | undefined) => void
   readonly onCommit: (width: number) => void
@@ -469,7 +486,8 @@ interface EditorSplit {
  * cannot outrun or lag the panel, a frame drag resizes the one box whose flex
  * row splits, and a collapse leaves no gap behind. The docked surface fills
  * what the editor and its seam leave; the surface still owns the page's body,
- * the room rule, and the floating layer.
+ * the room rule, and the floating layer. A single-pane preview replaces the
+ * split row with the file push; the dock stays mounted in the layout behind it.
  */
 function SidebarPanel(panel: PanelProps & {
   readonly width: number
@@ -478,12 +496,6 @@ function SidebarPanel(panel: PanelProps & {
 }): ReactNode {
   const { sessionId, surface, actions, t, renderSlot, openTab, width, reportRoom, fullscreen, panelRef, editor } = panel
   const { expanded } = surface.layout
-  // The file push is the panel's whole content only on the mobile container,
-  // whose narrow layout has no column to split: the dock surface (the tree)
-  // waits one back step behind it, instead of leaving the record with no
-  // surface at all. A desktop frame — fullscreen included — always splits the
-  // editor pane beside the tree, so a push there would read as a mode switch.
-  const filePush = panel.mobile && editor.open && editor.tab !== undefined
   return (
     <div
       ref={panelRef}
@@ -491,65 +503,52 @@ function SidebarPanel(panel: PanelProps & {
       style={{ right: fullscreen ? 0 : RAIL_WIDTH, width: fullscreen ? '100%' : Math.max(0, width - RAIL_WIDTH) }}
       data-sidebar-right-panel={fullscreen ? 'fullscreen' : 'push'}
       data-sidebar-right-open={expanded || undefined}
+      data-sidebar-right-single={editor.single || undefined}
       // Off-edge is out of reach: the stylesheet's visibility flip takes the
       // hidden box out of the tab order, and this takes it out of the
       // accessibility tree.
       aria-hidden={!expanded || undefined}
     >
-      {filePush ? (
-        <div className={css.filePush} data-sidebar-right-file-push>
-          <div className={css.filePushBar}>
-            <button
-              type="button"
-              className={css.filePushBack}
-              aria-label={t('mobile.fileBack')}
-              data-sidebar-right-file-back
-              onClick={() => { actions.clearEditor(sessionId) }}
-            >
-              <IconChevronLeftOutlineRegular size={16} />
-            </button>
-            <span className={css.filePushTitle} data-sidebar-right-file-title>
-              {titlesFor(panel)(editor.tab)}
-            </span>
-          </div>
-          <div className={css.filePushBody} data-sidebar-right-file-body>
-            {bodiesFor(panel)(editor.tab)}
-          </div>
-        </div>
-      ) : (
-        <>
-          {editor.mounted && (
-            <EditorPane panel={panel} tab={editor.tab} width={editor.width} open={editor.open} />
-          )}
-          {editor.mounted && (
-            <EditorDivider
-              width={editor.width}
-              open={editor.open}
-              live={editor.live}
-              onPreview={editor.onPreview}
-              onCommit={editor.onCommit}
-            />
-          )}
-          <div className={css.panelBody} data-sidebar-right-body>
-            <DockSurface
-              state={surface.layout}
-              canSplit={canSplit(surface.layout) && dockPaneIds(surface.layout).length < 2}
-              hideSplitWhenBlocked
-              dropZones="horizontal"
-              minPaneFraction={0.2}
-              canAddTab={paneId => guideIn(surface.layout, paneId) === undefined}
-              canCloseTab={tabId => canCloseTab(surface, tabId)}
-              intents={intentsFor(sessionId, actions, openTab, panel.closeTab, panel.splitPane)}
-              labels={dockLabels(t)}
-              renderTab={bodiesFor(panel)}
-              renderTabTitle={titlesFor(panel)}
-              renderTabMenuItems={(tab, dismiss) =>
-                renderSlot('sidebar.right.tab.menu.item', { tab, dismiss })}
-              onRoom={reportRoom}
-            />
-          </div>
-        </>
+      {(editor.mounted || editor.single) && (
+        <EditorPane
+          panel={panel}
+          tab={editor.tab}
+          width={editor.single ? width : editor.width}
+          open={editor.open}
+          single={editor.single}
+        />
       )}
+      {editor.mounted && !editor.single && (
+        <EditorDivider
+          width={editor.width}
+          open={editor.open}
+          live={editor.live}
+          onPreview={editor.onPreview}
+          onCommit={editor.onCommit}
+        />
+      )}
+      <div
+        className={css.panelBody}
+        data-sidebar-right-body
+        data-sidebar-right-body-single={editor.single || undefined}
+      >
+        <DockSurface
+          state={surface.layout}
+          canSplit={canSplit(surface.layout) && dockPaneIds(surface.layout).length < 2}
+          hideSplitWhenBlocked
+          dropZones="horizontal"
+          minPaneFraction={0.2}
+          canAddTab={paneId => guideIn(surface.layout, paneId) === undefined}
+          canCloseTab={tabId => canCloseTab(surface, tabId)}
+          intents={intentsFor(sessionId, actions, openTab, panel.closeTab, panel.splitPane)}
+          labels={dockLabels(t)}
+          renderTab={bodiesFor(panel)}
+          renderTabTitle={titlesFor(panel)}
+          renderTabMenuItems={(tab, dismiss) =>
+            renderSlot('sidebar.right.tab.menu.item', { tab, dismiss })}
+          onRoom={reportRoom}
+        />
+      </div>
     </div>
   )
 }
@@ -557,32 +556,56 @@ function SidebarPanel(panel: PanelProps & {
 // enpoi: the editor pane left of the file tree (old EditorHost split).
 /**
  * The editor pane inside the panel box, left of the tree: the resource tab the
- * rail's file open landed. Its width is the split's one free variable — the
- * tree takes the remainder — so opening a file grows the pane and shrinks the
- * tree in one flex change, and the panel's own slide carries the pane away.
+ * rail's file open landed. Its width is the split's free variable; the tree
+ * takes the remainder and keeps its minimum while the box can supply it, so an
+ * open fits the pane to the column the operator chose and the panel's own
+ * slide carries the pane away.
  *
  * The pane stays mounted at width zero before its first record and after its
  * last, which gives both transitions a state to land on instead of a mount and
- * an unmount in one frame.
+ * an unmount in one frame. In the single-preview presentation it fills the
+ * panel, draws the back bar, and keeps the same body mounted across the
+ * split/single resize.
  */
-function EditorPane({ panel, tab, width, open }: {
+function EditorPane({ panel, tab, width, open, single }: {
   readonly panel: PanelProps
   readonly tab: TabRecord | undefined
   readonly width: number
   readonly open: boolean
+  readonly single: boolean
 }): ReactNode {
   return (
     <div
       className={css.editor}
-      style={{ width }}
+      style={{ width: single ? '100%' : width }}
       data-sidebar-right-editor
+      data-sidebar-right-editor-single={single || undefined}
+      data-sidebar-right-file-push={single || undefined}
       data-sidebar-right-editor-open={open || undefined}
       aria-hidden={!open || undefined}
     >
-      {/* The body exists only while the pane is open: a closed pane that still
-          mounted its record would run that record's effects twice when the
-          dock draws the same tab, and would keep a hidden copy alive. */}
-      {open && tab !== undefined && bodiesFor(panel)(tab)}
+      {single && open && tab !== undefined && (
+        <div className={css.filePushBar} data-sidebar-right-file-bar>
+          <button
+            type="button"
+            className={css.filePushBack}
+            aria-label={panel.t('mobile.fileBack')}
+            data-sidebar-right-file-back
+            onClick={() => { panel.actions.clearEditor(panel.sessionId) }}
+          >
+            <IconChevronLeftOutlineRegular size={16} />
+          </button>
+          <span className={css.filePushTitle} data-sidebar-right-file-title>
+            {titlesFor(panel)(tab)}
+          </span>
+        </div>
+      )}
+      {/* One body wrapper for both presentations: switching split/single only
+          changes the pane's geometry, so the document component keeps its
+          scroll position and caret instead of remounting. */}
+      <div className={css.filePushBody} data-sidebar-right-file-body={single || undefined}>
+        {open && tab !== undefined && bodiesFor(panel)(tab)}
+      </div>
     </div>
   )
 }
@@ -687,7 +710,7 @@ const CONTEXT_KIND = 'dsh-context'
 const RAIL_MARKER = 'data-sidebar-right-rail-mounted'
 /** Width of the editor pane's drag divider, in px; mirrors the stylesheet. */
 const EDITOR_DIVIDER = 5
-/** Narrowest panel the right column leaves once the editor takes its share. */
+/** Narrowest tree/dock width the preview leaves in the panel box. */
 const PANEL_MIN = 160
 /**
  * Body marker the editor divider sets while it drags; the stylesheet pauses
@@ -702,8 +725,8 @@ const EDITOR_RESIZE_MARKER = 'data-sidebar-right-editor-resizing'
  * which session it is acting on, because this is the seat that knows both.
  */
 export function RightbarSeat({
-  sessionId, width, viewportWidth, canShow, mobile, useStore, actions, t, renderSlot, syncPresentation, bindService, openTab, closeTab,
-  selectKind, setEditorWidth, setRightbarWidth, useTabTypes, useTabNavigation, useRail, useRailItems, occurrence,
+  sessionId, width, canShow, mobile, useStore, actions, t, renderSlot, syncPresentation, bindService, openTab, closeTab,
+  selectKind, setEditorWidth, setOpen, useTabTypes, useTabNavigation, useRail, useRailItems, occurrence,
   retainTab, active, useShortcuts, splitPane, toggleFullscreen,
 }: RightbarSeatProps): ReactNode {
   // One store instance per session, so this map holds this session's surface.
@@ -716,17 +739,23 @@ export function RightbarSeat({
   const railState = useRail(state => state)
   const railItems = useRailItems(items => items)
   const shown = active && surface !== undefined && surface.layout.expanded
-  const autoFullscreen = viewportWidth < 768
-  // The mobile container owns the whole viewport: the panel is always the
-  // fullscreen presentation, whatever the saved manual mode says, and the rail
-  // never becomes a column (the shell's bottom bar stands in for it).
-  const fullscreen = mobile || autoFullscreen || surface?.layout.mode === 'fullscreen'
+  // The compact shell owns the viewport and passes mobile:true; the desktop
+  // frame keeps push until the saved mode or the room rule says otherwise.
+  // A push that cannot claim its normal column falls back to the fullscreen
+  // overlay instead of collapsing the panel or resetting the operator's mode.
+  const overlayFallback = shown && !mobile && !canShow
+  const fullscreen = mobile || surface?.layout.mode === 'fullscreen' || overlayFallback
+  const forcedFullscreen = mobile || overlayFallback
   const panelRef = useRef<HTMLDivElement | null>(null)
   // The kit's room-rule readings, kept in a ref: the service reads them at
   // call time through the binding, and a reading never re-renders anything.
   const room = useRef<ReadonlyMap<PaneId, HalvesFit>>(new Map())
   const reportRoom = useCallback((fits: ReadonlyMap<PaneId, HalvesFit>): void => { room.current = fits }, [])
-  const track = shown && !mobile && !autoFullscreen
+  const track = shown && !mobile && !overlayFallback
+  const closeForced = useCallback(() => {
+    setOpen(false)
+    actions.setExpanded(sessionId, false)
+  }, [actions, sessionId, setOpen])
 
   // enpoi: the rail's lit kind is global: the operator's last choice, else the
   // first registered page. It stays lit whether or not the panel is drawn.
@@ -750,8 +779,9 @@ export function RightbarSeat({
 
   // enpoi: apply the intent to whichever session this seat now draws: a switch
   // from a session into a subagent session (and back) must not close the panel
-  // or drop its page. The narrow frame's own collapse is a responsive fact, not
-  // an operator choice, so `canShow` guards re-opening there.
+  // or drop its page. A stored open intent opens even when the normal track
+  // cannot fit: the presentation falls through to the fullscreen overlay rather
+  // than staying closed or resetting the saved mode.
   //
   // A target with no surface yet (the first switch after a reload) is opened
   // here before paint, and `openContent` materializes as part of its plan: the
@@ -759,7 +789,7 @@ export function RightbarSeat({
   // page, so no open animation plays for what the operator never closed.
   useLayoutEffect(() => {
     if (surface === undefined) {
-      if (openIntent && canShow && litKind !== undefined && litDefinition !== undefined) {
+      if (openIntent && litKind !== undefined && litDefinition !== undefined) {
         const address = pageAddress(litKind)
         actions.openContent(sessionId, {
           kind: litKind, contentId: address, title: litDefinition.title(address),
@@ -770,7 +800,7 @@ export function RightbarSeat({
       return
     }
     if (openIntent) {
-      if (litKind === undefined || !canShow) return
+      if (litKind === undefined) return
       const address = pageAddress(litKind)
       // A kind that allows multiple pages stores each under its own address:
       // any tab of the kind already shows the lit page, so no second one opens.
@@ -784,17 +814,13 @@ export function RightbarSeat({
     } else if (surface.layout.expanded) {
       actions.setExpanded(sessionId, false)
     }
-  }, [actions, canShow, litDefinition, litKind, openIntent, sessionId, surface])
-
-  useLayoutEffect(() => {
-    if (shown && !fullscreen && !canShow) actions.setExpanded(sessionId, false)
-  }, [actions, sessionId, shown, fullscreen, canShow])
+  }, [actions, litDefinition, litKind, openIntent, sessionId, surface])
 
   // Touch devices: the back gesture leaves fullscreen before it touches
-  // browser history. A viewport-derived or mobile fullscreen collapses the
-  // panel; the wide-frame mode switch returns to the pushed presentation.
+  // browser history. A viewport-derived, compact, or room-fallback fullscreen
+  // collapses the panel; the wide-frame mode switch returns to push.
   useBackHandler('sidebar-right:fullscreen', () => {
-    if (mobile || autoFullscreen) actions.setExpanded(sessionId, false)
+    if (mobile || forcedFullscreen) closeForced()
     else actions.setMode(sessionId, 'push')
   }, shown && fullscreen)
 
@@ -844,12 +870,12 @@ export function RightbarSeat({
   // last commit, and its commands act on the session actually on screen.
   useEffect(
     () => active
-      ? bindService({ sessionId, actions, surfaces, autoFullscreen,
+      ? bindService({ sessionId, actions, surfaces, autoFullscreen: forcedFullscreen,
         closeWithFocus: (paneId, close) => { closeWithPaneFocus(document, sessionId, paneId, close) },
         openWithFocus: (open) => { openWithPaneFocus(document, sessionId, open) },
         canSplitPane: paneId => room.current.get(paneId)?.row !== false })
       : undefined,
-    [bindService, sessionId, actions, surfaces, autoFullscreen, active],
+    [bindService, sessionId, actions, surfaces, forcedFullscreen, active],
   )
   // The Tab domain is not synced here: the controller adopted this session's
   // store as the runtime minted it and reconciles on the store's own commits,
@@ -885,30 +911,23 @@ export function RightbarSeat({
   // closing the tab has something to shrink.
   const editorMounted = surface !== undefined && !mobile && (isFilesActive || editorTab !== undefined)
 
-  // enpoi: the file push is the mobile container's presentation of the record:
-  // no rail column exists there, so the panel draws the document itself and the
-  // tree waits one back step behind it. Desktop frames always split the pane
-  // beside the tree.
-  const filePush = mobile && shown && editorOpen
-  useBackHandler('sidebar-right:file-push', () => { actions.clearEditor(sessionId) }, filePush)
-
-  // enpoi: auto-widen rightbar column on file open so preview and tree both fit comfortably!
-  const widenedSession = useRef<string | null>(null)
-  useLayoutEffect(() => {
-    if (!editorOpen || !shown || width >= 720 || fullscreen || setRightbarWidth === undefined) return
-    if (widenedSession.current === sessionId) return
-    widenedSession.current = sessionId
-    const target = Math.min(Math.max(760, width + railState.editorWidth), Math.round(viewportWidth * 0.75))
-    setRightbarWidth(target)
-  }, [editorOpen, shown, width, fullscreen, sessionId, setRightbarWidth, railState.editorWidth, viewportWidth])
-
+  // The preview and tree share the panel box the operator chose. The preview
+  // yields first when the box cannot hold both: the tree keeps PANEL_MIN and
+  // the preview takes the remainder. When even the preferred 200px preview
+  // would not fit, or the panel is fullscreen, the preview owns the whole box
+  // as a single pane and the dock waits behind the back control. The editor's
+  // 200px drag minimum is a stored preference, never a visual floor.
   const available = Math.max(0, width - RAIL_WIDTH - (editorOpen ? EDITOR_DIVIDER : 0))
-  const editorWidth = editorOpen
-    ? Math.min(previewWidth ?? railState.editorWidth, Math.max(EDITOR_WIDTH_MIN, available - PANEL_MIN))
+  const splitPreviewWidth = Math.max(0, available - PANEL_MIN)
+  const singlePreview = editorOpen && (fullscreen || splitPreviewWidth < EDITOR_WIDTH_MIN)
+  const filePush = shown && singlePreview
+  useBackHandler('sidebar-right:file-push', () => { actions.clearEditor(sessionId) }, filePush)
+  const editorWidth = editorOpen && !singlePreview
+    ? Math.min(Math.max(0, previewWidth ?? railState.editorWidth), splitPreviewWidth)
     : 0
   const panel: PanelProps | undefined = surface === undefined ? undefined : {
     sessionId, actions, t, renderSlot, surface, openTab, closeTab, useTabTypes, useTabNavigation, useStore, occurrence,
-    fullscreen, autoFullscreen, mobile, reportRoom, active, retainTab, shortcuts, splitPane, toggleFullscreen,
+    fullscreen, reportRoom, active, retainTab, shortcuts, splitPane, toggleFullscreen,
   }
   return (
     <>
@@ -919,10 +938,11 @@ export function RightbarSeat({
           items={railItems}
           active={shown ? litKind : undefined}
           fullscreen={fullscreen}
-          autoFullscreen={autoFullscreen}
+          autoFullscreen={forcedFullscreen}
           actions={actions}
           sessionId={sessionId}
           onSelect={selectKind}
+          onCloseForced={closeForced}
           t={t}
         />
       )}
@@ -932,7 +952,8 @@ export function RightbarSeat({
           width={width}
           panelRef={panelRef}
           editor={{
-            tab: editorTab, mounted: editorMounted, open: editorOpen, live: editorLive, width: editorWidth,
+            tab: editorTab, mounted: editorMounted, open: editorOpen, live: editorLive,
+            single: singlePreview, width: editorWidth,
             onPreview: setPreviewWidth,
             onCommit: (px) => { setPreviewWidth(undefined); setEditorWidth(px) },
           }}

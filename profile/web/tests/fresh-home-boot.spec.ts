@@ -216,7 +216,7 @@ describe('fresh-home boot composition', () => {
     expect(registry['oracle']?.label).toBe('The Oracle')
   })
 
-  it('enables the fleet capabilities by default and pre-attaches no tool group for any seat', () => {
+  it('enables the fleet capabilities by default and pre-attaches only the creator trio to the creator seat', () => {
     const state = initialCapabilitiesState()
     for (const id of ['oracle_review', 'roundtable', 'chorus', 'fixer', 'explorer', 'librarian', 'designer']) {
       expect(state.tools[id], `tool ${id} must default on`).toBe(true)
@@ -229,9 +229,10 @@ describe('fresh-home boot composition', () => {
     expect(state.mcp).toEqual({})
 
     const catalog = resolveToolGroups(undefined)
-    for (const seat of ['orchestrator', 'sysadmin', 'creator', 'broker', 'fixer', 'explorer', 'librarian', 'designer', 'oracle']) {
+    for (const seat of ['orchestrator', 'sysadmin', 'broker', 'fixer', 'explorer', 'librarian', 'designer', 'oracle']) {
       expect(preAttachFor(catalog, seat), `seat ${seat} pre-attach`).toEqual([])
     }
+    expect(preAttachFor(catalog, 'creator'), 'creator pre-attach').toEqual(['creator'])
     // C5: the recall family is static and enabled on a fresh install, so exact
     // earlier messages stay reachable for every seat without an attach step.
     expect(catalog.byId.get('recall')).toMatchObject({

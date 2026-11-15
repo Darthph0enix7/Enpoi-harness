@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import { ToolCallId, boundContextSummary, type ContentBlock } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import { CHILD_TOOL_BUDGET, createSettlementMessage, withChildBudgetGuidance } from '../src/continuation-messages.ts'
 
 const childId = SessionId('settled-child')
@@ -71,6 +72,92 @@ describe('continuable settlement content', () => {
       form: 'notice',
       summary: boundContextSummary(expected),
       senderSessionId: childId,
+    })
+  })
+
+  it('bounds and sanitizes the failure diagnostic without reasoning or credentials', () => {
+    const secret = 'sk-abcdefghijklmnop '
+    const long = `${secret}${'x'.repeat(4_000)}`
+    const message = createSettlementMessage(childId, {
+      stopReason: 'error',
+      failure: { code: 'PROVIDER ERROR!' },
+      lastSuccessfulOperation: { seq: SessionSeq(42) },
+      lastPublicText: long,
+    })
+
+    const text = message.content
+      .flatMap(block => block.type === 'text' ? [block.text] : [])
+      .join('\n')
+    expect(text).toContain('Diagnostic: code=PROVIDERERROR; recoverability=unknown; '
+      + 'last successful tool result at event seq 42.')
+    expect(text).toContain('Last public text before the ending (unverified):')
+    expect(text).toContain('[redacted]')
+    expect(text).not.toContain(secret.trim())
+    expect(text.length).toBeLessThan(2_000)
+    expect(text).not.toContain('private child reasoning')
+  })
+
+  it('truncates a multibyte public excerpt at a UTF-8 boundary', () => {
+    const message = createSettlementMessage(childId, {
+      stopReason: 'error',
+      failure: { code: 'E' },
+      lastPublicText: '权限'.repeat(300),
+    })
+    const blocks = message.content.flatMap(block => block.type === 'text' ? [block.text] : [])
+    const excerpt = blocks.find(text => text.includes('权限'))
+    expect(excerpt?.endsWith('…')).toBe(true)
+    expect(blocks.join('\n')).not.toContain('\uFFFD')
+  })
+
+  it('reports unknown rather than an unsafe failure code', () => {
+    const message = createSettlementMessage(childId, {
+      stopReason: 'error',
+      failure: { code: '***' },
+    })
+    expect(message.content[1]).toEqual({
+      type: 'text',
+      text: 'Diagnostic: code=UNKNOWN; recoverability=unknown.',
+    })
+  })
+
+  it('states a recoverable ending positively', () => {
+    const message = createSettlementMessage(childId, {
+      stopReason: 'error',
+      failure: { code: 'RETRYABLE', recoverable: true },
+    })
+    expect(message.content[1]).toEqual({
+      type: 'text',
+      text: 'Diagnostic: code=RETRYABLE; recoverability=yes.',
+    })
+  })
+
+  it('keeps an image in the closing report while excluding nontext diagnostics', () => {
+    const image: ContentBlock = {
+      type: 'image',
+      attachment: {
+        attachmentId: AttachmentId(`sha256:${'a'.repeat(64)}`),
+        mediaType: 'image/png',
+        bytes: 1,
+        width: 1,
+        height: 1,
+      },
+    }
+    const message = createSettlementMessage(childId, {
+      stopReason: 'completed',
+      output: [reasoning, { type: 'text', text: 'answer' }, image],
+    })
+    expect(message.content).toContainEqual(image)
+    expect(message.content).not.toContainEqual(reasoning)
+  })
+
+  it('states a provably discarded ending as not recoverable', () => {
+    const message = createSettlementMessage(childId, {
+      stopReason: 'refusal',
+      failure: { code: 'TURN_BLOCKED', recoverable: false },
+    })
+    expect(message.content[1]).toEqual({
+      type: 'text',
+      text: 'Diagnostic: code=TURN_BLOCKED; recoverability=no (the ending discarded the input).',
     })
   })
 

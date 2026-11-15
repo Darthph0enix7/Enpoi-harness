@@ -109,3 +109,24 @@ export function computeColumns(viewport: number, sidebar: number, rightbar: numb
     : Math.min(available, clampWidth(rightbar, RIGHTBAR_MIN, viewport * RIGHTBAR_MAX_RATIO))
   return { sidebar: s, center: Math.max(0, viewport - s - r), rightbar: r }
 }
+
+/**
+ * The width the frame's solver actually draws for a requested right-panel
+ * width, after the sidebar and center reserves. This is the same solve the
+ * frame performs, kept here so a stored drag records the width the operator
+ * saw rather than an unrealizable request. Zero means the frame cannot fit a
+ * right panel at all.
+ * @param viewport - available frame width in px.
+ * @param sidebar - effective sidebar width preference in px (0 = closed).
+ * @param requested - requested right-panel width in px.
+ * @param collapsedWidth - track width of the closed sidebar.
+ * @returns the drawn right-panel width, or zero when it does not fit.
+ */
+export function renderedRightbarWidth(
+  viewport: number,
+  sidebar: number,
+  requested: number,
+  collapsedWidth = SIDEBAR_COLLAPSED,
+): number {
+  return computeColumns(viewport, sidebar, requested, collapsedWidth).rightbar
+}

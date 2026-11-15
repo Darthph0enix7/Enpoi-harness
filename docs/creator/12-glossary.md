@@ -81,7 +81,7 @@ One line per term, harness-specific meaning first. `$DSH_HOME` is the user's har
 - **agent picker** — the composer's preset selector (`conversation.input.agent`): switches an idle session's preset; Settings → Agent presets sets the new-task default.
 - **incident / incident store** — bounded failure rows at `$DSH_HOME/diagnostics/incidents.sqlite` from the logger sink, plugin lifecycle failures, session-event error paths, and client reports; read with `diagnostics_report`.
 - **gate** — one of the four automated acceptance checks (error audit, tool roster diff, token contrast, rebrand) — see doc 11.
-- **grant / pin / Full access / approval** — the permission model: policy outcomes (`allow/ask/deny`), standing grants, exact-command pins, broad-allow, Full access (no prompts; parent judgement applies), approval cards naming the child session, agent label, depth, and matched rule, plus a parent recommendation — see doc 04.
+- **grant / pin / Full access / approval** — the permission model: policy outcomes (`allow/ask/deny`), standing grants, exact-command pins, broad-allow, Full access (no prompts; a child matches the root's standing consent with no model judgement or budget — an explicit root deny still wins, a child deny applies at every spawn, and the child keeps its own sandbox limits), approval cards naming the child session, agent label, depth, and matched rule, plus a parent recommendation — see doc 04.
 - **pack_sig** — **not a harness term.** It belongs to a different project's document toolchain; do not use it when describing this harness.
 
 ## Research

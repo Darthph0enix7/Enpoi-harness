@@ -49,13 +49,21 @@ export {
 } from './device.ts'
 export type { DeviceClassification, DeviceKind, DeviceReading, DeviceSnapshot, DeviceSource, PointerKind } from './device.ts'
 export {
+  getLayoutModeRuntime, getLayoutModeSnapshot, LAYOUT_BREAKPOINTS, LayoutModeRuntime,
+  resolveLayoutMode, startLayoutModeRuntime, useLayoutMode,
+} from './layout-mode.ts'
+export type { LayoutMode, LayoutModeReading, LayoutModeSnapshot } from './layout-mode.ts'
+export {
   backStack, registerBackSurface, useBackHandler, BackStack,
   BACK_SURFACE_STATE_KEY, BACK_SURFACE_TOKEN_KEY, BACK_SURFACE_DEPTH_KEY,
 } from './back-stack.ts'
 export { RiskConfirmation } from './RiskConfirmation.tsx'
 export type { RiskConfirmationProps } from './RiskConfirmation.tsx'
 export { ConnectionIndicator } from './ConnectionIndicator.tsx'
-export type { ConnectionIndicatorState } from './ConnectionIndicator.tsx'
+export type {
+  ConnectionIndicatorState,
+  ConnectionTerminalPresentation,
+} from './ConnectionIndicator.tsx'
 export { FishLogo, FISH_LOGO_PATH, FISH_LOGO_VIEWBOX } from './FishLogo.tsx'
 export { EnpoiMark, EnpoiWordmark } from './EnpoiMark.tsx'
 export { BrandWordmark } from './BrandWordmark.tsx'

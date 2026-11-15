@@ -519,13 +519,128 @@ describe('watchdog', () => {
 
   it('removes listeners, timers, and the global on disposal', () => {
     const { reload, reports, health } = bench({ bootDeadlineMs: 100 })
+    health.markBootFailed('retryable')
     expect(healthGlobal()).toBeDefined()
     health.dispose()
     health.dispose()
     expect(healthGlobal()).toBeUndefined()
     window.dispatchEvent(new ErrorEvent('error', { message: 'after dispose' }))
+    window.dispatchEvent(new Event('online'))
+    window.dispatchEvent(new Event('pageshow'))
     vi.advanceTimersByTime(1_000)
     expect(reports).toHaveLength(0)
     expect(reload).not.toHaveBeenCalled()
+  })
+})
+
+describe('retryable boot recovery', () => {
+  it('recovers on online, pageshow, and visible events inside the cooldown and cap', () => {
+    const { reload, health, clock } = bench()
+    health.markBootFailed('retryable')
+    expect(reload).not.toHaveBeenCalled()
+
+    window.dispatchEvent(new Event('online'))
+    expect(reload).toHaveBeenCalledOnce()
+    // Cooldown suppresses an immediate second opportunity.
+    window.dispatchEvent(new Event('pageshow'))
+    expect(reload).toHaveBeenCalledOnce()
+
+    clock.value += 30_000
+    window.dispatchEvent(new Event('pageshow'))
+    expect(reload).toHaveBeenCalledTimes(2)
+
+    clock.value += 30_000
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(reload).toHaveBeenCalledTimes(3)
+
+    // The rolling cap refuses a fourth auto-reload even after the cooldown.
+    clock.value += 30_000
+    window.dispatchEvent(new Event('online'))
+    expect(reload).toHaveBeenCalledTimes(3)
+    expect(health.checkNow()).toBe(false)
+  })
+
+  it('never auto-recovers a fatal plugin/config boot failure', () => {
+    const { reload, health } = bench()
+    health.markBootFailed()
+    window.dispatchEvent(new Event('online'))
+    window.dispatchEvent(new Event('pageshow'))
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(reload).not.toHaveBeenCalled()
+    expect(health.retryBoot()).toEqual({ kind: 'reload' })
+  })
+
+  it('stays inert on later online and pageshow events while the page is healthy', () => {
+    const { container, reload, health, clock } = bench()
+    mountWorkspace(container)
+    health.markBootComplete()
+    clock.value += 2_000
+    window.dispatchEvent(new Event('online'))
+    window.dispatchEvent(new Event('pageshow'))
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(reload).not.toHaveBeenCalled()
+  })
+
+  it('waits for visibility before a background recovery opportunity', () => {
+    const { reload, health } = bench()
+    health.markBootFailed('retryable')
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+    window.dispatchEvent(new Event('online'))
+    window.dispatchEvent(new Event('pageshow'))
+    expect(reload).not.toHaveBeenCalled()
+
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(reload).toHaveBeenCalledOnce()
+  })
+
+  it('ignores a boot failure recorded after completion or disposal', () => {
+    const completed = bench()
+    completed.health.markBootComplete()
+    completed.health.markBootFailed('retryable')
+    window.dispatchEvent(new Event('online'))
+    expect(completed.reload).not.toHaveBeenCalled()
+
+    const disposed = bench()
+    disposed.health.dispose()
+    disposed.health.markBootFailed('retryable')
+    expect(disposed.health.retryBoot()).toEqual({ kind: 'ignored', reason: 'disposed' })
+  })
+
+  it('guards the explicit retry action and ignores it outside a visible failure', () => {
+    const { reload, health } = bench()
+    expect(health.retryBoot()).toEqual({ kind: 'ignored', reason: 'not-failed' })
+    health.markBootFailed('retryable')
+    expect(health.retryBoot()).toEqual({ kind: 'reload' })
+    expect(health.retryBoot()).toMatchObject({ kind: 'suppressed', reason: 'cooldown' })
+    expect(reload).toHaveBeenCalledOnce()
+    health.dispose()
+    expect(health.retryBoot()).toEqual({ kind: 'ignored', reason: 'disposed' })
+  })
+})
+
+
+describe('explicit retry reasons', () => {
+  it('reports cooldown, limit, and unavailable-storage reasons', () => {
+    const { health, clock } = bench({ maxReloadsPerWindow: 2 })
+    health.markBootFailed('retryable')
+    expect(health.retryBoot()).toEqual({ kind: 'reload' })
+    expect(health.retryBoot()).toMatchObject({
+      kind: 'suppressed',
+      reason: 'cooldown',
+      retryAfterMs: 30_000,
+    })
+    clock.value += 30_000
+    expect(health.retryBoot()).toEqual({ kind: 'reload' })
+    clock.value += 30_000
+    expect(health.retryBoot()).toMatchObject({
+      kind: 'suppressed',
+      reason: 'limit',
+      retryAfterMs: 570_000,
+    })
+
+    const noStorage = bench({ storage: null })
+    noStorage.health.markBootFailed('retryable')
+    expect(noStorage.health.retryBoot()).toEqual({ kind: 'suppressed', reason: 'storage' })
   })
 })

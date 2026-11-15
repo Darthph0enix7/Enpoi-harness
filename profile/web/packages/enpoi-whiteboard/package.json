@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "main": "lib/index.js",
+  "scripts": {
+    "build:types": "tsc -p tsconfig.json && node scripts/rewrite-dts-imports.mjs"
+  },
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",
@@ -16,7 +19,9 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-system-prompt": "workspace:*",
-    "@deepseek-ai/dsh-tools": "workspace:*"
+    "@deepseek-ai/dsh-tools": "workspace:*",
+    "@deepseek-ai/dsh-util-values": "workspace:*",
+    "@deepseek-ai/schemastery": "workspace:~"
   },
   "dsh": {
     "bundle": {

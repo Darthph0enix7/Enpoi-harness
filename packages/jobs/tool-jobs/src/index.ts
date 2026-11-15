@@ -21,7 +21,7 @@ import { JobId } from '@deepseek-ai/dsh-jobs'
 import type { JobView, JobRead } from '@deepseek-ai/dsh-jobs'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent'
-import { publicJob, renderModelDelta, statusLine } from './render.ts'
+import { publicJob, renderModelDelta, retainedStderrExcerpt, statusLine, STDERR_EXCERPT_PREFIX } from './render.ts'
 import type { PublicJobSnapshot } from './render.ts'
 import { CompletionNoticeOutbox } from './completion-outbox.ts'
 declare module '@deepseek-ai/dsh-llm' {
@@ -57,6 +57,12 @@ export interface Config {
    * the next user input.
    */
   maxConsecutiveWakes?: number
+  /**
+   * Maximum characters of retained stderr repeated above a long or lossy
+   * finished read, so the tail of a truncated read still leads with its error
+   * evidence (default 200). Set 0 to disable the excerpt.
+   */
+  stderrExcerptMaxChars?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -64,6 +70,7 @@ export const Config: z<Config> = z.object({
   maxWaitTimeoutMs: z.number().min(1).default(600_000),
   completionDelivery: z.union(['quiet', 'wakeup'] as const).default('wakeup'),
   maxConsecutiveWakes: z.number().min(1),
+  stderrExcerptMaxChars: z.number().step(1).min(0).default(200),
 })
 
 /** Shared schema for job-control outputs. */
@@ -102,11 +109,11 @@ function retainHead(text: string, maxBytes: number): string {
 function fitWithSuffix(
   content: string,
   suffix: string,
-  maxBytes: number | undefined,
+  maxBytes: number,
   omitted: string,
 ): string {
   const complete = `${content}${suffix}`
-  if (maxBytes === undefined || encoder.encode(complete).byteLength <= maxBytes) return complete
+  if (encoder.encode(complete).byteLength <= maxBytes) return complete
   const fixed = `${content.endsWith(omitted.trimStart()) ? '' : omitted}${suffix}`
   const fixedBytes = encoder.encode(fixed).byteLength
   if (fixedBytes >= maxBytes) return retainTail(fixed, maxBytes)
@@ -182,13 +189,91 @@ function presentJobCall(title: string, kind: 'read' | 'execute', rawInput?: stri
   return { card: 'generic', title, kind, ...rawInput !== undefined ? { rawInput } : {} }
 }
 
-/** The consuming read as the model sees it: the delta, then the result once, then the status line. */
-function readBody(read: JobRead): { text: string; job: PublicJobSnapshot } {
+/** Output omission marker the canonical `job_output` finalizer inserts before its status footer. */
+const OUTPUT_OMITTED = '\n[output truncated]'
+
+/**
+ * Fit a canonical `job_output` result. A retained-stderr excerpt is the read's
+ * first line; when a producer budget truncates the read and can hold that line
+ * beside the status footer, both survive and the remaining bytes go to the
+ * output tail, whose spill reference and exit evidence stay readable. When the
+ * budget cannot hold the excerpt, the footer and tail win and the excerpt is
+ * dropped rather than left partial.
+ * @param content - the read body without its status footer.
+ * @param suffix - the status footer, including its leading newline.
+ * @param maxBytes - the producer's complete-result budget.
+ * @returns the bounded complete result.
+ */
+function fitJobOutput(content: string, suffix: string, maxBytes: number): string {
+  const complete = `${content}${suffix}`
+  if (encoder.encode(complete).byteLength <= maxBytes) return complete
+  const newline = content.indexOf('\n')
+  if (newline > 0 && content.startsWith(STDERR_EXCERPT_PREFIX)) {
+    const head = content.slice(0, newline)
+    if (head.endsWith(']')) {
+      const rest = content.slice(newline + 1)
+      const fixed = `${rest.endsWith(OUTPUT_OMITTED.trimStart()) ? '' : OUTPUT_OMITTED}${suffix}`
+      const fixedBytes = encoder.encode(fixed).byteLength
+      const headBytes = encoder.encode(head).byteLength
+      const available = maxBytes - fixedBytes
+      if (fixedBytes < maxBytes && rest.length > 0 && available >= headBytes + 1) {
+        const tail = retainTail(rest, available - headBytes - 1)
+        return `${head}${tail.length > 0 ? `\n${tail}` : ''}${fixed}`
+      }
+    }
+  }
+  return fitWithSuffix(content, suffix, maxBytes, OUTPUT_OMITTED)
+}
+
+/** Whether a job has reached one of its terminal statuses. */
+function isTerminal(status: JobView['status']): boolean {
+  return status === 'completed' || status === 'killed' || status === 'failed'
+}
+
+/**
+ * The excerpt a long or lossy finished read prepends. Lost bytes and a producer
+ * budget that truncates the complete read are the same conditions that make
+ * the existing dropped-output and truncation markers appear; a normal short,
+ * clean read already shows its stderr in place and gets no duplicate header.
+ * @param read - the consuming read.
+ * @param job - the read's public projection.
+ * @param body - the rendered read body, before the status footer.
+ * @param maxBytes - the producer's complete-result budget, or undefined when unbounded.
+ * @param maxChars - the configured excerpt character budget.
+ * @returns the excerpt metadata line, or undefined when none applies.
+ */
+function terminalStderrExcerpt(
+  read: JobRead,
+  job: PublicJobSnapshot,
+  body: string,
+  maxBytes: number | undefined,
+  maxChars: number,
+): string | undefined {
+  if (!isTerminal(job.status)) return undefined
+  const visible = read.chunks.filter(chunk => chunk.channel !== 'log')
+  const lostBytes = read.lossy || visible.some(chunk => chunk.gapBefore === true)
+  const rendered = body.length > 0 ? body : '(no new output)'
+  const complete = `${rendered}${rendered.endsWith('\n') ? '' : '\n'}${statusLine(job)}`
+  const truncated = maxBytes !== undefined && encoder.encode(complete).byteLength > maxBytes
+  if (!lostBytes && !truncated) return undefined
+  return retainedStderrExcerpt(visible, maxChars)
+}
+
+/**
+ * The consuming read as the model sees it: an optional retained-stderr excerpt
+ * for a long or lossy finished read, the delta, then the result once.
+ */
+function readBody(read: JobRead, maxBytes: number | undefined, stderrExcerptMaxChars: number): { text: string; job: PublicJobSnapshot } {
   const delta = renderModelDelta(read.chunks, read.lossy, read.job.output.spillPaths ?? [])
-  const text = read.result === undefined
+  const body = read.result === undefined
     ? delta
     : `${delta}${delta.length > 0 && !delta.endsWith('\n') ? '\n' : ''}${read.result}`
-  return { text, job: publicJob(read.job) }
+  const job = publicJob(read.job)
+  const excerpt = terminalStderrExcerpt(read, job, body, maxBytes, stderrExcerptMaxChars)
+  // An excerpt exists only when a visible stderr chunk rendered into `body`,
+  // so the prepended metadata line always has output beneath it.
+  const text = excerpt === undefined ? body : `${excerpt}\n${body}`
+  return { text, job }
 }
 
 export function apply(ctx: Context, config: Config): void {
@@ -196,6 +281,7 @@ export function apply(ctx: Context, config: Config): void {
   const waitCap = config.maxWaitTimeoutMs ?? 600_000
   const delivery = config.completionDelivery ?? 'wakeup'
   const wakeBudget = config.maxConsecutiveWakes
+  const stderrExcerptMaxChars = config.stderrExcerptMaxChars ?? 200
 
   // Turns this plugin opened on each owner since that owner last consumed
   // human input. Keyed by the exact Agent, so a same-session replacement
@@ -239,7 +325,7 @@ export function apply(ctx: Context, config: Config): void {
       if (rawSingleText(result.content) === `${content}${suffix}`) {
         return [{
           type: 'text',
-          text: fitWithSuffix(content, suffix, maxBytes, '\n[output truncated]'),
+          text: fitJobOutput(content, suffix, maxBytes),
         }]
       }
     }
@@ -369,7 +455,8 @@ export function apply(ctx: Context, config: Config): void {
         // set before any later settlement, which then notifies as usual.
         await jobs.wait(id, Math.min(args.timeout_ms ?? waitDefault, waitCap), exec.agent?.id, exec.signal)
       }
-      return readBody(jobs.read(id, exec.agent?.id))
+      const maxBytes = outputLimits.get(exec) ?? visibleOutputLimit(ctx, exec)
+      return readBody(jobs.read(id, exec.agent?.id), maxBytes, stderrExcerptMaxChars)
     },
     presentCall: args => presentJobCall(`Read output from background job ${args.job_id}`, 'read', args.job_id),
   }))

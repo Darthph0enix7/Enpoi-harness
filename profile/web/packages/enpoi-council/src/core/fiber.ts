@@ -18,7 +18,7 @@ import { queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { getBriefService } from 'dsh-enpoi-context-keeper'
-import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
+import { configuredRoleToolDenies, readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
@@ -88,8 +88,12 @@ export function estimateTokens(text: string): number {
 
 // Base deny list for EVERY council fiber (anti-leak). Passed UNCONDITIONALLY —
 // the fork's tools.restrict() skips unknown deny names safely.
-// NOTE: `run_code` is deliberately absent — the PTC transport is reserved and
-// naming it in a filter throws (doc 52).
+// NOTE: `run_code` is deliberately absent from this base list because core
+// `tools.restrict()` rejects it in `allow` but accepts it in `deny`; a role's
+// explicit `run_code: deny` is merged into the child filter at spawn. This is
+// NOT a claim that PTC is non-functional or tool-fenced: a seat holding
+// run_code can run a program with direct filesystem/process effects, bounded
+// only by its OS sandbox.
 export const COUNCIL_DENIED_TOOLS = [
   'send_message',
   'oracle_review', 'dispatch_task', 'subagent', 'subagent_fork', 'subagent_codex',
@@ -363,6 +367,14 @@ export async function startSeatFiber(
   signal: AbortSignal,
 ): Promise<SeatFiber> {
   const personaModel = opts.model ?? resolvePersonaModel(ctx, opts.seatId)
+  // `opts.seatId` is the trusted spawn role id from the council spec (debater,
+  // referee, chair, broker, curator), not a descriptor label or the parent
+  // preset. Explicit operator role tool denies join the fiber's deny list.
+  const roleDenies = configuredRoleToolDenies(
+    readOrchestrationDocument(ctx.get('settings') as SettingsDocumentReader | undefined),
+    opts.seatId,
+  )
+  const denyTools = [...new Set([...opts.denyTools, ...roleDenies])]
   const started = await ctx.subagents.startContinuable({
     provider: 'spawn',
     label: opts.label,
@@ -372,7 +384,7 @@ export async function startSeatFiber(
       parent,
       persona: opts.persona,
       quiet: true,
-      toolFilter: opts.denyTools.length > 0 ? { deny: [...opts.denyTools] } : undefined,
+      toolFilter: denyTools.length > 0 ? { deny: denyTools } : undefined,
       ...(personaModel !== undefined ? {
         agentOptions: {
           provider: personaModel.provider,

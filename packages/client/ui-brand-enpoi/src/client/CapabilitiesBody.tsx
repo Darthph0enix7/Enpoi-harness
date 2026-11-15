@@ -48,7 +48,7 @@
  * toggles with rollback, background persistence.
  */
 import { useState, useEffect, useMemo, useSyncExternalStore, type ReactNode } from 'react'
-import { Switch } from '@deepseek-ai/dsh-client-ui-primitives'
+import { DisclosureRow, Switch } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { BrandEnpoiKey, BrandT } from './locales.ts'
 import { AGENT_MODELS_KIND } from './kinds.ts'
@@ -984,6 +984,7 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo, t }: Capa
   const sessionIds = useSessions(state => state.ids)
   const [pending, setPending] = useState<Record<string, boolean>>({})
   const [writeError, setWriteError] = useState<string | null>(null)
+  const [helpOpen, setHelpOpen] = useState(false)
   // Scoping: the blank/new-session page (or no bound session) edits DEFAULTS;
   // a live session edits SESSION OVERRIDES. MCP mounts are session overrides.
   const sessionBlank = useSessions(state => sessionId === undefined ? undefined : state.byId[sessionId]?.blank)
@@ -1368,6 +1369,20 @@ export function CapabilitiesBody({ sessionId, useSessions, useTabInfo, t }: Capa
               : t('capsModeHintDefaults')}
           </span>
         </div>
+        <DisclosureRow
+          icon={iconSparkle(12)}
+          title={t('capsHelpTitle')}
+          open={helpOpen}
+          expandable
+          expandOnRowClick
+          onToggle={() => { setHelpOpen(value => !value) }}
+          className={c('help')}
+          titleClassName={c('helpTitle')}
+        >
+          <div className={c('helpBody')}>
+            {mode === 'session' ? t('capsHelpSession') : t('capsHelpDefaults')}
+          </div>
+        </DisclosureRow>
       </header>
 
       {writeError !== null && (

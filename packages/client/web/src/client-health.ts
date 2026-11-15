@@ -86,12 +86,45 @@ export interface ClientHealthGlobal {
   report(kind: string, message: string, stack?: string): void
 }
 
+/** Recovery disposition of one visible startup failure. */
+export type BootFailureDisposition =
+  /** Deterministic failure (plugin activation, export, manifest, or configuration); never auto-retried. */
+  | 'fatal'
+  /** Transport or module-fetch failure; a bounded online/pageshow/visible recovery may retry it. */
+  | 'retryable'
+
+/** Why one explicit retry could not consume a guarded reload slot. */
+export type BootRetryBlockReason = 'cooldown' | 'limit' | 'storage'
+
+/** Outcome of one explicit retry action, including its user-visible reason. */
+export type BootRetryOutcome =
+  | { readonly kind: 'reload' }
+  | {
+    readonly kind: 'suppressed'
+    readonly reason: BootRetryBlockReason
+    /** Time until the cooldown/window allows another attempt, when bounded. */
+    readonly retryAfterMs?: number
+  }
+  | { readonly kind: 'ignored'; readonly reason: 'not-failed' | 'disposed' }
+
 /** Installable page health surface. */
 export interface ClientHealth {
   /** Boot reached application mount: stop the deadline and start the settle probe. */
   markBootComplete(): void
-  /** Boot failed visibly on the boot page: the watchdog stands down and never reloads. */
-  markBootFailed(): void
+  /**
+   * Boot failed visibly on the boot page. A fatal failure stands the watchdog
+   * down for good; a retryable failure keeps the page visible and allows one
+   * guarded recovery on a later online, pageshow, or visible event.
+   * @param disposition - failure classification (default `fatal`).
+   */
+  markBootFailed(disposition?: BootFailureDisposition): void
+  /**
+   * Retry one visible startup failure through the same cooldown/cap guard as
+   * automatic recovery. Only the visible failure path uses this; a healthy
+   * mounted page never calls it.
+   * @returns the guarded reload outcome.
+   */
+  retryBoot(): BootRetryOutcome
   /**
    * Run one blank/stall probe against the current page.
    * @returns whether the probe recovered a failure.
@@ -208,6 +241,15 @@ interface ReloadRecord {
   n: number
 }
 
+/** Result of consuming one guarded reload slot. */
+type ReloadSlot =
+  | { readonly allowed: true }
+  | {
+    readonly allowed: false
+    readonly reason: BootRetryBlockReason
+    readonly retryAfterMs?: number
+  }
+
 /** Guardian of the one-reload-per-window auto-recovery invariant. */
 class ReloadGuard {
   constructor(
@@ -223,11 +265,11 @@ class ReloadGuard {
    * so a reload grants at most the cap inside the rolling window and never
    * twice inside the cooldown; unavailable storage denies the slot rather than
    * risk an unguarded reload loop.
-   * @returns true when the caller may reload.
+   * @returns the granted slot, or the persisted reason it was denied.
    */
-  consume(): boolean {
+  consume(): ReloadSlot {
     const storage = this.storage
-    if (storage === undefined) return false
+    if (storage === undefined) return { allowed: false, reason: 'storage' }
     const now = this.now()
     let next: ReloadRecord = { t: now, n: 1 }
     try {
@@ -241,16 +283,22 @@ class ReloadGuard {
             && typeof record.n === 'number'
             && now - record.t <= this.windowMs
           ) {
-            if (record.n >= this.maxReloads || now - record.t < this.cooldownMs) return false
+            const elapsed = now - record.t
+            if (record.n >= this.maxReloads) {
+              return { allowed: false, reason: 'limit', retryAfterMs: Math.max(0, this.windowMs - elapsed) }
+            }
+            if (elapsed < this.cooldownMs) {
+              return { allowed: false, reason: 'cooldown', retryAfterMs: this.cooldownMs - elapsed }
+            }
             next = { t: now, n: record.n + 1 }
           }
         }
       }
       storage.setItem(RELOAD_RECORD_KEY, JSON.stringify(next))
-      return true
+      return { allowed: true }
     } catch {
       // Unreadable or unwritable storage: deny rather than reload without a guard.
-      return false
+      return { allowed: false, reason: 'storage' }
     }
   }
 }
@@ -291,7 +339,7 @@ class ClientHealthMonitor implements ClientHealth {
   private readonly startTimes: number[] = []
   private readonly lastByMessage = new Map<string, number>()
   private bootComplete = false
-  private bootFailed = false
+  private bootFailure: BootFailureDisposition | undefined
   private bootCompletedAt: number | undefined
   private startedAt: number
   private bootElapsedMs = 0
@@ -313,7 +361,17 @@ class ClientHealthMonitor implements ClientHealth {
   }
 
   private readonly onVisibility = (): void => {
-    if (this.doc.visibilityState === 'visible') this.checkNow()
+    if (this.doc.visibilityState !== 'visible') return
+    if (this.bootFailure !== undefined) {
+      this.recoverBootFailure()
+      return
+    }
+    this.checkNow()
+  }
+
+  private readonly onRecoveryOpportunity = (): void => {
+    if (this.doc.visibilityState !== 'visible') return
+    this.recoverBootFailure()
   }
 
   constructor(options: ClientHealthOptions) {
@@ -351,6 +409,8 @@ class ClientHealthMonitor implements ClientHealth {
     this.win.addEventListener('error', this.onError)
     this.win.addEventListener('unhandledrejection', this.onRejection as EventListener)
     this.doc.addEventListener('visibilitychange', this.onVisibility)
+    this.win.addEventListener('online', this.onRecoveryOpportunity)
+    this.win.addEventListener('pageshow', this.onRecoveryOpportunity)
     ;(globalThis as Record<string, unknown>)[CLIENT_HEALTH_GLOBAL] = this.face
     this.armBootDeadline()
   }
@@ -366,14 +426,29 @@ class ClientHealthMonitor implements ClientHealth {
     }, this.settleMs)
   }
 
-  markBootFailed(): void {
-    if (this.disposed) return
-    this.bootFailed = true
+  markBootFailed(disposition: BootFailureDisposition = 'fatal'): void {
+    if (this.disposed || this.bootComplete) return
+    this.bootFailure = disposition
     this.clearBootDeadline()
   }
 
+  retryBoot(): BootRetryOutcome {
+    if (this.disposed) return { kind: 'ignored', reason: 'disposed' }
+    if (this.bootFailure === undefined) return { kind: 'ignored', reason: 'not-failed' }
+    const slot = this.reloadGuard.consume()
+    if (!slot.allowed) {
+      return {
+        kind: 'suppressed',
+        reason: slot.reason,
+        ...(slot.retryAfterMs === undefined ? {} : { retryAfterMs: slot.retryAfterMs }),
+      }
+    }
+    this.reload()
+    return { kind: 'reload' }
+  }
+
   checkNow(): boolean {
-    if (this.disposed || this.bootFailed) return false
+    if (this.disposed || this.bootFailure !== undefined) return false
     const now = this.now()
     if (!this.bootComplete) {
       if (now - this.startedAt < this.bootElapsedMs + this.pendingBootWindowMs) return false
@@ -397,7 +472,7 @@ class ClientHealthMonitor implements ClientHealth {
     this.pendingBootWindowMs = windowMs
     this.deadlineTimer = setTimeout(() => {
       this.deadlineTimer = undefined
-      if (this.disposed || this.bootComplete || this.bootFailed) return
+      if (this.disposed || this.bootComplete || this.bootFailure !== undefined) return
       this.evaluateBootDeadline()
     }, windowMs)
   }
@@ -426,7 +501,7 @@ class ClientHealthMonitor implements ClientHealth {
       this.now() - this.startedAt,
     )
     this.pendingBootWindowMs = 0
-    if (this.bootComplete || this.bootFailed) return 'ignored'
+    if (this.bootComplete || this.bootFailure !== undefined) return 'ignored'
     const progress = this.readBootProgress()
     const advancing = progress !== undefined && progress !== this.lastBootProgress
     if (progress !== undefined) this.lastBootProgress = progress
@@ -440,7 +515,7 @@ class ClientHealthMonitor implements ClientHealth {
   fatal(reason: unknown, kind = 'renderer.fatal'): 'reload' | 'fallback' | 'ignored' {
     if (this.disposed) return 'ignored'
     this.report(kind, describeReason(reason), stackOf(reason))
-    if (this.reloadGuard.consume()) {
+    if (this.reloadGuard.consume().allowed) {
       this.reload()
       return 'reload'
     }
@@ -460,8 +535,20 @@ class ClientHealthMonitor implements ClientHealth {
     this.win.removeEventListener('error', this.onError)
     this.win.removeEventListener('unhandledrejection', this.onRejection as EventListener)
     this.doc.removeEventListener('visibilitychange', this.onVisibility)
+    this.win.removeEventListener('online', this.onRecoveryOpportunity)
+    this.win.removeEventListener('pageshow', this.onRecoveryOpportunity)
     const globals = globalThis as Record<string, unknown>
     if (globals[CLIENT_HEALTH_GLOBAL] === this.face) Reflect.deleteProperty(globalThis, CLIENT_HEALTH_GLOBAL)
+  }
+
+  /**
+   * One guarded recovery attempt for a visible retryable boot failure. Fatal
+   * startup failures, including plugin activation/export/configuration errors,
+   * stay put; the tab's online/pageshow/visible events cannot mask them.
+   */
+  private recoverBootFailure(): void {
+    if (this.bootFailure !== 'retryable') return
+    this.retryBoot()
   }
 
   /**

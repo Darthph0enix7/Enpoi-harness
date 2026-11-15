@@ -4,19 +4,21 @@ The surface a model sees = the mounted tool registry **minus** whatever the tool
 
 ## 1. The default tool set on install
 
-The wire rosters captured in `scripts/tool-inventory/expected-<preset>.json` are the authority for "what does preset X actually advertise":
+The captured rosters in `scripts/tool-inventory/expected-<preset>.json` record what each preset advertises in the built profile. Each fixture includes an artifact receipt; the fixture check rejects stale captures. `apps/web/tests/keyless-tool-inventory.e2e.ts` boots the shipped composition with an isolated child environment, owned home and state paths, and a local fake model. It captures the tool schemas from one simulated turn per preset and compares them with the runtime wire log.
 
-| Preset | Wire tools | Fixture |
+| Preset | Inventory status | Fixture |
 |---|---|---|
-| orchestrator | 50 | `scripts/tool-inventory/expected-orchestrator.json` |
-| sysadmin | 50 (≡ orchestrator) | `scripts/tool-inventory/expected-sysadmin.json` |
-| creator | 53 | `scripts/tool-inventory/expected-creator.json` |
+| orchestrator | Captured; count and artifact receipt in fixture | `scripts/tool-inventory/expected-orchestrator.json` |
+| sysadmin | Captured; count and artifact receipt in fixture | `scripts/tool-inventory/expected-sysadmin.json` |
+| creator | Captured; harness-authoring trio pre-attached | `scripts/tool-inventory/expected-creator.json` |
 
-Capture notes: `scripts/tool-inventory/roster-baseline.json:1-3`. The fixtures are the re-probed canonical captures; the creator tool group attaches only to the creator seat, so orchestrator and sysadmin advertise the same 50 names and creator carries the three creator-group tools on top (53). `scripts/tool-roster-diff.mjs` reports `MATCH` against the stored baseline; `DRIFT` means a fixture or the baseline moved — re-probe with `node scripts/preset-tool-inventory.mjs --print --presets=creator` (one model call) and refresh the fixture and the baseline in the same change.
+Capture requires a current host build, verified profile-bundle fingerprints, and a validated client build record. Set `DSH_KEYLESS_INVENTORY_CAPTURE=1` to run it and `DSH_TOOL_INVENTORY_WRITE=1` to update fixtures after reviewing the printed tool differences. Requests are restricted to the test server's own port; this is a test guard, not an OS sandbox. The receipt records profile source/output fingerprints, external package artifacts, selected host artifacts, and the client build record. HEAD is informational, not a freshness condition. `DSH_INVENTORY_DEV_BLOCKED=1` permits only the development assertion for explicitly stale fixtures; it is not release evidence.
+
+The capture includes shipped compatibility exemptions, but no operator settings. A live session can additionally advertise operator-enabled `web_search`, attached groups, custom tools, or operator compatibility overrides. `scripts/preset-tool-inventory.mjs` is the separate live-wire probe and spends one model call per preset. `scripts/tool-inventory/roster-baseline.json` is its historical baseline; `scripts/tool-roster-diff.mjs` can report drift from that baseline even when the shipped-default capture is current.
 
 The **permission** side is complete by construction: `packages/enpoi-capabilities/tests/tool-defaults-completeness.spec.ts` fails a newly advertised preset tool until it has an explicit `SHIPPED_TOOL_DEFAULTS` row or a documented `SHIPPED_TOOL_DEFAULT_EXEMPTIONS` prefix, and the Permissions page reads the generated host mirror instead of a hand-kept list (04 §1).
 
-The shipped group catalog is data (`packages/enpoi-tool-groups/src/catalog.ts:52-158`). Static groups are always presented; on-demand groups must be attached:
+The shipped group catalog is data (`packages/enpoi-tool-groups/src/catalog.ts:86-234`). Static groups are always presented; on-demand groups must be attached:
 
 | Group | Mode | Members |
 |---|---|---|
@@ -29,10 +31,12 @@ The shipped group catalog is data (`packages/enpoi-tool-groups/src/catalog.ts:52
 | `reporting` | static | fast_report |
 | `whiteboard` | static | whiteboard_forget, whiteboard_pin, whiteboard_read, whiteboard_unpin, whiteboard_write |
 | `memory` | static | memory_confirm, memory_rescind, memory_save, memory_search |
-| `peer` | on-demand | peer_status, peer_ask, peer_asks, peer_answer, peer_cancel |
-| `debug` | on-demand | diagnostics_report, session_debug, session_event_read, session_event_search, session_event_trace, session_search, session_trace |
+| `recall` | static | session_event_read, session_event_search, session_search |
+| `peer` | on-demand | peer_status, peer_sessions, peer_ask, peer_asks, peer_answer, peer_cancel |
+| `debug` | on-demand | diagnostics_report, session_debug, session_event_trace, session_trace |
+| `creator` | on-demand | cordis_inspect_list, cordis_inspect_query, plugin_manager (pre-attached to the `creator` seat only) |
 
-Anything not named by a group is never denied by the filter — it fails open (`catalog.ts:277-303`). `tool_groups` itself is never a group member (`index.ts:54-55`). `run_code` is a reserved presentation transport and cannot be filtered (`catalog.ts:271-275`, `294-299`).
+The `creator` group also declares `seats: ['creator']`, so orchestrator and sysadmin can neither see nor attach it. Anything not named by a group is never denied by the filter — it fails open (`catalog.ts:277-303`). `tool_groups` itself is never a group member (`index.ts:54-55`). `run_code` is a reserved presentation transport and cannot be filtered (`catalog.ts:271-275`, `294-299`).
 
 ## 2. The `tool_groups` meta-tool
 
@@ -49,8 +53,8 @@ A seat is a preset/agent identity. `Config.seat` defaults to `'default'` (`index
 - Operator override: `enpoi-orchestration.toolGroups.seats.<seat>.preAttach` (string[]).
 - Else the union of each group's own `preAttach` entries for that seat (`preAttachFor`, `catalog.ts:225-233`).
 - Unknown ids are ignored and disabled groups dropped; order follows the catalog.
-- Shipped group defaults: every group declares `preAttach: []` except `debug`, which names `['orchestrator', 'sysadmin', 'creator', 'broker']` — the three main agents plus the council broker start with the read-only diagnostics surface attached (`catalog.ts:147-160`). The group comment is the reason: a seat-specific attached set would change the presented tool array across an agent switch and invalidate the cached prompt prefix.
-- The profile document (`$PROFILE/cordis.patch.yml` → `toolGroups.seats`) restates `debug` for `creator` and `broker` and pins the council seats (`skeptic`, `architect`, `pragmatist`, `referee`, `chair`) to explicit empty lists. A seat entry replaces the group-level `preAttach` union, so an explicit empty list is how a seat opts out of a group default (`preAttachFor`, `catalog.ts:218-233`). Read the document before asserting a seat's set; an operator override always wins.
+- Shipped group defaults: the `creator` group carries `preAttach: ['creator']`, so only the creator seat starts with its harness-authoring trio attached; `peer` and `debug` declare `preAttach: []` and every other seat starts detached (`catalog.ts`). Operator `seats.<seat>.preAttach` entries override this.
+- An operator seat entry replaces the group-level `preAttach` union, so an explicit empty list is how a seat opts out of any future group default (`preAttachFor`, `catalog.ts:218-233`). Read the profile document before asserting a seat's set; an operator override always wins.
 - A delegated child carries the **parent's** preset; its real seat is read from its `subagent/descriptor` label — `roundtable seat: pragmatist`, `council chair: …`, etc. (`seatOfAgent`, `index.ts:287-302`; `seatOfDescriptorLabel`, `catalog.ts:243-268`). An unrecognized label falls back to the mount seat.
 
 ## 4. Hiding vs advertising

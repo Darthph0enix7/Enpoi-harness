@@ -118,12 +118,12 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      * entries come from the same registry that lights the desktop icon rail,
      * so the bar grows with the registry instead of naming kinds here.
      */
-    'shell.mobile.bar': { kind: 'list'; scope: 'root' }
+    'shell.mobile.bar': { kind: 'list'; scope: 'root'; owner: MobileSurfacesOwnerProps }
     /**
      * The same surface entries inside the header overflow sheet, shown when
      * the bottom bar is folded (soft keyboard, landscape, short viewport).
      */
-    'shell.mobile.more': { kind: 'list'; scope: 'root' }
+    'shell.mobile.more': { kind: 'list'; scope: 'root'; owner: MobileSurfacesOwnerProps }
   }
 }
 
@@ -159,6 +159,22 @@ export interface RightbarOwnerProps {
   mobile: boolean
 }
 
+/**
+ * Compact surface-seat owner share. The frame owns the overflow sheet's state,
+ * so the bar and the sheet see one open flag and one select/dismiss path
+ * instead of reaching into the shell DOM.
+ */
+export interface MobileSurfacesOwnerProps {
+  /** Whether the header overflow sheet is open. */
+  open: boolean
+  /** Open the header overflow sheet from the bar's More control. */
+  openMore: () => void
+  /** Dismiss the header overflow sheet (mask, Escape, back, close). */
+  dismiss: () => void
+  /** Called after a surface entry selected its kind; the owner closes the sheet. */
+  onSelect: (kind: string) => void
+}
+
 /** Required services (cordis fiber inject — the loader passes all module exports as an object plugin). */
 export const inject = ['slots', 'theme', 'locale', 'shortcuts']
 
@@ -191,9 +207,10 @@ export function apply(ctx: ClientContext): void {
   installAdaptiveStyles(ctx)
 
   ctx.effect(() => {
-    // The host record outlives this origin's cache: the local read seeds the
-    // first paint, then the host's record replaces it when it carries a
-    // preference. Adopting is refused once the operator resized in this page.
+    // This origin's cache is the width authority and seeds the first paint.
+    // The host record is a first-visit seed for fields the origin has not
+    // written; it never replaces a local preference, so another device's
+    // width cannot force this one's panel wider or narrower.
     const hostWidths = createHostWidthSync()
     const handle = createLayoutStore({ persistHost: (widths) => { hostWidths.mirror(widths) } })
     const instance = handle.create()
@@ -222,6 +239,7 @@ export function apply(ctx: ClientContext): void {
         'shell.mobile.header': { kind: 'list', scope: 'root' },
         'shell.mobile.bar': { kind: 'list', scope: 'root' },
         'shell.mobile.more': { kind: 'list', scope: 'root' },
+        'settings.surface': { kind: 'single', scope: 'root' },
       },
       store,
       // The mobile container branches on the shared classifier and dismisses

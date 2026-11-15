@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { bindSnapshotSelector, makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SessionListState } from '@deepseek-ai/dsh-api-session-controller/client'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SettingsRootComponentProps } from '../src/client/shell-contract.ts'
 import { createSettingsShellStore } from '../src/client/shell-store.ts'
+import { getLayoutModeRuntime } from '@deepseek-ai/dsh-client-ui-primitives'
 import { SettingsRoot } from '../src/client/SettingsRoot.tsx'
 import { en, zh } from '../src/client/locales.ts'
 import type { DesktopUpdateView } from '../src/client/desktop-update-bridge.ts'
@@ -18,6 +19,7 @@ const usePanelInfo: GlobalStandardProps['usePanelInfo'] = selector => selector({
 
 afterEach(() => {
   cleanup()
+  getLayoutModeRuntime().setFrameWidth(1440)
   vi.useRealTimers()
 })
 
@@ -34,14 +36,19 @@ const SEAT_CONTENT: Record<string, string> = {
 
 type AttentionSnapshot = Parameters<Parameters<SettingsRootComponentProps['useSessionStatus']>[0]>[0]
 type ConnectionSnapshot = Parameters<Parameters<SettingsRootComponentProps['useConnectionState']>[0]>[0]
+type ConnectionDiagnosisSnapshot = Parameters<Parameters<SettingsRootComponentProps['useConnectionDiagnosis']>[0]>[0]
 const noAttention: AttentionSnapshot = new Map()
 const useSessionStatus: SettingsRootComponentProps['useSessionStatus'] = selector => selector(noAttention)
 
 function mount({
   wide = true,
   phone = false,
+  compact = phone,
+  compactWidth = 390,
   dictionary = en,
+  sectionContent,
   connectionState = 'connected',
+  connectionDiagnosis,
   desktopUpdate = { failed: false, opening: false },
   onboardingActive = true,
   onboardingRequest = false,
@@ -59,8 +66,11 @@ function mount({
 }: {
   wide?: boolean
   phone?: boolean
+  compact?: boolean
+  compactWidth?: number
   dictionary?: typeof en | typeof zh
   connectionState?: ConnectionSnapshot
+  connectionDiagnosis?: ConnectionDiagnosisSnapshot
   desktopUpdate?: DesktopUpdateView
   onboardingActive?: boolean
   onboardingRequest?: boolean
@@ -68,17 +78,22 @@ function mount({
   mainView?: boolean
   rows?: Row[]
   steps?: Step[]
+  sectionContent?: (id: string) => ReactNode
 } = {}) {
   // Mutable row source standing in for the bound useSections hook; bump()
   // plays a ledger change through the same observable contract.
   let current = rows
   let currentConnectionState = connectionState
+  let currentConnectionDiagnosis = connectionDiagnosis
   const listeners = new Set<() => void>()
   const connectionListeners = new Set<() => void>()
+  const diagnosisListeners = new Set<() => void>()
   const reconnect = vi.fn()
   const renderSlot = vi.fn(
     ((key: string, _owner: unknown, opts?: { only?: string }) => {
-      if (key === 'settings.section') return <div data-testid={`section-${opts?.only ?? 'all'}`} />
+      if (key === 'settings.section') {
+        return sectionContent?.(opts?.only ?? 'all') ?? <div data-testid={`section-${opts?.only ?? 'all'}`} />
+      }
       return SEAT_CONTENT[key]
     }) as SettingsRootComponentProps['renderSlot'],
   )
@@ -100,6 +115,7 @@ function mount({
   const unusedHook = (() => { throw new Error('unused by SettingsRoot') }) as never
   const shell = createSettingsShellStore().create()
   const close = vi.fn(() => { shell.actions.close() })
+  getLayoutModeRuntime().setFrameWidth(compact ? compactWidth : 1440)
   const props: SettingsRootComponentProps = {
     useStore: bindSnapshotSelector(shell),
     actions: { ...shell.actions, close },
@@ -112,10 +128,12 @@ function mount({
     openDesktopUpdate: () => {},
     publishOpenSection: () => () => {},
     useDesktopUpdate: select => select(desktopUpdate),
-    // jsdom is a desktop: the phone page stays out of the modal specs.
+    // The shell mode now owns the page choice; this fixture keeps the device
+    // snapshot for the standard prop contract only.
     useDevice: select => select({
       device: phone ? 'phone' : 'desktop', pointer: phone ? 'coarse' : 'fine',
-      width: phone ? 390 : 1440, keyboardOpen: false, keyboardInset: 0,
+      width: phone ? compactWidth : 1440, restingHeight: phone ? 844 : 900,
+      keyboardOpen: false, keyboardInset: 0,
     }),
     t: makeTranslate(dictionary),
     useConnectionState: (select) => {
@@ -126,6 +144,15 @@ function mount({
         return () => { connectionListeners.delete(listener) }
       }, [])
       return select(currentConnectionState)
+    },
+    useConnectionDiagnosis: (select) => {
+      const [, force] = useState(0)
+      useEffect(() => {
+        const listener = () => { force(n => n + 1) }
+        diagnosisListeners.add(listener)
+        return () => { diagnosisListeners.delete(listener) }
+      }, [])
+      return select(currentConnectionDiagnosis)
     },
     useOnboardingSteps: select => select(steps),
     useOnboardingRequest: select => select({ requested: onboardingRequest }),
@@ -154,11 +181,20 @@ function mount({
       for (const fn of [...connectionListeners]) fn()
     })
   }
+  const setConnectionDiagnosis = (next: typeof currentConnectionDiagnosis) => {
+    act(() => {
+      currentConnectionDiagnosis = next
+      for (const fn of [...diagnosisListeners]) fn()
+    })
+  }
   const setDesktopUpdate = (next: DesktopUpdateView) => {
     desktopUpdate = next
     view.rerender(<SettingsRoot {...props} />)
   }
-  return { view, renderSlot, bump, listeners, reconnect, setConnectionState, setDesktopUpdate, close }
+  return {
+    view, renderSlot, bump, listeners, reconnect, setConnectionState, setConnectionDiagnosis,
+    diagnosisListeners, setDesktopUpdate, close,
+  }
 }
 
 function openPanel() {
@@ -267,13 +303,51 @@ describe('SettingsRoot trigger', () => {
     expect(screen.queryByRole('status')).toBeNull()
   })
 
+  it('renders a terminal connection diagnosis with bounded details and clears it on recovery', () => {
+    const mounted = mount({
+      connectionState: 'disconnected',
+      connectionDiagnosis: 'connection: recovery paused because retired sources did not stop; reload the page to reset recovery',
+    })
+    const action = screen.getByRole('button', { name: 'Disconnected, reconnect now' })
+    expect(action.textContent).toContain('Connection stopped')
+    fireEvent.click(action)
+    expect(mounted.reconnect).toHaveBeenCalledOnce()
+
+    const summary = mounted.view.container.querySelector('summary')
+    fireEvent.click(summary as Element)
+    const details = screen.getByRole('note', { name: 'Connection details' })
+    expect(details.textContent).toContain('retired sources did not stop')
+    expect(details.textContent).toContain('Automatic reconnect is paused')
+    expect(screen.getByRole('button', { name: 'Reload page' })).toBeTruthy()
+
+    for (let index = 0; index < 5; index += 1) {
+      mounted.setConnectionDiagnosis(`connection: recovery paused ${String(index)}; reload the page`)
+    }
+    // Repeated diagnosis notifications ride one mounted subscription.
+    expect(mounted.diagnosisListeners.size).toBe(1)
+
+    mounted.setConnectionDiagnosis(undefined)
+    mounted.setConnectionState('connected')
+    expect(screen.queryByText('Connection stopped')).toBeNull()
+    expect(screen.getByRole('status', { name: 'Connected' })).toBeTruthy()
+  })
+
+  it('does not keep a residual connecting hold in front of a terminal diagnosis', () => {
+    const mounted = mount({ connectionState: 'connecting' })
+    expect(screen.getByText('Reconnecting')).toBeTruthy()
+    mounted.setConnectionDiagnosis('connection: recovery paused; reload the page')
+    mounted.setConnectionState('disconnected')
+    expect(screen.getByText('Connection stopped')).toBeTruthy()
+    expect(screen.queryByText('Reconnecting')).toBeNull()
+  })
+
   it('keeps the reconnect indicator out of the collapsed rail', () => {
     mount({ wide: false, connectionState: 'disconnected' })
     expect(screen.queryByRole('button', { name: 'Disconnected, reconnect now' })).toBeNull()
   })
 })
 
-describe('SettingsPanel chrome seats', () => {
+describe('SettingsSurface chrome seats', () => {
   it('names the dialog via aria-labelledby pointing at the header seat node', () => {
     mount()
     openPanel()
@@ -301,7 +375,7 @@ describe('SettingsPanel chrome seats', () => {
   })
 })
 
-describe('SettingsPanel close paths', () => {
+describe('SettingsSurface close paths', () => {
   it('closes via the header button and restores trigger focus', async () => {
     mount()
     const trigger = openPanel()
@@ -340,7 +414,7 @@ describe('SettingsPanel close paths', () => {
   })
 })
 
-describe('SettingsPanel navigation', () => {
+describe('SettingsSurface navigation', () => {
   it('projects rows, marks the first active, and renders only that section', () => {
     mount()
     openPanel()
@@ -484,22 +558,29 @@ describe('SettingsPanel navigation', () => {
   })
 })
 
-describe('SettingsRoot phone page', () => {
+describe('SettingsRoot compact page', () => {
   it('pushes a section and steps back to the list, then closes from the page control', () => {
     mount({ phone: true })
-    openPanel()
-    // The modal layer never mounts on a phone; the page owns its own chrome.
-    expect(screen.getByRole('dialog', { name: 'Settings' })).toBeTruthy()
+    const trigger = openPanel()
+    // The page is a body portal, not part of the transformed sidebar.
+    expect(screen.getByRole('dialog', { name: 'Settings Title' })).toBeTruthy()
+    const page = document.querySelector('[data-shortcut-modal="settings"]')!
+    expect(document.body.contains(page)).toBe(true)
     expect(document.querySelector('[data-settings-mobile-list]')).toBeTruthy()
+    expect(document.querySelectorAll('[data-settings-scroll]')).toHaveLength(1)
     fireEvent.click(screen.getByRole('button', { name: 'Models' }))
     expect(document.querySelector('[data-settings-mobile-detail="models"]')).toBeTruthy()
     expect(screen.getByTestId('section-models')).toBeTruthy()
     expect(document.querySelector('[data-settings-mobile-list]')).toBeNull()
+    expect(screen.getByRole('dialog', { name: 'Models' })).toBeTruthy()
+    expect(document.activeElement).toBe(document.querySelector('[data-settings-mobile-control]'))
     fireEvent.click(document.querySelector('[data-settings-mobile-control]')!)
     expect(document.querySelector('[data-settings-mobile-list]')).toBeTruthy()
     expect(screen.queryByTestId('section-models')).toBeNull()
+    expect(document.activeElement).toBe(document.querySelector('[data-settings-mobile-row="models"]'))
     fireEvent.click(document.querySelector('[data-settings-mobile-control]')!)
     expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(trigger)
   })
 
   it('lists every registered section as a single-column row', () => {
@@ -507,5 +588,63 @@ describe('SettingsRoot phone page', () => {
     openPanel()
     const rows = document.querySelectorAll('[data-settings-mobile-row]')
     expect([...rows].map(row => row.getAttribute('data-settings-mobile-row'))).toEqual(['general', 'models', 'agent-presets'])
+    expect(document.querySelectorAll('[data-settings-scroll]')).toHaveLength(1)
+  })
+
+  it('keeps the section host, draft text, selection, and scroll across compact toggles', () => {
+    let sectionMounts = 0
+    function Section() {
+      useEffect(() => { sectionMounts += 1 }, [])
+      return (
+        <div data-testid="section-models">
+          <input data-testid="section-editor" defaultValue="draft survives" />
+        </div>
+      )
+    }
+    mount({ compact: false, sectionContent: () => <Section /> })
+    openPanel()
+    fireEvent.click(screen.getByRole('button', { name: 'Models' }))
+    const editor = screen.getByTestId('section-editor') as HTMLInputElement
+    const host = document.querySelector<HTMLElement>('[data-settings-content]')!
+    const dialog = screen.getByRole('dialog')
+    expect(document.body.contains(dialog)).toBe(true)
+    editor.focus()
+    editor.setSelectionRange(2, 7)
+    host.scrollTop = 120
+    act(() => { getLayoutModeRuntime().setFrameWidth(800) })
+    expect(screen.getByTestId('section-editor')).toBe(editor)
+    expect(screen.getByRole('dialog')).toBe(dialog)
+    expect(document.querySelector('[data-settings-content]')).toBe(host)
+    expect(editor.value).toBe('draft survives')
+    expect(editor.selectionStart).toBe(2)
+    expect(editor.selectionEnd).toBe(7)
+    expect(document.activeElement).toBe(editor)
+    expect(host.scrollTop).toBe(120)
+    expect(sectionMounts).toBe(1)
+    act(() => { getLayoutModeRuntime().setFrameWidth(1440) })
+    expect(screen.getByTestId('section-editor')).toBe(editor)
+    expect(screen.getByRole('dialog')).toBe(dialog)
+    expect(document.querySelector('[data-settings-content]')).toBe(host)
+    expect(editor.value).toBe('draft survives')
+    expect(host.scrollTop).toBe(120)
+    expect(sectionMounts).toBe(1)
+  })
+
+  it.each([
+    { label: 'tablet touch', phone: true, width: 800 },
+    { label: 'phone', phone: true, width: 390 },
+    { label: 'narrow fine-pointer desktop', phone: false, width: 390 },
+  ])('portals one full page to body on $label at $widthpx', ({ phone, width }) => {
+    mount({ phone, compact: true, compactWidth: width })
+    const trigger = openPanel()
+    const page = document.querySelector('[data-shortcut-modal="settings"]')!
+    expect(document.body.contains(page)).toBe(true)
+    expect(document.querySelector('[data-settings-mobile-list]')).toBeTruthy()
+    expect(document.querySelectorAll('[data-settings-scroll]')).toHaveLength(1)
+    // The shared modal layer keeps Tab inside the page step.
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(page.contains(document.activeElement)).toBe(true)
+    fireEvent.click(document.querySelector('[data-settings-mobile-control]')!)
+    expect(document.activeElement).toBe(trigger)
   })
 })

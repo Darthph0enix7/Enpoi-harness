@@ -4,16 +4,17 @@
  * `subagent-sessions`).
  *
  * The dispatch lineage as a tree: the current session's top-most `parentId`
- * ancestor (the main session) is the root, every descendant hangs below it
+ * ancestor (the main session) is the one root, every descendant hangs below it
  * with depth indentation, and clicking any row opens its session through the
- * injected `openSession` (the apply-world `ctx.sessions.open`) — the main
- * session stays one click away without the left session list. A compact
- * ancestor strip repeats the root → current path for jumping up one level.
- * Lineage is read from the list projection (`parentId` / `origin:
- * 'subagent'`), so no session-log scan is needed. Sibling order and the
- * 50-row cap keep the branch nearest the current session visible; refresh
- * re-pulls the host list baseline through `ctx.sessions.refresh`, and the
- * store remains the live data channel.
+ * injected `openSession` (the apply-world `ctx.sessions.open`). Lineage comes
+ * from the list projection (`parentId` / `origin: 'subagent'`); parent catalog
+ * metadata fills only an absent parent and supplies a creation time when the
+ * list row has no update time. Sibling order is running-first, then latest
+ * update/creation, so active and recent children stay near the root while each
+ * subtree remains contiguous. The 50-row cap keeps the current row and its
+ * ancestors visible. A missing selected row retains only the same session's
+ * last tree, never another root's, and refresh re-pulls the host baseline
+ * through `ctx.sessions.refresh`; the store remains the live data channel.
  *
  * Rows lead with the agent identity, never the query: the persona is parsed
  * from the host's subagent identity projection (`council debater: Critic` →
@@ -52,15 +53,24 @@ interface TreeRow extends LineageNode {
   current: boolean
 }
 
-/** The built lineage: visible rows, pre-cap total, root → current path, and titles by id. */
-interface Lineage {
-  rows: TreeRow[]
-  total: number
-  path: SessionId[]
-  titles: ReadonlyMap<SessionId, string>
+/** Durable catalog facts used only when the list row omits them. */
+interface CatalogMeta {
+  /** Unambiguous direct parent, absent when competing catalogs claim the child. */
+  parentId?: SessionId
+  /** Direct-child creation time used when the list row carries no update time. */
+  createdAt: number
 }
 
-/** Rows drawn at once; nodes nearest the current session rank first. */
+/** The built lineage: one resolved root and the root → current path. */
+interface Lineage {
+  rows: TreeRow[]
+  /** True when `currentId` is listed and its root was resolved. */
+  rooted: boolean
+  rootId?: SessionId
+  path: SessionId[]
+}
+
+/** Rows drawn at once; the current path stays visible inside the cap. */
 const MAX_ROWS = 50
 
 /** Extra left padding per tree depth, in pixels. */
@@ -178,7 +188,9 @@ function nodeDisplay(node: TreeRow, registry: RoleRegistryMap, t: BrandT): { lab
     return { label: registryRoleLabel(registry, role), cleanTitle: node.title }
   }
   return {
-    label: node.depth === 0 ? t('subagentRowMain') : (node.origin === 'subagent' ? t('subagentRowSubagent') : t('subagentRowSession')),
+    label: node.origin === 'subagent'
+      ? t('subagentRowSubagent')
+      : node.depth === 0 ? t('subagentRowMain') : t('subagentRowSession'),
     cleanTitle: node.title,
   }
 }
@@ -191,110 +203,114 @@ function statusOf(node: LineageNode): 'running' | 'idle' | 'done' {
 
 /**
  * Build the lineage tree rooted at the current session's top-most listed
- * ancestor. Sibling order keeps the current session, its direct children, and
- * the branches nearest it ahead of the rest (the cap then keeps them). Without
- * a listed current row the forest of top-level sessions is shown, newest first.
+ * ancestor. One root is resolved; a caller retains the previous tree while the
+ * selected row is missing instead of rendering every root as a duplicate main.
+ * Sibling order puts running and recently updated children first while each
+ * subtree stays contiguous.
  * @param nodes - every summary in the list projection.
  * @param currentId - the session the tab is rendered for, when listed.
- * @returns pre-order rows, pre-cap total, ancestor path, and id → title map.
+ * @param catalog - direct-child metadata from loaded parent catalogs.
+ * @returns pre-order rows, the resolved root, and the root → current path.
  */
-function buildLineage(nodes: readonly LineageNode[], currentId: SessionId | undefined): Lineage {
+function buildLineage(
+  nodes: readonly LineageNode[],
+  currentId: SessionId | undefined,
+  catalog: ReadonlyMap<SessionId, CatalogMeta>,
+): Lineage {
   const byId = new Map<SessionId, LineageNode>()
-  const titles = new Map<SessionId, string>()
-  for (const node of nodes) {
-    byId.set(node.id, node)
-    titles.set(node.id, node.title)
+  for (const node of nodes) byId.set(node.id, node)
+
+  // A listed parent is authoritative; catalog ancestry only fills an absent
+  // parent. A parent outside the projection degrades the row to a root.
+  const parentOf = new Map<SessionId, SessionId>()
+  for (const node of byId.values()) {
+    const listed = node.parentId
+    const catalogParent = catalog.get(node.id)?.parentId
+    const parent = listed === undefined
+      ? catalogParent !== undefined && catalogParent !== node.id && byId.has(catalogParent)
+        ? catalogParent
+        : undefined
+      : listed !== node.id && byId.has(listed)
+        ? listed
+        : undefined
+    if (parent !== undefined) parentOf.set(node.id, parent)
   }
 
-  // Children adjacency for listed parents; everything else is a top-level row.
+  const wouldCycle = (child: SessionId, parent: SessionId): boolean => {
+    const seen = new Set<SessionId>()
+    let cursor: SessionId | undefined = parent
+    while (cursor !== undefined) {
+      if (cursor === child || seen.has(cursor)) return true
+      seen.add(cursor)
+      cursor = parentOf.get(cursor)
+    }
+    return false
+  }
+  for (const [child, parent] of [...parentOf]) {
+    if (wouldCycle(child, parent)) parentOf.delete(child)
+  }
+
   const children = new Map<SessionId, LineageNode[]>()
-  const roots: LineageNode[] = []
-  for (const node of nodes) {
-    const parentId = node.parentId
-    if (parentId !== undefined && parentId !== node.id && byId.has(parentId)) {
-      const siblings = children.get(parentId)
-      if (siblings === undefined) children.set(parentId, [node])
-      else siblings.push(node)
-    } else {
-      roots.push(node)
-    }
+  for (const node of byId.values()) {
+    const parent = parentOf.get(node.id)
+    if (parent === undefined) continue
+    const siblings = children.get(parent)
+    if (siblings === undefined) children.set(parent, [node])
+    else siblings.push(node)
   }
 
-  // Distances from the current session along parent/child edges; the cap keeps
-  // the nodes closest to the operator's current position.
-  const distance = new Map<SessionId, number>()
-  if (currentId !== undefined && byId.has(currentId)) {
-    distance.set(currentId, 0)
-    const queue: SessionId[] = [currentId]
-    while (queue.length > 0) {
-      const id = queue.shift()
-      if (id === undefined) break
-      const next = (distance.get(id) ?? 0) + 1
-      const neighbours: SessionId[] = []
-      const parentId = byId.get(id)?.parentId
-      if (parentId !== undefined && byId.has(parentId)) neighbours.push(parentId)
-      for (const child of children.get(id) ?? []) neighbours.push(child.id)
-      for (const neighbour of neighbours) {
-        if (distance.has(neighbour)) continue
-        distance.set(neighbour, next)
-        queue.push(neighbour)
-      }
-    }
-  }
-
-  // Minimum distance inside one subtree: the branch holding the current
-  // session always outranks its siblings.
-  const subtreeDistance = new Map<SessionId, number>()
-  const measure = (id: SessionId, visiting: Set<SessionId>): number => {
-    if (visiting.has(id)) return Number.POSITIVE_INFINITY
-    visiting.add(id)
-    let best = distance.get(id) ?? Number.POSITIVE_INFINITY
-    for (const child of children.get(id) ?? []) best = Math.min(best, measure(child.id, visiting))
-    visiting.delete(id)
-    return best
-  }
-  for (const node of nodes) subtreeDistance.set(node.id, measure(node.id, new Set()))
-
-  /** Sibling order: stable chronological order; never jump the active row to the top! */
-  const order = (siblings: readonly LineageNode[]): LineageNode[] =>
-    [...siblings].sort((left, right) => left.updatedAt - right.updatedAt)
-
-  // Walk the current session's parent chain to the top-most listed ancestor.
+  // One resolved root only. A missing current row is retained by the caller;
+  // rendering every root would present unrelated sessions as duplicate mains.
   let rootId: SessionId | undefined
   const path: SessionId[] = []
   if (currentId !== undefined && byId.has(currentId)) {
-    const seen = new Set<SessionId>([currentId])
-    let id = currentId
-    for (;;) {
+    const seen = new Set<SessionId>()
+    let id: SessionId | undefined = currentId
+    while (id !== undefined && !seen.has(id)) {
+      seen.add(id)
       path.push(id)
-      const parentId = byId.get(id)?.parentId
-      if (parentId === undefined || seen.has(parentId) || !byId.has(parentId)) {
-        rootId = id
-        break
-      }
-      seen.add(parentId)
-      id = parentId
+      id = parentOf.get(id)
     }
     path.reverse()
+    rootId = path[0]
   }
 
-  // Pre-order walk from the root; a cycle degrades to one visit per node.
+  /** Sibling order: running first, then latest durable update, then stable identity. */
+  const order = (siblings: readonly LineageNode[]): LineageNode[] =>
+    [...siblings].sort((left, right) =>
+      Number(right.running) - Number(left.running)
+      || right.updatedAt - left.updatedAt
+      || (left.id < right.id ? -1 : 1))
+
+  // Pre-order walk from the resolved root. Cycle-closing edges were dropped
+  // above, so every child is reachable once without a visited set.
   const rows: TreeRow[] = []
-  const visited = new Set<SessionId>()
   const walk = (node: LineageNode, depth: number): void => {
-    if (visited.has(node.id)) return
-    visited.add(node.id)
     rows.push({ ...node, depth, current: node.id === currentId })
     for (const child of order(children.get(node.id) ?? [])) walk(child, depth + 1)
   }
-  if (rootId !== undefined) {
-    const root = byId.get(rootId)
-    if (root !== undefined) walk(root, 0)
-  } else {
-    for (const root of [...roots].sort((left, right) => right.updatedAt - left.updatedAt)) walk(root, 0)
-  }
+  // `rootId` is always a `byId` key: it comes from the current path, whose
+  // every step was accepted only when the listed parent exists.
+  if (rootId !== undefined) walk(byId.get(rootId) as LineageNode, 0)
 
-  return { rows, total: rows.length, path, titles }
+  return { rows, rooted: rootId !== undefined, ...(rootId === undefined ? {} : { rootId }), path }
+}
+
+/**
+ * Keep the current row and its ancestors visible inside the row cap without
+ * reordering the pre-order tree.
+ * @param rows - the full prioritized lineage.
+ * @param path - root → current identities, empty when no current row is listed.
+ * @returns at most {@link MAX_ROWS} rows in tree order.
+ */
+function visibleLineageRows(rows: readonly TreeRow[], path: readonly SessionId[]): TreeRow[] {
+  if (rows.length <= MAX_ROWS) return [...rows]
+  const pinnedRows = rows.filter(row => path.includes(row.id)).slice(-MAX_ROWS)
+  const pinned = new Set(pinnedRows.map(row => row.id))
+  const room = Math.max(0, MAX_ROWS - pinnedRows.length)
+  const selected = new Set(rows.filter(row => !pinned.has(row.id)).slice(0, room).map(row => row.id))
+  for (const id of pinned) selected.add(id)
+  return rows.filter(row => selected.has(row.id))
 }
 
 /** Monochrome micro icon (stroke currentColor). */
@@ -328,9 +344,17 @@ export function SubagentSessionsBody({
   // address first and falls back to the ordinary path for real sessions.
   const addresses = useMemo(() => {
     const map = new Map<SessionId, SubagentAddress>()
+    const ambiguous = new Set<SessionId>()
     for (const [parentSessionId, projection] of Object.entries(projections)) {
       for (const entry of projection.values.subagentCatalog ?? []) {
-        map.set(entry.id, { parentSessionId: parentSessionId as SessionId, childSessionId: entry.id, mode: entry.mode })
+        if (ambiguous.has(entry.id)) continue
+        const existing = map.get(entry.id)
+        if (existing === undefined) {
+          map.set(entry.id, { parentSessionId: parentSessionId as SessionId, childSessionId: entry.id, mode: entry.mode })
+        } else if (existing.parentSessionId !== parentSessionId) {
+          map.delete(entry.id)
+          ambiguous.add(entry.id)
+        }
       }
     }
     return map
@@ -367,22 +391,51 @@ export function SubagentSessionsBody({
   }, [deferred, addresses, openChild])
 
   const currentId = sessionId === '' ? undefined : sessionId
+  // Catalog facts fill only what a list row omits; competing claims keep their
+  // ancestry unresolved rather than selecting an arbitrary parent.
+  const catalog = useMemo(() => {
+    const claims = new Map<SessionId, CatalogMeta & { ambiguous: boolean }>()
+    for (const [parentSessionId, projection] of Object.entries(projections)) {
+      for (const entry of projection.values.subagentCatalog ?? []) {
+        const existing = claims.get(entry.id)
+        if (existing === undefined) {
+          claims.set(entry.id, {
+            parentId: parentSessionId as SessionId,
+            createdAt: entry.createdAt,
+            ambiguous: false,
+          })
+          continue
+        }
+        if (existing.parentId !== parentSessionId) existing.ambiguous = true
+        existing.createdAt = Math.max(existing.createdAt, entry.createdAt)
+      }
+    }
+    const result = new Map<SessionId, CatalogMeta>()
+    for (const [id, claim] of claims) {
+      result.set(id, {
+        createdAt: claim.createdAt,
+        ...(claim.ambiguous ? {} : { parentId: claim.parentId }),
+      })
+    }
+    return result
+  }, [projections])
+
   const lineage = useMemo(() => {
     const nodes: LineageNode[] = []
     const known = new Set<SessionId>()
     for (const summary of Object.values(byId)) {
-      known.add(summary.id as SessionId)
+      const id = summary.id
+      known.add(id)
+      const meta = catalog.get(id)
       nodes.push({
-        id: summary.id as SessionId,
+        id,
         title: summary.displayTitle,
         subagentLabel: summary.projectionValues?.subagent?.label,
-        parentId: summary.parentId as SessionId | undefined,
+        parentId: summary.parentId,
         origin: summary.origin,
         running: summary.running,
-        // The merged SessionSummary carries `running` (upstream dropped the
-        // durable `completed` bit): a no-longer-running child reads as done.
-        completed: !summary.running,
-        updatedAt: summary.updatedAt ?? 0,
+        completed: summary.projectionValues?.subagentTiming?.lastTurnCompleted === true,
+        updatedAt: summary.updatedAt > 0 ? summary.updatedAt : meta?.createdAt ?? 0,
       })
     }
     // The parent's durable catalog is the authoritative record of every child it
@@ -391,7 +444,7 @@ export function SubagentSessionsBody({
     // or finished run never vanishes from the operator's view.
     for (const [parentSessionId, projection] of Object.entries(projections)) {
       for (const entry of projection.values.subagentCatalog ?? []) {
-        const childId = entry.id as SessionId
+        const childId = entry.id
         if (known.has(childId)) continue
         known.add(childId)
         nodes.push({
@@ -401,26 +454,44 @@ export function SubagentSessionsBody({
           parentId: parentSessionId as SessionId,
           origin: 'subagent',
           running: false,
-          completed: true,
-          updatedAt: entry.createdAt ?? 0,
+          completed: false,
+          updatedAt: entry.createdAt,
         })
       }
     }
-    return buildLineage(nodes, currentId)
-  }, [byId, currentId, projections])
+    return buildLineage(nodes, currentId, catalog)
+  }, [byId, currentId, projections, catalog])
 
   // A pending list snapshot (reconnect, the first pull after a switch) can
-  // arrive with no rows for a moment. The last non-empty tree stays drawn
-  // until the snapshot lands, so the panel never flashes its empty state.
-  const retained = useRef<readonly TreeRow[] | undefined>(undefined)
+  // arrive with no rows for a moment. Retain only this selected session's last
+  // tree: another session's root must never stand in for it.
+  const retained = useRef<{
+    sessionId: SessionId | undefined
+    rows: readonly TreeRow[]
+    path: readonly SessionId[]
+  } | undefined>(undefined)
   useEffect(() => {
-    if (lineage.rows.length > 0) retained.current = lineage.rows
-  }, [lineage])
-  const rows = lineage.rows.length > 0 || phase !== 'pending'
-    ? lineage.rows
-    : retained.current ?? lineage.rows
+    if (lineage.rooted) {
+      retained.current = {
+        sessionId: currentId,
+        rows: lineage.rows,
+        path: lineage.path,
+      }
+    }
+  }, [lineage, currentId])
+  const retainedTree = retained.current
+  const sameRetainedLineage = retainedTree !== undefined
+    && retainedTree.sessionId === currentId
+  // A definitive ready snapshot with the selected row absent means removal,
+  // not a transient re-pull; only a pending list keeps the same lineage visible.
+  const retainedRows = retainedTree !== undefined && sameRetainedLineage
+    && !lineage.rooted && phase === 'pending'
+    ? retainedTree
+    : undefined
+  const rows = retainedRows?.rows ?? lineage.rows
+  const path = retainedRows?.path ?? lineage.path
 
-  const visibleRows = rows.slice(0, MAX_ROWS)
+  const visibleRows = visibleLineageRows(rows, path)
 
   const onRefresh = (): void => {
     if (refreshing) return

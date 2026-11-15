@@ -21,8 +21,11 @@
   --dsh-visual-viewport-height: 100dvh;
 }
 
-/* Touch root container: the layout viewport binds to the dynamic viewport
-   height and rubber-band scrolling cannot chain past the app. */
+/* Compact root container: the layout viewport binds to the dynamic viewport
+   height and rubber-band scrolling cannot chain past the app. The layout mode
+   covers a narrow fine-pointer window as well as touch devices. */
+:root[data-layout='compact'] body,
+:root[data-layout='compact'] #root,
 :root[data-device='phone'] body,
 :root[data-device='phone'] #root,
 :root[data-device='tablet'] body,

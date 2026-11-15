@@ -64,8 +64,8 @@ interface BrowserWakeWindow {
 /** Document surface consumed by {@link watchBrowserNetwork}. */
 interface BrowserWakeDocument {
   readonly visibilityState?: string
-  addEventListener(type: 'visibilitychange', listener: () => void): void
-  removeEventListener(type: 'visibilitychange', listener: () => void): void
+  addEventListener(type: 'visibilitychange' | 'resume', listener: () => void): void
+  removeEventListener(type: 'visibilitychange' | 'resume', listener: () => void): void
 }
 
 /**
@@ -73,13 +73,18 @@ interface BrowserWakeDocument {
  *
  * `online` and `offline` are debounced by `networkDebounceMs`, so an
  * interface flap does not abort a healthy generation or restart the retry
- * ladder several times. A visible `visibilitychange` or `pageshow` (including
- * bfcache restores) requests one immediate reconnect, debounced across the
- * burst one wake produces. A wake skips the request before the first outcome,
- * while a connected generation has received a frame within
- * `wakeStaleThresholdMs`, while the browser reports offline, or while a
- * handshake started less than `wakeConnectingGraceMs` ago; a generation
- * waiting in backoff or disconnected is still replaced at once.
+ * ladder several times. `navigator.onLine` is a hint, not proof: a wake
+ * observed while the hint says offline stays pending instead of retrying.
+ * The next `online` event always requests one coalesced recovery, even when
+ * the debounced availability never moved (the sleep/wake case where the
+ * offline transition was not delivered). A visible `visibilitychange`,
+ * Page Lifecycle `resume`, or `pageshow` (including bfcache restores)
+ * requests one stale-appropriate reconnect, debounced across the burst one
+ * wake produces. A wake skips the request before the first outcome, while a
+ * connected generation has received a frame within `wakeStaleThresholdMs`,
+ * or while a handshake started less than `wakeConnectingGraceMs` ago; a
+ * generation waiting in backoff or disconnected is replaced at once. No
+ * retry is issued while the browser hint reports offline.
  *
  * One low-frequency watchdog reconnects a connected generation that received
  * no frame for `watchdogStaleMs`, coalescing repeated ticks into one request.
@@ -107,6 +112,16 @@ export function watchBrowserNetwork(
   let networkTimer: ReturnType<typeof setTimeout> | undefined
   let reportedAvailable = nav.onLine
   let watchdogFired = false
+  /** A wake/recovery request retained while the browser hint says offline. */
+  let pendingWake = false
+  /** The pending timer carries a forced online recovery, not only a stale wake. */
+  let wakeForce = false
+  /** An `online` event arrived; recover after the debounce even if availability did not move. */
+  let onlineRecoveryPending = false
+  /** Last watcher-issued reconnect, used to coalesce a delayed online event into the same wake burst. */
+  let lastRecoveryAt: number | undefined
+  /** When the pending online hint first arrived; measured at the event, not at debounce close. */
+  let onlineRecoveryAt: number | undefined
   const cancelWake = (): void => {
     if (wakeTimer === undefined) return
     clearTimeout(wakeTimer)
@@ -124,49 +139,103 @@ export function watchBrowserNetwork(
    * generation is replaced at once only when no handshake is in flight
    * (backoff) or when that handshake already exceeded its wake grace.
    */
-  const needsRecovery = (): boolean => {
+  const needsRecovery = (force: boolean): boolean => {
     const state = getState()
     if (state === undefined) return false
-    if (state === 'connected') return controller.isProbablyStale(resolved.wakeStaleThresholdMs)
+    if (state === 'connected') {
+      return force || controller.isProbablyStale(resolved.wakeStaleThresholdMs)
+    }
     if (state === 'disconnected') return true
     const connectingFor = controller.connectingForMs()
     return connectingFor === undefined || connectingFor >= resolved.wakeConnectingGraceMs
   }
   const attemptWake = (): void => {
     wakeTimer = undefined
-    if (nav.onLine !== true || !needsRecovery()) return
+    const force = wakeForce || pendingWake
+    wakeForce = false
+    if (nav.onLine !== true) {
+      pendingWake = true
+      return
+    }
+    if (!needsRecovery(force)) {
+      pendingWake = false
+      return
+    }
+    pendingWake = false
+    onlineRecoveryPending = false
+    lastRecoveryAt = Date.now()
     controller.reconnect()
   }
-  const scheduleWake = (): void => {
-    if (wakeTimer !== undefined || nav.onLine !== true || !needsRecovery()) return
+  const scheduleWake = (force = false): void => {
+    if (wakeTimer !== undefined) {
+      if (force) wakeForce = true
+      return
+    }
+    if (!needsRecovery(force)) return
+    if (nav.onLine !== true) {
+      pendingWake = true
+      return
+    }
+    wakeForce = force
     wakeTimer = setTimeout(attemptWake, resolved.wakeReconnectDebounceMs + (controller.wakeJitterMs?.() ?? 0))
   }
   /** Apply the network state the browser reports when the debounce closes. */
   const applyNetwork = (): void => {
     networkTimer = undefined
     const available = nav.onLine === true
-    if (available === reportedAvailable) return
+    const force = onlineRecoveryPending
+    const onlineAt = onlineRecoveryAt
+    onlineRecoveryPending = false
+    onlineRecoveryAt = undefined
+    if (available === reportedAvailable) {
+      if (!available) {
+        if (force || pendingWake) pendingWake = true
+        return
+      }
+      if (force || pendingWake) {
+        // A wake reconnect is already part of this burst; the delayed online
+        // event must not replace it with a second generation. Compare the
+        // event time to the recovery, never the timer's own debounce close.
+        if (lastRecoveryAt !== undefined && onlineAt !== undefined
+          && onlineAt - lastRecoveryAt <= resolved.networkDebounceMs) return
+        scheduleWake(true)
+      }
+      return
+    }
     reportedAvailable = available
     controller.setNetworkAvailable(available)
+    if (available) {
+      // The availability transition already restarts the connection loop.
+      // Retire the coalesced request so it cannot replace that fresh attempt.
+      pendingWake = false
+      wakeForce = false
+      cancelWake()
+    } else if (force || pendingWake || wakeTimer !== undefined) {
+      pendingWake = true
+    }
   }
   const scheduleNetwork = (): void => {
     if (networkTimer !== undefined) return
     networkTimer = setTimeout(applyNetwork, resolved.networkDebounceMs)
   }
   const online = (): void => {
-    if (reportedAvailable && nav.onLine === true) {
-      cancelNetwork()
-      return
-    }
+    // A debounced transition restarts the loop itself. When the offline
+    // transition was missed (the common sleep/wake case), this flag forces one
+    // coalesced recovery after the debounce even though availability did not
+    // move. navigator.onLine remains a hint; no attempt is issued offline.
+    if (!onlineRecoveryPending) onlineRecoveryAt = Date.now()
+    onlineRecoveryPending = true
     scheduleNetwork()
   }
   const offline = (): void => {
+    if (wakeTimer !== undefined || onlineRecoveryPending) pendingWake = true
     cancelWake()
     scheduleNetwork()
   }
   const pageShow = (): void => { scheduleWake() }
+  const resume = (): void => { scheduleWake() }
   const watchdog = setInterval(() => {
-    if (nav.onLine !== true || getState() !== 'connected'
+    if (!reportedAvailable || getState() !== 'connected'
       || controller.hasObservedInboundHeartbeat?.() === false
       || !controller.isProbablyStale(resolved.watchdogStaleMs)) {
       watchdogFired = false
@@ -184,6 +253,8 @@ export function watchBrowserNetwork(
     }
     doc.addEventListener('visibilitychange', visibilityChange)
     removeDocumentListeners.push(() => { doc.removeEventListener('visibilitychange', visibilityChange) })
+    doc.addEventListener('resume', resume)
+    removeDocumentListeners.push(() => { doc.removeEventListener('resume', resume) })
   }
   controller.setNetworkAvailable(reportedAvailable)
   win.addEventListener('online', online)
@@ -192,6 +263,11 @@ export function watchBrowserNetwork(
   return () => {
     cancelWake()
     cancelNetwork()
+    pendingWake = false
+    wakeForce = false
+    onlineRecoveryPending = false
+    onlineRecoveryAt = undefined
+    lastRecoveryAt = undefined
     clearInterval(watchdog)
     win.removeEventListener('online', online)
     win.removeEventListener('offline', offline)

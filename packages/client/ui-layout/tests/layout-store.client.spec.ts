@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createLayoutStore } from '../src/client/stores.ts'
 import type { LayoutWidths } from '../src/client/stores.ts'
-import { defaultRightbarWidth, resolveRightbarWidth } from '../src/client/columns.ts'
+import { computeColumns, defaultRightbarWidth, resolveRightbarWidth } from '../src/client/columns.ts'
 import type { MainPanelId } from '../src/client/service.ts'
 
 const WIDTHS_KEY = 'dsh.client.layout.widths'
@@ -18,7 +18,12 @@ function readStored(): { sidebar: number; rightbar: { px: number; ratio: number 
   return JSON.parse(localStorage.getItem(WIDTHS_KEY) ?? 'null') as { sidebar: number; rightbar: { px: number; ratio: number } | null }
 }
 
-beforeEach(() => { vi.stubGlobal('innerWidth', 1920); localStorage.clear() })
+beforeEach(() => {
+  vi.stubGlobal('innerWidth', 1920)
+  localStorage.clear()
+  delete document.documentElement.dataset.platform
+  document.documentElement.removeAttribute('data-windows-titlebar')
+})
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('createLayoutStore', () => {
@@ -31,7 +36,8 @@ describe('createLayoutStore', () => {
         viewportWidth: 1920,
         narrowExpanded: false,
         rightbar: null,
-        widthsEdited: false,
+        sidebarLocal: false,
+        rightbarLocal: false,
         rightbarShown: false,
         rightbarTrack: false,
         rightbarFullscreen: false,
@@ -121,6 +127,9 @@ describe('createLayoutStore', () => {
       localStorage.setItem(WIDTHS_KEY, JSON.stringify({ sidebar: 280, rightbar }))
       expect(createLayoutStore().create().store.getSnapshot().layoutInfo.rightbar).toBeNull()
     }
+    // A non-finite JSON number (1e400 parses to Infinity) is not a width.
+    localStorage.setItem(WIDTHS_KEY, '{"sidebar":1e400,"rightbar":null}')
+    expect(createLayoutStore().create().store.getSnapshot().layoutInfo).toMatchObject(defaults)
   })
 
   it('reads defaults and skips writes when the browser has no storage', () => {
@@ -285,16 +294,108 @@ describe('right panel', () => {
     expect(resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, 1920)).toBe(1100)
   })
 
-  it('clamps drag preferences to 300px and 70% of the current frame', () => {
+  it('clamps drag preferences to 300px, 70% of the frame, and the rendered share', () => {
     const { store, actions } = createLayoutStore().create()
     actions.setViewportWidth(1600)
     actions.setRightbar(9999)
     expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(1120, 1600))
     actions.setViewportWidth(1000)
     actions.setRightbar(9999)
-    expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(700, 1000))
+    // The collapsed rail leaves 544px for the right panel; storing the 700px
+    // ceiling would overcommit the share on a later, wider frame.
+    expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(544, 1000))
     actions.setRightbar(1)
     expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(300, 1000))
+  })
+
+  it.each([1024, 1220, 1525, 1920])('stores the width the frame renders at %ipx', (viewport) => {
+    const { store, actions } = createLayoutStore().create()
+    actions.setViewportWidth(viewport)
+    actions.setSidebar(280)
+    actions.openRightbar(true, false)
+    actions.setRightbar(1200)
+    const rendered = computeColumns(viewport, 280, 1200).rightbar
+    expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(rendered, viewport))
+    expect(resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, viewport)).toBe(rendered)
+    // The stored share, scaled to a larger frame, stays the share that was
+    // actually drawn rather than the requested target.
+    expect(computeColumns(1920, 280, resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, 1920)).rightbar)
+      .toBe(computeColumns(1920, 280, rendered / viewport * 1920).rightbar)
+  })
+
+  it.each([
+    [1024, 760, 344],
+    [1220, 760, 540],
+    [1525, 840, 840],
+    [1920, 949, 949],
+  ] as const)('does not store an auto request beyond the %ipx frame (%ipx)', (viewport, requested, rendered) => {
+    const { store, actions } = createLayoutStore().create()
+    actions.setViewportWidth(viewport)
+    actions.setSidebar(280)
+    actions.openRightbar(true, false)
+    actions.setRightbar(requested)
+    expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(rendered, viewport))
+    expect(computeColumns(viewport, 280, requested).rightbar).toBe(rendered)
+  })
+
+  it('uses the frame narrow-sidebar branch when storing a manual width', () => {
+    const { store, actions } = createLayoutStore().create()
+    actions.setSidebar(264)
+    actions.setViewportWidth(1000)
+    actions.openRightbar(true, false)
+    actions.toggleSidebar()
+    actions.setRightbar(500)
+    // The manually expanded narrow sidebar leaves 336px for the panel; the
+    // collapsed-rail branch would have stored 500.
+    expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(336, 1000))
+    expect(computeColumns(1000, 264, 500).rightbar).toBe(336)
+  })
+
+  it('does not record a width the frame cannot fit', () => {
+    const { store, actions } = createLayoutStore().create()
+    actions.setViewportWidth(700)
+    actions.setSidebar(280)
+    actions.openRightbar(true, false)
+    actions.setRightbar(300)
+    expect(store.getSnapshot().layoutInfo.rightbar).toBeNull()
+    expect(store.getSnapshot().layoutInfo.rightbarLocal).toBe(false)
+    expect(readStored().rightbar).toBeNull()
+  })
+
+  it('ignores a non-finite width request', () => {
+    const { store, actions } = createLayoutStore().create()
+    actions.setViewportWidth(1000)
+    actions.setRightbar(Number.NaN)
+    expect(store.getSnapshot().layoutInfo.rightbar).toBeNull()
+  })
+
+  it('falls back to the rail width when there is no document', () => {
+    vi.stubGlobal('document', undefined)
+    const { store, actions } = createLayoutStore().create()
+    actions.setViewportWidth(1000)
+    actions.setRightbar(600)
+    expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(544, 1000))
+  })
+
+  it('uses the platform collapsed track for the rendered share', () => {
+    document.documentElement.dataset.platform = 'darwin'
+    const mac = createLayoutStore().create()
+    mac.actions.setViewportWidth(1000)
+    mac.actions.setRightbar(600)
+    expect(mac.store.getSnapshot().layoutInfo.rightbar).toEqual(preference(600, 1000))
+    document.documentElement.dataset.platform = 'linux'
+    document.documentElement.setAttribute('data-windows-titlebar', '')
+    const windows = createLayoutStore().create()
+    windows.actions.setViewportWidth(1000)
+    windows.actions.setRightbar(600)
+    expect(windows.store.getSnapshot().layoutInfo.rightbar).toEqual(preference(600, 1000))
+    document.documentElement.removeAttribute('data-windows-titlebar')
+    delete document.documentElement.dataset.platform
+    const linux = createLayoutStore().create()
+    linux.actions.setViewportWidth(1000)
+    linux.actions.setRightbar(600)
+    // The collapsed rail leaves 544px for the right column.
+    expect(linux.store.getSnapshot().layoutInfo.rightbar).toEqual(preference(544, 1000))
   })
 
   it('draws the minimum width on a phone without recording a preference', () => {
@@ -305,7 +406,7 @@ describe('right panel', () => {
     expect(resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, 320)).toBe(300)
   })
 
-  it('collapses a manually expanded narrow sidebar on opening, not presentation reports', () => {
+  it('collapses a manually expanded narrow sidebar only for a normal tracked opening', () => {
     const { store, actions } = createLayoutStore().create()
     actions.setSidebar(400)
     actions.setViewportWidth(800)
@@ -313,11 +414,25 @@ describe('right panel', () => {
     actions.openRightbar(true, false)
     expect(store.getSnapshot().layoutInfo).toMatchObject({ sidebar: 400, narrowExpanded: false })
     actions.toggleSidebar()
+    // Fullscreen is an overlay report; it must not consume the sidebar override.
     actions.openRightbar(true, true)
+    expect(store.getSnapshot().layoutInfo.narrowExpanded).toBe(true)
+    actions.closeRightbar()
+    // Nor does an untracked report.
+    actions.openRightbar(false, false)
     expect(store.getSnapshot().layoutInfo.narrowExpanded).toBe(true)
     actions.closeRightbar()
     actions.openRightbar(true, false)
     expect(store.getSnapshot().layoutInfo.narrowExpanded).toBe(false)
+  })
+
+  it('leaves the narrow override alone when the right panel cannot fit', () => {
+    const { store, actions } = createLayoutStore().create()
+    actions.setViewportWidth(700)
+    actions.setSidebar(280)
+    actions.toggleSidebar()
+    actions.openRightbar(true, false)
+    expect(store.getSnapshot().layoutInfo).toMatchObject({ narrowExpanded: true, rightbarShown: false })
   })
 
   it('keeps the wide sidebar preference and never opens a closed right panel on resize', () => {
@@ -341,12 +456,42 @@ describe('host width record', () => {
     expect(persistHost).toHaveBeenLastCalledWith({ sidebar: 320, rightbar: preference(720, 1920) })
   })
 
-  it('adopts the host record over this origin cache and rewrites the local copy', () => {
+  it('keeps this origin\'s cache instead of replacing it with a host record', () => {
     localStorage.setItem(WIDTHS_KEY, JSON.stringify({ sidebar: 280, rightbar: preference(500, 1920) }))
     const { store, actions } = createLayoutStore().create()
     actions.adoptWidths({ sidebar: 360, rightbar: preference(720, 1920) })
-    expect(store.getSnapshot().layoutInfo.sidebar).toBe(360)
+    expect(store.getSnapshot().layoutInfo.sidebar).toBe(280)
+    expect(resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, 1920)).toBe(500)
+    expect(readStored()).toEqual({ sidebar: 280, rightbar: preference(500, 1920) })
+  })
+
+  it('keeps a compact local width over a stale wide host record after reload', () => {
+    localStorage.setItem(WIDTHS_KEY, JSON.stringify({ sidebar: 280, rightbar: preference(420, 1525) }))
+    const { store, actions } = createLayoutStore().create()
+    actions.adoptWidths({ sidebar: 280, rightbar: preference(840, 1525) })
+    expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(420, 1525))
+    expect(resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, 1920)).toBe(529)
+    expect(readStored().rightbar).toEqual(preference(420, 1525))
+  })
+
+  it('seeds a host field that has no local preference', () => {
+    localStorage.setItem(WIDTHS_KEY, JSON.stringify({ sidebar: 280, rightbar: null }))
+    const { store, actions } = createLayoutStore().create()
+    actions.adoptWidths({ sidebar: 360, rightbar: preference(720, 1920) })
+    expect(store.getSnapshot().layoutInfo.sidebar).toBe(280)
     expect(resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, 1920)).toBe(720)
+    expect(readStored()).toEqual({ sidebar: 280, rightbar: preference(720, 1920) })
+  })
+
+  it('seeds both host fields only when the origin has no written width', () => {
+    const { store, actions } = createLayoutStore().create()
+    actions.adoptWidths({ sidebar: 360, rightbar: preference(720, 1920) })
+    expect(store.getSnapshot().layoutInfo).toMatchObject({
+      sidebar: 360,
+      rightbar: preference(720, 1920),
+      sidebarLocal: true,
+      rightbarLocal: true,
+    })
     expect(readStored()).toEqual({ sidebar: 360, rightbar: preference(720, 1920) })
   })
 
@@ -358,13 +503,13 @@ describe('host width record', () => {
     expect(resolveRightbarWidth(store.getSnapshot().layoutInfo.rightbar, 1920)).toBe(640)
   })
 
-  it('keeps the local right width when the host record carries none', () => {
+  it('keeps both local widths when the host record carries no right preference', () => {
     localStorage.setItem(WIDTHS_KEY, JSON.stringify({ sidebar: 280, rightbar: preference(700, 1920) }))
     const { store, actions } = createLayoutStore().create()
     actions.adoptWidths({ sidebar: 300 })
-    expect(store.getSnapshot().layoutInfo.sidebar).toBe(300)
+    expect(store.getSnapshot().layoutInfo.sidebar).toBe(280)
     expect(store.getSnapshot().layoutInfo.rightbar).toEqual(preference(700, 1920))
-    expect(readStored()).toEqual({ sidebar: 300, rightbar: preference(700, 1920) })
+    expect(readStored()).toEqual({ sidebar: 280, rightbar: preference(700, 1920) })
   })
 
   it('never reports an opening to the host', () => {

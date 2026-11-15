@@ -557,7 +557,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ConnectionRecoveryConfig',
-    declaration: 'export interface ConnectionRecoveryConfig {\n    backoffBaseMs?: number;\n    backoffFactor?: number;\n    backoffMaxMs?: number;\n    generationReadyWarnMs?: number;\n    generationReadyTimeoutMs?: number;\n    stableConnectionMs?: number;\n    wakeReconnectDebounceMs?: number;\n    wakeStaleThresholdMs?: number;\n    wakeConnectingGraceMs?: number;\n    watchdogIntervalMs?: number;\n    watchdogStaleMs?: number;\n    networkDebounceMs?: number;\n    reconnectStaggerMs?: number;\n    rpcTimeoutMs?: number;\n}',
+    declaration: 'export interface ConnectionRecoveryConfig {\n    backoffBaseMs?: number;\n    backoffFactor?: number;\n    backoffMaxMs?: number;\n    generationReadyWarnMs?: number;\n    generationReadyTimeoutMs?: number;\n    settleTimeoutMs?: number;\n    maxRetiredGenerations?: number;\n    stableConnectionMs?: number;\n    wakeReconnectDebounceMs?: number;\n    wakeStaleThresholdMs?: number;\n    wakeConnectingGraceMs?: number;\n    watchdogIntervalMs?: number;\n    watchdogStaleMs?: number;\n    networkDebounceMs?: number;\n    reconnectStaggerMs?: number;\n    rpcTimeoutMs?: number;\n}',
   },
   {
     name: 'ConnectionRpcFailure',
@@ -569,7 +569,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ConnectionSinks',
-    declaration: 'export interface ConnectionSinks {\n    onConnected?: (host: ConnectionHostInfo) => void;\n    onStateChange?: (state: ConnectionState) => void;\n    onReconnectRequested?: () => void;\n}',
+    declaration: 'export interface ConnectionSinks {\n    onConnected?: (host: ConnectionHostInfo) => void;\n    onStateChange?: (state: ConnectionState, diagnosis?: string) => void;\n    onReconnectRequested?: () => void;\n}',
   },
   {
     name: 'ConnectionState',
@@ -577,7 +577,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ConnectionStateSource',
-    declaration: 'export interface ConnectionStateSource {\n    getSnapshot(): ConnectionState | undefined;\n    subscribe(listener: () => void): () => void;\n}',
+    declaration: 'export interface ConnectionStateSource {\n    getSnapshot(): ConnectionState | undefined;\n    getDiagnosis?(): string | undefined;\n    subscribe(listener: () => void): () => void;\n}',
   },
   {
     name: 'EntryKeyOf',

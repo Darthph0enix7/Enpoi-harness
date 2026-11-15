@@ -1,13 +1,273 @@
 {
   "preset": "orchestrator",
+  "captureMethod": "keyless-profile-composition",
+  "captureSource": "apps/web/tests/keyless-tool-inventory.e2e.ts",
+  "captureReceipt": {
+    "version": "0.1.7-enpoi.2",
+    "head": "b6c25d742bc616718f2d2e21b68e6f6d9b1e8e00",
+    "profileFingerprints": {
+      "dsh-enpoi-agent-switch": {
+        "dir": "enpoi-agent-switch",
+        "sourceInputs": "adf4c5ffd7ec3270a92dec61e9b795e8758286776bdcbc0fc79a45f4e99bc71b",
+        "outputSha": "24ac21a10b52d80244e86ccb7a18e5c8e930a308d5826748b5bd913d115ebe59"
+      },
+      "dsh-enpoi-capabilities": {
+        "dir": "enpoi-capabilities",
+        "sourceInputs": "f4ba1a1a456da07a27e821b350c2b445be88153ca19965aa170862dbc17693fe",
+        "outputSha": "d4baf14d588fc8df3aac0b5f17c6edc37f8c1380eaa40f0941bd9d3f2805a666"
+      },
+      "dsh-enpoi-cascade": {
+        "dir": "enpoi-cascade",
+        "sourceInputs": "fd4adec53f228748dceaddaa2bddb7390e382f06cd6697b7d37f1aa8a2238af5",
+        "outputSha": "10790e5463a14011153561c059964818a6bb6cb8395556a6e5d4a4f3ad839e04"
+      },
+      "dsh-enpoi-catalog-rules": {
+        "dir": "enpoi-catalog-rules",
+        "sourceInputs": "c3effcd0215b1d541b22a6ee3002450640785768996c25b6246cace9eef75fea",
+        "outputSha": "3a1ec24f494d2aa41605f0b0929ba68ef3fb7db2ab310e11b93e1629eef52456"
+      },
+      "dsh-enpoi-commandcode-provider": {
+        "dir": "enpoi-commandcode-provider",
+        "sourceInputs": "4b4c0eda4efe9205b736742d1d340d92c9cde4c87b8e957c204edb82e87709b4",
+        "outputSha": "999e25fd92a214d60ba405ea7eaa7454f0ee84c8e6ee3a7828a9e486e5bda6c5"
+      },
+      "dsh-enpoi-context-keeper": {
+        "dir": "enpoi-context-keeper",
+        "sourceInputs": "c848b37e1ad2199e163b4e078d997d36a2fb8282c6d41a6013e0e68a00623f1e",
+        "outputSha": "deb59d7f399d4b7282a0c274178f8d4a3608a68b2cc00b78f3d819caf0346f04"
+      },
+      "dsh-enpoi-contracts": {
+        "dir": "enpoi-contracts",
+        "sourceInputs": "391eda09a7976a60ac0408982e3479949716080c4f21cd751d117dc2b2e3e4c1",
+        "outputSha": "0259eee20c4fda819e6fefcbf870fb141e432fbc7e6419a05d0ae6c1a47d78ea"
+      },
+      "dsh-enpoi-council": {
+        "dir": "enpoi-council",
+        "sourceInputs": "40653c26fa9431175c712f49525784be51475e6101af623ab55a0565f21aedf6",
+        "outputSha": "2507fd0f76bf9db382c2aa9bb9c4219978db889c082bf4b4b78170165e893458"
+      },
+      "dsh-enpoi-custom-tools": {
+        "dir": "enpoi-custom-tools",
+        "sourceInputs": "5032595fcd0de31cc8f1ade800872beb051762cdb9cda603325235e1d1fcd4a0",
+        "outputSha": "4e761209bf676bf516a2ad3e72ad4332917224fb6458887d2387b0beae90c2db"
+      },
+      "dsh-enpoi-debug": {
+        "dir": "enpoi-debug",
+        "sourceInputs": "860078de8cd6292b20ea5b383b99e06b570fcef2aa89f443bcf7c2de5c9d3ad0",
+        "outputSha": "8c5b65084169c93cc236c14b379da66c9b74fb6228940454ecf3dbe33fcd2e29"
+      },
+      "dsh-enpoi-diagnostics": {
+        "dir": "enpoi-diagnostics",
+        "sourceInputs": "34601ca4a772dd8928aa0ed82407033893fd88115c9d2e91104b6f65640d7819",
+        "outputSha": "30821bedd7bac073428d9525f5106e697a110b575bc8635b0a52aa015f9aac3f"
+      },
+      "dsh-enpoi-file-revert": {
+        "dir": "enpoi-file-revert",
+        "sourceInputs": "4f050e6ff40b8548dbebad715b0d01222420e65dec4a1ccbb3797f994885642d",
+        "outputSha": "eaf8327cf47efcc32d820e80b0dd057ba85e375a2e8bded9c520b423099cb8c1"
+      },
+      "dsh-enpoi-fs-ops": {
+        "dir": "enpoi-fs-ops",
+        "sourceInputs": "c287e833e224f67d99b99d159f1fa952d03e91da3f452c54514d7b01354b9e06",
+        "outputSha": "6b6a03de535b501cff481ba95d5a49b960f87d11f01072d2c81b7522554c9202"
+      },
+      "dsh-enpoi-git": {
+        "dir": "enpoi-git",
+        "sourceInputs": "810465444db64a2f235692cfed3d6e864bd98469df4b7d60c9139f3687297696",
+        "outputSha": "4c9995844097cf2242881c171e3d6abc3536e46d7ef6698d3e9aed191b879b51"
+      },
+      "dsh-enpoi-heavy-providers": {
+        "dir": "enpoi-heavy-providers",
+        "sourceInputs": "9f421e3e77d91789d3b842d8e203285f014108a0fb2b253ca50d7b3cd3d43998",
+        "outputSha": "2356cf3f9b0f3fbde084fe16fa79ee72075f6322e4556497c9d2e0835017ff39"
+      },
+      "dsh-enpoi-living-brief": {
+        "dir": "enpoi-living-brief",
+        "sourceInputs": "bf007df44ed7e18f249efd7ba3e9ff013e5f1f2116dee6b3012a90093bb196e2",
+        "outputSha": "b12c171fc2b3b51443424a8be065df0c645f0a20120938105d250510db0f5eda"
+      },
+      "dsh-enpoi-memory": {
+        "dir": "enpoi-memory",
+        "sourceInputs": "6f1f325c94b53d99d61089c1c50beafc0394271d43d0a86dae599c4c6671c82f",
+        "outputSha": "1669f9b45aebc30caa71b79bb2ef71da4b86294753c4346a13e6e2e9865cd7e1"
+      },
+      "dsh-enpoi-model-chains": {
+        "dir": "enpoi-model-chains",
+        "sourceInputs": "1a08592d533c3d7358d0f8fa52a30381af370a27ec9c486a1df8de53216ca35e",
+        "outputSha": "0970973c834179ebf0723896de9ee43432f9fe7beb97d8c6cd2a340271fdfcdb"
+      },
+      "dsh-enpoi-oracle": {
+        "dir": "enpoi-oracle",
+        "sourceInputs": "ec5b258774846e10bddb8fe5a33869c2d68c8f7b21c723c5b31d91915e3668cb",
+        "outputSha": "6dfa3d0bf25664ddaa21b81d466b84d453909dbf849a52b89b2fed29441c810c"
+      },
+      "dsh-enpoi-peer-bridge": {
+        "dir": "enpoi-peer-bridge",
+        "sourceInputs": "be879ee804f9d44cfc79332ebb25e2b75f4459940c108e8a7f0da3985a839a65",
+        "outputSha": "73d040c70e62f28cda656fc760ec16f039313023a60c540b0c5463964763d76d"
+      },
+      "dsh-enpoi-preset-authoring": {
+        "dir": "enpoi-preset-authoring",
+        "sourceInputs": "c9d01dcaec1c2cda7ba1c8e2bb663ce40357386f7f001737622531a058350c6b",
+        "outputSha": "12be78f5624f481dfd4623c36cfd322247553032b6f9fa77a338189479cff501"
+      },
+      "dsh-enpoi-provider-sync": {
+        "dir": "enpoi-provider-sync",
+        "sourceInputs": "cbc7ea1b207a1c4d217a3d095864956ca9481c3c1e75cb90929e47f82b5dee5f",
+        "outputSha": "2d815edf07dd6f89e36347e0ba1fba0c5234f84e891eaa8274c172c3e6676e04"
+      },
+      "dsh-enpoi-role-registry": {
+        "dir": "enpoi-role-registry",
+        "sourceInputs": "aacc673d650e7532b7d4a0d22cd9515766b457879e20c50f80cbee9539e2b6fc",
+        "outputSha": "6a894db3bf24868cfd4dc3cd8c530d9a79a5bdaeba0e0258f41b7fdd8041f96b"
+      },
+      "dsh-enpoi-runtime-probe": {
+        "dir": "enpoi-runtime-probe",
+        "sourceInputs": "92dd642cb7e49943a6bcb0d427f3f987c8f64f1cd5aef7bc4927df2a2482b4fd",
+        "outputSha": "c02c894c3368729401a0203afed48dd9547896aec5f662cc45c8e8e09bf835c1"
+      },
+      "dsh-enpoi-skin-guard": {
+        "dir": "enpoi-skin-guard",
+        "sourceInputs": "588cfd79fdb4ddaa3c6e19864eebce1afe8cf87cdcdce3295b31a16929d95827",
+        "outputSha": "bb9163691232d58af75ceb2c5afe74cde292ed58622cbed41a8a8295bc21c07f"
+      },
+      "dsh-enpoi-tool-groups": {
+        "dir": "enpoi-tool-groups",
+        "sourceInputs": "e61647874f72a2c54beef10d6737cc2d662cc0d6281b4638fd5d801b8b09ff88",
+        "outputSha": "2f67a113695e08da89719c51d6030e73f6d8e0f18667377592c6218a51715f53"
+      },
+      "dsh-enpoi-ui-state": {
+        "dir": "enpoi-ui-state",
+        "sourceInputs": "4ec765c0285aca563ffd8eb1d31c4383463d4d0f7e39d0c5657c2eeee1552926",
+        "outputSha": "a309eb300f9c59faeef1551635e6a791d8e92af55481ee615dbb5d14b2d8f3bb"
+      },
+      "dsh-enpoi-update-check": {
+        "dir": "enpoi-update-check",
+        "sourceInputs": "9bc5c6bdde5a5d98f4e069daf306dcb746c9c3ab58dc593c997ed69b5a85db64",
+        "outputSha": "b9bf6bb3307a176a0431d23ec47c251ad1636f6a399524e97b8e626f042bab75"
+      },
+      "dsh-enpoi-verify-gate": {
+        "dir": "enpoi-verify-gate",
+        "sourceInputs": "1ce61f9ddbf1a273f94739445f6675cb447da4792751ab2e2ee115412efbcedf",
+        "outputSha": "031f86eef007364a96b33f27470824a77bc0ed05c9f8fe54b844ae0c13723c74"
+      },
+      "dsh-enpoi-whiteboard": {
+        "dir": "enpoi-whiteboard",
+        "sourceInputs": "3a67b035801c9aa17046ff264835367b5b06faa1c441dd69f700b3d5ca5a9c67",
+        "outputSha": "4b1c55bfab7d242a8c3a353ebde75721331f29f30f48817e69fde3bf84990a64"
+      }
+    },
+    "externalBundles": {
+      "@earendil-works/pi-ai": {
+        "version": "0.85.1",
+        "packageJson": "b54df5a36d523febdeebfc5682dc4faed101fee10aba913d5f3679582f018da3",
+        "entry": "010778daab84fd68b88507d6cd2c4ff1fc1f2efe230e096100eebff98d5183a5"
+      },
+      "@linxin666/dsh-client-ui-skin-center": {
+        "version": "0.3.21",
+        "packageJson": "48743a0d1237b8709c173b3bce4ac89130273f992ca91d62626302632ed0c4f4",
+        "entry": "a2874e7dc2884a9aa65afcba36557f7b9695099660c927d7b13faf629946a45d"
+      },
+      "@xterm/addon-fit": {
+        "version": "0.11.0",
+        "packageJson": "2f1016c5683f76ac1250c466afc29164bc82da7c2ef224c7d5ab83397edf1637",
+        "entry": "ba3ea256ce0620a0992a197d6c9baea64823fc93d8da07a9e366ca9943c18527"
+      },
+      "@xterm/xterm": {
+        "version": "6.0.0",
+        "packageJson": "f5a0dde40a146d6c7a86b22daf6e5740517e5d708ec1d162197e0445431d8f4f",
+        "entry": "14903579ff54664cd72f8e8699e6961a6272c21863ec1c3b118cdc8af5d4a972"
+      },
+      "dsh-compressor": {
+        "version": "0.1.0",
+        "packageJson": "d290bdb4348c3f5272c0c84a9f696b815a297109ec46aa54e998ddfbcec632f6",
+        "entry": "f4348aca25c80852d91772880ce7a2ad21d7c46c8a2b43face744789282186a7"
+      },
+      "dsh-context": {
+        "version": "0.54.4",
+        "packageJson": "864a9fbcbf93ec0dde08d58e7960cd85f525504a99f4e9c77ccc01dc8feec34d",
+        "entry": "6e03ab3a6ea6b67ebc2d3b384b0515422f8e6c5731b5515ed0461cf6c0a3efee"
+      },
+      "dsh-context-lens": {
+        "version": "0.3.1",
+        "packageJson": "54d8893de66e4aae069431f54d286a4459841eab8aa50269a9233f87f487095a",
+        "entry": "def00324164f5a48ccabd1e3657d8f06cebaec360d602b023cea18b6c8bd02ca"
+      },
+      "dsh-fast": {
+        "version": "0.2.14",
+        "packageJson": "cc30f0f3e90ccf44d1e1468808d56a7fb343dde742e3c42b6ef59b11a4b441bc",
+        "entry": "3038a7e4f9b5898b6858e0fdea7f2ae4ca4e3751d30dc137731a8c9f0a79c31f"
+      }
+    },
+    "hostPackages": {
+      "@__OWNER__/dsh": {
+        "name": "@__OWNER__/dsh",
+        "version": "0.1.7-enpoi.2",
+        "packageJson": "684c0c91ac240f7a29569452c618e564260e1f5ba9a0f914fb330cfd5c9a655f",
+        "entry": null
+      },
+      "@deepseek-ai/dsh-app-boot": {
+        "name": "@deepseek-ai/dsh-app-boot",
+        "version": "0.1.7-enpoi.2",
+        "packageJson": "3f91266a7c934a53a8a07d4399603ef9b23dc59c352405087550c4acbae52daa",
+        "entry": "6a396fb993e39a55f18c1d57fa27ce784264d2910562c636c6bfa0afce0f25e1"
+      },
+      "@deepseek-ai/dsh-scope": {
+        "name": "@deepseek-ai/dsh-scope",
+        "version": "0.1.7-enpoi.2",
+        "packageJson": "a732b9b0142a60616fc56b2492762d6e9d1adee7ae4cdd27ce33c955080fd3f8",
+        "entry": "2829df71d76e08941457d4dd173eac60783e55354921137c8b75e8b5c0d2ecca"
+      },
+      "@deepseek-ai/dsh-tools": {
+        "name": "@deepseek-ai/dsh-tools",
+        "version": "0.1.7-enpoi.2",
+        "packageJson": "5a47b6bc03cf2d2fa8ad6d6db52b590e29cd676dc225bbd46f7d94d16e34d636",
+        "entry": "bdde0f60cc45f2023f07e2ee927269039d05049b3d982a121c7a761bc0f5c641"
+      },
+      "@deepseek-ai/dsh-llm": {
+        "name": "@deepseek-ai/dsh-llm",
+        "version": "0.1.7-enpoi.2",
+        "packageJson": "a448adc8fcd0192f17fb84320e01d512bb9badc0ad39a8fef80ff5e8b7b8a396",
+        "entry": "3dd1784edbab5445def3807225d9230f56adc34eb2d653a40261e3eed8739e9e"
+      },
+      "@deepseek-ai/dsh-base": {
+        "name": "@deepseek-ai/dsh-base",
+        "version": "0.1.7-enpoi.2",
+        "packageJson": "4b99b205a93ced44c362b2aa6f72023649020697d02cba0cf71090e1a5cc99c6",
+        "entry": "8e609bb71c20b858c77f0e9f90bb1319db8477b13f9f965f1a1e18524bf50881"
+      },
+      "@deepseek-ai/dsh-web-app": {
+        "name": "@deepseek-ai/dsh-web-app",
+        "version": "0.1.7-enpoi.2",
+        "packageJson": "9e300952c0719dea8a074dadf6b9857b87b6257b4b2a6423741fadc3bd3abdfd",
+        "entry": "83b1e4e90a82ef3c0b15eb9ff49c630cf061f33dbf6f98854fa884ee7665c8a5"
+      }
+    },
+    "combinedDigest": "05b81939832f14b108d53a566619a2e8850019f229dbd31d78940b6aef3c558a"
+  },
+  "captureClientBuild": {
+    "artifacts": {
+      "fileCount": 378,
+      "sha256": "fba8958f128a1cda645cdc31825bb0cc1ef77d7347cb2dbab8902d597538ee9c"
+    },
+    "environment": {
+      "DSH_CLIENT_BUILD_PROFILE": "official",
+      "DSH_CLIENT_COMMIT_HASH": "b6c25d7",
+      "DSH_CLIENT_TITLE": "DeepSeek Harness",
+      "DSH_CLIENT_VERSION": "0.1.7-enpoi.2"
+    }
+  },
+  "captureScope": "shipped profile/web bundles and preset rows only; isolated child process with owned HOME/DSH_HOME/DSH_MEMORY_DB/DSH_WIRE_LOG/XDG paths, strict env whitelist, no operator settings or credentials; real runtime permissions/tool-group filtering; tools captured from GenerateOptions and cross-checked against the per-session wire capture",
   "tools": [
     "ask_user_question",
     "bash",
     "chorus",
+    "compressor_retrieve",
     "council_list",
     "council_register",
     "create_goal",
-    "diagnostics_report",
+    "custom_research-fetch",
+    "custom_research-verify",
     "edit",
     "exit_plan_mode",
     "fast_report",
@@ -31,19 +291,17 @@
     "read_image",
     "request_evidence",
     "roundtable",
+    "run_code",
     "send_message",
-    "session_debug",
     "session_event_read",
     "session_event_search",
-    "session_event_trace",
     "session_search",
-    "session_trace",
     "skill",
     "subagent",
     "todo_write",
     "tool_groups",
     "update_goal",
-    "web_search",
+    "web_fetch",
     "whiteboard_forget",
     "whiteboard_pin",
     "whiteboard_read",

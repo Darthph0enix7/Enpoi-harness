@@ -163,6 +163,13 @@ describe('AgentModelsBody — dynamic fleet', () => {
     expect(screen.getByRole('button', { name: 'built-in default: kilo/poolside/laguna-s-2.1:free' })).toBeTruthy()
   })
 
+  it('keeps the summarizer route rationale in an accessible disclosure', () => {
+    mount(mergeRoleRegistry(undefined), { keeper: null }, directoryFace())
+    expect(screen.queryByText(/context summarizer/)).toBeNull()
+    fireEvent.click(screen.getByText('Why the summarizer route matters'))
+    expect(screen.getByText(/context summarizer/)).toBeTruthy()
+  })
+
   it('labels the keeper built-in default exactly', () => {
     mount(mergeRoleRegistry(undefined), { keeper: null }, directoryFace())
 

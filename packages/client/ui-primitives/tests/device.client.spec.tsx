@@ -59,6 +59,13 @@ function installViewportWidth(width: number): void {
   vi.stubGlobal('innerHeight', 844)
 }
 
+/** Focus a real editable control; the layout-shrink keyboard branch requires it. */
+function focusEditable(element: HTMLElement = document.createElement('textarea')): HTMLElement {
+  document.body.append(element)
+  element.focus()
+  return element
+}
+
 function installScreenSize(width: number, height: number): void {
   Object.defineProperty(window.screen, 'width', { configurable: true, value: width })
   Object.defineProperty(window.screen, 'height', { configurable: true, value: height })
@@ -73,6 +80,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  document.body.replaceChildren()
   vi.useRealTimers()
   vi.unstubAllGlobals()
   // Object.defineProperty shapes survive unstubAllGlobals; drop them explicitly.
@@ -164,6 +172,7 @@ describe('DeviceRuntime', () => {
     const viewport = installVisualViewport(844)
     const runtime = new DeviceRuntime()
     const stop = runtime.install()
+    focusEditable()
     viewport.height = 444
     viewport.emit()
     flushFrames()
@@ -193,16 +202,36 @@ describe('DeviceRuntime', () => {
     stop()
   })
 
+  it('publishes a settled desktop resize as the new resting height', () => {
+    installTouch(0, false)
+    installViewportWidth(1440)
+    const runtime = new DeviceRuntime()
+    const stop = runtime.install()
+    expect(runtime.getSnapshot().restingHeight).toBe(844)
+    vi.stubGlobal('innerHeight', 700)
+    window.dispatchEvent(new Event('resize'))
+    flushFrames()
+    expect(runtime.getSnapshot().restingHeight).toBe(700)
+    expect(runtime.getSnapshot().keyboardOpen).toBe(false)
+    stop()
+  })
+
   it('reports a resized layout viewport as an open keyboard with no lift', () => {
     installTouch(1, true)
     installViewportWidth(390)
     const runtime = new DeviceRuntime()
     const stop = runtime.install()
+    focusEditable()
+    expect(runtime.getSnapshot().restingHeight).toBe(844)
     vi.stubGlobal('innerHeight', 444)
     window.dispatchEvent(new Event('resize'))
     flushFrames()
+    // The shrink is a keyboard candidate, not a new resting height.
+    expect(runtime.getSnapshot().keyboardOpen).toBe(false)
+    expect(runtime.getSnapshot().restingHeight).toBe(844)
     vi.advanceTimersByTime(120)
     expect(runtime.getSnapshot().keyboardOpen).toBe(true)
+    expect(runtime.getSnapshot().restingHeight).toBe(844)
     // The layout viewport already shrank, so the shell must not lift again.
     expect(runtime.getSnapshot().keyboardInset).toBe(0)
     expect(document.documentElement.style.getPropertyValue('--dsh-keyboard-inset')).toBe('0px')
@@ -210,6 +239,7 @@ describe('DeviceRuntime', () => {
     window.dispatchEvent(new Event('resize'))
     flushFrames()
     expect(runtime.getSnapshot().keyboardOpen).toBe(false)
+    expect(runtime.getSnapshot().restingHeight).toBe(844)
     stop()
   })
 
@@ -219,6 +249,7 @@ describe('DeviceRuntime', () => {
     const viewport = installVisualViewport(844)
     const runtime = new DeviceRuntime()
     const stop = runtime.install()
+    focusEditable()
     viewport.height = 444
     vi.stubGlobal('innerHeight', 444)
     viewport.emit()
@@ -227,9 +258,136 @@ describe('DeviceRuntime', () => {
     expect(runtime.getSnapshot().keyboardOpen).toBe(true)
     expect(runtime.getSnapshot().keyboardInset).toBe(0)
     viewport.height = 844
+    vi.stubGlobal('innerHeight', 844)
     viewport.emit()
     flushFrames()
     expect(runtime.getSnapshot().keyboardOpen).toBe(false)
+    stop()
+  })
+
+  it('treats a coarse layout shrink as a real resize when no editable has focus', () => {
+    installTouch(1, true)
+    installViewportWidth(390)
+    vi.stubGlobal('innerHeight', 800)
+    const runtime = new DeviceRuntime()
+    const stop = runtime.install()
+    vi.stubGlobal('innerHeight', 650)
+    window.dispatchEvent(new Event('resize'))
+    flushFrames()
+    vi.advanceTimersByTime(KEYBOARD_SETTLE_MS)
+    expect(runtime.getSnapshot().keyboardOpen).toBe(false)
+    expect(runtime.getSnapshot().restingHeight).toBe(650)
+    stop()
+  })
+
+  it('treats the same shrink as a keyboard only with a focused textual editable', () => {
+    installTouch(1, true)
+    installViewportWidth(390)
+    vi.stubGlobal('innerHeight', 800)
+    const input = document.createElement('input')
+    input.type = 'password'
+    focusEditable(input)
+    const runtime = new DeviceRuntime()
+    const stop = runtime.install()
+    vi.stubGlobal('innerHeight', 650)
+    window.dispatchEvent(new Event('resize'))
+    flushFrames()
+    expect(runtime.getSnapshot().restingHeight).toBe(800)
+    vi.advanceTimersByTime(KEYBOARD_SETTLE_MS)
+    expect(runtime.getSnapshot().keyboardOpen).toBe(true)
+    expect(runtime.getSnapshot().restingHeight).toBe(800)
+    stop()
+  })
+
+  it('does not treat readonly, disabled, select, or button focus as a keyboard', () => {
+    installTouch(1, true)
+    installViewportWidth(390)
+    vi.stubGlobal('innerHeight', 800)
+    const readonly = document.createElement('textarea')
+    readonly.readOnly = true
+    focusEditable(readonly)
+    const runtime = new DeviceRuntime()
+    const stop = runtime.install()
+    vi.stubGlobal('innerHeight', 650)
+    window.dispatchEvent(new Event('resize'))
+    flushFrames()
+    vi.advanceTimersByTime(KEYBOARD_SETTLE_MS)
+    expect(runtime.getSnapshot().keyboardOpen).toBe(false)
+    stop()
+
+    const select = document.createElement('select')
+    select.append(document.createElement('option'))
+    focusEditable(select)
+    const second = new DeviceRuntime()
+    const secondStop = second.install()
+    window.dispatchEvent(new Event('resize'))
+    flushFrames()
+    vi.advanceTimersByTime(KEYBOARD_SETTLE_MS)
+    expect(second.getSnapshot().keyboardOpen).toBe(false)
+    secondStop()
+
+    const button = document.createElement('button')
+    button.type = 'button'
+    focusEditable(button)
+    const third = new DeviceRuntime()
+    const thirdStop = third.install()
+    window.dispatchEvent(new Event('resize'))
+    flushFrames()
+    vi.advanceTimersByTime(KEYBOARD_SETTLE_MS)
+    expect(third.getSnapshot().keyboardOpen).toBe(false)
+    thirdStop()
+  })
+
+  it('detects contentEditable and shadow-root editable focus', () => {
+    installTouch(1, true)
+    installViewportWidth(390)
+    vi.stubGlobal('innerHeight', 800)
+    const editable = document.createElement('div')
+    editable.setAttribute('contenteditable', 'true')
+    editable.tabIndex = 0
+    focusEditable(editable)
+    const content = new DeviceRuntime()
+    const contentStop = content.install()
+    vi.stubGlobal('innerHeight', 650)
+    window.dispatchEvent(new Event('resize'))
+    flushFrames()
+    vi.advanceTimersByTime(KEYBOARD_SETTLE_MS)
+    expect(content.getSnapshot().keyboardOpen).toBe(true)
+    contentStop()
+
+    const host = document.createElement('div')
+    document.body.append(host)
+    const shadow = host.attachShadow({ mode: 'open' })
+    const input = document.createElement('input')
+    shadow.append(input)
+    input.focus()
+    vi.stubGlobal('innerHeight', 800)
+    const shadowed = new DeviceRuntime()
+    const shadowStop = shadowed.install()
+    vi.stubGlobal('innerHeight', 650)
+    window.dispatchEvent(new Event('resize'))
+    flushFrames()
+    vi.advanceTimersByTime(KEYBOARD_SETTLE_MS)
+    expect(shadowed.getSnapshot().keyboardOpen).toBe(true)
+    shadowStop()
+  })
+
+  it('adopts the layout height when focus leaves without another resize', () => {
+    installTouch(1, true)
+    installViewportWidth(390)
+    vi.stubGlobal('innerHeight', 800)
+    const editable = focusEditable()
+    const runtime = new DeviceRuntime()
+    const stop = runtime.install()
+    vi.stubGlobal('innerHeight', 650)
+    window.dispatchEvent(new Event('resize'))
+    flushFrames()
+    vi.advanceTimersByTime(KEYBOARD_SETTLE_MS)
+    expect(runtime.getSnapshot().keyboardOpen).toBe(true)
+    editable.blur()
+    flushFrames()
+    expect(runtime.getSnapshot().keyboardOpen).toBe(false)
+    expect(runtime.getSnapshot().restingHeight).toBe(650)
     stop()
   })
 
@@ -239,6 +397,7 @@ describe('DeviceRuntime', () => {
     const viewport = installVisualViewport(844)
     const runtime = new DeviceRuntime()
     const stop = runtime.install()
+    focusEditable()
     viewport.height = 444
     viewport.offsetTop = 400
     viewport.emit()
@@ -378,6 +537,7 @@ describe('DeviceRuntime', () => {
     const viewport = installVisualViewport(844)
     const runtime = new DeviceRuntime()
     const stop = runtime.install()
+    focusEditable()
     // A resizes-content keyboard shrinks the viewport without touching the
     // display: the orientation event must not reset the resting height.
     viewport.height = 444
@@ -396,6 +556,7 @@ describe('DeviceRuntime', () => {
     const viewport = installVisualViewport(844)
     const runtime = new DeviceRuntime()
     const stop = runtime.install()
+    focusEditable()
     viewport.height = 444
     viewport.emit()
     flushFrames()
@@ -478,6 +639,26 @@ describe('DeviceRuntime', () => {
     vi.advanceTimersByTime(1000)
     expect(runtime.getSnapshot().keyboardOpen).toBe(false)
     expect(document.documentElement.getAttribute('data-keyboard')).toBeNull()
+  })
+
+  it('clears a pending rotation timer on dispose and survives a missing rAF', () => {
+    installTouch(1, true)
+    installViewportWidth(390)
+    installScreenSize(390, 844)
+    installVisualViewport(844)
+    const runtime = new DeviceRuntime()
+    // refresh() is a supported read path on an uninstalled runtime, and a
+    // display change arms the rotation guard without any listener set.
+    runtime.refresh()
+    installScreenSize(844, 390)
+    runtime.refresh()
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    runtime.dispose()
+    expect(vi.getTimerCount()).toBe(0)
+    // jsdom teardown removes requestAnimationFrame; a timer that survived
+    // dispose would otherwise schedule through the absent global.
+    vi.stubGlobal('requestAnimationFrame', undefined)
+    expect(() => { vi.advanceTimersByTime(KEYBOARD_ROTATION_GUARD_MS) }).not.toThrow()
   })
 
   it('disposes its listeners and is reinstallable', () => {

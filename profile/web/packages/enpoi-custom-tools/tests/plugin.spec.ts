@@ -15,7 +15,10 @@ interface RegisteredTool {
 interface Harness {
   tools: Map<string, RegisteredTool>
   disposals: string[]
-  seam: { render: (name: string, args: unknown) => { command?: string } | undefined } | undefined
+  seam: {
+    render: (name: string, args: unknown, identity?: { sessionId?: string; callId?: string | number }) => { command?: string } | undefined
+    discard?: (name: string, identity?: { sessionId?: string; callId?: string | number }) => void
+  } | undefined
   handlers: Array<(ns: unknown) => void>
   setDocument: (customTools: unknown) => void
   shellCalls: Array<Record<string, unknown>>
@@ -84,6 +87,20 @@ let harness: Harness
 
 beforeEach(() => { harness = makeHarness([RECORD]) })
 
+/** Render the policy snapshot and execute with the SAME trusted identity. */
+async function executeGuarded(
+  h: Harness,
+  toolName: string,
+  args: unknown,
+  callId = 'call-1',
+  sessionId = 'session-1',
+): Promise<Record<string, unknown>> {
+  const tool = h.tools.get(toolName)
+  if (tool === undefined) throw new Error(`missing tool ${toolName}`)
+  expect(h.seam?.render(toolName, args, { sessionId, callId })).toBeDefined()
+  return await tool.execute(args, { agent: { session: { id: sessionId } }, callId }) as Record<string, unknown>
+}
+
 describe('registration', () => {
   it('registers one real tool per record with the model-facing schema', () => {
     const tool = harness.tools.get('custom_echo-tool')
@@ -140,7 +157,7 @@ describe('execution', () => {
   it('runs the rendered command through the shell and returns stdout/stderr/exit honestly', async () => {
     const tool = harness.tools.get('custom_echo-tool')!
     harness.shellResult = { exitCode: 3, signal: null, timedOut: false, stdout: { text: 'out\n' }, stderr: { text: 'err\n' } }
-    const value = await tool.execute({ message: 'hello world' }, { agent: { session: {} }, signal: undefined }) as Record<string, unknown>
+    const value = await executeGuarded(harness, 'custom_echo-tool', { message: 'hello world' })
     expect(harness.shellCalls[0]).toMatchObject({ command: "echo 'hello world'", description: 'Echo Tool' })
     expect(harness.shellCalls[0]?.sandboxPolicy).toMatchObject({ mode: 'workspace-write' })
     // The trusted DSH_* overlay rides with the spec, exactly like tool-bash, so
@@ -160,18 +177,147 @@ describe('execution', () => {
     expect(harness.shellCalls).toHaveLength(0)
   })
 
+  it('executes the exact snapshot the policy guard rendered across a hot settings change', async () => {
+    const inFlight = harness.tools.get('custom_echo-tool')!
+    expect(harness.seam?.render('custom_echo-tool', { message: 'old' }, { sessionId: 'session-1', callId: 'call-1' }))
+      .toEqual({ command: "echo 'old'" })
+    harness.setDocument([{ ...RECORD, command: 'echo {{message}}-new' }])
+    harness.handlers[0]!('enpoi-orchestration')
+    expect(harness.tools.get('custom_echo-tool')?.description).toBe('Echo a message')
+    // The old closure is still executing the approved call; it must use the
+    // snapshot, not the newly registered definition.
+    await inFlight.execute({ message: 'old' }, { agent: { session: { id: 'session-1' } }, callId: 'call-1' })
+    expect(harness.shellCalls[0]?.command).toBe("echo 'old'")
+    // A direct call with no policy snapshot is refused, not re-rendered.
+    const refused = await harness.tools.get('custom_echo-tool')!.execute(
+      { message: 'new' }, { agent: { session: { id: 'session-1' } }, callId: 'call-2' },
+    ) as Record<string, unknown>
+    expect(harness.shellCalls).toHaveLength(1)
+    expect(String(refused.error)).toContain('no trusted execution snapshot')
+  })
+
+  it('keeps the same call id independent across sessions and tools', async () => {
+    const h = makeHarness([RECORD, { id: 'other-tool', description: 'Other', command: 'true' }])
+    h.seam?.render('custom_echo-tool', { message: 'a' }, { sessionId: 'session-a', callId: 'same-id' })
+    h.seam?.render('custom_echo-tool', { message: 'b' }, { sessionId: 'session-b', callId: 'same-id' })
+    h.seam?.render('custom_other-tool', {}, { sessionId: 'session-a', callId: 'same-id' })
+    const echo = h.tools.get('custom_echo-tool')!
+    const other = h.tools.get('custom_other-tool')!
+    expect(String((await echo.execute({ message: 'a' }, {
+      agent: { session: { id: 'session-a' } }, callId: 'same-id',
+    }) as Record<string, unknown>).error)).toBe('')
+    expect(String((await echo.execute({ message: 'b' }, {
+      agent: { session: { id: 'session-b' } }, callId: 'same-id',
+    }) as Record<string, unknown>).error)).toBe('')
+    expect(String((await other.execute({}, {
+      agent: { session: { id: 'session-a' } }, callId: 'same-id',
+    }) as Record<string, unknown>).error)).toBe('')
+    expect(h.shellCalls.map(call => call.command)).toEqual(["echo 'a'", "echo 'b'", 'true'])
+  })
+
+  it('refuses a single-use snapshot replay', async () => {
+    const tool = harness.tools.get('custom_echo-tool')!
+    harness.seam?.render('custom_echo-tool', { message: 'once' }, { sessionId: 'session-a', callId: 'replay-id' })
+    const consumed = await tool.execute(
+      { message: 'once' }, { agent: { session: { id: 'session-a' } }, callId: 'replay-id' },
+    ) as Record<string, unknown>
+    expect(String(consumed.error)).toBe('')
+    const replay = await tool.execute(
+      { message: 'once' }, { agent: { session: { id: 'session-a' } }, callId: 'replay-id' },
+    ) as Record<string, unknown>
+    expect(harness.shellCalls).toHaveLength(1)
+    expect(String(replay.error)).toContain('no trusted execution snapshot')
+  })
+
+  it('rejects a duplicate identity instead of overwriting the approved command', async () => {
+    const inFlight = harness.tools.get('custom_echo-tool')!
+    harness.seam?.render('custom_echo-tool', { message: 'approved' }, { sessionId: 'session-1', callId: 'duplicate' })
+    harness.setDocument([{ ...RECORD, command: 'echo {{message}}-changed' }])
+    harness.handlers[0]!('enpoi-orchestration')
+    // A corrupt/replayed producer renders the same session+call+tool again.
+    expect(harness.seam?.render('custom_echo-tool', { message: 'changed' }, {
+      sessionId: 'session-1', callId: 'duplicate',
+    })).toEqual({ command: "echo 'changed'-changed" })
+    const first = await inFlight.execute({ message: 'approved' }, {
+      agent: { session: { id: 'session-1' } }, callId: 'duplicate',
+    }) as Record<string, unknown>
+    const second = await harness.tools.get('custom_echo-tool')!.execute({ message: 'changed' }, {
+      agent: { session: { id: 'session-1' } }, callId: 'duplicate',
+    }) as Record<string, unknown>
+    expect(harness.shellCalls).toHaveLength(0)
+    expect(String(first.error)).toContain('identity rejected (duplicate)')
+    expect(String(second.error)).toContain('identity rejected (duplicate)')
+    // A third render cannot clear the rejection while it is tracked.
+    harness.seam?.render('custom_echo-tool', { message: 'third' }, { sessionId: 'session-1', callId: 'duplicate' })
+    const third = await harness.tools.get('custom_echo-tool')!.execute({ message: 'third' }, {
+      agent: { session: { id: 'session-1' } }, callId: 'duplicate',
+    }) as Record<string, unknown>
+    expect(harness.shellCalls).toHaveLength(0)
+    expect(String(third.error)).toContain('identity rejected (duplicate)')
+  })
+
+  it('refuses a call without a trusted session/call identity', async () => {
+    const tool = harness.tools.get('custom_echo-tool')!
+    harness.seam?.render('custom_echo-tool', { message: 'x' }, { sessionId: 'session-1', callId: 'call-1' })
+    const value = await tool.execute({ message: 'x' }, {}) as Record<string, unknown>
+    expect(harness.shellCalls).toHaveLength(0)
+    expect(String(value.error)).toContain('no trusted execution snapshot')
+  })
+
+  it('drops a denied call snapshot and refuses its reuse', async () => {
+    const tool = harness.tools.get('custom_echo-tool')!
+    const identity = { sessionId: 'session-1', callId: 'denied-call' }
+    harness.seam?.render('custom_echo-tool', { message: 'denied' }, identity)
+    harness.seam?.discard?.('custom_echo-tool', identity)
+    const value = await tool.execute({ message: 'denied' }, {
+      agent: { session: { id: identity.sessionId } }, callId: identity.callId,
+    }) as Record<string, unknown>
+    expect(harness.shellCalls).toHaveLength(0)
+    expect(String(value.error)).toContain('identity rejected (denied)')
+  })
+
+  it('recovers after 257 normal denials; a fresh identity is not globally wedged', async () => {
+    for (let index = 0; index < 257; index += 1) {
+      const identity = { sessionId: `denied-session-${String(index)}`, callId: `denied-${String(index)}` }
+      harness.seam?.render('custom_echo-tool', { message: `denied${String(index)}` }, identity)
+      harness.seam?.discard?.('custom_echo-tool', identity)
+    }
+    expect(harness.shellCalls).toHaveLength(0)
+    const fresh = await executeGuarded(
+      harness, 'custom_echo-tool', { message: 'fresh' }, 'fresh-call', 'fresh-session',
+    )
+    expect(String(fresh.error)).toBe('')
+    expect(harness.shellCalls.at(-1)?.command).toBe("echo 'fresh'")
+  })
+
+  it('evicts the oldest abandoned snapshot and refuses it with a capacity reason', async () => {
+    const tool = harness.tools.get('custom_echo-tool')!
+    for (let index = 0; index < 257; index += 1) {
+      harness.seam?.render('custom_echo-tool', { message: `x${String(index)}` }, {
+        sessionId: 'session-1', callId: `call-${String(index)}`,
+      })
+    }
+    const value = await tool.execute({ message: 'x0' }, {
+      agent: { session: { id: 'session-1' } }, callId: 'call-0',
+    }) as Record<string, unknown>
+    expect(harness.shellCalls).toHaveLength(0)
+    expect(String(value.error)).toContain('identity rejected (capacity)')
+  })
+
   it('reports a render failure without touching the shell', async () => {
     const h = makeHarness([{ ...RECORD, command: 'echo {{nope}}' }])
     const tool = h.tools.get('custom_echo-tool')!
-    const value = await tool.execute({ message: 'x' }, {}) as Record<string, unknown>
+    expect(h.seam?.render('custom_echo-tool', { message: 'x' }, { sessionId: 's', callId: 'c' })).toBeUndefined()
+    const value = await tool.execute({ message: 'x' }, { agent: { session: { id: 's' } }, callId: 'c' }) as Record<string, unknown>
     expect(h.shellCalls).toHaveLength(0)
-    expect(String(value.error)).toContain('unknown parameter "nope"')
+    expect(String(value.error)).toContain('no trusted execution snapshot')
   })
 
   it('reports a shell failure as an honest error value', async () => {
     const tool = harness.tools.get('custom_echo-tool')!
     harness.shellThrows = true
-    const value = await tool.execute({ message: 'x' }, {}) as Record<string, unknown>
+    harness.seam?.render('custom_echo-tool', { message: 'x' }, { sessionId: 'session-1', callId: 'call-1' })
+    const value = await tool.execute({ message: 'x' }, { agent: { session: { id: 'session-1' } }, callId: 'call-1' }) as Record<string, unknown>
     expect(value.exitCode).toBeNull()
     expect(String(value.error)).toContain('executor refused')
   })

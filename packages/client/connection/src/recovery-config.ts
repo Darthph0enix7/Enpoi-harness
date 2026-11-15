@@ -21,6 +21,10 @@ export const DEFAULT_RECONNECT_STAGGER_MS = 100
 export const DEFAULT_RPC_TIMEOUT_MS = 45_000
 /** Default continuous-readiness window before a lost generation resets the retry ladder. */
 export const DEFAULT_STABLE_CONNECTION_MS = 30_000
+/** Default bound on one aborted generation to settle before it is retired. */
+export const DEFAULT_GENERATION_SETTLE_MS = 5_000
+/** Default number of abandoned generations tolerated behind the current attempt. */
+export const DEFAULT_MAX_RETIRED_GENERATIONS = 1
 
 /** Timing for generation readiness, retry progression, and browser recovery. */
 export interface ConnectionRecoveryConfig {
@@ -37,6 +41,20 @@ export interface ConnectionRecoveryConfig {
   generationReadyWarnMs?: number
   /** Deadline in ms for readiness, including physical connection setup. Default: 15000. */
   generationReadyTimeoutMs?: number
+  /**
+   * Time in ms an aborted generation has to settle before it is counted as
+   * retired and a fresh generation may replace it. A retired source keeps its
+   * callbacks fenced; recovery pauses once the abandoned budget is exceeded.
+   * Default: 5000.
+   */
+  settleTimeoutMs?: number
+  /**
+   * Abandoned generation sources tolerated while a replacement runs. Past
+   * this budget recovery pauses in a terminal disconnected state and asks for
+   * a manual page reload rather than spawning unbounded unabortable work.
+   * Default: 1.
+   */
+  maxRetiredGenerations?: number
   /**
    * Continuous readiness in ms before a lost generation resets the retry
    * ladder. A generation that becomes ready and then dies sooner keeps
@@ -88,6 +106,8 @@ export const ConnectionRecoveryConfigSchema: z<ConnectionRecoveryConfig> = z.obj
   backoffMaxMs: z.natural().min(1).max(MAX_TIMER_MS).default(10_000),
   generationReadyWarnMs: z.natural().min(1).max(MAX_TIMER_MS).default(DEFAULT_GENERATION_READY_WARN_MS),
   generationReadyTimeoutMs: z.natural().min(1).max(MAX_TIMER_MS).default(15_000),
+  settleTimeoutMs: z.natural().min(1).max(MAX_TIMER_MS).default(DEFAULT_GENERATION_SETTLE_MS),
+  maxRetiredGenerations: z.natural().min(1).max(64).default(DEFAULT_MAX_RETIRED_GENERATIONS),
   stableConnectionMs: z.natural().min(1).max(MAX_TIMER_MS).default(DEFAULT_STABLE_CONNECTION_MS),
   wakeReconnectDebounceMs: z.natural().min(1).max(MAX_TIMER_MS).default(DEFAULT_WAKE_RECONNECT_DEBOUNCE_MS),
   wakeStaleThresholdMs: z.natural().min(1).max(MAX_TIMER_MS).default(DEFAULT_WAKE_STALE_THRESHOLD_MS),

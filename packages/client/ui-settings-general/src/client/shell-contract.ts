@@ -63,6 +63,11 @@ export type SettingsRootInjected = {
     device: HostObservable<DeviceSnapshot>
     /** Connection-owned state for the current Host connection. */
     connectionState: HostObservable<ConnectionState | undefined>
+    /**
+     * Optional terminal diagnosis from Connection. Older hosts without the
+     * getter publish `undefined`; the indicator then keeps its normal state.
+     */
+    connectionDiagnosis: HostObservable<string | undefined>
     /** settings.section ledger projected into ordered nav rows. */
     sections: HostObservable<readonly SettingsSectionRow[]>
     /** settings.onboarding ledger projected into coordinator order. */
@@ -81,6 +86,28 @@ export type SettingsRootComponentProps =
   & PropsStore<ReturnType<typeof createSettingsShellStore>>
   & PropsRenderSlots<
     | 'settings.trigger'
+    | 'settings.header'
+    | 'settings.action'
+    | 'settings.close'
+    | 'settings.section'
+    | 'settings.onboarding'
+  >
+  & InjectFace<SettingsRootInjected>
+  & PropsLocale<'settings'>
+
+/** Sidebar slide-over seat: only the launcher/trigger children exist there. */
+export type SettingsTriggerComponentProps =
+  PropsRuntime<'sidebar.settings'>
+  & PropsStore<ReturnType<typeof createSettingsShellStore>>
+  & PropsRenderSlots<'settings.launcher' | 'settings.trigger'>
+  & InjectFace<SettingsRootInjected>
+  & PropsLocale<'settings'>
+
+/** Stable root surface seat: the panel chrome and mounted-section children. */
+export type SettingsSurfaceComponentProps =
+  PropsRuntime<'settings.surface'>
+  & PropsStore<ReturnType<typeof createSettingsShellStore>>
+  & PropsRenderSlots<
     | 'settings.header'
     | 'settings.action'
     | 'settings.close'

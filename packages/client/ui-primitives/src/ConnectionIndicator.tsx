@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react'
-import { IconCheckOutlineRegular, IconRefreshOutlineRegular } from './icons/index.tsx'
+import {
+  IconCheckOutlineRegular,
+  IconRefreshOutlineRegular,
+  IconWarningTriangleOutlineRegular,
+} from './icons/index.tsx'
 import { StateDot } from './StateDot.tsx'
 import css from './ConnectionIndicator.module.css'
 
@@ -11,6 +15,22 @@ export type ConnectionIndicatorState =
 
 /** Exit-transition length; keep equal to the `.leaving` transition duration in the stylesheet. */
 const EXIT_MS = 150
+
+/** Owner-supplied terminal presentation when Connection reports a diagnosis. */
+export interface ConnectionTerminalPresentation {
+  /** Bounded, sanitized detail from the Connection diagnosis. */
+  readonly text: string
+  /** Concise stopped-state label, e.g. Connection stopped. */
+  readonly stoppedLabel: string
+  /** Accessible name of the single warning-details control. */
+  readonly detailsLabel: string
+  /** Localized instruction to reload from a clean state. */
+  readonly reloadInstruction: string
+  /** Localized explicit manual reload action. */
+  readonly reloadLabel: string
+  /** User-intent reload; this primitive never reloads on its own. */
+  readonly onReload: () => void
+}
 
 /**
  * Render an inline connection-recovery control. The outage and retry-attempt
@@ -24,6 +44,8 @@ const EXIT_MS = 150
  * @param props.reconnectActionLabel - accessible label for the outage action.
  * @param props.restartActionLabel - accessible label for replacing an active attempt.
  * @param props.onReconnect - request an immediate reconnect attempt.
+ * @param props.diagnosis - optional terminal presentation; when present on
+ * `disconnected`, the pill reads Connection stopped and exposes details.
  * @returns the indicator, or null when no connection feedback is active.
  */
 export function ConnectionIndicator({
@@ -34,6 +56,7 @@ export function ConnectionIndicator({
   reconnectActionLabel,
   restartActionLabel,
   onReconnect,
+  diagnosis,
 }: {
   state: ConnectionIndicatorState | undefined
   disconnectedLabel: string
@@ -42,6 +65,7 @@ export function ConnectionIndicator({
   reconnectActionLabel: string
   restartActionLabel: string
   onReconnect: () => void
+  diagnosis?: ConnectionTerminalPresentation | undefined
 }) {
   const [rendered, setRendered] = useState(state)
   const leaving = state === undefined && rendered !== undefined
@@ -66,6 +90,34 @@ export function ConnectionIndicator({
       >
         <span className={css.icon} aria-hidden="true"><IconCheckOutlineRegular size={14} /></span>
         <span className={css.label}>{recoveredLabel}</span>
+      </div>
+    )
+  }
+
+  if (rendered === 'disconnected' && diagnosis !== undefined) {
+    return (
+      <div className={`${css.stopped}${leavingClass}`} data-phase="stopped">
+        <button
+          type="button"
+          className={css.stoppedAction}
+          aria-label={reconnectActionLabel}
+          onClick={onReconnect}
+        >
+          <span className={css.icon} aria-hidden="true"><IconRefreshOutlineRegular size={14} /></span>
+          <span className={css.label}>{diagnosis.stoppedLabel}</span>
+        </button>
+        <details className={css.details}>
+          <summary className={css.detailsSummary} aria-label={diagnosis.detailsLabel}>
+            <IconWarningTriangleOutlineRegular size={14} />
+          </summary>
+          <div className={css.detailsPanel} role="note" aria-label={diagnosis.detailsLabel}>
+            <p className={css.detailsText}>{diagnosis.text}</p>
+            <p className={css.detailsInstruction}>{diagnosis.reloadInstruction}</p>
+            <button type="button" className={css.reloadAction} onClick={diagnosis.onReload}>
+              {diagnosis.reloadLabel}
+            </button>
+          </div>
+        </details>
       </div>
     )
   }

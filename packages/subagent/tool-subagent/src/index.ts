@@ -11,7 +11,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { scopeChainOf, scopeOf } from '@deepseek-ai/dsh-scope'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
@@ -566,9 +566,10 @@ export const SHARED_CHILD_KEEP: readonly string[] = [
  */
 const ROLE_CHILD_DENY: Record<string, readonly string[]> = {
   // `run_code` is deliberately absent everywhere: the PTC presentation
-  // transport is reserved, and `tools.restrict()` throws when a filter names
-  // it. A child holding it can only orchestrate the tools it can already see,
-  // which these lists bound.
+  // transport is reserved, and `tools.restrict()` refuses to name it. This is
+  // NOT a tool fence: a child holding run_code can run a program with direct
+  // filesystem/process effects, bounded only by its OS sandbox. Do not treat
+  // this list as a capability boundary for PTC.
   //
   // Operator defaults: every sub-agent may run bash (reading,
   // analysis, tests — not only writing), use skills, search memory, and keep
@@ -770,7 +771,7 @@ export interface OrchestrationSettingsDocument {
   /** Operator role registry, merged over the code defaults. */
   roles?: Record<string, RoleRegistryEntry>
   /** Operator permission overrides, including per-role tool availability. */
-  permissions?: { agents?: Record<string, { available?: string[] }> }
+  permissions?: { agents?: Record<string, { available?: string[]; tools?: Record<string, 'allow' | 'ask' | 'deny'> }> }
   /**
    * Merge-mode edits over the compiled child tool lists. The role edits apply
    * only while the built-in allowlist is the effective layer: an explicit
@@ -1009,11 +1010,14 @@ export function childToolFilter(
   // The keep names are profile-provided (the whiteboard and the compressor
   // retrieval exist only where their plugins mount), so an unmounted one must
   // degrade to the live registry instead of aborting the spawn.
+  // The reserved PTC transport is mode-owned presentation, never a role
+  // capability: an operator edit that names it in the keep list must not make
+  // `tools.restrict({ allow })` throw, nor strip it from an explicit deny.
   const keep = auditAvailability(
     applyBuiltinListEdit(SHARED_CHILD_KEEP, builtinEdits?.sharedKeep),
     'child keep list',
     audit,
-  )
+  ).filter(name => name !== RUN_CODE_NAME)
   const keepTool = (name: string): boolean => keep.includes(name)
   // The Oracle and the Librarian are the children allowed to delegate
   // (operator design: the reviewer spawns its own researchers; the librarian's
@@ -1041,11 +1045,16 @@ export function childToolFilter(
   if (stored !== undefined) {
     // Explicit surface: allow the named tools plus the whiteboard keep list,
     // deny everything else except the shared anti-leak floor (never widen what
-    // SHARED_CHILD_DENY already removes).
+    // SHARED_CHILD_DENY already removes). A stored availability list may name
+    // the reserved transport; drop it from the allow mask (the selected mode
+    // appends it unless an explicit deny removes it) so a role's own surface
+    // never turns into a `tools.restrict({ allow: [run_code] })` spawn throw.
+    const storedSurface = auditAvailability(stored, `role "${role}"`, audit)
+      .filter(name => name !== RUN_CODE_NAME)
     return {
       ...configured,
-      allow: [...new Set([...configured?.allow ?? [], ...auditAvailability(stored, `role "${role}"`, audit), ...keep])],
-      deny: [...new Set([...configured?.deny ?? [], ...sharedDeny])],
+      allow: [...new Set([...configured?.allow ?? [], ...storedSurface, ...keep])],
+      deny: [...new Set([...configured?.deny ?? [], ...sharedDeny, ...roleToolDenies(document, role)])],
     }
   }
   return {
@@ -1053,7 +1062,12 @@ export function childToolFilter(
     ...configured?.allow !== undefined
       ? { allow: [...new Set([...configured.allow, ...keep])] }
       : {},
-    deny: [...new Set([...configured?.deny ?? [], ...sharedDeny, ...roleEntry.deny.filter(name => !keepTool(name))])],
+    deny: [...new Set([
+      ...configured?.deny ?? [],
+      ...sharedDeny,
+      ...roleEntry.deny.filter(name => !keepTool(name)),
+      ...roleToolDenies(document, role),
+    ])],
   }
 }
 
@@ -1076,6 +1090,30 @@ function roleAvailableAllowlist(
   if (role === undefined) return undefined
   const available = document?.permissions?.agents?.[role]?.available
   return Array.isArray(available) ? available.map(String) : undefined
+}
+
+/**
+ * Operator tool-level denies for one selected role. The role id here is the
+ * TRUSTED spawn parameter (not a descriptor label or task prose); feeding these
+ * names into the child toolFilter's `deny` list makes `tools.restrict()` the
+ * execution backstop, rather than relying on the child's parent-preset policy
+ * or on hiding the tool from the catalog alone. An explicit deny of the
+ * reserved PTC transport is executable now that `tools.restrict()` accepts it
+ * in `deny`; command-level role `bashPatterns` cannot be expressed through a
+ * tool filter and remain a policy-channel limitation.
+ * @param document - the live orchestration document.
+ * @param role - the selected role id.
+ * @returns deny rows for the role's explicit tool entries.
+ */
+function roleToolDenies(
+  document: OrchestrationSettingsDocument | undefined,
+  role: string,
+): string[] {
+  const tools = document?.permissions?.agents?.[role]?.tools
+  if (tools === undefined || typeof tools !== 'object') return []
+  return Object.entries(tools)
+    .filter(([, policy]) => policy === 'deny')
+    .map(([name]) => name)
 }
 
 /**

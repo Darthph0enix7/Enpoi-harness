@@ -37,6 +37,32 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
+const fakeTsc = `#!/usr/bin/env node
+const { appendFileSync, mkdirSync, readFileSync, writeFileSync } = require('node:fs')
+const { join } = require('node:path')
+const log = process.env.FAKE_TSC_LOG
+if (log !== undefined) appendFileSync(log, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }) + '\\n')
+if (process.env.FAKE_TSC_FAIL === '1') {
+  console.error('fake tsc: requested failure')
+  process.exit(1)
+}
+const out = join(process.cwd(), 'lib')
+mkdirSync(out, { recursive: true })
+const source = readFileSync(join(process.cwd(), 'src/index.ts'), 'utf8')
+writeFileSync(join(out, 'index.d.ts'), 'export declare const value: number\\n// ' + source.trim() + '\\n')
+if (process.env.FAKE_TSC_MUTATE_SOURCE !== undefined) appendFileSync(process.env.FAKE_TSC_MUTATE_SOURCE, '\\n// mutated during type build\\n')
+`
+
+const fakeRewrite = `import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+const root = dirname(dirname(fileURLToPath(import.meta.url)))
+const file = join(root, 'lib/index.d.ts')
+const log = process.env.FAKE_REWRITE_LOG
+if (log !== undefined) appendFileSync(log, 'rewritten\\n')
+writeFileSync(file, readFileSync(file, 'utf8') + '// rewritten\\n')
+`
+
 const fakeEsbuild = `#!/usr/bin/env node
 const { appendFileSync, readFileSync, writeFileSync } = require('node:fs')
 const { join } = require('node:path')
@@ -75,12 +101,44 @@ function fixture(options: { spaces?: boolean } = {}): Fixture {
   return { root, profile, packageDir, esbuild, log: join(root, 'esbuild-calls.log') }
 }
 
+function producerFixture(): Fixture {
+  const f = fixture()
+  writeFileSync(join(f.packageDir, 'package.json'), `${JSON.stringify({
+    name: 'dsh-enpoi-one',
+    private: true,
+    type: 'module',
+    exports: { '.': { types: './lib/index.d.ts', default: './lib/index.js' } },
+    scripts: { 'build:types': 'tsc -p tsconfig.json && node scripts/rewrite-dts-imports.mjs' },
+  }, null, 2)}\n`)
+  writeFileSync(join(f.packageDir, 'tsconfig.json'), '{"compilerOptions":{}}\n')
+  mkdirSync(join(f.packageDir, 'scripts'), { recursive: true })
+  writeFileSync(join(f.packageDir, 'scripts/rewrite-dts-imports.mjs'), fakeRewrite)
+  const tsc = join(f.profile, 'node_modules/typescript/lib/tsc.js')
+  mkdirSync(dirname(tsc), { recursive: true })
+  writeFileSync(tsc, fakeTsc)
+  return f
+}
+
+function logCount(path: string): number {
+  return existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).length : 0
+}
+
+function tscCalls(f: Fixture): number {
+  return logCount(join(f.root, 'tsc-calls.log'))
+}
+
+function rewriteCalls(f: Fixture): number {
+  return logCount(join(f.root, 'rewrite-calls.log'))
+}
+
 function runBuild(f: Fixture, overrides: Record<string, string> = {}) {
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     NODE_BIN: process.execPath,
     FORCE_BUILD: '0',
     FAKE_ESBUILD_LOG: f.log,
+    FAKE_TSC_LOG: join(f.root, 'tsc-calls.log'),
+    FAKE_REWRITE_LOG: join(f.root, 'rewrite-calls.log'),
     ...overrides,
   }
   delete env.ESBUILD_BIN
@@ -262,5 +320,83 @@ describe.skipIf(win32)('profile plugin bundle freshness', () => {
     expect(outfile).toBeDefined()
     expect(outfile?.slice('--outfile='.length).startsWith(f.profile)).toBe(true)
     expect(existsSync(join(f.packageDir, 'lib/index.js'))).toBe(true)
+  })
+
+  it('builds producer declarations and verifies a prebuilt install without TSC or esbuild', () => {
+    const f = producerFixture()
+    const first = runBuild(f)
+    expect(first.status).toBe(0)
+    expect(first.stdout).toContain('BUILD enpoi-one')
+    expect(tscCalls(f)).toBe(1)
+    expect(rewriteCalls(f)).toBe(1)
+
+    const fingerprints = JSON.parse(readFileSync(fingerprintPath(f), 'utf8')) as {
+      packages: Record<string, { typesSha?: string }>
+    }
+    expect(fingerprints.packages['enpoi-one']?.typesSha).toMatch(/^[0-9a-f]{64}$/)
+
+    rmSync(f.esbuild)
+    rmSync(join(f.profile, 'node_modules/typescript'), { recursive: true, force: true })
+    const second = runBuild(f)
+    expect(second.status).toBe(0)
+    expect(second.stdout).toContain('prebuilt fingerprint verified')
+    expect(invocations(f)).toHaveLength(1)
+    expect(tscCalls(f)).toBe(1)
+    expect(rewriteCalls(f)).toBe(1)
+  })
+
+  it('rebuilds when an emitted declaration changes', () => {
+    const f = producerFixture()
+    expect(runBuild(f).status).toBe(0)
+    const before = JSON.parse(readFileSync(fingerprintPath(f), 'utf8')) as {
+      packages: Record<string, { typesSha?: string }>
+    }
+    writeFileSync(join(f.packageDir, 'lib/index.d.ts'), `${readFileSync(join(f.packageDir, 'lib/index.d.ts'), 'utf8')}// tampered\n`)
+
+    const result = runBuild(f)
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('BUILD enpoi-one  (declaration content changed)')
+    expect(tscCalls(f)).toBe(2)
+    const after = JSON.parse(readFileSync(fingerprintPath(f), 'utf8')) as typeof before
+    expect(after.packages['enpoi-one']?.typesSha).toBe(before.packages['enpoi-one']?.typesSha)
+    expect(readFileSync(join(f.packageDir, 'lib/index.d.ts'), 'utf8')).not.toContain('// tampered')
+  })
+
+  it('rebuilds when a producer postprocess source changes', () => {
+    const f = producerFixture()
+    expect(runBuild(f).status).toBe(0)
+    const script = join(f.packageDir, 'scripts/rewrite-dts-imports.mjs')
+    writeFileSync(script, `${readFileSync(script, 'utf8')}\n// changed\n`)
+
+    const result = runBuild(f)
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('BUILD enpoi-one  (source inputs changed)')
+    expect(tscCalls(f)).toBe(2)
+    expect(rewriteCalls(f)).toBe(2)
+  })
+
+  it('fails explicitly when producer declarations are missing and TSC is unavailable', () => {
+    const f = producerFixture()
+    expect(runBuild(f).status).toBe(0)
+    rmSync(join(f.packageDir, 'lib/index.d.ts'))
+    rmSync(join(f.profile, 'node_modules/typescript'), { recursive: true, force: true })
+
+    const result = runBuild(f)
+    expect(result.status).toBe(1)
+    expect(result.stdout).toContain('FAIL enpoi-one')
+    expect(result.stdout).toContain('TypeScript compiler not found')
+  })
+
+  it('does not hash non-producer scripts trees', () => {
+    const f = fixture()
+    mkdirSync(join(f.packageDir, 'scripts'), { recursive: true })
+    writeFileSync(join(f.packageDir, 'scripts/helper.mjs'), 'export const value = 1\n')
+    expect(runBuild(f).status).toBe(0)
+    writeFileSync(join(f.packageDir, 'scripts/helper.mjs'), 'export const value = 2\n')
+
+    const result = runBuild(f)
+    expect(result.status).toBe(0)
+    expect(result.stdout).toContain('prebuilt fingerprint verified')
+    expect(invocations(f)).toHaveLength(1)
   })
 })

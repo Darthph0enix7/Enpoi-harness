@@ -18,6 +18,15 @@
  * Update them intentionally with `--update` after reviewing the printed diff —
  * a diff on every sync is the point, so never regenerate blindly.
  *
+ * This paid probe remains the only LIVE-wire capture. The SHIPPED-default
+ * fixture path is the keyless, isolated subprocess capture in
+ * `apps/web/tests/keyless-tool-inventory.e2e.ts`; it is BLOCKED until the
+ * central build records fresh profile-bundle fingerprints, and the committed
+ * fixtures carry `stale: true` meanwhile. `--update` here drops the keyless
+ * provenance, and the guard then fails until the file is re-captured through
+ * that path. Do not treat a live wire list as the shipped default: operator
+ * settings and install exemptions are part of a live header.
+ *
  * Usage: node scripts/preset-tool-inventory.mjs [options]
  *   --origin=<url>       dsh web origin (default http://127.0.0.1:3080)
  *   --token=<launch>     process launch token; without it the script mints the

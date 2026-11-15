@@ -19,6 +19,7 @@
     "@deepseek-ai/dsh-session-projection": "^0.1.0-rc.8",
     "@deepseek-ai/dsh-subagent": "^0.1.0-rc.8",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.8",
+    "@deepseek-ai/dsh-util-values": "workspace:*",
     "@deepseek-ai/schemastery": "workspace:~",
     "dsh-enpoi-context-keeper": "workspace:*"
   },
@@ -28,6 +29,7 @@
     }
   },
   "dependencies": {
-    "dsh-enpoi-contracts": "workspace:*"
+    "dsh-enpoi-contracts": "workspace:*",
+    "dsh-enpoi-whiteboard": "workspace:*"
   }
 }

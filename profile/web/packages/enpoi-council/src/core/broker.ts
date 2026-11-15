@@ -128,7 +128,7 @@ const BROKER_PERSONA = [
   'SHEET 2',
   '...',
   'Never speculate. If an answer is not findable, its FACTS say "NOT FINDABLE" and the CITATION shows the closest place you looked.',
-  'The run_code tool is non-functional in this deployment — never call it.',
+  'If run_code is present, it executes code under the configured sandbox; it is not a tool-only sandbox or a bypass for the council’s evidence workflow.',
 ].join('\n')
 
 function isExternalTarget(target: string): boolean {

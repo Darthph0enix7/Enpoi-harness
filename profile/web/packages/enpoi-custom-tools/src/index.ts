@@ -16,7 +16,11 @@
  * enpoi-capabilities `tools/pre-execute` listener uses to feed the rendered
  * command into the SAME policy evaluator bash uses (dangerous verbs, wrappers,
  * interpreters). A destructive match asks or denies per the operator's policy;
- * the tool's own `custom_<id>` permission row defaults to ask.
+ * the tool's own `custom_<id>` permission row defaults to ask. The seam also
+ * pins the rendered definition to the trusted session + call + tool identity;
+ * execution consumes that single-use snapshot so a hot settings edit cannot
+ * make the approved command A run as B. A duplicate/replayed identity is
+ * rejected, not overwritten, and stays refused for the bounded rolling window.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -70,14 +74,52 @@ interface ShellEnvLike {
 
 /** Structural view of one tool execution context. */
 interface ToolRunLike {
-  agent?: { session?: unknown }
+  agent?: { id?: string; session?: { id?: string; header?: { id?: string } } }
   signal?: AbortSignal
+  /** The call identity, used to match the pre-execute policy snapshot. */
+  callId?: string | number
 }
+
+/** Trusted call identity supplied by the policy guard and the tool runtime. */
+export interface CustomToolCallIdentity {
+  readonly sessionId?: string
+  readonly callId?: string | number
+}
+
+/** One pre-execute command snapshot, consumed by the matching execution. */
+interface CommandSnapshot {
+  readonly toolName: string
+  readonly record: CustomToolRecord
+  readonly command: string
+  readonly key: string
+}
+
+/** Stable identity key: session + call + tool; no trusted identity = no key. */
+function snapshotKeyOf(toolName: string, identity: CustomToolCallIdentity | undefined): string | undefined {
+  if (identity === undefined || identity.sessionId === undefined || identity.sessionId === '' || identity.callId === undefined) return undefined
+  return `${identity.sessionId}\u0000${String(identity.callId)}\u0000${toolName}`
+}
+
+/** Bound on policy snapshots awaiting execution; oldest entries drop first. */
+const MAX_PENDING_SNAPSHOTS = 256
+
+/** Bound on rejected identities (rolling dedupe window); oldest entries drop first. */
+const MAX_REJECTED_SNAPSHOTS = 256
+
+/** Why an identity cannot execute; used in the structured refusal. */
+type SnapshotRejection = 'duplicate' | 'denied' | 'capacity'
 
 /** The seam enpoi-capabilities reads to guard a custom tool's rendered command. */
 export interface CustomToolCommandsSeam {
-  /** Render one registered custom tool's command for the policy guard. */
-  render(toolName: string, args: unknown): { command: string } | undefined
+  /**
+   * Render one registered custom tool's command for the policy guard and pin
+   * that definition to the trusted session + call + tool identity, so execution
+   * uses the same command version the policy saw even if settings hot-apply in
+   * between. A duplicate identity is rejected, never overwritten.
+   */
+  render(toolName: string, args: unknown, identity?: CustomToolCallIdentity): { command: string } | undefined
+  /** Drop a snapshot that will never execute (denied/cancelled before dispatch). */
+  discard?(toolName: string, identity?: CustomToolCallIdentity): void
 }
 
 /** Canonical output schema in author-spec form (nullable fields use oneOf: the registry rejects type arrays). */
@@ -147,7 +189,46 @@ export function readCustomToolRecords(settings: SettingsDocumentReader | undefin
 export function apply(ctx: Context, _config: unknown): void {
   const registered = new Map<string, { dispose: () => void; fingerprint: string }>()
   const live = new Map<string, CustomToolRecord>()
+  const pending = new Map<string, CommandSnapshot>()
+  const rejected = new Map<string, SnapshotRejection>()
   let warned = ''
+
+  /**
+   * Refuse one identity for the rolling dedupe window. The map is bounded by
+   * MAX_REJECTED_SNAPSHOTS, so a stream of denied calls evicts the oldest
+   * tombstone instead of wedging every future custom tool for the process.
+   */
+  const rejectSnapshot = (key: string, reason: SnapshotRejection): void => {
+    pending.delete(key)
+    rejected.delete(key)
+    rejected.set(key, reason)
+    while (rejected.size > MAX_REJECTED_SNAPSHOTS) {
+      const oldest = rejected.keys().next().value
+      if (oldest === undefined) break
+      rejected.delete(oldest)
+    }
+  }
+
+  /**
+   * Remember one call's frozen command. A duplicate render for the same
+   * session+call+tool identity is a replay/corruption signal: reject the
+   * identity instead of overwriting the first approved command. The pending
+   * entry is removed, so both the original and the duplicate execution refuse.
+   * Identity ids are unique per core call contract; a duplicate is not a
+   * legitimate retry and gets no new approval in this window.
+   */
+  const rememberSnapshot = (key: string, snapshot: CommandSnapshot): void => {
+    if (rejected.has(key) || pending.has(key)) {
+      rejectSnapshot(key, 'duplicate')
+      return
+    }
+    pending.set(key, snapshot)
+    while (pending.size > MAX_PENDING_SNAPSHOTS) {
+      const oldest = pending.keys().next().value
+      if (oldest === undefined) break
+      rejectSnapshot(oldest, 'capacity')
+    }
+  }
 
   const shell = (): ShellExecutorLike | undefined => ctx.get('shell') as ShellExecutorLike | undefined
 
@@ -175,10 +256,28 @@ export function apply(ctx: Context, _config: unknown): void {
       },
       isConcurrencySafe: () => true,
       async execute(args: unknown, exec: ToolRunLike): Promise<CustomToolValue> {
-        const rendered = renderCommand(record, args)
-        if (rendered.command === undefined) {
-          return { command: '', exitCode: null, signal: null, timedOut: false, stdout: '', stderr: '', error: `custom tool ${record.id}: ${rendered.error}` }
+        const sessionId = typeof exec.agent?.id === 'string'
+          ? exec.agent.id
+          : typeof exec.agent?.session?.id === 'string'
+            ? exec.agent.session.id
+            : typeof exec.agent?.session?.header?.id === 'string' ? exec.agent.session.header.id : undefined
+        const key = snapshotKeyOf(toolNameOf(record.id), sessionId === undefined ? undefined : {
+          sessionId,
+          ...exec.callId === undefined ? {} : { callId: exec.callId },
+        })
+        const snapshot = key === undefined ? undefined : pending.get(key)
+        const rejection = key === undefined ? undefined : rejected.get(key)
+        if (key !== undefined) pending.delete(key)
+        if (snapshot === undefined || snapshot.toolName !== toolNameOf(record.id) || snapshot.key !== key) {
+          return {
+            command: '', exitCode: null, signal: null, timedOut: false, stdout: '', stderr: '',
+            error: rejection === undefined
+              ? `custom tool ${record.id}: no trusted execution snapshot for this call; refusing to run (policy approval and execution must share the same session/call identity)`
+              : `custom tool ${record.id}: execution snapshot identity rejected (${rejection}); refusing to run`,
+          }
         }
+        const active = snapshot.record
+        const rendered = { command: snapshot.command }
         const value: CustomToolValue = {
           command: rendered.command,
           exitCode: null,
@@ -196,7 +295,7 @@ export function apply(ctx: Context, _config: unknown): void {
           const dshEnv = (ctx.get('shellEnv') as ShellEnvLike | undefined)?.collect(exec)
           const spec = executor.resolve({
             command: rendered.command,
-            description: record.name,
+            description: active.name,
             timeoutMs: DEFAULT_TIMEOUT_MS,
             ...exec.signal === undefined ? {} : { signal: exec.signal },
             ...policy === undefined ? {} : { sandboxPolicy: policy },
@@ -210,7 +309,7 @@ export function apply(ctx: Context, _config: unknown): void {
           value.stdout = result.stdout.text
           value.stderr = result.stderr.text
         } catch (error) {
-          value.error = `custom tool ${record.id} could not execute: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`
+          value.error = `custom tool ${active.id} could not execute: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`
         }
         return value
       },
@@ -250,13 +349,20 @@ export function apply(ctx: Context, _config: unknown): void {
   // The policy guard's seam: enpoi-capabilities renders the command through
   // this to evaluate the SAME danger rules bash uses, before execution.
   ctx.provide('customToolCommands', {
-    render(toolName: string, args: unknown): { command: string } | undefined {
+    render(toolName: string, args: unknown, identity?: CustomToolCallIdentity): { command: string } | undefined {
       const id = recordIdOf(toolName)
       if (id === undefined) return undefined
       const record = live.get(id)
       if (record === undefined) return undefined
       const rendered = renderCommand(record, args)
-      return rendered.command === undefined ? undefined : { command: rendered.command }
+      if (rendered.command === undefined) return undefined
+      const key = snapshotKeyOf(toolName, identity)
+      if (key !== undefined) rememberSnapshot(key, { toolName, record, command: rendered.command, key })
+      return { command: rendered.command }
+    },
+    discard(toolName: string, identity?: CustomToolCallIdentity): void {
+      const key = snapshotKeyOf(toolName, identity)
+      if (key !== undefined) rejectSnapshot(key, 'denied')
     },
   } satisfies CustomToolCommandsSeam)
 
@@ -270,6 +376,8 @@ export function apply(ctx: Context, _config: unknown): void {
     for (const entry of registered.values()) entry.dispose()
     registered.clear()
     live.clear()
+    pending.clear()
+    rejected.clear()
   }, 'enpoi-custom-tools: registered tools')
   sync()
   process.stderr.write('[enpoi-custom-tools] mounted\n')

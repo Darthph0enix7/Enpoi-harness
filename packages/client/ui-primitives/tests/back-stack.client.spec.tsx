@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  BackStack, Modal, backStack, registerBackSurface,
+  BackStack, Modal, backStack, getLayoutModeRuntime, registerBackSurface,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 
 /** Dispatch one popstate carrying a whole history record, as a traversal delivers it. */
@@ -18,8 +18,9 @@ function pushedState(index: number): unknown {
 }
 
 /** Classify this bench as a phone so `useBackHandler` registers. */
-function installPhoneEnvironment(): void {
-  vi.stubGlobal('innerWidth', 390)
+function installPhoneEnvironment(width = 390, height = 844): void {
+  vi.stubGlobal('innerWidth', width)
+  vi.stubGlobal('innerHeight', height)
   Object.defineProperty(navigator, 'maxTouchPoints', { configurable: true, value: 1 })
   vi.stubGlobal('matchMedia', (query: string) => ({
     matches: query === '(pointer: coarse)',
@@ -27,6 +28,12 @@ function installPhoneEnvironment(): void {
     addEventListener: () => { /* the classification re-read is the tested path */ },
     removeEventListener: () => { /* symmetric with addEventListener */ },
   }))
+  getLayoutModeRuntime().setFrameWidth(width)
+}
+
+/** Set the canonical compact/desktop measure used by `useBackHandler`. */
+function setFrameMode(width: number): void {
+  act(() => { getLayoutModeRuntime().setFrameWidth(width) })
 }
 
 let back: ReturnType<typeof vi.spyOn>
@@ -203,12 +210,48 @@ describe('useBackHandler', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
-  it('stays inert on a fine-pointer desktop', () => {
+  it('stays inert on a wide fine-pointer desktop', () => {
+    setFrameMode(1440)
     const onClose = vi.fn()
     render(<Modal open onClose={onClose} title="Add key" closeLabel="Close">body</Modal>)
     expect(window.history.pushState).not.toHaveBeenCalled()
     dispatchState(null)
     expect(onClose).not.toHaveBeenCalled()
     expect(screen.getByRole('dialog')).toBeDefined()
+  })
+
+  it('registers in a fine-pointer 800px compact frame and dismisses once', () => {
+    setFrameMode(800)
+    const onClose = vi.fn()
+    render(<Modal open onClose={onClose} title="Add key" closeLabel="Close">body</Modal>)
+    expect(backStack.depth()).toBe(1)
+    expect(window.history.pushState).toHaveBeenCalledTimes(1)
+    expect(backStack.dismissTop()).toBe(true)
+    expect(back).toHaveBeenCalledTimes(1)
+    dispatchState(null)
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(backStack.depth()).toBe(0)
+  })
+
+  it('keeps the legacy touch-tablet back path on a wide shell', () => {
+    installPhoneEnvironment(1024, 768)
+    const onClose = vi.fn()
+    render(<Modal open onClose={onClose} title="Add key" closeLabel="Close">body</Modal>)
+    expect(backStack.depth()).toBe(1)
+    dispatchState(null)
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('registers and releases one record when the frame crosses compact mid-open', () => {
+    setFrameMode(1440)
+    render(<Modal open onClose={() => {}} title="Add key" closeLabel="Close">body</Modal>)
+    expect(backStack.depth()).toBe(0)
+    setFrameMode(800)
+    expect(backStack.depth()).toBe(1)
+    setFrameMode(1440)
+    expect(backStack.depth()).toBe(0)
+    expect(back).toHaveBeenCalledTimes(1)
+    setFrameMode(800)
+    expect(backStack.depth()).toBe(1)
   })
 })

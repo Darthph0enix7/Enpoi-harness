@@ -4,7 +4,7 @@
  * facts the live mount depends on:
  *   1. a restriction installed through a scope tagged with the agent key hides
  *      inherited tools from `tools.schemas(agent)` and lifts cleanly;
- *   2. the plugin hides exactly the 12 on-demand members, keeps static tools,
+ *   2. the plugin hides exactly the 13 on-demand members, keeps static tools,
  *      and reveals a group only after `attach` + `turn/end`.
  */
 import { describe, expect, it } from 'vitest'
@@ -14,7 +14,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { apply } from '../src/index.js'
 
-const PEER = ['peer_status', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']
+const PEER = ['peer_status', 'peer_sessions', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']
 const DEBUG = ['diagnostics_report', 'session_debug', 'session_event_trace', 'session_trace']
 const RECALL = ['session_event_read', 'session_event_search', 'session_search']
 
@@ -100,15 +100,22 @@ describe('real composition: scope filter + plugin', () => {
 
       // Before the boundary the peer tool is not callable: the call must carry
       // the next-turn hint, not a bare UNKNOWN_TOOL.
-      const pending = await ctx.tools.execute({
+      const execute = (callId: string, name: string) => ctx.tools.execute({
         signal: new AbortController().signal,
-        callId: 'c-pending' as never,
-        name: 'peer_status',
+        callId: callId as never,
+        name,
         arguments: {},
         agent: agent as never,
       })
+      const pending = await execute('c-pending', 'peer_status')
       expect(pending.isError).toBe(true)
       expect(JSON.stringify(pending.content)).toContain('End your turn now')
+      // P1 regression: the discovery listing follows the SAME schema and
+      // executor guard; an attach this turn must not leave it callable.
+      expect(base).not.toContain('peer_sessions')
+      const pendingSessions = await execute('c-pending-sessions', 'peer_sessions')
+      expect(pendingSessions.isError).toBe(true)
+      expect(JSON.stringify(pendingSessions.content)).toContain('End your turn now')
 
       ctx.emit('session/event', agent.session as never, { type: 'turn/end', data: { turn: 1 } } as never)
       const after = ctx.tools.schemas(agent).map(tool => tool.name)
@@ -117,14 +124,20 @@ describe('real composition: scope filter + plugin', () => {
       expect(after).toContain('synthetic_ungrouped')
       expect(RECALL.every(name => after.includes(name))).toBe(true)
 
-      const settled = await ctx.tools.execute({
-        signal: new AbortController().signal,
-        callId: 'c-settled' as never,
-        name: 'peer_status',
-        arguments: {},
-        agent: agent as never,
-      })
+      const settled = await execute('c-settled', 'peer_status')
       expect(settled.isError).toBe(false)
+      const settledSessions = await execute('c-settled-sessions', 'peer_sessions')
+      expect(settledSessions.isError).toBe(false)
+
+      // Detach is applied at the next boundary: the discovery listing leaves
+      // the schema and the executor refuses with the attach hint again.
+      await definition!.execute({ action: 'detach', group: 'peer' }, { agent } as never)
+      ctx.emit('session/event', agent.session as never, { type: 'turn/end', data: { turn: 2 } } as never)
+      const detached = ctx.tools.schemas(agent).map(tool => tool.name)
+      expect(detached).not.toContain('peer_sessions')
+      const refused = await execute('c-refused-sessions', 'peer_sessions')
+      expect(refused.isError).toBe(true)
+      expect(JSON.stringify(refused.content)).toContain('not attached')
     } finally {
       await ctx.fiber.dispose()
     }

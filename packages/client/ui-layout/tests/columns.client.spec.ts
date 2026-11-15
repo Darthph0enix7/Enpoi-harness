@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  clampWidth, computeColumns, defaultRightbarWidth, resolveRightbarWidth,
+  clampWidth, computeColumns, defaultRightbarWidth, renderedRightbarWidth, resolveRightbarWidth,
   RIGHTBAR_DEFAULT_MAX, RIGHTBAR_MIN, SIDEBAR_DEFAULT,
 } from '../src/client/columns.ts'
 
@@ -92,5 +92,13 @@ describe('computeColumns', () => {
   it('leaves a closed right track closed when the frame widens', () => {
     expect(computeColumns(755, 0, 0).rightbar).toBe(0)
     expect(computeColumns(1920, 0, 0).rightbar).toBe(0)
+  })
+})
+
+describe('renderedRightbarWidth', () => {
+  it('returns the solver width, or zero when the panel cannot fit', () => {
+    expect(renderedRightbarWidth(1024, 280, 760)).toBe(344)
+    expect(renderedRightbarWidth(1220, 280, 760)).toBe(540)
+    expect(renderedRightbarWidth(700, 280, 300)).toBe(0)
   })
 })

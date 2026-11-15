@@ -42,6 +42,20 @@ function keeperSourceRecord(overrides: Record<string, unknown> = {}): string {
   })
 }
 
+/** Source record a child memory_save writes before its tool call returns. */
+function childSaveSourceRecord(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    source: 'memory_save',
+    sessionId: 'child-1',
+    cwd: '/work/a',
+    parentSessionId: 'parent-1',
+    agentRole: 'fixer',
+    settled: true,
+    callId: 'call-1',
+    ...overrides,
+  })
+}
+
 /** Insert a tentative row with a raw source record (including SQL NULL) for reconcile cases. */
 function insertTentative(id: string, sourceRecord: string | null, origin = 'compaction'): void {
   db.prepare(
@@ -338,6 +352,65 @@ describe('pipeline — CBDC state machine (I10)', () => {
     )
     expect(replay).toHaveLength(0)
     expect(p.get(id)!.state).toBe('orphaned_cancelled')
+  })
+
+  it('preserves only settled child memory_save claims with a session proof', async () => {
+    const p = makePipeline(db)
+    const valid: Array<[string, string]> = [
+      ['child-save-default', childSaveSourceRecord()],
+      ['child-save-no-call-id', childSaveSourceRecord({ callId: undefined })],
+      ['child-save-padded', childSaveSourceRecord({ sessionId: ' \tchild-1\n ' })],
+      ['child-save-no-parent', childSaveSourceRecord({ parentSessionId: undefined })],
+      ['child-save-blank-parent', childSaveSourceRecord({ parentSessionId: '  ' })],
+      ['child-save-number-parent', childSaveSourceRecord({ parentSessionId: 42 })],
+    ]
+    const validIds: string[] = []
+    for (const [suffix, sourceRecord] of valid) {
+      const rows = await p.intake(
+        [{ fact: `settled child save ${suffix}`, category: 'PROJECT' }],
+        { origin: 'worker:fixer', trust: 'untrusted_external', provenance: sourceRecord },
+      )
+      expect(rows[0]!.state).toBe('tentative')
+      validIds.push(rows[0]!.id)
+    }
+    const bareWorker = await p.intake(
+      [{ fact: 'settled child save bare worker origin', category: 'PROJECT' }],
+      { origin: 'worker', trust: 'untrusted_external', provenance: childSaveSourceRecord() },
+    )
+    const operator = await p.intake(
+      [{ fact: 'root operator fact stays committed', category: 'RULES' }],
+      { origin: 'orchestrator', trust: 'operator', provenance: JSON.stringify({ source: 'memory_save', sessionId: 'root-1', cwd: '/work/a' }) },
+    )
+
+    const badProofs: Array<[string, string | null, string]> = [
+      ['missing-session', childSaveSourceRecord({ sessionId: undefined }), 'worker:fixer'],
+      ['blank-session', childSaveSourceRecord({ sessionId: ' \t\n ' }), 'worker:fixer'],
+      ['number-session', childSaveSourceRecord({ sessionId: 42 }), 'worker:fixer'],
+      ['missing-settled', childSaveSourceRecord({ settled: undefined }), 'worker:fixer'],
+      ['false-settled', childSaveSourceRecord({ settled: false }), 'worker:fixer'],
+      ['one-settled', childSaveSourceRecord({ settled: 1 }), 'worker:fixer'],
+      ['string-settled', childSaveSourceRecord({ settled: 'true' }), 'worker:fixer'],
+      ['wrong-source', childSaveSourceRecord({ source: 'keeper' }), 'worker:fixer'],
+      ['sql-null', null, 'worker:fixer'],
+      ['malformed', '{not json', 'worker:fixer'],
+      ['json-null', 'null', 'worker:fixer'],
+      ['json-array', '[]', 'worker:fixer'],
+      ['root-origin', childSaveSourceRecord(), 'orchestrator'],
+      ['keeper-origin', childSaveSourceRecord(), 'keeper'],
+      ['worker-prefix-only', childSaveSourceRecord(), 'workerFoo'],
+    ]
+    for (const [suffix, sourceRecord, origin] of badProofs) {
+      insertTentative(`claim-child-${suffix}`, sourceRecord, origin)
+    }
+
+    expect(await p.reconcileBoot()).toBe(badProofs.length)
+    for (const id of validIds) expect(p.get(id)!.state).toBe('tentative')
+    expect(p.get(bareWorker[0]!.id)!.state).toBe('tentative')
+    expect(p.get(operator[0]!.id)).toMatchObject({ state: 'committed', source_trust: 'operator' })
+    for (const [suffix] of badProofs) {
+      expect(p.get(`claim-child-${suffix}`)!.state).toBe('orphaned_cancelled')
+    }
+    expect(await p.reconcileBoot()).toBe(0)
   })
 
   it('boot reconcile never revives rescinded or orphaned claims', async () => {

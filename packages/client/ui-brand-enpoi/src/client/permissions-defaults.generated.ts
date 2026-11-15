@@ -20,7 +20,7 @@
 
 export const HOST_DEFAULTS_DIGEST = 'fa311fad760a1c2298a21c7d5722c4377521527122a2f78fc5e5b9257d168cd1'
 
-export const MIRROR_SOURCE_DIGEST = 'f40d51e5d90542acf36875168615fb6993ac7a35da24f5cf9748e757c7fe75ad'
+export const MIRROR_SOURCE_DIGEST = 'ebe930db72378bfc449ae0e9810a0117d0147abf7795462cf19d80245b3ae07f'
 
 /** Shipped per-tool defaults from the host policy resolver. */
 export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'deny'>> = Object.freeze({
@@ -189,11 +189,20 @@ export const SHIPPED_TOOL_GROUP_CATALOG: readonly ShippedToolGroupMirror[] = Obj
     enabled: true,
   }),
   Object.freeze({
+    id: 'recall',
+    label: 'Recall',
+    purpose: 'search and read earlier messages of this and other sessions',
+    mode: 'static',
+    members: Object.freeze(['session_event_read', 'session_event_search', 'session_search']),
+    preAttach: Object.freeze([]),
+    enabled: true,
+  }),
+  Object.freeze({
     id: 'peer',
     label: 'Peer interconnect',
     purpose: 'cross-device peer sessions: status, ask, answer, cancel',
     mode: 'on-demand',
-    members: Object.freeze(['peer_status', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']),
+    members: Object.freeze(['peer_status', 'peer_sessions', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']),
     preAttach: Object.freeze([]),
     enabled: true,
   }),
@@ -202,7 +211,7 @@ export const SHIPPED_TOOL_GROUP_CATALOG: readonly ShippedToolGroupMirror[] = Obj
     label: 'Debug & observability',
     purpose: 'session log, event trace, and diagnostics inspection',
     mode: 'on-demand',
-    members: Object.freeze(['diagnostics_report', 'session_debug', 'session_event_read', 'session_event_search', 'session_event_trace', 'session_search', 'session_trace']),
+    members: Object.freeze(['diagnostics_report', 'session_debug', 'session_event_trace', 'session_trace']),
     preAttach: Object.freeze([]),
     enabled: true,
   }),
@@ -212,7 +221,7 @@ export const SHIPPED_TOOL_GROUP_CATALOG: readonly ShippedToolGroupMirror[] = Obj
     purpose: 'inspect and manage the harness plugin composition',
     mode: 'on-demand',
     members: Object.freeze(['cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager']),
-    preAttach: Object.freeze([]),
+    preAttach: Object.freeze(['creator']),
     seats: Object.freeze(['creator']),
     enabled: true,
   }),
@@ -236,4 +245,4 @@ export const ROLE_CHILD_DENY: Readonly<Record<string, readonly string[]>> = Obje
 })
 
 /** The main-agent advertised surface (shipped preset inventory). */
-export const OPERATOR_SURFACE: readonly string[] = Object.freeze(['ask_user_question', 'bash', 'chorus', 'council_list', 'council_register', 'create_goal', 'diagnostics_report', 'edit', 'exit_plan_mode', 'fast_report', 'get_goal', 'glob', 'grep', 'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'mcp', 'memory_confirm', 'memory_rescind', 'memory_save', 'memory_search', 'oracle_review', 'present', 'ralph', 'read', 'read_image', 'request_evidence', 'roundtable', 'send_message', 'session_debug', 'session_event_read', 'session_event_search', 'session_event_trace', 'session_search', 'session_trace', 'skill', 'subagent', 'todo_write', 'tool_groups', 'update_goal', 'web_search', 'whiteboard_forget', 'whiteboard_pin', 'whiteboard_read', 'whiteboard_unpin', 'whiteboard_write', 'workflow', 'write'])
+export const OPERATOR_SURFACE: readonly string[] = Object.freeze(['ask_user_question', 'bash', 'chorus', 'compressor_retrieve', 'council_list', 'council_register', 'create_goal', 'custom_research-fetch', 'custom_research-verify', 'edit', 'exit_plan_mode', 'fast_report', 'get_goal', 'glob', 'grep', 'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'mcp', 'memory_confirm', 'memory_rescind', 'memory_save', 'memory_search', 'oracle_review', 'present', 'ralph', 'read', 'read_image', 'request_evidence', 'roundtable', 'run_code', 'send_message', 'session_event_read', 'session_event_search', 'session_search', 'skill', 'subagent', 'todo_write', 'tool_groups', 'update_goal', 'web_fetch', 'whiteboard_forget', 'whiteboard_pin', 'whiteboard_read', 'whiteboard_unpin', 'whiteboard_write', 'workflow', 'write'])

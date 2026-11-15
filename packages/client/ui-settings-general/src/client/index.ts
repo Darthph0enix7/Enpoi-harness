@@ -13,7 +13,7 @@ import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
 import { getDeviceRuntime } from '@deepseek-ai/dsh-client-ui-primitives'
-import { resolveSlotLabel } from '@deepseek-ai/dsh-client-ui-slots'
+import { resolveSlotLabel, type HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: the settings slot declarations plus the ctx.configForms Context
 // merge. Cross-plugin collaboration goes through the service, never a value
 // import (client bundle purity gate).
@@ -27,7 +27,8 @@ import type {
   SettingsOnboardingStep, SettingsRootInjected, SettingsSectionRow,
 } from './shell-contract.ts'
 import { createSettingsShellStore } from './shell-store.ts'
-import { SettingsRoot } from './SettingsRoot.tsx'
+import { SettingsSurfaceSlot, SettingsTriggerSlot } from './SettingsRoot.tsx'
+import { connectionDiagnosisSource } from './connection-status.ts'
 import { DesktopUpdateBadge } from './DesktopUpdateIndicator.tsx'
 import type { DesktopUpdateBridge } from './desktop-update-bridge.ts'
 import { DesktopUpdateSource } from './desktop-update-source.ts'
@@ -92,6 +93,7 @@ export function apply(ctx: ClientContext): void {
   }, CurrentVersionRow))
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-settings-general: dictionaries')
   const connection = ctx.get('connection') as ConnectionHandle
+  const connectionDiagnosis: HostObservable<string | undefined> = connectionDiagnosisSource(connection)
   const carrier = (globalThis as typeof globalThis & { dshDesktop?: { protocolVersion: number; updates?: DesktopUpdateBridge } }).dshDesktop
   const desktopUpdate = new DesktopUpdateSource(carrier?.protocolVersion === 1 ? carrier.updates : undefined)
   ctx.effect(() => () => { desktopUpdate.dispose() }, 'ui-settings-general: desktop update carrier')
@@ -107,6 +109,34 @@ export function apply(ctx: ClientContext): void {
   // The Settings shell publishes its close action here once the seat registers;
   // the document action closes the same panel the header button does.
   let closeSettingsPanel: () => void = () => {}
+  // One shell store is shared by the sidebar trigger and the stable root
+  // surface. The sidebar chrome can swap between desktop column and compact
+  // drawer without resetting the open section or the mounted panel.
+  const shellHandle = createSettingsShellStore()
+  const shellInstance = shellHandle.create()
+  const shellStore: typeof shellHandle = { ...shellHandle, create: () => shellInstance }
+  closeSettingsPanel = () => { shellInstance.actions.close() }
+  // The rail trigger and this command share the declared owner store, so the
+  // palette entry opens and closes the same surface as the mouse control.
+  const disposeCommand = ctx.shortcuts.register({
+    id: 'settings.open' as ShortcutCommandId, label: () => t('shortcut.open'), aliases: ['settings', 'preferences'],
+    defaults: {
+      'desktop:macos': { code: 'Comma', modifiers: ['primary'] },
+      'desktop:windows': { code: 'Comma', modifiers: ['primary'] },
+      'desktop:linux': { code: 'Comma', modifiers: ['primary'] },
+      'web:macos': { code: 'Comma', modifiers: ['primary'] },
+      'web:windows': { code: 'Comma', modifiers: ['primary'] },
+    },
+    regions: ['page', 'editable', 'terminal'], modals: ['settings'],
+    resolve: ({ modal }) => {
+      if (modal !== null && modal !== 'settings') return { status: 'blocked', reason: 'modal' }
+      return { status: 'handled', run: () => {
+        if (modal === 'settings') shellInstance.actions.close()
+        else shellInstance.actions.open()
+      } }
+    },
+  })
+  ctx.effect(() => () => { closeSettingsPanel = () => {}; disposeCommand() }, 'ui-settings-general: settings command')
   // The shared ConfigForms mirror updates after document commits and reconnects.
   const documentController = ctx.remote.$host.isLoopback
     ? new SettingsDocumentStore(
@@ -145,6 +175,7 @@ export function apply(ctx: ClientContext): void {
       desktopUpdate: desktopUpdate.store,
       device: getDeviceRuntime(),
       connectionState: connection.state,
+      connectionDiagnosis,
       onboardingRequest,
       sections: {
         getSnapshot: () => {
@@ -199,48 +230,35 @@ export function apply(ctx: ClientContext): void {
     requestOnboarding: () => { onboardingRequest.update((s) => { s.requested = true }) },
   }), 'ui-settings-general: settingsUi service')
 
-  ctx.slots.inject('sidebar.settings', () => {
-    const shellHandle = createSettingsShellStore()
-    const shellInstance = shellHandle.create()
-    const shellStore: typeof shellHandle = { ...shellHandle, create: () => shellInstance }
-    closeSettingsPanel = () => { shellInstance.actions.close() }
-    // The rail trigger and this command share the declared owner store, so the
-    // palette entry opens and closes the same surface as the mouse control.
-    const disposeCommand = ctx.shortcuts.register({
-      id: 'settings.open' as ShortcutCommandId, label: () => t('shortcut.open'), aliases: ['settings', 'preferences'],
-      defaults: {
-        'desktop:macos': { code: 'Comma', modifiers: ['primary'] },
-        'desktop:windows': { code: 'Comma', modifiers: ['primary'] },
-        'desktop:linux': { code: 'Comma', modifiers: ['primary'] },
-        'web:macos': { code: 'Comma', modifiers: ['primary'] },
-        'web:windows': { code: 'Comma', modifiers: ['primary'] },
-      },
-      regions: ['page', 'editable', 'terminal'], modals: ['settings'],
-      resolve: ({ modal }) => {
-        if (modal !== null && modal !== 'settings') return { status: 'blocked', reason: 'modal' }
-        return { status: 'handled', run: () => {
-          if (modal === 'settings') shellInstance.actions.close()
-          else shellInstance.actions.open()
-        } }
-      },
-    })
-    const disposeSlot = ctx.slots.register({
-      name: 'sidebar.settings',
-      locale: NS,
-      store: shellStore,
-      children: {
-        'settings.launcher': { kind: 'single', scope: 'root' },
-        'settings.trigger': { kind: 'single', scope: 'root' },
-        'settings.header': { kind: 'single', scope: 'root' },
-        'settings.action': { kind: 'list', scope: 'root' },
-        'settings.close': { kind: 'single', scope: 'root' },
-        'settings.section': { kind: 'list', scope: 'root' },
-        'settings.onboarding': { kind: 'list', scope: 'root' },
-      },
-      inject: shellInjected,
-    }, SettingsRoot)
-    return () => { closeSettingsPanel = () => {}; disposeCommand(); disposeSlot() }
-  })
+  // The sidebar keeps only the launch chrome; the panel lives at the stable
+  // root surface below, outside the mode-swapped sidebar column/drawer.
+  ctx.slots.inject('sidebar.settings', () => ctx.slots.register({
+    name: 'sidebar.settings',
+    locale: NS,
+    store: shellStore,
+    children: {
+      'settings.launcher': { kind: 'single', scope: 'root' },
+      'settings.trigger': { kind: 'single', scope: 'root' },
+    },
+    inject: shellInjected,
+  }, SettingsTriggerSlot))
+
+  // One SettingsRoot surface for both desktop and compact. AppFrame renders
+  // this slot at the frame root, outside the conditional sidebar/drawer, so a
+  // layout-mode switch cannot remount the dialog or its mounted section.
+  ctx.slots.inject('settings.surface', () => ctx.slots.register({
+    name: 'settings.surface',
+    locale: NS,
+    store: shellStore,
+    children: {
+      'settings.header': { kind: 'single', scope: 'root' },
+      'settings.action': { kind: 'list', scope: 'root' },
+      'settings.close': { kind: 'single', scope: 'root' },
+      'settings.section': { kind: 'list', scope: 'root' },
+      'settings.onboarding': { kind: 'list', scope: 'root' },
+    },
+    inject: shellInjected,
+  }, SettingsSurfaceSlot))
 
   ctx.slots.inject('settings.trigger', () =>
     ctx.slots.register({ name: 'settings.trigger', locale: NS }, TriggerContent))

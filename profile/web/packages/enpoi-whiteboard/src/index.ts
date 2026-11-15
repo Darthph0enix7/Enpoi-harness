@@ -22,18 +22,23 @@
  * resolved view; project/global entries stay behind a collapsed disclosure.
  *
  * Guarantees: a rendered resolved board over the hard budget REFUSES the write
- * (never silently trims); `path` entries are validated on write and flagged
- * `stale` — never deleted; `whiteboard_forget` returns the entry it removed.
- * Session buckets are bounded by a one-sweep-per-activation GC that keeps the
- * newest {@link DEFAULT_MAX_SESSION_BOARDS} boards.
+ * (never silently trims); an exact single-path entry is validated and flagged
+ * `stale` — never deleted — while prose/mixed legacy values are unverified, not
+ * stale; `whiteboard_forget` returns the entry it removed. Mutations return a
+ * short receipt; only `whiteboard_read` returns the full resolved view. Session
+ * buckets are bounded by a one-sweep-per-activation GC that keeps the newest
+ * {@link DEFAULT_MAX_SESSION_BOARDS} boards.
  *
  * @module dsh-enpoi-whiteboard
  */
 
 import type { Context, Volatile } from '@deepseek-ai/cordis'
+import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import Schema from '@deepseek-ai/schemastery'
 import { readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { isAbsolute, resolve } from 'node:path'
 import {
   DEFAULT_BUDGET_TOKENS,
@@ -57,8 +62,11 @@ import {
   versionLine,
   writeBoard,
   type BoardScopeFacts,
+  type LintResult,
   type ResolvedBoard,
   type WhiteboardEntry,
+  type WhiteboardEntryKind,
+  type WhiteboardScope,
   type WhiteboardStore,
   type WhiteboardTarget,
   type WhiteboardWriteRequest,
@@ -75,11 +83,11 @@ function live<T extends object>(schema: T): T {
   return (schema as T & { volatile?: () => T }).volatile?.() ?? schema
 }
 
-/** Read one effective Config field (Volatile ref on 0.1.7+, plain value before it). */
-function value<T>(field: T | Volatile<T> | undefined): T | undefined {
-  return typeof (field as Volatile<T> | undefined)?.get === 'function'
-    ? (field as Volatile<T>).get()
-    : field as T | undefined
+/** Read one effective numeric Config field (Volatile ref on 0.1.7+, plain value before it). */
+function value(field: number | Volatile<number> | undefined): number | undefined {
+  if (field === undefined) return undefined
+  if (typeof field === 'number') return field
+  return field.get()
 }
 
 /** Live-editable whiteboard bounds. */
@@ -101,11 +109,127 @@ export interface ResolvedWhiteboardConfig {
   maxSessionBoards: number
 }
 
+/** One entry in the full read result. */
+type WhiteboardReadEntryValue = {
+  id: string
+  kind: WhiteboardEntryKind
+  text: string
+  pinned: boolean
+  version: number
+  scope: WhiteboardScope
+  stale?: boolean
+}
+
+/** The full read tool value (stored view plus live path diagnostics). */
+type WhiteboardReadValue = {
+  ok: true
+  version: number
+  scope: WhiteboardScope
+  tokens: number
+  budget: number
+  entries: WhiteboardReadEntryValue[]
+  stale: string[]
+  staleTotal: number
+  unknown: string[]
+  unknownTotal: number
+  rendered: string
+  versionLine: string
+}
+
+/** A refused mutation value. */
+type WhiteboardRefusalValue = {
+  ok: false
+  reason: 'refused'
+  message: string
+  tokens?: number
+  budget?: number
+}
+
+/** One successful mutation receipt. */
+type WhiteboardReceiptValue = {
+  ok: true
+  op: string
+  changedIds: string[]
+  changedTotal: number
+  version: number
+  scope: WhiteboardScope
+  checkedScope: WhiteboardScope
+  checkedFacts: BoardScopeFacts
+  tokens: number
+  budget: number
+  callerTokens: number
+  callerScope: WhiteboardScope
+  stale: string[]
+  staleTotal: number
+  unknown: string[]
+  unknownTotal: number
+  note?: string
+}
+
+/** One entry removed by `whiteboard_forget`. */
+type WhiteboardRemovedEntry = {
+  id: string
+  kind: WhiteboardEntryKind
+  text: string
+  pinned: boolean
+  version: number
+  scope: WhiteboardScope
+}
+
+/** The forget tool value: a receipt that carries the removed entry, or a refusal. */
+type WhiteboardForgetValue = (WhiteboardReceiptValue & { removed?: WhiteboardRemovedEntry }) | WhiteboardRefusalValue
+
+/** Narrow one JSON value to a plain object. */
+function isJsonObject(value: unknown): value is { [key: string]: JsonValue } {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** Narrow the tool output boundary to the read value (the output schema validates the fields). */
+function isWhiteboardReadValue(value: unknown): value is WhiteboardReadValue {
+  return isJsonObject(value)
+    && value.ok === true
+    && Array.isArray(value.entries)
+    && Array.isArray(value.stale)
+    && Array.isArray(value.unknown)
+}
+
+/** Narrow the tool output boundary to a successful mutation receipt. */
+function isWhiteboardReceiptValue(value: unknown): value is WhiteboardReceiptValue {
+  return isJsonObject(value) && value.ok === true && typeof value.op === 'string' && Array.isArray(value.changedIds)
+}
+
+/** Narrow the tool output boundary to a refusal. */
+function isWhiteboardRefusalValue(value: unknown): value is WhiteboardRefusalValue {
+  return isJsonObject(value) && value.ok === false && value.reason === 'refused' && typeof value.message === 'string'
+}
+
+/** Resolve one mutation render value, failing loud if the tool schema and renderer drift. */
+function mutationRenderValue(value: JsonValue): WhiteboardReceiptValue | WhiteboardRefusalValue {
+  if (isWhiteboardRefusalValue(value) || isWhiteboardReceiptValue(value)) return value
+  throw new Error('whiteboard mutation rendered a value outside its output schema')
+}
+
+/** Resolve one read render value, failing loud if the tool schema and renderer drift. */
+function readRenderValue(value: JsonValue): WhiteboardReadValue {
+  if (isWhiteboardReadValue(value)) return value
+  throw new Error('whiteboard_read rendered a value outside its output schema')
+}
+
+/** Resolve one forget render value, failing loud if the tool schema and renderer drift. */
+function forgetRenderValue(value: JsonValue): WhiteboardForgetValue {
+  if (isWhiteboardRefusalValue(value) || isWhiteboardReceiptValue(value)) return value
+  throw new Error('whiteboard_forget rendered a value outside its output schema')
+}
+
 /** Shared settings namespace (owned by enpoi-capabilities). */
 const ORCH_NS = 'enpoi-orchestration'
 
 /** The structural slice of the settings service this plugin uses. */
 interface SettingsLike extends SettingsDocumentReader {
+  /** Pre-0.1.7 namespace reader. */
+  get?: (ns: string) => unknown
+  /** 0.1.7+ narrow namespace reader. */
+  describeNamespace?: (ns: string) => { ns: string; value?: unknown } | undefined
   describe?: () => Array<{ ns: string; revision?: number; value?: unknown }>
   mutate?: (
     ns: string,
@@ -144,29 +268,154 @@ function settingsOf(ctx: Context): SettingsLike | undefined {
 /** One-time-per-process notice that a legacy board is being read in memory. */
 let legacyReadLogged = false
 
+/** Whether a value is a plain settings document object (not null/array/scalar). */
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Normalize/migrate one settings namespace document; owns the one-time legacy read notice. */
+function storeFromDocument(document: Record<string, unknown> | undefined): WhiteboardStore {
+  const migration = migrateLegacyStore(document?.whiteboard)
+  if (migration.migrated && !legacyReadLogged) {
+    legacyReadLogged = true
+    const destination = migration.attributedTo === undefined ? 'global' : `session ${migration.attributedTo}`
+    process.stderr.write(`[enpoi-whiteboard] legacy board read (${migration.entries} entries) — migrated in memory into ${destination}\n`)
+  }
+  return migration.store
+}
+
 /**
- * Read the current multi-scope store. Never throws: a missing settings service
- * or a malformed value answers the empty store, so the plugin can never break a
- * turn (doc 66 invariant 1). A legacy single-board document is migrated in
- * memory — a `meta.writtenBySessionId` global board lands in that session's
- * bucket — and rewritten in the new shape by the next write or by the one-time
- * settings migration.
+ * Read the current multi-scope store for the fail-open read/injection path.
+ * Never throws: a missing settings service or a malformed value answers the
+ * empty store, so a read can never break a turn (doc 66 invariant 1). Mutations
+ * use {@link strictStoreFromSettings} instead: a transient read failure there
+ * must not be mistaken for an empty board and overwrite it. A legacy
+ * single-board document is migrated in memory — a `meta.writtenBySessionId`
+ * global board lands in that session's bucket — and rewritten in the new shape
+ * by the next write or by the one-time settings migration.
+ * @param settings - the `settings` service, or undefined when absent.
+ * @returns the normalized store.
+ */
+function storeFromSettings(settings: SettingsDocumentReader | undefined): WhiteboardStore {
+  try {
+    return storeFromDocument(readOrchestrationDocument(settings))
+  } catch {
+    return normalizeStore(undefined)
+  }
+}
+
+/** A strict mutation read: the store plus the revision from the same describe snapshot. */
+type StrictStoreRead =
+  | { ok: true; store: WhiteboardStore; revision?: number }
+  | { ok: false; message: string }
+
+/** Stringify an error without letting a hostile `toString` throw. */
+function errorText(error: unknown): string {
+  try {
+    return String(error)
+  } catch {
+    return 'unknown error'
+  }
+}
+
+/** The bounded refusal one failed strict mutation read returns. */
+function strictReadFailure(error: unknown): { ok: false; message: string } {
+  return { ok: false, message: `board read failed — board not written (${errorText(error)})` }
+}
+
+/**
+ * Read the store for a mutation. Unlike the fail-open read/injection path, any
+ * settings-surface throw or malformed namespace value refuses the write, so a
+ * transient read failure can never be mistaken for an empty board and overwrite
+ * the stored one. `describe()` is called once per attempt: its value and
+ * revision come from the same snapshot. A descriptor without a resolved value
+ * (the pre-0.1.7/test shape) falls back to `get()` for the value while keeping
+ * that snapshot's revision. An absent namespace is a first write, not an error.
+ * @param settings - the `settings` service, or undefined when absent.
+ * @returns the store plus the revision to fence the write, or a bounded refusal.
+ */
+function strictStoreFromSettings(settings: SettingsLike | undefined): StrictStoreRead {
+  if (settings === undefined) return { ok: false, message: 'settings service unavailable — board not written' }
+  let sawSurface = false
+  let revision: number | undefined
+  let document: Record<string, unknown> | undefined
+  let descriptor: { ns: string; revision?: number; value?: unknown } | undefined
+  if (typeof settings.describe === 'function') {
+    sawSurface = true
+    try {
+      const entries = settings.describe()
+      descriptor = entries.find((entry) => entry.ns === ORCH_NS)
+      if (descriptor !== undefined) revision = descriptor.revision
+    } catch (error) {
+      return strictReadFailure(error)
+    }
+  }
+  if (descriptor?.value !== undefined) {
+    if (!isObjectRecord(descriptor.value)) return { ok: false, message: 'whiteboard document is malformed — board not written' }
+    document = descriptor.value
+  } else {
+    if (typeof settings.get === 'function') {
+      sawSurface = true
+      let value: unknown
+      try {
+        value = settings.get(ORCH_NS)
+      } catch (error) {
+        return strictReadFailure(error)
+      }
+      if (value !== undefined) {
+        if (!isObjectRecord(value)) return { ok: false, message: 'whiteboard document is malformed — board not written' }
+        document = value
+      }
+    }
+    if (document === undefined && typeof settings.describeNamespace === 'function') {
+      sawSurface = true
+      let narrow: { ns: string; value?: unknown } | undefined
+      try {
+        narrow = settings.describeNamespace(ORCH_NS)
+      } catch (error) {
+        return strictReadFailure(error)
+      }
+      if (narrow?.value !== undefined) {
+        if (!isObjectRecord(narrow.value)) return { ok: false, message: 'whiteboard document is malformed — board not written' }
+        document = narrow.value
+      }
+    }
+  }
+  if (!sawSurface) return { ok: false, message: 'settings service unavailable — board not written' }
+  try {
+    const raw = document?.whiteboard
+    if (raw !== undefined && raw !== null && !isObjectRecord(raw)) {
+      return { ok: false, message: 'whiteboard document is malformed — board not written' }
+    }
+    return { ok: true, store: storeFromDocument(document), revision }
+  } catch (error) {
+    return strictReadFailure(error)
+  }
+}
+
+/**
+ * Read the current multi-scope store from one plugin context.
  * @param ctx - owning plugin context.
  * @returns the normalized store.
  */
 export function readWhiteboardStore(ctx: Context): WhiteboardStore {
-  try {
-    const doc = readOrchestrationDocument(settingsOf(ctx))
-    const migration = migrateLegacyStore(doc?.whiteboard)
-    if (migration.migrated && !legacyReadLogged) {
-      legacyReadLogged = true
-      const destination = migration.attributedTo === undefined ? 'global' : `session ${migration.attributedTo}`
-      process.stderr.write(`[enpoi-whiteboard] legacy board read (${migration.entries} entries) — migrated in memory into ${destination}\n`)
-    }
-    return migration.store
-  } catch {
-    return normalizeStore(undefined)
-  }
+  return storeFromSettings(settingsOf(ctx))
+}
+
+/**
+ * Resolve the shared whiteboard for one reader without a plugin context. This is
+ * the shared-consumer read: it applies the same legacy migration and
+ * global → project → parent-session → session resolution as the read tool,
+ * budget check, and injected block, and it never writes or opens another
+ * datastore. Consumers pass the `settings` service they already hold. This is
+ * the fail-open read path (a missing/malformed document resolves empty);
+ * mutations use the strict read and refuse instead of overwriting.
+ * @param settings - the `settings` service, or undefined.
+ * @param facts - the reader's session/project/parent scope facts.
+ * @returns the resolved view; an absent or malformed document resolves empty.
+ */
+export function resolvedBoard(settings: SettingsDocumentReader | undefined, facts: BoardScopeFacts = {}): ResolvedBoard {
+  return resolveBoard(storeFromSettings(settings), facts)
 }
 
 /**
@@ -177,7 +426,7 @@ export function readWhiteboardStore(ctx: Context): WhiteboardStore {
  * @returns the resolved view.
  */
 export function readWhiteboard(ctx: Context, facts: BoardScopeFacts = {}): ResolvedBoard {
-  return resolveBoard(readWhiteboardStore(ctx), facts)
+  return resolvedBoard(settingsOf(ctx), facts)
 }
 
 /** The cwd a tool call resolves `path` entries against. */
@@ -212,53 +461,72 @@ function isChildSession(exec: ToolExecLike | undefined): boolean {
   return sessionFacts(exec).parentSessionId !== undefined
 }
 
-/** Resolve one entry's path text against a cwd (absolute entries pass through). */
-function resolveEntryPath(entry: WhiteboardEntry, cwd: string): string {
-  return isAbsolute(entry.text) ? entry.text : resolve(cwd, entry.text)
+/** Resolve one parsed path against a cwd (absolute and home paths pass through resolved). */
+function resolveEntryPath(pathText: string, cwd: string): string {
+  if (pathText === '~') return homedir()
+  if (pathText.startsWith('~/') || pathText.startsWith('~\\')) return resolve(homedir(), pathText.slice(2))
+  return isAbsolute(pathText) ? pathText : resolve(cwd, pathText)
 }
 
-/** The board with its path entries linted against the calling session's cwd. */
-function linted<T extends { entries: readonly WhiteboardEntry[] }>(doc: T, exec: ToolExecLike | undefined): T {
-  const cwd = toolCwd(exec)
-  return lintPaths(doc, (entry) => resolveEntryPath(entry, cwd), existsSync, Date.now()).doc
+/** The board with its path entries linted against a cwd (the project's own cwd when writing there). */
+function linted<T extends { entries: readonly WhiteboardEntry[] }>(
+  doc: T,
+  exec: ToolExecLike | undefined,
+  cwd: string = toolCwd(exec),
+): LintResult<T> {
+  return lintPaths(doc, (_entry, pathText) => resolveEntryPath(pathText, cwd), existsSync, Date.now())
 }
 
-/** A write refusal surfaced to the model verbatim. */
-function refusal(message: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
-  return { ok: false, reason: 'refused', message, ...extra }
+/** A write refusal surfaced to the model verbatim, escaped and code-point bounded. */
+function refusal(message: string, extra: Pick<WhiteboardRefusalValue, 'tokens' | 'budget'> = {}): WhiteboardRefusalValue {
+  return { ok: false, reason: 'refused', message: safeMessage(message), ...extra }
 }
 
 /** The result of one fenced store commit. */
 type CommitResult =
-  | { ok: true; store: WhiteboardStore }
+  | { ok: true; store: WhiteboardStore; changed: boolean; changedIds: string[] }
   | { ok: false; message: string; tokens?: number; budget?: number }
+
+/** One build's candidate store plus whether it actually changed anything. */
+type BuildResult =
+  | { ok: true; store: WhiteboardStore; changed?: boolean; changedIds?: string[] }
+  | { ok: false; message: string }
 
 /**
  * Read-modify-write the store under the namespace revision fence: a concurrent
  * writer (another tool call, or the operator's settings surface) is re-read and
  * the transition replayed, so a write is never silently clobbered. The candidate
  * is budget-checked as the resolved view of `checkFacts` — the audience the
- * write targets (or the writer's own session for a global write).
+ * write targets (or the writer's own session for a global write). Reads are
+ * strict for mutations: a throw from the settings surface refuses before any
+ * build or mutate, so a transient read failure cannot overwrite the board with
+ * an empty store. The revision and value come from one `describe()` snapshot
+ * per attempt. A transition that reports no change commits nothing and returns
+ * the current store, so an identical write cannot bump the version or churn the
+ * injected context.
  * @param ctx - owning plugin context.
  * @param config - resolved plugin config.
  * @param checkFacts - the scope facts the budget check resolves against.
  * @param build - pure transition from the current store to the candidate.
- * @returns the committed store, or a refusal message.
+ * @returns the committed store and changed ids, or a refusal message.
  */
 async function commitStore(
   ctx: Context,
   config: ResolvedWhiteboardConfig,
   checkFacts: BoardScopeFacts,
-  build: (store: WhiteboardStore, now: number) => { ok: true; store: WhiteboardStore } | { ok: false; message: string },
+  build: (store: WhiteboardStore, now: number) => BuildResult,
 ): Promise<CommitResult> {
   const settings = settingsOf(ctx)
   if (settings?.mutate === undefined) return { ok: false, message: 'settings service unavailable — board not written' }
   let lastError: unknown
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const now = Date.now()
-    const current = readWhiteboardStore(ctx)
+    const strict = strictStoreFromSettings(settings)
+    if (!strict.ok) return { ok: false, message: strict.message }
+    const current = strict.store
     const built = build(current, now)
     if (!built.ok) return { ok: false, message: built.message }
+    if (built.changed === false) return { ok: true, store: current, changed: false, changedIds: [] }
     const next: WhiteboardStore = { ...built.store, version: current.version + 1 }
     const check = checkBudget(resolveBoard(next, checkFacts), config.budgetTokens)
     if (!check.ok) {
@@ -269,24 +537,24 @@ async function commitStore(
         budget: check.budget,
       }
     }
-    const revision = settings.describe?.().find((entry) => entry.ns === ORCH_NS)?.revision
     try {
-      await settings.mutate(ORCH_NS, [{ op: 'set', path: ['whiteboard'], value: next }], revision)
-      return { ok: true, store: next }
+      await settings.mutate(ORCH_NS, [{ op: 'set', path: ['whiteboard'], value: next }], strict.revision)
+      return { ok: true, store: next, changed: true, changedIds: built.changedIds ?? [] }
     } catch (error) {
       lastError = error
       if ((error as { code?: string })?.code === 'SETTINGS_CONFLICT' && attempt < 2) continue
-      return { ok: false, message: `board write failed: ${String(error)}` }
+      return { ok: false, message: `board write failed: ${errorText(error)}` }
     }
   }
-  return { ok: false, message: `board write failed after retries: ${String(lastError)}` }
+  return { ok: false, message: `board write failed after retries: ${errorText(lastError)}` }
 }
 
 /**
- * Result fields every whiteboard tool may return (the `boardView` shape plus the
- * optional `note`). Declared once so a tool output schema cannot drift from the
- * real result — `whiteboard_pin`/`whiteboard_unpin` shipped without `scope` and
- * the harness rejected their (correct) output as invalid.
+ * Result fields every whiteboard tool may return (the full `boardView` shape,
+ * the short mutation receipt, and the optional `note`). Declared once so a tool
+ * output schema cannot drift from the real result — `whiteboard_pin`/
+ * `whiteboard_unpin` shipped without `scope` and the harness rejected their
+ * (correct) output as invalid.
  */
 const BOARD_RESULT_PROPERTIES = {
   ok: { type: 'boolean' as const },
@@ -294,19 +562,91 @@ const BOARD_RESULT_PROPERTIES = {
   message: { type: 'string' as const },
   version: { type: 'number' as const },
   scope: { type: 'string' as const },
+  checkedScope: { type: 'string' as const },
+  checkedFacts: { type: 'object' as const, additionalProperties: true },
   tokens: { type: 'number' as const },
   budget: { type: 'number' as const },
+  callerTokens: { type: 'number' as const },
+  callerScope: { type: 'string' as const },
+  op: { type: 'string' as const },
+  changedIds: { type: 'array' as const, items: { type: 'string' as const } },
+  changedTotal: { type: 'number' as const },
   entries: { type: 'array' as const, items: { type: 'object' as const, additionalProperties: true } },
   stale: { type: 'array' as const, items: { type: 'string' as const } },
+  staleTotal: { type: 'number' as const },
+  unknown: { type: 'array' as const, items: { type: 'string' as const } },
+  unknownTotal: { type: 'number' as const },
   rendered: { type: 'string' as const },
   versionLine: { type: 'string' as const },
   note: { type: 'string' as const },
 }
 
-/** The resolved view plus numbers for one tool result. */
-function boardView(resolved: ResolvedBoard, budgetTokens: number): Record<string, unknown> {
-  const rendered = renderWhiteboard(resolved)
-  const entries = resolved.entries.map((entry) => ({
+/** How many ids one mutation receipt lists before reporting the remainder as a count. */
+const MAX_RECEIPT_IDS = 8
+
+/** Hard cap on rendered mutation/refusal text, counted in code points (never splits a surrogate pair). */
+const MAX_RECEIPT_CODEPOINTS = 600
+
+/** Bound text by code points, so a bound never splits a surrogate pair. */
+function takeChars(text: string, max: number): string {
+  const chars = Array.from(text)
+  return chars.length <= max ? text : chars.slice(0, max).join('')
+}
+
+/** Bound text by code points with an explicit truncation marker. */
+function boundText(text: string, max: number): string {
+  return Array.from(text).length <= max ? text : `${takeChars(text, max - 1)}…`
+}
+
+/** Escape control characters and newlines in one dynamic value before it enters a receipt. */
+function escapeControls(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, (char) => {
+    if (char === '\n') return '\\n'
+    if (char === '\r') return '\\r'
+    if (char === '\t') return '\\t'
+    const code = char.codePointAt(0) ?? 0
+    return `\\u${code.toString(16).padStart(4, '0')}`
+  })
+}
+
+/** Escape control characters and bound one dynamic receipt/refusal value. */
+function safeText(value: unknown, max: number = MAX_RECEIPT_CODEPOINTS): string {
+  return boundText(escapeControls(String(value)), max)
+}
+
+/** Escape control characters and bound a refusal message. */
+function safeMessage(message: string): string {
+  return safeText(message, MAX_RECEIPT_CODEPOINTS)
+}
+
+/** Bound the assembled receipt while preserving its intentional line breaks. */
+function boundedReceipt(text: string): string {
+  return boundText(text, MAX_RECEIPT_CODEPOINTS)
+}
+
+/** Dedupe and bound one receipt id list, putting operation-relevant ids first. */
+function boundedIds(ids: readonly string[], first: readonly string[] = []): string[] {
+  const available = new Set(ids)
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const id of [...first, ...ids]) {
+    if (!available.has(id) || seen.has(id)) continue
+    seen.add(id)
+    out.push(id)
+    if (out.length >= MAX_RECEIPT_IDS) break
+  }
+  return out
+}
+
+/**
+ * The full read result. `rendered` and `tokens` are the stored resolved view —
+ * exactly what the runtime-context injection would render — while `entries`,
+ * `stale`, and `unknown` are the live lint diagnostics. A filesystem change
+ * therefore changes diagnostics without changing the injected text/count.
+ */
+function boardView(stored: ResolvedBoard, diagnostic: LintResult<ResolvedBoard>, budgetTokens: number): WhiteboardReadValue {
+  const rendered = renderWhiteboard(stored)
+  const entries = diagnostic.doc.entries.map((entry) => ({
     id: entry.id,
     kind: entry.kind,
     text: entry.text,
@@ -315,42 +655,109 @@ function boardView(resolved: ResolvedBoard, budgetTokens: number): Record<string
     scope: entry.scope,
     ...(entry.stale === true ? { stale: true } : {}),
   }))
-  const stale = resolved.entries.filter((entry) => entry.stale === true).map((entry) => entry.id)
   return {
     ok: true,
-    version: resolved.version,
-    scope: resolved.scope,
+    version: stored.version,
+    scope: stored.scope,
     tokens: estimateTokens(rendered),
     budget: budgetTokens,
     entries,
-    stale,
+    stale: diagnostic.stale,
+    staleTotal: diagnostic.stale.length,
+    unknown: diagnostic.unknown,
+    unknownTotal: diagnostic.unknown.length,
     rendered,
-    versionLine: versionLine(resolved),
+    versionLine: versionLine(stored),
   }
 }
 
-/** The write target plus the facts its budget check resolves. */
-type WriteTarget = { target: WhiteboardTarget; checkFacts: BoardScopeFacts }
+/** The two assembled views one mutation receipt reports. */
+interface ReceiptViews {
+  /** The committed store resolved on the budget-checked facts (the audience the write was checked against). */
+  checked: ResolvedBoard
+  /** The scope facts the budget check used. */
+  checkedFacts: BoardScopeFacts
+  /** Live path diagnostics for the checked view; they never change `tokens`. */
+  checkedDiagnostics: LintResult<ResolvedBoard>
+  /** The caller's stored resolved view, for comparison with `whiteboard_read`. */
+  caller: ResolvedBoard
+}
+
+/**
+ * The short mutation receipt: ids that actually changed, the checked view's
+ * stored resolved token use against the budget, a board-version scalar, and
+ * bounded relevant stale / unverified path ids. It also reports the caller
+ * read's tokens/scope when the checked target differs. It never carries the
+ * full board — `whiteboard_read` is the full view.
+ */
+function receiptView(
+  views: ReceiptViews,
+  budgetTokens: number,
+  op: string,
+  changedIds: readonly string[],
+  note?: string,
+): WhiteboardReceiptValue {
+  const { checked, checkedFacts, checkedDiagnostics, caller } = views
+  return {
+    ok: true,
+    op,
+    changedIds: boundedIds(changedIds),
+    changedTotal: changedIds.length,
+    version: checked.version,
+    scope: caller.scope,
+    checkedScope: checked.scope,
+    checkedFacts,
+    tokens: estimateTokens(renderWhiteboard(checked)),
+    budget: budgetTokens,
+    callerTokens: estimateTokens(renderWhiteboard(caller)),
+    callerScope: caller.scope,
+    stale: boundedIds(checkedDiagnostics.stale, changedIds),
+    staleTotal: checkedDiagnostics.stale.length,
+    unknown: boundedIds(checkedDiagnostics.unknown, changedIds),
+    unknownTotal: checkedDiagnostics.unknown.length,
+    ...(note === undefined ? {} : { note: safeText(note, 240) }),
+  }
+}
+
+/** The guidance note one mutation returns when path entries need operator action. */
+function pathNote(staleTotal: number, unknownTotal: number): string | undefined {
+  const parts: string[] = []
+  if (staleTotal > 0) parts.push(`${staleTotal} stale path entr${staleTotal === 1 ? 'y' : 'ies'} (missing on disk; repoint or forget — never auto-deleted)`)
+  if (unknownTotal > 0) parts.push(`${unknownTotal} path entr${unknownTotal === 1 ? 'y' : 'ies'} unverified (not one checkable path on this host; not stale)`)
+  return parts.length === 0 ? undefined : parts.join(' · ')
+}
+
+/** The write target plus the facts and cwd its budget check resolves. */
+type WriteTarget = { target: WhiteboardTarget; checkFacts: BoardScopeFacts; checkCwd?: string }
 
 /**
  * Resolve one write's storage target. `scope` is explicit or defaults to the
  * caller's own session; explicit `sessionId`/`projectId` override the calling
- * session's identity. The budget check resolves the audience a write targets:
- * a project write checks global + that project, a session write checks the
- * writer's whole resolved view (its own session defaults here), and a global
- * write checks the writer's view — the best available approximation.
+ * session's identity. The budget check sees the view it can assemble:
+ * - global, default project, and session writes check the caller's full resolved view;
+ * - an explicit foreign project checks that project's global + project view;
+ * - an explicit foreign session checks global + that session.
+ * It cannot enumerate every session reader or persist a cwd catalog, so the
+ * hard budget is enforced on the assembled checked view, not globally for all
+ * readers. `checkCwd` is the cwd relative path entries are linted against; a
+ * foreign session has no cwd in the tool identity, so its diagnostics use the
+ * caller cwd.
  * @param exec - the tool execution identity.
  * @param args - the tool arguments.
- * @returns the target and check facts, or an error message.
+ * @returns the target, check facts/cwd, or an error message.
  */
 function writeTargetFor(exec: ToolExecLike | undefined, args: Record<string, unknown>): WriteTarget | { error: string } {
   const own = sessionFacts(exec)
+  const ownCwd = toolCwd(exec)
   const scope = isWhiteboardScope(args.scope) ? args.scope : 'session'
-  if (scope === 'global') return { target: { scope: 'global' }, checkFacts: own }
+  if (scope === 'global') return { target: { scope: 'global' }, checkFacts: own, checkCwd: ownCwd }
   if (scope === 'project') {
     const explicit = typeof args.projectId === 'string' && args.projectId.length > 0 ? args.projectId : undefined
-    const projectId = explicit ?? toolCwd(exec)
-    return { target: { scope: 'project', projectId }, checkFacts: { projectId } }
+    const projectId = explicit ?? ownCwd
+    const foreign = explicit !== undefined && explicit !== ownCwd
+    return foreign
+      ? { target: { scope: 'project', projectId }, checkFacts: { projectId }, checkCwd: projectId }
+      : { target: { scope: 'project', projectId }, checkFacts: own, checkCwd: ownCwd }
   }
   const explicit = typeof args.sessionId === 'string' && args.sessionId.length > 0 ? args.sessionId : undefined
   const sessionId = explicit ?? own.sessionId
@@ -358,6 +765,7 @@ function writeTargetFor(exec: ToolExecLike | undefined, args: Record<string, unk
   return {
     target: { scope: 'session', sessionId },
     checkFacts: sessionId === own.sessionId ? own : { sessionId },
+    checkCwd: ownCwd,
   }
 }
 
@@ -412,8 +820,8 @@ function planWriteTargets(
 
 /** The five board tools (doc 67 §B). */
 function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
-  const tools = (ctx as unknown as { tools?: { register?: (definition: unknown) => void } }).tools
-  if (tools?.register === undefined) {
+  const tools: ToolRuntime | undefined = ctx.tools
+  if (tools === undefined) {
     process.stderr.write('[enpoi-whiteboard] no tools service — board tools not mounted\n')
     return
   }
@@ -422,7 +830,7 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
     name: 'whiteboard_read',
     description: [
       'Read the pinned context board resolved for this session: global entries, then this project\'s, then this session\'s (a direct child also inherits its parent session\'s), later scopes overriding earlier ones by entry id.',
-      'Every entry reports the scope that authored it. Returns the exact injected block, its token cost, and stale path flags.',
+      'Every entry reports the scope that authored it. This is the full view. `rendered` and `tokens` are the exact stored resolved injection; `entries`, `stale`, and `unknown` are live filesystem diagnostics and never change `rendered` or `tokens`. Mutations return only a short receipt.',
     ].join(' '),
     parameters: { type: 'object', properties: {}, required: [] },
     output: {
@@ -445,16 +853,18 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
             },
           },
           stale: { type: 'array', items: { type: 'string' } },
+          unknown: { type: 'array', items: { type: 'string' } },
           rendered: { type: 'string' },
           versionLine: { type: 'string' },
         },
-        required: ['ok', 'version', 'scope', 'tokens', 'budget', 'entries', 'stale', 'rendered', 'versionLine'],
+        required: ['ok', 'version', 'scope', 'tokens', 'budget', 'entries', 'stale', 'staleTotal', 'unknown', 'unknownTotal', 'rendered', 'versionLine'],
       },
-      render: (_args, value) => [{ type: 'text', text: renderWhiteboardResult(value) }],
+      render: (_args: unknown, value: JsonValue) => [{ type: 'text', text: renderWhiteboardResult(readRenderValue(value)) }],
     },
     isConcurrencySafe: () => true,
     async execute(_args: unknown, exec: ToolExecLike) {
-      return boardView(linted(readWhiteboard(ctx, sessionFacts(exec)), exec), config.budgetTokens)
+      const stored = readWhiteboard(ctx, sessionFacts(exec))
+      return boardView(stored, linted(stored, exec), config.budgetTokens)
     },
   })
 
@@ -462,9 +872,9 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
     name: 'whiteboard_write',
     description: [
       'Author the pinned context board for one scope. scope defaults to session (your own session); project stores under your session cwd (or projectId) and applies to that project; global applies to every session.',
-      'Append entries, or replace entries by id (every replace bumps the entry version). A replace under the default session scope replaces the entry in the scope that authored it, so a project/global entry is replaced there.',
-      'Kinds: path (project-relative path — validated on write, flagged stale when missing, never deleted), rule, fact, task.',
-      'The resolved block has a HARD token budget; an over-budget write is refused and nothing changes.',
+      'Append entries, or replace entries by id. A replace under the default session scope replaces the entry in the scope that authored it, so a project/global entry is replaced there. Repeating an identical id+content is a deterministic no-op: no entry version, board version, or injected-context change.',
+      'Kinds: path, rule, fact, task. A path entry must contain exactly one filesystem path (absolute, cwd-relative, ~/…, or a quoted path containing spaces; include a separator or file extension for bare names). Quoting makes glob metacharacters literal. Prose, path lists, multiline text, URLs, and unquoted globs are refused — use rule/fact/task for those. Missing paths are flagged stale, never deleted.',
+      'Returns a short receipt (changed ids, checked stored-view tokens against the budget, checked scope/facts, caller-read tokens, board version, bounded stale/unverified ids), not the full board; use whiteboard_read for the full resolved view. The HARD budget is checked on the view the target can assemble: your full resolved view for global, default-project, and session writes; an explicit foreign project checks that project\'s view; an explicit foreign session checks that session. Other readers are not enumerated and no cwd catalog is persisted.',
       'Keep only core context the orchestrator must not have to repeat: current docs, invariants, task state.',
     ].join(' '),
     parameters: {
@@ -499,7 +909,7 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
         properties: { ...BOARD_RESULT_PROPERTIES },
         required: ['ok'],
       },
-      render: (_args, value) => [{ type: 'text', text: renderWriteResult(value) }],
+      render: (_args: unknown, value: JsonValue) => [{ type: 'text', text: renderWriteResult(mutationRenderValue(value)) }],
     },
     isConcurrencySafe: () => false,
     async execute(args: Record<string, unknown>, exec: ToolExecLike) {
@@ -509,6 +919,9 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
       if (!Array.isArray(rawEntries) || rawEntries.length === 0) return refusal('entries must be a non-empty array')
       const requests: WhiteboardWriteRequest[] = []
       for (const raw of rawEntries) {
+        if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+          return refusal('entries[] must contain objects')
+        }
         const row = raw as Record<string, unknown>
         const kind = row.kind
         if (kind !== 'path' && kind !== 'rule' && kind !== 'fact' && kind !== 'task') {
@@ -530,23 +943,32 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
         const plan = planWriteTargets(store, target.target, facts, requests, mode, explicitScope)
         if (!plan.ok) return plan
         let next = store
+        const changedIds: string[] = []
         for (const group of plan.groups) {
           const applied = applyStoreWrites(next, group.target, group.requests, mode, now)
           if (!applied.ok) return applied
+          if (applied.changedIds.length === 0) continue
+          for (const id of applied.changedIds) if (!changedIds.includes(id)) changedIds.push(id)
           const board = readBoard(applied.store, group.target)
+          const lintCwd = group.target.scope === 'project' ? group.target.projectId : undefined
           next = board === undefined
             ? applied.store
-            : writeBoard(applied.store, group.target, linted(board, exec))
+            : writeBoard(applied.store, group.target, linted(board, exec, lintCwd).doc)
         }
-        return { ok: true, store: next }
+        return { ok: true, store: next, changed: changedIds.length > 0, changedIds }
       })
       if (!committed.ok) return refusal(committed.message, committed.tokens === undefined ? {} : { tokens: committed.tokens, budget: committed.budget })
-      const resolved = resolveBoard(committed.store, facts)
-      const stale = resolved.entries.filter((entry) => entry.stale === true).map((entry) => entry.id)
-      return {
-        ...boardView(linted(resolved, exec), config.budgetTokens),
-        note: stale.length > 0 ? `${stale.length} path entry(ies) flagged stale (missing on disk) — prune or repoint them` : 'written',
-      }
+      const caller = resolveBoard(committed.store, facts)
+      const checked = resolveBoard(committed.store, target.checkFacts)
+      const checkedView = linted(checked, exec, target.checkCwd)
+      const note = committed.changed ? pathNote(checkedView.stale.length, checkedView.unknown.length) : undefined
+      return receiptView(
+        { checked, checkedFacts: target.checkFacts, checkedDiagnostics: checkedView, caller },
+        config.budgetTokens,
+        committed.changed ? mode : 'unchanged',
+        committed.changedIds,
+        note,
+      )
     },
   })
 
@@ -564,7 +986,7 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
         properties: { ...BOARD_RESULT_PROPERTIES },
         required: ['ok'],
       },
-      render: (_args, value) => [{ type: 'text', text: renderWriteResult(value) }],
+      render: (_args: unknown, value: JsonValue) => [{ type: 'text', text: renderWriteResult(mutationRenderValue(value)) }],
     },
     isConcurrencySafe: () => false,
     async execute(args: Record<string, unknown>, exec: ToolExecLike) {
@@ -575,10 +997,19 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
       const committed = await commitStore(ctx, config, facts, (store, now) => {
         const target = findEntryTarget(store, facts, id)
         if (target === undefined) return { ok: false, message: `no entry with id "${id}" in this session's resolved board` }
-        return setStorePinned(store, target, id, true, now)
+        const pinned = setStorePinned(store, target, id, true, now)
+        return pinned.ok ? { ok: true, store: pinned.store, changed: pinned.changed, changedIds: pinned.changed ? [id] : [] } : pinned
       })
       if (!committed.ok) return refusal(committed.message, committed.tokens === undefined ? {} : { tokens: committed.tokens, budget: committed.budget })
-      return { ...boardView(linted(resolveBoard(committed.store, facts), exec), config.budgetTokens), note: `pinned ${id}` }
+      const caller = resolveBoard(committed.store, facts)
+      const view = linted(caller, exec)
+      return receiptView(
+        { checked: caller, checkedFacts: facts, checkedDiagnostics: view, caller },
+        config.budgetTokens,
+        'pin',
+        committed.changedIds,
+        committed.changed ? undefined : `already pinned ${id}`,
+      )
     },
   })
 
@@ -596,7 +1027,7 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
         properties: { ...BOARD_RESULT_PROPERTIES },
         required: ['ok'],
       },
-      render: (_args, value) => [{ type: 'text', text: renderWriteResult(value) }],
+      render: (_args: unknown, value: JsonValue) => [{ type: 'text', text: renderWriteResult(mutationRenderValue(value)) }],
     },
     isConcurrencySafe: () => false,
     async execute(args: Record<string, unknown>, exec: ToolExecLike) {
@@ -607,10 +1038,19 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
       const committed = await commitStore(ctx, config, facts, (store, now) => {
         const target = findEntryTarget(store, facts, id)
         if (target === undefined) return { ok: false, message: `no entry with id "${id}" in this session's resolved board` }
-        return setStorePinned(store, target, id, false, now)
+        const pinned = setStorePinned(store, target, id, false, now)
+        return pinned.ok ? { ok: true, store: pinned.store, changed: pinned.changed, changedIds: pinned.changed ? [id] : [] } : pinned
       })
       if (!committed.ok) return refusal(committed.message, committed.tokens === undefined ? {} : { tokens: committed.tokens, budget: committed.budget })
-      return { ...boardView(linted(resolveBoard(committed.store, facts), exec), config.budgetTokens), note: `unpinned ${id}` }
+      const caller = resolveBoard(committed.store, facts)
+      const view = linted(caller, exec)
+      return receiptView(
+        { checked: caller, checkedFacts: facts, checkedDiagnostics: view, caller },
+        config.budgetTokens,
+        'unpin',
+        committed.changedIds,
+        committed.changed ? undefined : `already unpinned ${id}`,
+      )
     },
   })
 
@@ -639,7 +1079,7 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
         },
         required: ['ok'],
       },
-      render: (_args, value) => [{ type: 'text', text: renderForgetResult(value) }],
+      render: (_args: unknown, value: JsonValue) => [{ type: 'text', text: renderForgetResult(forgetRenderValue(value)) }],
     },
     isConcurrencySafe: () => false,
     async execute(args: Record<string, unknown>, exec: ToolExecLike) {
@@ -661,44 +1101,88 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
           version: result.removed.version,
           scope: target.scope,
         }
-        return { ok: true, store: result.store }
+        return { ok: true, store: result.store, changed: true, changedIds: [id] }
       })
       if (!committed.ok) return refusal(committed.message, committed.tokens === undefined ? {} : { tokens: committed.tokens, budget: committed.budget })
-      const view = boardView(linted(resolveBoard(committed.store, facts), exec), config.budgetTokens)
-      return removed === undefined
-        ? { ...view, note: `forgot ${id}` }
-        : { ...view, removed, note: `forgot ${id}: ${String(removed.text)}` }
+      const caller = resolveBoard(committed.store, facts)
+      const view = linted(caller, exec)
+      const base = receiptView(
+        { checked: caller, checkedFacts: facts, checkedDiagnostics: view, caller },
+        config.budgetTokens,
+        'forget',
+        committed.changedIds,
+        `forgot ${id}`,
+      )
+      return removed === undefined ? base : { ...base, removed }
     },
   })
 }
 
-/** Model-facing render for a successful board read. */
-function renderWhiteboardResult(value: Record<string, unknown>): string {
-  const entries = Array.isArray(value.entries) ? value.entries as Array<Record<string, unknown>> : []
-  if (entries.length === 0) return `Whiteboard v${String(value.version)} resolves to no entries for this session (0/${String(value.budget)} tokens).`
-  const lines = entries.map((entry) => `• ${entry.pinned === true ? '📌 ' : ''}[${String(entry.kind)}] ${String(entry.text)}${entry.stale === true ? ' (stale)' : ''} — ${String(entry.id)} v${String(entry.version)} · ${String(entry.scope)}`)
-  return [...lines, `— v${String(value.version)} · ${String(value.scope)} · ${String(value.tokens)}/${String(value.budget)} tokens`].join('\n')
+/** Bound one displayed id without losing its identifying head; control characters are escaped. */
+function shortId(id: unknown): string {
+  return safeText(id, 32)
 }
 
-/** Model-facing render for a board mutation (or its refusal). */
-function renderWriteResult(value: Record<string, unknown>): string {
-  if (value.ok !== true) return String(value.message ?? 'Whiteboard write refused.')
-  const stale = Array.isArray(value.stale) ? value.stale as string[] : []
-  const head = `Whiteboard v${String(value.version)} (${String(value.scope)}) — ${stale.length} stale path flag(s).`
-  const rendered = typeof value.rendered === 'string' && value.rendered.length > 0 ? value.rendered : '(empty)'
-  return `${head}\n${rendered}`
+/** Render one bounded id list plus the omitted count. */
+function renderIdList(value: unknown, total: number): string {
+  const ids = Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string') : []
+  const shown = ids.map(shortId).join(', ')
+  return total > ids.length ? `${shown}${shown.length > 0 ? ' ' : ''}(+${total - ids.length} more)` : shown
+}
+
+/** Model-facing render for a successful board read (the full stored view plus live diagnostics). */
+function renderWhiteboardResult(value: WhiteboardReadValue): string {
+  const entries = value.entries
+  const unknown = value.unknown
+  const warning = unknown.length > 0
+    ? `\nUnverified path entries (not stale): ${unknown.map((id) => escapeControls(String(id))).join(', ')}`
+    : ''
+  const scope = safeText(value.scope, 24)
+  if (entries.length === 0) return `Whiteboard v${String(value.version)} resolves to no entries for this session (0/${String(value.budget)} tokens).${warning}`
+  const lines = entries.map((entry) => `• ${entry.pinned === true ? '📌 ' : ''}[${safeText(entry.kind, 16)}] ${String(entry.text)}${entry.stale === true ? ' (stale)' : ''} — ${escapeControls(String(entry.id))} v${String(entry.version)} · ${safeText(entry.scope, 24)}`)
+  return `${[...lines, `— v${String(value.version)} · ${scope} · ${String(value.tokens)}/${String(value.budget)} tokens`].join('\n')}${warning}`
+}
+
+/** Model-facing render for one short mutation receipt (or its refusal). */
+function renderReceipt(value: WhiteboardReceiptValue | WhiteboardRefusalValue): string {
+  if (value.ok !== true) return safeMessage(String(value.message ?? 'Whiteboard mutation refused.'))
+  const op = safeText(typeof value.op === 'string' ? value.op : 'write', 24)
+  const changedTotal = typeof value.changedTotal === 'number' ? value.changedTotal : 0
+  const staleTotal = typeof value.staleTotal === 'number' ? value.staleTotal : 0
+  const unknownTotal = typeof value.unknownTotal === 'number' ? value.unknownTotal : 0
+  const tokens = typeof value.tokens === 'number' ? value.tokens : 0
+  const callerTokens = typeof value.callerTokens === 'number' ? value.callerTokens : tokens
+  const callerScope = safeText(value.scope, 32)
+  const checkedScope = safeText(typeof value.checkedScope === 'string' ? value.checkedScope : value.scope, 32)
+  const head = checkedScope === callerScope && callerTokens === tokens
+    ? `Whiteboard v${String(value.version)} · ${callerScope} · ${String(tokens)}/${String(value.budget)} tokens`
+    : `Whiteboard v${String(value.version)} · read ${callerScope} ${String(callerTokens)} tok · checked ${checkedScope} ${String(tokens)}/${String(value.budget)} tok`
+  const action = op === 'unchanged'
+    ? 'unchanged (identical content; no version or injection change)'
+    : `${op}: ${changedTotal === 0 ? 'none' : renderIdList(value.changedIds, changedTotal)}`
+  const flags: string[] = []
+  if (staleTotal > 0) flags.push(`stale ${staleTotal}: ${renderIdList(value.stale, staleTotal)}`)
+  if (unknownTotal > 0) flags.push(`unverified path ${unknownTotal}: ${renderIdList(value.unknown, unknownTotal)}`)
+  const lines = [head, [action, ...flags].filter((part) => part.length > 0).join(' · ')]
+  const note = typeof value.note === 'string' && value.note.length > 0 ? safeText(value.note, 240) : undefined
+  if (note !== undefined) lines.push(note)
+  return boundedReceipt(lines.join('\n'))
+}
+
+/** Model-facing render for a board mutation (short receipt). */
+function renderWriteResult(value: WhiteboardReceiptValue | WhiteboardRefusalValue): string {
+  return renderReceipt(value)
 }
 
 /** Model-facing render for a forgotten entry — the removed text is always reported. */
-function renderForgetResult(value: Record<string, unknown>): string {
-  if (value.ok !== true) return String(value.message ?? 'Whiteboard forget refused.')
-  const raw = value.removed
-  const removed = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : undefined
+function renderForgetResult(value: WhiteboardForgetValue): string {
+  if (value.ok !== true) return safeMessage(String(value.message ?? 'Whiteboard forget refused.'))
+  const removed = value.removed
+  const display = removed === undefined ? '' : safeText(removed.text, 240)
   const head = removed === undefined
     ? 'Whiteboard entry forgotten.'
-    : `Forgot [${String(removed.kind)}] ${String(removed.text)} — ${String(removed.id)} (${String(removed.scope)}).`
-  const rendered = typeof value.rendered === 'string' && value.rendered.length > 0 ? value.rendered : '(empty)'
-  return `${head}\n${rendered}`
+    : `Forgot [${safeText(removed.kind, 16)}] ${display} — ${shortId(removed.id)} (${safeText(removed.scope, 24)}).`
+  return boundedReceipt(`${head}\n${renderReceipt({ ...value, op: 'forget', note: undefined })}`)
 }
 
 /** Delay before the activation sweep, so the settings service has mounted. */
@@ -709,8 +1193,8 @@ const SESSION_SWEEP_DELAY_MS = 2_000
  * harness has no session-delete event a plugin can hook (delete disposes the
  * live session and removes its log), so the trigger is one sweep per plugin
  * activation — every profile restart prunes what accumulated. Best-effort: a
- * missing settings service or a conflict leaves the store untouched; one line
- * reports what was dropped.
+ * missing settings service, a strict-read failure, or a conflict leaves the
+ * store untouched; one line reports what was dropped.
  * @param ctx - owning plugin context.
  * @param config - resolved plugin config.
  */
@@ -773,6 +1257,8 @@ function installInjection(ctx: Context): void {
   })
   ctx.effect(() => dispose, 'enpoi-whiteboard: runtime-context injection')
 }
+
+export type { BoardScopeFacts, ResolvedBoard, WhiteboardEntry } from './board'
 
 export function apply(ctx: Context, config: Config = {}): void {
   const budgetTokens = value(config.budgetTokens)

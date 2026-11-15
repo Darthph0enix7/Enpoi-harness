@@ -22,9 +22,10 @@
  * carries the persona assignment hook plus the assignment callbacks, and the
  * footer links to the Capabilities tab through the tab's own `openTab` action.
  */
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { ModelSelection } from '@deepseek-ai/dsh-api-session-controller/types'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import { DisclosureRow } from '@deepseek-ai/dsh-client-ui-primitives'
 import { ModelSelect, type ModelSelectOverride, type ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { HostObservable, InjectFace, PropsLocale, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PersonaMap } from './persona-store.ts'
@@ -104,6 +105,7 @@ export function AgentModelsBody({
   // Seats come from the role registry plus the live council registry: each
   // council renders its own seats under its own label, arbiters share their
   // group, and persona-assigned ids neither registry claims keep rows.
+  const [helpOpen, setHelpOpen] = useState(false)
   const categories = useMemo(
     () => buildFleetCategories(registry, Object.keys(assignments), councils, t),
     [registry, assignments, councils, t],
@@ -137,6 +139,7 @@ export function AgentModelsBody({
       <header className={css.head}>
         <span className={css.headTitle}>{t('agentFleetRouting')}</span>
         <span className={css.headCount}>{t('agentSeatCount', { count: totalSeats })}</span>
+        <p className={css.headHint}>{t('agentFleetHint')}</p>
       </header>
       <div className={css.groups}>
         {categories.map(category => (
@@ -210,6 +213,18 @@ export function AgentModelsBody({
           {t('agentCapabilities')}
         </button>
       </footer>
+      <DisclosureRow
+        icon={<MicroIcon d="M8 2v12M2 8h12" size={11} />}
+        title={t('agentHelpTitle')}
+        open={helpOpen}
+        expandable
+        expandOnRowClick
+        onToggle={() => { setHelpOpen(value => !value) }}
+        className={css.footHelp}
+        titleClassName={css.footHelpTitle}
+      >
+        <div className={css.footHelpBody}>{t('agentFootHintFull', { route: KEEPER_DEFAULT_ROUTE })}</div>
+      </DisclosureRow>
     </div>
   )
 }

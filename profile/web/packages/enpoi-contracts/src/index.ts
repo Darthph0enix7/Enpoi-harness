@@ -11,6 +11,9 @@
  */
 
 import { z } from 'zod'
+// Load the augmented modules so declaration emit resolves both targets.
+import type {} from '@deepseek-ai/dsh-session/types'
+import type {} from '@deepseek-ai/dsh-session-projection/types'
 
 // ── TraceContext (doc 35 §8.1) ──────────────────────────────────────────────
 
@@ -295,4 +298,36 @@ export function readOrchestrationDocument(
   settings: SettingsDocumentReader | undefined,
 ): Record<string, unknown> | undefined {
   return readSettingsDocument(settings, ORCHESTRATION_NAMESPACE)
+}
+
+// ── Trusted-role tool denies ────────────────────────────────────────────────
+
+/**
+ * Explicit operator tool denies for one trusted role id, read from the live
+ * orchestration document. Spawn paths whose child carries the parent preset
+ * (Oracle, evidence research, council seats) merge these into the child tool
+ * filter. The role argument is the trusted spawn role, never a descriptor label
+ * or inherited parent preset. An explicit `run_code` deny is included: core
+ * `tools.restrict()` accepts the reserved transport in `deny` and removes it
+ * from that child's scope, while PTC remains the preset's presentation choice
+ * for scopes that do not deny it.
+ * @param document - the live `enpoi-orchestration` document, if readable.
+ * @param role - trusted spawn role id.
+ * @returns deny names for the role's explicit tool rows.
+ */
+export function configuredRoleToolDenies(
+  document: Record<string, unknown> | undefined,
+  role: string,
+): string[] {
+  const permissions = document?.permissions
+  if (permissions === null || typeof permissions !== 'object') return []
+  const agents = (permissions as Record<string, unknown>).agents
+  if (agents === null || typeof agents !== 'object') return []
+  const entry = (agents as Record<string, unknown>)[role]
+  if (entry === null || typeof entry !== 'object') return []
+  const tools = (entry as Record<string, unknown>).tools
+  if (tools === null || typeof tools !== 'object') return []
+  return Object.entries(tools as Record<string, unknown>)
+    .filter(([, policy]) => policy === 'deny')
+    .map(([name]) => name)
 }

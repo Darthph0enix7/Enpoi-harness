@@ -37,6 +37,8 @@ export const zh = {
   'mobile.surfaces': '面板',
   'mobile.fullscreen': '全屏',
   'mobile.exitFullscreen': '退出全屏',
+  'mobile.hideControls': '隐藏控件',
+  'mobile.showControls': '显示控件',
   'brand.localBuild': 'Enpoi Harness',
   'workspace.defaultName': '默认工作区',
   'unknown': '未知',

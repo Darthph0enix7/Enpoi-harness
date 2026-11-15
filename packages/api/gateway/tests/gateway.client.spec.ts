@@ -7,6 +7,8 @@ import { z } from 'zod'
 import { RemoteMock } from '@deepseek-ai/dsh-remote-mock'
 import {
   apply as applyConnection,
+  ConnectionTerminalError,
+  isConnectionTerminalError,
   type ClientTransportHooks,
   type ConnectionGeneration,
   type ConnectionGenerationSource,
@@ -31,6 +33,12 @@ import type {
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import type { ClientRemote } from '../src/client/index.ts'
 import { apply, inject, isRemoteFailure, RemoteStream } from '../src/client/index.ts'
+import {
+  DEFAULT_REMOTE_EVENT_MAX_RETIRED_TASKS,
+  raceDeliveryWithAbort,
+  resolveRemoteEventLimits,
+} from '../src/client/remote-events.ts'
+import { REMOTE_EVENT_LIMITS_GLOBAL } from '../src/stream-protocol.ts'
 import {
   ClientUplinkQueue,
   RemoteStreamCarrierError,
@@ -2013,6 +2021,303 @@ describe('Client Typert API', () => {
     await client.dispose()
   })
 
+  it('settles generation teardown when a listener ignores cancellation and drops its late result', async () => {
+    const call = vi.fn<ConnectionHandle['rpc']['call']>().mockResolvedValue({ ok: true, value: undefined })
+    const { ctx, client, carrier, generation, run } = await eventBench(call)
+    const target = ctx.extend()
+    ctx.typert.contexts.registerClient('agent', {
+      identity: candidate => candidate === target ? agentId('agent-stuck') : undefined,
+      resolve: id => id === 'agent-stuck' ? target : undefined,
+    })
+    const entered = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<FixtureApprovalOutcome>()
+    let listenerCalls = 0
+    target.remote.$on('fixture/approval', async () => {
+      listenerCalls += 1
+      if (listenerCalls === 1) {
+        entered.resolve(undefined)
+        return release.promise
+      }
+      return 'allowed'
+    })
+    try {
+      carrier.emit(approvalFrame('event-stuck', 'agent-stuck', 'wait'))
+      await entered.promise
+
+      run.abort(new Error('fixture generation ended'))
+      const outcome = await Promise.race([
+        run.done.then(() => 'settled' as const),
+        new Promise<'hung'>((resolve) => {
+          setTimeout(() => { resolve('hung') }, 200)
+        }),
+      ])
+      expect(outcome).toBe('settled')
+
+      const replacement = generation.start()
+      await replacement.ready
+      carrier.emit(approvalFrame('event-fresh', 'agent-stuck', 'fresh'))
+      await vi.waitFor(() => { expect(call).toHaveBeenCalledOnce() })
+
+      // The retired handler resolves only after the replacement answered; its
+      // capability is revoked, so it sends no late result and cannot overwrite
+      // the fresh generation's outcome.
+      release.resolve('allowed')
+      await Promise.resolve()
+      expect(call).toHaveBeenCalledOnce()
+      expect(call).toHaveBeenCalledWith(
+        '/api',
+        '$events/result',
+        {
+          args: {
+            clientId: 'event-client-2',
+            eventId: 'event-fresh',
+            outcome: { kind: 'result', value: 'allowed' },
+          },
+        },
+        expect.any(AbortSignal),
+      )
+    } finally {
+      release.resolve('allowed')
+      await client.dispose()
+    }
+  })
+
+  it('contains a late rejection from a retired listener without an unhandled rejection', async () => {
+    const call = vi.fn<ConnectionHandle['rpc']['call']>().mockResolvedValue({ ok: true, value: undefined })
+    const { ctx, client, carrier, run } = await eventBench(call)
+    const target = ctx.extend()
+    ctx.typert.contexts.registerClient('agent', {
+      identity: candidate => candidate === target ? agentId('agent-late-reject') : undefined,
+      resolve: id => id === 'agent-late-reject' ? target : undefined,
+    })
+    const entered = Promise.withResolvers<undefined>()
+    const gate = Promise.withResolvers<FixtureApprovalOutcome>()
+    target.remote.$on('fixture/approval', async () => {
+      entered.resolve(undefined)
+      return gate.promise
+    })
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      carrier.emit(approvalFrame('event-late-reject', 'agent-late-reject', 'wait'))
+      await entered.promise
+      run.abort(new Error('fixture generation ended'))
+      await expect(run.done).resolves.toBeUndefined()
+
+      gate.reject(new Error('late listener rejection'))
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(unhandled).toEqual([])
+      expect(call).not.toHaveBeenCalled()
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+      gate.resolve('allowed')
+      await client.dispose()
+    }
+  })
+
+  it('discards a result reply that settles after the generation aborts', async () => {
+    const reply = Promise.withResolvers<Awaited<ReturnType<ConnectionHandle['rpc']['call']>>>()
+    const call = vi.fn<ConnectionHandle['rpc']['call']>(() => reply.promise)
+    const { client, carrier, run } = await eventBench(call)
+    try {
+      carrier.emit(approvalFrame('event-late-success', 'agent-missing', 'respond'))
+      await vi.waitFor(() => { expect(call).toHaveBeenCalledOnce() })
+
+      run.abort(new Error('fixture generation ended'))
+      await expect(run.done).resolves.toBeUndefined()
+      // The transport answers after the generation fence; the retired answer
+      // must not treat that response as current work.
+      reply.resolve({ ok: true, value: undefined })
+      await Promise.resolve()
+      await Promise.resolve()
+    } finally {
+      reply.resolve({ ok: true, value: undefined })
+      await client.dispose()
+    }
+  })
+
+  it('bounds retired listener tasks across reconnects and refuses a generation at the retirement threshold', async () => {
+    const { ctx, client, carrier, generation, run: initial } = await eventBench()
+    initial.abort(new Error('fixture initial generation ended'))
+    await expect(initial.done).resolves.toBeUndefined()
+    const target = ctx.extend()
+    ctx.typert.contexts.registerClient('agent', {
+      identity: candidate => candidate === target ? agentId('agent-retired') : undefined,
+      resolve: id => id === 'agent-retired' ? target : undefined,
+    })
+    const pending: Array<ReturnType<typeof Promise.withResolvers<FixtureApprovalOutcome>>> = []
+    target.remote.$on('fixture/approval', async () => {
+      const gate = Promise.withResolvers<FixtureApprovalOutcome>()
+      pending.push(gate)
+      return gate.promise
+    })
+    try {
+      for (let index = 0; index < DEFAULT_REMOTE_EVENT_MAX_RETIRED_TASKS; index += 1) {
+        const run = generation.start()
+        await run.ready
+        carrier.emit(approvalFrame(`event-stuck-${String(index)}`, 'agent-retired', 'wait'))
+        await vi.waitFor(() => { expect(pending).toHaveLength(index + 1) })
+        run.abort(new Error('fixture generation ended'))
+        await expect(run.done).resolves.toBeUndefined()
+      }
+      expect(carrier.calls).toHaveLength(DEFAULT_REMOTE_EVENT_MAX_RETIRED_TASKS + 1)
+
+      // A replacement is refused before opening another stream once the
+      // retained-task count reaches the configured threshold.
+      const refused = generation.start()
+      await expect(refused.done).rejects.toThrow(/resources are exhausted.*reload the page/)
+      await expect(refused.done).rejects.toThrow('resources are exhausted')
+      expect(carrier.calls).toHaveLength(DEFAULT_REMOTE_EVENT_MAX_RETIRED_TASKS + 1)
+
+      pending[0]!.resolve('allowed')
+      await new Promise(resolve => setTimeout(resolve, 0))
+      const recovered = generation.start()
+      await recovered.ready
+      expect(carrier.calls).toHaveLength(DEFAULT_REMOTE_EVENT_MAX_RETIRED_TASKS + 2)
+      recovered.abort(new Error('fixture cleanup'))
+      await expect(recovered.done).resolves.toBeUndefined()
+    } finally {
+      for (const gate of pending) gate.resolve('allowed')
+      await client.dispose()
+    }
+  })
+
+  it('bounds active emits and answers per generation before launching more work', async () => {
+    ;(globalThis as Record<string, unknown>)[REMOTE_EVENT_LIMITS_GLOBAL] = {
+      maxActiveTasks: 2,
+      maxRetiredTasks: 4,
+    }
+    try {
+      const { ctx, client, carrier, run } = await eventBench()
+      const target = ctx.extend()
+      ctx.typert.contexts.registerClient('agent', {
+        identity: candidate => candidate === target ? agentId('agent-bounded') : undefined,
+        resolve: id => id === 'agent-bounded' ? target : undefined,
+      })
+      const entered = { emit: 0, answer: 0 }
+      const releases: Array<() => void> = []
+      // Notifications are declared void-returning; this fixture deliberately
+      // returns pending work to hold the active-task budget.
+      // oxlint-disable-next-line typescript/no-misused-promises -- pending notification fixture
+      ctx.remote.$on('fixture/changed', async () => {
+        entered.emit += 1
+        await new Promise<void>((resolve) => { releases.push(resolve) })
+      })
+      target.remote.$on('fixture/approval', async () => {
+        entered.answer += 1
+        await new Promise<void>((resolve) => { releases.push(resolve) })
+        return 'allowed'
+      })
+      try {
+        carrier.emit({ type: 'emit', event: 'fixture/changed', args: ['one'] })
+        carrier.emit(approvalFrame('event-active-1', 'agent-bounded', 'one'))
+        await vi.waitFor(() => {
+          expect(entered).toEqual({ emit: 1, answer: 1 })
+        })
+        // The cap is checked before the third frame launches a task.
+        carrier.emit(approvalFrame('event-active-2', 'agent-bounded', 'two'))
+        const failure: unknown = await run.done.then(() => undefined, (error: unknown) => error)
+        expect(isConnectionTerminalError(failure)).toBe(true)
+        expect(failure).not.toBeInstanceOf(ConnectionTerminalError)
+        expect(typeof failure === 'object' && failure !== null
+          ? Reflect.get(failure, Symbol.for('dsh.connection.terminal-failure'))
+          : undefined).toBe(true)
+        await expect(run.done).rejects.toThrow(/listener capacity reached.*reload the page/)
+        expect(entered).toEqual({ emit: 1, answer: 1 })
+        for (const release of releases) release()
+        await new Promise(resolve => setTimeout(resolve, 0))
+      } finally {
+        for (const release of releases) release()
+        await client.dispose()
+      }
+    } finally {
+      Reflect.deleteProperty(globalThis, REMOTE_EVENT_LIMITS_GLOBAL)
+    }
+  })
+
+  it('does not retire listener tasks that settle cooperatively within the generation', async () => {
+    ;(globalThis as Record<string, unknown>)[REMOTE_EVENT_LIMITS_GLOBAL] = {
+      maxActiveTasks: 8,
+      maxRetiredTasks: 1,
+    }
+    try {
+      const call = vi.fn<ConnectionHandle['rpc']['call']>()
+        .mockResolvedValue({ ok: true, value: undefined })
+      const { ctx, client, carrier, generation, run } = await eventBench(call)
+      const target = ctx.extend()
+      ctx.typert.contexts.registerClient('agent', {
+        identity: candidate => candidate === target ? agentId('agent-cooperative') : undefined,
+        resolve: id => id === 'agent-cooperative' ? target : undefined,
+      })
+      target.remote.$on('fixture/approval', async () => 'allowed')
+      try {
+        for (let index = 0; index < 5; index += 1) {
+          carrier.emit(approvalFrame(`event-cooperative-${String(index)}`, 'agent-cooperative', 'go'))
+        }
+        await vi.waitFor(() => { expect(call).toHaveBeenCalledTimes(5) })
+      } finally {
+        run.abort(new Error('fixture generation ended'))
+        await expect(run.done).resolves.toBeUndefined()
+        const replacement = generation.start()
+        await replacement.ready
+        expect(carrier.calls).toHaveLength(2)
+        replacement.abort(new Error('fixture cleanup'))
+        await expect(replacement.done).resolves.toBeUndefined()
+        await client.dispose()
+      }
+    } finally {
+      Reflect.deleteProperty(globalThis, REMOTE_EVENT_LIMITS_GLOBAL)
+    }
+  })
+
+  it('returns disposal promptly when the forwarded-event opener never settles or honors abort', async () => {
+    let opened = 0
+    const open: NonNullable<ConnectionHandle['rpc']['open']> = () => {
+      opened += 1
+      return {
+        [Symbol.asyncIterator]: () => ({
+          next: () => new Promise<IteratorResult<unknown>>(() => {}),
+          return: () => new Promise<IteratorResult<unknown>>(() => {}),
+        }),
+      }
+    }
+    const { client, generation } = await benchFiber(
+      vi.fn<ConnectionHandle['rpc']['call']>(),
+      'in-process',
+      open,
+    )
+    const run = generation.start()
+    await vi.waitFor(() => { expect(opened).toBe(1) })
+    const disposed = await Promise.race([
+      client.dispose().then(() => 'done' as const),
+      new Promise<'hung'>((resolve) => { setTimeout(() => { resolve('hung') }, 200) }),
+    ])
+    expect(disposed).toBe('done')
+    await expect(run.done).resolves.toBeUndefined()
+  })
+
+  it('validates forwarded-event client resource limits from the page bootstrap', () => {
+    expect(resolveRemoteEventLimits()).toEqual({
+      maxActiveTasks: 64,
+      maxRetiredTasks: 4,
+    })
+    expect(resolveRemoteEventLimits({ maxActiveTasks: 2, maxRetiredTasks: 1 })).toEqual({
+      maxActiveTasks: 2,
+      maxRetiredTasks: 1,
+    })
+    for (const value of [
+      null,
+      'limits',
+      { maxActiveTasks: 0 },
+      { maxActiveTasks: 1.5 },
+      { maxRetiredTasks: 0 },
+      { maxRetiredTasks: Number.NaN },
+    ]) {
+      expect(() => resolveRemoteEventLimits(value)).toThrow(/forwarded Remote event/)
+    }
+  })
+
   it('normalizes a non-Error result transport failure', async () => {
     const call = vi.fn<ConnectionHandle['rpc']['call']>().mockRejectedValue('fixture transport failure')
     const { client, carrier, run } = await eventBench(call)
@@ -3576,3 +3881,38 @@ async function drainStream(source: AsyncIterable<unknown>): Promise<unknown[]> {
   for await (const value of source) values.push(value)
   return values
 }
+
+
+describe('raceDeliveryWithAbort', () => {
+  it('settles on abort even when the owned task never settles', async () => {
+    const controller = new AbortController()
+    const raced = raceDeliveryWithAbort(new Promise<never>(() => {}), controller.signal)
+    controller.abort()
+    await expect(raced).resolves.toBeUndefined()
+  })
+
+  it('settles immediately for an already aborted signal', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    await expect(raceDeliveryWithAbort(new Promise<never>(() => {}), controller.signal))
+      .resolves.toBeUndefined()
+  })
+
+  it('propagates a failed owned task to the waiter', async () => {
+    const controller = new AbortController()
+    const delivery = Promise.withResolvers<undefined>()
+    const raced = raceDeliveryWithAbort(delivery.promise, controller.signal)
+    delivery.reject(new Error('owned task failed'))
+    await expect(raced).rejects.toThrow('owned task failed')
+  })
+
+  it('ignores a task settlement after the abort already won', async () => {
+    const controller = new AbortController()
+    const delivery = Promise.withResolvers<undefined>()
+    const raced = raceDeliveryWithAbort(delivery.promise, controller.signal)
+    controller.abort()
+    await expect(raced).resolves.toBeUndefined()
+    delivery.resolve(undefined)
+    await Promise.resolve()
+  })
+})

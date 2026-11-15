@@ -203,15 +203,21 @@ describe('ui-settings-general apply', () => {
     for (const [name] of SEATS) expect(ownEntries(c, name)).toEqual([])
   })
 
-  it('re-registers after a Loader rebuild of the declaring chain (stale disposers must not block)', async ({ mock, start }) => {
+  it('re-registers the sidebar trigger after a Loader rebuild of the declaring chain', async ({ mock, start }) => {
     const { c, settings } = await client(mock, start)
-    const before = SEATS.map(([name]) => ownEntries(c, name)[0])
+    const triggerBefore = ownEntries(c, 'settings.trigger')[0]
+    const surfaceBefore = c.ctx.slots.entries('settings.surface')[0]
+    const stableBefore = new Map(
+      SEATS.filter(([name]) => name !== 'settings.trigger').map(([name]) => [name, ownEntries(c, name)[0]]),
+    )
     await c.reload(SIDEBAR)
     await c.flush()
     expectSeated(c)
-    SEATS.forEach(([name], index) => {
-      expect(ownEntries(c, name)[0]).not.toBe(before[index])
-    })
+    expect(ownEntries(c, 'settings.trigger')[0]).not.toBe(triggerBefore)
+    // The panel and its mounted-section seats live at the root surface now, so
+    // a sidebar declaration rebuild cannot churn them.
+    expect(c.ctx.slots.entries('settings.surface')[0]).toBe(surfaceBefore)
+    for (const [name, before] of stableBefore) expect(ownEntries(c, name)[0]).toBe(before)
     expect(c.ctx.slots.spec('settings.general.item')).toEqual({ kind: 'list', scope: 'root' })
     expect(c.ctx.slots.entries('settings.general.item').filter(row => row.locale === NS).map(row => row.options.id)).toEqual(['developer-tools', 'current-version'])
     // The recovered registrations still ride the locale path.

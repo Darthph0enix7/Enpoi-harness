@@ -240,7 +240,7 @@ export async function runCouncil(
         ? 'Propose ideas as SPROUT: <title> | <rationale> lines (one per idea).'
         : (spec.ledgerKinds.some(k => k.kind === 'crux') ? 'Where you identify a decisive point of disagreement, add a PROPOSE_CRUX: <assertion> line.' : ''),
       'If you need ground truth from the codebase or the web, add NEED_EVIDENCE(target: <area>, question: <what to verify>) lines. Evidence arrives at the next epoch boundary — conclude your arguments conditionally.',
-      'IMPORTANT: this council provides NO shell and NO file tools (run_code is non-functional; bash/read/grep/glob are denied). Never attempt commands or file reads — argue directly, or request facts with NEED_EVIDENCE.',
+      'IMPORTANT: this council provides NO shell and NO file tools (bash/read/grep/glob are denied). If run_code is present, it executes code under the configured sandbox; it is not a tool-only sandbox or a bypass for the council’s evidence workflow. Request evidence with NEED_EVIDENCE.',
       'PROTOCOL LINE FORMATS (the council parses these mechanically — always exactly these, one line each, no markdown, no headings around them):',
       '  NEED_EVIDENCE(target: <area>, question: <what to verify>)',
       '  PROPOSE_CRUX: <assertion>',
@@ -365,7 +365,7 @@ export async function runCouncil(
           isChallenge
             ? 'The deliberation has stabilized. State your strongest UNADDRESSED fatal flaw — with evidence — or emit CONCUR [entry-id] WITH <seat> to concede. Nothing else.'
             : buildEpochInstructions(spec),
-          'NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary. This council has no shell and no file tools (run_code, bash, read/grep/glob are all denied here) — never attempt them.',
+          'NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary. bash/read/grep/glob are denied here. If run_code is present, it executes code under the configured sandbox; it is not a tool-only sandbox or a bypass for the council’s evidence workflow. Request evidence with NEED_EVIDENCE.',
           'PROTOCOL LINE FORMATS (mechanically parsed — one line each, exactly): NEED_EVIDENCE(target: <area>, question: <what>) and PROPOSE_CRUX: <assertion>. Never reformat or decorate them — variants are dropped.',
         ].filter(Boolean).join('\n\n')
         },

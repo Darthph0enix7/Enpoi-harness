@@ -39,6 +39,8 @@ export const en = {
   'mobile.surfaces': 'Panels',
   'mobile.fullscreen': 'Fullscreen',
   'mobile.exitFullscreen': 'Exit fullscreen',
+  'mobile.hideControls': 'Hide controls',
+  'mobile.showControls': 'Show controls',
   'brand.localBuild': 'Enpoi Harness',
   'workspace.defaultName': 'Default workspace',
   'unknown': 'Unknown',

@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
-  '@linxin666/dsh-client-ui-skin-center@0.3.21': 36ccd7627606dec265b03cf643b6c89b5d0ac20ab98de57863653bd37f14216d
+  '@linxin666/dsh-client-ui-skin-center@0.3.21': fdb6b41505d20ccd31107ba4a3f3cc1e755afaa3a823ef62a47a2c1b1b3bab2c
   dsh-compressor@0.1.0: 4afd979922c95ae4e811abdd299f11b76d25afa72ddebc6609506d11be42a5d0
   dsh-fast@0.2.14: 1c83147d84bee58c1512878f7f669131aac1710890138724a76b4df68d344ba6
 
@@ -18,7 +18,7 @@ importers:
         version: 0.85.1(ws@8.22.0)(zod@4.6.5)
       '@linxin666/dsh-client-ui-skin-center':
         specifier: ^0.3.21
-        version: 0.3.21(patch_hash=36ccd7627606dec265b03cf643b6c89b5d0ac20ab98de57863653bd37f14216d)
+        version: 0.3.21(patch_hash=fdb6b41505d20ccd31107ba4a3f3cc1e755afaa3a823ef62a47a2c1b1b3bab2c)
       '@xterm/addon-fit':
         specifier: ^0.11.0
         version: 0.11.0
@@ -228,6 +228,9 @@ importers:
       dsh-enpoi-contracts:
         specifier: workspace:*
         version: link:../enpoi-contracts
+      dsh-enpoi-whiteboard:
+        specifier: workspace:*
+        version: link:../enpoi-whiteboard
 
   packages/enpoi-peer-bridge: {}
 
@@ -1873,7 +1876,7 @@ snapshots:
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
-  '@linxin666/dsh-client-ui-skin-center@0.3.21(patch_hash=36ccd7627606dec265b03cf643b6c89b5d0ac20ab98de57863653bd37f14216d)':
+  '@linxin666/dsh-client-ui-skin-center@0.3.21(patch_hash=fdb6b41505d20ccd31107ba4a3f3cc1e755afaa3a823ef62a47a2c1b1b3bab2c)':
     dependencies:
       jpeg-js: 0.4.4
       lightningcss: 1.33.0

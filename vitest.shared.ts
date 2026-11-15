@@ -19,14 +19,16 @@ export function standardDecoratorPlugin() {
     transform(code: string, id: string) {
       const file = id.split('?', 1)[0]!
       if (!/\.[cm]?tsx?$/.test(file) || !decoratorSyntax.test(code)) return
+      const compilerOptions: ts.CompilerOptions = {
+        target: ts.ScriptTarget.ES2024,
+        module: ts.ModuleKind.ESNext,
+        sourceMap: true,
+      }
+      // `exactOptionalPropertyTypes` forbids `jsx: undefined`; only .tsx needs it.
+      if (file.endsWith('x')) compilerOptions.jsx = ts.JsxEmit.ReactJSX
       const result = ts.transpileModule(code, {
         fileName: file,
-        compilerOptions: {
-          target: ts.ScriptTarget.ES2024,
-          module: ts.ModuleKind.ESNext,
-          jsx: file.endsWith('x') ? ts.JsxEmit.ReactJSX : undefined,
-          sourceMap: true,
-        },
+        compilerOptions,
       })
       return {
         code: result.outputText

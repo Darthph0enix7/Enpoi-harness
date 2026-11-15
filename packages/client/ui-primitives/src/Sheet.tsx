@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import type { ReactNode } from 'react'
+import type { ReactNode, Ref } from 'react'
 import { createPortal } from 'react-dom'
 import clsx from 'clsx'
 import { IconCloseOutlineMedium } from './icons/index.tsx'
@@ -38,6 +38,8 @@ interface SheetBaseProps {
   contentClassName?: string
   /** Back-stack surface id; distinguish surfaces that can nest (default `ui-primitives:sheet`). */
   surfaceId?: string
+  /** Optional dialog element ref for a caller-owned focus trap layer. */
+  dialogRef?: Ref<HTMLDivElement>
   /** Render children directly in the panel (no default header/close/body chrome). */
   headless?: boolean
 }
@@ -63,6 +65,8 @@ type SheetProps = SheetBaseProps & (
  * @param props.children - scrolling body content.
  * @param props.footer - action row kept below the scrolling body.
  * @param props.surfaceId - back-stack surface id (default `ui-primitives:sheet`).
+ * @param props.dialogRef - optional panel element ref; the primitive itself
+ *   never manages focus, so the layered caller owns entry/trap/return.
  * @param props.contentClassName - optional class for the scrolling region.
  * @param props.headless - render children directly in the panel (no default
  *   header/close/body chrome); mask, panel, Escape, and aria-label remain.
@@ -70,7 +74,7 @@ type SheetProps = SheetBaseProps & (
  */
 export function Sheet({
   open, onClose, title, closeLabel, description, children, footer,
-  className, contentClassName, surfaceId = 'ui-primitives:sheet', headless = false,
+  className, contentClassName, surfaceId = 'ui-primitives:sheet', dialogRef, headless = false,
 }: SheetProps) {
   useEffect(() => {
     if (!open) return
@@ -89,6 +93,7 @@ export function Sheet({
     <div className={css.root} role="presentation" data-sheet-root="">
       <div className={css.mask} aria-hidden="true" onClick={onClose} />
       <div
+        ref={dialogRef}
         className={clsx(css.panel, className)}
         role="dialog"
         aria-modal="true"

@@ -44,3 +44,15 @@ describe('collapsed right sidebar', () => {
     expect(panel).toContain('transition: visibility 0s linear var(--ds-transition-duration-slow)')
   })
 })
+
+describe('compact surface bar', () => {
+  it('bounds each bar target so the first three, active pin, and More fit 320px', () => {
+    const item = declarationsFrom(css, '.barItem')
+    expect(item).toContain('flex: 1 1 44px')
+    expect(item).toContain('box-sizing: border-box')
+    expect(item).toContain('min-width: 44px')
+    expect(item).toContain('max-width: 50px')
+    expect(item).toContain('min-height: 44px')
+    expect(declarationsFrom(css, '.surfaceLabel')).toContain('max-width: 100%')
+  })
+})

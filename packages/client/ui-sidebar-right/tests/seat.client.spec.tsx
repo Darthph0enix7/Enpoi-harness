@@ -224,6 +224,15 @@ describe('RightbarSeat presentation', () => {
     expect(h.frame.closeRightbar).not.toHaveBeenCalled()
   })
 
+  it('opens a stored open intent as the overlay when a normal push cannot fit', async () => {
+    const h = await mountSeat(900, false, 1)
+    // No surface exists yet and the rail state resolves open by default. The
+    // missing normal column must not leave the panel collapsed.
+    expect(h.layout().expanded).toBe(true)
+    expect(element(h.view.container, '[data-sidebar-right-panel]').dataset['sidebarRightPanel']).toBe('fullscreen')
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(false, true)
+  })
+
   it('opens the first rail item at mount and keeps the tab strip controls reachable', async () => {
     const h = await mountSeat(1440, true, 2)
     // With no explicit intent, the shipped first-load default is open: the
@@ -342,6 +351,108 @@ describe('RightbarSeat presentation', () => {
     expect(parseFloat(panel.style.width)).toBe(420 - 44)
   })
 
+  it('opens and closes a file without touching the persisted rightbar width', async () => {
+    const h = await mountSeat()
+    h.frame.setRightbar.mockClear()
+    const tab = h.open('a.txt')
+    expect(h.frame.setRightbar).not.toHaveBeenCalled()
+    const editor = element(h.view.container, '[data-sidebar-right-editor]')
+    expect(parseFloat(editor.style.width)).toBeGreaterThan(0)
+    // The preview is the operator's rail preference; opening it never rewrites
+    // the outer column. Closing leaves the same preference for the reopen.
+    expect(h.controller.rail.state.getSnapshot().editorWidth).toBe(420)
+    act(() => { h.controller.close(tab.id) })
+    expect(h.frame.setRightbar).not.toHaveBeenCalled()
+    h.open('b.txt')
+    expect(h.frame.setRightbar).not.toHaveBeenCalled()
+    expect(h.controller.rail.state.getSnapshot().editorWidth).toBe(420)
+  })
+
+  it.each([
+    [420, 211, false],
+    [300, 256, true],
+    [240, 196, true],
+  ])('fits the %ipx panel box without negative widths', async (width, expected, single) => {
+    const h = await mountSeat()
+    h.view.update({ width, viewportWidth: 1525, canShow: true, mobile: false })
+    h.open('a.txt')
+    const panel = element(h.view.container, '[data-sidebar-right-panel]')
+    expect(parseFloat(panel.style.width)).toBe(width - 44)
+    if (single) {
+      // Below the 200px split preference the preview takes the whole box; the
+      // tree waits behind the back control instead of leaving a 91px split.
+      const editor = element(h.view.container, '[data-sidebar-right-editor]')
+      expect(editor.hasAttribute('data-sidebar-right-editor-single')).toBe(true)
+      expect(editor.style.width).toBe('100%')
+      expect(element(editor, '[data-sidebar-right-file-back]')).toBeTruthy()
+      expect(element(h.view.container, '[data-sidebar-right-body]').hasAttribute('data-sidebar-right-body-single')).toBe(true)
+      expect(parseFloat(panel.style.width)).toBe(expected)
+    } else {
+      const editor = element(h.view.container, '[data-sidebar-right-editor]')
+      expect(parseFloat(editor.style.width)).toBe(expected)
+      // The 5px seam is the only other fixed child; the tree keeps its minimum.
+      expect(width - 44 - 5 - expected).toBe(160)
+    }
+    expect(h.frame.setRightbar).not.toHaveBeenCalled()
+  })
+
+  it('restores the preferred preview width when the panel widens', async () => {
+    const h = await mountSeat()
+    h.view.update({ width: 300, viewportWidth: 1525, canShow: true, mobile: false })
+    h.open('a.txt')
+    // A 300px outer column cannot give the 420px preference a useful split.
+    const editor = element(h.view.container, '[data-sidebar-right-editor]')
+    expect(editor.hasAttribute('data-sidebar-right-editor-single')).toBe(true)
+    const previewBody = element(editor, '[data-tab-body]')
+    h.view.update({ width: 900, viewportWidth: 1525, canShow: true, mobile: false })
+    // The 420px rail preference survived the single-pane draw and returns when
+    // the box can split; the same document body stays mounted.
+    expect(h.view.container.querySelector('[data-sidebar-right-file-push]')).toBeNull()
+    expect(parseFloat(element(h.view.container, '[data-sidebar-right-editor]').style.width)).toBe(420)
+    expect(element(h.view.container, '[data-sidebar-right-editor] [data-tab-body]')).toBe(previewBody)
+    expect(h.frame.setRightbar).not.toHaveBeenCalled()
+  })
+
+  it('does not widen when a delayed restored surface reveals a preview', async () => {
+    // A host surface arrives after the first paint: the preview record exists,
+    // but the column starts collapsed. Expanding it must not call the frame's
+    // persisted-width setter.
+    localStorage.setItem('dsh.client.sidebarRight.rail', JSON.stringify({ open: null, kind: 'files', editorWidth: 420 }))
+    localStorage.setItem(SURFACES_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      sessions: {
+        [SESSION]: {
+          layout: {
+            nodes: {
+              pane1: { kind: 'pane', id: 'pane1', host: 'dock', tabs: ['tab1', 'tab2'], activeTabId: 'tab1' },
+            },
+            tabs: {
+              tab1: { id: 'tab1', kind: 'files', contentId: 'sidebar://files', title: 'Files' },
+              tab2: {
+                id: 'tab2', kind: 'text',
+                contentId: 'dsh-resource://file/session/s-test/restored.txt', title: 'restored.txt',
+              },
+            },
+            rootId: 'pane1', floats: [], activePaneId: 'pane1', expanded: false, mode: 'push',
+          },
+          minted: 3,
+          editorTabId: 'tab2',
+          navigation: { tab2: { address: 'dsh-resource://file/session/s-test/restored.txt', revision: 1 } },
+          updatedAt: 1,
+        },
+      },
+    }))
+    const h = await mountSeat(1440, true, 0)
+    expect(h.layout().expanded).toBe(false)
+    h.frame.setRightbar.mockClear()
+    act(() => { h.actions.setExpanded(SESSION, true) })
+    expect(h.layout().expanded).toBe(true)
+    expect(h.frame.setRightbar).not.toHaveBeenCalled()
+    const editor = element(h.view.container, '[data-sidebar-right-editor]')
+    expect(editor.hasAttribute('data-sidebar-right-editor-open')).toBe(true)
+    expect(parseFloat(editor.style.width)).toBeGreaterThanOrEqual(0)
+  })
+
   it('opens a tab action\'s file in the editor pane while the panel keeps its page', async () => {
     const h = await mountSeat(1440, true, 0)
     h.open('a.txt')
@@ -420,6 +531,26 @@ describe('RightbarSeat presentation', () => {
     expect(panel.hasAttribute('data-sidebar-right-open')).toBe(true)
   })
 
+  it('keeps a divider drag preference in the rail, never the outer column', async () => {
+    const h = await mountSeat()
+    h.open('a.txt')
+    const divider = element(h.view.container, '[data-sidebar-right-editor-divider]')
+    const capture = vi.fn()
+    Object.defineProperty(divider, 'setPointerCapture', { configurable: true, value: capture })
+    Object.defineProperty(divider, 'releasePointerCapture', { configurable: true, value: vi.fn() })
+    act(() => {
+      fireEvent.pointerDown(divider, { button: 0, pointerId: 1, clientX: 400 })
+      fireEvent.pointerMove(divider, { pointerId: 1, clientX: 350 })
+      fireEvent.pointerUp(divider, { pointerId: 1, clientX: 350 })
+    })
+    expect(capture).toHaveBeenCalledWith(1)
+    // The 50px left drag lands on the 200px preferred floor; the outer column
+    // is untouched and the renderer still fits it to the panel box.
+    expect(h.controller.rail.state.getSnapshot().editorWidth).toBe(200)
+    expect(h.frame.setRightbar).not.toHaveBeenCalled()
+    expect(parseFloat(element(h.view.container, '[data-sidebar-right-editor]').style.width)).toBe(200)
+  })
+
   it('keeps the editor divider interactive only while the pane is open', async () => {
     const h = await mountSeat()
     expect(h.view.container.querySelector('[data-sidebar-right-editor-divider]')).toBeNull()
@@ -462,28 +593,57 @@ describe('RightbarSeat presentation', () => {
     expect(element(h.view.container, '[data-sidebar-right-panel]').hasAttribute('data-sidebar-right-open')).toBe(true)
   })
 
-  it('fills the viewport without replacing the content tree or releasing the wide track', async () => {
+  it('fills fullscreen as a single preview and restores the split on exit', async () => {
     const h = await mountSeat()
     const tab = h.open()
     const panel = element(h.view.container, '[data-sidebar-right-panel]')
-    const body = element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')
-    // The editor shares the column, so the panel takes what the rail and editor leave.
+    const files = Object.values(h.layout().tabs).find(entry => entry.kind === 'files')!
     const wideWidth = panel.style.width
     expect(parseFloat(wideWidth)).toBeGreaterThan(0)
+    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]').dataset['tabBody']).toBe(files.id)
+    const previewBody = element(h.view.container, '[data-sidebar-right-editor] [data-tab-body]')
     fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
     expect(h.layout().mode).toBe('fullscreen')
     expect(panel.style.width).toBe('100%')
     expect(panel.dataset['sidebarRightPanel']).toBe('fullscreen')
-    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')).toBe(body)
+    // Fullscreen gives the document the whole panel; the dock tree and every
+    // other tab remain in the layout behind the back control.
+    expect(element(h.view.container, '[data-sidebar-right-file-body] [data-tab-body]').dataset['tabBody']).toBe(tab.id)
+    expect(element(h.view.container, '[data-sidebar-right-editor] [data-tab-body]')).toBe(previewBody)
+    expect(element(h.view.container, '[data-sidebar-right-body]').hasAttribute('data-sidebar-right-body-single')).toBe(true)
+    expect(h.layout().tabs[files.id]).toBeDefined()
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, true)
     expect(h.bodies.get(tab.id)?.sidebar).toEqual({ expanded: true, fullscreen: true })
     fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
     expect(panel.style.width).toBe(wideWidth)
-    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]')).toBe(body)
+    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]').dataset['tabBody']).toBe(files.id)
+    const editor = element(h.view.container, '[data-sidebar-right-editor]')
+    expect(element(editor, '[data-tab-body]').dataset['tabBody']).toBe(tab.id)
+    expect(element(editor, '[data-tab-body]')).toBe(previewBody)
+    expect(parseFloat(editor.style.width)).toBe(211)
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
+    expect(h.frame.setRightbar).not.toHaveBeenCalled()
     act(() => { h.controller.toggleExpanded() })
     expect(h.layout().expanded).toBe(false)
     expect(h.frame.closeRightbar).toHaveBeenCalled()
+  })
+
+  it('returns from a fullscreen preview to the dock without losing tabs and reopens it', async () => {
+    const h = await mountSeat()
+    const file = h.open('a.txt')
+    const files = Object.values(h.layout().tabs).find(entry => entry.kind === 'files')!
+    fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
+    expect(element(h.view.container, '[data-sidebar-right-file-push]')).toBeTruthy()
+    fireEvent.click(element(h.view.container, '[data-sidebar-right-file-back]'))
+    expect(h.instance.getSnapshot().bySession[SESSION]?.editorTabId).toBeUndefined()
+    expect(h.view.container.querySelector('[data-sidebar-right-file-push]')).toBeNull()
+    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]').dataset['tabBody']).toBe(files.id)
+    expect(h.layout().tabs[file.id]).toBeDefined()
+    // The tree row reopens the same document record; the panel returns to the
+    // single fullscreen preview rather than creating or losing a tab.
+    const again = h.open('a.txt')
+    expect(again.id).toBe(file.id)
+    expect(element(h.view.container, '[data-sidebar-right-file-body] [data-tab-body]').dataset['tabBody']).toBe(file.id)
   })
 
   it('derives narrow fullscreen without recording mode and returns to normal when widened', async () => {
@@ -500,18 +660,17 @@ describe('RightbarSeat presentation', () => {
     expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
   })
 
-  it('closes on automatic fullscreen exit and re-seats the lit files page when widened', async () => {
+  it('closes on a forced fullscreen exit and stays closed when widened', async () => {
     const h = await mountSeat(500, false)
     const record = h.open()
     const signal = h.bodies.get(record.id)!.tab.signal
     fireEvent.click(element(h.view.container, '[data-sidebar-right-mode]'))
     expect(h.layout().expanded).toBe(false)
     expect(h.layout().mode).toBe('push')
+    expect(h.controller.rail.state.getSnapshot().open).toBe(false)
     h.view.update({ width: 420, viewportWidth: 1440, canShow: true, mobile: false })
-    // The rail still records the open intent: widening seats the lit files page.
-    const files = Object.values(h.layout().tabs).find(tab => tab.kind === 'files')!
-    expect(h.layout().expanded).toBe(true)
-    expect(element(h.view.container, '[data-sidebar-right-body] [data-tab-body]').dataset['tabBody']).toBe(files.id)
+    // The operator closed a forced overlay; growth must not reopen it.
+    expect(h.layout().expanded).toBe(false)
     expect(h.layout().tabs[record.id]).toBeDefined()
     expect(signal.aborted).toBe(false)
   })
@@ -528,21 +687,29 @@ describe('RightbarSeat presentation', () => {
     expect(h.instance.getSnapshot()).toBe(stored)
   })
 
-  it('collapses a normal panel that cannot fit, keeps its records, and re-seats the lit page on growth', async () => {
+  it('falls back to overlay when a normal panel cannot fit, keeps its records, and returns to push on growth', async () => {
     const h = await mountSeat()
     const record = h.open()
     const signal = h.bodies.get(record.id)!.tab.signal
-    h.view.update({ width: 420, viewportWidth: 900, canShow: false, mobile: false })
-    expect(h.layout().expanded).toBe(false)
+    // A failed push reports no normal width; the overlay still fills the panel.
+    h.view.update({ width: 0, viewportWidth: 900, canShow: false, mobile: false })
+    // The room rule takes the fullscreen overlay instead of collapsing the
+    // panel or resetting the saved push mode; the record and dock tabs survive.
+    expect(h.layout().expanded).toBe(true)
+    expect(h.layout().mode).toBe('push')
+    expect(element(h.view.container, '[data-sidebar-right-panel]').dataset['sidebarRightPanel']).toBe('fullscreen')
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(false, true)
     expect(h.layout().tabs[record.id]).toBeDefined()
     expect(signal.aborted).toBe(false)
     h.view.update({ width: 420, viewportWidth: 1440, canShow: true, mobile: false })
-    // The rail's open intent still stands: growth re-seats the lit files page
-    // without touching the document record.
+    // Growth returns the same expanded surface to its normal push split.
     expect(h.layout().expanded).toBe(true)
+    expect(element(h.view.container, '[data-sidebar-right-panel]').dataset['sidebarRightPanel']).toBe('push')
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(true, false)
     expect(h.layout().tabs[record.id]).toBeDefined()
     expect(Object.values(h.layout().tabs).some(tab => tab.kind === 'files')).toBe(true)
     expect(signal.aborted).toBe(false)
+    expect(h.frame.setRightbar).not.toHaveBeenCalled()
   })
 })
 
@@ -915,7 +1082,7 @@ describe('RightbarSeat on the mobile container', () => {
     const push = element(h.view.container, '[data-sidebar-right-file-push]')
     expect(push.querySelector('[data-sidebar-right-file-back]')).toBeTruthy()
     expect(element(h.view.container, '[data-sidebar-right-file-body] [data-tab-body]').dataset['tabBody']).toBe(editorTabId)
-    expect(h.view.container.querySelector('[data-sidebar-right-body]')).toBeNull()
+    expect(element(h.view.container, '[data-sidebar-right-body]').hasAttribute('data-sidebar-right-body-single')).toBe(true)
     fireEvent.click(element(h.view.container, '[data-sidebar-right-file-back]'))
     expect(h.instance.getSnapshot().bySession[SESSION]?.editorTabId).toBeUndefined()
     expect(h.view.container.querySelector('[data-sidebar-right-file-push]')).toBeNull()
@@ -924,18 +1091,28 @@ describe('RightbarSeat on the mobile container', () => {
     expect(h.layout().tabs[editorTabId!]).toBeDefined()
   })
 
-  it('keeps the editor pane split beside the tree on a narrow desktop frame, never a push', async () => {
-    // 420px is a desktop device by pointer and the column is fullscreen, but
-    // the pane still splits beside the tree: the push is the mobile container's
-    // presentation only.
-    const h = await mountSeat(420, true, 1)
-    expect(h.view.container.querySelector('[data-sidebar-right-rail]')).not.toBeNull()
+  it.each([320, 390, 800])('keeps the compact fullscreen preview single at %ipx', async (width) => {
+    const h = await mountSeat(width, true, 1, true)
+    h.open('a.txt')
+    const panel = element(h.view.container, '[data-sidebar-right-panel]')
+    expect(panel.style.width).toBe('100%')
+    expect(panel.dataset['sidebarRightPanel']).toBe('fullscreen')
+    expect(element(h.view.container, '[data-sidebar-right-file-push]')).toBeTruthy()
+    expect(element(h.view.container, '[data-sidebar-right-editor]').hasAttribute('data-sidebar-right-editor-single')).toBe(true)
+    expect(h.frame.setRightbar).not.toHaveBeenCalled()
+  })
+
+  it('shows a compact fullscreen preview as a single pane, never a cramped split', async () => {
+    // The compact frame passes mobile:true; its preview owns the panel and the
+    // tree waits behind the back control, while the dock tab survives.
+    const h = await mountSeat(420, true, 1, true)
+    expect(h.view.container.querySelector('[data-sidebar-right-rail]')).toBeNull()
     h.open('a.txt')
     const editorTabId = h.instance.getSnapshot().bySession[SESSION]?.editorTabId
     expect(editorTabId).toBeDefined()
-    expect(h.view.container.querySelector('[data-sidebar-right-file-push]')).toBeNull()
-    expect(element(h.view.container, '[data-sidebar-right-editor] [data-tab-body]').dataset['tabBody']).toBe(editorTabId)
-    expect(element(h.view.container, '[data-sidebar-right-body]')).toBeTruthy()
+    expect(element(h.view.container, '[data-sidebar-right-file-body] [data-tab-body]').dataset['tabBody']).toBe(editorTabId)
+    expect(element(h.view.container, '[data-sidebar-right-editor]').hasAttribute('data-sidebar-right-editor-single')).toBe(true)
+    expect(element(h.view.container, '[data-sidebar-right-body]').hasAttribute('data-sidebar-right-body-single')).toBe(true)
     const files = Object.values(h.layout().tabs).find(tab => tab.kind === 'files')!
     expect(getPane(h.layout(), h.layout().activePaneId).activeTabId).toBe(files.id)
   })

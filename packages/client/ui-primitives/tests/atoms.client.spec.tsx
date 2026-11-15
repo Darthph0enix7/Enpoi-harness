@@ -677,6 +677,72 @@ describe('ConnectionIndicator', () => {
     expect(screen.getByRole('status', { name: 'Connected' })).toBeTruthy()
   })
 
+  it('renders a terminal diagnosis as a compact stopped pill with warning details and explicit reload', () => {
+    const reconnect = vi.fn()
+    const reload = vi.fn()
+    const labels = {
+      disconnectedLabel: 'Disconnected, retry',
+      connectingLabel: 'Connecting',
+      recoveredLabel: 'Connected',
+      reconnectActionLabel: 'Disconnected, reconnect now',
+      restartActionLabel: 'Connecting, restart now',
+      onReconnect: reconnect,
+      diagnosis: {
+        text: 'connection: recovery paused; reload the page to reset recovery',
+        stoppedLabel: 'Connection stopped',
+        detailsLabel: 'Connection details',
+        reloadInstruction: 'Automatic reconnect is paused. Reload the page to start from a clean state.',
+        reloadLabel: 'Reload page',
+        onReload: reload,
+      },
+    }
+    const { container, rerender } = render(<ConnectionIndicator state="disconnected" {...labels} />)
+    const action = screen.getByRole('button', { name: 'Disconnected, reconnect now' })
+    expect(action.textContent).toContain('Connection stopped')
+    expect(action.textContent).not.toContain('reload the page')
+    const summary = container.querySelector('summary')
+    expect(summary?.closest('details')?.open).toBe(false)
+
+    fireEvent.click(action)
+    expect(reconnect).toHaveBeenCalledOnce()
+
+    fireEvent.click(summary as Element)
+    const details = screen.getByRole('note', { name: 'Connection details' })
+    expect(details.textContent).toContain('recovery paused')
+    expect(details.textContent).toContain('Reload the page to start from a clean state')
+    fireEvent.click(screen.getByRole('button', { name: 'Reload page' }))
+    expect(reload).toHaveBeenCalledOnce()
+
+    // A healthy state clears the terminal surface on the same mounted pill.
+    rerender(<ConnectionIndicator state="recovered" {...labels} />)
+    expect(screen.queryByText('Connection stopped')).toBeNull()
+    expect(screen.getByRole('status', { name: 'Connected' })).toBeTruthy()
+  })
+
+  it('keeps the terminal detail hidden until its single warning control opens it', () => {
+    const labels = {
+      disconnectedLabel: 'Disconnected, retry',
+      connectingLabel: 'Connecting',
+      recoveredLabel: 'Connected',
+      reconnectActionLabel: 'Disconnected, reconnect now',
+      restartActionLabel: 'Connecting, restart now',
+      onReconnect: vi.fn(),
+      diagnosis: {
+        text: 'connection: recovery paused; reload the page',
+        stoppedLabel: 'Connection stopped',
+        detailsLabel: 'Connection details',
+        reloadInstruction: 'Reload the page.',
+        reloadLabel: 'Reload page',
+        onReload: vi.fn(),
+      },
+    }
+    const { container } = render(<ConnectionIndicator state="disconnected" {...labels} />)
+    const summary = container.querySelector('summary')
+    expect(summary?.closest('details')?.open).toBe(false)
+    fireEvent.click(summary as Element)
+    expect(summary?.closest('details')?.open).toBe(true)
+  })
+
   it('fades out for the exit duration before unmounting', () => {
     vi.useFakeTimers()
     try {

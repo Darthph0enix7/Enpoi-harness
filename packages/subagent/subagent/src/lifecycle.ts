@@ -20,10 +20,43 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { foldConsumedWork } from '@deepseek-ai/dsh-agent'
 import { SessionLogOffset } from '@deepseek-ai/dsh-session'
-import type { SessionEvent, SessionId, SessionLogOffset as SessionLogOffsetType } from '@deepseek-ai/dsh-session'
+import type {
+  SessionEvent,
+  SessionId,
+  SessionLogOffset as SessionLogOffsetType,
+  SessionSeq,
+} from '@deepseek-ai/dsh-session'
 import { finalAssistantOutput, joinedAssistantText } from './assistant-output.ts'
 import { SubagentRunId } from './types.ts'
 import type { SubagentResult, SubagentRun, SubagentRunEndInfo, SubagentRunInfo } from './types.ts'
+
+/**
+ * The structured reason one epoch stopped before finishing. The code is the
+ * provider-neutral code the ending turn recorded when it recorded one; a
+ * harness reason code otherwise. No error text is carried: the child's own log
+ * remains the authority for details, and a notice stays bounded; credential redaction
+ * is best-effort, not a security scanner.
+ */
+export interface ActivationFailure {
+  /** Stable machine-routing code for the ending. */
+  readonly code: string
+  /**
+   * Whether the ending provably discarded accepted input, so the work cannot
+   * be recovered by continuing the child. Absent when that is unknown; absence
+   * must not be read as a recovery promise.
+   */
+  readonly recoverable?: boolean
+}
+
+/**
+ * The last log event in one epoch that proves the child completed a tool
+ * operation successfully. It gives a parent a concrete seq to inspect without
+ * treating the child's closing prose as verification.
+ */
+export interface ActivationOperationRef {
+  /** Event seq of the last successful `tool/result` in the epoch. */
+  readonly seq: SessionSeq
+}
 
 /**
  * How one Activation's residency epoch ended, as both the terminal lifecycle
@@ -34,6 +67,12 @@ export interface ActivationTerminal {
   readonly stopReason: SubagentResult['stopReason']
   /** The epoch's final assistant content, absent when it produced none or failed. */
   readonly output?: readonly ContentBlock[]
+  /** The structured ending when the epoch stopped before finishing. */
+  readonly failure?: ActivationFailure
+  /** Last successful tool operation in the epoch, when one is recorded. */
+  readonly lastSuccessfulOperation?: ActivationOperationRef
+  /** Last public (text-only) assistant content in the epoch, when one exists. */
+  readonly lastPublicText?: string
 }
 
 /**
@@ -200,9 +239,18 @@ export function createActivationObserver(
   let captured: ActivationTerminal = { stopReason: 'completed' }
   // Teardown failure overrides the epoch's own outcome and withholds its
   // output: an answer this harness could not durably release is not a result.
+  // The diagnostic facts (evidence seq, last public text) still travel: they
+  // describe what the log recorded, not a result the harness failed to keep.
   const terminal = (failure: unknown): ActivationTerminal => failure === undefined
     ? captured
-    : { stopReason: 'error' }
+    : {
+      stopReason: 'error',
+      failure: { code: 'TEARDOWN_FAILED' },
+      ...captured.lastSuccessfulOperation === undefined
+        ? {}
+        : { lastSuccessfulOperation: captured.lastSuccessfulOperation },
+      ...captured.lastPublicText === undefined ? {} : { lastPublicText: captured.lastPublicText },
+    }
   return {
     start: (child: Agent): void => {
       boundary = child.session.seq
@@ -212,9 +260,16 @@ export function createActivationObserver(
       // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       const own = child.session.snapshotEvents(boundary)
       const output = (joinTurns ? joinedAssistantText(own) : finalAssistantOutput(own)) ?? undefined
+      const consumed = foldConsumedWork(own)
+      const failure = activationFailure(consumed)
+      const lastSuccessfulOperation = lastSuccessfulOperationOf(own)
+      const lastPublicText = lastPublicTextOf(own)
       captured = {
-        stopReason: epochStopReason(own),
+        stopReason: epochStopReasonOf(consumed),
         ...output === undefined ? {} : { output },
+        ...failure === undefined ? {} : { failure },
+        ...lastSuccessfulOperation === undefined ? {} : { lastSuccessfulOperation },
+        ...lastPublicText === undefined ? {} : { lastPublicText },
       }
     },
     truncated: (child: Agent): boolean => {
@@ -250,7 +305,14 @@ export function createActivationObserver(
  *   closed cleanly and had nothing left to run.
  */
 function epochStopReason(events: readonly SessionEvent[]): SubagentResult['stopReason'] {
-  const { end, droppedUnrun } = foldConsumedWork(events)
+  return epochStopReasonOf(foldConsumedWork(events))
+}
+
+/** Apply the epoch stop rule to an already-folded account of consumed work. */
+function epochStopReasonOf(
+  consumed: ReturnType<typeof foldConsumedWork>,
+): SubagentResult['stopReason'] {
+  const { end, droppedUnrun } = consumed
   switch (end?.data.reason.kind) {
     case 'max-tokens':
       return 'max-tokens'
@@ -275,6 +337,71 @@ function epochStopReason(events: readonly SessionEvent[]): SubagentResult['stopR
     default:
       return 'error'
   }
+}
+
+/**
+ * Name the structured reason one epoch stopped early. A recorded provider
+ * failure wins over a later unrun cancellation, mirroring the stop rule; a
+ * clean ending with cancelled unrun work still reports the cancellation. A
+ * `completed` epoch with no dropped work has no failure.
+ */
+function activationFailure(
+  consumed: ReturnType<typeof foldConsumedWork>,
+): ActivationFailure | undefined {
+  const reason = consumed.end?.data.reason
+  if (reason === undefined) {
+    return consumed.droppedUnrun ? { code: 'WORK_DROPPED_UNRUN', recoverable: false } : undefined
+  }
+  switch (reason.kind) {
+    case 'error':
+      return { code: reason.error.code === '' ? 'UNKNOWN' : reason.error.code }
+    case 'aborted':
+      return reason.error === undefined
+        ? { code: 'TURN_ABORTED' }
+        : { code: reason.error.code === '' ? 'UNKNOWN' : reason.error.code }
+    // A pre-step rejection discarded the claimed input, so continuing the
+    // child starts new work rather than recovering this task.
+    case 'blocked':
+      return { code: 'TURN_BLOCKED', recoverable: false }
+    case 'max-tokens':
+      return { code: 'OUTPUT_TOKEN_LIMIT' }
+    case 'interrupted':
+      return { code: 'TURN_INTERRUPTED' }
+    case 'completed':
+      return consumed.droppedUnrun
+        ? { code: 'WORK_DROPPED_UNRUN', recoverable: false }
+        : undefined
+    /* v8 ignore next 4 -- See epochStopReasonOf: `forked` is seed-only and a
+     * backend-added ending cannot be listed; name it instead of claiming success. */
+    default:
+      return { code: 'UNRECOGNIZED_TURN_END' }
+  }
+}
+
+/** The last successful tool result in one epoch-owned suffix. */
+function lastSuccessfulOperationOf(
+  events: readonly SessionEvent[],
+): ActivationOperationRef | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event === undefined || event.type !== 'tool/result') continue
+    if (event.data.error !== undefined || event.data.message.isError === true) continue
+    return { seq: event.seq }
+  }
+  return undefined
+}
+
+/** The last public (text-only) assistant content in one epoch-owned suffix. */
+function lastPublicTextOf(events: readonly SessionEvent[]): string | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event === undefined || event.type !== 'assistant/message') continue
+    const text = event.data.message.content
+      .flatMap(block => block.type === 'text' && block.text.trim() !== '' ? [block.text.trim()] : [])
+      .join('\n')
+    if (text !== '') return text
+  }
+  return undefined
 }
 
 /** Render any listener-thrown value without letting coercion escape containment. */

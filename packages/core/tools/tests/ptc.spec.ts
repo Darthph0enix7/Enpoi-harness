@@ -3,7 +3,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { createUserMessage, ToolCallId  } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
-import { createScope } from '@deepseek-ai/dsh-scope'
+import { bindScopeParent, createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt, { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
 import { PtcRuntime } from '@deepseek-ai/dsh-ptc-runtime'
@@ -77,6 +77,16 @@ async function setup(options: SetupOptions = {}) {
 /** Mint an agent scope configured like production that can register scoped tool policy. */
 async function mintAgentScope(ctx: Context, name = 'scoped'): Promise<{ scope: Scope; agent: Agent }> {
   const agent = { id: SessionId(name), session: { header: {}, append: () => {} } } as unknown as Agent
+  let scope!: Scope
+  await ctx.plugin(Object.assign((inner: Context) => { scope = createScope(inner, agent) },
+    { inject: ['tools', 'systemPrompt'] }))
+  return { scope, agent }
+}
+
+/** Mint a child scope parented to `parent`, as a subagent creation window does. */
+async function mintChildScope(ctx: Context, parent: Agent, name: string): Promise<{ scope: Scope; agent: Agent }> {
+  const agent = { id: SessionId(name), session: { header: {}, append: () => {} } } as unknown as Agent
+  bindScopeParent(agent, parent)
   let scope!: Scope
   await ctx.plugin(Object.assign((inner: Context) => { scope = createScope(inner, agent) },
     { inject: ['tools', 'systemPrompt'] }))
@@ -332,7 +342,7 @@ describe('mode-aware wire contribution', () => {
     expect(result.content).toEqual([{ type: 'text', text: 'kept' }])
   })
 
-  it.each(['ptc', 'both'] as const)('reserves run_code against scoped shadows and explicit restrictions in mode %s', async (mode) => {
+  it.each(['ptc', 'both'] as const)('reserves run_code against scoped shadows and allow-list naming in mode %s', async (mode) => {
     const { ctx, systemPrompt } = await setup({ mode })
     const { scope, agent } = await mintAgentScope(ctx)
     const impostor = defineContentToolFixture({
@@ -345,7 +355,6 @@ describe('mode-aware wire contribution', () => {
     expect(() => scope.ctx.tools.register(impostor)).toThrow(/reserved for the PTC mode presentation transport/)
     expect(() => ctx.tools.register(impostor)).toThrow(/reserved for the PTC mode presentation transport/)
     expect(() => scope.ctx.tools.restrict({ allow: [RUN_CODE_NAME] })).toThrow(/cannot name reserved PTC mode presentation transport/)
-    expect(() => scope.ctx.tools.restrict({ deny: [RUN_CODE_NAME] })).toThrow(/cannot name reserved PTC mode presentation transport/)
     scope.ctx.systemPrompt.section({
       name: 'scoped-note',
       order: scope.ctx.systemPrompt.getSectionOrder('TOOLS_SDK') - 10,
@@ -367,6 +376,75 @@ describe('mode-aware wire contribution', () => {
     expect(ctx.tools.get(RUN_CODE_NAME, agent)).toBe(ctx.tools.get(RUN_CODE_NAME))
     const result = await runCode(ctx, 'return 1', { agent })
     expect(result.content).toEqual([{ type: 'text', text: '(run_code completed with no output)' }])
+  })
+
+  it('honors an explicit run_code deny in both mode without touching native tools', async () => {
+    const { ctx, systemPrompt, runtime } = await setup({ mode: 'both' })
+    registerEcho(ctx, 'echo')
+    const { scope, agent } = await mintAgentScope(ctx)
+    const lift = scope.ctx.tools.restrict({ deny: [RUN_CODE_NAME] })
+
+    const assembly = await systemPrompt.assemble({ scope: agent })
+    expect(assembly.tools.map(tool => tool.name)).toEqual(['echo'])
+    expect(assembly.sections.find(section => section.name === 'tools:sdk')?.text).toContain('echo: {')
+    expect(ctx.tools.get(RUN_CODE_NAME, agent)).toBeUndefined()
+
+    // The hidden transport resolves as unknown before the registry can reach
+    // requireRuntime()/resolve()/run(), so no Node program is ever spawned.
+    const denied = await runCode(ctx, 'return 1', { agent })
+    expect(denied.isError).toBe(true)
+    expect(denied.content).toEqual([{ type: 'text', text: `Error: unknown tool "${RUN_CODE_NAME}"` }])
+    expect(runtime.lastRequest).toBeUndefined()
+
+    // Native tools remain fully callable; the deny is transport-only.
+    const echo = await ctx.tools.execute({
+      signal: testToolSignal,
+      callId: ToolCallId('echo-call'),
+      name: 'echo',
+      arguments: { value: 'x' },
+      agent,
+    })
+    expect(echo.content).toEqual([{ type: 'text', text: 'echo:x' }])
+
+    lift()
+    const restored = await systemPrompt.assemble({ scope: agent })
+    expect(restored.tools.map(tool => tool.name)).toEqual(['echo', RUN_CODE_NAME])
+    expect(ctx.tools.get(RUN_CODE_NAME, agent)).toBeDefined()
+  })
+
+  it('fails loud when ptc-only would have no callable tool after an explicit run_code deny', async () => {
+    const { ctx, systemPrompt, runtime } = await setup({ mode: 'ptc' })
+    registerEcho(ctx, 'echo')
+    const { scope, agent } = await mintAgentScope(ctx)
+    const lift = scope.ctx.tools.restrict({ deny: [RUN_CODE_NAME] })
+
+    await expect(systemPrompt.assemble({ scope: agent })).rejects.toThrow(/PTC_TOOL_SURFACE_EMPTY/)
+    const denied = await runCode(ctx, 'return 1', { agent })
+    expect(denied.isError).toBe(true)
+    expect(denied.content).toEqual([{ type: 'text', text: `Error: unknown tool "${RUN_CODE_NAME}"` }])
+    expect(runtime.lastRequest).toBeUndefined()
+
+    lift()
+    const restored = await systemPrompt.assemble({ scope: agent })
+    expect(restored.tools.map(tool => tool.name)).toEqual([RUN_CODE_NAME])
+  })
+
+  it('applies an ancestor run_code deny to nested scopes and restores it on lift', async () => {
+    const { ctx, runtime } = await setup({ mode: 'both' })
+    registerEcho(ctx, 'echo')
+    const parent = await mintAgentScope(ctx, 'parent')
+    const child = await mintChildScope(ctx, parent.agent, 'child')
+    const lift = parent.scope.ctx.tools.restrict({ deny: [RUN_CODE_NAME] })
+
+    expect(ctx.tools.schemas(parent.agent).map(tool => tool.name)).toEqual(['echo'])
+    expect(ctx.tools.schemas(child.agent).map(tool => tool.name)).toEqual(['echo'])
+    const result = await runCode(ctx, 'return 1', { agent: child.agent })
+    expect(result.isError).toBe(true)
+    expect(runtime.lastRequest).toBeUndefined()
+
+    lift()
+    expect(ctx.tools.schemas(parent.agent).map(tool => tool.name).sort()).toEqual(['echo', RUN_CODE_NAME].sort())
+    expect(ctx.tools.schemas(child.agent).map(tool => tool.name).sort()).toEqual(['echo', RUN_CODE_NAME].sort())
   })
 
   it.each(['ptc', 'both'] as const)('keeps run_code in the toolOrder universe without exposing it as a restriction target in mode %s', async (mode) => {

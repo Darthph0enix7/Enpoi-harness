@@ -1,14 +1,14 @@
 /**
- * Host durability for the frame's column widths.
+ * Host seed/backcompat for the frame's column widths.
  *
  * The local cache in `stores.ts` is per origin, and the operator reaches the
  * same harness through several (a tailnet address, its DNS name, a tunnel
- * URL), so a width dragged on one origin did not exist on another — the panel
- * kept "forgetting" a resize whenever the entry URL changed. The
- * `enpoiUiState.layout` record is the host-side authority: one record for the
- * harness, because the width is the operator's preference for this host, not
- * a per-session fact. The local record stays the synchronous first-paint
- * cache and yields to the host record once that read settles.
+ * URL), so a width dragged on one origin once did not exist on another. The
+ * `enpoiUiState.layout` record keeps that record for a first visit, but it is
+ * now a seed only: this device's written cache is the authority, and the host
+ * record fills only fields the origin has not written. That keeps a compact
+ * local width from being replaced by a width another device or screen chose.
+ * The local record remains the synchronous first-paint cache.
  */
 import type { HostLayoutWidths, LayoutWidths } from './stores.ts'
 
@@ -74,9 +74,11 @@ async function uiStateRpc<T>(method: string, args: Record<string, unknown>): Pro
 
 /**
  * Validate one host layout response. `{ updatedAt: 0 }` is the service's
- * "nothing stored" answer, so an equal-or-earlier stamp carries no preference.
+ * "nothing stored" answer, so it carries no preference. The stamp is only a
+ * presence check here; the store's local-cache presence decides whether a
+ * member may seed, never a host timestamp.
  * @param value - the raw `enpoiUiState.getLayout` value.
- * @returns the adopted widths (the right panel member only when the host has
+ * @returns the seed widths (the right panel member only when the host has
  *   one), or null when the host holds nothing usable.
  */
 export function readHostWidths(value: unknown): HostLayoutWidths | null {
@@ -103,9 +105,10 @@ export interface HostWidthSync {
    */
   mirror(widths: LayoutWidths): void
   /**
-   * Hand the host's record to the store once it arrives. A failed read leaves
-   * the local cache in force; the next gesture still pushes.
-   * @param adopt - store action applying the record.
+   * Hand the host's record to the store once it arrives. The store seeds only
+   * fields this origin has not written; a failed read leaves the local cache
+   * in force, and the next gesture still pushes.
+   * @param adopt - store action seeding the record.
    */
   hydrate(adopt: (widths: HostLayoutWidths) => void): void
   /** Cancel pending work when the plugin unloads. */
@@ -164,7 +167,7 @@ export function createHostWidthSync(): HostWidthSync {
         const widths = readHostWidths(result.value)
         if (widths === null) return
         // A record equal to what this page last pushed proves nothing new; the
-        // store already holds it and adopting would only rewrite the cache.
+        // store already holds it and seeding would only rewrite the cache.
         const json = JSON.stringify(widths)
         if (json === lastPushed) return
         lastPushed = json

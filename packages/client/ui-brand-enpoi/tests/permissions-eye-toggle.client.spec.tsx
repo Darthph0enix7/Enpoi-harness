@@ -92,7 +92,7 @@ async function mount(
   const settings = installFakeSettings(initial, tools)
   const mod = await import('../src/client/PermissionsSettings.tsx')
   render(<mod.PermissionsSettings t={brandT} close={vi.fn()} />)
-  await screen.findByText('Global (all agents)')
+  await screen.findAllByText('Global (all agents)')
   fireEvent.click(screen.getByRole('button', { name: 'The Oracle' }))
   return settings
 }
@@ -111,6 +111,41 @@ afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
   vi.resetModules()
+})
+
+describe('permissions shell affordances', () => {
+  it('keeps the full legend behind one disclosure and lets the subject picker choose without a write', async () => {
+    const settings = installFakeSettings({ permissions: { defaults: { unknownTools: 'ask' } } }, ['bash', 'read'])
+    const mod = await import('../src/client/PermissionsSettings.tsx')
+    render(<mod.PermissionsSettings t={brandT} close={vi.fn()} />)
+    await screen.findAllByText('Global (all agents)')
+    expect(screen.queryByText(/Reads and web ship allow/)).toBeNull()
+    fireEvent.click(screen.getByText('How rules resolve'))
+    expect(screen.getByText(/Reads and web ship allow/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Global (all agents)', pressed: true })).toBeTruthy()
+    const subjectPicker = screen.getByRole('button', { name: /^Permission subjects: Global \(all agents\)$/ })
+    fireEvent.click(subjectPicker)
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'The Oracle' }))
+    expect(screen.getByRole('button', { name: /^Permission subjects: The Oracle$/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /The Oracle/, pressed: true })).toBeTruthy()
+    expect(settings.mutations).toHaveLength(0)
+  })
+
+  it('shows the delegate truth only in an agent pane, expands it accessibly, and writes nothing', async () => {
+    const settings = installFakeSettings({ permissions: { defaults: { unknownTools: 'ask' } } }, ['bash', 'read'])
+    const mod = await import('../src/client/PermissionsSettings.tsx')
+    render(<mod.PermissionsSettings t={brandT} close={vi.fn()} />)
+    await screen.findAllByText('Global (all agents)')
+    expect(screen.queryByText(brandT('permAgentDelegateHint'))).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'The Oracle' }))
+    const hint = screen.getByRole('button', { name: brandT('permAgentDelegateHint') })
+    expect(hint.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByText(brandT('permAgentDelegateDetail'))).toBeNull()
+    fireEvent.click(hint)
+    expect(screen.getByText(brandT('permAgentDelegateDetail'))).toBeTruthy()
+    expect(screen.getByRole('button', { name: brandT('permAgentDelegateHint') }).getAttribute('aria-expanded')).toBe('true')
+    expect(settings.mutations).toHaveLength(0)
+  })
 })
 
 describe('permissions availability eye', () => {

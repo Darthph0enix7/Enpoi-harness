@@ -5,7 +5,7 @@
  */
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 
-export type TurnEnd = 'completed' | 'error' | 'aborted' | 'max-tokens'
+export type TurnEnd = 'completed' | 'error' | 'aborted' | 'max-tokens' | 'blocked'
 
 export interface SpawnRecord {
   childId: string
@@ -43,14 +43,34 @@ export interface OracleHarness {
   readonly interruptions: Array<{ childId: string; authority: unknown }>
   readonly drained: Array<{ parentId: string; childIds: string[] }>
   readonly emitListeners: (event: string, payload: unknown) => void
+  readonly loggerLines: string[]
+  readonly deliveryAttempts: () => number
   setSettings: (value: Record<string, unknown>) => void
   setParentStatus: (status: 'idle' | 'running') => void
+  setParentLive: (live: boolean) => void
+  replaceParent: () => void
+  setDeliveryFailure: (mode: 'none' | 'once' | 'always') => void
+  setChildLive: (childId: string, live?: boolean) => void
   setLivingBrief: (text: string | null) => void
   pushHuman: (text: string) => number
   seedChild: (childId: string, label: string, mode?: 'continuable' | 'one-shot') => void
   seedPrompt: (childId: string, messageId: string, text: string) => void
-  settle: (childId: string, messageId: string, text: string, reason?: TurnEnd) => void
-  settleLastSpawn: (text: string, reason?: TurnEnd) => void
+  seedSyntheticUser: (childId: string, text: string) => void
+  seedSteeringUser: (childId: string, text: string) => void
+  seedToolResult: (childId: string, isError?: boolean) => void
+  settle: (
+    childId: string,
+    messageId: string,
+    text: string,
+    reason?: TurnEnd,
+    options?: { emitEnd?: boolean; errorCode?: string },
+  ) => void
+  settleLastSpawn: (
+    text: string,
+    reason?: TurnEnd,
+    options?: { emitEnd?: boolean; errorCode?: string },
+  ) => void
+  dispose: () => void
   tool: (name?: string) => RegisteredTool
 }
 
@@ -88,7 +108,9 @@ export function createOracleHarness(options: {
   parentId?: string
   humanText?: string
   parentStatus?: 'idle' | 'running'
+  parentSessionId?: string
   livingBrief?: string | null
+  whiteboardBudgetTokens?: number
 } = {}): OracleHarness {
   const parentId = options.parentId ?? 'parent-1'
   const spawns: SpawnRecord[] = []
@@ -102,11 +124,20 @@ export function createOracleHarness(options: {
   const tools = new Map<string, Record<string, unknown>>()
   const settings: Record<string, unknown> = options.settings ?? { parameters: { oracle: { timeoutMs: 120_000 } } }
   let parentStatus: 'idle' | 'running' = options.parentStatus ?? 'idle'
+  let parentLive = true
+  let deliveryAttempts = 0
+  let deliveryFailure: 'none' | 'once' | 'always' = 'none'
+  const loggerLines: string[] = []
   let livingBriefText: string | null = options.livingBrief ?? null
   let messageSeq = 0
   let spawnSeq = 0
   let parentEvents: Array<Record<string, unknown>> = []
   let humanSeq = 0
+  const whiteboardBudgetTokens = options.whiteboardBudgetTokens ?? 1500
+  const liveChildren = new Map<string, Record<string, unknown>>()
+  const effects: Array<() => void> = []
+  const childTurns = new Map<string, number>()
+  const messageTurns = new Map<string, number>()
 
   const emit = (event: string, payload: unknown): void => {
     for (const listener of listeners.get(event) ?? []) listener(payload)
@@ -125,6 +156,10 @@ export function createOracleHarness(options: {
 
   const appendPrompt = (childId: string, messageId: string, content: readonly ContentBlock[]): void => {
     const log = logs.get(childId) ?? []
+    const turn = (childTurns.get(childId) ?? 0) + 1
+    childTurns.set(childId, turn)
+    messageTurns.set(messageId, turn)
+    log.push({ type: 'turn/start', seq: log.length, data: { turn } })
     log.push({
       type: 'user/message',
       seq: log.length,
@@ -133,13 +168,42 @@ export function createOracleHarness(options: {
     logs.set(childId, log)
   }
 
-  const settle = (childId: string, messageId: string, text: string, reason: TurnEnd = 'completed'): void => {
+  const seedToolResult = (childId: string, isError = false): void => {
     const log = logs.get(childId) ?? []
+    log.push({
+      type: 'tool/result',
+      seq: log.length,
+      data: {
+        turn: childTurns.get(childId) ?? 1,
+        step: 1,
+        message: {
+          id: `tool-${childId}-${log.length}`,
+          role: 'tool',
+          source: { kind: 'tool', callId: 'call-1' },
+          toolCallId: 'call-1',
+          content: [{ type: 'text', text: isError ? 'tool failed' : 'tool output' }],
+          isError,
+        },
+        ...isError ? { error: { name: 'Error', code: 'TOOL_FAILED' } } : {},
+      },
+    })
+    logs.set(childId, log)
+  }
+
+  const settle = (
+    childId: string,
+    messageId: string,
+    text: string,
+    reason: TurnEnd = 'completed',
+    settleOptions: { emitEnd?: boolean; errorCode?: string } = {},
+  ): void => {
+    const log = logs.get(childId) ?? []
+    const turn = messageTurns.get(messageId) ?? childTurns.get(childId) ?? 1
     log.push({
       type: 'assistant/message',
       seq: log.length,
       data: {
-        turn: 1,
+        turn,
         step: 1,
         message: {
           id: `assistant-${childId}-${log.length}`,
@@ -153,18 +217,22 @@ export function createOracleHarness(options: {
       type: 'turn/end',
       seq: log.length,
       data: {
-        turn: 1,
+        turn,
         reason: reason === 'completed'
           ? { kind: 'completed' }
           : reason === 'max-tokens'
             ? { kind: 'max-tokens' }
             : reason === 'aborted'
               ? { kind: 'aborted', reason: { kind: 'user' } }
-              : { kind: 'error', error: { message: 'provider exploded', code: 'UNKNOWN' } },
+              : reason === 'blocked'
+                ? { kind: 'blocked' }
+                : { kind: 'error', error: { message: 'provider exploded', code: settleOptions.errorCode ?? 'UNKNOWN' } },
       },
     })
     logs.set(childId, log)
-    emit('subagent/end', { id: childId, messageId, stopReason: reason })
+    if (settleOptions.emitEnd !== false) {
+      emit('subagent/end', { id: childId, messageId, stopReason: reason })
+    }
   }
 
   const runtime: Record<PropertyKey, unknown> = {
@@ -221,23 +289,41 @@ export function createOracleHarness(options: {
     sendMessage: async () => { throw new Error('sendMessage is unused in these specs') },
   }
 
-  const parent = {
+  const recordDelivery = (delivery: DeliveryCall): void => {
+    deliveryAttempts += 1
+    if (deliveryFailure === 'always' || deliveryFailure === 'once') {
+      if (deliveryFailure === 'once') deliveryFailure = 'none'
+      throw new Error('parent delivery rejected')
+    }
+    deliveries.push(delivery)
+  }
+
+  const makeParent = () => ({
+    get id() { return parentId },
     session: {
       id: parentId,
       seq: 0,
-      header: { cwd: '/workspace/project' },
+      header: {
+        cwd: '/workspace/project',
+        ...options.parentSessionId === undefined ? {} : { parentSession: options.parentSessionId },
+      },
       snapshotEvents: () => parentEvents,
       append: () => undefined,
     },
     get status() { return parentStatus },
-    followup(message: DeliveryCall['message']) { deliveries.push({ kind: 'followup', message }) },
-    steer(message: DeliveryCall['message']) { deliveries.push({ kind: 'steer', message }) },
+    followup(message: DeliveryCall['message']) { recordDelivery({ kind: 'followup', message }) },
+    steer(message: DeliveryCall['message']) { recordDelivery({ kind: 'steer', message }) },
     send(message: DeliveryCall['message'], target: string, wakeup: boolean) {
-      deliveries.push({ kind: 'send', message, target, wakeup })
+      recordDelivery({ kind: 'send', message, target, wakeup })
     },
-  }
+  })
+  let parent = makeParent()
 
-  const agents = { get: (id: string) => (id === parentId ? parent : undefined) }
+  const agents = {
+    get: (id: string) => (id === parentId && parentLive
+      ? parent
+      : liveChildren.get(id)),
+  }
   const sessionProjections = {
     snapshot: () => ({
       values: livingBriefText === null ? {} : {
@@ -256,7 +342,13 @@ export function createOracleHarness(options: {
     sessionPersistence,
     sessionProjections,
     get: (name: string): unknown => {
-      if (name === 'settings') return { get: () => settings }
+      if (name === 'settings') {
+        return {
+          get: (ns: string) => ns === 'enpoi-whiteboard'
+            ? { budgetTokens: whiteboardBudgetTokens }
+            : settings,
+        }
+      }
       if (name === 'agents') return agents
       if (name === 'sessionPersistence') return sessionPersistence
       if (name === 'sessionProjections') return sessionProjections
@@ -269,16 +361,24 @@ export function createOracleHarness(options: {
       return () => { set.delete(listener) }
     },
     inject: (_names: unknown, callback: (scope: unknown) => void) => { callback(ctx); return () => undefined },
+    effect: (callback: () => () => void) => {
+      const disposer = callback()
+      effects.push(disposer)
+      return disposer
+    },
     tools: {
       register: (definition: { name: string } & Record<string, unknown>) => { tools.set(definition.name, definition) },
     },
     subagents: Object.assign(runtime, subagents),
-    logger: { warn: () => undefined, info: () => undefined },
+    logger: {
+      warn: (line: string) => { loggerLines.push(`warn:${line}`) },
+      info: (line: string) => { loggerLines.push(`info:${line}`) },
+    },
   }
 
   return {
     ctx,
-    parent,
+    get parent() { return parent },
     settings,
     spawns,
     prompts,
@@ -286,22 +386,69 @@ export function createOracleHarness(options: {
     interruptions,
     drained,
     emitListeners: emit,
+    loggerLines,
+    deliveryAttempts: () => deliveryAttempts,
     setSettings: (value) => {
       for (const key of Object.keys(settings)) delete settings[key]
       Object.assign(settings, value)
     },
     setParentStatus: (status) => { parentStatus = status },
+    setParentLive: (live) => { parentLive = live },
+    replaceParent: () => { parent = makeParent() },
+    setDeliveryFailure: (mode) => { deliveryFailure = mode },
+    setChildLive: (childId, live = true) => {
+      if (!live) {
+        liveChildren.delete(childId)
+        return
+      }
+      liveChildren.set(childId, {
+        id: childId,
+        session: { id: childId, snapshotEvents: () => logs.get(childId) ?? [] },
+      })
+    },
     setLivingBrief: (text) => { livingBriefText = text },
     pushHuman,
     seedChild: (childId, label, mode = 'continuable') => {
       children.push({ id: childId, mode, label, createdAt: children.length, seq: children.length })
     },
     seedPrompt: (childId, messageId, text) => { appendPrompt(childId, messageId, [{ type: 'text', text }]) },
+    seedSyntheticUser: (childId, text) => {
+      const log = logs.get(childId) ?? []
+      log.push({
+        type: 'user/message',
+        seq: log.length,
+        data: {
+          id: `synthetic-${childId}-${log.length}`,
+          role: 'user',
+          source: { kind: 'agent-inject' },
+          content: [{ type: 'text', text }],
+        },
+      })
+      logs.set(childId, log)
+    },
+    seedSteeringUser: (childId, text) => {
+      const log = logs.get(childId) ?? []
+      log.push({
+        type: 'user/message',
+        seq: log.length,
+        data: {
+          id: `steering-${childId}-${log.length}`,
+          role: 'user',
+          source: { kind: 'user' },
+          content: [{ type: 'text', text }],
+        },
+      })
+      logs.set(childId, log)
+    },
+    seedToolResult,
     settle,
-    settleLastSpawn: (text, reason) => {
+    settleLastSpawn: (text, reason, settleOptions) => {
       const last = spawns[spawns.length - 1]
       if (last === undefined) throw new Error('no spawn to settle')
-      settle(last.childId, last.messageId, text, reason)
+      settle(last.childId, last.messageId, text, reason, settleOptions)
+    },
+    dispose: () => {
+      for (const disposer of effects.splice(0)) disposer()
     },
     tool: (name = 'oracle_review') => {
       const definition = tools.get(name)

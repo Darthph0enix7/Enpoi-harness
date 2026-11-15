@@ -12,6 +12,9 @@
  * the server view in without clobbering a path whose write is in flight.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import {
+  DisclosureRow, IconChevronDownOutlineRegular, Menu,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { BrandEnpoiKey, BrandT } from './locales.ts'
 import {
@@ -309,6 +312,7 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
   /** Package copy translate. */
   t: BrandT
 }) {
+  const [delegateHintOpen, setDelegateHintOpen] = useState(false)
   const available = perms.agents?.[agent]?.available
   const agentGrants = Object.values(perms.grants ?? {}).filter(grant => grant.agent === agent)
   /**
@@ -352,6 +356,20 @@ function AgentPane({ agent, registry, perms, toolRows, removable, onRemoveSubjec
             {t('permOpenDynamicRoles')}
           </button>
         </div>
+        <div className={c('agentDelegateHint')}>
+          <DisclosureRow
+            icon={<Icon d={ICONS.agent} size={12} />}
+            title={t('permAgentDelegateHint')}
+            open={delegateHintOpen}
+            expandable
+            expandOnRowClick
+            onToggle={() => { setDelegateHintOpen(value => !value) }}
+            rowClassName={c('agentDelegateRow')}
+            titleClassName={c('agentDelegateTitle')}
+          >
+            <div className={c('legendBody')}>{t('permAgentDelegateDetail')}</div>
+          </DisclosureRow>
+        </div>
         {toolRows.map((row) => {
           const state = rowPolicyState(perms, agent, row)
           // An aggregate with no live members has nothing to toggle, and a
@@ -394,6 +412,8 @@ export function PermissionsSettings({ t }: { close: () => void } & PropsLocale<'
   const [registry, setRegistry] = useState<RoleRegistryMap>(() => getRoleRegistry())
   const [failed, setFailed] = useState(false)
   const [selected, setSelected] = useState<string | null>(null)
+  const [subjectMenuOpen, setSubjectMenuOpen] = useState(false)
+  const [legendOpen, setLegendOpen] = useState(false)
   const [draftSubject, setDraftSubject] = useState('')
   /** Last rendered MCP-status fingerprint; a mounted/down flip re-reads the tool list. */
   const mcpFingerprint = useRef('')
@@ -622,6 +642,36 @@ export function PermissionsSettings({ t }: { close: () => void } & PropsLocale<'
       .then((ok) => { if (!ok) setPerms(previous) })
   }
 
+  const subjectItems = [
+    { id: 'global', label: t('permGlobalAll') },
+    ...subjects.map(subject => ({ id: subject.id, label: subject.label })),
+  ]
+  const currentSubjectLabel = selected === null
+    ? t('permGlobalAll')
+    : subjects.find(subject => subject.id === selected)?.label ?? selected
+  const addSubjectForm = (
+    <div className={c('railAdd')}>
+      <input
+        type="text"
+        className={c('railAddInput')}
+        placeholder={t('permNewRoleId')}
+        value={draftSubject}
+        onChange={(e) => { setDraftSubject(e.target.value) }}
+        onKeyDown={(e) => { if (e.key === 'Enter') addSubject(draftSubject) }}
+        aria-label={t('permNewSubjectAria')}
+      />
+      <button
+        type="button"
+        className={c('railAddBtn')}
+        title={t('permAddSubject')}
+        aria-label={t('permAddSubject')}
+        onClick={() => { addSubject(draftSubject) }}
+      >
+        <Icon d={ICONS.add} size={11} />
+      </button>
+    </div>
+  )
+
   if (perms === null) {
     return (
       <div className={c('container')}>
@@ -643,17 +693,58 @@ export function PermissionsSettings({ t }: { close: () => void } & PropsLocale<'
     <div className={c('container')}>
       <div className={c('intro')}>
         <span className={c('introIcon')}><Icon d={ICONS.shield} size={14} /></span>
-        <span>
+        <span>{t('permIntroShort')}</span>
+      </div>
+      <DisclosureRow
+        icon={<Icon d={ICONS.shield} size={12} />}
+        title={t('permLegendTitle')}
+        open={legendOpen}
+        expandable
+        expandOnRowClick
+        onToggle={() => { setLegendOpen(value => !value) }}
+        className={c('legend')}
+        titleClassName={c('legendTitle')}
+      >
+        <div className={c('legendBody')}>
           <b>{t('permIntroSource')}</b>{t('permIntroInherit')}
           <b>{t('permIntroFilled')}</b> {t('permIntroYourRule')}<b>{t('permIntroDashed')}</b> {t('permIntroShipped')}
           <b>{t('permIntroWhiteboard')}</b>{t('permIntroDerived')}
-        </span>
+        </div>
+      </DisclosureRow>
+      <div className={c('subjectPicker')}>
+        <Menu
+          open={subjectMenuOpen}
+          onClose={() => { setSubjectMenuOpen(false) }}
+          items={subjectItems}
+          selectedId={selected ?? 'global'}
+          onSelect={(id) => {
+            setSubjectMenuOpen(false)
+            setSelected(id === 'global' ? null : id)
+          }}
+          align="start"
+          portal
+          anchor={(
+            <button
+              type="button"
+              className={c('subjectTrigger')}
+              aria-label={`${t('permRailAria')}: ${currentSubjectLabel}`}
+              aria-haspopup="menu"
+              aria-expanded={subjectMenuOpen}
+              onClick={() => { setSubjectMenuOpen(value => !value) }}
+            >
+              <span>{currentSubjectLabel}</span>
+              <IconChevronDownOutlineRegular size={14} />
+            </button>
+          )}
+        />
+        {addSubjectForm}
       </div>
       <div className={c('layout')}>
         <nav className={c('rail')} aria-label={t('permRailAria')}>
           <button
             type="button"
             className={`${c('railCell')} ${selected === null ? c('railCellActive') : ''}`}
+            aria-pressed={selected === null}
             onClick={() => { setSelected(null) }}
           >
             {t('permGlobalAll')}
@@ -666,6 +757,7 @@ export function PermissionsSettings({ t }: { close: () => void } & PropsLocale<'
               <button
                 type="button"
                 className={`${c('railCell')} ${selected === subject.id ? c('railCellActive') : ''} ${subject.main === true ? c('railCellMain') : ''}`}
+                aria-pressed={selected === subject.id}
                 onClick={() => { setSelected(subject.id) }}
               >
                 {subject.main === true && <span className={c('railMainTag')}>{t('permMain')}</span>}
@@ -673,26 +765,7 @@ export function PermissionsSettings({ t }: { close: () => void } & PropsLocale<'
               </button>
             </span>
           ))}
-          <div className={c('railAdd')}>
-            <input
-              type="text"
-              className={c('railAddInput')}
-              placeholder={t('permNewRoleId')}
-              value={draftSubject}
-              onChange={(e) => { setDraftSubject(e.target.value) }}
-              onKeyDown={(e) => { if (e.key === 'Enter') addSubject(draftSubject) }}
-              aria-label={t('permNewSubjectAria')}
-            />
-            <button
-              type="button"
-              className={c('railAddBtn')}
-              title={t('permAddSubject')}
-              aria-label={t('permAddSubject')}
-              onClick={() => { addSubject(draftSubject) }}
-            >
-              <Icon d={ICONS.add} size={11} />
-            </button>
-          </div>
+          {addSubjectForm}
         </nav>
         <div className={c('pane')}>
           {selected === null ? (

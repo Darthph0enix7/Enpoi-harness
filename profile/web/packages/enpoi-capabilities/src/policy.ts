@@ -8,9 +8,11 @@
  * editable); the shipped defaults below are code, not YAML.
  *
  * Resolution order (Oracle plan gate, amended):
- *   capability-disabled → read-only veto → agent bashPatterns → agent tool
- *   → global bashPatterns → global tool → grants (same granularity as the
- *   ask they short-circuit) → MCP wildcards → defaults.unknownTools.
+ *   capability-disabled → read-only veto → agent bashPatterns → agent
+ *   tools.bash → operator bashPatterns → operator tools.bash deny → shipped
+ *   non-catch-all rules → operator tools.bash ask/allow → shipped catch-all/
+ *   default; grants short-circuit an ask at the same granularity; non-bash
+ *   tools use the matrix → MCP wildcards → defaults.unknownTools.
  * Deny terminates immediately; grants NEVER upgrade a deny.
  */
 
@@ -305,6 +307,13 @@ export const SHIPPED_TOOL_DEFAULT_EXEMPTIONS: readonly { prefix: string; except?
   },
 ])
 
+/**
+ * Resolution note for the `mcp__` exemption above: unconfigured MCP names do
+ * not fall to `defaults.unknownTools`. A mounted server's tools resolve through
+ * the MCP wildcard ladder and, with no exact row or server wildcard, to the
+ * shipped MCP default (`allow`). Set an operator row or server wildcard to gate
+ * that server's surface.
+ */
 export const SHIPPED_BASH_PATTERNS: BashPattern[] = [
   { pattern: 'git *', policy: 'allow' },
   { pattern: 'rm', policy: 'ask' },
@@ -350,12 +359,376 @@ export const SHIPPED_BASH_PATTERNS: BashPattern[] = [
   { pattern: '*', policy: 'allow' },
 ]
 
+/** One heredoc scan result: body-masked command plus the bodies that expand. */
+export interface HeredocAnalysis {
+  /** The command with every heredoc body and terminator removed (line shape kept). */
+  readonly command: string
+  /** Bodies of UNQUOTED heredocs, which the shell expands before the command runs. */
+  readonly unquotedBodies: readonly string[]
+  /** Command substitutions extracted from unquoted bodies, in source order. */
+  readonly expandedCommands: readonly string[]
+  /** True when the bounded scanner cannot classify the heredoc safely. */
+  readonly unsupported: boolean
+}
+
+/** One heredoc header found on a line. */
+interface HeredocHeader {
+  readonly delimiter: string
+  readonly quoted: boolean
+  readonly stripTabs: boolean
+}
+
+/** Shell metacharacters that end a heredoc delimiter word. */
+const HEREDOC_WORD_END = new Set([' ', '\t', '\r', '\n', ';', '|', '&', '<', '>', '(', ')'])
+
+/**
+ * Find heredoc headers on one line without claiming to parse shell. Quoted
+ * text and comments are skipped; more than one header on a line or a
+ * delimiter containing expansion syntax marks the line unsupported so the
+ * caller can fail closed.
+ * @param line - one source line.
+ * @returns the headers found, or a marker that the bounded scan failed.
+ */
+function heredocHeadersOnLine(line: string): { headers: HeredocHeader[]; unsupported: boolean } {
+  const headers: HeredocHeader[] = []
+  let quote: '"' | "'" | null = null
+  let arithmetic = 0
+  let i = 0
+  while (i < line.length) {
+    const ch = line[i] as string
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      i += 1
+      continue
+    }
+    if (arithmetic > 0) {
+      if (ch === '(') arithmetic += 1
+      else if (ch === ')') arithmetic -= 1
+      i += 1
+      continue
+    }
+    if (ch === '$' && line[i + 1] === '(' && line[i + 2] === '(') {
+      // `$((1 << 2))` is an arithmetic shift, never a heredoc opener.
+      arithmetic = 2
+      i += 3
+      continue
+    }
+    if (ch === '(' && line[i + 1] === '(' && (i === 0 || /[\s;|&(]/.test(line[i - 1] ?? ''))) {
+      arithmetic = 2
+      i += 2
+      continue
+    }
+    if (quote !== null) {
+      if (ch === quote) quote = null
+      i += 1
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      i += 1
+      continue
+    }
+    if (ch === '#' && (i === 0 || /\s/.test(line[i - 1] ?? ''))) break
+    if (ch !== '<' || line[i + 1] !== '<') {
+      i += 1
+      continue
+    }
+    const third = line[i + 2]
+    if (third === '<') {
+      // `<<<` is a here-string, not a heredoc: its word stays in the command
+      // text and the shared substitution extractor scans it normally.
+      i += 3
+      continue
+    }
+    let cursor = i + 2
+    let stripTabs = false
+    if (line[cursor] === '-') {
+      stripTabs = true
+      cursor += 1
+    }
+    while (line[cursor] === ' ' || line[cursor] === '\t') cursor += 1
+    const start = cursor
+    let delimiter = ''
+    let quoted = false
+    while (cursor < line.length) {
+      const wordChar = line[cursor] as string
+      if (wordChar === '"' || wordChar === "'") {
+        quoted = true
+        const end = line.indexOf(wordChar, cursor + 1)
+        if (end === -1) return { headers, unsupported: true }
+        delimiter += line.slice(cursor + 1, end)
+        cursor = end + 1
+        continue
+      }
+      if (wordChar === '\\') {
+        quoted = true
+        if (line[cursor + 1] !== undefined) delimiter += line[cursor + 1]
+        cursor += 2
+        continue
+      }
+      if (HEREDOC_WORD_END.has(wordChar)) break
+      delimiter += wordChar
+      cursor += 1
+    }
+    if (cursor === start || delimiter === '') return { headers, unsupported: true }
+    if (/[$`]/.test(delimiter)) return { headers, unsupported: true }
+    headers.push({ delimiter, quoted, stripTabs })
+    i = cursor
+  }
+  return { headers, unsupported: false }
+}
+
+/**
+ * Extract command substitutions from one shell text (ordinary arguments,
+ * unquoted heredoc bodies, here-strings, and malformed prefixes). This is a
+ * bounded quote-aware scanner, not a shell parser: `$(...)`, arithmetic
+ * `$(( ... ))` inner text, `${...}`, and backticks are scanned; unterminated
+ * or over-depth syntax marks the scan unsupported. Unsupported analysis is
+ * refused as an `[ANALYSIS_LIMIT]` deny, never an auto-allowable ask.
+ * @param text - one command text or heredoc body.
+ * @returns substitution command texts and whether the scan was supported.
+ */
+function extractSubstitutions(text: string): { commands: string[]; unsupported: boolean } {
+  const commands: string[] = []
+  let unsupported = false
+  const scan = (input: string, depth: number): void => {
+    if (depth > MAX_SUBSTITUTION_DEPTH) {
+      unsupported = true
+      return
+    }
+    let i = 0
+    let quote: '"' | "'" | null = null
+    while (i < input.length) {
+      const ch = input[i] as string
+      if (quote === "'") {
+        if (ch === "'") quote = null
+        i += 1
+        continue
+      }
+      if (quote === '"') {
+        if (ch === '"') {
+          quote = null
+          i += 1
+          continue
+        }
+        if (ch === '\\' && i + 1 < input.length) {
+          i += 2
+          continue
+        }
+      } else if (ch === '"' || ch === "'") {
+        quote = ch
+        i += 1
+        continue
+      }
+      if (ch === '\\' && i + 1 < input.length) {
+        i += 2
+        continue
+      }
+      if (ch === '`') {
+        let cursor = i + 1
+        let inner = ''
+        let closed = false
+        while (cursor < input.length) {
+          const c = input[cursor] as string
+          if (c === '\\' && cursor + 1 < input.length) {
+            inner += input[cursor + 1]
+            cursor += 2
+            continue
+          }
+          if (c === '`') {
+            closed = true
+            break
+          }
+          inner += c
+          cursor += 1
+        }
+        if (!closed) {
+          unsupported = true
+          i += 1
+          continue
+        }
+        commands.push(inner)
+        scan(inner, depth + 1)
+        i = cursor + 1
+        continue
+      }
+      if (ch === '$' && input[i + 1] === '(' && input[i + 2] === '(') {
+        // Arithmetic expansion: `$((...))`; scan its inner text so a command
+        // substitution such as `$(( $(git push --force) ))` is not hidden.
+        let cursor = i + 3
+        let level = 2
+        while (cursor < input.length && level > 0) {
+          const c = input[cursor] as string
+          if (c === '(') level += 1
+          else if (c === ')') level -= 1
+          cursor += 1
+        }
+        if (level !== 0) unsupported = true
+        else scan(input.slice(i + 3, cursor - 2), depth + 1)
+        i = cursor
+        continue
+      }
+      if (ch === '$' && input[i + 1] === '(') {
+        let cursor = i + 2
+        let level = 1
+        let inner = ''
+        while (cursor < input.length) {
+          const c = input[cursor] as string
+          if (c === '\\' && cursor + 1 < input.length) {
+            inner += input[cursor + 1]
+            cursor += 2
+            continue
+          }
+          if (c === '"' || c === "'") {
+            const end = input.indexOf(c, cursor + 1)
+            if (end === -1) {
+              unsupported = true
+              break
+            }
+            inner += input.slice(cursor, end + 1)
+            cursor = end + 1
+            continue
+          }
+          if (c === '(') level += 1
+          else if (c === ')') {
+            level -= 1
+            if (level === 0) break
+          }
+          inner += c
+          cursor += 1
+        }
+        if (level !== 0) {
+          unsupported = true
+          i += 1
+          continue
+        }
+        commands.push(inner)
+        scan(inner, depth + 1)
+        i = cursor + 1
+        continue
+      }
+      if (ch === '$' && input[i + 1] === '{') {
+        // Parameter expansion can nest a command substitution; inspect the
+        // inner text instead of treating the whole expansion as data.
+        let cursor = i + 2
+        let level = 1
+        while (cursor < input.length) {
+          const c = input[cursor] as string
+          if (c === '\\') {
+            cursor += 2
+            continue
+          }
+          if (c === '{') level += 1
+          else if (c === '}') {
+            level -= 1
+            if (level === 0) break
+          }
+          cursor += 1
+        }
+        if (level !== 0) {
+          unsupported = true
+          i += 1
+          continue
+        }
+        scan(input.slice(i + 2, cursor), depth + 1)
+        i = cursor + 1
+        continue
+      }
+      i += 1
+    }
+  }
+  scan(text, 0)
+  return { commands, unsupported }
+}
+
+/**
+ * Bounded heredoc scan for policy evaluation. Quoted heredoc bodies are
+ * literal data and are removed from classification; unquoted bodies yield
+ * their command substitutions so the caller can evaluate the same policy
+ * ladder (deny wins, ask propagates). Unsupported syntax is reported rather
+ * than guessed at.
+ * @param command - the raw shell command.
+ * @returns body-masked command, unquoted bodies/substitutions, and an unsupported flag.
+ */
+export function analyzeHeredocs(command: string): HeredocAnalysis {
+  const lines = command.split('\n')
+  const out: string[] = []
+  const unquotedBodies: string[] = []
+  const expandedCommands: string[] = []
+  let unsupported = false
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i] as string
+    const found = heredocHeadersOnLine(line)
+    out.push(line)
+    if (found.unsupported) {
+      unsupported = true
+      i += 1
+      continue
+    }
+    if (found.headers.length === 0) {
+      i += 1
+      continue
+    }
+    if (found.headers.length > 1) {
+      unsupported = true
+      i += 1
+      continue
+    }
+    const header = found.headers[0] as HeredocHeader
+    let cursor = i + 1
+    const body: string[] = []
+    let terminated = false
+    while (cursor < lines.length) {
+      const bodyLine = lines[cursor] as string
+      const compared = header.stripTabs ? bodyLine.replace(/^\t+/, '') : bodyLine
+      if (compared === header.delimiter) {
+        terminated = true
+        break
+      }
+      body.push(bodyLine)
+      cursor += 1
+    }
+    if (!terminated) {
+      unsupported = true
+      i += 1
+      continue
+    }
+    if (!header.quoted) {
+      const bodyText = body.join('\n')
+      unquotedBodies.push(bodyText)
+      const extracted = extractSubstitutions(bodyText)
+      if (extracted.unsupported) unsupported = true
+      expandedCommands.push(...extracted.commands)
+    }
+    // Keep line positions for later compounds, but never expose the body as
+    // commands or as credential operands.
+    for (let blank = i + 1; blank <= cursor; blank += 1) out.push('')
+    i = cursor + 1
+  }
+  const masked = out.join('\n')
+  // Ordinary arguments, double quotes, here-strings, and malformed prefixes
+  // use the SAME extractor as unquoted heredoc bodies. Quoted heredoc bodies
+  // were blanked above and stay literal.
+  const ordinary = extractSubstitutions(masked)
+  if (ordinary.unsupported) unsupported = true
+  expandedCommands.unshift(...ordinary.commands)
+  return { command: masked, unquotedBodies, expandedCommands, unsupported }
+}
+
 /**
  * Split a bash command into top-level sub-commands (Oracle amendment 3):
  * separators `&&`, `||`, `;`, `|`, and newlines at quote depth 0. Quoted
- * segments never split.
+ * segments never split; heredoc bodies are removed first so literal prose
+ * never becomes a command.
  */
 export function splitCompoundCommand(command: string): string[] {
+  const splitTarget = analyzeHeredocs(command).command
+  return splitPlainCompoundCommand(splitTarget)
+}
+
+/** The quote-aware separator split, after heredoc bodies have been masked. */
+function splitPlainCompoundCommand(command: string): string[] {
   const parts: string[] = []
   let current = ''
   let quote: '"' | "'" | null = null
@@ -406,6 +779,275 @@ export function stripEnvPrefixes(subCommand: string): string {
   let i = 0
   while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i] ?? '')) i += 1
   return i > 0 ? tokens.slice(i).join(' ') : subCommand.trim()
+}
+
+/** One shell word with whether any part of it was quoted. */
+interface ShellWordToken {
+  readonly value: string
+  readonly quoted: boolean
+}
+
+/** Credential-looking env templates that are deliberately safe to name. */
+const SAFE_ENV_TEMPLATE = /(?:^|[\\/])\.env\.(?:example|template|sample)$/i
+
+/**
+ * Credential-bearing paths. This is a path/basename matcher, not a prose
+ * keyword scan: the credential rail is applied to actual operands and
+ * redirection targets by {@link credentialOperandOf}, never to quoted prose.
+ */
+const CREDENTIAL_PATH = /(?:^|[\s/'"=@])\.env(?:\.(?!example\b|template\b|sample\b)[A-Za-z0-9._-]+)?(?:$|[\s/'"])|(?:^|[\s/'"=@])\.ssh(?:\/|[\s'"]|$)|id_(?:rsa|ed25519|ecdsa)\b|\.pem\b|(?:^|[\s/'"=@])\.netrc\b|(?:^|[\s/'"=@])\.aws(?:\/|[\s'"]|$)|(?:^|[\s/'"=@])\.git-credentials\b|(?:^|[\s/'"=@])known_hosts\b|(?:^|[\s/'"=@])credentials\.json(?:$|[\s/'"])|(?:^|[\s/'"=@])\.credentials\.(?:yaml|yml)(?:$|[\s/'"])|(?:^|[\s/'"=@])auth\.json(?:$|[\s/'"])|\/\.config\/gcloud\/|\/\.kube\/config\b|\/\.docker\/config\.json\b|\/\.npmrc\b/i
+
+/** Read one path as a credential operand, or undefined when it is safe/absent. */
+export function credentialPathOf(path: string): string | undefined {
+  const value = path.replace(/^['"]+|['"]+$/g, '').trim()
+  if (value === '' || value.startsWith('-')) return undefined
+  if (SAFE_ENV_TEMPLATE.test(value)) return undefined
+  return CREDENTIAL_PATH.test(value) ? value : undefined
+}
+
+/**
+ * Split one sub-command into words while retaining whether each word carried
+ * a quote. This is a lexical aid for operand classification, not a complete
+ * shell parser; unsupported constructs stay visible to the existing opaque
+ * scans.
+ * @param sub - one env-stripped sub-command.
+ * @returns words with their quoted flag.
+ */
+function shellWordTokens(sub: string): ShellWordToken[] {
+  const words: ShellWordToken[] = []
+  let current = ''
+  let quoted = false
+  let quote: '"' | "'" | null = null
+  const flush = (): void => {
+    if (current !== '' || quoted) words.push({ value: current, quoted })
+    current = ''
+    quoted = false
+  }
+  let i = 0
+  while (i < sub.length) {
+    const ch = sub[i] as string
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      else current += ch
+      i += 1
+      continue
+    }
+    if (quote === '"') {
+      if (ch === '"') {
+        quote = null
+        i += 1
+        continue
+      }
+      if (ch === '\\' && (sub[i + 1] === '"' || sub[i + 1] === '\\')) {
+        current += sub[i + 1]
+        i += 2
+        continue
+      }
+      current += ch
+      i += 1
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      quoted = true
+      i += 1
+      continue
+    }
+    if (ch === '\\' && i + 1 < sub.length) {
+      current += sub[i + 1]
+      quoted = true
+      i += 2
+      continue
+    }
+    if (/\s/.test(ch)) {
+      flush()
+      i += 1
+      continue
+    }
+    current += ch
+    i += 1
+  }
+  flush()
+  return words
+}
+
+/** Commands whose arguments are data, not file operands. */
+const DATA_COMMANDS: ReadonlySet<string> = new Set(['echo', 'printf', 'logger', 'true', 'false', ':'])
+
+/** Commands whose non-flag arguments are file operands, even when quoted. */
+const FILE_ARG_COMMANDS: ReadonlySet<string> = new Set([
+  'cat', 'tac', 'head', 'tail', 'less', 'more', 'wc', 'sort', 'uniq', 'cut', 'cp', 'mv', 'rm', 'rmdir', 'unlink',
+  'chmod', 'chown', 'chgrp', 'stat', 'file', 'du', 'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'install', 'tee', 'source', '.',
+  'vim', 'nvim', 'vi', 'nano', 'emacs', 'sed', 'awk',
+])
+
+/** Flags whose following word is a file operand even for pattern-first commands. */
+const FILE_VALUE_FLAGS: ReadonlySet<string> = new Set([
+  '-f', '--file', '--files-from', '-T', '-I', '--include', '--exclude-from',
+])
+
+/** Commands whose first non-flag argument is a pattern/script, not a file. */
+const PATTERN_FIRST_COMMANDS: ReadonlySet<string> = new Set(['grep', 'egrep', 'fgrep', 'rg', 'sed', 'awk'])
+
+/**
+ * The first credential operand in one command, using actual shell words and
+ * redirection targets. Quoted prose is ignored unless it is a redirection
+ * target; heredoc bodies are excluded entirely.
+ * @param command - one shell command.
+ * @returns the first credential-looking operand, or undefined.
+ */
+export function credentialOperandOf(command: string, depth = 0): string | undefined {
+  if (depth > MAX_WRAPPER_DEPTH) return undefined
+  const analysis = analyzeHeredocs(command)
+  if (analysis.unsupported) return undefined
+  // Redirection targets are file effects even when quoted; the scanner ignores
+  // `>`/`<` inside quotes, so prose (`git commit -m "see > .env"`) is not a path.
+  for (const target of redirectionTargets(analysis.command)) {
+    const hit = credentialPathOf(target)
+    if (hit !== undefined) return hit
+  }
+  // Unquoted heredoc bodies execute their substitutions; inspect those too.
+  for (const expanded of analysis.expandedCommands) {
+    const nested = credentialOperandOf(expanded, depth + 1)
+    if (nested !== undefined) return nested
+  }
+  const sanitized = stripEnvPrefixes(analysis.command)
+  for (const sub of splitCompoundCommand(sanitized)) {
+    const words = shellWordTokens(stripEnvPrefixes(sub))
+    if (words.length === 0) continue
+    // See through sudo/timeout/env/nice/command: their operand still reads.
+    const prefix = scanWrapperPrefix(words.map(word => word.value), false)
+    if (prefix.query) continue
+    const start = prefix.end > 0 && prefix.end < words.length ? prefix.end : 0
+    const commandWord = words[start]
+    if (commandWord === undefined) continue
+    const argv0 = commandWord.value.slice(commandWord.value.lastIndexOf('/') + 1)
+    if (DATA_COMMANDS.has(argv0)) continue
+    if (SHELL_INTERPRETERS.has(argv0) && depth < MAX_WRAPPER_DEPTH) {
+      const inline = words.findIndex((word, index) => index > start && word.value === '-c')
+      const inner = inline === -1 ? undefined : words[inline + 1]
+      if (inner !== undefined) {
+        const nested = credentialOperandOf(inner.value, depth + 1)
+        if (nested !== undefined) return nested
+      }
+    }
+    const patternFirst = PATTERN_FIRST_COMMANDS.has(argv0)
+    const fileArgs = FILE_ARG_COMMANDS.has(argv0) || patternFirst
+    let patternSkipped = !patternFirst
+    for (let index = start + 1; index < words.length; index += 1) {
+      const word = words[index]
+      if (word === undefined) continue
+      if (word.value.startsWith('-')) {
+        const eq = word.value.indexOf('=')
+        if (eq > 0) {
+          const inline = credentialPathOf(word.value.slice(eq + 1))
+          if (inline !== undefined) return inline
+        }
+        if (FILE_VALUE_FLAGS.has(word.value)) {
+          const next = words[index + 1]
+          if (next !== undefined) {
+            const hit = credentialPathOf(next.value)
+            if (hit !== undefined) return hit
+            index += 1
+          }
+        }
+        continue
+      }
+      if (!patternSkipped) {
+        // grep/sed/awk: the first non-flag argument is the pattern/script; the
+        // following ones are file operands.
+        patternSkipped = true
+        continue
+      }
+      if (word.quoted && !fileArgs) continue
+      const hit = credentialPathOf(word.value)
+      if (hit !== undefined) return hit
+    }
+  }
+  return undefined
+}
+
+/**
+ * Redirection targets outside quoted text. `<<`/`<<<` are not file
+ * redirections and are skipped; a quoted target (for example `> ".env"`) is
+ * returned without its quotes. This is a bounded lexical scan, not a shell
+ * parser.
+ * @param command - one command text.
+ * @returns redirection targets in source order.
+ */
+function redirectionTargets(command: string): string[] {
+  const targets: string[] = []
+  let quote: '"' | "'" | null = null
+  let i = 0
+  while (i < command.length) {
+    const ch = command[i] as string
+    if (quote !== null) {
+      if (ch === '\\' && quote === '"' && i + 1 < command.length) {
+        i += 2
+        continue
+      }
+      if (ch === quote) quote = null
+      i += 1
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      i += 1
+      continue
+    }
+    if (ch === '\\' && i + 1 < command.length) {
+      i += 2
+      continue
+    }
+    if (ch !== '>' && ch !== '<') {
+      i += 1
+      continue
+    }
+    if (ch === '<' && command[i + 1] === '<') {
+      // Heredoc/here-string operator; its body is masked and its delimiter is
+      // not a file target.
+      i += command[i + 2] === '<' ? 3 : 2
+      continue
+    }
+    if (ch === '<' && command[i + 1] === '(') {
+      // Process substitution is another execution surface, not a redirection.
+      i += 2
+      continue
+    }
+    let cursor = i + 1
+    if (ch === '>' && (command[cursor] === '>' || command[cursor] === '|')) cursor += 1
+    else if (ch === '<' && command[cursor] === '>') cursor += 1
+    while (command[cursor] === ' ' || command[cursor] === '\t') cursor += 1
+    let target = ''
+    if (command[cursor] === '"' || command[cursor] === "'") {
+      const quoteChar = command[cursor] as string
+      cursor += 1
+      while (cursor < command.length) {
+        const c = command[cursor] as string
+        if (c === '\\' && quoteChar === '"' && cursor + 1 < command.length) {
+          target += command[cursor + 1]
+          cursor += 2
+          continue
+        }
+        if (c === quoteChar) {
+          cursor += 1
+          break
+        }
+        target += c
+        cursor += 1
+      }
+    } else {
+      while (cursor < command.length) {
+        const c = command[cursor] as string
+        if (/\s/.test(c) || c === ';' || c === '|' || c === '&') break
+        target += c
+        cursor += 1
+      }
+    }
+    if (target !== '' && !target.startsWith('&')) targets.push(target)
+    i = cursor
+  }
+  return targets
 }
 
 /** A shell word's version stem (`mkfs.ext4` → `mkfs`; `rm` → `rm`). */
@@ -631,6 +1273,10 @@ const VERSION_HELP_FLAGS: ReadonlySet<string> = new Set(['--version', '-V', '--h
 /** Bound on nested wrapper inspection (`bash -c "bash -c '…'"`). */
 const MAX_WRAPPER_DEPTH = 3
 
+/** Bounded policy-analysis limits; not a Bash sandbox. */
+const MAX_ANALYSIS_CHARS = 64_000
+const MAX_SUBSTITUTION_DEPTH = 3
+
 /** One sub-command's decision through the four tiers (no grants, no compound). */
 function decideSubCommand(
   sub: string,
@@ -638,7 +1284,11 @@ function decideSubCommand(
   agent: string | undefined,
 ): PolicyDecision {
   const agentCfg = agent !== undefined ? config.agents?.[agent] : undefined
-  // 1. agent bashPatterns → 2. agent tools.bash → 3. global bashPatterns → 4. global tools.bash
+  // Explicit precedence: agent patterns > agent tools.bash > operator patterns
+  // > operator deny > shipped non-catchall rules > operator ask > operator
+  // allow > shipped catch-all/default. An operator tool allow therefore cannot
+  // absorb the shipped rm/dd/shutdown asks; an explicit operator deny still
+  // outranks every shipped rule.
   const agentPatterns = agentCfg?.bashPatterns
   if (agentPatterns !== undefined) {
     for (const { pattern, policy } of agentPatterns) {
@@ -654,17 +1304,36 @@ function decideSubCommand(
     if (agentTool === 'ask') return { kind: 'ask', reason: `agent policy asks for bash`, source: `agent:${agent}`, grantTier: 'tool' }
     return { kind: 'allow', source: `agent:${agent}` }
   }
-  const globalPatterns = [...(config.bashPatterns ?? []), ...SHIPPED_BASH_PATTERNS]
-  for (const { pattern, policy } of globalPatterns) {
+  const operatorPatterns = config.bashPatterns
+  if (operatorPatterns !== undefined) {
+    for (const { pattern, policy } of operatorPatterns) {
+      if (!matchBashPattern(pattern, sub)) continue
+      if (policy === 'deny') return { kind: 'deny', reason: `bash rule "${pattern}" denies this command`, source: `pattern:${pattern}` }
+      if (policy === 'ask') return patternAsk(pattern, `bash rule "${pattern}" requires approval`, `pattern:${pattern}`)
+      return { kind: 'allow', source: `pattern:${pattern}` }
+    }
+  }
+  const operatorTool = config.tools?.bash
+  if (operatorTool === 'deny') return { kind: 'deny', reason: 'operator policy denies bash', source: 'matrix:global' }
+  for (const { pattern, policy } of SHIPPED_BASH_PATTERNS) {
+    if (pattern === '*') continue
     if (!matchBashPattern(pattern, sub)) continue
     if (policy === 'deny') return { kind: 'deny', reason: `bash rule "${pattern}" denies this command`, source: `pattern:${pattern}` }
     if (policy === 'ask') return patternAsk(pattern, `bash rule "${pattern}" requires approval`, `pattern:${pattern}`)
     return { kind: 'allow', source: `pattern:${pattern}` }
   }
-  const globalTool = config.tools?.bash ?? SHIPPED_TOOL_DEFAULTS.bash ?? 'ask'
-  if (globalTool === 'deny') return { kind: 'deny', reason: 'operator policy denies bash', source: 'matrix:global' }
-  if (globalTool === 'ask') return { kind: 'ask', reason: 'operator policy asks for bash', source: 'matrix:global', grantTier: 'tool' }
-  return { kind: 'allow', source: 'matrix:global' }
+  if (operatorTool === 'ask') return { kind: 'ask', reason: 'operator policy asks for bash', source: 'matrix:global', grantTier: 'tool' }
+  if (operatorTool === 'allow') return { kind: 'allow', source: 'matrix:global' }
+  for (const { pattern, policy } of SHIPPED_BASH_PATTERNS) {
+    if (pattern !== '*') continue
+    if (policy === 'deny') return { kind: 'deny', reason: `bash rule "${pattern}" denies this command`, source: `pattern:${pattern}` }
+    if (policy === 'ask') return patternAsk(pattern, `bash rule "${pattern}" requires approval`, `pattern:${pattern}`)
+    return { kind: 'allow', source: `pattern:${pattern}` }
+  }
+  const shippedTool = SHIPPED_TOOL_DEFAULTS.bash ?? 'ask'
+  if (shippedTool === 'deny') return { kind: 'deny', reason: 'shipped policy denies bash', source: 'matrix:shipped' }
+  if (shippedTool === 'ask') return { kind: 'ask', reason: 'shipped policy asks for bash', source: 'matrix:shipped', grantTier: 'tool' }
+  return { kind: 'allow', source: 'matrix:shipped' }
 }
 
 /** The basename of one shell word (`/usr/bin/bash` → `bash`). */
@@ -873,6 +1542,15 @@ function hiddenDangerAsk(ctx: BashEvaluationContext): PolicyDecision {
     source: 'scan:hidden-danger',
     grantTier: 'pattern',
     pattern: ctx.rawCommand,
+  }
+}
+
+/** A typed fail-closed refusal when the bounded parser cannot classify an effect. */
+function analysisLimitRefusal(ctx: BashEvaluationContext, detail: string): PolicyDecision {
+  return {
+    kind: 'deny',
+    reason: `[ANALYSIS_LIMIT] ${detail}; refusing because the effect cannot be classified safely`,
+    source: 'scan:analysis-limit',
   }
 }
 
@@ -1185,10 +1863,48 @@ export function resolvePolicy(input: PolicyResolutionInput): PolicyDecision {
  * @param input - the resolution input (config, agent, grants).
  * @returns the command-level decision.
  */
-export function evaluateCommandPolicy(command: string, input: PolicyResolutionInput): PolicyDecision {
+export function evaluateCommandPolicy(command: string, input: PolicyResolutionInput, depth = 0): PolicyDecision {
+  const ctx: BashEvaluationContext = { config: input.config, agent: input.agent, rawCommand: command }
+  if (depth > MAX_SUBSTITUTION_DEPTH || command.length > MAX_ANALYSIS_CHARS) {
+    return analysisLimitRefusal(ctx, depth > MAX_SUBSTITUTION_DEPTH
+      ? 'command substitution nesting exceeds the bounded policy analyzer'
+      : 'command exceeds the bounded policy-analysis size')
+  }
+  const heredocs = analyzeHeredocs(command)
+  if (heredocs.unsupported) {
+    // A bounded scanner that cannot classify a heredoc/here-string fails
+    // closed. An explicit deny on any parseable raw line still wins, including
+    // multiple malformed heredocs and a here-string such as `cat <<< .env`.
+    const rawDeny = denyInRawSubcommands(command, input)
+    if (rawDeny !== undefined) return rawDeny
+    // Best-effort substitution extraction from the raw text: a denied command
+    // must not become an opaque ask merely because the heredoc shape was
+    // uncertain.
+    const extracted = extractSubstitutions(command)
+    for (const expanded of extracted.commands) {
+      const decision = evaluateCommandPolicy(expanded, input, depth + 1)
+      if (decision.kind === 'deny') return decision
+    }
+    if (bashNeverRuns(input.config, input.agent)) {
+      return { kind: 'deny', reason: 'operator policy denies bash', source: 'matrix:global' }
+    }
+    return analysisLimitRefusal(ctx, 'command uses a heredoc/here-string shape the bounded analyzer cannot classify')
+  }
   const subs = splitCompoundCommand(command)
   if (subs.length === 0) return { kind: 'deny', reason: 'empty command', source: 'policy:empty' }
-  const evalCtx: BashEvaluationContext = { config: input.config, agent: input.agent, rawCommand: command }
+  const evalCtx = ctx
+
+  // Unquoted heredoc bodies expand command substitutions. Evaluate each one
+  // through this same ladder; explicit deny wins, an ask propagates to the
+  // forwarder so rails classify the same effect.
+  let expandedAsk: PolicyDecision | null = null
+  for (const expanded of heredocs.expandedCommands) {
+    const decision = evaluateCommandPolicy(expanded, input, depth + 1)
+    if (decision.kind === 'deny') {
+      return { kind: 'deny', reason: `${decision.reason} (in an unquoted heredoc substitution)`, source: decision.source }
+    }
+    if (decision.kind === 'ask' && expandedAsk === null) expandedAsk = decision
+  }
 
   let sawAsk: PolicyDecision | null = null
   let firstAllow: PolicyDecision | null = null
@@ -1226,7 +1942,32 @@ export function evaluateCommandPolicy(command: string, input: PolicyResolutionIn
     }
     return sawAsk
   }
+  if (expandedAsk !== null) {
+    // Pin the OUTER command for a grant: granting the inner substitution alone
+    // would not authorize the call the operator actually sees.
+    return {
+      kind: 'ask',
+      reason: `unquoted heredoc substitution: ${expandedAsk.reason}`,
+      source: `heredoc:${expandedAsk.source}`,
+      grantTier: expandedAsk.grantTier,
+      ...expandedAsk.pattern !== undefined ? { pattern: command } : {},
+    }
+  }
   return { kind: 'allow', source: firstAllow?.source ?? 'policy:all-subcommands-allowed' }
+}
+
+/** Explicit deny on any raw parseable sub-command of an unsupported heredoc. */
+function denyInRawSubcommands(command: string, input: PolicyResolutionInput): PolicyDecision | undefined {
+  const ctx: BashEvaluationContext = { config: input.config, agent: input.agent, rawCommand: command }
+  for (const raw of splitPlainCompoundCommand(command)) {
+    const sub = stripEnvPrefixes(raw)
+    if (sub === '') continue
+    // Same wrapper/home-surface path the normal evaluator uses, so `timeout 5
+    // rm` cannot hide an explicit deny behind an uncertain heredoc shape.
+    const decision = evaluateSubCommand(sub, 0, ctx)
+    if (decision.kind === 'deny') return decision
+  }
+  return undefined
 }
 
 /**
@@ -1325,12 +2066,45 @@ export function advertisedToolNames(
 }
 
 /**
+ * Whether bash has no runnable path under the explicit precedence. This is the
+ * advertise-side twin of {@link decideSubCommand}: a tool-level deny removes
+ * bash only when no higher-precedence pattern can allow a command; a pattern
+ * allow keeps the surface because the command can still run for this agent.
+ * @param config - the permission document.
+ * @param agent - the asking role id.
+ * @returns true when every command would resolve deny.
+ */
+function bashNeverRuns(config: PermissionPolicyConfig, agent: string | undefined): boolean {
+  const agentCfg = agent !== undefined ? config.agents?.[agent] : undefined
+  const agentPatterns = agentCfg?.bashPatterns
+  if (agentPatterns !== undefined && agentPatterns.length > 0) {
+    if (agentPatterns[0]?.pattern === '*') return agentPatterns[0].policy === 'deny'
+    // A specific allow/ask can keep some command runnable; only an all-deny
+    // list plus an agent tool deny proves the surface gone.
+    if (agentPatterns.some(entry => entry.policy !== 'deny')) return false
+    if (agentCfg?.tools?.bash === 'deny') return true
+  } else if (agentCfg?.tools?.bash === 'deny') {
+    return true
+  }
+  if (agentCfg?.tools?.bash !== undefined) return false
+  const operatorPatterns = config.bashPatterns
+  if (operatorPatterns !== undefined && operatorPatterns.length > 0) {
+    if (operatorPatterns[0]?.pattern === '*') return operatorPatterns[0].policy === 'deny'
+    if (operatorPatterns.some(entry => entry.policy !== 'deny')) return false
+    return config.tools?.bash === 'deny'
+  }
+  if (config.tools?.bash !== undefined) return config.tools.bash === 'deny'
+  return false
+}
+
+/**
  * Whether one tool can never run for an agent: only a decision that stays
  * `deny` is impossible — a tool-level deny row, the unknown-tools deny
  * default, the read-only session veto, or a role-gated deny — because an `ask`
  * is answerable (human card, forwarded parent ask, or the session's own
- * Full-access mode). bash is judged by its tool-level row: its command-less
- * resolution is the empty-command guard, not a policy on bash itself.
+ * Full-access mode). bash follows the explicit pattern > tool precedence; a
+ * tool-level deny is the backstop even when a stale surface still advertises
+ * bash.
  * @param toolName - the assembled wire tool name.
  * @param input - resolution context (agent role, permission config, sandbox, MCP catalog).
  * @returns whether the tool has no runnable path for that agent.
@@ -1344,11 +2118,7 @@ function neverRunsTool(
     mcpServerNames?: readonly string[]
   },
 ): boolean {
-  if (toolName === 'bash') {
-    const agentBash = input.agent !== undefined ? input.config.agents?.[input.agent]?.tools?.bash : undefined
-    const policy = agentBash ?? input.config.tools?.bash ?? SHIPPED_TOOL_DEFAULTS.bash ?? 'ask'
-    return policy === 'deny'
-  }
+  if (toolName === 'bash') return bashNeverRuns(input.config, input.agent)
   const decision = resolvePolicy({
     toolName,
     agent: input.agent,
@@ -1428,3 +2198,7 @@ export function standingGrantRecord(id: string, proposal: GrantProposal, created
     createdAt,
   }
 }
+
+// The operator role-deny reader lives in the shared contracts leaf; re-export
+// keeps the capabilities policy surface stable for in-package consumers.
+export { configuredRoleToolDenies } from 'dsh-enpoi-contracts'

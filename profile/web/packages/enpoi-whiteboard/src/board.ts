@@ -1,8 +1,9 @@
 /**
  * enpoi-whiteboard — pinned-board vocabulary: per-scope storage, resolution,
  * normalization, rendering, the hard token budget, and the path/staleness lint.
- * Pure functions only; the settings transport, tools and runtime-context
- * injection live in ./index.ts.
+ * Functions are pure apart from the host-platform default that selects which
+ * absolute-path syntax is checkable; the settings transport, tools and
+ * runtime-context injection live in ./index.ts.
  *
  * Storage contract (doc 66 §3c, doc 67 §B): `enpoi-orchestration.whiteboard`
  * holds `{ version, docs: { global?: Board, projects: { <cwd>: Board },
@@ -13,13 +14,21 @@
  * ({@link migrateLegacyStore}). Every entry carries a version; path entries
  * are validated on write and flagged stale — never auto-deleted.
  *
+ * Path contract: one `path` entry names exactly one filesystem path. A quoted
+ * path may contain spaces; unquoted prose, path lists, multiline text, URLs,
+ * and unquoted glob patterns are not filesystem paths — the lint reports them as
+ * `unknown` (a warning) and never as stale. Legacy entries that put prose or
+ * several paths in one entry stay readable: they are preserved untouched and
+ * are not auto-pruned or reclassified as missing files.
+ *
  * Resolution contract: a read merges global → project (matching the session
  * cwd) → parent session (direct-child inheritance) → session (matching the
  * session id), later scopes overriding earlier ones by entry id, and reports
  * each resolved entry's authoring scope. The injected block is that resolved
  * view (session entries plus explicitly shared project/global ones); the
  * Watchtower card's primary surface is session-only, with shared entries in a
- * collapsed disclosure.
+ * collapsed disclosure. The injected block is version-free so a write that
+ * changes only bookkeeping cannot churn the request context.
  *
  * Bounded GC: session buckets do not accumulate forever — a sweep keeps only
  * the newest {@link DEFAULT_MAX_SESSION_BOARDS} by `updatedAt`
@@ -39,7 +48,7 @@ export interface WhiteboardEntry {
   /** Stable entry id; the handle for pin/unpin/replace-by-id. */
   id: string
   kind: WhiteboardEntryKind
-  /** The entry text (one compact line; `path` entries are project-relative paths). */
+  /** The entry text. New `path` writes name exactly one filesystem path; legacy mixed text is preserved and reported unverified. */
   text: string
   /** Pinned entries are never trimmed by an explicit compact; unpinned ones may be. */
   pinned: boolean
@@ -47,9 +56,9 @@ export interface WhiteboardEntry {
   pinnedAt: number
   /** Entry version: 1 at creation, +1 per replace-by-id. */
   version: number
-  /** Epoch ms of the last path validation. */
+  /** Epoch ms of the last checkable path validation; cleared when the text is not a checkable single path. */
   lastValidatedAt?: number
-  /** Set when a `path` entry no longer resolves; cleared when it does again. */
+  /** Set when a `path` entry is one checkable path that no longer resolves; cleared when it resolves again or stops being one path. */
   stale?: boolean
 }
 
@@ -180,6 +189,97 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** Which host syntax an absolute path belongs to. */
+export type PathSyntax = 'posix' | 'windows'
+
+/** Why a `path` entry's text cannot be validated as one filesystem path. */
+export type PathUnknownReason = 'empty' | 'multiline' | 'multiple' | 'prose' | 'glob' | 'url'
+
+/** One `path` entry's parsed text: one identifiable path, or an unknown warning. */
+export type PathTextCheck =
+  | { kind: 'path'; path: string; absolute?: PathSyntax }
+  | { kind: 'unknown'; reason: PathUnknownReason }
+
+/** The host whose absolute-path rules the current lint runs under. */
+function hostPathSyntax(): PathSyntax {
+  return process.platform === 'win32' ? 'windows' : 'posix'
+}
+
+/** A Windows drive/UNC absolute path, accepted even when the host is POSIX. */
+const WINDOWS_ABSOLUTE = /^(?:[A-Za-z]:[\\/]|\\\\[^\\/\s]+[\\/][^\\/\s]+)/
+/** A POSIX absolute path (`/`), accepted even when the host is Windows. */
+const POSIX_ABSOLUTE = /^\//
+/** A home-relative path (`~`, `~/…`, or `~\…`). */
+const HOME_RELATIVE = /^~($|[\\/])/
+/** A URL scheme, never a filesystem path. */
+const URL_TEXT = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//
+/** Shell-style glob magic; unquoted text with these is a pattern, not one path. */
+const GLOB_TEXT = /[*?[\]{}]/
+/** A path separator, or a file extension on a bare name. */
+function hasPathSignal(value: string): boolean {
+  if (value.includes('/') || value.includes('\\')) return true
+  const base = value.split(/[\\/]/).pop() ?? value
+  const dot = base.lastIndexOf('.')
+  return dot >= 0 && dot < base.length - 1
+}
+
+/** Strip one balanced outer quote pair; balanced quoting is the space-path intent marker. */
+function unquotePath(text: string): { value: string; quoted: boolean } {
+  const first = text[0]
+  const last = text[text.length - 1]
+  if (text.length >= 2 && first === last && (first === '"' || first === "'" || first === '`')) {
+    const inner = text.slice(1, -1)
+    if (!inner.includes(first)) return { value: inner.trim(), quoted: true }
+  }
+  return { value: text, quoted: false }
+}
+
+/**
+ * Classify one `path` entry's text. Only a confidently identifiable single
+ * filesystem path is validated; prose, lists, multiline text, URLs, and
+ * unquoted glob patterns are `unknown` warnings. This keeps legacy mixed prose/path entries
+ * from being falsely reported stale while still validating exact paths.
+ * @param text - the entry text.
+ * @returns the single path to validate, or the reason the text is not one path.
+ */
+export function classifyPathText(text: string): PathTextCheck {
+  const trimmed = text.trim()
+  if (trimmed.length === 0) return { kind: 'unknown', reason: 'empty' }
+  if (/[\r\n]/.test(trimmed)) return { kind: 'unknown', reason: 'multiline' }
+  if (/\0|[\u0000-\u001f\u007f]/.test(trimmed)) return { kind: 'unknown', reason: 'prose' }
+  const unquoted = unquotePath(trimmed)
+  const value = unquoted.value
+  if (value.length === 0) return { kind: 'unknown', reason: 'empty' }
+  if (URL_TEXT.test(value)) return { kind: 'unknown', reason: 'url' }
+  // Quoting makes glob metacharacters literal: "docs/plan[1].md" and
+  // "path?.md" are paths to validate, while the unquoted forms stay globs.
+  if (!unquoted.quoted && GLOB_TEXT.test(value)) return { kind: 'unknown', reason: 'glob' }
+  if (!unquoted.quoted && /\s/.test(value)) return { kind: 'unknown', reason: 'multiple' }
+  const windows = WINDOWS_ABSOLUTE.test(value)
+  const posix = POSIX_ABSOLUTE.test(value)
+  const home = HOME_RELATIVE.test(value)
+  // Quoting only allows spaces; a bare word (quoted or not) is not identifiable
+  // as a path, so prose can never be validated as a missing file.
+  if (!windows && !posix && !home && !hasPathSignal(value)) {
+    return { kind: 'unknown', reason: 'prose' }
+  }
+  if (windows) return { kind: 'path', path: value, absolute: 'windows' }
+  if (posix) return { kind: 'path', path: value, absolute: 'posix' }
+  return { kind: 'path', path: value }
+}
+
+/** Whether a parsed path can be checked on the host running the lint. */
+function checkableOnHost(check: Extract<PathTextCheck, { kind: 'path' }>, syntax: PathSyntax): boolean {
+  return check.absolute === undefined || check.absolute === syntax
+}
+
+/** Whether a stored `path` entry's stale flag still describes a checkable single path. */
+function keepsStaleFlag(entry: { kind: WhiteboardEntryKind; text: string }, syntax: PathSyntax): boolean {
+  if (entry.kind !== 'path') return false
+  const check = classifyPathText(entry.text)
+  return check.kind === 'path' && checkableOnHost(check, syntax)
+}
+
 function finiteVersion(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0
 }
@@ -207,7 +307,13 @@ export function normalizeEntry(raw: unknown): WhiteboardEntry | undefined {
     version,
   }
   if (typeof raw.lastValidatedAt === 'number' && Number.isFinite(raw.lastValidatedAt)) entry.lastValidatedAt = raw.lastValidatedAt
-  if (raw.stale === true) entry.stale = true
+  // A stale flag and its validation timestamp are derived state. Keep them only
+  // while the text is still one checkable path on this host; a legacy
+  // prose/mixed entry must not inherit a false `(stale)` label or a misleading
+  // validation time from the old whole-text lint.
+  const keeps = keepsStaleFlag(entry, hostPathSyntax())
+  if (!keeps) delete entry.lastValidatedAt
+  if (raw.stale === true && keeps) entry.stale = true
   return entry
 }
 
@@ -253,9 +359,29 @@ export function normalizeDoc(raw: unknown): WhiteboardDoc {
   return doc
 }
 
+/** A fresh scope bucket with no `Object.prototype` keys; arbitrary ids stay own data. */
+function emptyBucket(): Record<string, WhiteboardBoard> {
+  return Object.create(null) as Record<string, WhiteboardBoard>
+}
+
+/** Copy one scope bucket into a fresh null-prototype bucket (`__proto__`/`constructor` stay data). */
+function copyBucket(bucket: Record<string, WhiteboardBoard>): Record<string, WhiteboardBoard> {
+  const copy = emptyBucket()
+  for (const key of Object.keys(bucket)) {
+    const board = bucket[key]
+    if (board !== undefined) copy[key] = board
+  }
+  return copy
+}
+
+/** Read a bucket entry only when the id is an own key, never an inherited Object member. */
+function ownBoard(bucket: Record<string, WhiteboardBoard>, id: string): WhiteboardBoard | undefined {
+  return Object.hasOwn(bucket, id) ? bucket[id] : undefined
+}
+
 /** The empty store every read falls back to. */
 function emptyStore(): WhiteboardStore {
-  return { version: 0, docs: { projects: {}, sessions: {} } }
+  return { version: 0, docs: { projects: emptyBucket(), sessions: emptyBucket() } }
 }
 
 /**
@@ -293,13 +419,17 @@ export function normalizeStore(raw: unknown): WhiteboardStore {
   if (isRecord(raw.docs)) {
     const store = emptyStore()
     store.version = finiteVersion(raw.version)
-    if (isRecord(raw.docs.global)) store.docs.global = normalizeBoard(raw.docs.global)
+    const docs = raw.docs
+    if (Object.hasOwn(docs, 'global') && isRecord(docs.global)) store.docs.global = normalizeBoard(docs.global)
     for (const bucket of ['projects', 'sessions'] as const) {
-      const value = raw.docs[bucket]
+      if (!Object.hasOwn(docs, bucket)) continue
+      const value = docs[bucket]
       if (!isRecord(value)) continue
-      for (const [key, board] of Object.entries(value)) {
+      const target = store.docs[bucket]
+      for (const key of Object.keys(value)) {
+        const board = value[key]
         if (key.length === 0 || !isRecord(board)) continue
-        store.docs[bucket][key] = normalizeBoard(board)
+        target[key] = normalizeBoard(board)
       }
     }
     return store
@@ -354,16 +484,16 @@ export function migrateLegacyStore(raw: unknown, attributeToSessionId?: string):
 /** The stored board one target reads, if it has been written yet. */
 export function readBoard(store: WhiteboardStore, target: WhiteboardTarget): WhiteboardBoard | undefined {
   if (target.scope === 'global') return store.docs.global
-  if (target.scope === 'project') return store.docs.projects[target.projectId]
-  return store.docs.sessions[target.sessionId]
+  if (target.scope === 'project') return ownBoard(store.docs.projects, target.projectId)
+  return ownBoard(store.docs.sessions, target.sessionId)
 }
 
 /** Copy-on-write placement of one board into its scope bucket. */
 export function writeBoard(store: WhiteboardStore, target: WhiteboardTarget, board: WhiteboardBoard): WhiteboardStore {
   const docs: WhiteboardStore['docs'] = {
     ...store.docs,
-    projects: { ...store.docs.projects },
-    sessions: { ...store.docs.sessions },
+    projects: copyBucket(store.docs.projects),
+    sessions: copyBucket(store.docs.sessions),
   }
   if (target.scope === 'global') docs.global = board
   else if (target.scope === 'project') docs.projects[target.projectId] = board
@@ -395,11 +525,11 @@ export function resolveBoard(store: WhiteboardStore, facts: BoardScopeFacts): Re
   const layers: Array<{ scope: WhiteboardScope; board: WhiteboardBoard | undefined }> = [
     { scope: 'global', board: store.docs.global },
   ]
-  if (facts.projectId !== undefined) layers.push({ scope: 'project', board: store.docs.projects[facts.projectId] })
+  if (facts.projectId !== undefined) layers.push({ scope: 'project', board: ownBoard(store.docs.projects, facts.projectId) })
   if (facts.parentSessionId !== undefined && facts.parentSessionId !== facts.sessionId) {
-    layers.push({ scope: 'session', board: store.docs.sessions[facts.parentSessionId] })
+    layers.push({ scope: 'session', board: ownBoard(store.docs.sessions, facts.parentSessionId) })
   }
-  if (facts.sessionId !== undefined) layers.push({ scope: 'session', board: store.docs.sessions[facts.sessionId] })
+  if (facts.sessionId !== undefined) layers.push({ scope: 'session', board: ownBoard(store.docs.sessions, facts.sessionId) })
   const merged = new Map<string, ResolvedEntry>()
   let scope: WhiteboardScope = 'global'
   let updatedAt = 0
@@ -423,14 +553,14 @@ export function resolveBoard(store: WhiteboardStore, facts: BoardScopeFacts): Re
  */
 export function findEntryTarget(store: WhiteboardStore, facts: BoardScopeFacts, id: string): WhiteboardTarget | undefined {
   const has = (board: WhiteboardBoard | undefined): boolean => board !== undefined && board.entries.some((entry) => entry.id === id)
-  if (facts.sessionId !== undefined && has(store.docs.sessions[facts.sessionId])) {
+  if (facts.sessionId !== undefined && has(ownBoard(store.docs.sessions, facts.sessionId))) {
     return { scope: 'session', sessionId: facts.sessionId }
   }
   if (facts.parentSessionId !== undefined && facts.parentSessionId !== facts.sessionId
-    && has(store.docs.sessions[facts.parentSessionId])) {
+    && has(ownBoard(store.docs.sessions, facts.parentSessionId))) {
     return { scope: 'session', sessionId: facts.parentSessionId }
   }
-  if (facts.projectId !== undefined && has(store.docs.projects[facts.projectId])) {
+  if (facts.projectId !== undefined && has(ownBoard(store.docs.projects, facts.projectId))) {
     return { scope: 'project', projectId: facts.projectId }
   }
   if (has(store.docs.global)) return { scope: 'global' }
@@ -439,8 +569,9 @@ export function findEntryTarget(store: WhiteboardStore, facts: BoardScopeFacts, 
 
 /**
  * Render a board as the exact text injected into the runtime-context snapshot.
- * Compact by construction: one line per entry, pinned first. Renders a resolved
- * board and a stored board alike (both carry version + entries).
+ * Compact by construction: one line per entry, pinned first. The header carries
+ * no version: a store version bump that leaves every entry unchanged must not
+ * churn the injected block. Renders a resolved board and a stored board alike.
  * @param doc - the board to render.
  * @returns the block, or `''` when the board holds no entries.
  */
@@ -457,7 +588,7 @@ export function renderWhiteboard(doc: RenderableBoard): string {
       const stale = entry.stale === true ? ' (stale)' : ''
       return `- ${marker}[${entry.kind}] ${entry.text}${stale}`
     })
-  return `${WHITEBOARD_HEADER} (v${doc.version})\n${lines.join('\n')}`
+  return `${WHITEBOARD_HEADER}\n${lines.join('\n')}`
 }
 
 /** Character count of a rendered board, counted in code points (multibyte-safe). */
@@ -517,37 +648,64 @@ export interface WhiteboardWriteRequest {
 /** Result of linting path entries against the filesystem. */
 export interface LintResult<T> {
   doc: T
-  /** Ids of path entries that no longer resolve. */
+  /** Ids of single-path entries that no longer resolve. */
   stale: string[]
+  /** Ids of path entries whose text is prose, a list, a URL, or a glob — a warning, never stale. */
+  unknown: string[]
 }
 
 /**
- * Validate every `path` entry against the filesystem and flag the missing ones.
- * Stale entries stay in the board (flagged, never deleted) so the operator can
- * see and prune them. Generic over stored and resolved boards: only `entries`
- * is rewritten, every other field (including per-entry scope) survives.
+ * Validate exactly the `path` entries whose text is one identifiable filesystem
+ * path. Prose, path lists, multiline text, URLs, unquoted glob patterns, and
+ * absolute paths for another host are reported as `unknown` warnings and left unstale;
+ * their text is never rewritten or deleted. Stale entries stay in the board
+ * (flagged, never deleted) so the operator can repoint or forget them. Generic
+ * over stored and resolved boards: only `entries` is rewritten, every other
+ * field (including per-entry scope) survives.
  * @param doc - the board to lint.
- * @param resolvePath - maps an entry text to an absolute path.
+ * @param resolvePath - maps one parsed path to its host-usable path.
  * @param exists - filesystem predicate (`fs.existsSync` in production).
- * @param now - epoch ms stamped into `lastValidatedAt`.
- * @returns the linted board and the stale ids.
+ * @param now - epoch ms stamped into `lastValidatedAt` for checked entries.
+ * @param syntax - host absolute-path syntax; defaults to the running platform.
+ * @returns the linted board, stale ids, and unknown-path ids.
  */
 export function lintPaths<T extends { entries: readonly WhiteboardEntry[] }>(
   doc: T,
-  resolvePath: (entry: WhiteboardEntry) => string,
+  resolvePath: (entry: WhiteboardEntry, path: string) => string,
   exists: (path: string) => boolean,
   now: number,
+  syntax: PathSyntax = hostPathSyntax(),
 ): LintResult<T> {
   const stale: string[] = []
+  const unknown: string[] = []
   const entries = doc.entries.map((entry): WhiteboardEntry => {
     if (entry.kind !== 'path') return entry
+    const check = classifyPathText(entry.text)
+    if (check.kind === 'unknown' || !checkableOnHost(check, syntax)) {
+      const next = { ...entry }
+      delete next.stale
+      delete next.lastValidatedAt
+      unknown.push(entry.id)
+      return next
+    }
     let resolved: string
     try {
-      resolved = resolvePath(entry)
+      resolved = resolvePath(entry, check.path)
     } catch {
-      resolved = entry.text
+      const next = { ...entry }
+      delete next.stale
+      delete next.lastValidatedAt
+      unknown.push(entry.id)
+      return next
     }
-    const present = resolved.length > 0 && exists(resolved)
+    if (resolved.length === 0) {
+      const next = { ...entry }
+      delete next.stale
+      delete next.lastValidatedAt
+      unknown.push(entry.id)
+      return next
+    }
+    const present = exists(resolved)
     const next: WhiteboardEntry = { ...entry, lastValidatedAt: now }
     if (present) delete next.stale
     else {
@@ -556,27 +714,38 @@ export function lintPaths<T extends { entries: readonly WhiteboardEntry[] }>(
     }
     return next
   })
-  return { doc: { ...doc, entries: entries as T['entries'] }, stale }
+  return { doc: { ...doc, entries: entries as T['entries'] }, stale, unknown }
+}
+
+/** Refusal for a new `path` entry that is not exactly one filesystem path. */
+const ONE_PATH_REFUSAL = 'path entries require exactly one filesystem path (no prose, lists, multiline text, URLs, or unquoted globs); quote a path containing spaces or glob metacharacters and use one entry per path'
+
+/** Validate newly authored `path` text; unchanged legacy text is never re-judged. */
+function validatePathText(text: string): string | undefined {
+  return classifyPathText(text).kind === 'path' ? undefined : ONE_PATH_REFUSAL
 }
 
 /**
  * Apply a batch of write requests to one stored board: `append` adds new
- * entries (an explicit id must be unused), `replace` overwrites entries by id
- * and bumps their version. The caller owns the board-version bump, budget, and
- * path lint — this function is the pure entry transition.
+ * entries, `replace` overwrites entries by id and bumps their version. A write
+ * that would leave an entry's kind, text, and pinned flag unchanged is a
+ * deterministic no-op: it is not re-versioned and does not make the caller
+ * write or re-render the board. The caller owns the board-version bump, budget,
+ * and path lint — this function is the pure entry transition.
  * @param board - the current stored board.
  * @param requests - entries to write.
  * @param mode - `append` (default) or `replace` by id.
  * @param now - epoch ms stamped on new entries.
- * @returns the next board, or a refusal message.
+ * @returns the next board and the ids that actually changed, or a refusal.
  */
 export function applyWrites(
   board: WhiteboardBoard,
   requests: readonly WhiteboardWriteRequest[],
   mode: 'append' | 'replace',
   now: number,
-): { ok: true; board: WhiteboardBoard } | { ok: false; message: string } {
+): { ok: true; board: WhiteboardBoard; changedIds: string[] } | { ok: false; message: string } {
   const entries = board.entries.map((entry) => ({ ...entry }))
+  const changedIds: string[] = []
   for (const request of requests) {
     if (!isWhiteboardEntryKind(request.kind)) return { ok: false, message: `unknown entry kind "${String(request.kind)}"` }
     const text = typeof request.text === 'string' ? request.text.trim() : ''
@@ -587,22 +756,37 @@ export function applyWrites(
       const index = entries.findIndex((entry) => entry.id === id)
       if (index === -1) return { ok: false, message: `no entry with id "${id}" to replace` }
       const previous = entries[index]!
+      const pinned = request.pinned ?? previous.pinned
+      if (previous.kind === request.kind && previous.text === text && previous.pinned === pinned) continue
+      if (request.kind === 'path' && (previous.kind !== 'path' || previous.text !== text)) {
+        const invalid = validatePathText(text)
+        if (invalid !== undefined) return { ok: false, message: invalid }
+      }
       const next: WhiteboardEntry = {
         id,
         kind: request.kind,
         text,
-        pinned: request.pinned ?? previous.pinned,
+        pinned,
         pinnedAt: request.pinned === true && previous.pinned !== true ? now : previous.pinnedAt,
         version: previous.version + 1,
       }
       entries[index] = next
+      changedIds.push(id)
       continue
     }
     const id = typeof request.id === 'string' && request.id.length > 0
       ? request.id
       : `wb-${now.toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-    if (entries.some((entry) => entry.id === id)) {
+    const duplicate = entries.find((entry) => entry.id === id)
+    if (duplicate !== undefined) {
+      // Repeating the same entry is a no-op; a different body still asks for replace.
+      if (duplicate.kind === request.kind && duplicate.text === text
+        && (request.pinned === undefined || request.pinned === duplicate.pinned)) continue
       return { ok: false, message: `entry id "${id}" already exists — use mode "replace" to overwrite it` }
+    }
+    if (request.kind === 'path') {
+      const invalid = validatePathText(text)
+      if (invalid !== undefined) return { ok: false, message: invalid }
     }
     entries.push({
       id,
@@ -612,18 +796,22 @@ export function applyWrites(
       pinnedAt: request.pinned === true ? now : 0,
       version: 1,
     })
+    changedIds.push(id)
   }
-  return { ok: true, board: { ...board, entries } }
+  return { ok: true, board: { ...board, entries }, changedIds }
 }
 
 /**
- * Apply writes to one scope bucket and bump that board's version.
+ * Apply writes to one scope bucket. A semantic change bumps that board's
+ * version and `updatedAt`; an identical-content write leaves the store
+ * bit-identical and reports no changed ids, so no settings commit or context
+ * re-render follows.
  * @param store - the current store.
  * @param target - the scope bucket to write.
  * @param requests - entries to write.
  * @param mode - `append` (default) or `replace` by id.
  * @param now - epoch ms stamped onto the board.
- * @returns the next store, or a refusal message.
+ * @returns the next store and changed ids, or a refusal message.
  */
 export function applyStoreWrites(
   store: WhiteboardStore,
@@ -631,46 +819,50 @@ export function applyStoreWrites(
   requests: readonly WhiteboardWriteRequest[],
   mode: 'append' | 'replace',
   now: number,
-): { ok: true; store: WhiteboardStore } | { ok: false; message: string } {
+): { ok: true; store: WhiteboardStore; changedIds: string[] } | { ok: false; message: string } {
   const current = readBoard(store, target) ?? EMPTY_BOARD
   const applied = applyWrites(current, requests, mode, now)
   if (!applied.ok) return applied
+  if (applied.changedIds.length === 0) return { ok: true, store, changedIds: [] }
   const board: WhiteboardBoard = { ...applied.board, version: current.version + 1, updatedAt: now }
-  return { ok: true, store: writeBoard(store, target, board) }
+  return { ok: true, store: writeBoard(store, target, board), changedIds: applied.changedIds }
 }
 
 /**
- * Toggle one entry's pinned flag in its authoring board and bump the board
- * version. Unpin is the only way to make an entry compactable; it never
- * deletes anything.
+ * Toggle one entry's pinned flag in its authoring board. Unpin is the only way
+ * to make an entry compactable; it never deletes anything. Setting the flag it
+ * already has is a no-op.
  * @param board - the current stored board.
  * @param id - the entry id.
  * @param pinned - the flag to set.
  * @param now - epoch ms for `pinnedAt`.
- * @returns the next board, or an error message.
+ * @returns the next board and whether it changed, or an error message.
  */
 export function setPinned(
   board: WhiteboardBoard,
   id: string,
   pinned: boolean,
   now: number,
-): { ok: true; board: WhiteboardBoard } | { ok: false; message: string } {
+): { ok: true; board: WhiteboardBoard; changed: boolean } | { ok: false; message: string } {
   const index = board.entries.findIndex((entry) => entry.id === id)
   if (index === -1) return { ok: false, message: `no entry with id "${id}"` }
+  const previous = board.entries[index]!
+  if (previous.pinned === pinned) return { ok: true, board, changed: false }
   const entries = board.entries.map((entry, at) => (at === index
     ? { ...entry, pinned, pinnedAt: pinned ? now : entry.pinnedAt }
     : { ...entry }))
-  return { ok: true, board: { ...board, entries } }
+  return { ok: true, board: { ...board, entries }, changed: true }
 }
 
 /**
- * Toggle one entry's pinned flag in the scope bucket that authored it.
+ * Toggle one entry's pinned flag in the scope bucket that authored it. A
+ * repeated pin/unpin leaves the store untouched.
  * @param store - the current store.
  * @param target - the authoring scope bucket (from {@link findEntryTarget}).
  * @param id - the entry id.
  * @param pinned - the flag to set.
  * @param now - epoch ms stamped onto the board.
- * @returns the next store, or an error message.
+ * @returns the next store and whether it changed, or an error message.
  */
 export function setStorePinned(
   store: WhiteboardStore,
@@ -678,13 +870,14 @@ export function setStorePinned(
   id: string,
   pinned: boolean,
   now: number,
-): { ok: true; store: WhiteboardStore } | { ok: false; message: string } {
+): { ok: true; store: WhiteboardStore; changed: boolean } | { ok: false; message: string } {
   const current = readBoard(store, target)
   if (current === undefined) return { ok: false, message: `no entry with id "${id}"` }
   const pinnedResult = setPinned(current, id, pinned, now)
   if (!pinnedResult.ok) return pinnedResult
+  if (!pinnedResult.changed) return { ok: true, store, changed: false }
   const board: WhiteboardBoard = { ...pinnedResult.board, version: current.version + 1, updatedAt: now }
-  return { ok: true, store: writeBoard(store, target, board) }
+  return { ok: true, store: writeBoard(store, target, board), changed: true }
 }
 
 /**
@@ -745,13 +938,13 @@ export function sweepSessionBoards(
   const ids = Object.keys(store.docs.sessions)
   if (!Number.isFinite(limit) || ids.length <= Math.max(0, Math.floor(limit))) return { store, dropped: [] }
   const ordered = [...ids].sort((left, right) => {
-    const leftAt = store.docs.sessions[left]?.updatedAt ?? 0
-    const rightAt = store.docs.sessions[right]?.updatedAt ?? 0
+    const leftAt = ownBoard(store.docs.sessions, left)?.updatedAt ?? 0
+    const rightAt = ownBoard(store.docs.sessions, right)?.updatedAt ?? 0
     if (leftAt !== rightAt) return leftAt - rightAt
     return left < right ? -1 : 1
   })
   const dropped = ordered.slice(0, ids.length - Math.max(0, Math.floor(limit)))
-  const sessions = { ...store.docs.sessions }
+  const sessions = copyBucket(store.docs.sessions)
   for (const id of dropped) delete sessions[id]
   return { store: { ...store, docs: { ...store.docs, sessions } }, dropped }
 }

@@ -84,7 +84,8 @@
   z-index: 1;
   display: flex;
   width: min(1200px, calc(100vw - 32px));
-  height: min(860px, calc(100vh - 40px));
+  height: min(860px, calc(100dvh - 40px));
+  max-height: calc(100dvh - 40px);
   max-width: 100vw;
   border-radius: 20px;
   overflow: hidden;
@@ -233,7 +234,8 @@
   .panel {
     flex-direction: column;
     width: 100vw;
-    height: 100vh;
+    height: 100dvh;
+    max-height: 100dvh;
     border-radius: 0;
     max-width: 100vw;
   }
@@ -279,15 +281,43 @@
   }
 }
 
-/* Phone page (the mobile shell's settings presentation): full-viewport, safe
-   area padded, list pushes to one section detail. It never covers its own
-   close path, so the stuck-modal state cannot recur. */
+/* Compact page (the compact shell's settings presentation): full-viewport,
+   safe-area padded, list pushes to one section detail. It is body-portalled,
+   so a transformed sidebar cannot clip it, and it never covers its own close
+   path. */
+.chromeHost {
+  display: contents;
+}
+
+.mobilePagePanel {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.mobileBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .mobilePage {
   position: fixed;
   inset: 0;
   z-index: 1000;
   display: flex;
   flex-direction: column;
+  height: 100dvh;
+  max-height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  overscroll-behavior: contain;
   background: var(--dsw-alias-bg-layer-2);
 }
 
@@ -343,10 +373,18 @@
 .mobileList {
   flex: 1 1 auto;
   min-height: 0;
-  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 2px;
+  width: 100%;
+  max-width: 100%;
+  /* The page is 100% wide; without border-box the safe-area padding adds to
+     that content box and reports an 11px overflow on a 390px screen. */
+  box-sizing: border-box;
+  overflow-x: clip;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   padding: 8px max(8px, var(--dsh-safe-area-inset-right, 0px)) calc(12px + var(--dsh-safe-area-inset-bottom, 0px)) max(8px, var(--dsh-safe-area-inset-left, 0px));
 }
 
@@ -382,8 +420,23 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-x: clip;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   padding-bottom: var(--dsh-safe-area-inset-bottom, 0px);
+}
+
+.mobileDetail > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.mobileDetail[hidden] {
+  display: none;
 }
 
 /* Visually-hidden text seat (close button accessible name from slot content). */

@@ -21,6 +21,10 @@ const make = (host = stubConfigForm<ThemeSettings>()): {
   return { ctx, theme: new ThemeRuntime(ctx, host.scope), events, host }
 }
 
+afterEach(() => {
+  delete document.documentElement.dataset.dsThemeSource
+})
+
 describe('ThemeRuntime', () => {
   it('defaults to the system preference resolved against prefers-color-scheme', () => {
     const { theme } = make()
@@ -31,6 +35,32 @@ describe('ThemeRuntime', () => {
     expect(snapshot.active.id).toBe('light')
     expect(snapshot.active.colorScheme).toBe('light')
     expect(snapshot.themes.map(t => t.id)).toEqual(['light', 'dark'])
+  })
+
+  it.each(['dark', 'light', 'system'] as const)('preserves boot preference %s until Host settings arrive', (preference) => {
+    document.documentElement.dataset.dsThemeSource = preference
+    const { theme, events } = make()
+    expect(theme.getTheme().preference).toBe(preference)
+    expect(theme.getTheme().active.id).toBe(preference === 'system' ? 'light' : preference)
+    // No settings answer yet: hydration must not publish a synthetic change.
+    expect(events).toHaveLength(0)
+  })
+
+  it('falls back to the system default for missing or invalid boot preference', () => {
+    const missing = make().theme
+    expect(missing.getTheme().preference).toBe('system')
+    document.documentElement.dataset.dsThemeSource = 'sepia'
+    const invalid = make().theme
+    expect(invalid.getTheme().preference).toBe('system')
+  })
+
+  it('lets the Host settings answer replace the boot preference once it lands', () => {
+    document.documentElement.dataset.dsThemeSource = 'dark'
+    const { theme, host } = make()
+    expect(theme.getTheme().preference).toBe('dark')
+    host.publish({ status: 'ready', value: { preference: 'light', fontSize: 14 }, revision: 1, writable: true })
+    expect(theme.getTheme().preference).toBe('light')
+    expect(theme.getTheme().active.id).toBe('light')
   })
 
   it('seeds the initial font size from the boot-script body variable, ignoring junk', () => {
@@ -269,6 +299,54 @@ describe('ThemeRuntime', () => {
       media.flip()
       expect(theme.getTheme().active.id).toBe('light')
       expect(events).toHaveLength(1)
+    })
+
+    it('does not republish on a resume when the system scheme is unchanged', () => {
+      stubMedia(false)
+      const { theme, events } = make()
+      window.dispatchEvent(new Event('pageshow'))
+      document.dispatchEvent(new Event('resume'))
+      expect(theme.getTheme().active.id).toBe('light')
+      expect(events).toHaveLength(0)
+    })
+
+    it('repairs the system scheme on resume without a window global', async () => {
+      const media = stubMedia(false)
+      vi.stubGlobal('window', undefined)
+      const { ctx, theme } = make()
+      media.matches = true
+      document.dispatchEvent(new Event('resume'))
+      expect(theme.getTheme().active.id).toBe('dark')
+      await ctx.fiber.dispose()
+    })
+
+    it('does not republish on a resume while a concrete preference owns the palette', () => {
+      stubMedia(false)
+      const { theme, events } = make()
+      theme.setTheme('dark')
+      expect(events).toHaveLength(1)
+      window.dispatchEvent(new Event('pageshow'))
+      document.dispatchEvent(new Event('resume'))
+      expect(theme.getTheme().active.id).toBe('dark')
+      expect(events).toHaveLength(1)
+    })
+
+    it('rechecks the system scheme after pageshow and Page Lifecycle resume', () => {
+      const media = stubMedia(false)
+      const { theme, events } = make()
+      expect(theme.getTheme().active.id).toBe('light')
+
+      // A frozen page can miss the media change event; the wake events must
+      // repair the resolved palette without requiring a reload.
+      media.matches = true
+      window.dispatchEvent(new Event('pageshow'))
+      expect(theme.getTheme().active.id).toBe('dark')
+      expect(events).toHaveLength(1)
+
+      media.matches = false
+      document.dispatchEvent(new Event('resume'))
+      expect(theme.getTheme().active.id).toBe('light')
+      expect(events).toHaveLength(2)
     })
 
     it('OS flips do not republish while a concrete preference is set', () => {

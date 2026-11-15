@@ -6,16 +6,24 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   padding: 4px 2px 16px;
+  box-sizing: border-box;
+  container-type: inline-size;
 }
 
 .intro {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  font-size: 11px;
-  color: var(--dsw-alias-label-caption, #94a3b8);
+  box-sizing: border-box;
+  width: 100%;
   padding: 2px 2px 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-caption, #94a3b8);
 }
 
 .introIcon {
@@ -24,16 +32,16 @@
 }
 
 .statusLine {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--dsw-alias-label-caption, #94a3b8);
   padding: 4px 2px;
 }
 
 .retryBtn {
   align-self: flex-start;
-  height: 26px;
+  min-height: 32px;
   padding: 0 10px;
-  font-size: 11px;
+  font-size: 12px;
   border-radius: 7px;
   border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.14));
   background: rgba(255, 255, 255, 0.05);
@@ -51,13 +59,18 @@
   display: flex;
   align-items: flex-start;
   gap: 12px;
+  width: 100%;
+  min-width: 0;
 }
 
 .rail {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  box-sizing: border-box;
   width: 168px;
+  max-width: 100%;
+  min-width: 0;
   flex-shrink: 0;
   padding: 6px;
   background: var(--dsw-specific-input-major, rgba(17, 24, 39, 0.72));
@@ -68,18 +81,22 @@
 
 .railCell {
   text-align: left;
-  font-size: 11.5px;
-  line-height: 1.3;
-  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.35;
+  padding: 7px 8px;
   border: none;
   border-radius: 6px;
   background: transparent;
   color: var(--dsw-alias-label-caption, #94a3b8);
   cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
   transition: color 120ms ease, background 120ms ease;
+}
+
+.railCell:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
 }
 
 .railCell:hover {
@@ -127,6 +144,7 @@
 .pane {
   flex: 1;
   min-width: 0;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -162,13 +180,43 @@
 }
 
 .paneHint {
-  font-size: 10px;
+  font-size: 12px;
+  line-height: 1.5;
   color: var(--dsw-alias-label-caption, #94a3b8);
   padding: 8px 12px 0;
 }
 
+/* Compact, expandable truth about delegation beside the agent's own rules. */
+.agentDelegateHint {
+  padding: 4px 12px 0;
+}
+
+.agentDelegateRow {
+  height: auto;
+  min-height: 24px;
+  align-items: flex-start;
+}
+
+.agentDelegateTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 0;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+@media (pointer: coarse) {
+  .agentDelegateRow {
+    min-height: 44px;
+    align-items: center;
+  }
+}
+
 .empty {
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.5;
   color: var(--dsw-alias-label-caption, #94a3b8);
   padding: 10px 12px;
 }
@@ -205,15 +253,15 @@
 }
 
 .rowName {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--dsw-alias-label-primary, #e2e8f0);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 
 .rowHint {
-  font-size: 10px;
+  font-size: 12px;
+  line-height: 1.45;
   color: var(--dsw-alias-label-caption, #94a3b8);
   opacity: 0.8;
 }
@@ -229,7 +277,9 @@
 /* Segmented allow/ask/deny control (doc 55: global = absolute truth) */
 .policySeg {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: 2px;
   padding: 2px;
   border-radius: 8px;
@@ -238,12 +288,21 @@
 }
 .segBtn {
   all: unset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
   cursor: pointer;
-  font-size: 10.5px;
-  padding: 3px 9px;
+  font-size: 12px;
+  padding: 4px 9px;
   border-radius: 6px;
   color: rgba(255, 255, 255, 0.72);
 }
+.segBtn:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+
 .segBtn:hover {
   background: rgba(255, 255, 255, 0.08);
   color: #fff;
@@ -343,7 +402,7 @@
 
 .segBtn {
   padding: 4px 10px;
-  font-size: 11px;
+  font-size: 12px;
   border: none;
   background: transparent;
   color: var(--dsw-alias-label-caption, #94a3b8);
@@ -353,6 +412,11 @@
 
 .segBtn + .segBtn {
   border-left: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.08));
+}
+
+.segBtn:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
 }
 
 .segBtn:hover {
@@ -538,27 +602,112 @@
   box-shadow: 0 0 0 2px var(--dsw-alias-interactive-bg-hover-accent, rgba(127, 227, 236, 0.45));
 }
 
-/* Mobile: stack rail over pane, rail becomes a wrapping row */
-@media (max-width: 640px) {
+.subjectPicker {
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+/* Narrow content: one subject picker row, one pane, no wrapping chip rail. */
+@container (max-width: 620px) {
   .layout {
     flex-direction: column;
   }
 
   .rail {
-    flex-direction: row;
-    flex-wrap: wrap;
-    width: 100%;
+    display: none;
+  }
+
+  .subjectPicker {
+    display: flex;
   }
 
   .row {
     flex-direction: column;
     align-items: stretch;
     gap: 6px;
-    padding: 7px 12px;
+    padding: 8px 12px;
   }
 
   .rowTools {
+    flex-wrap: wrap;
     justify-content: flex-end;
+  }
+}
+
+
+.subjectTrigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0.5px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.14));
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-specific-input-major, rgba(17, 24, 39, 0.72));
+  color: var(--dsw-alias-label-primary, #e2e8f0);
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.subjectTrigger:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+
+.subjectTrigger > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.legend {
+  width: 100%;
+  min-width: 0;
+}
+
+.legendTitle {
+  color: var(--dsw-alias-label-secondary);
+}
+
+.legendBody {
+  padding: 4px 0 0 22px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--dsw-alias-label-caption, #94a3b8);
+}
+
+.legendBody b {
+  color: var(--dsw-alias-label-secondary);
+  font-weight: 550;
+}
+
+/* Coarse pointers get full touch targets on the policy and subject controls. */
+@media (pointer: coarse) {
+  .segBtn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .railAddBtn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .railAddInput {
+    height: 44px;
+  }
+
+  .railCell {
+    min-height: 44px;
   }
 }
 
@@ -575,9 +724,9 @@
 .railAddInput {
   flex: 1;
   min-width: 0;
-  height: 24px;
-  padding: 0 6px;
-  font-size: 11px;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
   color: var(--dsw-alias-label-primary, #e2e8f0);
   background: rgba(15, 23, 42, 0.35);
   border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.14));
@@ -597,13 +746,19 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  flex: none;
+  width: 28px;
+  height: 28px;
   border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.14));
   border-radius: 5px;
   background: transparent;
   color: var(--dsw-alias-label-caption, #94a3b8);
   cursor: pointer;
+}
+
+.railAddBtn:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
 }
 
 .railAddBtn:hover {

@@ -4,7 +4,7 @@ import type { Events } from '@deepseek-ai/cordis'
 import { bindScopeParent, createScope } from '@deepseek-ai/dsh-scope'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ToolRuntime, { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import type { PreToolDecision, ToolDefinition, ToolExecution, ToolExecutionInput, ToolExecutionToken } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 
@@ -183,7 +183,7 @@ describe('restrict()', () => {
 
   it('fails loud on an unscoped call, an empty filter, and names it does not inherit', async () => {
     const ctx = await mount()
-    const { scope } = await mintAgentScope(ctx, 'a')
+    const { scope, key } = await mintAgentScope(ctx, 'a')
     ctx.tools.register(tool('real'))
     scope.ctx.tools.register(tool('local'))
     expect(() => ctx.tools.restrict({ deny: ['real'] })).toThrow(/requires a scoped context/)
@@ -197,6 +197,10 @@ describe('restrict()', () => {
     // (e.g. `report`, per-child tools), and throwing there broke every spawn.
     // Unknown ALLOW names still throw (asserted above).
     expect(() => scope.ctx.tools.restrict({ deny: ['ghost', 'wraith'] })).not.toThrow()
+    // The reserved transport is absent from a native registry view, but an
+    // explicit deny is still a valid mask target (and a no-op there).
+    expect(() => scope.ctx.tools.restrict({ deny: [RUN_CODE_NAME] })).not.toThrow()
+    expect(ctx.tools.schemas(key).map(t => t.name).sort()).toEqual(['local', 'real'])
 
     const emptyCtx = await mount()
     const { scope: emptyScope } = await mintAgentScope(emptyCtx, 'empty')

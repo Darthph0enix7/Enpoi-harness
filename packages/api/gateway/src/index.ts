@@ -13,7 +13,7 @@ import {
   type ConnectionRpcHandler,
 } from '@deepseek-ai/dsh-client-connection'
 import { Deque } from '@deepseek-ai/dsh-deque'
-import type { WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
+import type { IndexInjection, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type {} from '@deepseek-ai/dsh-cmdline'
 import z from '@deepseek-ai/schemastery'
@@ -48,6 +48,7 @@ import {
 import {
   REMOTE_EVENT_STREAM_ENDPOINT,
   REMOTE_EVENT_STREAM_READY,
+  REMOTE_EVENT_LIMITS_GLOBAL,
   REMOTE_EVENT_RESULT_ENDPOINT,
   REMOTE_STREAM_MUX_PATH,
   isRemoteEventAgentId,
@@ -149,6 +150,8 @@ const DEFAULT_REMOTE_EVENT_QUEUE_MAX_BYTES = 8 * 1024 * 1024
  * entry self-heals instead of re-appearing on every connect. `0` disables it.
  */
 const DEFAULT_REMOTE_EVENT_REPLAY_MAX_AGE_MS = 15 * 60 * 1000
+const DEFAULT_REMOTE_EVENT_CLIENT_MAX_ACTIVE_TASKS = 64
+const DEFAULT_REMOTE_EVENT_CLIENT_MAX_RETIRED_TASKS = 4
 const EMPTY_ASYNC_ITERABLE: AsyncIterable<never> = {
   [Symbol.asyncIterator]: () => ({ next: () => Promise.resolve({ value: undefined, done: true }) }),
 }
@@ -200,6 +203,22 @@ export interface Config {
    * bound. @default 900000
    */
   readonly remoteEventReplayMaxAgeMs?: number
+  /**
+   * Concurrent forwarded-event listener tasks (Agent answers plus plain
+   * emits) one Client generation may launch before it fails as resource-
+   * exhausted. The failure is terminal until an explicit reconnect or reload;
+   * it is never retried automatically. @default 64
+   */
+  readonly remoteEventClientMaxActiveTasks?: number
+  /**
+   * Abandoned forwarded-event listener tasks tolerated behind the current
+   * Client generation. A task that ignores cancellation counts here until it
+   * settles; at or above this threshold a replacement Client generation is
+   * refused with a terminal diagnosis instead of stacking unbounded work. One
+   * teardown can retire up to the active-task budget, so this is a replacement
+   * threshold, not a hard ceiling on that burst. @default 4
+   */
+  readonly remoteEventClientMaxRetiredTasks?: number
 }
 
 interface ResolvedConfig extends Config {
@@ -210,6 +229,8 @@ interface ResolvedConfig extends Config {
   readonly remoteEventQueueMaxFrames: number
   readonly remoteEventQueueMaxBytes: number
   readonly remoteEventReplayMaxAgeMs: number
+  readonly remoteEventClientMaxActiveTasks: number
+  readonly remoteEventClientMaxRetiredTasks: number
 }
 
 /**
@@ -265,6 +286,10 @@ export class TypertGatewayService extends Service implements TypertGateway {
     remoteEventQueueMaxFrames: z.number().step(1).min(1).default(DEFAULT_REMOTE_EVENT_QUEUE_MAX_FRAMES),
     remoteEventQueueMaxBytes: z.number().step(1).min(1).default(DEFAULT_REMOTE_EVENT_QUEUE_MAX_BYTES),
     remoteEventReplayMaxAgeMs: z.number().step(1).min(0).default(DEFAULT_REMOTE_EVENT_REPLAY_MAX_AGE_MS),
+    remoteEventClientMaxActiveTasks: z.number().step(1).min(1)
+      .default(DEFAULT_REMOTE_EVENT_CLIENT_MAX_ACTIVE_TASKS),
+    remoteEventClientMaxRetiredTasks: z.number().step(1).min(1)
+      .default(DEFAULT_REMOTE_EVENT_CLIENT_MAX_RETIRED_TASKS),
   })
 
   /** Carrier adapter shared by the WebSocket mux and local Host transports. */
@@ -282,6 +307,8 @@ export class TypertGatewayService extends Service implements TypertGateway {
   private readonly remoteEventReplayMaxAgeMs: number
   private readonly remoteEventQueueMaxFrames: number
   private readonly remoteEventQueueMaxBytes: number
+  private readonly remoteEventClientMaxActiveTasks: number
+  private readonly remoteEventClientMaxRetiredTasks: number
 
   /**
    * Register the Gateway against the active Typert registry.
@@ -305,6 +332,8 @@ export class TypertGatewayService extends Service implements TypertGateway {
     this.remoteEventReplayMaxAgeMs = resolved.remoteEventReplayMaxAgeMs
     this.remoteEventQueueMaxFrames = resolved.remoteEventQueueMaxFrames
     this.remoteEventQueueMaxBytes = resolved.remoteEventQueueMaxBytes
+    this.remoteEventClientMaxActiveTasks = resolved.remoteEventClientMaxActiveTasks
+    this.remoteEventClientMaxRetiredTasks = resolved.remoteEventClientMaxRetiredTasks
     ctx.on('internal/service', () => {
       this.srcClaims = undefined
     })
@@ -314,6 +343,22 @@ export class TypertGatewayService extends Service implements TypertGateway {
         endpoint => this.claimsEndpoint(endpoint),
         (endpoint, payload, signal, peer) => this.dispatchRpc(endpoint, payload, signal, peer),
       )
+    })
+    ctx.inject(['webServer'], (webCtx) => {
+      webCtx.effect(() => {
+        const handler = (table: IndexInjection[]): void => {
+          table.push({
+            kind: 'global',
+            name: REMOTE_EVENT_LIMITS_GLOBAL,
+            value: {
+              maxActiveTasks: this.remoteEventClientMaxActiveTasks,
+              maxRetiredTasks: this.remoteEventClientMaxRetiredTasks,
+            },
+          })
+        }
+        const dispose = webCtx.on('webserver/index-inject', handler)
+        return () => { dispose() }
+      }, 'api-gateway: forwarded-event client limits')
     })
     ctx.inject(['connection', 'webServer'], (webCtx) => {
       const listen = (): void => {

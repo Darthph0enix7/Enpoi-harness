@@ -16,7 +16,10 @@ import { useSyncExternalStore } from 'react'
  * viewport (iOS) the layout keeps its height and `keyboardInset` is the lift
  * the shell must apply. Detecting open uses both signals, but only the
  * occlusion is ever a lift — applying the layout shrink as a lift as well
- * displaces the composer by the keyboard height twice.
+ * displaces the composer by the keyboard height twice. A layout-viewport
+ * shrink is trusted only while an editable control has focus; a genuine
+ * resize with no focused editor updates the resting height instead of
+ * freezing it as a keyboard.
  *
  * The singleton lives in this package's platform-module entry, so every client
  * bundle shares one instance; use `startDeviceRuntime()` to install listeners
@@ -86,6 +89,13 @@ export function classifyDevice(reading: DeviceReading): DeviceClassification {
 export interface DeviceSnapshot extends DeviceClassification {
   /** Last classified layout viewport width in px. */
   readonly width: number
+  /**
+   * The resting layout-viewport height in px, independent of a soft-keyboard
+   * shrink. Layout mode consumes this instead of reading `innerHeight` during
+   * a resize, because Android `resizes-content` fires resize before the
+   * keyboard marker can be published.
+   */
+  readonly restingHeight: number
   /** Whether the soft keyboard currently occludes the layout viewport. */
   readonly keyboardOpen: boolean
   /**
@@ -124,11 +134,23 @@ export class DeviceRuntime implements DeviceSource {
   /** @param snapshot - optional initial snapshot override (tests only). */
   constructor(snapshot?: DeviceSnapshot) {
     this.snapshot = snapshot ?? readDeviceSnapshot()
+    this.restingViewport = this.snapshot.restingHeight
   }
 
   /** @returns the current immutable snapshot. */
   getSnapshot(): DeviceSnapshot {
     return this.snapshot
+  }
+
+  /** Cancel every scheduled timer. */
+  private clearTimers(): void {
+    if (this.frame !== null) {
+      // jsdom teardown can remove the cancel pair together with rAF.
+      if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.frame)
+      this.frame = null
+    }
+    if (this.settle !== null) { clearTimeout(this.settle); this.settle = null }
+    if (this.rotationTimer !== null) { clearTimeout(this.rotationTimer); this.rotationTimer = null }
   }
 
   /**
@@ -164,16 +186,25 @@ export class DeviceRuntime implements DeviceSource {
       return () => { /* no DOM: nothing to release */ }
     }
     this.installed = true
-    this.restingViewport = readVisualViewportHeight() ?? window.innerHeight
+    // Do not adopt a keyboard-shrunk height while remounting mid-edit. The
+    // previous snapshot carries the resting height through a dispose/install
+    // cycle; the first install has no open keyboard yet.
+    if (!this.snapshot.keyboardOpen) this.restingViewport = readVisualViewportHeight() ?? window.innerHeight
     this.displaySignature = readDisplaySignature()
     const onResize = (): void => { this.scheduleMeasure() }
     const onViewport = (): void => { this.scheduleKeyboard() }
+    const onFocusChange = (): void => { this.scheduleKeyboard() }
     const onOrientation = (): void => {
       this.adoptRotatedViewport()
       this.scheduleKeyboard()
     }
     window.addEventListener('resize', onResize)
     window.addEventListener('orientationchange', onOrientation)
+    // A layout-shrink keyboard candidate is trusted only while an editable
+    // control has focus. Focusin/out re-sample even when the browser does not
+    // resize again, so blur adopts the new layout height immediately.
+    document.addEventListener('focusin', onFocusChange, true)
+    document.addEventListener('focusout', onFocusChange, true)
     const visual = window.visualViewport
     if (visual !== undefined && visual !== null) {
       visual.addEventListener('resize', onViewport)
@@ -204,6 +235,8 @@ export class DeviceRuntime implements DeviceSource {
     }
     this.cleanups.push(() => { window.removeEventListener('resize', onResize) })
     this.cleanups.push(() => { window.removeEventListener('orientationchange', onOrientation) })
+    this.cleanups.push(() => { document.removeEventListener('focusin', onFocusChange, true) })
+    this.cleanups.push(() => { document.removeEventListener('focusout', onFocusChange, true) })
     this.commit(this.measure())
     this.sampleKeyboard()
     return () => { this.dispose() }
@@ -211,11 +244,12 @@ export class DeviceRuntime implements DeviceSource {
 
   /** Remove every listener and the projected root state; the next install() rebuilds it. */
   dispose(): void {
+    // Timers belong to the runtime, not to the listener set: refresh() can arm
+    // the rotation guard on an uninstalled runtime, and a pending callback must
+    // never run once the owner is disposed (jsdom teardown removes the globals).
+    this.clearTimers()
     if (!this.installed) return
     this.installed = false
-    if (this.frame !== null) { cancelAnimationFrame(this.frame); this.frame = null }
-    if (this.settle !== null) { clearTimeout(this.settle); this.settle = null }
-    if (this.rotationTimer !== null) { clearTimeout(this.rotationTimer); this.rotationTimer = null }
     for (const cleanup of this.cleanups.splice(0)) cleanup()
     this.media = []
     // Installed implies the DOM existed when install() succeeded.
@@ -230,9 +264,16 @@ export class DeviceRuntime implements DeviceSource {
   /** rAF-throttle a full reclassification (resize and media-query changes). */
   private scheduleMeasure(): void {
     if (this.frame !== null) return
+    // A pending timer can outlive the DOM (jsdom teardown removes
+    // requestAnimationFrame); skip rather than call an absent global.
+    if (typeof requestAnimationFrame !== 'function') return
     this.frame = requestAnimationFrame(() => {
       this.frame = null
+      // A commit notifies subscribers, one of which may dispose the runtime;
+      // never arm follow-up timers on a disposed instance.
+      if (!this.installed) return
       this.commit(this.measure())
+      if (!this.installed) return
       this.sampleKeyboard()
     })
   }
@@ -246,6 +287,7 @@ export class DeviceRuntime implements DeviceSource {
   private measure(): DeviceSnapshot {
     return {
       ...readDeviceSnapshot(),
+      restingHeight: this.restingViewport,
       keyboardOpen: this.snapshot.keyboardOpen,
       keyboardInset: this.snapshot.keyboardInset,
     }
@@ -314,14 +356,22 @@ export class DeviceRuntime implements DeviceSource {
    * @returns the keyboard candidate in px: the visual occlusion, or the
    * layout viewport's own shrink below the resting height (Android
    * `interactive-widget=resizes-content`, where the occlusion stays 0),
-   * whichever is larger.
+   * whichever is larger. The layout-shrink branch requires a positively
+   * focused editable control, so a genuine short window resize with no editor
+   * focus cannot be mistaken for a keyboard. A genuine resize while an editor
+   * is focused remains ambiguous by design.
    */
   private readKeyboardCandidate(): number {
-    const occluded = this.readKeyboardOcclusion()
     if (this.snapshot.pointer !== 'coarse') return 0
-    const layoutHeight = window.innerHeight
-    const height = readVisualViewportHeight() ?? layoutHeight
-    return Math.max(occluded, Math.max(0, Math.round(this.restingViewport - height)))
+    const occluded = this.readKeyboardOcclusion()
+    const visualHeight = readVisualViewportHeight()
+    const visualShrink = visualHeight === null
+      ? 0
+      : Math.max(0, Math.round(this.restingViewport - visualHeight))
+    const layoutShrink = Math.max(0, Math.round(this.restingViewport - window.innerHeight))
+    // A positive visible VK occlusion is evidence on its own. A height shrink
+    // without occlusion is trusted only while an editable control has focus.
+    return Math.max(occluded, hasFocusedEditable() ? Math.max(layoutShrink, visualShrink) : 0)
   }
 
   /**
@@ -332,7 +382,8 @@ export class DeviceRuntime implements DeviceSource {
   private commitKeyboard(open: boolean): void {
     const inset = open ? this.readKeyboardOcclusion() : 0
     if (!open) this.restingViewport = readVisualViewportHeight() ?? window.innerHeight
-    if (this.snapshot.keyboardOpen === open && this.snapshot.keyboardInset === inset) return
+    if (this.snapshot.keyboardOpen === open && this.snapshot.keyboardInset === inset
+      && this.snapshot.restingHeight === this.restingViewport) return
     this.commit({ ...this.measure(), keyboardOpen: open, keyboardInset: inset })
   }
 
@@ -359,26 +410,73 @@ export class DeviceRuntime implements DeviceSource {
 /** Whether two snapshots carry the same published state. */
 function sameSnapshot(left: DeviceSnapshot, right: DeviceSnapshot): boolean {
   return left.device === right.device && left.pointer === right.pointer
-    && left.width === right.width && left.keyboardOpen === right.keyboardOpen
-    && left.keyboardInset === right.keyboardInset
+    && left.width === right.width && left.restingHeight === right.restingHeight
+    && left.keyboardOpen === right.keyboardOpen && left.keyboardInset === right.keyboardInset
 }
 
 /** Read the current browser classification readings. */
 function readDeviceSnapshot(): DeviceSnapshot {
   /* v8 ignore next -- browser capability module: every caller runs after install()'s DOM guard. */
   if (typeof window === 'undefined') {
-    return { device: 'desktop', pointer: 'fine', width: 0, keyboardOpen: false, keyboardInset: 0 }
+    return {
+      device: 'desktop', pointer: 'fine', width: 0, restingHeight: 0,
+      keyboardOpen: false, keyboardInset: 0,
+    }
   }
   const width = window.innerWidth
+  const restingHeight = readVisualViewportHeight() ?? window.innerHeight
   const hasTouch = navigator.maxTouchPoints > 0
   const coarsePointer = typeof window.matchMedia === 'function'
     && window.matchMedia('(pointer: coarse)').matches
   return {
     ...classifyDevice({ width, hasTouch, coarsePointer }),
     width,
+    restingHeight,
     keyboardOpen: false,
     keyboardInset: 0,
   }
+}
+
+/**
+ * Input types that do not summon a text keyboard when focused. Date/time inputs
+ * stay in the textual branch because the DOM exposes no reliable native-picker
+ * signal; a focused date field during a genuine window resize is therefore one
+ * documented ambiguous case.
+ */
+const NON_TEXT_INPUT_TYPES = new Set([
+  'button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio', 'range', 'reset', 'submit',
+])
+
+/** Whether one focused element is an editable control that can raise a keyboard. */
+function isEditableElement(element: Element): boolean {
+  if (typeof HTMLTextAreaElement !== 'undefined' && element instanceof HTMLTextAreaElement) {
+    return !element.disabled && !element.readOnly
+  }
+  if (typeof HTMLInputElement !== 'undefined' && element instanceof HTMLInputElement) {
+    return !element.disabled && !element.readOnly && !NON_TEXT_INPUT_TYPES.has(element.type)
+  }
+  if (typeof HTMLElement === 'undefined' || !(element instanceof HTMLElement)) return false
+  // contentEditable is inherited: check the focused element and its host chain.
+  const host = element.closest('[contenteditable]')
+  if (host !== null && host.getAttribute('contenteditable') !== 'false') return true
+  return element.isContentEditable === true
+}
+
+/**
+ * @returns whether the focused element chain reaches an editable control,
+ * including a document active element hosted by one or more shadow roots.
+ */
+function hasFocusedEditable(): boolean {
+  if (typeof document === 'undefined') return false
+  let active: Element | null = document.activeElement
+  while (active !== null) {
+    if (isEditableElement(active)) return true
+    const shadow = (active as HTMLElement).shadowRoot
+    const next = shadow?.activeElement ?? null
+    if (next === null || next === active) break
+    active = next
+  }
+  return false
 }
 
 /** @returns the document's visual viewport, or undefined where the API is absent. */

@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   denyNames, groupVisibleTo, planGroupAction, preAttachFor, renderMenuText, resolveToolGroups, seatOfDescriptorLabel, SHIPPED_TOOL_GROUPS,
@@ -5,11 +6,26 @@ import {
 import { applyToolGroupsProjection, toolGroupsProjection } from '../src/projection.js'
 import { apply, TOOL_GROUPS_TOOL } from '../src/index.js'
 
-const PEER = ['peer_status', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']
+const PEER = ['peer_status', 'peer_sessions', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']
 const DEBUG = ['diagnostics_report', 'session_debug', 'session_event_trace', 'session_trace']
 const RECALL = ['session_event_read', 'session_event_search', 'session_search']
 const CORE = ['read', 'write', 'edit', 'bash', 'glob', 'grep', 'subagent']
 const CREATOR = ['cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager']
+
+/**
+ * Every tool `enpoi-peer-bridge` registers, read from its keyless source (no
+ * peer session, no HTTP, no model call). The catalog contract is checked
+ * against the FULL registration set, not one hardcoded id: a newly registered
+ * peer tool that stays ungrouped would remain presented after `detach peer`.
+ */
+function peerBridgeRegistrations(): string[] {
+  const file = new URL('../../enpoi-peer-bridge/src/index.ts', import.meta.url)
+  // A profile-only checkout without the sibling source skips the contract.
+  if (!existsSync(file)) return [...PEER]
+  const source = readFileSync(file, 'utf8')
+  return [...source.matchAll(/ctx\.tools\.register\(\{\s*name:\s*'([^']+)'/gu)]
+    .map(match => match[1] as string)
+}
 /** A live-registry roster covering every shipped member plus two ungrouped tools. */
 const ROSTER: ReadonlySet<string> = new Set([
   ...SHIPPED_TOOL_GROUPS.flatMap(group => [...group.members]), 'house_tool', 'synthetic_ungrouped',
@@ -175,13 +191,41 @@ describe('tool-group catalog', () => {
     expect(byId.get('recall')?.seats).toBeUndefined()
     expect(byId.get('recall')?.enabled).toBe(true)
     expect(byId.get('creator')?.members).toEqual(CREATOR)
-    // No shipped group pre-attaches: every on-demand family starts detached.
-    for (const id of ['peer', 'debug', 'creator']) {
-      expect(byId.get(id)?.preAttach, id).toEqual([])
-    }
+    // Only the Creator seat's own authoring trio pre-attaches; peer and debug
+    // stay detached so every other fresh session starts with the base surface.
+    expect(byId.get('peer')?.preAttach).toEqual([])
+    expect(byId.get('debug')?.preAttach).toEqual([])
+    expect(byId.get('creator')?.preAttach).toEqual(['creator'])
     expect(byId.get('creator')?.seats).toEqual(['creator'])
     // Core is the everyday surface; every shipped member is registered nowhere else.
     expect(byId.get('core')?.members.length).toBe(13)
+  })
+
+  it('keeps every registered peer tool inside the on-demand peer group', () => {
+    const registered = peerBridgeRegistrations()
+    // The bridge registers exactly this family today; the guard is not tied to
+    // one id, so a future peer tool fails here until the catalog owns it.
+    expect(registered).toEqual([...PEER])
+    expect([...registered].sort()).toEqual([...PEER].sort())
+    expect(SHIPPED_TOOL_GROUPS.find(group => group.id === 'peer')?.members).toEqual(registered)
+    // In particular, the read-only discovery listing that leaked from a
+    // detached group is a member and is denied at the default attach state.
+    expect(denyNames(catalogWith(), new Set())).toContain('peer_sessions')
+  })
+
+  it('keeps the child-surface inventory union aware of every peer registration', () => {
+    // `enpoi-capabilities/tests/child-surfaces.spec.ts` builds its registry
+    // from the inventory fixture copies ∪ shipped group members ∪ review_run.
+    // The fixtures are historical captures, so the group membership is what
+    // makes a post-capture peer tool visible to that matrix. Read the same
+    // union sources keylessly here instead of editing the other spec.
+    const fixtureDir = new URL('../../enpoi-capabilities/tests/fixtures/tool-inventory/', import.meta.url)
+    const union = new Set<string>(['review_run', ...SHIPPED_TOOL_GROUPS.flatMap(group => [...group.members])])
+    for (const preset of ['orchestrator', 'sysadmin', 'creator'] as const) {
+      const fixture = JSON.parse(readFileSync(new URL(`expected-${preset}.json`, fixtureDir), 'utf8')) as { tools: string[] }
+      for (const name of fixture.tools) union.add(name)
+    }
+    for (const name of PEER) expect(union.has(name), `${name} missing from the child-surface registry union`).toBe(true)
   })
 
   it('never denies the recall family for any seat: earlier messages stay reachable', () => {
@@ -276,23 +320,27 @@ describe('tool-group catalog', () => {
     if (!absent.ok) expect(absent.reason).toContain('not attached')
   })
 
-  it('starts every seat with nothing attached; only an operator seat override pre-attaches', () => {
+  it('pre-attaches the creator trio to the creator seat alone and leaves debug detached', () => {
     const fresh = catalogWith()
-    for (const seat of ['orchestrator', 'sysadmin', 'creator', 'broker', 'skeptic', 'default']) {
+    for (const seat of ['orchestrator', 'sysadmin', 'broker', 'skeptic', 'fixer', 'default']) {
       expect(preAttachFor(fresh, seat), seat).toEqual([])
     }
+    expect(preAttachFor(fresh, 'creator')).toEqual(['creator'])
+    expect(fresh.byId.get('debug')?.preAttach).toEqual([])
     // An explicit operator override still wins, including an empty one.
     const overridden = catalogWith({ toolGroups: { seats: { creator: { preAttach: ['debug'] } } } })
     expect(preAttachFor(overridden, 'creator')).toEqual(['debug'])
-    const emptied = catalogWith({ toolGroups: { seats: { orchestrator: { preAttach: [] } } } })
+    const emptied = catalogWith({ toolGroups: { seats: { creator: { preAttach: [] } } } })
+    expect(preAttachFor(emptied, 'creator')).toEqual([])
     expect(preAttachFor(emptied, 'orchestrator')).toEqual([])
   })
 
-  it('resolves per-seat pre-attach from the operator document over the no-attach default', () => {
+  it('resolves per-seat pre-attach from the operator document over the shipped default', () => {
     const catalog = catalogWith({ toolGroups: { seats: { sysadmin: { preAttach: ['peer'] } } } })
     expect(preAttachFor(catalog, 'sysadmin')).toEqual(['peer'])
     expect(preAttachFor(catalog, 'orchestrator')).toEqual([])
     expect(preAttachFor(catalog, 'default')).toEqual([])
+    expect(preAttachFor(catalog, 'creator')).toEqual(['creator'])
     // A disabled group can never be pre-attached.
     const disabled = catalogWith({
       toolGroups: { groups: { debug: { enabled: false } }, seats: { sysadmin: { preAttach: ['debug'] } } },
@@ -305,7 +353,7 @@ describe('tool-group catalog', () => {
     expect(text).toContain('attach')
     expect(text).toContain('- peer —')
     expect(text).toContain('cross-device peer sessions')
-    expect(text).toContain('(5 tools, attached)')
+    expect(text).toContain('(6 tools, attached)')
     expect(text).toContain('- debug —')
     expect(text).toContain('session log, event trace, and diagnostics inspection')
     expect(text).toContain('(4 tools, not attached)')
@@ -326,7 +374,7 @@ describe('tool-group catalog', () => {
 
   it('lists every on-demand family in the fresh menu: visible ones with state, hidden ones as a notice', () => {
     const text = renderMenuText(catalogWith(), new Set(), [], 'orchestrator')
-    expect(text).toContain('- peer — cross-device peer sessions: status, ask, answer, cancel (5 tools, not attached)')
+    expect(text).toContain('- peer — cross-device peer sessions: status, ask, answer, cancel (6 tools, not attached)')
     expect(text).toContain('- debug — session log, event trace, and diagnostics inspection (4 tools, not attached)')
     expect(text).toContain('- creator — Creator-seat-only family (3 tools)')
     // A disabled family is offered nowhere, notice included.
@@ -474,7 +522,7 @@ describe('tool-group operator overrides', () => {
     const locked = catalog.byId.get('locked')!
     expect(groupVisibleTo(locked, 'creator')).toBe(true)
     expect(groupVisibleTo(locked, 'orchestrator')).toBe(false)
-    expect(preAttachFor(catalog, 'creator')).toEqual([])
+    expect(preAttachFor(catalog, 'creator')).toEqual(['creator'])
   })
 
   it('ignores a malformed custom group with a warning instead of half-applying it', () => {
@@ -622,6 +670,44 @@ describe('tool_groups plugin', () => {
     expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG, ...CREATOR].sort())
   })
 
+  it('keeps peer_sessions inside the peer lifecycle: hidden, pending, callable, hidden again', async () => {
+    const projections = fakeProjections()
+    const { ctx, installer, tool } = mount({ projections })
+    const agent = fakeAgent('s-peer-sessions', (type, data) => {
+      if (type === 'tool-groups/change') projections.set('s-peer-sessions', data.attached)
+    })
+    ctx.fire('agent/created', { agent, source: 'fresh' })
+    const run = (name: string) => (ctx.handlers.get('tools/pre-execute') ?? [])[0](
+      { agent, name }, () => Promise.resolve({ kind: 'allow' }),
+    )
+    // Detached: the discovery tool is denied with the same actionable hint.
+    expect(installer.live()).toContain('peer_sessions')
+    const detached = await run('peer_sessions')
+    expect(detached.kind).toBe('deny')
+    expect(detached.reason).toContain('tool group "peer"')
+    expect(detached.reason).toContain('not attached')
+
+    // Attached this turn: still hidden from the schema and hinted next-turn.
+    await tool.execute({ action: 'attach', group: 'peer' }, EXEC(agent))
+    expect(installer.live()).toContain('peer_sessions')
+    const pending = await run('peer_sessions')
+    expect(pending.kind).toBe('deny')
+    expect(pending.reason).toContain('End your turn now')
+
+    // The turn boundary applies the attach; the guard passes it through.
+    ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 1 } })
+    expect(installer.live()).not.toContain('peer_sessions')
+    expect((await run('peer_sessions')).kind).toBe('allow')
+
+    // Detach is likewise next-turn: the guard refuses immediately and the
+    // attached group's members return to the deny set after the boundary.
+    await tool.execute({ action: 'detach', group: 'peer' }, EXEC(agent))
+    expect((await run('peer_sessions')).reason).toContain('not attached')
+    ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 2 } })
+    expect(installer.live()).toContain('peer_sessions')
+    expect((await run('peer_sessions')).kind).toBe('deny')
+  })
+
   it('removes the restriction entirely when every on-demand group is attached', async () => {
     const projections = fakeProjections()
     const { ctx, installer, tool } = mount({ projections, seat: 'creator' })
@@ -629,9 +715,10 @@ describe('tool_groups plugin', () => {
       if (type === 'tool-groups/change') projections.set('session-1', data.attached)
     })
     ctx.fire('agent/created', { agent, source: 'fresh' })
+    // The creator seat already has its own trio attached; only peer/debug remain.
+    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG].sort())
     await tool.execute({ action: 'attach', group: 'peer' }, EXEC(agent))
-    await tool.execute({ action: 'attach', group: 'debug' }, EXEC(agent))
-    const attached = await tool.execute({ action: 'attach', group: 'creator' }, EXEC(agent))
+    const attached = await tool.execute({ action: 'attach', group: 'debug' }, EXEC(agent))
     expect(attached.attached).toEqual(['peer', 'debug', 'creator'])
     ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 1 } })
     expect(installer.calls[0].disposed).toBe(true)
@@ -691,7 +778,7 @@ describe('tool_groups plugin', () => {
     expect(text).toContain('- debug —')
     // Aware of the hidden family, with no attach state for it.
     expect(text).toContain('- creator — Creator-seat-only family (3 tools)')
-    expect(text).toContain('(5 tools, not attached)')
+    expect(text).toContain('(6 tools, not attached)')
     expect(menu.text({ scope: undefined })).toBe('')
   })
 
@@ -702,23 +789,24 @@ describe('tool_groups plugin', () => {
       if (type === 'tool-groups/change') projections.set('creator-session', data.attached)
     })
     ctx.fire('agent/created', { agent, source: 'fresh' })
-    // Nothing pre-attaches: the creator starts detached like every seat.
-    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG, ...CREATOR].sort())
+    // Shipped intent: the creator seat starts with its authoring trio attached.
+    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG].sort())
 
     const listed = await tool.execute({ action: 'list' }, EXEC(agent))
     expect(listed.groups.map((group: any) => group.id)).toEqual(['peer', 'debug', 'creator'])
-    expect(listed.groups.every((group: any) => group.attached === false)).toBe(true)
-
-    const attached = await tool.execute({ action: 'attach', group: 'creator' }, EXEC(agent))
-    expect(attached.ok).toBe(true)
-    ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 1 } })
-    // The creator's authoring tools are callable; the other families stay denied.
-    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG].sort())
+    expect(listed.groups.find((group: any) => group.id === 'creator')?.attached).toBe(true)
+    expect(listed.groups.filter((group: any) => group.id !== 'creator').every((group: any) => group.attached === false)).toBe(true)
 
     const detached = await tool.execute({ action: 'detach', group: 'creator' }, EXEC(agent))
     expect(detached.ok).toBe(true)
-    ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 2 } })
+    ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 1 } })
+    // Detached: the authoring trio returns to the deny set; peers/debug stay denied.
     expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG, ...CREATOR].sort())
+
+    const attached = await tool.execute({ action: 'attach', group: 'creator' }, EXEC(agent))
+    expect(attached.ok).toBe(true)
+    ctx.fire('session/event', agent.session, { type: 'turn/end', data: { turn: 2 } })
+    expect(installer.live()?.sort()).toEqual([...PEER, ...DEBUG].sort())
   })
 
   it('refuses an attach of a seat-restricted group outside its seats', async () => {
@@ -931,9 +1019,11 @@ describe('tool_groups plugin', () => {
     const agent = fakeAgent('s-disabled')
     ctx.fire('agent/created', { agent, source: 'fresh' })
     const handler = (ctx.handlers.get('tools/pre-execute') ?? [])[0]
-    const decision = await handler({ agent, name: 'peer_ask' }, () => Promise.resolve({ kind: 'allow' }))
-    expect(decision.kind).toBe('deny')
-    expect(decision.reason).toContain('disabled by the operator')
+    for (const name of ['peer_ask', 'peer_sessions']) {
+      const decision = await handler({ agent, name }, () => Promise.resolve({ kind: 'allow' }))
+      expect(decision.kind, name).toBe('deny')
+      expect(decision.reason, name).toContain('disabled by the operator')
+    }
   })
 })
 

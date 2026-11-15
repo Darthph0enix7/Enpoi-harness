@@ -778,6 +778,10 @@ select.input {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
+  /* The narrow breakpoint makes this 100% wide; without border-box its two
+     1px borders add a 2px horizontal overflow inside the compact settings
+     detail (measured 387 vs 385 at 390px). */
+  box-sizing: border-box;
   background: var(--dsw-alias-bg-module-platform);
   border: 1px solid var(--dsw-alias-border-l2);
   border-radius: 12px;

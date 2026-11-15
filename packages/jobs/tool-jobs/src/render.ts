@@ -60,6 +60,74 @@ export function statusLine(snapshot: Pick<PublicJobSnapshot, 'status' | 'detail'
 }
 
 /**
+ * Host-owned label that frames a retained stderr excerpt as untrusted job
+ * output: it is verbatim retained text, never a diagnosis or an instruction.
+ */
+export const STDERR_EXCERPT_LABEL = 'stderr excerpt (retained output; verbatim, not a diagnosis)'
+
+/** Opening of the single-line excerpt metadata; a fitted read keeps this head beside its status footer. */
+export const STDERR_EXCERPT_PREFIX = `[${STDERR_EXCERPT_LABEL}: `
+
+/**
+ * Escape one code point so the excerpt stays on its metadata line and cannot
+ * forge additional model-visible lines.
+ * @param char - one code point of job output.
+ * @returns the printable form: the character itself, a named escape, or a `\\uXXXX` escape.
+ */
+function escapeMetadataCharacter(char: string): string {
+  switch (char) {
+    case '\\': return '\\\\'
+    case '\n': return '\\n'
+    case '\r': return '\\r'
+    case '\t': return '\\t'
+    case '\u2028': return '\\u2028'
+    case '\u2029': return '\\u2029'
+    default: {
+      // Control ranges are BMP-only, so the first UTF-16 unit classifies them;
+      // astral code points are above C1 and stay verbatim.
+      const code = char.charCodeAt(0)
+      return code < 0x20 || (code >= 0x7f && code <= 0x9f)
+        ? `\\u${code.toString(16).padStart(4, '0')}`
+        : char
+    }
+  }
+}
+
+/**
+ * Clip escaped job output to a whole-code-point character budget.
+ * @param text - retained job output.
+ * @param maxChars - maximum displayed characters.
+ * @returns the escaped prefix that fits, never splitting a surrogate pair or escape.
+ */
+function clipMetadata(text: string, maxChars: number): string {
+  let out = ''
+  let used = 0
+  for (const char of text) {
+    const piece = escapeMetadataCharacter(char)
+    const width = piece === char ? 1 : piece.length
+    if (used + width > maxChars) break
+    out += piece
+    used += width
+  }
+  return out
+}
+
+/**
+ * Render the first retained stderr chunk of a read as one bounded metadata
+ * line. Retention may already have dropped earlier stderr, so the label says
+ * "retained output" rather than claiming the job's first error.
+ * @param chunks - chunks this read already returned; `log` narration is ignored.
+ * @param maxChars - maximum displayed characters of the excerpt text.
+ * @returns the bracketed line, or undefined when the read returned no stderr text.
+ */
+export function retainedStderrExcerpt(chunks: readonly JobChunk[], maxChars: number): string | undefined {
+  const first = chunks.find(chunk => chunk.channel === 'stderr' && /\S/u.test(chunk.text))
+  if (first === undefined) return undefined
+  const text = clipMetadata(first.text, maxChars)
+  return text.length > 0 ? `${STDERR_EXCERPT_PREFIX}${text}]` : undefined
+}
+
+/**
  * Render one consuming read for the model: stdout and unlabeled chunks in
  * order, then every stderr chunk in one `[stderr]` section, exactly as the
  * shell tools render a foreground result. `log` chunks are producer

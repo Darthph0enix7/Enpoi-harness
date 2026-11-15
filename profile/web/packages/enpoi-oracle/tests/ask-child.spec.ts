@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { askChild, ChildTurnTimeoutError, textOfContent, waitForChildMessageTurn } from '../src/ask-child.ts'
+import {
+  askChild,
+  ChildTurnTimeoutError,
+  ChildTurnUnavailableError,
+  textOfContent,
+  waitForChildMessageTurn,
+} from '../src/ask-child.ts'
 import { createOracleHarness, waitFor } from './harness.ts'
 
 const VERDICT = 'Reviewed.\n{"approved":true,"concerns":[],"unverified":[],"blockers":[]}'
@@ -33,6 +39,126 @@ describe('waitForChildMessageTurn', () => {
     expect(result.messageId).toBe(messageId)
     expect(result.text).toBe(VERDICT)
     expect(result.stopReason).toBe('completed')
+  })
+
+
+  it('settles a resident child from its live log without waiting for it to park', async () => {
+    const harness = createOracleHarness()
+    harness.setChildLive('child-1')
+    harness.seedPrompt('child-1', 'msg-1', 'review this')
+    harness.settle('child-1', 'msg-1', VERDICT, 'completed', { emitEnd: false })
+
+    const result = await waitForChildMessageTurn(harness.ctx as never, 'child-1' as never, 'msg-1' as never, {
+      signal: new AbortController().signal,
+      deadline: Date.now() + 2_000,
+      pollMs: 20,
+    })
+    expect(result.text).toBe(VERDICT)
+    expect(result.stopReason).toBe('completed')
+  })
+
+  it('needs only the live child when sessionPersistence is unavailable', async () => {
+    const harness = createOracleHarness()
+    delete harness.ctx.sessionPersistence
+    harness.setChildLive('child-1')
+    harness.seedPrompt('child-1', 'msg-1', 'review this')
+    harness.settle('child-1', 'msg-1', VERDICT, 'completed', { emitEnd: false })
+
+    const result = await waitForChildMessageTurn(harness.ctx as never, 'child-1' as never, 'msg-1' as never, {
+      signal: new AbortController().signal,
+      deadline: Date.now() + 2_000,
+      pollMs: 20,
+    })
+    expect(result.text).toBe(VERDICT)
+  })
+
+  it('never reports a later turn when the asked turn is still open', async () => {
+    const harness = createOracleHarness()
+    harness.setChildLive('child-1')
+    harness.seedPrompt('child-1', 'msg-1', 'first review')
+    harness.seedPrompt('child-1', 'msg-2', 'second review')
+    harness.settle('child-1', 'msg-2', 'VERDICT FOR THE SECOND TURN', 'completed', { emitEnd: false })
+
+    const error = await waitForChildMessageTurn(harness.ctx as never, 'child-1' as never, 'msg-1' as never, {
+      signal: new AbortController().signal,
+      deadline: Date.now() + 80,
+      pollMs: 10,
+    }).catch((thrown: unknown) => thrown)
+    expect(error).toBeInstanceOf(ChildTurnTimeoutError)
+  })
+
+  it('keeps scanning past a synthetic user message inside the asked turn', async () => {
+    const harness = createOracleHarness()
+    harness.seedPrompt('child-1', 'msg-1', 'review this')
+    harness.seedSyntheticUser('child-1', 'injected context')
+    harness.settle('child-1', 'msg-1', VERDICT)
+
+    const result = await waitForChildMessageTurn(harness.ctx as never, 'child-1' as never, 'msg-1' as never, {
+      signal: new AbortController().signal,
+      deadline: Date.now() + 2_000,
+      pollMs: 20,
+    })
+    expect(result.text).toBe(VERDICT)
+  })
+
+  it('keeps scanning past a human steering message inside the asked turn', async () => {
+    const harness = createOracleHarness()
+    harness.seedPrompt('child-1', 'msg-1', 'review this')
+    harness.seedSteeringUser('child-1', 'also check the retry path')
+    harness.settle('child-1', 'msg-1', VERDICT)
+
+    const result = await waitForChildMessageTurn(harness.ctx as never, 'child-1' as never, 'msg-1' as never, {
+      signal: new AbortController().signal,
+      deadline: Date.now() + 2_000,
+      pollMs: 20,
+    })
+    expect(result.text).toBe(VERDICT)
+  })
+
+  it('reports a child that ended before the asked turn was recorded', async () => {
+    const harness = createOracleHarness()
+    harness.seedPrompt('child-1', 'msg-1', 'review this')
+    const pending = waitForChildMessageTurn(harness.ctx as never, 'child-1' as never, 'msg-1' as never, {
+      signal: new AbortController().signal,
+      deadline: Date.now() + 2_000,
+      pollMs: 20,
+    })
+    harness.emitListeners('subagent/end', { id: 'child-1', stopReason: 'error' })
+
+    const error = await pending.catch((thrown: unknown) => thrown)
+    expect(error).toBeInstanceOf(ChildTurnUnavailableError)
+    expect((error as ChildTurnUnavailableError).reason).toBe('ended')
+    expect((error as ChildTurnUnavailableError).messageId).toBe('msg-1')
+  })
+
+  it('reports an unreadable parked child after the bounded absence grace', async () => {
+    const harness = createOracleHarness()
+    harness.seedPrompt('child-1', 'msg-1', 'review this')
+    const error = await waitForChildMessageTurn(harness.ctx as never, 'child-1' as never, 'msg-1' as never, {
+      signal: new AbortController().signal,
+      deadline: Date.now() + 2_000,
+      pollMs: 10,
+      absenceGraceMs: 40,
+    }).catch((thrown: unknown) => thrown)
+    expect(error).toBeInstanceOf(ChildTurnUnavailableError)
+    expect((error as ChildTurnUnavailableError).reason).toBe('unreadable-parked')
+  })
+
+  it('returns the recorded failure code and last successful tool result', async () => {
+    const harness = createOracleHarness()
+    harness.setChildLive('child-1')
+    harness.seedPrompt('child-1', 'msg-1', 'review this')
+    harness.seedToolResult('child-1')
+    harness.settle('child-1', 'msg-1', 'partial', 'error', { emitEnd: false, errorCode: 'PROVIDER_TIMEOUT' })
+
+    const result = await waitForChildMessageTurn(harness.ctx as never, 'child-1' as never, 'msg-1' as never, {
+      signal: new AbortController().signal,
+      deadline: Date.now() + 2_000,
+      pollMs: 20,
+    })
+    expect(result.stopReason).toBe('error')
+    expect(result.failureCode).toBe('PROVIDER_TIMEOUT')
+    expect(Number(result.lastSuccessfulOperationSeq)).toBe(2)
   })
 
   it('keeps waiting when the log does not carry the asked message', async () => {

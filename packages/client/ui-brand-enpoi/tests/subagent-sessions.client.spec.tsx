@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, afterEach, vi } from 'vitest'
-import { render, screen, cleanup, fireEvent, within } from '@testing-library/react'
+import { act, render, screen, cleanup, fireEvent, within } from '@testing-library/react'
 import { SubagentSessionsBody } from '../src/client/SubagentSessionsBody.tsx'
 import { mergeRoleRegistry, type RoleRegistryMap } from '../src/client/role-registry.ts'
 import { brandT } from './brand-i18n.client.ts'
@@ -11,20 +11,23 @@ interface Row {
   displayTitle: string
   parentId?: string
   origin?: 'subagent'
-  running?: boolean
+  running: boolean
   completed?: boolean
   blank?: boolean
   updatedAt?: number
   projectionValues?: {
     subagent?: { mode: 'one-shot' | 'continuable'; label?: string; seq?: number }
+    subagentTiming?: { lastTurnCompleted?: boolean }
   }
 }
 
 /** Arrival phase of the list projection, as SessionListState carries it. */
 type Phase = 'pending' | 'ready'
 
-function row(id: string, displayTitle: string, extra: Omit<Row, 'id' | 'displayTitle'> = {}): Row {
-  return { id, displayTitle, blank: false, updatedAt: 0, ...extra }
+type RowExtra = Omit<Row, 'id' | 'displayTitle' | 'running'> & { running?: boolean }
+
+function row(id: string, displayTitle: string, extra: RowExtra = {}): Row {
+  return { id, displayTitle, blank: false, running: false, updatedAt: 0, ...extra }
 }
 
 function byIdOf(rows: readonly Row[]): Record<string, Row> {
@@ -32,8 +35,8 @@ function byIdOf(rows: readonly Row[]): Record<string, Row> {
 }
 
 /** One catalog child entry, as the host's subagent catalog projects it. */
-function childEntry(id: string, mode: 'one-shot' | 'continuable' = 'continuable', label = 'child') {
-  return { kind: 'child' as const, id, mode, label, activity: 'inactive' as const, hasChildren: false }
+function childEntry(id: string, mode: 'one-shot' | 'continuable' = 'continuable', label = 'child', createdAt = 1) {
+  return { id, mode, label, createdAt, seq: 0 }
 }
 
 function mount(
@@ -64,9 +67,14 @@ function mount(
   const view = render(<SubagentSessionsBody {...props} />)
 
   /** Re-render the same instance with new props, as a session switch does. */
-  const rerender = (next: { sessionId?: string; rows?: Row[]; phase?: Phase } = {}): void => {
+  const rerender = (next: {
+    sessionId?: string
+    rows?: Row[]
+    phase?: Phase
+    catalogs?: Record<string, unknown>
+  } = {}): void => {
     const useNextSessions = (selector: (state: { byId: Record<string, Row>; phase: Phase; projectionsBySession: unknown }) => unknown) =>
-      selector({ byId: byIdOf(next.rows ?? rows), phase: next.phase ?? phase, projectionsBySession: catalogs })
+      selector({ byId: byIdOf(next.rows ?? rows), phase: next.phase ?? phase, projectionsBySession: next.catalogs ?? catalogs })
     const nextProps = {
       ...props,
       sessionId: next.sessionId ?? sessionId,
@@ -87,6 +95,7 @@ function mount(
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
 })
 
 describe('SubagentSessionsBody — lineage tree', () => {
@@ -152,11 +161,228 @@ describe('SubagentSessionsBody — lineage tree', () => {
     expect(openSession).toHaveBeenCalledWith('main')
   })
 
-  it('caps rows at 50 and reports the full total', () => {
-    const children = Array.from({ length: 60 }, (_, index) => row(`c${index}`, `Child ${index}`, { parentId: 'main', origin: 'subagent' }))
-    mount([row('main', 'Main Session'), ...children], 'main')
+  it('orders running first, then latest update, and keeps each subtree contiguous', () => {
+    const { list } = mount([
+      row('main', 'Main Session', { updatedAt: 1 }),
+      row('old-running', 'Old running', { parentId: 'main', origin: 'subagent', running: true, updatedAt: 10 }),
+      row('newest', 'Newest idle', { parentId: 'main', origin: 'subagent', updatedAt: 40 }),
+      row('grand', 'Grandchild', { parentId: 'newest', origin: 'subagent', updatedAt: 30 }),
+      row('middle', 'Middle idle', { parentId: 'main', origin: 'subagent', updatedAt: 20 }),
+    ], 'main')
+
+    const text = list().getAllByRole('button').map(button => button.textContent ?? '')
+    const order = ['Main Session', 'Old running', 'Newest idle', 'Grandchild', 'Middle idle']
+    const positions = order.map(value => text.findIndex(entry => entry.includes(value)))
+    expect(positions.every(value => value >= 0)).toBe(true)
+    expect(positions).toEqual([...positions].sort((left, right) => left - right))
+  })
+
+  it('uses catalog creation time when a list row has no durable update time', () => {
+    const { list } = mount([
+      row('main', 'Main Session', { updatedAt: 100 }),
+      row('old', 'Catalog child', { parentId: 'main', origin: 'subagent', updatedAt: 0 }),
+      row('newer', 'Newer child', { parentId: 'main', origin: 'subagent', updatedAt: 50 }),
+    ], 'main', 'ready', { main: { values: { subagentCatalog: [childEntry('old', 'continuable', 'Catalog child', 200)] } } })
+
+    const text = list().getAllByRole('button').map(button => button.textContent ?? '')
+    expect(text.findIndex(entry => entry.includes('Catalog child')))
+      .toBeLessThan(text.findIndex(entry => entry.includes('Newer child')))
+  })
+
+  it('keeps the current row and its ancestors inside the cap', () => {
+    const children = Array.from({ length: 60 }, (_, index) => row(`c${index}`, `Child ${index}`, {
+      parentId: 'main', origin: 'subagent', updatedAt: index + 1,
+    }))
+    const { list } = mount([row('main', 'Main Session', { updatedAt: 1 }), ...children], 'c0')
 
     expect(screen.getByText(/Showing 50 of 61/)).toBeTruthy()
+    expect(list().getByText('Main Session')).toBeTruthy()
+    expect(list().getByText('Child 0')).toBeTruthy()
+    expect(list().getByText('Child 59')).toBeTruthy()
+    expect(list().queryByText('Child 5')).toBeNull()
+  })
+
+  it('fills an absent parent from one unambiguous catalog claim', () => {
+    const { list } = mount([
+      row('main', 'Main Session'),
+      row('child', 'Child with catalog parent', { origin: 'subagent' }),
+    ], 'child', 'ready', {
+      main: { values: { subagentCatalog: [childEntry('child', 'continuable', 'Child with catalog parent')] } },
+    })
+
+    expect(list().getAllByText('Main').length).toBe(1)
+    const child = list().getByText('Child with catalog parent').closest('button') as HTMLElement
+    expect(Number(/\d+/.exec(child.style.paddingLeft)?.[0])).toBeGreaterThan(0)
+  })
+
+  it('drops cycle-closing catalog edges and keeps one finite root', () => {
+    const { list } = mount([
+      row('a', 'Cycle child', { parentId: 'x', origin: 'subagent', updatedAt: 1 }),
+      row('x', 'Cycle root', { parentId: 'y', origin: 'subagent', updatedAt: 3 }),
+      row('y', 'Cycle sibling', { parentId: 'x', origin: 'subagent', updatedAt: 2 }),
+    ], 'x')
+
+    expect(list().getAllByRole('button')).toHaveLength(2)
+    expect(list().getByText('Cycle root')).toBeTruthy()
+    expect(list().getByText('Cycle sibling')).toBeTruthy()
+    expect(screen.queryByText('Cycle child')).toBeNull()
+    expect(screen.queryByText('Main')).toBeNull()
+  })
+
+  it('does not override an authoritative parent that is outside the projection', () => {
+    const { list } = mount([
+      row('child', 'Child with absent parent', { parentId: 'absent-root', origin: 'subagent' }),
+    ], 'child', 'ready', {
+      main: { values: { subagentCatalog: [childEntry('child', 'continuable', 'Child with absent parent')] } },
+    })
+
+    expect(list().getByText('Subagent')).toBeTruthy()
+    expect(screen.queryByText('Main')).toBeNull()
+  })
+
+  it('labels a depth-zero subagent as a subagent, never as main', () => {
+    const { list } = mount([
+      row('orphan', 'Orphan child', { origin: 'subagent' }),
+    ], 'orphan')
+
+    expect(list().getByText('Subagent')).toBeTruthy()
+    expect(screen.queryByText('Main')).toBeNull()
+  })
+
+  it('keeps an authoritative parent when catalogs disagree and uses the latest creation time', () => {
+    const { list } = mount([
+      row('main', 'Main Session', { updatedAt: 1 }),
+      row('child', 'Disputed child', { parentId: 'main', origin: 'subagent', updatedAt: 0 }),
+      row('other', 'Other child', { parentId: 'main', origin: 'subagent', updatedAt: 15 }),
+    ], 'main', 'ready', {
+      'root-a': { values: { subagentCatalog: [
+        childEntry('child', 'continuable', 'Disputed child', 10),
+        childEntry('child', 'continuable', 'Disputed child', 20),
+      ] } },
+      'root-b': { values: { subagentCatalog: [childEntry('child', 'continuable', 'Disputed child', 30)] } },
+      'root-c': { values: { subagentCatalog: [childEntry('child', 'continuable', 'Disputed child', 40)] } },
+    })
+
+    const text = list().getAllByRole('button').map(button => button.textContent ?? '')
+    // The competing claims cannot replace the row's authoritative parent; the
+    // latest catalog creation time still orders the disputed child.
+    expect(text.findIndex(entry => entry.includes('Disputed child')))
+      .toBeLessThan(text.findIndex(entry => entry.includes('Other child')))
+    expect(text.filter(entry => entry.includes('Disputed child'))).toHaveLength(1)
+    expect(list().getAllByText('Main').length).toBe(1)
+  })
+
+  it('marks idle children done only with durable completion evidence', () => {
+    const { list } = mount([
+      row('main', 'Main Session'),
+      row('idle', 'Idle child', { parentId: 'main', origin: 'subagent' }),
+      row('done', 'Completed child', {
+        parentId: 'main', origin: 'subagent',
+        projectionValues: { subagentTiming: { lastTurnCompleted: true } },
+      }),
+    ], 'main')
+
+    expect((list().getByText('Idle child').closest('button') as HTMLElement).querySelector('[data-state="idle"]')).toBeTruthy()
+    expect((list().getByText('Completed child').closest('button') as HTMLElement).querySelector('[data-state="done"]')).toBeTruthy()
+  })
+
+  it('never renders a forest when the selected session is missing', () => {
+    mount([
+      row('root-a', 'First root', { updatedAt: 2 }),
+      row('root-b', 'Second root', { updatedAt: 1 }),
+    ], 'missing')
+
+    expect(screen.queryByText('Main')).toBeNull()
+    expect(screen.getByText('No subagent sessions yet')).toBeTruthy()
+  })
+
+  it('formats compact ages and advances the clock without list churn', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+    const now = Date.now()
+    const { list } = mount([
+      row('main', 'Main Session'),
+      row('now', 'Just now', { parentId: 'main', origin: 'subagent', updatedAt: now }),
+      row('minutes', 'Minutes', { parentId: 'main', origin: 'subagent', updatedAt: now - 5 * 60_000 }),
+      row('hours', 'Hours', { parentId: 'main', origin: 'subagent', updatedAt: now - 2 * 3_600_000 }),
+      row('days', 'Days', { parentId: 'main', origin: 'subagent', updatedAt: now - 2 * 86_400_000 }),
+    ], 'main')
+
+    for (const label of ['just now', '5m ago', '2h ago', '2d ago']) {
+      expect(list().getByText(label)).toBeTruthy()
+    }
+    act(() => { vi.advanceTimersByTime(30_000) })
+  })
+
+  it('labels a non-subagent child as a session', () => {
+    const { list } = mount([
+      row('main', 'Main Session'),
+      row('fork', 'Fork child', { parentId: 'main' }),
+    ], 'main')
+
+    expect(list().getByText('Session')).toBeTruthy()
+  })
+
+  it('tolerates missing catalog values and unlabeled catalog children', () => {
+    const { list } = mount([
+      row('main', 'Main Session'),
+    ], 'main', 'ready', {
+      main: { values: {
+        subagentCatalog: [{ id: 'catalog-child', mode: 'one-shot', createdAt: 5, seq: 0 }],
+      } },
+      empty: { values: {} },
+    })
+
+    expect(list().getByText('catalog-child')).toBeTruthy()
+  })
+
+  it('opens a deferred child when its parent catalog arrives', () => {
+    const { openChild, openSession, list, rerender } = mount([
+      row('main', 'Main Session'),
+      row('child', 'Fixer child', { parentId: 'main', origin: 'subagent' }),
+      row('grand', 'Grandchild', { parentId: 'child', origin: 'subagent' }),
+    ], 'grand')
+
+    fireEvent.click(list().getByText('Fixer child'))
+    expect(openSession).toHaveBeenCalledWith('main')
+    expect(openChild).not.toHaveBeenCalled()
+
+    rerender({ catalogs: { main: { values: { subagentCatalog: [childEntry('child')] } } } })
+    expect(openChild).toHaveBeenCalledWith({
+      parentSessionId: 'main', childSessionId: 'child', mode: 'continuable',
+    })
+  })
+
+  it('stops waiting for a deferred child whose catalog never arrives', () => {
+    vi.useFakeTimers()
+    const { openChild, openSession, list } = mount([
+      row('main', 'Main Session'),
+      row('child', 'Fixer child', { parentId: 'main', origin: 'subagent' }),
+    ], 'child')
+
+    fireEvent.click(list().getByText('Fixer child'))
+    expect(openSession).toHaveBeenCalledWith('main')
+    act(() => { vi.advanceTimersByTime(2_500) })
+    expect(openChild).not.toHaveBeenCalled()
+  })
+
+  it('coalesces refresh clicks and exposes the refreshing state', async () => {
+    const { refreshSessions } = mount([row('main', 'Main Session')], 'main')
+    let settle!: () => void
+    const pull = new Promise<void>((resolve) => { settle = resolve })
+    refreshSessions.mockImplementation(() => pull)
+    const refresh = screen.getByRole('button', { name: 'Refresh session list' })
+
+    fireEvent.click(refresh)
+    fireEvent.click(refresh)
+    expect(refreshSessions).toHaveBeenCalledOnce()
+    expect(refresh.className).toContain('refreshing')
+
+    await act(async () => {
+      settle()
+      await pull
+    })
+    expect(refresh.className).not.toContain('refreshing')
   })
 
   it('keeps the empty state when the list projection has no sessions', () => {
@@ -166,6 +392,11 @@ describe('SubagentSessionsBody — lineage tree', () => {
 
   it('shows the empty state while the first list snapshot is still pending', () => {
     mount([], 'child', 'pending')
+    expect(screen.getByText('No subagent sessions yet')).toBeTruthy()
+  })
+
+  it('treats an empty session id as no selected row', () => {
+    mount([], '')
     expect(screen.getByText('No subagent sessions yet')).toBeTruthy()
   })
 })
@@ -194,7 +425,7 @@ describe('SubagentSessionsBody — agent identity rows', () => {
     const critic = list().getByText('Critic').closest('button') as HTMLElement
     expect(critic.textContent).toContain('Debate the migration plan')
     // Reading order proves the persona is the primary label and the query secondary.
-    expect(critic.textContent!.indexOf('Critic')).toBeLessThan(critic.textContent!.indexOf('Debate the migration plan'))
+    expect((critic.textContent ?? '').indexOf('Critic')).toBeLessThan((critic.textContent ?? '').indexOf('Debate the migration plan'))
 
     // An all-lowercase host label is title-cased for display.
     const skeptic = list().getByText('Skeptic').closest('button') as HTMLElement
@@ -217,7 +448,7 @@ describe('SubagentSessionsBody — agent identity rows', () => {
     // A registry role with a label leads the row; the query stays secondary.
     const muse = list().getByText('The Muse').closest('button') as HTMLElement
     expect(muse.textContent).toContain('Draft the set')
-    expect(muse.textContent!.indexOf('The Muse')).toBeLessThan(muse.textContent!.indexOf('Draft the set'))
+    expect((muse.textContent ?? '').indexOf('The Muse')).toBeLessThan((muse.textContent ?? '').indexOf('Draft the set'))
 
     // A registry role without a label falls back to the title-cased role id.
     const scribe = list().getByText('Scribe').closest('button') as HTMLElement
@@ -257,26 +488,49 @@ describe('SubagentSessionsBody — agent identity rows', () => {
     // parent's durable catalog keeps it on the panel with its role intact.
     const failed = list().getByText('Designer').closest('button') as HTMLElement
     expect(failed.textContent).toContain('Design watch controls')
-    // Settled, not running: the panel never claims a dead child is still alive.
-    expect(failed.querySelector('[data-state="done"]')).toBeTruthy()
+    // No durable completion evidence: the panel shows idle, not invented done.
+    expect(failed.querySelector('[data-state="idle"]')).toBeTruthy()
   })
 
-  it('keeps the lineage on screen when opening a row lands on a pending snapshot', () => {
-    const { openSession, refreshSessions, list, rerender } = mount([
+  it('keeps only the same session lineage while its snapshot is pending', () => {
+    const { refreshSessions, list, rerender } = mount([
       row('main', 'Main Session'),
       row('child', 'Debate the migration plan', { parentId: 'main', origin: 'subagent' }),
-    ])
+    ], 'child')
 
-    fireEvent.click(list().getByText('Main Session'))
-    expect(openSession).toHaveBeenCalledWith('main')
-
-    // The switched session's list snapshot is momentarily unavailable (pending
-    // re-pull); the panel keeps drawing the previous tree instead of blanking.
-    rerender({ sessionId: 'main', rows: [], phase: 'pending' })
+    // The selected session's list snapshot is momentarily unavailable (pending
+    // re-pull); the panel keeps drawing its own previous tree instead of blanking.
+    rerender({ rows: [], phase: 'pending' })
 
     expect(list().getByText('Main Session')).toBeTruthy()
     expect(list().getByText('Debate the migration plan')).toBeTruthy()
-    // Opening a row and re-rendering never trigger a refresh fetch by themselves.
+    // Re-rendering never triggers a refresh fetch by itself.
     expect(refreshSessions).not.toHaveBeenCalled()
+  })
+
+  it('does not retain a removed session tree after a ready snapshot', () => {
+    const { rerender } = mount([
+      row('main', 'Main Session'),
+      row('child', 'Debate the migration plan', { parentId: 'main', origin: 'subagent' }),
+    ], 'main')
+
+    rerender({ rows: [], phase: 'ready' })
+
+    expect(screen.queryByText('Main Session')).toBeNull()
+    expect(screen.queryByText('Debate the migration plan')).toBeNull()
+    expect(screen.getByText('No subagent sessions yet')).toBeTruthy()
+  })
+
+  it('never retains another session root for a newly selected session', () => {
+    const { rerender } = mount([
+      row('main', 'Main Session'),
+      row('child', 'Debate the migration plan', { parentId: 'main', origin: 'subagent' }),
+    ], 'child')
+
+    rerender({ sessionId: 'other', rows: [], phase: 'pending' })
+
+    expect(screen.queryByText('Main Session')).toBeNull()
+    expect(screen.queryByText('Debate the migration plan')).toBeNull()
+    expect(screen.getByText('No subagent sessions yet')).toBeTruthy()
   })
 })

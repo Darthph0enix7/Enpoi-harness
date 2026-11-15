@@ -10,16 +10,114 @@ import type {
   BootManifest, ClientModuleCreateOptions, ClientModuleSystem, DshWindow,
 } from '@deepseek-ai/dsh-client-modules/client'
 import { installBootGate } from './boot-gate.ts'
-import { installClientHealth, type ClientHealth } from './client-health.ts'
+import {
+  installClientHealth, type BootFailureDisposition, type ClientHealth,
+} from './client-health.ts'
 import { bootClient } from './boot-client.ts'
-import { BootPage } from './boot-page.ts'
+import { BootPage, type BootRetryFeedback } from './boot-page.ts'
 import { mountClient } from './mount.ts'
 import { getStaticModules } from './seed.ts'
 import { installWindowDragRecall } from './window-drag/recall.ts'
 import './base.css'
 
-/** Module transport hook replaced by jsdom tests. */
-export type BootSeams = Pick<ClientModuleCreateOptions, 'loadBundle'>
+/** Stage whose failure the startup classifier is judging. */
+export type BootFailureStage =
+  /** Injection bootstrap, module-system construction, or manifest validation. */
+  | 'bootstrap'
+  /** Bundle import or plugin activation through the Loader. */
+  | 'plugins'
+  /** Renderer handoff, reveal gate, or first application mount. */
+  | 'mount'
+
+/** Carrier-owned fatal presentation; retryable failures also receive an action. */
+export type BootFailureHandler = (
+  reason: unknown,
+  retry?: () => BootRetryFeedback,
+) => void
+
+/** Module transport and page-health hooks replaced by jsdom tests. */
+export interface BootSeams extends Pick<ClientModuleCreateOptions, 'loadBundle'> {
+  /**
+   * Page-health monitor replacement owned by the caller until {@link AppWebEntry.dispose}.
+   * Production omits it: the kernel installs the page's own monitor.
+   */
+  health?: ClientHealth
+}
+
+/**
+ * Transport-shaped messages that mean a bundle could not be fetched, as
+ * opposed to a deterministic plugin/export/manifest failure. Browsers and the
+ * worker transport spell the same condition differently, so the classifier
+ * checks the whole `cause` chain instead of one engine's wording.
+ */
+const TRANSIENT_BOOT_ERROR = new RegExp([
+  'failed to fetch',
+  'fetch failed',
+  'network ?error',
+  'networkerror',
+  'load failed',
+  'chunkloaderror',
+  'error loading dynamically imported module',
+  'dynamically imported module',
+  'importing a module script failed',
+  'module script failed',
+  'internet connection appears to be offline',
+  '\\boffline\\b',
+  'err_(?:network|internet_disconnected|connection_(?:refused|reset|closed)|timed_out)',
+  'econn(?:reset|refused)',
+  'etimedout',
+  'enotfound',
+  'eai_again',
+].join('|'), 'i')
+
+/**
+ * Whether one thrown value (or any cause in its chain) is a retryable
+ * transport/module-fetch failure rather than a deterministic startup error.
+ * @param reason - value thrown while loading or activating the client.
+ * @returns true for transport, network, chunk, and offline errors.
+ */
+export function isTransientBootError(reason: unknown): boolean {
+  const seen = new Set<unknown>()
+  let current: unknown = reason
+  while (current !== null && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current)
+    if (current instanceof Error) {
+      if (current.name === 'NetworkError') return true
+      if (TRANSIENT_BOOT_ERROR.test(current.message)) return true
+      const code: unknown = (current as { code?: unknown }).code
+      if (typeof code === 'string' && TRANSIENT_BOOT_ERROR.test(code)) return true
+    }
+    current = (current as { cause?: unknown }).cause
+  }
+  return typeof reason === 'string' && TRANSIENT_BOOT_ERROR.test(reason)
+}
+
+/**
+ * Classify one visible startup failure. Plugin-stage failures are transport
+ * failures only when the module system recorded a transient import error;
+ * plugin activation, export, manifest, and configuration errors stay fatal
+ * even if their own text happens to resemble a network error.
+ * @param reason - value caught by the boot kernel.
+ * @param stage - boot stage that failed.
+ * @param modules - module system carrying the per-row import error, when ready.
+ * @param pluginIds - manifest rows whose imports the plugin stage attempted.
+ * @returns the recovery disposition for the visible boot page.
+ */
+export function classifyBootFailure(
+  reason: unknown,
+  stage: BootFailureStage,
+  modules?: Pick<ClientModuleSystem, 'importError'>,
+  pluginIds: readonly string[] = [],
+): BootFailureDisposition {
+  if (stage === 'plugins') {
+    if (modules === undefined) return 'fatal'
+    return pluginIds.some((id) => {
+      const error = modules.importError(id)
+      return error !== undefined && isTransientBootError(error)
+    }) ? 'retryable' : 'fatal'
+  }
+  return stage === 'mount' && isTransientBootError(reason) ? 'retryable' : 'fatal'
+}
 
 /** Browser boot entry consumed by `apps/web`. */
 export class AppWebEntry {
@@ -48,18 +146,21 @@ export class AppWebEntry {
   /**
    * Load and activate every client entry, then hand the mount point to the
    * UI renderer. Plugin failures remain visible on the boot page.
-   * @param onFailure - Optional carrier-owned fatal presentation; keeps the boot page visible.
+   * @param onFailure - Optional carrier-owned presentation; a retryable failure
+   * also receives the explicit retry action. Keeps the boot page visible.
    * @returns Resolves after application mount or failure reporting.
    */
-  async run(onFailure?: (reason: unknown) => void): Promise<void> {
+  async run(onFailure?: BootFailureHandler): Promise<void> {
     // The page health net installs before the first await: a stalled boot, an
     // error/rejection breadcrumb, or a fatal render crash all have one owner,
     // and the boot deadline covers everything the failure rendering below
     // cannot see.
-    const health = this.health ??= installClientHealth({
+    const { health: healthSeam, ...moduleSeams } = this.seams ?? {}
+    const health = this.health ??= healthSeam ?? installClientHealth({
       container: this.container,
       bootProgress: () => this.bootProgress,
     })
+    let stage: BootFailureStage = 'bootstrap'
     try {
       // Boot-readiness gate: whichever bootstrap applies the injection table
       // settles this deferred once every row has taken effect — the served
@@ -87,7 +188,7 @@ export class AppWebEntry {
         boot: win.__DSH_BOOT__,
         staticModules: getStaticModules(),
         ...transport?.loadBundle === undefined ? {} : { loadBundle: transport.loadBundle },
-        ...this.seams,
+        ...moduleSeams,
       })
       this.manifest = this.modules.manifest
       // Advertised critical reads (sessions, settings) hold the boot page until
@@ -100,6 +201,7 @@ export class AppWebEntry {
       this.page.setTotal(this.manifest.plugins.length)
       await prefetching
       this.bootProgress += 1
+      stage = 'plugins'
       await bootClient({
         ctx,
         modules: this.modules,
@@ -110,6 +212,7 @@ export class AppWebEntry {
         },
       })
       this.bootProgress += 1
+      stage = 'mount'
       // The shell owns the one watcher that keeps Electron's window drag rects in
       // step with the rows that own them (electron#32341), so no chrome row has to
       // know that trap. It installs before the first mount, so the surface the
@@ -123,12 +226,50 @@ export class AppWebEntry {
       await mountClient(ctx, this.container)
       health.markBootComplete()
     } catch (reason) {
-      // The failure is visible on the boot page (or the carrier's own surface);
-      // the watchdog must not reload in a loop over a deterministic failure.
-      health.markBootFailed()
+      // The failure stays visible on the boot page (or the carrier's own
+      // surface). A transport/module-fetch failure keeps a bounded recovery
+      // path through online/pageshow/visible events and the page's explicit
+      // retry action; a deterministic plugin/export/config failure never
+      // auto-reloads. The guard's cooldown and rolling cap bound both paths.
+      const disposition = stage === 'plugins'
+        ? classifyBootFailure(reason, stage, this.modules, this.manifest.plugins.map(row => row.id))
+        : classifyBootFailure(reason, stage)
+      health.markBootFailed(disposition)
       console.error(reason)
-      if (onFailure !== undefined) onFailure(reason)
-      else this.page.fail(reason instanceof Error ? reason.message : String(reason))
+      const retry = (): BootRetryFeedback => this.retryFeedback(health.retryBoot())
+      if (onFailure !== undefined) {
+        if (disposition === 'retryable') onFailure(reason, retry)
+        else onFailure(reason)
+      } else {
+        this.page.fail(
+          reason instanceof Error ? reason.message : String(reason),
+          retry,
+        )
+      }
+    }
+  }
+
+  /** Translate one guarded retry outcome into visible boot-page feedback. */
+  private retryFeedback(outcome: ReturnType<ClientHealth['retryBoot']>): BootRetryFeedback {
+    if (outcome.kind === 'reload') return { message: 'Reloading…', disabled: true }
+    if (outcome.kind === 'ignored') {
+      return {
+        message: outcome.reason === 'disposed'
+          ? 'Retry is no longer available; reload the page manually.'
+          : 'Retry is only available after a visible boot failure; reload the page manually.',
+        disabled: true,
+      }
+    }
+    if (outcome.reason === 'cooldown') {
+      const seconds = Math.max(1, Math.ceil((outcome.retryAfterMs ?? 0) / 1000))
+      return { message: `Retry is cooling down; try again in ${String(seconds)}s or reload the page manually.` }
+    }
+    if (outcome.reason === 'limit') {
+      return { message: 'Retry limit reached; reload the page manually to try again.', disabled: true }
+    }
+    return {
+      message: 'Retry guard storage is unavailable; reload the page manually to try again.',
+      disabled: true,
     }
   }
 

@@ -193,6 +193,11 @@ export function makePipeline(db: DatabaseSync) {
    * - keeper: `source: 'keeper'`, non-blank `sessionId`, non-negative integer
    *   `batchBasedOnSeq`, and JSON `settled: true`, written after model
    *   settlement and the live ownership check.
+   * - child `memory_save` under `worker[:<role>]`: `source: 'memory_save'`, a
+   *   non-blank `sessionId`, and JSON `settled: true`. The tool call wrote the
+   *   row before returning; a root `memory_save` is committed and cannot reach
+   *   this branch. The recorded `parentSessionId`/`callId` are attribution,
+   *   not proof.
    * This is a structural source-record check, not authentication. Rescinded and
    * already-orphaned rows are never touched.
    */
@@ -230,6 +235,18 @@ export function makePipeline(db: DatabaseSync) {
                       )) > 0
                       AND json_type(provenance, '$.batchBasedOnSeq') = 'integer'
                       AND json_extract(provenance, '$.batchBasedOnSeq') >= 0
+                      AND json_type(provenance, '$.settled') = 'true'
+                    )
+                    OR
+                    (
+                      (origin = 'worker' OR substr(origin, 1, 7) = 'worker:')
+                      AND json_type(provenance, '$.source') = 'text'
+                      AND json_extract(provenance, '$.source') = 'memory_save'
+                      AND json_type(provenance, '$.sessionId') = 'text'
+                      AND length(trim(
+                        json_extract(provenance, '$.sessionId'),
+                        char(9) || char(10) || char(11) || char(12) || char(13) || ' '
+                      )) > 0
                       AND json_type(provenance, '$.settled') = 'true'
                     )
                   ),

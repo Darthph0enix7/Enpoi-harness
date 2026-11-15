@@ -8,9 +8,8 @@
  * child's workspace relation, return one short sentence plus an advisory
  * suggestion (`allow` / `reject` / `allow-once`). On an interactive card the
  * answer is PRESENTATION ONLY — the card renders it as its own line and the
- * human's answer resolves the ask. In Full access (no card) the SAME call is
- * the parent's judgement and its suggestion IS applied in the operator's place
- * (forwarding.ts); the prompt says so when `applied` is set.
+ * human's answer resolves the ask. Full access does not call this seam: the
+ * root's standing consent is applied directly by the forwarder.
  *
  * Bounds: the call is deadline-bounded ({@link RECOMMENDATION_TIMEOUT_MS}),
  * caps its output tokens, and answers `undefined` on ANY failure (error,
@@ -44,8 +43,12 @@ export const RECOMMENDATION_MAX_TOKENS = 96
 /** Longest recommendation line shown on the card (longer answers are clipped). */
 export const RECOMMENDATION_MAX_CHARS = 240
 
-/** Longest serialized argument payload sent to the reasoner. */
-const ARGUMENTS_MAX_CHARS = 600
+/**
+ * One display-only cap for the advisory prompt. This is not a model budget,
+ * quota, or policy decision: policy and rails always evaluate the complete
+ * command, and the prompt explicitly marks any clipped display.
+ */
+const DISPLAY_MAX_CHARS = 16_384
 
 /** The advisory suggestion vocabulary; every parsed answer is validated against it. */
 const SUGGESTIONS: readonly RecommendationSuggestion[] = ['allow', 'reject', 'allow-once']
@@ -57,12 +60,6 @@ const SYSTEM_PROMPT = [
   '{"text": "<one short sentence, at most 160 characters>", "suggestion": "allow" | "reject" | "allow-once"}',
   'Judge only from the facts given. "allow-once" = the action looks safe to run once; "allow" = safe and repeatable; "reject" = risky.',
   'Your answer is advisory: the human answers the card. Never output code, commands, or tool calls.',
-].join('\n')
-
-/** Appended when the answer is applied as the decision (Full access, no card). */
-const APPLIED_PROMPT = [
-  'This request comes from a root session in Full access: there is no human card, and your suggestion is APPLIED as the decision in the operator\'s place.',
-  'Judge accordingly: reject anything you are not certain is safe.',
 ].join('\n')
 
 /** The facts one root-side recommendation call is made from. */
@@ -77,11 +74,8 @@ export interface RecommendationAsk {
   readonly rail?: RailHit | undefined
   /** The ask the child's own policy produced (why it asked + matched rule). */
   readonly decision: AskDecision
-  /**
-   * True when this answer is APPLIED as the decision (the Full-access parent
-   * judgement) rather than rendered as card advice; the prompt says so.
-   */
-  readonly applied?: boolean | undefined
+  /** The captured command actually classified/run, when the tool has one. */
+  readonly command?: string | undefined
 }
 
 /** The host-owned model call the one recommendation attempt runs through. */
@@ -114,16 +108,42 @@ function shortId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id
 }
 
-/** One argument payload bounded for the prompt; lossless JSON or a placeholder. */
-function boundedArguments(args: Record<string, unknown> | undefined): string {
-  if (args === undefined) return '(none)'
+/** One bounded argument view that is always valid JSON. */
+interface BoundedArguments {
+  readonly json: string
+  readonly truncated: boolean
+}
+
+/**
+ * Bound the serialized arguments without corrupting the JSON. A truncated
+ * payload becomes a valid wrapper object; the truncation marker lives outside
+ * the payload body so a reader can tell display loss from data loss. Policy and
+ * rails always evaluate the complete command, never this preview.
+ */
+function boundedArguments(args: Record<string, unknown> | undefined): BoundedArguments {
+  if (args === undefined) return { json: '{"_none":true}', truncated: false }
   let serialized: string
   try {
-    serialized = JSON.stringify(args) ?? '(unserializable)'
+    serialized = JSON.stringify(args) ?? '{"_unserializable":true}'
   } catch {
-    serialized = '(unserializable)'
+    serialized = '{"_unserializable":true}'
   }
-  return serialized.length > ARGUMENTS_MAX_CHARS ? `${serialized.slice(0, ARGUMENTS_MAX_CHARS - 1)}…` : serialized
+  if (serialized.length <= DISPLAY_MAX_CHARS) return { json: serialized, truncated: false }
+  return {
+    json: JSON.stringify({
+      _truncated: true,
+      _originalCharacters: serialized.length,
+      preview: serialized.slice(0, DISPLAY_MAX_CHARS),
+    }),
+    truncated: true,
+  }
+}
+
+/** One command view for the prompt: verbatim when bounded, explicitly clipped otherwise. */
+function boundedCommand(command: string | undefined): { text: string; truncated: boolean } | undefined {
+  if (command === undefined || command.trim() === '') return undefined
+  if (command.length <= DISPLAY_MAX_CHARS) return { text: command, truncated: false }
+  return { text: `${command.slice(0, DISPLAY_MAX_CHARS)}…`, truncated: true }
 }
 
 /**
@@ -136,17 +156,26 @@ export function buildRecommendationPrompt(ask: RecommendationAsk): { system: str
   const rail = ask.rail === undefined
     ? 'no never-approvable class matched'
     : `matched ${ask.rail.rail} (${ask.rail.evidence})`
-  const user = [
+  const args = boundedArguments(ask.args)
+  const command = boundedCommand(ask.command)
+  const lines = [
     'Forwarded child ask',
     `tool: ${ask.toolName}`,
-    `arguments: ${boundedArguments(ask.args)}`,
+    `arguments: ${args.json}`,
+    ...command === undefined ? [] : [`command: ${command.text}`],
     `child: ${ask.origin.label} (depth ${ask.origin.depth}, session ${shortId(ask.origin.childSessionId)})`,
     `why it asked: ${ask.decision.reason}`,
     `matched rule: ${ask.decision.source}`,
     `rails verdict: ${rail}`,
     `workspace: ${ask.workspaceRelation}`,
-  ].join('\n')
-  return { system: ask.applied === true ? `${SYSTEM_PROMPT}\n${APPLIED_PROMPT}` : SYSTEM_PROMPT, user }
+  ]
+  if (args.truncated) {
+    lines.push('arguments display truncated outside the JSON body; the complete command was evaluated by policy and rails.')
+  }
+  if (command?.truncated === true) {
+    lines.push('command display clipped for length; the complete command was evaluated by policy and rails. Do not reject solely because this display is clipped.')
+  }
+  return { system: SYSTEM_PROMPT, user: lines.join('\n') }
 }
 
 /**

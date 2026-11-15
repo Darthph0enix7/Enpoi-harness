@@ -28,11 +28,12 @@ import {
   RemoteStreamCarrierError,
   RemoteStreamMuxClient,
 } from './stream-client.ts'
-import { ClientRemoteEvents } from './remote-events.ts'
+import { ClientRemoteEvents, resolveRemoteEventLimits } from './remote-events.ts'
 import {
   RemoteStream,
   type RemoteStreamOptions,
 } from './remote-stream.ts'
+import { REMOTE_EVENT_LIMITS_GLOBAL } from '../stream-protocol.ts'
 
 export { RemoteStreamCarrierError } from './stream-client.ts'
 export { RemoteJournalStream } from './journal-stream.ts'
@@ -162,6 +163,9 @@ class ClientRemoteService extends Service implements ClientRemote {
       ctx,
       connection,
       (endpoint, payload, signal) => this.openRemoteStream(endpoint, payload, signal),
+      resolveRemoteEventLimits(
+        (globalThis as { [REMOTE_EVENT_LIMITS_GLOBAL]?: unknown })[REMOTE_EVENT_LIMITS_GLOBAL],
+      ),
     )
     if (connection.rpc.open === undefined) this.streams.start()
     let disposed = false

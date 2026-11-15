@@ -39,6 +39,10 @@ export {
 
 // Connection loop types are public through ConnectionHandle.start; the
 // controller remains package-internal.
+export {
+  ConnectionTerminalError,
+  isConnectionTerminalError,
+} from './connection.ts'
 export type {
   ConnectionRecoveryConfig,
   ConnectionGeneration,
@@ -64,6 +68,11 @@ export interface ConnectionGenerationState {
 export interface ConnectionStateSource {
   /** Current state, or undefined before the first connection outcome. */
   getSnapshot(): ConnectionState | undefined
+  /**
+   * Actionable detail for a terminal disconnected state (for example an
+   * exhausted recovery budget that needs a page reload). Undefined otherwise.
+   */
+  getDiagnosis?(): string | undefined
   /** Subscribe to state changes. */
   subscribe(listener: () => void): () => void
 }
@@ -196,6 +205,7 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
   let generationId = 0
   let generation: ConnectionGeneration | undefined
   let state: ConnectionState | undefined
+  let diagnosis: string | undefined
   const generationListeners = new Set<() => void>()
   const stateListeners = new Set<() => void>()
   const publishGeneration = (next: ConnectionGeneration | undefined): void => {
@@ -209,9 +219,10 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
       }
     }
   }
-  const publishState = (next: ConnectionState | undefined): void => {
-    if (state === next) return
+  const publishState = (next: ConnectionState | undefined, nextDiagnosis?: string): void => {
+    if (state === next && diagnosis === nextDiagnosis) return
     state = next
+    diagnosis = nextDiagnosis
     for (const listener of [...stateListeners]) {
       try {
         listener()
@@ -239,6 +250,7 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
     },
     state: {
       getSnapshot: () => state,
+      getDiagnosis: () => diagnosis,
       subscribe: (listener) => {
         stateListeners.add(listener)
         return () => { stateListeners.delete(listener) }
@@ -275,13 +287,13 @@ export function installConnection(ctx: Context, options: ConnectionInstallOption
           if (!ownsGeneration() || !Object.is(generation, nextGeneration)) return
           sinks.onConnected?.(host)
         },
-        onStateChange: (state) => {
+        onStateChange: (state, detail) => {
           if (state !== 'connected') {
             publishGeneration(undefined)
           }
           if (!ownsGeneration()) return
-          publishState(state)
-          sinks.onStateChange?.(state)
+          publishState(state, detail)
+          sinks.onStateChange?.(state, detail)
         },
       }, effective)
       const current = {

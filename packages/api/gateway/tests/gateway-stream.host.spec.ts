@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import WebSocket, { type RawData } from 'ws'
 import { Context, symbols } from '@deepseek-ai/cordis'
 import { apply as applyConnection, inject as connectionInject } from '@deepseek-ai/dsh-client-connection'
-import WebServer from '@deepseek-ai/dsh-host-webserver'
+import WebServer, { type IndexInjection } from '@deepseek-ai/dsh-host-webserver'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type { AppReady } from '@deepseek-ai/dsh-cmdline'
 import {
@@ -37,9 +37,10 @@ import TypertGatewayService, {
   type TypertRemoteEventOutcome,
 } from '@deepseek-ai/dsh-api-gateway'
 import { z } from 'zod'
-import type {
-  RemoteEventClientId,
-  RemoteEventInvocationFrame,
+import {
+  REMOTE_EVENT_LIMITS_GLOBAL,
+  type RemoteEventClientId,
+  type RemoteEventInvocationFrame,
 } from '../src/stream-protocol.ts'
 
 vi.mock('node:crypto', async (importOriginal) => {
@@ -372,6 +373,8 @@ describe('Typert Remote streams', () => {
       remoteEventQueueMaxFrames: 4_096,
       remoteEventQueueMaxBytes: 8 * 1024 * 1024,
       remoteEventReplayMaxAgeMs: 900_000,
+      remoteEventClientMaxActiveTasks: 64,
+      remoteEventClientMaxRetiredTasks: 4,
     })
     const maxDelayConfig = {
       websocketHeartbeatIntervalMs: MAX_TIMER_DELAY_MS,
@@ -381,6 +384,8 @@ describe('Typert Remote streams', () => {
       remoteEventQueueMaxFrames: 1,
       remoteEventQueueMaxBytes: 1,
       remoteEventReplayMaxAgeMs: 0,
+      remoteEventClientMaxActiveTasks: 1,
+      remoteEventClientMaxRetiredTasks: 1,
     }
     expect(TypertGatewayService.Config(maxDelayConfig)).toEqual(maxDelayConfig)
     // Zero is the emergency application-heartbeat disable, not a busy timer.
@@ -400,6 +405,26 @@ describe('Typert Remote streams', () => {
     for (const remoteEventReplayMaxAgeMs of [-1, 1.5]) {
       expect(() => TypertGatewayService.Config({ remoteEventReplayMaxAgeMs })).toThrow()
     }
+    for (const remoteEventClientMaxActiveTasks of [0, 1.5]) {
+      expect(() => TypertGatewayService.Config({ remoteEventClientMaxActiveTasks })).toThrow()
+    }
+    for (const remoteEventClientMaxRetiredTasks of [0, 1.5]) {
+      expect(() => TypertGatewayService.Config({ remoteEventClientMaxRetiredTasks })).toThrow()
+    }
+  })
+
+  it('injects validated forwarded-event client limits into served pages', async () => {
+    const { ctx } = await setup(true, {
+      remoteEventClientMaxActiveTasks: 7,
+      remoteEventClientMaxRetiredTasks: 2,
+    })
+    const rows: IndexInjection[] = []
+    ctx.emit('webserver/index-inject', rows)
+    expect(rows).toContainEqual({
+      kind: 'global',
+      name: REMOTE_EVENT_LIMITS_GLOBAL,
+      value: { maxActiveTasks: 7, maxRetiredTasks: 2 },
+    })
   })
 
   it('rejects an enabled heartbeat whose missed timeout does not exceed its interval', async () => {

@@ -10,7 +10,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { createClientTest, type TestClient, webApp } from '@deepseek-ai/dsh-client-test-runtime/src/assembly/index.ts'
 import { inject } from '../src/client/index.ts'
 import type { SettingsRootInjected } from '../src/client/shell-contract.ts'
-import { SettingsRoot } from '../src/client/SettingsRoot.tsx'
+import { SettingsSurfaceSlot, SettingsTriggerSlot } from '../src/client/SettingsRoot.tsx'
 import type { DesktopUpdatePresentation } from '../src/client/desktop-update-bridge.ts'
 
 const SELF = '@deepseek-ai/dsh-client-ui-settings-general'
@@ -24,16 +24,21 @@ function injectedOf(c: TestClient): SettingsRootInjected {
   return (entry.inject as () => SettingsRootInjected)()
 }
 
-/** The shell's child declarations (chrome, actions, sections, and onboarding overlays). */
-const CHILD_SPECS = {
+/** The sidebar seat keeps only launch chrome; the root surface owns the panel. */
+const SIDEBAR_CHILD_SPECS = {
+  'settings.launcher': { kind: 'single', scope: 'root' },
   'settings.trigger': { kind: 'single', scope: 'root' },
+} as const
+/** The stable root surface owns the dialog chrome, mounted section, and onboarding. */
+const SURFACE_CHILD_SPECS = {
   'settings.header': { kind: 'single', scope: 'root' },
   'settings.action': { kind: 'list', scope: 'root' },
   'settings.close': { kind: 'single', scope: 'root' },
   'settings.section': { kind: 'list', scope: 'root' },
   'settings.onboarding': { kind: 'list', scope: 'root' },
 } as const
-const CHILD_NAMES = Object.keys(CHILD_SPECS) as Array<keyof typeof CHILD_SPECS>
+const SIDEBAR_CHILD_NAMES = Object.keys(SIDEBAR_CHILD_SPECS) as Array<keyof typeof SIDEBAR_CHILD_SPECS>
+const SURFACE_CHILD_NAMES = Object.keys(SURFACE_CHILD_SPECS) as Array<keyof typeof SURFACE_CHILD_SPECS>
 
 /**
  * Section ids the web-app roster registers, in nav order: this package, then
@@ -86,10 +91,12 @@ describe('ui-settings-general shell', () => {
     expect(inject).toEqual(['slots', 'locale', 'connection', 'remote', 'remote.settings', 'configForms', 'shortcuts'])
   })
 
-  it('occupies sidebar.settings, declared by ui-sidebar, and declares every child slot', async ({ start }) => {
+  it('occupies the sidebar trigger seat and the stable root surface with split children', async ({ start }) => {
     const c = await start()
-    expect(c.ctx.slots.entries('sidebar.settings').map(entry => entry.component)).toEqual([SettingsRoot])
-    for (const name of CHILD_NAMES) expect(c.ctx.slots.spec(name)).toEqual(CHILD_SPECS[name])
+    expect(c.ctx.slots.entries('sidebar.settings').map(entry => entry.component)).toEqual([SettingsTriggerSlot])
+    expect(c.ctx.slots.entries('settings.surface').map(entry => entry.component)).toEqual([SettingsSurfaceSlot])
+    for (const name of SIDEBAR_CHILD_NAMES) expect(c.ctx.slots.spec(name)).toEqual(SIDEBAR_CHILD_SPECS[name])
+    for (const name of SURFACE_CHILD_NAMES) expect(c.ctx.slots.spec(name)).toEqual(SURFACE_CHILD_SPECS[name])
   }, COLD_BOOT_TIMEOUT_MS)
 
   it('projects the section ledger: product sections in order, defaults for bare rows, stable snapshots', async ({ start }) => {
@@ -121,6 +128,7 @@ describe('ui-settings-general shell', () => {
     const injected = injectedOf(c)
     expect(injected.hooks.connectionState).toBe(c.connection.state)
     expect(injected.hooks.connectionState.getSnapshot()).toBe('connected')
+    expect(injected.hooks.connectionDiagnosis.getSnapshot()).toBeUndefined()
     injected.reconnect()
     await c.mock.streams.opened('$events', 2)
     await vi.waitFor(() => { expect(c.connection.state.getSnapshot()).toBe('connected') })
@@ -152,11 +160,14 @@ describe('ui-settings-general shell', () => {
     const c = await start()
     const before = c.ctx.slots.entries('sidebar.settings')[0]
     expect(before).toBeDefined()
+    const surfaceBefore = c.ctx.slots.entries('settings.surface')[0]
     await c.reload(SIDEBAR)
     await c.flush()
-    expect(c.ctx.slots.entries('sidebar.settings').map(entry => entry.component)).toEqual([SettingsRoot])
+    expect(c.ctx.slots.entries('sidebar.settings').map(entry => entry.component)).toEqual([SettingsTriggerSlot])
     expect(c.ctx.slots.entries('sidebar.settings')[0]).not.toBe(before)
-    for (const name of CHILD_NAMES) expect(c.ctx.slots.spec(name)).toEqual(CHILD_SPECS[name])
+    expect(c.ctx.slots.entries('settings.surface')).toEqual([surfaceBefore])
+    for (const name of SIDEBAR_CHILD_NAMES) expect(c.ctx.slots.spec(name)).toEqual(SIDEBAR_CHILD_SPECS[name])
+    for (const name of SURFACE_CHILD_NAMES) expect(c.ctx.slots.spec(name)).toEqual(SURFACE_CHILD_SPECS[name])
   })
 
   it('unregisters the shell and collapses every child slot when its row unloads', async ({ start }) => {
@@ -164,6 +175,8 @@ describe('ui-settings-general shell', () => {
     await c.unload(SELF)
     await c.flush()
     expect(c.ctx.slots.entries('sidebar.settings')).toHaveLength(0)
-    for (const name of CHILD_NAMES) expect(c.ctx.slots.spec(name)).toBeUndefined()
+    expect(c.ctx.slots.entries('settings.surface')).toHaveLength(0)
+    for (const name of SIDEBAR_CHILD_NAMES) expect(c.ctx.slots.spec(name)).toBeUndefined()
+    for (const name of SURFACE_CHILD_NAMES) expect(c.ctx.slots.spec(name)).toBeUndefined()
   })
 })

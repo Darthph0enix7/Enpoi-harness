@@ -1,8 +1,7 @@
 diff --git a/lib/client.js b/lib/client.js
-index c794079..fb9c8bd 100644
 --- a/lib/client.js
 +++ b/lib/client.js
-@@ -402,6 +402,7 @@ window.__ModuleLoader__.load({
+@@ -402,6 +402,7 @@
  		const sourceSets = /* @__PURE__ */ new WeakMap();
  		const contentObservers = /* @__PURE__ */ new WeakMap();
  		const contentFrames = /* @__PURE__ */ new WeakMap();
@@ -10,7 +9,7 @@ index c794079..fb9c8bd 100644
  		/** Write a marker attribute only when the desired state is not applied yet. */
  		function applyMarker(el, attr, active) {
  			if (el === null) return;
-@@ -442,12 +443,40 @@ window.__ModuleLoader__.load({
+@@ -442,12 +443,40 @@
  		* data-chat-anchor-key nodes during a switch; a body-wide query would count
  		* those stale rows and flash the composer frost over the new empty topic.
  		*/
@@ -52,7 +51,7 @@ index c794079..fb9c8bd 100644
  		* Coalesce the mutation bursts of a streaming conversation into one content
  		* check per frame; a check scheduled for a document that stopped observing is
  		* dropped so a late frame can never re-add the marker after teardown.
-@@ -471,7 +500,9 @@ window.__ModuleLoader__.load({
+@@ -471,7 +500,9 @@
  			updateConversationContent(doc);
  			const win = doc.defaultView;
  			if (win === null || typeof win.MutationObserver !== "function") return;
@@ -63,7 +62,7 @@ index c794079..fb9c8bd 100644
  			observer.observe(doc.body ?? doc.documentElement, {
  				childList: true,
  				subtree: true
-@@ -480,6 +511,7 @@ window.__ModuleLoader__.load({
+@@ -480,6 +511,7 @@
  		}
  		/** Stop the content observer, cancel pending work and drop the marker. */
  		function stopContentObserver(doc) {
@@ -71,7 +70,7 @@ index c794079..fb9c8bd 100644
  			const frame = contentFrames.get(doc);
  			if (frame !== void 0) {
  				const win = doc.defaultView;
-@@ -613,7 +645,7 @@ window.__ModuleLoader__.load({
+@@ -613,7 +645,7 @@
  		* persisted selection and the card-driven descriptor resolution.
  		*/
  		var WallpaperController = class {
@@ -80,7 +79,7 @@ index c794079..fb9c8bd 100644
  			selectionValue = "";
  			modeValue = "live";
  			fitValue = "cover";
-@@ -959,7 +991,7 @@ window.__ModuleLoader__.load({
+@@ -959,7 +991,7 @@
  			}
  			readAll() {
  				const value = this.scope.getSnapshot().value ?? {};
@@ -89,7 +88,25 @@ index c794079..fb9c8bd 100644
  				this.selectionValue = typeof value.selection === "string" ? value.selection : "";
  				this.modeValue = value.mode === "frame" ? "frame" : "live";
  				const rawFit = value.fit;
-@@ -3115,6 +3147,12 @@ window.__ModuleLoader__.load({
+@@ -2491,7 +2523,7 @@
+ 					for (const item of json.details ?? []) map[item.id] = item;
+ 					setVerifyReports(map);
+ 					if (json.repaired && json.repaired.length > 0) {
+-						await runtime.refreshCatalog();
++						await runtime.refreshCatalog(true);
+ 						if (activeId && json.repaired.includes(activeId)) {
+ 							const freshEntry = runtime.find(activeId);
+ 							if (freshEntry) await preview.runSkin(() => switchAndDeactivateCustomTheme(activeId, freshEntry));
+@@ -2516,7 +2548,7 @@
+ 					});
+ 					const json = await res.json().catch(() => null);
+ 					if (!res.ok || json?.ok !== true) throw new Error("uninstall failed");
+-					await runtime.refreshCatalog();
++					await runtime.refreshCatalog(true);
+ 					if (mounted.current) setConfirmUninstallId(null);
+ 				} catch {
+ 					if (mounted.current) setError(t("uninstallFailed"));
+@@ -3115,6 +3147,12 @@
  			persist;
  			/** The fixed backdrop-filter element, present only while active blur > 0. */
  			blurElement = null;
@@ -102,7 +119,7 @@ index c794079..fb9c8bd 100644
  			/** The body MutationObserver, installed lazily once a blur is active. */
  			observer = null;
  			/** Pending requestAnimationFrame id for a coalesced recheck. */
-@@ -3189,14 +3227,14 @@ window.__ModuleLoader__.load({
+@@ -3189,14 +3227,14 @@
  			}
  			setBlurEmpty(value) {
  				this.blurEmptyValue = this.clampBlur(value);
@@ -119,7 +136,7 @@ index c794079..fb9c8bd 100644
  				this.syncBlur();
  				this.publish();
  				this.persist(this.snapshot());
-@@ -3226,6 +3264,12 @@ window.__ModuleLoader__.load({
+@@ -3226,6 +3264,12 @@
  					this.observer.disconnect();
  					this.observer = null;
  				}
@@ -132,7 +149,7 @@ index c794079..fb9c8bd 100644
  			}
  			/** Copy one config into the live fields, defaults filling the gaps. */
  			assign(config) {
-@@ -3272,22 +3316,63 @@ window.__ModuleLoader__.load({
+@@ -3272,22 +3316,63 @@
  			*/
  			syncBlur() {
  				if (this.disposed) return;
@@ -199,7 +216,7 @@ index c794079..fb9c8bd 100644
  			}
  			/** True while a Wallpaper Engine wallpaper is mounted. */
  			hasWallpaper() {
-@@ -3295,6 +3380,7 @@ window.__ModuleLoader__.load({
+@@ -3295,6 +3380,7 @@
  			}
  			/** Create (if needed) and size the fixed backdrop-filter element. */
  			ensureBlurElement(active) {
@@ -207,7 +224,7 @@ index c794079..fb9c8bd 100644
  				if (this.blurElement === null) {
  					const element = document.createElement("div");
  					element.style.position = "fixed";
-@@ -3303,9 +3389,11 @@ window.__ModuleLoader__.load({
+@@ -3303,9 +3389,11 @@
  					element.style.pointerEvents = "none";
  					element.setAttribute("aria-hidden", "true");
  					this.blurElement = element;
@@ -220,7 +237,7 @@ index c794079..fb9c8bd 100644
  				this.blurElement.style.backdropFilter = blur;
  				this.blurElement.style.setProperty("-webkit-backdrop-filter", blur);
  			}
-@@ -3314,26 +3402,45 @@ window.__ModuleLoader__.load({
+@@ -3314,26 +3402,45 @@
  				if (this.blurElement === null) return;
  				this.blurElement.remove();
  				this.blurElement = null;
@@ -275,7 +292,7 @@ index c794079..fb9c8bd 100644
  			}
  			/** Coalesce burst mutations into one rAF-delayed recheck. */
  			scheduleRecheck() {
-@@ -4117,6 +4224,16 @@ window.__ModuleLoader__.load({
+@@ -4117,6 +4224,16 @@
  				if (observedComposer !== null && observedComposer.isConnected) return observedComposer;
  				return doc.body === null ? null : doc.body.querySelector(composerSelector);
  			};
@@ -292,7 +309,7 @@ index c794079..fb9c8bd 100644
  			const syncHeight = () => {
  				if (doc.body === null) return;
  				const composer = resolveComposer();
-@@ -4125,6 +4242,7 @@ window.__ModuleLoader__.load({
+@@ -4125,6 +4242,7 @@
  					if (observedComposer !== null && resizeObserver !== null) resizeObserver.unobserve(observedComposer);
  					observedComposer = composer;
  					if (resizeObserver !== null) resizeObserver.observe(composer);
@@ -300,7 +317,7 @@ index c794079..fb9c8bd 100644
  				}
  				const rect = composer.getBoundingClientRect();
  				if (rect.height <= 0) return;
-@@ -4146,9 +4264,30 @@ window.__ModuleLoader__.load({
+@@ -4146,9 +4264,30 @@
  					syncHeight();
  				});
  			};
@@ -333,7 +350,7 @@ index c794079..fb9c8bd 100644
  				mutationObserver.observe(doc.body, {
  					childList: true,
  					subtree: true
-@@ -4226,7 +4365,209 @@ window.__ModuleLoader__.load({
+@@ -4226,7 +4365,209 @@
  		}
  		/** Remove every node an activation left in a layer (used on dispose). */
  		function clearLayer(layer) {
@@ -544,7 +561,7 @@ index c794079..fb9c8bd 100644
  		}
  		/**
  		* Build the background media element for a manifest backgroundMedia layer.
-@@ -4238,11 +4579,13 @@ window.__ModuleLoader__.load({
+@@ -4238,11 +4579,13 @@
  			const fullBleed = "position:absolute;top:0;right:0;bottom:0;left:0;width:100%;height:100%;object-fit:cover;";
  			if (layer.type === "image") {
  				const img = doc.createElement("img");
@@ -559,11 +576,639 @@ index c794079..fb9c8bd 100644
  			} else {
  				const video = doc.createElement("video");
  				video.src = `${assetBase}/${layer.src}`;
+@@ -4308,18 +4651,23 @@
+ 				const link = doc.createElement("link");
+ 				link.rel = "stylesheet";
+ 				link.href = href;
+-				const timer = setTimeout(() => rejectLink(/* @__PURE__ */ new Error(`stylesheet load timeout: ${href}`)), 15e3);
+-				link.onload = () => {
++				const fail = (error) => {
+ 					clearTimeout(timer);
+-					resolveLink();
++					link.remove();
++					rejectLink(error);
+ 				};
+-				link.onerror = () => {
++				const timer = setTimeout(() => fail(/* @__PURE__ */ new Error(`stylesheet load timeout: ${href}`)), 15e3);
++				link.onload = () => {
+ 					clearTimeout(timer);
+-					rejectLink(/* @__PURE__ */ new Error(`stylesheet load failed: ${href}`));
++					link.setAttribute("data-dsh-skin-ready", "");
++					resolveLink(link);
+ 				};
++				link.onerror = () => fail(/* @__PURE__ */ new Error(`stylesheet load failed: ${href}`));
+ 				doc.head.appendChild(link);
+ 			}));
+ 			let latestRequest = 0;
++			let disposed = false;
++			let choiceEpoch = 0;
+ 			let currentActivation = null;
+ 			const initialSkinId = doc.documentElement?.getAttribute("data-dsh-skin") || null;
+ 			let active = initialSkinId;
+@@ -4348,15 +4696,104 @@
+ 				};
+ 				for (const listener of listeners) listener();
+ 			};
++			const stylesheetResources = /* @__PURE__ */ new Map();
++			/** Every stylesheet link currently carrying one href, in document order. */
++			function stylesheetLinks(href) {
++				const found = [];
++				for (const node of doc.head.querySelectorAll("link")) {
++					if (node.getAttribute("href") === href) found.push(node);
++				}
++				return found;
++			}
++			/** A server-preloaded link already applied before the runtime booted. */
++			function preloadedStylesheet(href) {
++				for (const link of stylesheetLinks(href)) {
++					if (link.sheet != null || link.hasAttribute("data-dsh-skin-ready")) return link;
++				}
++				return null;
++			}
+ 			/**
+-			* Install one stylesheet as a tracked <link> (the load itself happened in
+-			* loadStylesheet; here we only register the teardown). Links keep relative
+-			* url() resolution intact — a <style> tag would resolve them against the
+-			* document and 404 every skin asset.
++			* One shared stylesheet request per href. Every activation awaiting the same
++			* href holds a reference; the exact node returned by the loader stays alive
++			* until the last reference releases it. A preloaded node is borrowed and is
++			* never removed by an abandoned attempt.
+ 			*/
+-			function trackStylesheet(activation, label, href) {
+-				const link = doc.head.querySelector(`link[href="${href}"]`);
+-				ledger.record(activation, `style:${label}`, () => link?.remove());
++			function acquireStylesheet(href) {
++				let resource = stylesheetResources.get(href);
++				if (resource === void 0) {
++					const preloaded = preloadedStylesheet(href);
++					if (preloaded !== null) {
++						resource = {
++							href,
++							link: preloaded,
++							borrowed: true,
++							refs: 0,
++							ready: Promise.resolve(preloaded),
++							failed: false
++						};
++					} else {
++						resource = {
++							href,
++							link: null,
++							borrowed: false,
++							refs: 0,
++							ready: null,
++							failed: false
++						};
++						resource.ready = Promise.resolve().then(() => loadStylesheet(href)).then((link) => {
++							if (link === null || link === void 0 || typeof link.remove !== "function") {
++								throw new Error(`stylesheet loader did not return its link: ${href}`);
++							}
++							link.setAttribute("data-dsh-skin-ready", "");
++							resource.link = link;
++							return link;
++						}).catch((error) => {
++							resource.failed = true;
++							if (stylesheetResources.get(href) === resource) stylesheetResources.delete(href);
++							throw error;
++						});
++					}
++					stylesheetResources.set(href, resource);
++				}
++				resource.refs += 1;
++				return resource;
++			}
++			function releaseStylesheet(resource) {
++				if (resource === null) return;
++				resource.refs = Math.max(0, resource.refs - 1);
++				if (resource.refs > 0) return;
++				if (stylesheetResources.get(resource.href) === resource) stylesheetResources.delete(resource.href);
++				if (!resource.borrowed && resource.link !== null) {
++					resource.link.remove();
++					resource.link = null;
++				}
++			}
++			async function ensureStylesheet(href) {
++				const resource = acquireStylesheet(href);
++				try {
++					const link = await resource.ready;
++					if (resource.failed || link === null) throw new Error(`stylesheet unavailable: ${href}`);
++					return { resource, link };
++				} catch (error) {
++					releaseStylesheet(resource);
++					throw error;
++				}
++			}
++			/**
++			* Retire dangling duplicates only at the commit point. Links referenced by
++			* any live resource, including another activation, are never touched.
++			*/
++			function retireDanglingStylesheets(href, keep) {
++				const live = /* @__PURE__ */ new Set();
++				for (const resource of stylesheetResources.values()) {
++					if (resource.link !== null) live.add(resource.link);
++				}
++				for (const candidate of stylesheetLinks(href)) {
++					if (candidate !== keep && !live.has(candidate)) candidate.remove();
++				}
++			}
++			function trackStylesheet(activation, label, resource) {
++				ledger.record(activation, `style:${label}`, () => releaseStylesheet(resource));
+ 			}
+ 			/**
+ 			* Paint the skin background art into the `background` decoration layer
+@@ -4377,12 +4814,14 @@
+ 			* The body's own opaque background is forced transparent while art is
+ 			* mounted, or the shell's static panels would cover the negative-z layer.
+ 			*/
++			let backgroundPaintOwner = null;
+ 			function setBackgroundLayer(activation, nodes) {
+ 				const style = doc.body.style;
+ 				const previousBackgroundColor = style.getPropertyValue("background-color");
+ 				const previousBackgroundImage = style.getPropertyValue("background-image");
++				backgroundPaintOwner = activation;
+ 				const restore = () => {
+-					if (currentActivation !== activation) return;
++					if (backgroundPaintOwner !== activation) return;
+ 					clearLayer(layers.background);
+ 					setSceneBackdropActive(doc, "skin", false);
+ 					if (previousBackgroundColor === "") style.removeProperty("background-color");
+@@ -4423,18 +4862,20 @@
+ 				const assetBase = `${apiBase}/skins/${entry.manifest.id}`;
+ 				setBackgroundLayer(activation, buildBackgroundMedia(doc, variant, assetBase));
+ 			}
+-			async function installHooks(activation, entry) {
++			async function installHooks(activation, entry, assertCurrent) {
+ 				if (!entry.manifest.facets?.client) return;
+ 				const importHooks = deps.importHooks ?? ((url) => import(
+ 					/* @vite-ignore */
+ 					url
+ ));
++				let hooks = null;
++				const cleanups = [];
+ 				try {
+ 					const factory = (await importHooks(`${apiBase}/skins/${entry.manifest.id}/hooks.mjs`))?.default;
++					assertCurrent();
+ 					if (typeof factory !== "function") throw new Error("hooks.mjs must default-export defineSkinHooks()");
+-					const hooks = factory();
++					hooks = factory();
+ 					if (typeof hooks?.apply !== "function") throw new Error("defineSkinHooks() must return { apply }");
+-					const cleanups = [];
+ 					const ctx = {
+ 						skinId: entry.manifest.id,
+ 						scopeAttr: entry.manifest.id,
+@@ -4462,7 +4903,18 @@
+ 						}
+ 					});
+ 				} catch (error) {
+-					onError(`hooks failed for ${entry.manifest.id}; static skin stays active`, error);
++					try {
++						hooks?.dispose?.();
++					} catch (disposeError) {
++						onError(`hooks dispose failed for ${entry.manifest.id}`, disposeError);
++					}
++					for (const cleanup of cleanups.reverse()) try {
++						cleanup();
++					} catch (cleanupError) {
++						onError(`hooks cleanup failed for ${entry.manifest.id}`, cleanupError);
++					}
++					onError(`hooks failed for ${entry.manifest.id}; previous skin intact`, error);
++					throw error;
+ 				}
+ 			}
+ 			async function persist(id) {
+@@ -4476,31 +4928,63 @@
+ 					body: JSON.stringify({ active: id })
+ 				});
+ 			}
+-			async function switchInternal(id, entry, shouldPersist) {
++			async function switchInternal(id, entry, shouldPersist, commitState = shouldPersist, strict = false, guard = null) {
++				if (disposed) throw new StaleSwitch();
+ 				const seq = ++latestRequest;
+ 				const activation = ledger.beginActivation();
++				let stylesheetResource = null;
++				let patchesResource = null;
++				let backgroundTouched = false;
++				const activationResources = [];
++				const current = () => !disposed && seq === latestRequest && (guard === null || guard());
++				const assertCurrent = () => {
++					if (!current()) throw new StaleSwitch();
++				};
+ 				try {
++					let stylesheetLink = null;
++					let patchesLink = null;
+ 					if (id !== null && entry !== null) {
+ 						const stylesheetHref = `${apiBase}/skins/${id}/stylesheet`;
+ 						const patchesHref = entry.manifest.contributes.patches !== void 0 ? `${apiBase}/skins/${id}/patches` : null;
+-						await loadStylesheet(stylesheetHref);
+-						trackStylesheet(activation, "stylesheet", stylesheetHref);
++						const stylesheet = await ensureStylesheet(stylesheetHref);
++						stylesheetResource = stylesheet.resource;
++						assertCurrent();
++						stylesheetLink = stylesheet.link;
++						trackStylesheet(activation, "stylesheet", stylesheetResource);
++						activationResources.push(stylesheetResource);
++						stylesheetResource = null;
+ 						if (patchesHref !== null) {
+-							await loadStylesheet(patchesHref).catch(() => {});
+-							trackStylesheet(activation, "patches", patchesHref);
++							const patches = await ensureStylesheet(patchesHref);
++							patchesResource = patches.resource;
++							assertCurrent();
++							patchesLink = patches.link;
++							trackStylesheet(activation, "patches", patchesResource);
++							activationResources.push(patchesResource);
++							patchesResource = null;
+ 						}
+-						if (seq !== latestRequest) throw new StaleSwitch();
+ 						installBackground(activation, entry);
+-						await installHooks(activation, entry);
+-					} else setBackgroundLayer(activation, []);
+-					if (seq !== latestRequest) throw new StaleSwitch();
++						backgroundTouched = true;
++						await installHooks(activation, entry, assertCurrent);
++						assertCurrent();
++						// Every new link and hook is ready: only now retire dangling nodes
++						// that no live resource references. Other activations keep theirs.
++						retireDanglingStylesheets(stylesheetHref, stylesheetLink);
++						if (patchesHref !== null) retireDanglingStylesheets(patchesHref, patchesLink);
++					} else {
++						setBackgroundLayer(activation, []);
++						backgroundTouched = true;
++					}
++					assertCurrent();
+ 					if (id === null) doc.documentElement.removeAttribute("data-dsh-skin");
+ 					else doc.documentElement.setAttribute("data-dsh-skin", id);
++					for (const resource of activationResources) {
++						if (resource.link !== null) resource.borrowed = false;
++					}
+ 					const previous = currentActivation;
+ 					currentActivation = activation;
+ 					active = id;
+ 					if (entry !== null) lastEntry = entry;
+-					if (shouldPersist) {
++					if (commitState) {
+ 						committed = {
+ 							id,
+ 							entry
+@@ -4513,21 +4997,18 @@
+ 					}
+ 					emit();
+ 					if (previous !== null) ledger.disposeActivation(previous);
+-					if (shouldPersist) await persist(id).catch((error) => onError("failed to persist the skin selection", error));
++					if (shouldPersist && current()) await persist(id).catch((error) => onError("failed to persist the skin selection", error));
+ 					return active;
+ 				} catch (error) {
++					releaseStylesheet(stylesheetResource);
++					releaseStylesheet(patchesResource);
+ 					ledger.disposeActivation(activation);
++					if (backgroundTouched && !disposed && currentActivation !== null) repaintBackgroundForTheme();
+ 					if (error instanceof StaleSwitch) return active;
+-					if (currentActivation === null) {
+-						active = null;
+-						committed = {
+-							id: null,
+-							entry: null
+-						};
+-						doc.documentElement.removeAttribute("data-dsh-skin");
+-						emit();
+-					}
++					// Preserve the last known DOM selection: the server-stamped attribute
++					// and preloaded links stay live while the next attempt is prepared.
+ 					onError(`switch to ${id ?? "stock"} failed; previous skin intact`, error);
++					if (strict) throw error;
+ 					return active;
+ 				}
+ 			}
+@@ -4538,14 +5019,26 @@
+ 				get layers() {
+ 					return layers;
+ 				},
++				get choiceEpoch() {
++					return choiceEpoch;
++				},
++				claimUserChoice() {
++					choiceEpoch += 1;
++				},
+ 				async switchTo(id, entry) {
+-					return await switchInternal(id, entry, true);
++					choiceEpoch += 1;
++					return await switchInternal(id, entry, true, true);
++				},
++				async hydrate(id, entry, epoch) {
++					return await switchInternal(id, entry, false, true, true, () => choiceEpoch === epoch);
+ 				},
+ 				async tryOn(id, entry) {
+-					return await switchInternal(id, entry, false);
++					choiceEpoch += 1;
++					return await switchInternal(id, entry, false, false);
+ 				},
+ 				async exitTryOn() {
+-					return await switchInternal(committed.id, committed.entry, false);
++					choiceEpoch += 1;
++					return await switchInternal(committed.id, committed.entry, false, false);
+ 				},
+ 				subscribe(listener) {
+ 					listeners.add(listener);
+@@ -4563,6 +5056,8 @@
+ 					return await switchInternal(id, id === null ? null : lastEntry, false);
+ 				},
+ 				shutdown() {
++					if (disposed) return;
++					disposed = true;
+ 					latestRequest += 1;
+ 					unsubscribeTheme();
+ 					if (currentActivation !== null) {
+@@ -4577,6 +5072,7 @@
+ 						entry: null
+ 					};
+ 					emit();
++					listeners.clear();
+ 					doc.documentElement.removeAttribute("data-dsh-skin");
+ 				}
+ 			};
+@@ -4610,6 +5106,7 @@
+ 				ledger: createEffectLedger(),
+ 				apiBase,
+ 				fetchImpl,
++				loadStylesheet: options.loadStylesheet,
+ 				suppressBackgroundMedia: options.suppressBackgroundMedia,
+ 				onError: (message, error) => {
+ 					console.error(`[skin-center] ${message}`, error);
+@@ -4620,18 +5117,74 @@
+ 			const disposeShellRendering = installShellRenderingAdapter(doc);
+ 			let catalog = null;
+ 			let diagnostics = [];
++			let catalogGeneration = 0;
++			let catalogInflight = null;
+ 			const listeners = /* @__PURE__ */ new Set();
++			const cleanups = /* @__PURE__ */ new Set();
++			const controllerUnsubscribes = /* @__PURE__ */ new Set();
+ 			const emit = () => {
++				if (disposed) return;
+ 				for (const listener of listeners) listener();
+ 			};
+-			async function refreshCatalog() {
+-				const res = await fetchImpl(`${apiBase}/catalog`);
+-				if (!res.ok) throw new Error(`catalog fetch -> ${res.status}`);
+-				const payload = await res.json();
+-				catalog = payload.skins ?? [];
+-				diagnostics = payload.diagnostics ?? [];
+-				emit();
++			const bootFailure = (message, recoverable, cause) => {
++				const error = new Error(message);
++				error.name = "SkinBootError";
++				error.recoverable = recoverable;
++				if (cause !== void 0) error.cause = cause;
++				return error;
++			};
++			const httpFailure = (what, status) => bootFailure(
++				`${what} fetch -> ${status}`,
++				status >= 500 || status === 408 || status === 429
++			);
++			const invalidPayload = (what, detail) => bootFailure(
++				`${what} payload is invalid${detail === void 0 ? "" : `: ${detail}`}`,
++				false
++			);
++			const isCatalogPayload = (payload) => {
++				if (payload === null || typeof payload !== "object" || payload.ok !== true || !Array.isArray(payload.skins)) return false;
++				for (const skin of payload.skins) {
++					if (skin === null || typeof skin !== "object") return false;
++					if (skin.manifest === null || typeof skin.manifest !== "object") return false;
++					if (typeof skin.manifest.id !== "string" || skin.manifest.id.trim() === "") return false;
++					if (skin.manifest.contributes === null || typeof skin.manifest.contributes !== "object") return false;
++				}
++				return true;
++			};
++			async function refreshCatalog(force = false) {
++				if (disposed) return catalog;
++				if (catalogInflight !== null && !force) return await catalogInflight.promise;
++				const epoch = ++catalogGeneration;
++				const promise = (async () => {
++					const response = await fetchImpl(`${apiBase}/catalog`);
++					if (!response.ok) throw httpFailure("catalog", response.status);
++					let payload;
++					try {
++						payload = await response.json();
++					} catch (error) {
++						throw invalidPayload("catalog", "unreadable JSON");
++					}
++					if (!isCatalogPayload(payload)) throw invalidPayload("catalog");
++					if (disposed || epoch !== catalogGeneration) return catalog;
++					catalog = payload.skins;
++					diagnostics = Array.isArray(payload.diagnostics) ? payload.diagnostics : [];
++					emit();
++					return catalog;
++				})().finally(() => {
++					if (catalogInflight !== null && catalogInflight.epoch === epoch) catalogInflight = null;
++				});
++				catalogInflight = { epoch, promise };
++				return await promise;
+ 			}
++			let disposed = false;
++			let retryTimer = null;
++			let rearmTimer = null;
++			let retryAttempt = 0;
++			let bootStopped = false;
++			let bootTransportExhausted = false;
++			let bootHardLogged = false;
++			let bootTransportLogged = false;
++			const bootEpoch = controller.choiceEpoch;
+ 			const store = {
+ 				controller,
+ 				adapter,
+@@ -4644,12 +5197,40 @@
+ 				subscribe(listener) {
+ 					const off = controller.subscribe(listener);
+ 					listeners.add(listener);
++					controllerUnsubscribes.add(off);
+ 					return () => {
+ 						off();
++						controllerUnsubscribes.delete(off);
+ 						listeners.delete(listener);
+ 					};
+ 				},
++				retryBoot() {
++					if (disposed || bootStopped || controller.choiceEpoch !== bootEpoch) return false;
++					bootTransportExhausted = false;
++					retryAttempt = 0;
++					scheduleBootRetry();
++					return true;
++				},
+ 				shutdown() {
++					if (disposed) return;
++					disposed = true;
++					if (retryTimer !== null) {
++						clearTimeout(retryTimer);
++						retryTimer = null;
++					}
++					if (rearmTimer !== null) {
++						clearTimeout(rearmTimer);
++						rearmTimer = null;
++					}
++					for (const cleanup of cleanups) try {
++						cleanup();
++					} catch (error) {
++						console.warn("[skin-center] cleanup failed during shutdown", error);
++					}
++					cleanups.clear();
++					listeners.clear();
++					for (const off of controllerUnsubscribes) off();
++					controllerUnsubscribes.clear();
+ 					adapter.stop();
+ 					disposeShellRendering();
+ 					controller.shutdown();
+@@ -4659,38 +5240,127 @@
+ 				const root = doc.defaultView;
+ 				root.__skinRuntime = store;
+ 			}
+-			(async () => {
++			const BOOT_RETRY_BASE_MS = 1e3;
++			const BOOT_RETRY_MAX_MS = 3e4;
++			const BOOT_RETRY_MAX_ATTEMPTS = 5;
++			const BOOT_REARM_DEBOUNCE_MS = 1e3;
++			const readAuthoritative = async () => {
++				const response = await fetchImpl(`${apiBase}/active`);
++				if (!response.ok) throw httpFailure("active", response.status);
++				let payload;
+ 				try {
+-					await refreshCatalog();
+-					let active = doc.documentElement?.getAttribute("data-dsh-skin") || null;
+-					if (!active) {
+-						const payload = await (await fetchImpl(`${apiBase}/active`)).json();
+-						active = payload.ok && typeof payload.active === "string" ? payload.active : null;
++					payload = await response.json();
++				} catch (error) {
++					throw invalidPayload("active", "unreadable JSON");
++				}
++				if (payload === null || typeof payload !== "object" || payload.ok !== true) throw invalidPayload("active");
++				if (!Object.prototype.hasOwnProperty.call(payload, "active")) throw invalidPayload("active", "missing active");
++				if (payload.active === null) return null;
++				if (typeof payload.active !== "string" || payload.active.trim() === "") throw invalidPayload("active");
++				return payload.active;
++			};
++			const scheduleBootRetry = () => {
++				if (disposed || bootStopped || bootTransportExhausted || retryTimer !== null || controller.choiceEpoch !== bootEpoch) return;
++				const delay = Math.min(BOOT_RETRY_MAX_MS, BOOT_RETRY_BASE_MS * 2 ** retryAttempt);
++				retryAttempt += 1;
++				retryTimer = setTimeout(() => {
++					retryTimer = null;
++					void activateBootSkin();
++				}, delay);
++			};
++			const requestBootRearm = () => {
++				if (disposed || bootStopped || !bootTransportExhausted || controller.choiceEpoch !== bootEpoch) return;
++				if (doc.visibilityState === "hidden" || rearmTimer !== null) return;
++				rearmTimer = setTimeout(() => {
++					rearmTimer = null;
++					if (disposed || bootStopped || !bootTransportExhausted || controller.choiceEpoch !== bootEpoch) return;
++					bootTransportExhausted = false;
++					retryAttempt = 0;
++					scheduleBootRetry();
++				}, BOOT_REARM_DEBOUNCE_MS);
++			};
++			const activateBootSkin = async () => {
++				if (disposed || bootStopped || controller.choiceEpoch !== bootEpoch) return;
++				try {
++					await refreshCatalog(false);
++					if (disposed || controller.choiceEpoch !== bootEpoch) return;
++					const stamped = doc.documentElement?.getAttribute("data-dsh-skin") || null;
++					let active = stamped;
++					if (!active) active = await readAuthoritative();
++					if (disposed || controller.choiceEpoch !== bootEpoch) return;
++					if (active === null) {
++						if (stamped !== null) await controller.hydrate(null, null, bootEpoch);
++						retryAttempt = 0;
++						return;
+ 					}
+-					if (active === null) return;
+ 					let entry = store.find(active);
+ 					if (entry === null) {
+-						const defaultEntry = store.find("blue-fantasy");
+-						if (defaultEntry !== null) await controller.switchTo("blue-fantasy", defaultEntry);
+-						else await controller.switchTo(null, null);
++						const authoritative = await readAuthoritative();
++						if (disposed || controller.choiceEpoch !== bootEpoch) return;
++						if (authoritative === null) {
++							await controller.hydrate(null, null, bootEpoch);
++							retryAttempt = 0;
++							return;
++						}
++						if (authoritative !== active) {
++							active = authoritative;
++							entry = store.find(active);
++						}
++					}
++					if (entry === null) throw bootFailure(`skin ${active} is not in the catalog`, false);
++					if (disposed || controller.choiceEpoch !== bootEpoch) return;
++					await controller.hydrate(active, entry, bootEpoch);
++					if (disposed || controller.choiceEpoch !== bootEpoch) return;
++					retryAttempt = 0;
++				} catch (error) {
++					if (disposed || controller.choiceEpoch !== bootEpoch) return;
++					if (error?.recoverable === false) {
++						if (!bootHardLogged) {
++							bootHardLogged = true;
++							console.error("[skin-center] boot activation failed permanently; keeping the last skin", error);
++						}
++						bootStopped = true;
+ 						return;
+ 					}
+-					await controller.switchTo(active, entry);
+-				} catch {
+-					await controller.switchTo(null, null).catch(() => {});
++					if (retryAttempt >= BOOT_RETRY_MAX_ATTEMPTS) {
++						if (!bootTransportLogged) {
++							bootTransportLogged = true;
++							console.warn("[skin-center] boot activation paused after transport retries; keeping the last skin", error);
++						}
++						bootTransportExhausted = true;
++						return;
++					}
++					scheduleBootRetry();
+ 				}
+-			})();
+-			if (typeof doc.defaultView !== "undefined" && doc.defaultView !== null) {
+-				const win = doc.defaultView;
++			};
++			void activateBootSkin();
++			const root = doc.defaultView;
++			if (root !== void 0 && root !== null) {
++				const rearm = () => requestBootRearm();
+ 				const onSkinApplied = (e) => {
++					if (disposed) return;
+ 					const detail = e.detail;
+-					if (detail && typeof detail.id === "string") refreshCatalog().then(async () => {
++					if (!detail || typeof detail.id !== "string") return;
++					controller.claimUserChoice();
++					const epoch = controller.choiceEpoch;
++					refreshCatalog(true).then(async () => {
++						if (disposed || controller.choiceEpoch !== epoch) return;
+ 						const entry = store.find(detail.id);
+ 						if (entry !== null) await controller.switchTo(detail.id, entry);
++					}).catch((error) => {
++						if (!disposed) console.warn("[skin-center] applied-skin refresh failed", error);
+ 					});
+ 				};
+-				win.addEventListener("dsh-skin-applied", onSkinApplied);
+-				listeners.add(() => win.removeEventListener("dsh-skin-applied", onSkinApplied));
++				root.addEventListener("online", rearm);
++				root.addEventListener("pageshow", rearm);
++				doc.addEventListener("visibilitychange", rearm);
++				doc.addEventListener("resume", rearm);
++				root.addEventListener("dsh-skin-applied", onSkinApplied);
++				cleanups.add(() => root.removeEventListener("online", rearm));
++				cleanups.add(() => root.removeEventListener("pageshow", rearm));
++				cleanups.add(() => doc.removeEventListener("visibilitychange", rearm));
++				cleanups.add(() => doc.removeEventListener("resume", rearm));
++				cleanups.add(() => root.removeEventListener("dsh-skin-applied", onSkinApplied));
+ 			}
+ 			return store;
+ 		}
 diff --git a/lib/index.js b/lib/index.js
-index 9affcbf..5ed4e58 100644
 --- a/lib/index.js
 +++ b/lib/index.js
-@@ -9395,7 +9395,7 @@ const SkinBackgroundConfigSchema = z.object({
+@@ -9395,7 +9395,7 @@
  const SKIN_WALLPAPER_NAMESPACE = "skin-wallpaper";
  /** Runtime schema for SkinWallpaperConfig. */
  const SkinWallpaperConfigSchema = z.object({

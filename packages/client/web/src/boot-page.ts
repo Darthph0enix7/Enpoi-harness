@@ -6,6 +6,14 @@
 import type { LoaderEntryState } from './loader-status.ts'
 import css from './boot-page.module.css'
 
+/** Feedback rendered after one explicit retry attempt. */
+export interface BootRetryFeedback {
+  /** Bounded explanation for the suppressed attempt or reload handoff. */
+  readonly message: string
+  /** Disable further clicks because only a manual page reload can continue. */
+  readonly disabled?: boolean
+}
+
 /** Create a div with one module class and optional text. */
 function div(className: string | undefined, text?: string): HTMLDivElement {
   const el = document.createElement('div')
@@ -25,6 +33,9 @@ export class BootPage {
   private readonly active = new Set<string>()
   private total = 0
   private failure: string | undefined
+  private retry: (() => BootRetryFeedback | undefined) | undefined
+  private retryFeedback: string | undefined
+  private retryDisabled = false
 
   /**
    * Build and attach the boot page.
@@ -77,9 +88,13 @@ export class BootPage {
   /**
    * Display the boot failure report.
    * @param message - Failure report text.
+   * @param retry - Optional explicit retry action rendered on the report.
    */
-  fail(message: string): void {
+  fail(message: string, retry?: () => BootRetryFeedback | undefined): void {
     this.failure = message
+    this.retry = retry
+    this.retryFeedback = undefined
+    this.retryDisabled = false
     this.render()
   }
 
@@ -101,6 +116,28 @@ export class BootPage {
     report.append(div(css.failedTitle, 'Failed to load plugins'))
     for (const id of failed) report.append(div(css.failedItem, id))
     if (this.failure !== undefined) report.append(div(css.failedItem, this.failure))
+    const retry = this.retry
+    if (retry !== undefined) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = css.failedItem ?? ''
+      button.dataset.dshBootRetry = ''
+      button.textContent = 'Retry'
+      button.disabled = this.retryDisabled
+      button.addEventListener('click', () => {
+        const feedback = retry()
+        if (feedback === undefined) return
+        this.retryFeedback = feedback.message
+        this.retryDisabled = feedback.disabled === true
+        this.render()
+      })
+      report.append(button)
+      if (this.retryFeedback !== undefined) {
+        const feedback = div(css.failedItem, this.retryFeedback)
+        feedback.dataset.dshBootRetryFeedback = ''
+        report.append(feedback)
+      }
+    }
     this.card.replaceChildren(this.wordmark, report)
   }
 

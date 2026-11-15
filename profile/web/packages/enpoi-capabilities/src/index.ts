@@ -56,7 +56,7 @@ import { installReviewRunTool } from './review-run'
 import { createApprovalParkJournal } from './approval-parks'
 import {
   ChildApprovalForwarder, FORWARDED_ASK_MARKER, delegatedChildOf, forwardedApprovalsSeam,
-  type ApprovalOutcome, type ChildAgentLike, type ModelRecommendation, type ParentRailQuery,
+  type ApprovalOutcome, type ChildAgentLike, type ModelRecommendation, type ParentAskQuery, type ParentRailQuery,
   type RecommendationQuery, type RootAskQuery, type RootHandle, type RootMode,
 } from './forwarding'
 import { requestRecommendation, RECOMMENDATION_TIMEOUT_MS } from './recommendation'
@@ -1346,7 +1346,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
   // A delegated child's approval policy is pinned `never`, so its asks used to
   // dead-end. The forwarder resolves them through the nearest live ROOT session:
   // rails first, then a session-scoped grant, then the root's mode — Full access
-  // applies one bounded parent judgement in the operator's place (doc 82 item 8),
+  // matches the root's own Full-access standing consent (doc 82 item 8),
   // every other mode keeps the existing human card. See forwarding.ts.
 
   /** Live Agent slice the root walk reads (structural `ctx.get('agents')`). */
@@ -1380,9 +1380,9 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
 
   /**
    * The root's effective mode for a forwarded ask: Full access / no restrictions
-   * (sandbox `danger-full-access` + approval `never`) applies one bounded parent
-   * judgement in the operator's place (doc 82 item 8); approval `never` without
-   * full access is unattended (no card possible); everything else is interactive.
+   * (sandbox `danger-full-access` + approval `never`) matches the root's standing
+   * consent (doc 82 item 8); approval `never` without full access is unattended
+   * (no card possible); everything else is interactive.
    */
   function rootModeOf(root: RootHandle): RootMode | undefined {
     const agent = root.agent as AgentLike
@@ -1396,24 +1396,54 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
   }
 
   /**
-   * The parent's own effective-policy ceiling for one rail class. The boundary
-   * ceiling is the root's sandbox scope; every other rail runs the same policy
-   * ladder under the root's role, so the operator's own deny rules and explicit
-   * allows decide. An ask or deny there means the child's card stays closed.
+   * The root's actual policy decision for one tool/command under its role.
+   * Child-role denies are enforced at spawn through the trusted role filter,
+   * not inferred here from a descriptor label or inherited preset.
+   */
+  function rootPolicyDecision(query: {
+    root: RootHandle
+    toolName: string
+    command?: string
+  }): ReturnType<typeof resolvePolicy> {
+    const agent = query.root.agent as AgentLike
+    const custom = query.toolName.startsWith('custom_') && query.command !== undefined
+    const config = readPermissionConfig()
+    const sandboxMode = readSandboxMode(agent)
+    return resolvePolicy({
+      toolName: query.toolName,
+      ...custom
+        ? { customCommand: query.command }
+        : query.command !== undefined ? { command: query.command } : {},
+      agent: askingAgentOf({ agent }),
+      reviewer: false,
+      config,
+      sandboxMode,
+      mcpServerNames: readMcpServerNames() ?? [],
+    })
+  }
+
+  /**
+   * The root's effective rail ceiling. Explicit deny wins; in Full access the
+   * root's standing consent allows an ask exactly as it would for the root;
+   * otherwise only an outright allow passes.
    */
   function parentAllowsRail(query: ParentRailQuery): boolean {
     const agent = query.root.agent as AgentLike
+    const decision = rootPolicyDecision(query)
+    if (decision.kind === 'deny') return false
     if (query.rail === 'boundary') return readSandboxMode(agent) === 'danger-full-access'
-    const decision = resolvePolicy({
-      toolName: query.toolName,
-      ...query.command !== undefined ? { command: query.command } : {},
-      agent: askingAgentOf({ agent }),
-      reviewer: false,
-      config: readPermissionConfig(),
-      sandboxMode: readSandboxMode(agent),
-      mcpServerNames: readMcpServerNames() ?? [],
-    })
-    return decision.kind === 'allow'
+    return rootModeOf(query.root) === 'full-access' || decision.kind === 'allow'
+  }
+
+  /**
+   * The root's effective decision for an ordinary Full-access ask. This is the
+   * "match parent" authority: explicit deny wins, otherwise the root's
+   * Full-access standing consent decides. No model judgement is involved.
+   */
+  function parentAllowsAsk(query: ParentAskQuery): boolean {
+    const decision = rootPolicyDecision(query)
+    if (decision.kind === 'deny') return false
+    return rootModeOf(query.root) === 'full-access'
   }
 
   /**
@@ -1448,8 +1478,8 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
    * deadline). Every miss returns undefined (the forwarder keeps its derived
    * line): no `llm`, no default-model selection, provider error, timeout, cut,
    * or unparseable output. On the card the answer is advisory presentation
-   * only; in Full access (no card) the forwarder APPLIES the suggestion as the
-   * parent's judgement, and `query.applied` tells the prompt so.
+   * only; Full access no longer invokes the model because the root's effective
+   * decision is the child's authority.
    */
   async function forwardedRecommendation(query: RecommendationQuery): Promise<ModelRecommendation | undefined> {
     const llm = ctx.get('llm') as {
@@ -1471,9 +1501,9 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
         ...query.args !== undefined ? { args: query.args } : {},
         origin: query.origin,
         workspaceRelation: query.workspaceRelation,
+        ...query.command !== undefined ? { command: query.command } : {},
         ...query.rail !== undefined ? { rail: query.rail } : {},
         decision: query.decision,
-        ...query.applied === true ? { applied: true } : {},
       },
       {
         stream: options => llm.stream!(options),
@@ -1493,13 +1523,9 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     )
   }
 
-  // Per-turn judgement budget (Full access, doc 82 item 8): the forwarder caps
-  // how many parent judgements one root turn may spend. `turn/start` bumps the
-  // root session's turn identity; the forwarder resets its budget on the bump.
-  // The same event drives the idle-parent park failsafe (doc 04 §6, doc 11):
+  // `turn/start` drives the idle-parent park failsafe (doc 04 §6, doc 11):
   // asks parked while the root sat between turns replay here, in FIFO order,
   // under the root's policy at that moment.
-  const rootTurns = new Map<string, number>()
   const approvalParks = createApprovalParkJournal()
 
   const approvalForwarding = new ChildApprovalForwarder({
@@ -1508,7 +1534,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     parentAllowsRail,
     askRoot: requestRootApproval,
     recommendation: forwardedRecommendation,
-    turnOf: (root: RootHandle) => String(rootTurns.get(root.id) ?? 0),
+    parentAllowsAsk,
     isRootIdle: (root: RootHandle) => {
       const agent = root.agent as { session?: Parameters<typeof hasOpenTurn>[0] | undefined } | undefined
       return agent?.session === undefined ? false : !hasOpenTurn(agent.session)
@@ -1525,7 +1551,6 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     const disposeTurn = ctx.on('session/event', ((session: { id?: string }, event: { type?: string }) => {
       if (typeof session?.id !== 'string' || session.id === '') return undefined
       if (event?.type === 'turn/start') {
-        rootTurns.set(session.id, (rootTurns.get(session.id) ?? 0) + 1)
         // The root returned: replay every ask parked while it sat between turns.
         approvalForwarding.replayParked(session.id)
       }
@@ -1533,7 +1558,6 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     }) as never)
     const disposeDisposed = ctx.on('session/disposed', ((session: { id?: string }) => {
       if (typeof session?.id !== 'string') return
-      rootTurns.delete(session.id)
       // A parked ask must not outlive the child or root session it belongs to.
       approvalForwarding.releaseSession(session.id, 'the session ended before the ask was resolved')
     }) as never)
@@ -1543,7 +1567,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       // Plugin disposal releases every parked child with a corrective denial.
       approvalForwarding.dispose()
     }
-  }, 'enpoi-capabilities: forwarded-ask turn budget + park replay')
+  }, 'enpoi-capabilities: forwarded-ask park replay')
   // Finality seam (doc 55): the core tool registry's ask path reads
   // `forwardedApprovals` so an outer ask or a reviewer denial cannot re-open a
   // call a forwarded child ask already allowed. Keyed by the requester's
@@ -1587,13 +1611,36 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     const config = readPermissionConfig()
     const isBash = exec.name === 'bash'
     // Custom tools (enpoi-custom-tools): the rendered command enters the SAME
-    // evaluator bash uses, so dangerous verbs/wrappers/interpreters ask or deny
-    // exactly as they would for bash. The seam is optional: without the plugin
-    // the tool name alone resolves through the matrix/defaults.
-    const customCommand = !isBash && exec.name.startsWith('custom_')
-      ? (ctx.get('customToolCommands') as { render?: (name: string, args: unknown) => { command?: string } | undefined } | undefined)
-        ?.render?.(exec.name, exec.arguments)?.command
+    // evaluator bash uses; the seam pins it to the trusted session/call identity
+    // so execution cannot fall back to a re-render after settings change.
+    const customSeam = !isBash && exec.name.startsWith('custom_')
+      ? ctx.get('customToolCommands') as {
+        render?: (
+          name: string,
+          args: unknown,
+          identity?: { sessionId?: string; callId?: string | number },
+        ) => { command?: string } | undefined
+        discard?: (name: string, identity?: { sessionId?: string; callId?: string | number }) => void
+      } | undefined
       : undefined
+    const agentSessionId = (exec.agent as { id?: unknown } | undefined)?.id
+    const execSessionId = typeof agentSessionId === 'string'
+      ? agentSessionId
+      : typeof execSession?.id === 'string' ? execSession.id : undefined
+    const customIdentity = {
+      ...execSessionId === undefined ? {} : { sessionId: execSessionId },
+      ...exec.callId === undefined ? {} : { callId: exec.callId },
+    }
+    const customCommand = customSeam
+      ?.render?.(exec.name, exec.arguments, customIdentity)?.command
+    const discardCustomSnapshot = (): void => {
+      if (customSeam !== undefined) customSeam.discard?.(exec.name, customIdentity)
+    }
+    // Capture the exact command once. The policy decision, forwarder rails,
+    // card recommendation, and park record all use this value; no later path
+    // re-renders a custom command.
+    const capturedCommand = customCommand
+      ?? (isBash && typeof exec.arguments?.command === 'string' ? exec.arguments.command : undefined)
     // A delegated child is identified once per call: its policy resolution
     // must not consume a config standing grant, because the ask has to reach
     // the parent-forwarding path (rails, parent policy, or card) rather than
@@ -1615,7 +1662,10 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       mcpServerNames: readMcpServerNames() ?? [],
     })
     if (decision.kind === 'allow') return await next()
-    if (decision.kind === 'deny') return { kind: 'deny', reason: decision.reason }
+    if (decision.kind === 'deny') {
+      discardCustomSnapshot()
+      return { kind: 'deny', reason: decision.reason }
+    }
     // A session with approval prompts disabled (delegation pins 'never') cannot
     // answer this ask itself. A delegated child's ask is forwarded through the
     // parent (below); any other such session denies here, naming the real actor
@@ -1633,10 +1683,14 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
           toolName: exec.name,
           args: exec.arguments,
           decision,
+          ...capturedCommand !== undefined ? { command: capturedCommand } : {},
           ...exec.callId !== undefined ? { callId: exec.callId } : {},
           ...exec.signal !== undefined ? { signal: exec.signal } : {},
         })
-        if (resolution.kind === 'deny') return { kind: 'deny', reason: resolution.reason }
+        if (resolution.kind === 'deny') {
+          discardCustomSnapshot()
+          return { kind: 'deny', reason: resolution.reason }
+        }
         // The forwarded decision is approval, not the whole gate: downstream
         // pre-execute layers (tool groups, mutation capture) still run. A
         // downstream ask cannot be satisfied from a child's `never` session, so
@@ -1650,8 +1704,10 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
             && approvalForwarding.resolvesFinalCall(delegated.childSessionId, String(exec.callId), exec.name)) {
             return { kind: 'allow', reason: 'the forwarded parent decision is final for this call' }
           }
+          discardCustomSnapshot()
           return { kind: 'deny', reason: `a downstream policy layer requires approval for ${exec.name}, which a delegated child's forwarded ask cannot satisfy` }
         }
+        if (downstream.kind === 'deny') discardCustomSnapshot()
         return downstream
       }
       // Full access (the corrected model, 2026-09-28): a MAIN/root
@@ -1660,7 +1716,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       // resolves allow with the mode named and an audit line: no card, no
       // denial, rails included (rails are a child-forwarding concern; a root
       // call is the operator's own). A delegated child never reaches this
-      // branch (checked above), so the parent-judgement path is untouched.
+      // branch (checked above), so the forwarded-consent path is untouched.
       if (isFullAccessMode(approvalPolicy.policy, readSandboxMode(exec.agent))) {
         process.stderr.write(
           `[enpoi-capabilities] audit: allowed ${exec.name} for the main session in Full access mode `
@@ -1670,9 +1726,13 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
         // (e.g. a tool the operator disabled) stands, but no layer may card
         // here — Full access never asks.
         const downstream = await next()
-        if (downstream.kind === 'deny') return downstream
+        if (downstream.kind === 'deny') {
+          discardCustomSnapshot()
+          return downstream
+        }
         return { kind: 'allow', reason: FULL_ACCESS_ASK_REASON }
       }
+      discardCustomSnapshot()
       return {
         kind: 'deny',
         reason: `${exec.name} was denied automatically: this ${approvalPolicy.delegated ? 'delegated subagent' : 'session'} runs with approval prompts disabled, so the approval policy denied it without asking a user. It required approval because: ${decision.reason}.`,

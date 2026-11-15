@@ -229,6 +229,7 @@ export function apply(ctx: ClientContext): void {
       // enpoi: the rail's gestures and its two hook sources (icons, state).
       selectKind: (kind) => { controller.selectKind(kind) },
       setEditorWidth: (px) => { rail.setEditorWidth(px) },
+      setOpen: (open) => { rail.setOpen(open) },
       setRightbarWidth: (px) => { layout.setRightbar(px) },
       hooks: {
         shortcuts: ctx.shortcuts.catalog,

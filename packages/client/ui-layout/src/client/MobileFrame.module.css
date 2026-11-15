@@ -1,10 +1,10 @@
 /*
- * Mobile shell chrome. Every responsive fold (soft keyboard, landscape,
+ * Compact shell chrome. Every responsive fold (soft keyboard, landscape,
  * short viewport) is a stylesheet rule so the frame needs no re-render; the
  * desktop frame's own stylesheet is untouched. Geometry the other mobile
  * lanes read: `--dsh-mobile-header-height` / `--dsh-mobile-bar-height` are
  * the chrome insets the fullscreen right panel sits between. They live on the
- * root while the mobile shell is mounted so body-portalled overlay chips can
+ * root while the compact shell is mounted so body-portalled overlay chips can
  * read the bar height as `--dsh-shell-inset-bottom`.
  */
 :global(html[data-mobile-shell]) {
@@ -35,7 +35,17 @@
   --dsh-mobile-bar-height: 0px;
 }
 
+/* Immersive hides both chrome rows; zero their geometry for the fullscreen
+   right panel and body-portalled overlays instead of leaving empty bands. */
+:global(html[data-mobile-shell][data-mobile-immersive]) {
+  --dsh-mobile-header-height: 0px;
+  --dsh-mobile-bar-height: 0px;
+  --dsh-shell-inset-bottom: 0px;
+}
+
 .header {
+  grid-row: 1;
+  grid-column: 1;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -52,18 +62,30 @@
   display: none;
 }
 
-/* Tap strip that brings the chrome back while immersive; the back gesture
-   restores it too. */
+/* Floating restore control while the chrome is hidden. A visible 44px target
+   replaces the old invisible edge strip, so the way back is discoverable and
+   the back gesture/Escape still run the same restore. */
 .immersiveRestore {
   position: fixed;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 16px;
+  top: calc(var(--dsh-safe-area-inset-top, 0px) + 8px);
+  right: calc(var(--dsh-safe-area-inset-right, 0px) + 8px);
+  z-index: 85;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
   padding: 0;
   border: none;
-  background: transparent;
-  z-index: 55;
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-2);
+  box-shadow: var(--dsw-elevation-prominent);
+  color: var(--dsw-alias-label-primary);
+  cursor: pointer;
+}
+
+.immersiveRestore:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 
 .title {
@@ -108,6 +130,8 @@
 }
 
 .content {
+  grid-row: 2;
+  grid-column: 1;
   position: relative;
   min-height: 0;
   min-width: 0;
@@ -116,7 +140,15 @@
   flex-direction: column;
 }
 
+/* The persistent rightbar wrapper contributes no grid item in compact mode;
+   its occupant anchors itself to the viewport. */
+.rightbarHost {
+  display: contents;
+}
+
 .bar {
+  grid-row: 3;
+  grid-column: 1;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -133,8 +165,10 @@
   display: flex;
   align-items: center;
   gap: 2px;
-  overflow-x: auto;
-  overflow-y: hidden;
+  /* The bar is bounded to five 44px targets, which fit a 320px viewport with
+     its safe-area padding. A wider safe area shrinks the text labels instead
+     of turning the bar into a horizontal scroller. */
+  overflow: hidden;
 }
 
 .barButton {

@@ -293,6 +293,14 @@ describe('skin center runtime cost', () => {
       'shrinkBackgroundImage',
       'encodeBackgroundDerivative',
       'requestIdleCallback',
+      'ensureStylesheet',
+      'stylesheetResources',
+      'retireDanglingStylesheets',
+      'data-dsh-skin-ready',
+      'scheduleBootRetry',
+      'activateBootSkin',
+      'BOOT_RETRY_MAX_ATTEMPTS',
+      'claimUserChoice',
     ]) expect(PATCH_TEXT).toContain(marker)
     // The paint-time downscale only edits lib/client.js: no dependency, import,
     // or require is added by the patch.

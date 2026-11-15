@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { createRef } from 'react'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Sheet, getDeviceSnapshot } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -33,6 +34,16 @@ describe('Sheet', () => {
       </Sheet>,
     )
     expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
+  it('exposes the dialog element through an optional caller ref', () => {
+    const dialog = createRef<HTMLDivElement>()
+    render(
+      <Sheet open onClose={() => {}} title="Models" closeLabel="Close" dialogRef={dialog}>
+        <p>body</p>
+      </Sheet>,
+    )
+    expect(dialog.current).toBe(screen.getByRole('dialog', { name: 'Models' }))
   })
 
   it('renders a safe-area padded dialog with title, body, and footer', () => {

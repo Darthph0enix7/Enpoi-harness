@@ -16,24 +16,34 @@
  *       "enpoi-one": {
  *         "sourceInputs": "<sha256>",
  *         "outputSha": "<sha256>",
- *         "buildFlags": "<sha256>"
+ *         "buildFlags": "<sha256>",
+ *         "typesSha": "<sha256>"   // only for declaration producers
  *       }
  *     }
  *   }
  *
  * `sourceInputs` covers the package's `src/**` TypeScript/JavaScript/JSON
  * files plus `package.json` and `tsconfig.json`, hashed in sorted relative-path
- * order. Root runtime data JSON is not part of the bundle, so editing it does
- * not force a pointless rebuild. `outputSha` is the SHA-256 of `lib/index.js`.
- * `buildFlags` is the SHA-256 of the canonical esbuild argv printed by
- * `flags`; the build script consumes that same list, keeping the fingerprint
- * and the actual compiler invocation on one source of truth.
+ * order. Declaration producers (`scripts.build:types`) additionally hash their
+ * `scripts` tree `.mjs` build helper. Root runtime data JSON is not part of the
+ * bundle, so editing it does not force a pointless rebuild. `outputSha` is the
+ * SHA-256 of `lib/index.js`. `buildFlags` is the SHA-256 of the canonical
+ * esbuild argv printed by `flags`; the build script consumes that same list,
+ * keeping the fingerprint and the actual compiler invocation on one source of
+ * truth.
  *
- * A prebuilt bundle may be skipped only when all three values match the files
- * on disk. Missing entries always request a build, so a source checkout or an
- * older install can never silently keep a stale bundle. Release builds set
- * `FORCE_BUILD=1` in `profile/web/build-plugins.sh` to regenerate this map for
- * every package before the artifact is staged.
+ * `typesSha` is present only when a package both opts into declarations and
+ * exports a `types` target. It covers every emitted `lib` declaration, so a
+ * changed declaration forces a rebuild even when `lib/index.js` is unchanged.
+ * Entries written before declaration fingerprints existed stay valid for
+ * ordinary plugins; a producer without `typesSha` is rebuilt once, which is
+ * the expected packaging change.
+ *
+ * A prebuilt bundle may be skipped only when every recorded value matches the
+ * files on disk. Missing entries always request a build, so a source checkout
+ * or an older install can never silently keep a stale bundle. Release builds
+ * set `FORCE_BUILD=1` in `profile/web/build-plugins.sh` to regenerate this map
+ * for every package before the artifact is staged.
  *
  * Source symlinks under `src` are rejected rather than silently skipped: a
  * link can point outside the package, and esbuild may follow it while this
@@ -71,6 +81,7 @@ export const BUILD_FLAGS = Object.freeze([
 ])
 
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs', '.json'])
+const SCRIPT_EXTENSIONS = new Set(['.mjs'])
 const ROOT_INPUT_FILES = ['package.json', 'tsconfig.json']
 const SKIPPED_SOURCE_DIRS = new Set(['node_modules', '.git'])
 const MAX_SOURCE_DEPTH = 16
@@ -87,7 +98,84 @@ function regularFile(path) {
   }
 }
 
-function sourceFilesIn(directory, packageRoot, found, depth) {
+/** Read one package manifest, or an empty object when it is absent/unreadable. */
+function packageManifest(packageDir) {
+  try {
+    return JSON.parse(readFileSync(join(resolve(packageDir), 'package.json'), 'utf8'))
+  } catch {
+    return {}
+  }
+}
+
+/** Whether one package opts into declaration emit through its manifest build:types script. */
+export function isDeclarationProducer(packageDir) {
+  const scripts = packageManifest(packageDir).scripts
+  return scripts !== null && typeof scripts === 'object' && typeof scripts['build:types'] === 'string'
+}
+
+/** The declaration target one package exports, when it publishes types. */
+export function declaredTypesTarget(packageDir) {
+  const manifest = packageManifest(packageDir)
+  const rootExport = manifest.exports?.['.']
+  if (rootExport !== null && typeof rootExport === 'object' && typeof rootExport.types === 'string') return rootExport.types
+  return typeof manifest.types === 'string' ? manifest.types : undefined
+}
+
+/** Whether one declared types target exists and carries declaration content. */
+function declarationTargetValid(packageDir, typesTarget) {
+  const path = join(resolve(packageDir), typesTarget)
+  try {
+    const info = statSync(path)
+    return info.isFile() && info.size > 0
+  } catch {
+    return false
+  }
+}
+
+/** Collect every emitted declaration under lib, sorted by package-relative path. */
+function declarationFilesIn(directory, packageRoot, found, depth) {
+  if (depth > MAX_SOURCE_DEPTH) {
+    throw new Error(`declaration tree exceeds ${MAX_SOURCE_DEPTH} levels below ${packageRoot}`)
+  }
+  const entries = readdirSync(directory, { withFileTypes: true }).sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+  for (const entry of entries) {
+    const path = join(directory, entry.name)
+    if (entry.isSymbolicLink()) {
+      const input = relative(packageRoot, path).split(sep).join('/')
+      throw new Error(`declaration symlink is not supported (refusing to hash an unverifiable artifact): ${input}`)
+    }
+    if (entry.isDirectory()) {
+      declarationFilesIn(path, packageRoot, found, depth + 1)
+      continue
+    }
+    if (entry.isFile() && entry.name.endsWith('.d.ts')) found.add(relative(packageRoot, path).split(sep).join('/'))
+  }
+}
+
+/**
+ * SHA-256 of a package's emitted declarations, or null when it publishes none.
+ * @param {string} packageDir plugin package directory
+ * @returns {string | null} lowercase hex digest
+ */
+export function declarationDigest(packageDir) {
+  const root = resolve(packageDir)
+  const lib = join(root, 'lib')
+  if (!existsSync(lib) || !statSync(lib).isDirectory()) return null
+  const found = new Set()
+  declarationFilesIn(lib, root, found, 0)
+  if (found.size === 0) return null
+  const hash = createHash('sha256')
+  hash.update(`dsh-profile-bundle-declarations-v${FINGERPRINT_VERSION}\0`)
+  for (const file of [...found].sort()) {
+    const data = readFileSync(join(root, file))
+    hash.update(`${Buffer.byteLength(file)}:${file}\0`)
+    hash.update(`${data.length}\0`)
+    hash.update(data)
+  }
+  return hash.digest('hex')
+}
+
+function sourceFilesIn(directory, packageRoot, found, depth, extensions = SOURCE_EXTENSIONS) {
   if (depth > MAX_SOURCE_DEPTH) {
     throw new Error(`source tree exceeds ${MAX_SOURCE_DEPTH} levels below ${packageRoot}`)
   }
@@ -100,11 +188,11 @@ function sourceFilesIn(directory, packageRoot, found, depth) {
     }
     if (entry.isDirectory()) {
       if (SKIPPED_SOURCE_DIRS.has(entry.name)) continue
-      sourceFilesIn(path, packageRoot, found, depth + 1)
+      sourceFilesIn(path, packageRoot, found, depth + 1, extensions)
       continue
     }
     if (!entry.isFile()) continue
-    if (!SOURCE_EXTENSIONS.has(extname(entry.name).toLowerCase())) continue
+    if (!extensions.has(extname(entry.name).toLowerCase())) continue
     found.add(relative(packageRoot, path).split(sep).join('/'))
   }
 }
@@ -126,6 +214,15 @@ export function collectSourceInputs(packageDir) {
       throw new Error('source symlink is not supported (refusing to hash an unverifiable src directory): src')
     }
     sourceFilesIn(src, root, found, 0)
+  }
+  if (isDeclarationProducer(root)) {
+    const scripts = join(root, 'scripts')
+    if (existsSync(scripts)) {
+      if (lstatSync(scripts).isSymbolicLink()) {
+        throw new Error('source symlink is not supported (refusing to hash an unverifiable scripts directory): scripts')
+      }
+      sourceFilesIn(scripts, root, found, 0, SCRIPT_EXTENSIONS)
+    }
   }
   return [...found].sort()
 }
@@ -200,7 +297,7 @@ export function packageDirectory(profileRoot, name) {
  * @param {string} packageDir plugin package directory
  * @param {readonly string[]} [flags] build arguments
  * @param {string} [expectedSourceInputs] source hash captured before the build
- * @returns {{ sourceInputs: string, outputSha: string, buildFlags: string }} entry
+ * @returns {{ sourceInputs: string, outputSha: string, buildFlags: string, typesSha?: string }} entry
  */
 export function fingerprintEntry(packageDir, flags = BUILD_FLAGS, expectedSourceInputs = undefined) {
   const sourceInputs = sourceInputDigest(packageDir)
@@ -209,10 +306,20 @@ export function fingerprintEntry(packageDir, flags = BUILD_FLAGS, expectedSource
   }
   const outputSha = outputDigest(packageDir)
   if (outputSha === null) throw new Error(`no built bundle at ${join(packageDir, 'lib', 'index.js')}`)
+  const typesTarget = declaredTypesTarget(packageDir)
+  let typesSha
+  if (isDeclarationProducer(packageDir) && typesTarget !== undefined) {
+    if (!declarationTargetValid(packageDir, typesTarget)) {
+      throw new Error(`declared types target was not emitted or is empty: ${typesTarget}`)
+    }
+    typesSha = declarationDigest(packageDir)
+    if (typesSha === null) throw new Error(`declarations declared at ${typesTarget} but none emitted under lib`)
+  }
   return {
     sourceInputs,
     outputSha,
     buildFlags: buildFlagsDigest(flags),
+    ...(typesSha !== undefined ? { typesSha } : {}),
   }
 }
 
@@ -224,7 +331,7 @@ function emptyManifest() {
  * Read the fingerprint map. A missing, unreadable, or malformed map is treated
  * as empty so every package requests a build instead of inheriting trust.
  * @param {string} profileRoot profile web root
- * @returns {{ version: number, packages: Record<string, { sourceInputs: string, outputSha: string, buildFlags: string }> }} manifest
+ * @returns {{ version: number, packages: Record<string, { sourceInputs: string, outputSha: string, buildFlags: string, typesSha?: string }> }} manifest
  */
 export function readManifest(profileRoot) {
   const path = join(resolve(profileRoot), FINGERPRINT_FILE)
@@ -242,7 +349,7 @@ export function readManifest(profileRoot) {
 /**
  * Atomically replace the fingerprint map (temp file in the same directory).
  * @param {string} profileRoot profile web root
- * @param {{ packages: Record<string, { sourceInputs: string, outputSha: string, buildFlags: string }> }} manifest manifest to write
+ * @param {{ packages: Record<string, { sourceInputs: string, outputSha: string, buildFlags: string, typesSha?: string }> }} manifest manifest to write
  * @returns {string} fingerprint file path
  */
 export function writeManifest(profileRoot, manifest) {
@@ -252,10 +359,12 @@ export function writeManifest(profileRoot, manifest) {
     const entry = manifest.packages[name]
     if (entry === null || typeof entry !== 'object') continue
     if (typeof entry.sourceInputs !== 'string' || typeof entry.outputSha !== 'string' || typeof entry.buildFlags !== 'string') continue
+    if (entry.typesSha !== undefined && typeof entry.typesSha !== 'string') continue
     packages[name] = {
       sourceInputs: entry.sourceInputs,
       outputSha: entry.outputSha,
       buildFlags: entry.buildFlags,
+      ...(entry.typesSha !== undefined ? { typesSha: entry.typesSha } : {}),
     }
   }
   mkdirSync(root, { recursive: true })
@@ -276,7 +385,7 @@ export function writeManifest(profileRoot, manifest) {
  * @param {string} profileRoot profile web root
  * @param {string} name package directory name
  * @param {readonly string[]} [flags] current build arguments
- * @returns {{ ok: boolean, reason?: string, entry?: { sourceInputs: string, outputSha: string, buildFlags: string } }} result
+ * @returns {{ ok: boolean, reason?: string, entry?: { sourceInputs: string, outputSha: string, buildFlags: string, typesSha?: string } }} result
  */
 export function checkPackage(profileRoot, name, flags = BUILD_FLAGS) {
   const directory = packageDirectory(profileRoot, name)
@@ -297,6 +406,19 @@ export function checkPackage(profileRoot, name, flags = BUILD_FLAGS) {
   if (outputSha === null) return { ok: false, reason: 'bundle missing' }
   if (entry.outputSha !== outputSha) return { ok: false, reason: 'bundle content changed' }
   if (entry.buildFlags !== buildFlagsDigest(flags)) return { ok: false, reason: 'build flags changed' }
+  const typesTarget = declaredTypesTarget(directory)
+  if (isDeclarationProducer(directory) && typesTarget !== undefined) {
+    if (!declarationTargetValid(directory, typesTarget)) return { ok: false, reason: 'declared types target missing or empty' }
+    if (typeof entry.typesSha !== 'string') return { ok: false, reason: 'declaration fingerprint missing' }
+    let typesSha
+    try {
+      typesSha = declarationDigest(directory)
+    } catch (error) {
+      return { ok: false, reason: `declarations unreadable: ${error instanceof Error ? error.message : String(error)}` }
+    }
+    if (typesSha === null) return { ok: false, reason: 'declarations missing' }
+    if (entry.typesSha !== typesSha) return { ok: false, reason: 'declaration content changed' }
+  }
   return { ok: true, entry }
 }
 
@@ -308,7 +430,7 @@ export function checkPackage(profileRoot, name, flags = BUILD_FLAGS) {
  * @param {string} name package directory name
  * @param {readonly string[]} [flags] build arguments used
  * @param {string} [expectedSourceInputs] source hash captured before the build
- * @returns {{ entry: { sourceInputs: string, outputSha: string, buildFlags: string }, file: string }} recorded entry and file path
+ * @returns {{ entry: { sourceInputs: string, outputSha: string, buildFlags: string, typesSha?: string }, file: string }} recorded entry and file path
  */
 export function recordPackage(profileRoot, name, flags = BUILD_FLAGS, expectedSourceInputs = undefined) {
   const manifest = readManifest(profileRoot)

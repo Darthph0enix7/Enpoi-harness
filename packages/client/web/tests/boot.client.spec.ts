@@ -6,7 +6,10 @@ import type {
   WebBootEntry,
 } from '@deepseek-ai/dsh-client-modules/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AppWebEntry } from '../src/boot.ts'
+import {
+  AppWebEntry, classifyBootFailure, isTransientBootError, type BootFailureHandler,
+} from '../src/boot.ts'
+import { installClientHealth, type ClientHealth } from '../src/client-health.ts'
 
 const MODULES_ID = '@deepseek-ai/dsh-client-modules'
 const PROVIDER_CLIENT_ID = 'provider/client'
@@ -23,8 +26,33 @@ afterEach(() => {
   delete win.__ModuleLoader__
   delete transportGlobal.__DSH_TRANSPORT__
   delete (globalThis as Record<string, unknown>).__DSH_CLIENT_HEALTH__
+  sessionStorage.clear()
   document.body.innerHTML = ''
 })
+
+/** Minimal page-health stand-in for exercising boot-failure presentation branches. */
+function stubHealth(retryBoot: ClientHealth['retryBoot']): ClientHealth {
+  return {
+    markBootComplete: () => {},
+    markBootFailed: () => {},
+    checkNow: () => false,
+    fatal: () => 'ignored',
+    retryBoot,
+    dispose: () => {},
+  }
+}
+
+/** Page-health monitor with recording reload and a test clock, owned by the boot entry. */
+function bootHealth(container: HTMLElement, reload: () => void, now: () => number): ClientHealth {
+  return installClientHealth({
+    container,
+    reload,
+    storage: sessionStorage,
+    now,
+    postReport: () => {},
+    showFallback: () => {},
+  })
+}
 
 /** Install the stable facade shape that the Host injects before AppWebEntry runs. */
 function installFacade(
@@ -309,4 +337,221 @@ it('draws the shared boot page before Host injections and resumes without replac
     await entry.dispose()
     vi.unstubAllGlobals()
   }
+})
+
+
+describe('transient boot recovery', () => {
+  it('keeps a bundle fetch failure visible and retries on online/pageshow within cooldown and cap', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const container = document.createElement('div')
+    document.body.append(container)
+    installFacade()
+    win.__DSH_BOOT__ = {
+      rev: 'graph',
+      entries: [{ id: 'offline-row', url: '/offline.js', rev: '1' }],
+      batches: [{ phase: 'application', url: '/application.js', rev: '1', entries: ['offline-row'] }],
+    }
+    const reload = vi.fn()
+    const clock = { value: 1_000_000 }
+    const health = bootHealth(container, reload, () => clock.value)
+    const entry = new AppWebEntry(container, {
+      health,
+      loadBundle: async () => { throw new TypeError('Failed to fetch') },
+    })
+    try {
+      await entry.run()
+
+      expect(container.textContent).toContain('Failed to load plugins')
+      expect(container.textContent).toContain('offline-row')
+      expect(reload).not.toHaveBeenCalled()
+      const retry = container.querySelector<HTMLButtonElement>('[data-dsh-boot-retry]')
+      expect(retry).not.toBeNull()
+
+      window.dispatchEvent(new Event('online'))
+      expect(reload).toHaveBeenCalledOnce()
+      // The same cooldown/cap guards the explicit action.
+      retry?.click()
+      expect(reload).toHaveBeenCalledOnce()
+      clock.value += 30_000
+      retry?.click()
+      expect(reload).toHaveBeenCalledTimes(2)
+      clock.value += 30_000
+      window.dispatchEvent(new Event('pageshow'))
+      expect(reload).toHaveBeenCalledTimes(3)
+      clock.value += 30_000
+      window.dispatchEvent(new Event('online'))
+      expect(reload).toHaveBeenCalledTimes(3)
+
+      // Recovery never hides the startup failure while it is suppressed.
+      expect(container.textContent).toContain('Failed to load plugins')
+      expect(error).toHaveBeenCalledOnce()
+    } finally {
+      await entry.dispose()
+    }
+  })
+
+  it('does not auto-reload a deterministic plugin activation failure', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const container = document.createElement('div')
+    document.body.append(container)
+    const target = installFacade()
+    win.__DSH_BOOT__ = {
+      rev: 'graph',
+      entries: [{ id: 'broken', url: '/broken.js', rev: '1' }],
+      batches: [{ phase: 'application', url: '/application.js', rev: '1', entries: ['broken'] }],
+    }
+    const reload = vi.fn()
+    const clock = { value: 1_000_000 }
+    const health = bootHealth(container, reload, () => clock.value)
+    const entry = new AppWebEntry(container, {
+      health,
+      loadBundle: async () => {
+        target.load({ id: 'broken', factory: () => ({ apply() { throw new Error('plugin activation failed') } }) })
+      },
+    })
+    try {
+      await entry.run()
+
+      expect(container.textContent).toContain('Failed to load plugins')
+      expect(container.textContent).toContain('broken')
+      window.dispatchEvent(new Event('online'))
+      window.dispatchEvent(new Event('pageshow'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      clock.value += 30_000
+      window.dispatchEvent(new Event('online'))
+      expect(reload).not.toHaveBeenCalled()
+      expect(container.textContent).toContain('Failed to load plugins')
+
+      // An explicit user retry remains available; only automatic recovery is refused.
+      container.querySelector<HTMLButtonElement>('[data-dsh-boot-retry]')?.click()
+      expect(reload).toHaveBeenCalledOnce()
+    } finally {
+      await entry.dispose()
+    }
+  })
+
+  it('classifies transport shapes separately from deterministic plugin/export errors', () => {
+    expect(isTransientBootError(new TypeError('Failed to fetch'))).toBe(true)
+    expect(isTransientBootError('Failed to fetch')).toBe(true)
+    expect(isTransientBootError(Object.assign(new Error('offline shell'), { name: 'NetworkError' }))).toBe(true)
+    expect(isTransientBootError(Object.assign(new Error('socket dropped'), { code: 'ECONNRESET' }))).toBe(true)
+    expect(isTransientBootError(Object.assign(new Error('bundle did not load'), {
+      cause: new TypeError('error loading dynamically imported module'),
+    }))).toBe(true)
+    expect(isTransientBootError(new Error('plugin activation failed'))).toBe(false)
+    const cyclic = new Error('plugin cycle')
+    ;(cyclic as Error & { cause?: unknown }).cause = cyclic
+    expect(isTransientBootError(cyclic)).toBe(false)
+
+    const pluginFailure = new Error('web boot: 1 entry did not activate\nbroken: error')
+    expect(classifyBootFailure(pluginFailure, 'plugins')).toBe('fatal')
+    expect(classifyBootFailure(pluginFailure, 'plugins', { importError: () => undefined }, ['broken'])).toBe('fatal')
+    expect(classifyBootFailure(new TypeError('Load failed'), 'mount')).toBe('retryable')
+    expect(classifyBootFailure(new Error('renderer crashed'), 'mount')).toBe('fatal')
+    const modules = { importError: () => new Error('plugin activation failed') }
+    expect(classifyBootFailure(pluginFailure, 'plugins', modules, ['broken'])).toBe('fatal')
+    const fetchFailure = new Error('web boot: 1 entry did not activate\noffline: import failed: Failed to fetch')
+    expect(classifyBootFailure(fetchFailure, 'plugins', modules, ['offline'])).toBe('fatal')
+    const offlineImport = { importError: () => new TypeError('Failed to fetch') }
+    expect(classifyBootFailure(fetchFailure, 'plugins', offlineImport, ['offline'])).toBe('retryable')
+    expect(classifyBootFailure(new TypeError('Failed to fetch'), 'bootstrap')).toBe('fatal')
+  })
+})
+
+
+describe('retry feedback', () => {
+  it('shows and disables the explicit action for a terminal suppressed outcome', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const container = document.createElement('div')
+    document.body.append(container)
+    const retryBoot = vi.fn<ClientHealth['retryBoot']>(() => ({
+      kind: 'suppressed',
+      reason: 'limit',
+    }))
+    const entry = new AppWebEntry(container, { health: stubHealth(retryBoot) })
+    try {
+      await entry.run()
+      const button = container.querySelector<HTMLButtonElement>('[data-dsh-boot-retry]')
+      expect(button).not.toBeNull()
+      button?.click()
+      expect(container.textContent).toContain('Retry limit reached')
+      expect(container.textContent).toContain('reload the page manually')
+      expect(container.querySelector<HTMLButtonElement>('[data-dsh-boot-retry]')?.disabled).toBe(true)
+      expect(retryBoot).toHaveBeenCalledOnce()
+    } finally {
+      await entry.dispose()
+    }
+  })
+
+  it('shows the cooldown reason without disabling the action', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const container = document.createElement('div')
+    document.body.append(container)
+    const retryBoot = vi.fn<ClientHealth['retryBoot']>(() => ({
+      kind: 'suppressed',
+      reason: 'cooldown',
+      retryAfterMs: 4_000,
+    }))
+    const entry = new AppWebEntry(container, { health: stubHealth(retryBoot) })
+    try {
+      await entry.run()
+      const button = container.querySelector<HTMLButtonElement>('[data-dsh-boot-retry]')
+      button?.click()
+      expect(container.textContent).toContain('try again in 4s')
+      expect(button?.disabled).toBe(false)
+    } finally {
+      await entry.dispose()
+    }
+  })
+
+  it('shows the storage reason and disables the action when the retry guard is unavailable', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const container = document.createElement('div')
+    document.body.append(container)
+    const retryBoot = vi.fn<ClientHealth['retryBoot']>(() => ({
+      kind: 'suppressed',
+      reason: 'storage',
+    }))
+    const entry = new AppWebEntry(container, { health: stubHealth(retryBoot) })
+    try {
+      await entry.run()
+      container.querySelector<HTMLButtonElement>('[data-dsh-boot-retry]')?.click()
+      expect(container.textContent).toContain('Retry guard storage is unavailable')
+      expect(container.textContent).toContain('reload the page manually')
+      expect(container.querySelector<HTMLButtonElement>('[data-dsh-boot-retry]')?.disabled).toBe(true)
+    } finally {
+      await entry.dispose()
+    }
+  })
+
+  it('hands a retry action to a carrier-owned retryable failure', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const container = document.createElement('div')
+    document.body.append(container)
+    const target = installFacade()
+    win.__DSH_BOOT__ = {
+      rev: 'graph',
+      entries: [{ id: 'offline-carrier', url: '/offline.js', rev: '1' }],
+      batches: [{ phase: 'application', url: '/application.js', rev: '1', entries: ['offline-carrier'] }],
+    }
+    const retryBoot = vi.fn<ClientHealth['retryBoot']>(() => ({ kind: 'reload' }))
+    const report = vi.fn<BootFailureHandler>()
+    const entry = new AppWebEntry(container, {
+      health: stubHealth(retryBoot),
+      loadBundle: async () => {
+        target.load({ id: 'offline-carrier', factory: () => ({ apply: () => {} }) })
+        throw new TypeError('Failed to fetch')
+      },
+    })
+    try {
+      await entry.run(report)
+      expect(report).toHaveBeenCalledOnce()
+      const [, retry] = report.mock.calls[0]!
+      expect(retry).toBeTypeOf('function')
+      expect(retry!()).toEqual({ message: 'Reloading…', disabled: true })
+      expect(retryBoot).toHaveBeenCalledOnce()
+    } finally {
+      await entry.dispose()
+    }
+  })
 })

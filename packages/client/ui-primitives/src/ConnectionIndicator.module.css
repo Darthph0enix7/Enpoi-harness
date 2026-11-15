@@ -116,3 +116,118 @@
     transition: none;
   }
 }
+
+.stopped {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 4px 0 8px;
+  box-sizing: border-box;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-warn-label) 20%, transparent);
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-alias-state-warn-tertiary);
+  color: var(--dsw-alias-state-warn-label);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  max-width: min(100%, 260px);
+}
+
+.stoppedAction {
+  min-width: 0;
+  display: inline-grid;
+  grid-template-columns: 14px minmax(0, max-content);
+  align-items: center;
+  column-gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.stoppedAction:focus-visible,
+.detailsSummary:focus-visible,
+.reloadAction:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 2px;
+}
+
+.stopped .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.details {
+  position: relative;
+  flex: none;
+}
+
+.detailsSummary {
+  list-style: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: var(--dsw-radius-xs, 4px);
+  cursor: pointer;
+  color: inherit;
+}
+
+.detailsSummary::-webkit-details-marker {
+  display: none;
+}
+
+.detailsPanel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 2;
+  display: grid;
+  gap: 6px;
+  width: min(280px, 70vw);
+  padding: 10px;
+  box-sizing: border-box;
+  border: 0;
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-elevated, Canvas);
+  color: var(--dsw-alias-label-primary, CanvasText);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  box-shadow: var(--dsw-elevation-panel);
+}
+
+.detailsText,
+.detailsInstruction {
+  margin: 0;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.detailsText {
+  color: var(--dsw-alias-label-primary, CanvasText);
+}
+
+.detailsInstruction {
+  color: var(--dsw-alias-label-secondary, GrayText);
+}
+
+.reloadAction {
+  justify-self: start;
+  padding: 3px 8px;
+  border: 0.5px solid var(--dsw-alias-border-l2, currentColor);
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}

@@ -746,7 +746,9 @@ export interface Config {
 
 /**
  * Per-scope filter over global tools. Restrictions intersect and do not affect
- * scoped registrations or the reserved PTC mode transport.
+ * scoped registrations. The reserved PTC mode transport cannot be named by
+ * `allow` (it is owned by the selected presentation), but `deny` may remove it
+ * from that scope so an explicit operator/role deny is executable.
  */
 export interface ToolRestriction {
   /** Global tool names that stay visible; everything else is removed. */
@@ -812,6 +814,18 @@ class ToolLayer implements ScopeLayer {
         || (filter.deny !== undefined && filter.deny.has(name))) return false
     }
     return true
+  }
+
+  /**
+   * Whether any compiled restriction in this layer explicitly denies a name.
+   * Unlike {@link admits}, an `allow` mask does not deny an unlisted name —
+   * the reserved transport is appended outside allow-list filtering.
+   */
+  denies(name: string): boolean {
+    for (const filter of this.restrictions.values()) {
+      if (filter.deny !== undefined && filter.deny.has(name)) return true
+    }
+    return false
   }
 
   /** First monotonic denial from this layer's live guard registrations. */
@@ -1063,6 +1077,14 @@ export class ToolRuntime extends Service {
       const schemas = [...view.visible.values()].map(definition => this.schemaOf(definition, false))
       return { schemas, knownNames: [...view.knownNames] }
     }
+    // Under `ptc` the transport is the ONLY direct call. An explicit deny
+    // therefore leaves no callable tool at all; fail loud with the cause
+    // instead of emitting a silent empty surface that the model cannot act on.
+    // `both` keeps the native schemas, so a transport deny is a normal,
+    // non-empty surface there.
+    if (mode === 'ptc' && !view.visible.has(RUN_CODE_NAME)) {
+      throw new Error(`[PTC_TOOL_SURFACE_EMPTY] dsh-tools: PTC mode has no callable tool because the reserved "${RUN_CODE_NAME}" transport is explicitly denied for this scope; allow ${RUN_CODE_NAME} or present this scope as "native"/"both"`)
+    }
     // Validate the runtime language BEFORE projecting schemas: schemaOf reads
     // run_code's language-aware description/parameters getters, whose own
     // flavor-table guard would otherwise surface first. This keeps the
@@ -1140,8 +1162,10 @@ export class ToolRuntime extends Service {
 
   /**
    * Restrict global tools for the calling agent scope. Empty filters, unknown
-   * names, scope-local names, and reserved transport names fail. Restrictions
-   * intersect; scoped registrations remain visible.
+   * `allow` names, scope-local names, and a reserved transport name in `allow`
+   * fail. An explicit `deny` of the reserved transport is accepted and removes
+   * it from this scope; restrictions intersect and scoped registrations remain
+   * visible.
    * @param filter - global-tool mask: `allow` (keep only) and/or `deny` (remove).
    * @returns the exact disposer that lifts this restriction.
    */
@@ -1155,8 +1179,12 @@ export class ToolRuntime extends Service {
     if (allow === undefined && deny === undefined) {
       throw new Error('tools.restrict({}) is a no-op: pass `allow` and/or `deny` (an empty filter is almost always a materialized-empty-config bug)')
     }
-    if ([...allow ?? [], ...deny ?? []].includes(RUN_CODE_NAME)) {
-      throw new Error(`tools.restrict() cannot name reserved PTC mode presentation transport "${RUN_CODE_NAME}"; restrict end-capability tools instead`)
+    // `allow` cannot name the transport: it is presentation infrastructure,
+    // not a capability an allow-list can keep (an allow mask deliberately
+    // leaves it appended). An explicit `deny` is different — it is the
+    // operator/role's executable veto and must be representable.
+    if ([...allow ?? []].includes(RUN_CODE_NAME)) {
+      throw new Error(`tools.restrict() cannot name reserved PTC mode presentation transport "${RUN_CODE_NAME}" in "allow"; restrict end-capability tools instead, or use "deny" to remove the transport`)
     }
     const known = this.view(scope).restrictableNames
     // Unknown ALLOW names are a real error (the caller wants to keep a tool
@@ -1168,7 +1196,10 @@ export class ToolRuntime extends Service {
     if (unknownAllow.length > 0) {
       throw new Error(`tools.restrict() names unknown global tool${unknownAllow.length > 1 ? 's' : ''} ${unknownAllow.map(n => `"${n}"`).join(', ')}; known global tools: ${[...known].sort().join(', ') || '(none)'}`)
     }
-    const denySet = new Set([...deny ?? []].filter(name => known.has(name)))
+    // The transport is not in `restrictableNames` (it never enters the
+    // global/scoped capability layers), but an explicit deny of it is a
+    // supported mask target and must survive compilation.
+    const denySet = new Set([...deny ?? []].filter(name => name === RUN_CODE_NAME || known.has(name)))
     const compiled: CompiledToolRestriction = {
       ...allow !== undefined ? { allow: new Set(allow) } : {},
       ...denySet.size > 0 ? { deny: denySet } : {},
@@ -1264,12 +1295,15 @@ export class ToolRuntime extends Service {
         visible.set(name, definition)
       }
     }
-    // Presentation infrastructure is resolved last and outside capability
-    // filtering. Registration rejects this reserved name, so the insertion is
-    // an invariant assertion as well as protection against future layer
-    // changes. Per scope: a native agent must not find `run_code` in its
+    // Presentation infrastructure is resolved last and outside the capability
+    // allow/deny filter. Registration rejects this reserved name, so the
+    // insertion is an invariant assertion as well as protection against future
+    // layer changes. An explicit `deny` is the one exception: it is the
+    // operator/role's executable veto, so the transport is absent from that
+    // scope's view and `get()` resolves it as unknown BEFORE any program
+    // starts. Per scope: a native agent must not find `run_code` in its
     // dispatch table because some other agent in the process presents it.
-    if (this.modeFor(scope) !== 'native') {
+    if (this.modeFor(scope) !== 'native' && !layers.some(layer => layer.denies(RUN_CODE_NAME))) {
       visible.set(RUN_CODE_NAME, this.requirePtcTransport())
     }
     return { visible, knownNames, restrictableNames }

@@ -62,22 +62,28 @@ describe('recommendation prompt', () => {
     expect(prompt.system).toContain('advisory')
   })
 
-  it('names a matched rail and bounds a huge argument payload', () => {
+  it('names a matched rail and keeps a huge argument payload valid JSON', () => {
     const prompt = buildRecommendationPrompt(ask({
       rail: { rail: 'credentials', evidence: '.env' },
-      args: { command: 'x'.repeat(2000) },
+      args: { command: 'x'.repeat(20_000) },
     }))
     expect(prompt.user).toContain('rails verdict: matched credentials (.env)')
-    expect(prompt.user.length).toBeLessThan(1200)
-    expect(prompt.user).toContain('…')
+    const line = prompt.user.split('\n').find(entry => entry.startsWith('arguments: '))
+    expect(line).toBeDefined()
+    const parsed = JSON.parse(line!.slice('arguments: '.length)) as Record<string, unknown>
+    expect(parsed._truncated).toBe(true)
+    expect(typeof parsed.preview).toBe('string')
+    expect(prompt.user).toContain('arguments display truncated outside the JSON body')
   })
 
-  it('marks an APPLIED judgement (Full access) as the decision, not card advice', () => {
-    const applied = buildRecommendationPrompt(ask({ applied: true }))
-    expect(applied.system).toContain('Full access')
-    expect(applied.system).toContain('APPLIED')
-    expect(buildRecommendationPrompt(ask()).system).not.toContain('APPLIED')
+  it('carries the captured command separately and marks a clipped display', () => {
+    const short = buildRecommendationPrompt(ask({ command: 'cat .env' }))
+    expect(short.user).toContain('command: cat .env')
+    const long = buildRecommendationPrompt(ask({ command: 'x'.repeat(20_000) }))
+    expect(long.user).toContain('command display clipped for length')
+    expect(long.user).toContain('complete command was evaluated by policy and rails')
   })
+
 })
 
 describe('recommendation parsing (untrusted model output)', () => {

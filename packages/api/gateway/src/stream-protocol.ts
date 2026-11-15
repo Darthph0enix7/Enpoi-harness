@@ -15,6 +15,17 @@ export const REMOTE_EVENT_RESULT_ENDPOINT = '$events/result'
 /** Empty standard Remote payload used to open the forwarded-event stream. */
 export const REMOTE_EVENT_STREAM_PAYLOAD = { args: {} } as const
 
+/** Page global carrying validated forwarded-event client resource limits. */
+export const REMOTE_EVENT_LIMITS_GLOBAL = '__DSH_REMOTE_EVENT_LIMITS__'
+
+/** Resource budget for forwarded-event listener work on one Client. */
+export interface RemoteEventClientLimits {
+  /** Concurrent listener tasks (answers plus emits) one generation may launch. */
+  readonly maxActiveTasks: number
+  /** Abandoned listener tasks tolerated behind the current generation. */
+  readonly maxRetiredTasks: number
+}
+
 /** Discriminator for the first item proving the Host event source is ready. */
 export const REMOTE_EVENT_STREAM_READY = { type: 'ready' } as const
 

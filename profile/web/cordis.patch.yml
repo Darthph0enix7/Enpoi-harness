@@ -236,7 +236,7 @@
 
                 ## Memory & Recall
                 - Long sessions are compacted automatically: older turns are replaced by a structured checkpoint, and the full transcript stays in the session log. When you need exact earlier wording, code, or tool output, use session_event_search (keywords) and then session_event_read (seq); session_search finds other sessions.
-                - Cross-session memory is tool-driven and never injected. Call memory_search when starting a task, returning to a subsystem, or before re-deriving a decision. Each compaction saves the checkpoint's durable facts there automatically; save anything else a future session must know with memory_save, and memory_rescind a fact that proved wrong.
+                - Cross-session memory is tool-driven and never injected. Call memory_search when starting a task, returning to a subsystem, or before re-deriving a decision. Each compaction saves the checkpoint's durable facts there as tentative claims; a root session commits one with memory_confirm. Save anything else a future session must know with memory_save (a child's save stays tentative until a root session confirms it), and memory_rescind a fact that proved wrong.
                 ## Communication
                 - Answer directly, no preamble, no flattery.
                 - Brief delegation notices ("Checking docs via librarian...").
@@ -657,7 +657,7 @@
 
                 ## Memory & Recall
                 - Long sessions are compacted automatically: older turns are replaced by a structured checkpoint, and the full transcript stays in the session log. When you need exact earlier wording, code, or tool output, use session_event_search (keywords) and then session_event_read (seq); session_search finds other sessions.
-                - Cross-session memory is tool-driven and never injected. Call memory_search when starting a task, returning to a subsystem, or before re-deriving a decision. Each compaction saves the checkpoint's durable facts there automatically; save anything else a future session must know with memory_save, and memory_rescind a fact that proved wrong.
+                - Cross-session memory is tool-driven and never injected. Call memory_search when starting a task, returning to a subsystem, or before re-deriving a decision. Each compaction saves the checkpoint's durable facts there as tentative claims; a root session commits one with memory_confirm. Save anything else a future session must know with memory_save (a child's save stays tentative until a root session confirms it), and memory_rescind a fact that proved wrong.
                 ## Communication
                 - Answer directly, no preamble, no flattery.
                 - Brief delegation notices ("Checking docs via librarian...").
@@ -1056,7 +1056,7 @@
 
                 ## Memory & Recall
                 - Long sessions are compacted automatically: older turns are replaced by a structured checkpoint, and the full transcript stays in the session log. When you need exact earlier wording, code, or tool output, use session_event_search (keywords) and then session_event_read (seq); session_search finds other sessions.
-                - Cross-session memory is tool-driven and never injected. Call memory_search when starting a task, returning to a subsystem, or before re-deriving a decision. Each compaction saves the checkpoint's durable facts there automatically; save anything else a future session must know with memory_save, and memory_rescind a fact that proved wrong.
+                - Cross-session memory is tool-driven and never injected. Call memory_search when starting a task, returning to a subsystem, or before re-deriving a decision. Each compaction saves the checkpoint's durable facts there as tentative claims; a root session commits one with memory_confirm. Save anything else a future session must know with memory_save (a child's save stays tentative until a root session confirms it), and memory_rescind a fact that proved wrong.
                 ## Communication
                 - Answer directly, no preamble, no flattery.
                 - Brief delegation notices ("Checking docs via librarian...").

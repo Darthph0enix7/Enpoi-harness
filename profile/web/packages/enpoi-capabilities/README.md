@@ -69,7 +69,9 @@ DEFAULT world; the agent's pulls are session-scoped and durable.
   session's pull). Permission row: shipped `allow` — `list` is read-only and
   mount/unmount only touch servers the operator configured, scoped to the
   calling session and reversible. The mounted server's OWN tools keep their own
-  rows (`defaults.unknownTools` = `ask`), so the dangerous surface still asks.
+  rows; a mounted server with no exact row or server wildcard falls to the
+  shipped MCP default (`allow`), so an operator must set a row or wildcard to
+  gate that server's surface.
 - **Honest listing**: the operator view (`enpoiCapabilities.mcpMounts`) lists
   every configured server, switched-off unpulled ones marked `enabled:false`
   with state `disabled`; `mounted` requires both the session's world and a live
@@ -93,3 +95,42 @@ DEFAULT world; the agent's pulls are session-scoped and durable.
   it mounted.
 
 **V2 (not in scope)**: composite/workflow tools (a tool = a chain of steps).
+
+
+## Permission semantics: execution vs forwarded asks
+
+- The resolver runs fresh per dispatch. `allow` executes immediately; `ask`
+  goes to the session's card, a delegated child's parent ask, or the root's
+  Full-access standing consent; `deny` refuses.
+- **Rails are a forwarded-ask ceiling, not a global execution boundary.** They
+  run only after a child's call resolves `ask`. A call resolved `allow` never
+  enters the forwarder, so the credentials, recursive-delete, exfiltration,
+  history-rewrite, and privilege rails do not run for it. Do not read the rail
+  list as a secret-read or general side-effect guard for allow-resolved calls.
+- Mode matrix: root normal = ask becomes the operator card; root Full access =
+  ask becomes `allowed` with `FULL_ACCESS_ASK_REASON` (the mode is the operator's
+  standing consent); delegated child under a normal root = ask is forwarded to
+  the root card; delegated child under a Full-access root = the root's own
+  standing consent (match parent), with no model judgement and no quota.
+- **PTC / `run_code`:** arbitrary program execution is bounded by the OS
+  sandbox mode, not by the request permission realm. Direct filesystem and
+  process effects inside a program are not individually approved; only nested
+  tool calls re-enter the guarded pipeline. Treat it as an execution surface,
+  not as a request-scoped capability.
+- Bash precedence is agent patterns → agent `tools.bash` → operator patterns →
+  operator `tools.bash` deny → shipped non-catch-all rules → operator
+  `tools.bash` ask/allow → shipped catch-all/default. A global `tools.bash:
+  allow` does not absorb the shipped `rm`/`dd`/`shutdown` asks, and a grant is
+  never blanket danger consent.
+- Shell analysis is bounded: one quote-aware extractor covers ordinary
+  arguments, double quotes, arithmetic `$((...))`/`${...}`, here-strings, and
+  unquoted heredoc substitutions; quoted heredoc bodies stay literal data. The
+  resolver refuses with `[ANALYSIS_LIMIT]` beyond 64,000 characters or three
+  nested substitution levels, or for an unsupported shape, instead of turning
+  uncertainty into an auto-allowable ask. This is a policy-analysis bound, not
+  a Bash sandbox.
+- Full access does not invoke a root model judgement. The child matches the
+  root's actual effective authority: explicit root/child denies still win;
+  otherwise the root's Full-access standing consent allows the ask. Normal
+  interactive cards keep their advisory recommendation, but that recommendation
+  never resolves the ask.

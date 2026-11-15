@@ -20,5 +20,16 @@ Operator-authored command tools for the Enpoi Harness profile.
   or deny per the operator's policy. The tool's own `custom_<id>` permission
   row defaults to **ask** (`defaults.unknownTools`), so first use is
   operator-granted; the Permissions page lists the row automatically from the
-  live tool registry.
+  live tool registry. The seam pins the rendered definition to the tool call
+  id; execution consumes that snapshot, so a hot settings edit between approval
+  and execution cannot turn the approved command into a different command.
+  The snapshot key is the trusted session + call + tool identity. Duplicate or
+  replayed renders for one identity reject it instead of overwriting the first
+  approved command. Pending and rejection identities are each bounded LRUs
+  (256); the rejection entry is a rolling dedupe window, not a permanent
+  process-wide ban, so many denied calls cannot wedge unrelated sessions. A
+  capacity-evicted or rejected identity refuses with a reason
+  (`capacity`/`denied`/`duplicate`), and a leftover from a card denial or
+  downstream-allow path is single-use and cannot execute after the
+  tool/registry denies it.
 - **V2 (not in scope)**: composite/workflow tools (a tool = a chain of steps).

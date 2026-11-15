@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import type { SubagentStartRequest } from '@deepseek-ai/dsh-subagent'
 import * as tool from '../src/index.ts'
 import { ROLE_CHILD_ALLOW, SHARED_CHILD_KEEP } from '../src/index.ts'
@@ -415,6 +416,31 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toContain('"web_fetch"')
     expect(warnings[0]).toContain('role "fixer"')
+  })
+
+  it('strips the reserved transport from a role availability allowlist and keeps an explicit deny', () => {
+    // A stored/registry availability list is the child's role surface, not the
+    // PTC presentation: naming `run_code` there must not compose an allow mask
+    // that `tools.restrict()` refuses. The explicit deny is still emitted so
+    // the child's execution backstop removes the transport.
+    const registry = tool.listRoleRegistry(undefined)
+    const document = {
+      permissions: {
+        agents: {
+          fixer: {
+            available: ['read', RUN_CODE_NAME],
+            tools: { [RUN_CODE_NAME]: 'deny' },
+          },
+        },
+      },
+    }
+    const filter = tool.childToolFilter(undefined, document as never, 'fixer', registry['fixer']!, {
+      isKnown: () => true,
+      warn: () => {},
+    })
+    expect(filter.allow).toContain('read')
+    expect(filter.allow).not.toContain(RUN_CODE_NAME)
+    expect(filter.deny).toContain(RUN_CODE_NAME)
   })
 
   it('leaves a code-authored unknown name for tools.restrict() to reject', async () => {

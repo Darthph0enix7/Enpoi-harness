@@ -46,7 +46,7 @@ function isPrivilegedHostname(hostname: string): boolean {
 export type {
   SettingsGeneralItemOwnerProps, SettingsHeaderOwnerProps, SettingsLauncherOwnerProps,
   SettingsOnboardingOwnerProps, SettingsPluginsTabOwnerProps, SettingsSectionOwnerProps,
-  SettingsTriggerOwnerProps,
+  SettingsSurfaceOwnerProps, SettingsTriggerOwnerProps,
 } from './contract/slots.ts'
 export type { SettingsScopeController, SettingsScopeBinder } from './settings-scope.ts'
 export type { SettingsScope, SettingsScopeSnapshot, SettingsScopeSpec } from './settings-contract.ts'

@@ -29,6 +29,97 @@ function renderFact(fact: string): string {
 /** Loose JSON value shape accepted by a tool render callback. */
 type RenderValue = Record<string, unknown>
 
+/** Result code for a delegated session attempting root-only memory mutation. */
+const DELEGATED_SESSION_DENIED = 'delegated_session_denied'
+/** Result code when no trusted calling session can authorize a root-only action. */
+const ROOT_SESSION_REQUIRED = 'root_session_required'
+
+/**
+ * Whether the calling session is a delegated subagent. A seeded root fork also
+ * records `parentSession`; the typed subagent origin or positive delegation
+ * depth is what distinguishes a child from that fork. A bare `parentSession`
+ * without seed lineage is still delegated.
+ * @param exec - the tool execution scope.
+ * @returns true when root-only memory actions must be denied.
+ */
+function delegatedSession(exec?: ToolRunContext): boolean {
+  const header = exec?.agent?.session.header
+  if (header === undefined) return false
+  if (header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0) return true
+  return header.parentSession !== undefined && header.isSeeded !== true
+}
+
+/**
+ * Authorize one root-only memory mutation. Missing execution context fails
+ * closed even though root `memory_save` keeps its legacy operator behavior.
+ * @param exec - the tool execution scope.
+ * @param action - the mutation named in the denial.
+ * @returns the denial payload, or undefined for a trusted root session.
+ */
+function rootOnlyDenial(exec: ToolRunContext | undefined, action: 'confirmation' | 'rescission'): { code: string; note: string } | undefined {
+  const header = exec?.agent?.session.header
+  if (header === undefined) {
+    return {
+      code: ROOT_SESSION_REQUIRED,
+      note: `Memory ${action} requires a trusted root session context; no database write was made.`,
+    }
+  }
+  if (!delegatedSession(exec)) return undefined
+  return {
+    code: DELEGATED_SESSION_DENIED,
+    note: action === 'confirmation'
+      ? 'Delegated sessions cannot confirm memory facts; the root session must accept the fact before it gains operator trust.'
+      : 'Delegated sessions cannot rescind memory facts; the root session must decide whether to tombstone the fact.',
+  }
+}
+
+/** Clamp one model-supplied result limit into [1, configured top-K]. */
+function memorySearchLimit(value: unknown, max: number): number {
+  if (value === undefined) return max
+  const requested = Number(value)
+  if (!Number.isFinite(requested) || requested < 1) return max
+  return Math.min(max, Math.floor(requested))
+}
+
+/** Intake authority derived from the calling session, not from the tool name. */
+interface MemorySaveAuthority {
+  readonly origin: string
+  readonly trust: 'operator' | 'untrusted_external'
+  readonly provenance: string
+}
+
+/**
+ * Resolve who is saving: a root session keeps the operator label (the model is
+ * acting for the operator), while a subagent child writes a tentative
+ * `worker:<role>` claim. Fork lineage alone is not a child: a forked root also
+ * records `parentSession`.
+ */
+function memorySaveAuthority(exec?: ToolRunContext): MemorySaveAuthority {
+  const session = exec?.agent?.session
+  const header = session?.header
+  const child = delegatedSession(exec)
+  const role = header?.agentPreset?.trim()
+  const provenance: Record<string, unknown> = {
+    source: 'memory_save',
+    sessionId: session?.id ?? '',
+    cwd: header?.cwd ?? '',
+  }
+  if (!child) {
+    return { origin: 'orchestrator', trust: 'operator', provenance: JSON.stringify(provenance) }
+  }
+  provenance.parentSessionId = header?.parentSession ?? ''
+  const agentRole = role !== undefined && role !== '' ? role : 'worker'
+  provenance.agentRole = agentRole
+  provenance.settled = true
+  const callId = exec?.callId
+  if (typeof callId === 'string' && callId !== '') provenance.callId = callId
+  return {
+    origin: agentRole === 'worker' ? 'worker' : `worker:${agentRole}`,
+    trust: 'untrusted_external',
+    provenance: JSON.stringify(provenance),
+  }
+}
+
 /** One `memory_search` fact row (C4). */
 interface MemoryFactRow {
   readonly id: string
@@ -49,7 +140,8 @@ export function registerMemoryTools(
   ctx.tools.register({
     name: 'memory_save',
     description: [
-      'Save one durable project fact to cross-session memory (operator trust: authoritative).',
+      'Save one durable project fact to cross-session memory. A root session saves with operator trust (authoritative);',
+      'a subagent child saves as tentative worker:<role> until a root session confirms it.',
       'Call it when the session settles something a FUTURE session must know and would otherwise re-derive:',
       'a project rule, an architecture decision with its reason, a constraint, a config value, a naming convention,',
       'or an exact path/command/identifier. Compaction already saves the checkpoint\'s durable facts automatically;',
@@ -78,16 +170,12 @@ export function registerMemoryTools(
     },
     isConcurrencySafe: () => true,
     async execute(args: Record<string, unknown>, exec?: ToolRunContext) {
-      // The source record is audit-only for operator saves: it never scopes retrieval.
-      const session = exec?.agent?.session
-      const provenance = JSON.stringify({
-        source: 'memory_save',
-        sessionId: session?.id ?? '',
-        cwd: session?.header.cwd ?? '',
-      })
+      // The source record scopes child saves and ranks same-project hits; a
+      // root save stays authoritative operator memory.
+      const authority = memorySaveAuthority(exec)
       const inserted = await pipeline.intake(
         [{ fact: String(args.fact ?? ''), category: String(args.category ?? 'PROJECT'), tags: String(args.tags ?? '') }],
-        { origin: 'orchestrator', trust: 'operator', provenance },
+        { origin: authority.origin, trust: authority.trust, provenance: authority.provenance },
       )
       if (inserted.length === 0) return { saved: false, note: 'Duplicate or invalid fact (already known / empty / >400 chars)' }
       const c = inserted[0]!
@@ -100,15 +188,16 @@ export function registerMemoryTools(
     description: [
       'Search cross-session memory. Call it when starting a task, returning to a subsystem,',
       'or before re-deriving a decision: it returns saved facts plus the durable facts each compaction extracted,',
-      'each with id, category, origin (memory_save | compaction | keeper), save date, state, and trust so you can weigh them.',
-      'Tentative claims are unconfirmed; verify before relying on them.',
+      'each with id, category, origin (memory_save | compaction | keeper | worker:<role>), save date, state, and trust so you can weigh them.',
+      'Hits are coverage-ranked: facts matching more query terms come first, exact phrases break ties, and the caller\'s',
+      'project cwd plus recency provide bounded tie-breaks. Tentative claims are unconfirmed; verify before relying on them.',
       'Nothing is injected — this is the only way memory reaches you. Compaction facts are scoped to the caller\'s workspace.',
     ].join(' '),
     parameters: {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'What you are looking for — natural language or keywords' },
-        limit: { type: 'number', description: 'Max results (default 8, max 10)' },
+        limit: { type: 'integer', description: 'Max results (clamped to the configured top-K)' },
       },
       required: ['query'],
     },
@@ -148,11 +237,13 @@ export function registerMemoryTools(
     },
     isConcurrencySafe: () => true,
     async execute(args: Record<string, unknown>, exec?: ToolRunContext) {
-      // Doc 38: retriever top-K resolved fresh per call (hot-swap).
+      // Doc 38: retriever top-K resolved fresh per call (hot-swap). The parser
+      // rejects non-integers; a direct caller gets the same clamp here.
       const params = getMemoryParams(ctx)
+      const limit = memorySearchLimit(args.limit, params.retrieverTopK)
       // L2: compaction-derived facts are workspace-scoped to the caller's cwd.
       const scope = { cwd: exec?.agent?.session.header.cwd, scopeCompaction: config.scopeCompactionFactsToWorkspace }
-      const hits = searchMemory(db, String(args.query ?? ''), Math.min(Number(args.limit ?? params.retrieverTopK) || params.retrieverTopK, params.retrieverTopK), scope)
+      const hits = searchMemory(db, String(args.query ?? ''), limit, scope)
       if (hits.length === 0) return { facts: [], note: 'No matching memory.' }
       return {
         facts: hits.map(h => ({
@@ -171,7 +262,7 @@ export function registerMemoryTools(
 
   ctx.tools.register({
     name: 'memory_rescind',
-    description: 'Retract a saved memory fact (tombstone — it will never be injected into future turns).',
+    description: 'Retract a saved memory fact (tombstone — it will never be injected into future turns). Root sessions only; a delegated subagent must report the fact to its parent instead.',
     parameters: {
       type: 'object',
       properties: {
@@ -183,7 +274,7 @@ export function registerMemoryTools(
     output: {
       schema: {
         type: 'object', additionalProperties: false,
-        properties: { rescinded: { type: 'boolean' }, note: { type: 'string' } },
+        properties: { rescinded: { type: 'boolean' }, code: { type: 'string' }, note: { type: 'string' } },
         required: ['rescinded'],
       },
       render: (_a, raw) => {
@@ -192,7 +283,9 @@ export function registerMemoryTools(
       },
     },
     isConcurrencySafe: () => true,
-    async execute(args: Record<string, unknown>) {
+    async execute(args: Record<string, unknown>, exec?: ToolRunContext) {
+      const denial = rootOnlyDenial(exec, 'rescission')
+      if (denial !== undefined) return { rescinded: false, ...denial }
       const ok = await pipeline.rescind(String(args.id ?? ''), String(args.reason ?? ''))
       return ok ? { rescinded: true } : { rescinded: false, note: `No active fact with id ${String(args.id)}` }
     },
@@ -200,7 +293,7 @@ export function registerMemoryTools(
 
   ctx.tools.register({
     name: 'memory_confirm',
-    description: 'Explicitly confirm a tentative (untrusted) memory fact. Commits it with the operator trust label and a fresh commit time; use only after verifying the fact. Facts saved with memory_save are already committed; confirmation applies to tentative claims.',
+    description: 'Explicitly confirm a tentative (untrusted) memory fact. Commits it with the operator trust label and a fresh commit time; use only after verifying the fact. Root sessions only: a delegated subagent must report the fact to its parent, which decides whether to confirm. Facts saved with memory_save in a root session are already committed; confirmation applies to tentative claims.',
     parameters: {
       type: 'object',
       properties: {
@@ -211,7 +304,7 @@ export function registerMemoryTools(
     output: {
       schema: {
         type: 'object', additionalProperties: false,
-        properties: { confirmed: { type: 'boolean' }, id: { type: 'string' }, state: { type: 'string' }, note: { type: 'string' } },
+        properties: { confirmed: { type: 'boolean' }, id: { type: 'string' }, state: { type: 'string' }, code: { type: 'string' }, note: { type: 'string' } },
         required: ['confirmed'],
       },
       render: (_a, raw) => {
@@ -220,7 +313,9 @@ export function registerMemoryTools(
       },
     },
     isConcurrencySafe: () => true,
-    async execute(args: Record<string, unknown>) {
+    async execute(args: Record<string, unknown>, exec?: ToolRunContext) {
+      const denial = rootOnlyDenial(exec, 'confirmation')
+      if (denial !== undefined) return { confirmed: false, ...denial }
       const id = String(args.id ?? '')
       const row = await pipeline.confirm(id)
       if (row !== null) return { confirmed: true, id: row.id, state: row.state }

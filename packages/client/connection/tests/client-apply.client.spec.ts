@@ -683,6 +683,60 @@ describe('connection client apply', () => {
     expect(handle.state.getSnapshot()).toBeUndefined()
   })
 
+  it('publishes a terminal reload diagnosis after the retired-generation budget is exhausted', async () => {
+    ;(globalThis as Win).location = { hostname: 'localhost' }
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const handle = await mount()
+    const cleanups: Array<() => void> = []
+    let calls = 0
+    handle.registerGenerationSource((signal) => {
+      calls += 1
+      if (calls <= 2) return new Promise<void>((resolve) => { cleanups.push(resolve) })
+      return new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => { resolve() }, { once: true })
+      })
+    })
+    const observed: Array<{ state: ConnectionState | undefined; diagnosis: string | undefined }> = []
+    const loop = handle.start({
+      onStateChange: (state, diagnosis) => { observed.push({ state, diagnosis }) },
+    }, {
+      backoffBaseMs: 10,
+      backoffMaxMs: 10,
+      generationReadyTimeoutMs: 100,
+      settleTimeoutMs: 100,
+      maxRetiredGenerations: 1,
+    })
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      handle.reconnect()
+      await vi.advanceTimersByTimeAsync(200)
+      expect(calls).toBe(2)
+
+      handle.reconnect()
+      await vi.advanceTimersByTimeAsync(300)
+      expect(calls).toBe(2)
+      expect(handle.state.getSnapshot()).toBe('disconnected')
+      expect(handle.state.getDiagnosis?.()).toContain('reload the page')
+      expect(observed.at(-1)?.state).toBe('disconnected')
+      expect(observed.at(-1)?.diagnosis).toContain('reload the page')
+      handle.reconnect()
+      await vi.advanceTimersByTimeAsync(1_000)
+      expect(calls).toBe(2)
+      expect(handle.state.getSnapshot()).toBe('disconnected')
+
+      cleanups[0]!()
+      await vi.advanceTimersByTimeAsync(300)
+      expect(calls).toBeGreaterThanOrEqual(3)
+    } finally {
+      loop.stop()
+      for (const cleanup of cleanups.splice(0)) cleanup()
+      await vi.advanceTimersByTimeAsync(0)
+      warnSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
   it('does not announce disconnection after a generation subscriber stops the loop', async () => {
     ;(globalThis as Win).location = { hostname: 'localhost' }
     const handle = await mount()

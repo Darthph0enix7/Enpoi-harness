@@ -14,11 +14,11 @@
  */
 
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ChangeEvent, KeyboardEvent, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
+import type { ChangeEvent, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent as ReactPointerEvent } from 'react'
 import clsx from 'clsx'
 import {
   IconChevronDownOutlineRegular, IconPlusOutlineMedium, IconWarningOutlineRegular, Menu, Toast, Tooltip,
-  useSheetPresentation,
+  useLayoutMode,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 // Type-only: the `plan` projection key merge (the TodoDock posture — the
 // composer reads a host-computed value; the domain owns the key).
@@ -152,11 +152,29 @@ export const InputBar = memo(function InputBar({
     if (row === null) return
     return observeControlRow(row)
   }, [])
+  const rootRef = useRef<HTMLDivElement | null>(null)
   const cardRef = useRef<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
-  // Phone composer layout: model/agent move to a rider row above the card and
-  // the card keeps the footer controls. Same threshold as the picker sheets.
-  const compactComposer = useSheetPresentation()
+  const collapseTimer = useRef<number | undefined>(undefined)
+  const settleTimer = useRef<number | undefined>(undefined)
+  const modelSyncTimer = useRef<number | undefined>(undefined)
+  const ownedModelOverlay = useRef<Element | null>(null)
+  const collapseIfIdleRef = useRef<() => void>(() => {})
+  // The shell mode is the one shared viewport decision. Compact keeps a single
+  // input row until the user focuses/types/attaches/opens a menu; desktop
+  // always renders the full composer.
+  const compactComposer = useLayoutMode() === 'compact'
+  const [compactExpanded, setCompactExpanded] = useState(false)
+  const expanded = !compactComposer || compactExpanded
+  const hasAccessory = accessory !== undefined
+
+  // A session change normally returns the next composer to one row, but never
+  // hide controls under an editor that still owns focus.
+  useEffect(() => {
+    const active = document.activeElement
+    if (active !== null && rootRef.current?.contains(active) === true) return
+    setCompactExpanded(false)
+  }, [sessionId])
 
   // A continuable child without its live parent cannot accept human input,
   // but its independent Stop below stays available while it runs.
@@ -174,6 +192,159 @@ export const InputBar = memo(function InputBar({
   // be disabled do lock it — there is no session to choose a model for.
   const modelSeatLocked = removed || inert || !live
   const machineBusy = input?.phase === 'adjudicating' || input?.phase === 'submitting'
+  // Compact expansion is intent-driven, not geometry-driven. The toolbar and
+  // model/permission controls stay in the same mounted card; only their CSS
+  // visibility changes. Programmatic editor focus is suppressed above, so a
+  // fresh compact session still starts as one row.
+  useEffect(() => {
+    if (!compactComposer) {
+      setCompactExpanded(false)
+      return
+    }
+    if (draft.trim() !== '' || attachments.length > 0 || commandMenuOpen || activity || hasAccessory) {
+      setCompactExpanded(true)
+    }
+  }, [compactComposer, draft, attachments.length, commandMenuOpen, activity, hasAccessory])
+
+  // A desktop → compact resize while the editor is focused keeps the expanded
+  // controls (and the editor) rather than collapsing under the caret.
+  useEffect(() => {
+    if (!compactComposer) return
+    const active = document.activeElement
+    if (active !== null && rootRef.current?.contains(active) === true) setCompactExpanded(true)
+  }, [compactComposer])
+
+  useEffect(() => () => {
+    if (collapseTimer.current !== undefined) window.clearTimeout(collapseTimer.current)
+    if (settleTimer.current !== undefined) window.clearTimeout(settleTimer.current)
+    if (modelSyncTimer.current !== undefined) window.clearTimeout(modelSyncTimer.current)
+    ownedModelOverlay.current = null
+  }, [])
+
+  /**
+   * Whether an overlay that belongs to this composer is open. The command and
+   * stop menus are local state; the agent and permission triggers carry their
+   * own `aria-expanded` state inside the composer; a model picker is recorded
+   * when its own trigger opens a new marked popover/sheet. Unrelated dialogs
+   * are deliberately invisible here.
+   */
+  const hasOpenOwnedOverlay = (): boolean => {
+    if (workspacePickerOpen) return true
+    const modelOverlay = ownedModelOverlay.current
+    if (modelOverlay !== null && modelOverlay.isConnected) return true
+    const root = rootRef.current
+    if (root === null) return false
+    return root.querySelector(
+      '[data-agent-trigger][aria-expanded="true"], [data-permission-trigger][aria-expanded="true"]',
+    ) !== null
+  }
+
+  /** Collapse only an empty, idle compact composer after focus leaves the
+      composer and every composer-owned portalled picker/menu. */
+  const collapseIfIdle = (): void => {
+    if (!compactComposer) return
+    const active = document.activeElement
+    if (active !== null && rootRef.current?.contains(active) === true) return
+    if (draft.trim() !== '' || attachments.length > 0 || commandMenuOpen || stopAllOpen || activity
+      || running || machineBusy || uploadsPending || hasOpenOwnedOverlay()) return
+    setCompactExpanded(false)
+  }
+  collapseIfIdleRef.current = collapseIfIdle
+
+  /** A zero-delay settle check for outside focus/pointer events and trigger
+      state changes; the latest render's closure decides. */
+  const scheduleCollapseCheck = useCallback((): void => {
+    if (settleTimer.current !== undefined) window.clearTimeout(settleTimer.current)
+    settleTimer.current = window.setTimeout(() => {
+      settleTimer.current = undefined
+      collapseIfIdleRef.current()
+    }, 0)
+  }, [])
+
+  // Re-evaluate when a composer-owned trigger opens/closes (agent and
+  // permission pickers carry aria-expanded inside the composer), or when a
+  // click/focus lands outside it (including the click that closes a model
+  // popover, which has no closing event of its own).
+  useEffect(() => {
+    if (!compactComposer || !compactExpanded) return undefined
+    const root = rootRef.current
+    const observer = new MutationObserver(scheduleCollapseCheck)
+    if (root !== null) {
+      observer.observe(root, { subtree: true, attributes: true, attributeFilter: ['aria-expanded'] })
+    }
+    const onOutsideActivity = (event: Event): void => {
+      if (event.target instanceof Node && rootRef.current?.contains(event.target) === true) return
+      scheduleCollapseCheck()
+    }
+    document.addEventListener('pointerdown', onOutsideActivity, true)
+    document.addEventListener('focusin', onOutsideActivity, true)
+    return () => {
+      observer.disconnect()
+      document.removeEventListener('pointerdown', onOutsideActivity, true)
+      document.removeEventListener('focusin', onOutsideActivity, true)
+      if (settleTimer.current !== undefined) {
+        window.clearTimeout(settleTimer.current)
+        settleTimer.current = undefined
+      }
+    }
+  }, [compactComposer, compactExpanded, scheduleCollapseCheck])
+
+  // The model picker exposes its own trigger and a portalled marker, but no
+  // aria-controls. Record the new overlay created by a composer model trigger
+  // click so later outside events can tell whether it belongs to this
+  // composer; agent/permission pickers expose aria-expanded directly.
+  const onComposerClickCapture = (event: MouseEvent<HTMLDivElement>): void => {
+    if (!compactComposer) return
+    const target = event.target
+    if (!(target instanceof Element)) return
+    const trigger = target.closest('[data-model-trigger]')
+    if (trigger === null || rootRef.current?.contains(trigger) !== true) return
+    const before = new Set(document.querySelectorAll('[data-model-popover], [data-dsh-list-surface]'))
+    if (modelSyncTimer.current !== undefined) window.clearTimeout(modelSyncTimer.current)
+    modelSyncTimer.current = window.setTimeout(() => {
+      modelSyncTimer.current = undefined
+      const after = [...document.querySelectorAll('[data-model-popover], [data-dsh-list-surface]')]
+      const opened = after.find(element => !before.has(element)) ?? null
+      ownedModelOverlay.current = opened
+      if (opened !== null) setCompactExpanded(true)
+      scheduleCollapseCheck()
+    }, 0)
+  }
+
+  const onComposerBlur = (event: FocusEvent<HTMLDivElement>): void => {
+    if (!compactComposer || !compactExpanded) return
+    const next = event.relatedTarget
+    if (next instanceof Node && rootRef.current?.contains(next) === true) return
+    if (collapseTimer.current !== undefined) window.clearTimeout(collapseTimer.current)
+    // Let a click that is opening a portal menu/focus target land first.
+    collapseTimer.current = window.setTimeout(() => {
+      collapseTimer.current = undefined
+      const active = document.activeElement
+      if (active !== null && rootRef.current?.contains(active) === true) return
+      collapseIfIdle()
+    }, 0)
+  }
+
+  const onComposerKeyDown = (event: KeyboardEvent<HTMLDivElement>): void => {
+    if (!compactComposer || !compactExpanded || event.key !== 'Escape' || event.defaultPrevented) return
+    // IME composition owns Escape and the editor; never collapse mid-compose.
+    if (event.nativeEvent.isComposing) return
+    // Collapse only from the editor/root. A focused toolbar control must not be
+    // hidden while it owns focus (the browser would fall back to <body>).
+    const target = event.target
+    if (!(target instanceof Element)) return
+    if (target.closest('[contenteditable="true"]') === null && target !== rootRef.current) return
+    // Menus/popovers own Escape first; running turns keep the stop sequence.
+    if (running || machineBusy || commandMenuOpen || stopAllOpen || hasOpenOwnedOverlay()) return
+    if (draft.trim() !== '' || attachments.length > 0) return
+    event.preventDefault()
+    setCompactExpanded(false)
+  }
+
+  const onComposerFocus = (): void => {
+    if (compactComposer) setCompactExpanded(true)
+  }
+
   // The no-workspace surface remains the resident DOM node but acts as the
   // existing picker trigger. Message controls stay locked until a Session
   // exists; the trigger itself is read-only rather than disabled so pointer
@@ -207,9 +378,11 @@ export const InputBar = memo(function InputBar({
   // is ours to perform — switching to a longer draft otherwise leaves the
   // caret (restored at the draft's end) off screen.
   useEffect(() => {
-    if (locked || editor === null) return
+    // Compact starts with one quiet row: the user opens the keyboard by
+    // focusing the composer, not by switching sessions.
+    if (compactComposer || locked || editor === null) return
     focusDraftEditor(editor, revealSelection)
-  }, [locked, sessionId, editor])
+  }, [compactComposer, locked, sessionId, editor])
 
   // A persisted draft arrives AFTER the unlock effect: DefaultConversationViews
   // adopts it in its own mount effect, and a parent's mount effect runs after
@@ -313,6 +486,7 @@ export const InputBar = memo(function InputBar({
 
   const onToggleCommandMenu = (): void => {
     if (keyboard === undefined) return
+    if (compactComposer) setCompactExpanded(true)
     // The menu is a combobox over the editor, so the keyboard has to be there
     // before the launcher opens it: activating the button from the keyboard
     // leaves focus on the button, and restoring it afterwards would re-track an
@@ -400,7 +574,17 @@ export const InputBar = memo(function InputBar({
         : planActive ? t('placeholder.plan') : t('placeholder.default'))
 
   return (
-    <div className={clsx(css.root, variant === 'hero' && css.hero)} data-dsh-tour="composer">
+    <div
+      ref={rootRef}
+      className={clsx(css.root, variant === 'hero' && css.hero)}
+      data-dsh-tour="composer"
+      data-composer-compact={compactComposer ? '' : undefined}
+      data-composer-expanded={compactComposer ? (expanded ? 'true' : 'false') : undefined}
+      onFocus={onComposerFocus}
+      onBlur={onComposerBlur}
+      onClickCapture={onComposerClickCapture}
+      onKeyDown={onComposerKeyDown}
+    >
       {toast !== null && (
         <Toast
           key={toast.seq}
@@ -424,6 +608,8 @@ export const InputBar = memo(function InputBar({
         ref={cardRef}
         className={clsx(css.card, workspaceTrigger && css.cardWorkspaceTrigger)}
         data-composer-card
+        data-composer-compact={compactComposer ? '' : undefined}
+        data-composer-expanded={compactComposer ? (expanded ? 'true' : 'false') : undefined}
         onClick={workspaceTrigger ? onRequestWorkspace : undefined}
         onPointerDown={workspaceTrigger ? (e) => { e.stopPropagation() } : undefined}
       >
@@ -463,8 +649,9 @@ export const InputBar = memo(function InputBar({
           hint={hint}
           showPlaceholder={draft === '' && attachments.length === 0 && !claimActive}
         />
-        {/* Phone rider row: the model + agent pickers sit above the card, so the
-            footer keeps attach · permission · plan | send without crowding. */}
+        {/* Compact rider row: the model + agent pickers sit above the input
+            row, so the footer keeps attach · permission · plan | send without
+            crowding. Collapsed hides this row but keeps it mounted. */}
         {compactComposer && sessionId !== undefined && (
           <div className={css.rider} data-composer-rider>
             {renderSlot('conversation.input.model', { locked: modelSeatLocked })}
@@ -497,7 +684,7 @@ export const InputBar = memo(function InputBar({
               onChange={onPickFiles}
             />
             <div className={css.modes}>
-              {/* The agent picker rides the phone rider row above the card. */}
+              {/* The agent picker rides the compact rider row above the input. */}
               {sessionId === undefined || compactComposer
                 ? null
                 : renderSlot('conversation.input.agent', { locked })}

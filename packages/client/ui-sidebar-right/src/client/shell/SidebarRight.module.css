@@ -269,6 +269,8 @@
  */
 .editor {
   position: relative;
+  display: flex;
+  flex-direction: column;
   flex: none;
   align-self: stretch;
   min-width: 0;
@@ -286,6 +288,18 @@
     width var(--ds-transition-duration-slow) var(--ds-ease-in-out),
     opacity var(--ds-transition-duration-slow) var(--ds-ease-in-out),
     visibility 0s linear var(--ds-transition-duration-slow);
+}
+
+.editor[data-sidebar-right-editor-single] {
+  /* The single-preview presentation: the pane owns the panel box and the dock
+     waits behind the back control. Only geometry changes, so the document
+     component stays mounted across split/single and a resize. */
+  flex: 1 1 auto;
+  width: 100%;
+}
+
+.panel[data-sidebar-right-single] .panelBody {
+  display: none;
 }
 
 .editor[data-sidebar-right-editor-open] {
@@ -422,15 +436,10 @@
 :global([data-mobile-frame]) .panel[data-sidebar-right-panel='fullscreen'] {
   top: var(--dsh-mobile-header-height, 0px);
   bottom: var(--dsh-mobile-bar-height, 0px);
-}
-
-.filePush {
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: var(--dsw-alias-bg-base);
+  /* Compact fullscreen is the whole app, not a slab over the conversation.
+     Use the raised surface token so the skin's base ground (which may be
+     translucent) cannot let the hero/composer show through the file tree. */
+  background: var(--dsw-alias-bg-layer-2);
 }
 
 .filePushBar {
@@ -484,15 +493,20 @@
 }
 
 .barItem {
-  flex: none;
+  /* First three, an optional active pin, and More are the most the bar draws.
+     They fit 320px with the 44px immersive control at 44–50px each; a wider
+     safe-area inset shrinks the text label rather than hiding an entry. */
+  flex: 1 1 44px;
+  box-sizing: border-box;
   display: inline-flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 2px;
-  min-width: 48px;
+  min-width: 44px;
+  max-width: 50px;
   min-height: 44px;
-  padding: 0 4px;
+  padding: 0 2px;
   border: none;
   border-radius: 12px;
   color: var(--dsw-alias-label-secondary);
@@ -538,7 +552,7 @@
 .surfaceLabel {
   font-size: 10px;
   line-height: 1.2;
-  max-width: 64px;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

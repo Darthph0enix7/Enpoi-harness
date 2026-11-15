@@ -33,7 +33,11 @@
 
 import { writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
+import { RUN_CODE_NAME } from '@deepseek-ai/dsh-tools'
 import { SHARED_CHILD_DENY, SHARED_CHILD_KEEP, listRoleRegistry } from '@deepseek-ai/dsh-tool-subagent/src/index.ts'
+// The workspace source is the implementation this repo is changing; the
+// installed profile package is a build artifact and may lag it.
+import { childToolFilter } from '../../../../../packages/subagent/tool-subagent/src/index.ts'
 import {
   denyNames, preAttachFor, resolveToolGroups, seatOfDescriptorLabel,
   SHIPPED_TOOL_GROUPS,
@@ -44,7 +48,7 @@ import {
 import { CHORUS_SPEC } from '../../enpoi-council/src/profiles/chorus.ts'
 import { ROUNDTABLE_SPEC } from '../../enpoi-council/src/profiles/roundtable.ts'
 import { EVIDENCE_CHILD_DENY, ORACLE_TOOL_FILTER } from '../../enpoi-oracle/src/index.ts'
-import { resolvePolicy, reviewerSeatOf, seatToolDenyFor } from '../src/policy.ts'
+import { configuredRoleToolDenies, resolvePolicy, reviewerSeatOf, seatToolDenyFor } from '../src/policy.ts'
 import creatorInventory from './fixtures/tool-inventory/expected-creator.json'
 import orchestratorInventory from './fixtures/tool-inventory/expected-orchestrator.json'
 import sysadminInventory from './fixtures/tool-inventory/expected-sysadmin.json'
@@ -428,5 +432,43 @@ describe('child surfaces vs execution refusals', () => {
     if (out === undefined || out === '') return
     writeFileSync(out, buildSurfaceTable())
     expect(buildSurfaceTable()).toContain('| Role | Source |')
+  })
+})
+
+
+describe('trusted role tool denies (spawn filter)', () => {
+  const registry = listRoleRegistry(undefined)
+  const fixer = registry.fixer
+  if (fixer === undefined) throw new Error('fixer role missing')
+  const audit = { isKnown: () => true, warn: () => {} }
+
+  it('feeds an explicit operator role tool deny into the child restrict() deny list', () => {
+    const document = {
+      permissions: { agents: { fixer: { tools: { read: 'deny', bash: 'deny', write: 'allow', [RUN_CODE_NAME]: 'deny' } } } },
+    }
+    const filter = childToolFilter(undefined, document as never, 'fixer', fixer, audit)
+    expect(filter.deny).toContain('read')
+    expect(filter.deny).toContain('bash')
+    expect(filter.deny).toContain(RUN_CODE_NAME)
+    expect(filter.deny).not.toContain('write') // an allow row does not become a deny
+  })
+
+  it('keeps the deny backstop when an operator availability allowlist is present', () => {
+    const document = {
+      permissions: { agents: { fixer: { available: ['read', 'bash'], tools: { read: 'deny' } } } },
+    }
+    const filter = childToolFilter(undefined, document as never, 'fixer', fixer, audit)
+    expect(filter.allow).toContain('read')
+    expect(filter.deny).toContain('read') // restrict(): deny wins over allow
+  })
+
+  it('returns an explicit run_code deny for Oracle, evidence, and council spawn role ids', () => {
+    // The Oracle, evidence research (explorer/librarian), and council seats
+    // (debater/referee/chair/broker/curator) merge this helper's result into
+    // their child toolFilter; the reserved transport is no longer excluded.
+    const roles = ['oracle', 'explorer', 'librarian', 'debater', 'referee', 'chair', 'broker', 'curator']
+    const agents = Object.fromEntries(roles.map(role => [role, { tools: { run_code: 'deny' } }]))
+    const document = { permissions: { agents } }
+    for (const role of roles) expect(configuredRoleToolDenies(document, role)).toEqual(['run_code'])
   })
 })

@@ -177,7 +177,7 @@ export class ThemeRuntime {
   constructor(ctx: ClientContext, host: ConfigForm<ThemeSettings>) {
     this.ctx = ctx
     this.host = host
-    this.preference = DEFAULT_PREFERENCE
+    this.preference = bootstrapPreference()
     // Non-browser runs (node e2e booting the client tree) have no matchMedia.
     this.media = typeof matchMedia === 'undefined' ? undefined : matchMedia('(prefers-color-scheme: dark)')
     this.snapshot = this.buildSnapshot()
@@ -191,6 +191,24 @@ export class ThemeRuntime {
         media.addEventListener('change', onChange)
         return () => { media.removeEventListener('change', onChange) }
       }, 'ui-theme: prefers-color-scheme listener')
+      if (typeof document !== 'undefined') {
+        const doc = document as Document & ResumeEventDocument
+        const recheck = (): void => {
+          if (this.preference !== 'system') return
+          const resolved = media.matches ? 'dark' : 'light'
+          if (this.snapshot.active.id === resolved) return
+          this.publish()
+        }
+        const win = typeof window === 'undefined' ? undefined : window
+        ctx.effect(() => {
+          win?.addEventListener('pageshow', recheck)
+          doc.addEventListener('resume', recheck)
+          return () => {
+            win?.removeEventListener('pageshow', recheck)
+            doc.removeEventListener('resume', recheck)
+          }
+        }, 'ui-theme: system scheme recheck on resume')
+      }
     }
     ctx.effect(() => host.subscribe(() => { this.adopt() }), 'ui-theme: settings scope adoption')
     this.adopt()
@@ -357,6 +375,26 @@ export class ThemeRuntime {
     this.snapshot = this.buildSnapshot()
     this.ctx.emit('theme/change', this.snapshot)
   }
+}
+
+/**
+ * Preserve the Host boot palette while the settings scope is loading. The
+ * Host writes the durable preference on the root before any plugin runs; the
+ * initial snapshot must match that first paint instead of flashing the schema
+ * default. Missing or invalid boot state falls back to the schema default.
+ * @returns the boot-stamped built-in preference, or the schema default.
+ */
+function bootstrapPreference(): ThemePreference {
+  /* v8 ignore next -- needs a documentless run (node e2e booting the client tree), not constructible under jsdom */
+  if (typeof document === 'undefined') return DEFAULT_PREFERENCE
+  const preference = document.documentElement.dataset.dsThemeSource
+  return isThemePreference(preference) ? preference : DEFAULT_PREFERENCE
+}
+
+/** Page Lifecycle surface used only for a system-scheme wake recheck. */
+interface ResumeEventDocument {
+  addEventListener(type: 'resume', listener: () => void): void
+  removeEventListener(type: 'resume', listener: () => void): void
 }
 
 /**

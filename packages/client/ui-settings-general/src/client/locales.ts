@@ -36,6 +36,10 @@ export const zh = {
   'connection.connected': '连接成功',
   'connection.reconnect': '连接异常，点击立即重连',
   'connection.restart': '连接中断，正在重试，点击立即重连',
+  'connection.stopped': '连接已停止',
+  'connection.details': '连接详情',
+  'connection.reloadInstruction': '自动重连已暂停。重载页面可从干净状态恢复。',
+  'connection.reload': '重载页面',
 } satisfies Record<string, string>
 
 /** The settings namespace key union. */
@@ -77,4 +81,8 @@ export const en = {
   'connection.connected': 'Connected',
   'connection.reconnect': 'Disconnected, reconnect now',
   'connection.restart': 'Reconnecting, reconnect now',
+  'connection.stopped': 'Connection stopped',
+  'connection.details': 'Connection details',
+  'connection.reloadInstruction': 'Automatic reconnect is paused. Reload the page to start from a clean state.',
+  'connection.reload': 'Reload page',
 } satisfies Record<SettingsKey, string>

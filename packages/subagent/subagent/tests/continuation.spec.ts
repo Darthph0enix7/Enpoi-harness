@@ -2887,6 +2887,7 @@ describe('continuable settlement delivery', () => {
     expect(settlementNotices(parent)[0]!.text).toBe(
       `Background subagent ${started.childId} hit the output token limit and used up its automatic `
       + 'continuations before it finished — continue it with a follow-up.'
+      + '\nDiagnostic: code=OUTPUT_TOKEN_LIMIT; recoverability=unknown.'
       + '\nIts closing message:\nhalf an ans\n\nstill cut\n\nnothing more fits',
     )
   })
@@ -2987,6 +2988,7 @@ describe('continuable settlement delivery', () => {
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
       `Background subagent ${started.childId} declined the task — inspect its session ${started.childId} or continue it with a follow-up.`
+      + '\nDiagnostic: code=TURN_BLOCKED; recoverability=no (the ending discarded the input).'
       + '\nIt left no closing message.',
     )
   })
@@ -3017,7 +3019,8 @@ describe('continuable settlement delivery', () => {
     const child = await loadStoredSession(ctx.sessionPersistence, started.childId)
     expect(hasUserText(child.events, 'second task')).toBe(false)
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} failed before it finished — inspect its session ${started.childId} or continue it with a follow-up.`
+      `Background subagent ${started.childId} failed before it finished (code: UNKNOWN) — inspect its session ${started.childId} or continue it with a follow-up.`
+      + '\nDiagnostic: code=UNKNOWN; recoverability=unknown.'
       + '\nIts closing message:\nthe answer',
     )
   })
@@ -3054,6 +3057,7 @@ describe('continuable settlement delivery', () => {
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
       `Background subagent ${started.childId} was stopped before it finished — inspect its session ${started.childId} or continue it with a follow-up.`
+      + '\nDiagnostic: code=TURN_ABORTED; recoverability=unknown.'
       + '\nIts closing message:\nthe answer',
     )
   })
@@ -3081,6 +3085,7 @@ describe('continuable settlement delivery', () => {
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
       `Background subagent ${started.childId} was stopped before it finished — inspect its session ${started.childId} or continue it with a follow-up.`
+      + '\nDiagnostic: code=TURN_ABORTED; recoverability=unknown.'
       + '\nIt left no closing message.',
     )
   })
@@ -3108,6 +3113,7 @@ describe('continuable settlement delivery', () => {
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
       `Background subagent ${started.childId} was stopped before it finished — inspect its session ${started.childId} or continue it with a follow-up.`
+      + '\nDiagnostic: code=TURN_ABORTED; recoverability=unknown.'
       + '\nIt left no closing message.',
     )
   })
@@ -3150,6 +3156,7 @@ describe('continuable settlement delivery', () => {
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
       `Background subagent ${started.childId} was stopped before it finished — inspect its session ${started.childId} or continue it with a follow-up.`
+      + '\nDiagnostic: code=WORK_DROPPED_UNRUN; recoverability=no (the ending discarded the input).'
       + '\nIts closing message:\nthe answer',
     )
   })
@@ -3171,7 +3178,10 @@ describe('continuable settlement delivery', () => {
     await waitNoActivation(ctx, started.childId)
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
     expect(settlementNotices(parent)[0]!.text).toBe(
-      `Background subagent ${started.childId} failed before it finished — inspect its session ${started.childId} or continue it with a follow-up.\nIt left no closing message.`,
+      `Background subagent ${started.childId} failed before it finished (code: TEARDOWN_FAILED) — inspect its session ${started.childId} or continue it with a follow-up.`
+      + '\nDiagnostic: code=TEARDOWN_FAILED; recoverability=unknown.'
+      + '\nLast public text before the ending (unverified):\nthe answer'
+      + '\nIt left no closing message.',
     )
   })
 
@@ -3312,6 +3322,7 @@ describe('continuable settlement delivery', () => {
     expect(settlementNotices(parent)).toHaveLength(1)
     expect(settlementNotices(parent)[0]!.text).toBe(
       `Background subagent ${started.childId} was stopped before it finished — inspect its session ${started.childId} or continue it with a follow-up.`
+      + '\nDiagnostic: code=TURN_ABORTED; recoverability=unknown.'
       + '\nIt left no closing message.',
     )
     expect(parent.session.snapshotEvents().some(event => event.type === 'agent/inbox/spliced')).toBe(true)

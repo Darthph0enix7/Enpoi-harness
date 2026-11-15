@@ -446,8 +446,8 @@
 .activity { display: flex; align-items: center; flex: none; }
 .activity:empty { display: none; }
 .activityExpanded { flex: 1; min-width: 0; }
-/* ── Phone composer ──
-   Rider row above the card (model + agent), the card keeps the footer
+/* ── Compact composer ──
+   Rider row above the input row (model + agent), the card keeps the footer
    (attach · permission · plan | send/stop), the stack clears the safe area.
    The classifier's `--dsh-keyboard-inset` is the lift the keyboard adds
    beyond the layout viewport: nonzero only while the browser keeps the layout
@@ -514,4 +514,81 @@
       calc(100dvh - var(--dsh-keyboard-inset, 0px) - 220px)
     );
   }
+}
+
+/* ── Compact collapsed composer ──
+   One quiet row: attach, the mounted editor, send/stop. The full rider and
+   footer controls remain in the DOM and reappear in place on focus/type/
+   attachment/menu intent, so the editor is never remounted. The class is
+   driven by useLayoutMode() and the bar's own expansion state. */
+.card[data-composer-compact][data-composer-expanded='false'] {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 52px;
+  padding: 2px 6px 2px 7px;
+}
+
+.card[data-composer-compact][data-composer-expanded='false'] .scroll {
+  grid-column: 2;
+  grid-row: 1;
+  margin-right: 0;
+  max-height: 36px;
+  overflow-y: hidden;
+}
+
+.card[data-composer-compact][data-composer-expanded='false'] .scroll .input {
+  min-height: 36px;
+  padding: 6px 2px;
+}
+
+.card[data-composer-compact][data-composer-expanded='false'] .placeholder {
+  inset: 6px 2px auto;
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  -webkit-line-clamp: unset;
+}
+
+.card[data-composer-compact][data-composer-expanded='false'] .row {
+  display: contents;
+}
+
+.card[data-composer-compact][data-composer-expanded='false'] .tools {
+  grid-column: 1;
+  grid-row: 1;
+  gap: 0;
+}
+
+/* Keep the attach circle; the mode/permission/plan/left seats join the
+   expanded row only. */
+.card[data-composer-compact][data-composer-expanded='false'] .tools > :not(.add):not(input) {
+  display: none;
+}
+
+.card[data-composer-compact][data-composer-expanded='false'] .trailing {
+  grid-column: 3;
+  grid-row: 1;
+  margin-left: 0;
+  gap: 4px;
+}
+
+.card[data-composer-compact][data-composer-expanded='false'] .trailing > .standardControls,
+.card[data-composer-compact][data-composer-expanded='false'] .trailing > .activity {
+  display: none;
+}
+
+/* Stop-all is intentionally not hidden: its Menu wrapper is not a direct
+   .trailing child, and a live descendant turn must keep both Stop controls
+   reachable in the collapsed row. */
+
+.card[data-composer-compact][data-composer-expanded='false'] .primary {
+  transform: none;
+}
+
+.card[data-composer-compact][data-composer-expanded='false'] .rider,
+.card[data-composer-compact][data-composer-expanded='false'] .accessory {
+  display: none;
 }

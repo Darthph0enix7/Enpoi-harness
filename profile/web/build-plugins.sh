@@ -6,13 +6,21 @@
 # the profile's node_modules links into the harness workspace); everything else
 # is inlined. Run after any plugin source port, then restart dsh-web.service.
 #
+# Packages whose manifest declares `scripts.build:types` are declaration
+# producers: a source rebuild first runs the local TypeScript compiler and the
+# package's known `scripts/rewrite-dts-imports.mjs` postprocess, then bundles
+# JS. A verified prebuilt install skips both tools. The fingerprint map covers
+# the emitted declarations, so a missing or changed `.d.ts` cannot verify.
+#
 # Freshness is content-based, not mtime-based. `scripts/profile-bundle-
 # fingerprint.mjs` writes one map at `<profile-root>/.bundle-fingerprints.json`
 # with, per plugin, a SHA-256 of the build inputs (src TypeScript/JavaScript/
-# JSON plus package.json/tsconfig.json), a SHA-256 of lib/index.js, and a
-# SHA-256 of the canonical build flags. A shipped prebuilt bundle is skipped
-# only when all three match, so a source edit with a preserved timestamp still
-# rebuilds and a truncated/tampered bundle is restored. Missing entries request
+# JSON plus package.json/tsconfig.json; producers also hash scripts/**/*.mjs),
+# a SHA-256 of lib/index.js, and a SHA-256 of the canonical build flags.
+# Producers additionally record a SHA-256 over every emitted lib/**/*.d.ts. A
+# shipped prebuilt bundle is skipped only when every recorded value matches, so
+# a source edit with a preserved timestamp still rebuilds and a
+# truncated/tampered bundle or declaration is restored. Missing entries request
 # a build: source checkouts and older installs can never silently keep a stale
 # bundle.
 #
@@ -112,9 +120,22 @@ elif [ -f "$PROFILE_ROOT/../../harness/current/node_modules/esbuild/bin/esbuild"
   ESBUILD_CMD=("$NODE_BIN" "$PROFILE_ROOT/../../harness/current/node_modules/esbuild/bin/esbuild")
 elif command -v esbuild >/dev/null 2>&1; then
   ESBUILD_CMD=("$(command -v esbuild)")
-elif (cd "$SCRIPT_DIR" && pnpm exec which esbuild >/dev/null 2>&1); then
-  ESBUILD_CMD=(pnpm --dir "$SCRIPT_DIR/../.." exec esbuild)
 fi
+
+# Declaration emit is opt-in per producer manifest (`scripts.build:types`). The
+# build runs the known tsc entry and an optional known postprocess module as
+# direct argv; it never evaluates the manifest string through a shell and never
+# invokes pnpm. A verified prebuilt install skips both tsc and esbuild.
+TSC_JS=""
+for candidate in \
+  "$PROFILE_ROOT/node_modules/typescript/lib/tsc.js" \
+  "${HARNESS_ROOT:-}/node_modules/typescript/lib/tsc.js" \
+  "$PROFILE_ROOT/../../harness/current/node_modules/typescript/lib/tsc.js"; do
+  if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+    TSC_JS="$candidate"
+    break
+  fi
+done
 
 ERRDIR="$(mktemp -d "${TMPDIR:-/tmp}/dsh-profile-build.XXXXXX")" || exit 1
 TMP_OUT=""
@@ -124,6 +145,44 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+# A producer opts into declarations through its manifest. This only reads the
+# manifest; the actual build is the fixed tsc argv below, never that string.
+is_declaration_producer() {
+  "$NODE_BIN" -e 'const fs=require("node:fs"); const manifest=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); process.exit(manifest.scripts && typeof manifest.scripts["build:types"]==="string" ? 0 : 1)' "$1/package.json" >/dev/null 2>&1
+}
+
+# Build declarations for one producer before its JS bundle. A missing compiler
+# or missing tsconfig is an explicit failure, never a silent/untyped success.
+build_declarations() {
+  local pkg="$1"
+  local package_dir="$PACKAGES_DIR/$pkg"
+  if [ ! -f "$package_dir/tsconfig.json" ]; then
+    echo "FAIL $pkg  — build:types requires tsconfig.json"
+    return 1
+  fi
+  if [ -z "$TSC_JS" ]; then
+    echo "FAIL $pkg  — TypeScript compiler not found; declarations cannot be rebuilt"
+    echo "     Prebuilt declarations verify from $FINGERPRINT_FILE; edited producer sources need typescript."
+    return 1
+  fi
+  if ! (cd "$package_dir" && "$NODE_BIN" "$TSC_JS" -p tsconfig.json 2>"$ERRDIR/types-$pkg.err"); then
+    echo "FAIL $pkg  — declaration build failed"
+    sed -n '1,5p' "$ERRDIR/types-$pkg.err"
+    return 1
+  fi
+  if [ -f "$package_dir/scripts/rewrite-dts-imports.mjs" ]; then
+    if ! "$NODE_BIN" "$package_dir/scripts/rewrite-dts-imports.mjs"; then
+      echo "FAIL $pkg  — declaration postprocess failed"
+      return 1
+    fi
+  fi
+  if ! "$NODE_BIN" -e 'const fs=require("node:fs"); const path=require("node:path"); const manifest=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); const target=manifest.exports?.["."]?.types ?? manifest.types; if (typeof target !== "string") process.exit(1); const info=fs.statSync(path.join(process.argv[2], target)); if (!info.isFile() || info.size === 0) process.exit(1)' "$package_dir/package.json" "$package_dir"; then
+    echo "FAIL $pkg  — declaration build produced no exported types"
+    return 1
+  fi
+  return 0
+}
 
 cd "$PACKAGES_DIR" || exit 1
 
@@ -161,6 +220,13 @@ for dir in enpoi-*/; do
     echo "FAIL $pkg  — source fingerprint failed: $source_before"
     fail=1
     continue
+  fi
+
+  if is_declaration_producer "$pkg"; then
+    if ! build_declarations "$pkg"; then
+      fail=1
+      continue
+    fi
   fi
 
   if [ ${#ESBUILD_CMD[@]} -eq 0 ]; then

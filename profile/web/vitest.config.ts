@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 import { defineConfig } from 'vitest/config'
 
@@ -34,6 +35,13 @@ function standardDecoratorPlugin() {
 
 export default defineConfig({
   plugins: [standardDecoratorPlugin()],
+  resolve: {
+    alias: {
+      // Run the producer's actual source in profile tests; the package ships
+      // only a built JS entry and workspace symlinks are not guaranteed.
+      'dsh-enpoi-whiteboard': fileURLToPath(new URL('./packages/enpoi-whiteboard/src/index.ts', import.meta.url)),
+    },
+  },
   test: {
     include: ['packages/*/tests/**/*.spec.ts', 'tests/**/*.spec.ts'],
     environment: 'node',

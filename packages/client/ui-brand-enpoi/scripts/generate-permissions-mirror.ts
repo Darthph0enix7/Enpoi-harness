@@ -294,9 +294,21 @@ export function buildRepoMirrorData(paths: MirrorPaths = mirrorPaths()): Pick<
     initializerOf(roles, 'ROLE_CHILD_DENY') ?? fail('ROLE_CHILD_DENY'), 'ROLE_CHILD_DENY',
   ))
 
-  const fixture = JSON.parse(readFileSync(paths.operatorFixture, 'utf8')) as { preset?: unknown; tools?: unknown }
+  const fixture = JSON.parse(readFileSync(paths.operatorFixture, 'utf8')) as {
+    preset?: unknown
+    stale?: unknown
+    staleReason?: unknown
+    tools?: unknown
+  }
   if (fixture.preset !== 'orchestrator' || !Array.isArray(fixture.tools)) {
     throw new Error(`${paths.operatorFixture}: expected the orchestrator preset inventory`)
+  }
+  if (fixture.stale === true) {
+    const reason = typeof fixture.staleReason === 'string' ? `: ${fixture.staleReason}` : ''
+    throw new Error(
+      `${paths.operatorFixture}: inventory capture is marked stale${reason} — re-capture with ` +
+      'apps/web/tests/keyless-tool-inventory.e2e.ts before regenerating the permissions mirror',
+    )
   }
   const operatorSurface = canonical((fixture.tools as unknown[]).map((tool) => {
     if (typeof tool !== 'string') throw new Error(`${paths.operatorFixture}: non-string tool name`)

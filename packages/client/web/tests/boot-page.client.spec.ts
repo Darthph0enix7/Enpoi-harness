@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BootPage } from '../src/boot-page.ts'
 
 afterEach(() => { document.body.innerHTML = '' })
@@ -51,6 +51,45 @@ describe('BootPage', () => {
     expect(el.textContent).toContain('@deepseek-ai/dsh-client-ui-tool')
     expect(el.textContent).not.toContain('ok')
     expect(el.textContent).not.toContain('Loading plugins…')
+  })
+
+  it('renders one explicit retry action on a failure report', () => {
+    const { el, page } = mount()
+    const retry = vi.fn()
+    page.fail('offline', retry)
+    const button = el.querySelector<HTMLButtonElement>('[data-dsh-boot-retry]')
+    expect(button?.textContent).toBe('Retry')
+    button?.click()
+    expect(retry).toHaveBeenCalledOnce()
+  })
+
+  it('renders suppressed retry feedback and disables a terminal action', () => {
+    const { el, page } = mount()
+    const retry = vi.fn(() => ({ message: 'Retry limit reached; reload the page manually.', disabled: true }))
+    page.fail('offline', retry)
+    const button = el.querySelector<HTMLButtonElement>('[data-dsh-boot-retry]')
+    button?.click()
+    expect(el.textContent).toContain('Retry limit reached; reload the page manually.')
+    const disabled = el.querySelector<HTMLButtonElement>('[data-dsh-boot-retry]')
+    expect(disabled?.disabled).toBe(true)
+    disabled?.click()
+    expect(retry).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a cooldown retry action enabled for a later attempt', () => {
+    const { el, page } = mount()
+    const retry = vi.fn(() => ({ message: 'Retry is cooling down; try again in 4s.' }))
+    page.fail('offline', retry)
+    const button = el.querySelector<HTMLButtonElement>('[data-dsh-boot-retry]')
+    button?.click()
+    expect(el.textContent).toContain('Retry is cooling down; try again in 4s.')
+    expect(button?.disabled).toBe(false)
+  })
+
+  it('keeps a failure without a retry action button-free', () => {
+    const { el, page } = mount()
+    page.fail('config is broken')
+    expect(el.querySelector('[data-dsh-boot-retry]')).toBeNull()
   })
 
   it('shows the complete sweep report', () => {

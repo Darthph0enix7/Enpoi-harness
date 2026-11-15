@@ -820,18 +820,29 @@ describe('ToolRuntime', () => {
     it('dispatches the tool when the answerer grants allowed-once, forwarding the ask fields', async () => {
       const ctx = await approvalSetup()
       const agent = fakeAgent()
-      const controller = new AbortController()
       const seen: ApprovalRequest[] = []
+      const asked = Promise.withResolvers<undefined>()
+      const grant = Promise.withResolvers<ApprovalOutcome>()
       ctx.on('approval/request', (req) => {
         seen.push(req)
-        return Promise.resolve<ApprovalOutcome>('allowed-once')
+        asked.resolve(undefined)
+        return grant.promise
       })
       ctx.on('tools/pre-execute', async (_exec, _next): Promise<PreToolDecision> =>
         ({ kind: 'ask', reason: 'hook wants a human', displayReason: { en: 'Allow it?', zh: '允许吗？' } }))
 
-      const result = await ctx.tools.execute({
-        callId: ToolCallId('c1'), name: 'echo', arguments: { text: 'hi' }, agent, signal: controller.signal,
+      const pending = ctx.tools.execute({
+        callId: ToolCallId('c1'), name: 'echo', arguments: { text: 'hi' }, agent, signal: testToolSignal,
       })
+
+      await asked.promise
+      // The forwarded signal is live while the ask is pending. Caller abort in
+      // that state is covered by the ABORTED_BEFORE_DISPATCH test below; this
+      // call must not abort so allowed-once still proves dispatch.
+      expect(seen[0]?.signal?.aborted).toBe(false)
+
+      grant.resolve('allowed-once')
+      const result = await pending
 
       expect(result).toMatchObject({ isError: false, content: [{ type: 'text', text: 'hi' }] })
       expect(seen).toHaveLength(1)
@@ -839,11 +850,8 @@ describe('ToolRuntime', () => {
         agent, toolName: 'echo', callId: 'c1', reason: 'hook wants a human',
         displayReason: { en: 'Allow it?', zh: '允许吗？' },
       })
-      // The bounded ask dispatches with an ask-scoped expiry signal, so the
-      // forwarded signal is equivalent to the caller's rather than identical:
-      // aborting the caller still aborts what the ask forwarded.
-      expect(seen[0]?.signal?.aborted).toBe(false)
-      controller.abort()
+      // Settling the ask aborts the forwarded lifetime on purpose: every client
+      // still showing the approval card is told to dismiss it.
       expect(seen[0]?.signal?.aborted).toBe(true)
     })
 
