@@ -1,8 +1,17 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-11-13T23:20:01.247Z",
+  "generatedAt": "2026-11-15T02:14:47.852Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.128",
+      "commit": "737f91a",
+      "releasedAt": "2026-11-15T01:55:33.000Z",
+      "notes": [
+        "chore(harness): regenerate catalogs, translations, profile bundles and fingerprints",
+        "feat(harness): adaptive shell, bounded recovery, delegated policy truth, stable settings surface, keyless inventory"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.127",
       "commit": "b6c25d7",
@@ -391,14 +400,6 @@
       "releasedAt": "2026-10-13T12:04:45.000Z",
       "notes": [
         "fix(update): reset the prebuilt flag on the channel-divergence fallback"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.80",
-      "commit": "5eab1d7",
-      "releasedAt": "2026-10-13T11:34:50.000Z",
-      "notes": [
-        "fix(feedback): triage leaves no trace — delete the session artifacts after dispose"
       ]
     }
   ]
