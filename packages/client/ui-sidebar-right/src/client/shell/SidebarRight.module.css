@@ -183,6 +183,15 @@
   background: var(--dsw-alias-interactive-bg-active);
 }
 
+@media (pointer: coarse) {
+  /* The rail is hidden on the compact shell, but a touch desktop/tablet can
+     still show it; keep its targets at the same 44px minimum as the bar. */
+  .railButton {
+    width: 44px;
+    height: 44px;
+  }
+}
+
 /* The geometry of a message's action row button (ui-chat MessageIconActions),
    shared with the kit's split control beside it: a 28px circle around a 15px glyph. */
 .iconButton {
@@ -442,6 +451,19 @@
   background: var(--dsw-alias-bg-layer-2);
 }
 
+/* The compact shell already owns the surface bar at the bottom. The desktop
+   icon rail is a second, vertical copy of the same registry; at 412px it
+   also sits exactly over the bar's hide control and reserves 44px from the
+   conversation. Hide it and release its centre-column reservation so compact
+   content gets the full viewport width. */
+:global([data-mobile-frame]) .rail {
+  display: none;
+}
+
+:global(body[data-sidebar-right-rail-mounted]) :global([data-mobile-frame]) div:has(+ [data-rightbar-col]) {
+  padding-right: 0;
+}
+
 .filePushBar {
   flex: none;
   display: flex;
@@ -493,10 +515,11 @@
 }
 
 .barItem {
-  /* First three, an optional active pin, and More are the most the bar draws.
-     They fit 320px with the 44px immersive control at 44–50px each; a wider
-     safe-area inset shrinks the text label rather than hiding an entry. */
-  flex: 1 1 44px;
+  /* Spread the first three, active pin, and More across the full phone bar.
+     The old 50px cap left the right half of a 412px bar empty. The 88px cap
+     keeps a tablet from stretching four items into oversized slabs; the media
+     query below tightens it to 72px and centres the group. */
+  flex: 1 1 0;
   box-sizing: border-box;
   display: inline-flex;
   flex-direction: column;
@@ -504,7 +527,7 @@
   justify-content: center;
   gap: 2px;
   min-width: 44px;
-  max-width: 50px;
+  max-width: 88px;
   min-height: 44px;
   padding: 0 2px;
   border: none;
@@ -522,6 +545,12 @@
 .barItem:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+@media (min-width: 600px) {
+  .barItem {
+    max-width: 72px;
+  }
 }
 
 .moreItem {
@@ -551,11 +580,16 @@
 
 .surfaceLabel {
   font-size: 10px;
-  line-height: 1.2;
+  line-height: 1.15;
   max-width: 100%;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-align: center;
+  overflow-wrap: normal;
+  word-break: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 
 .surfaceEmpty {

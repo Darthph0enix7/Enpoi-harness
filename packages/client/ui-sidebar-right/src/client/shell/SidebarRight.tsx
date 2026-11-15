@@ -134,6 +134,8 @@ export interface SidebarRightInjected {
   readonly setEditorWidth: (px: number) => void
   /** Record the rail's explicit open intent; a forced fullscreen close clears it. */
   readonly setOpen: (open: boolean) => void
+  /** Record the compact presentation only; never persisted and never rewrites the desktop surface. */
+  readonly setCompactOpen: (open: boolean) => void
   /**
    * Set the rightbar column width preference in the frame layout.
    *
@@ -150,6 +152,8 @@ export interface SidebarRightInjected {
     readonly railItems: HostObservable<readonly SidebarRightRailItem[]>
     /** The global rail state: open intent, lit kind, and editor width. */
     readonly rail: HostObservable<SidebarRightRailState>
+    /** Compact-only presentation: whether the operator explicitly opened a surface. */
+    readonly compactOpen: HostObservable<boolean>
   }
   readonly keyedHooks: {
     readonly tabNavigation: (key: string) => HostObservable<SidebarRightTabNavigation>
@@ -726,8 +730,8 @@ const EDITOR_RESIZE_MARKER = 'data-sidebar-right-editor-resizing'
  */
 export function RightbarSeat({
   sessionId, width, canShow, mobile, useStore, actions, t, renderSlot, syncPresentation, bindService, openTab, closeTab,
-  selectKind, setEditorWidth, setOpen, useTabTypes, useTabNavigation, useRail, useRailItems, occurrence,
-  retainTab, active, useShortcuts, splitPane, toggleFullscreen,
+  selectKind, setEditorWidth, setOpen, setCompactOpen, useTabTypes, useTabNavigation, useRail, useRailItems,
+  useCompactOpen, occurrence, retainTab, active, useShortcuts, splitPane, toggleFullscreen,
 }: RightbarSeatProps): ReactNode {
   // One store instance per session, so this map holds this session's surface.
   // The binding published below serves the public face's commands on the
@@ -738,13 +742,31 @@ export function RightbarSeat({
   const surface = surfaces[sessionId]
   const railState = useRail(state => state)
   const railItems = useRailItems(items => items)
-  const shown = active && surface !== undefined && surface.layout.expanded
+  const compactOpen = useCompactOpen(value => value)
+  // Entering compact (or switching Session there) starts from the closed bar;
+  // the stored surface's `expanded` remains the desktop preference. A layout
+  // effect keeps a previous compact open from flashing a panel for one paint.
+  useLayoutEffect(() => {
+    if (mobile) setCompactOpen(false)
+  }, [mobile, sessionId, setCompactOpen])
+  const presentedSurface = surface !== undefined && mobile
+    ? {
+      ...surface,
+      layout: {
+        ...surface.layout,
+        expanded: compactOpen,
+        floats: compactOpen ? surface.layout.floats : [],
+      },
+    }
+    : surface
+  const expanded = presentedSurface !== undefined && presentedSurface.layout.expanded
+  const shown = active && expanded
   // The compact shell owns the viewport and passes mobile:true; the desktop
   // frame keeps push until the saved mode or the room rule says otherwise.
   // A push that cannot claim its normal column falls back to the fullscreen
   // overlay instead of collapsing the panel or resetting the operator's mode.
   const overlayFallback = shown && !mobile && !canShow
-  const fullscreen = mobile || surface?.layout.mode === 'fullscreen' || overlayFallback
+  const fullscreen = mobile || presentedSurface?.layout.mode === 'fullscreen' || overlayFallback
   const forcedFullscreen = mobile || overlayFallback
   const panelRef = useRef<HTMLDivElement | null>(null)
   // The kit's room-rule readings, kept in a ref: the service reads them at
@@ -753,9 +775,13 @@ export function RightbarSeat({
   const reportRoom = useCallback((fits: ReadonlyMap<PaneId, HalvesFit>): void => { room.current = fits }, [])
   const track = shown && !mobile && !overlayFallback
   const closeForced = useCallback(() => {
+    if (mobile) {
+      setCompactOpen(false)
+      return
+    }
     setOpen(false)
     actions.setExpanded(sessionId, false)
-  }, [actions, sessionId, setOpen])
+  }, [actions, mobile, sessionId, setCompactOpen, setOpen])
 
   // enpoi: the rail's lit kind is global: the operator's last choice, else the
   // first registered page. It stays lit whether or not the panel is drawn.
@@ -775,7 +801,7 @@ export function RightbarSeat({
       restoredOpen.current = { sessionId, expanded: surface.layout.expanded }
     }
   }
-  const openIntent = resolveRailOpen(railState.open, restoredOpen.current?.expanded)
+  const openIntent = mobile ? compactOpen : resolveRailOpen(railState.open, restoredOpen.current?.expanded)
 
   // enpoi: apply the intent to whichever session this seat now draws: a switch
   // from a session into a subagent session (and back) must not close the panel
@@ -788,6 +814,9 @@ export function RightbarSeat({
   // target's first painted frame already shows the panel expanded with its
   // page, so no open animation plays for what the operator never closed.
   useLayoutEffect(() => {
+    // Compact boot and compact close are presentation events; they must not
+    // adopt the host's desktop `expanded` or write it back.
+    if (mobile) return
     if (surface === undefined) {
       if (openIntent && litKind !== undefined && litDefinition !== undefined) {
         const address = pageAddress(litKind)
@@ -814,7 +843,7 @@ export function RightbarSeat({
     } else if (surface.layout.expanded) {
       actions.setExpanded(sessionId, false)
     }
-  }, [actions, litDefinition, litKind, openIntent, sessionId, surface])
+  }, [actions, litDefinition, litKind, mobile, openIntent, sessionId, surface])
 
   // Touch devices: the back gesture leaves fullscreen before it touches
   // browser history. A viewport-derived, compact, or room-fallback fullscreen
@@ -900,7 +929,8 @@ export function RightbarSeat({
   // rail tab, and a record is selected: the tree is always the visible anchor
   // beside it, and switching away collapses the pane in the same commit.
   const editorOpen = surface !== undefined
-    && surface.layout.expanded
+    && presentedSurface !== undefined
+    && presentedSurface.layout.expanded
     && isFilesActive
     && editorTab !== undefined
     && !shownByDock
@@ -925,9 +955,9 @@ export function RightbarSeat({
   const editorWidth = editorOpen && !singlePreview
     ? Math.min(Math.max(0, previewWidth ?? railState.editorWidth), splitPreviewWidth)
     : 0
-  const panel: PanelProps | undefined = surface === undefined ? undefined : {
-    sessionId, actions, t, renderSlot, surface, openTab, closeTab, useTabTypes, useTabNavigation, useStore, occurrence,
-    fullscreen, reportRoom, active, retainTab, shortcuts, splitPane, toggleFullscreen,
+  const panel: PanelProps | undefined = presentedSurface === undefined ? undefined : {
+    sessionId, actions, t, renderSlot, surface: presentedSurface, openTab, closeTab, useTabTypes, useTabNavigation,
+    useStore, occurrence, fullscreen, reportRoom, active, retainTab, shortcuts, splitPane, toggleFullscreen,
   }
   return (
     <>

@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { makeTranslate, RemoteError, sessionSnapshot } from '@deepseek-ai/dsh-client-test-runtime'
+import { hitBlockTargetClass } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
   SessionListState, SessionSummary, SessionSnapshot,
 } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -395,7 +396,7 @@ describe('SubagentHeaderLineage', () => {
     expect(input.refreshProjection).toHaveBeenCalledWith(PARENT)
   })
 
-  it('treats an idle cached-empty child catalog as loading, not a leaf', () => {
+  it('treats an idle cached-empty child catalog as a settled load affordance, never a spinner', () => {
     const summaries = { [CHILD]: summary(CHILD, 5) }
     const idle = props(catalog({
       state: 'idle',
@@ -407,6 +408,10 @@ describe('SubagentHeaderLineage', () => {
     hoverCatalog(screen.getByRole('button', { name: '1 个子智能体' }))
     const worker = (): HTMLElement => screen.getByRole('treeitem', { name: /worker/ })
 
+    // A cached-empty catalog is display state, not evidence of a read in flight.
+    expect(worker().querySelector('[data-state="ongoing"]')).toBeNull()
+    expect(worker().querySelector('[data-state="idle"]')).not.toBeNull()
+    expect(screen.queryByText('正在加载子智能体…')).toBeNull()
     expect(worker().getAttribute('aria-expanded')).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '加载 worker 的下级子智能体' }))
     expect(idle.refreshProjection).toHaveBeenCalledWith(CHILD)
@@ -420,6 +425,102 @@ describe('SubagentHeaderLineage', () => {
     view.rerender(<HeaderCatalog {...readyEmpty} />)
     expect(screen.queryByRole('button', { name: /worker 的下级子智能体/ })).toBeNull()
     expect(worker().querySelector('[class*="disclosure"]')).toBeNull()
+  })
+
+  it('settles every idle row of an all-cached catalog without a working indicator', () => {
+    const idleIds = [CHILD, 'child-2' as SessionId, 'child-3' as SessionId]
+    const entries = idleIds.map((id, index) => ({
+      id, mode: 'continuable' as const, label: `worker-${String(index)}`, activity: 'inactive' as const,
+    }))
+    const summaries = Object.fromEntries(idleIds.map(id => [id, summary(id, 1)]))
+    render(<HeaderCatalog {...props(
+      catalog({ state: 'idle', entries }),
+      Object.fromEntries(idleIds.map(id => [id, catalog({ state: 'idle', entries: [] })])),
+      summaries,
+    )} />)
+    hoverCatalog(screen.getByRole('button', { name: '3 个子智能体' }))
+
+    const rows = screen.getAllByRole('treeitem')
+    expect(rows).toHaveLength(3)
+    for (const row of rows) {
+      expect(row.querySelector('[data-state="ongoing"]')).toBeNull()
+      expect(row.querySelector('[data-state="idle"]')).not.toBeNull()
+    }
+    expect(screen.queryByText('正在加载子智能体…')).toBeNull()
+  })
+
+  it('keeps a row visible as a leaf after its loaded empty projection returns', () => {
+    const input = props(catalog({
+      entries: [{ id: CHILD, mode: 'continuable', label: 'worker', activity: 'inactive' }],
+    }), {
+      [CHILD]: catalog({ entries: [], state: 'ready' }),
+    })
+    render(<HeaderCatalog {...input} />)
+    const trigger = screen.getByRole('button', { name: '1 个子智能体' })
+
+    hoverCatalog(trigger)
+    fireEvent.click(screen.getByRole('treeitem', { name: /worker/ }))
+    expect(input.openChild).toHaveBeenCalledWith({
+      parentSessionId: PARENT, childSessionId: CHILD, mode: 'continuable',
+    })
+
+    // Reopening after the click must still list the row as a settled leaf.
+    hoverCatalog(trigger)
+    const worker = screen.getByRole('treeitem', { name: /worker/ })
+    expect(worker).toBeTruthy()
+    expect(worker.querySelector('[data-state="ongoing"]')).toBeNull()
+    expect(worker.querySelector('[data-state="idle"]')).not.toBeNull()
+    expect(screen.queryByRole('button', { name: /worker 的下级子智能体/ })).toBeNull()
+  })
+
+  it('shows an in-flight indicator only on the row whose catalog read is running', () => {
+    const other = 'child-2' as SessionId
+    const input = props(catalog({
+      entries: [
+        { id: CHILD, mode: 'continuable', label: 'loading-child', activity: 'inactive' },
+        { id: other, mode: 'continuable', label: 'settled-child', activity: 'inactive' },
+      ],
+    }), {
+      [CHILD]: catalog({ entries: [], state: 'loading' }),
+      [other]: catalog({ entries: [], state: 'idle' }),
+    })
+    render(<HeaderCatalog {...input} />)
+    hoverCatalog(screen.getByRole('button', { name: '2 个子智能体' }))
+
+    const loading = screen.getByRole('treeitem', { name: /loading-child/ })
+    const settled = screen.getByRole('treeitem', { name: /settled-child/ })
+    expect(loading.querySelector('[data-state="ongoing"]')).not.toBeNull()
+    expect(loading.querySelector('[data-state="idle"]')).not.toBeNull()
+    expect(settled.querySelector('[data-state="ongoing"]')).toBeNull()
+  })
+
+  it('maps running, completed, and idle activity onto the status tokens', () => {
+    const completed = 'child-2' as SessionId
+    const idle = 'child-3' as SessionId
+    const summaries = {
+      [CHILD]: summary(CHILD, 1),
+      [completed]: {
+        ...summary(completed, 1),
+        projectionValues: { subagentTiming: { settledMs: 1_000, lastTurnCompleted: true } },
+      },
+      [idle]: summary(idle, 1),
+    }
+    const statuses: SessionStatusSnapshot = new Map([[CHILD, {
+      running: true, completionUnread: false, pendingInteraction: undefined,
+    }]])
+    const input = props(catalog({
+      entries: [
+        { id: CHILD, mode: 'continuable', label: 'running-child', activity: 'running' },
+        { id: completed, mode: 'continuable', label: 'completed-child', activity: 'inactive' },
+        { id: idle, mode: 'continuable', label: 'idle-child', activity: 'inactive' },
+      ],
+    }), {}, summaries)
+    render(<HeaderCatalog {...input} useSessionStatus={select => select(statuses)} />)
+    hoverCatalog(screen.getByRole('button', { name: '1 个子智能体，正在运行' }))
+
+    expect(screen.getByRole('treeitem', { name: /running-child/ }).querySelector('[data-state="ongoing"]')).not.toBeNull()
+    expect(screen.getByRole('treeitem', { name: /completed-child/ }).querySelector('[data-state="done"]')).not.toBeNull()
+    expect(screen.getByRole('treeitem', { name: /idle-child/ }).querySelector('[data-state="idle"]')).not.toBeNull()
   })
 
   it('refreshes an idle cached-empty switcher root when it opens', () => {
@@ -536,6 +637,239 @@ describe('SubagentHeaderLineage', () => {
 
     expect(screen.getByRole('treeitem', { name: /worker/ }).children).toHaveLength(2)
     expect(screen.getByRole('button', { name: /加载 reviewer/ })).toBeTruthy()
+  })
+
+  it('opens the count menu on the first touch tap and ignores synthesized hover events', async () => {
+    const input = props(catalog())
+    render(<HeaderCatalog {...input} />)
+    const trigger = screen.getByRole('button', { name: /1 个子智能体，正在运行/ })
+
+    fireEvent.pointerDown(trigger, { pointerType: 'touch' })
+    fireEvent.pointerEnter(trigger, { pointerType: 'touch' })
+    fireEvent.click(trigger, { detail: 1 })
+    expect(screen.getByRole('tree')).toBeTruthy()
+    expect(trigger.getAttribute('aria-expanded')).toBe('true')
+
+    // The compatibility mouse events a phone synthesizes must not start a
+    // hover-close countdown that dismisses the menu before the user taps a row.
+    fireEvent.mouseEnter(trigger)
+    fireEvent.mouseLeave(trigger.parentElement!)
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 200)) })
+    expect(screen.getByRole('tree')).toBeTruthy()
+  })
+
+  it('toggles the count menu closed on a second touch tap', () => {
+    render(<HeaderCatalog {...props(catalog())} />)
+    const trigger = screen.getByRole('button', { name: /1 个子智能体，正在运行/ })
+    fireEvent.pointerDown(trigger, { pointerType: 'touch' })
+    fireEvent.click(trigger, { detail: 1 })
+    expect(screen.getByRole('tree')).toBeTruthy()
+
+    fireEvent.pointerDown(trigger, { pointerType: 'touch' })
+    fireEvent.click(trigger, { detail: 1 })
+    expect(screen.queryByRole('tree')).toBeNull()
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('gives the count trigger the shared coarse-pointer hit target', () => {
+    render(<HeaderCatalog {...props(catalog())} />)
+    const trigger = screen.getByRole('button', { name: /1 个子智能体，正在运行/ })
+    expect(trigger.className).toContain(hitBlockTargetClass)
+    expect(trigger.getAttribute('aria-haspopup')).toBe('tree')
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('gives the ancestor switcher the shared coarse-pointer hit target', () => {
+    const input = {
+      ...props(undefined, {}, {
+        [CHILD]: {
+          ...summary(CHILD, 1), parentId: PARENT, origin: 'subagent' as const,
+        },
+      }),
+      lineageSessionId: CHILD,
+      displayTitle: 'worker',
+      openTitle: () => {},
+    }
+    render(<HeaderCatalog {...input} />)
+    const switcher = screen.getByRole('button', { name: '切换子智能体：worker' })
+    expect(switcher.className).toContain(hitBlockTargetClass)
+    expect(switcher.getAttribute('aria-haspopup')).toBe('tree')
+    expect(switcher.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('closes the touch-opened menu on an outside tap', async () => {
+    render(<HeaderCatalog {...props(catalog())} />)
+    const trigger = screen.getByRole('button', { name: /1 个子智能体，正在运行/ })
+    fireEvent.pointerDown(trigger, { pointerType: 'touch' })
+    fireEvent.click(trigger, { detail: 1 })
+    expect(screen.getByRole('tree')).toBeTruthy()
+
+    fireEvent.pointerDown(document.body)
+    expect(screen.queryByRole('tree')).toBeNull()
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('opens the ancestor switcher on a touch tap instead of navigating', () => {
+    const openTitle = vi.fn()
+    const input = {
+      ...props(undefined, {}, {
+        [CHILD]: {
+          ...summary(CHILD, 1), parentId: PARENT, origin: 'subagent' as const,
+        },
+      }),
+      lineageSessionId: CHILD,
+      displayTitle: 'worker',
+      openTitle,
+    }
+    render(<HeaderCatalog {...input} />)
+    const trigger = screen.getByRole('button', { name: '切换子智能体：worker' })
+
+    fireEvent.pointerDown(trigger, { pointerType: 'touch' })
+    fireEvent.pointerEnter(trigger, { pointerType: 'touch' })
+    fireEvent.click(trigger, { detail: 1 })
+    expect(openTitle).not.toHaveBeenCalled()
+    expect(screen.getByRole('tree')).toBeTruthy()
+    expect(trigger.getAttribute('aria-expanded')).toBe('true')
+
+    fireEvent.pointerDown(trigger, { pointerType: 'touch' })
+    fireEvent.click(trigger, { detail: 1 })
+    expect(screen.queryByRole('tree')).toBeNull()
+  })
+
+  it('ignores hover intent on a coarse pointer', () => {
+    const original = window.matchMedia
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: vi.fn(() => ({
+        matches: true, media: '', onchange: null,
+        addListener: () => {}, removeListener: () => {},
+        addEventListener: () => {}, removeEventListener: () => {},
+        dispatchEvent: () => false,
+      })),
+    })
+    try {
+      vi.useFakeTimers()
+      render(<HeaderCatalog {...props(catalog())} />)
+      const trigger = screen.getByRole('button', { name: /1 个子智能体，正在运行/ })
+      fireEvent.mouseEnter(trigger)
+      act(() => { vi.advanceTimersByTime(300) })
+      expect(screen.queryByRole('tree')).toBeNull()
+
+      // Open by touch, then let compatibility mouse events cross the portaled
+      // menu: none of them may schedule the hover-close path.
+      fireEvent.pointerDown(trigger, { pointerType: 'touch' })
+      fireEvent.click(trigger, { detail: 1 })
+      const menu = document.querySelector('[role="tree"]') as HTMLElement
+      fireEvent.mouseEnter(menu)
+      fireEvent.mouseLeave(menu)
+      fireEvent.mouseLeave(trigger.parentElement!)
+      act(() => { vi.advanceTimersByTime(300) })
+      expect(screen.getByRole('tree')).toBeTruthy()
+    } finally {
+      Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: original })
+    }
+  })
+
+  it('keeps hover intent on a fine pointer', () => {
+    const original = window.matchMedia
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: vi.fn(() => ({
+        matches: false, media: '', onchange: null,
+        addListener: () => {}, removeListener: () => {},
+        addEventListener: () => {}, removeEventListener: () => {},
+        dispatchEvent: () => false,
+      })),
+    })
+    try {
+      render(<HeaderCatalog {...props(catalog())} />)
+      hoverCatalog(screen.getByRole('button', { name: /1 个子智能体，正在运行/ }))
+      expect(screen.getByRole('tree')).toBeTruthy()
+    } finally {
+      Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: original })
+    }
+  })
+
+  it('resolves a single unambiguous catalog claim as the breadcrumb parent', () => {
+    const input = {
+      ...props(undefined, {
+        [PARENT]: catalog({
+          entries: [{ id: CHILD, mode: 'continuable', label: 'worker', activity: 'inactive' }],
+        }),
+      }, {
+        [CHILD]: summary(CHILD, 1),
+      }),
+      lineageSessionId: CHILD,
+      displayTitle: 'worker',
+    }
+    render(<HeaderCatalog {...input} />)
+    hoverCatalog(screen.getByRole('button', { name: '切换子智能体：worker' }))
+    expect(screen.getByRole('treeitem', { name: /worker/ })).toBeTruthy()
+  })
+
+  it('shows an unavailable fallback with retry when a switcher parent settles empty', () => {
+    const input = {
+      ...props(undefined, { [PARENT]: catalog({ entries: [], state: 'ready' }) }, {
+        [CHILD]: {
+          ...summary(CHILD, 1), parentId: PARENT, origin: 'subagent' as const,
+        },
+      }),
+      lineageSessionId: CHILD,
+      displayTitle: 'worker',
+    }
+    render(<HeaderCatalog {...input} />)
+    hoverCatalog(screen.getByRole('button', { name: '切换子智能体：worker' }))
+
+    expect(screen.getByText('子智能体列表暂时不可用。')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '重试' }))
+    expect(input.refreshProjection).toHaveBeenCalledWith(PARENT)
+  })
+
+  it('renders a visible ambiguity fallback with retry instead of hiding the switcher', () => {
+    const claimant = 'claimant' as SessionId
+    const other = 'other-claimant' as SessionId
+    const shared = {
+      entries: [{ id: CHILD, mode: 'continuable' as const, label: 'worker', activity: 'inactive' as const }],
+    }
+    const input = {
+      ...props(undefined, {
+        [claimant]: catalog(shared),
+        [other]: catalog(shared),
+      }, {
+        [CHILD]: summary(CHILD, 1),
+      }),
+      lineageSessionId: CHILD,
+      displayTitle: 'worker',
+    }
+    render(<HeaderCatalog {...input} />)
+
+    const fallback = screen.getByRole('status')
+    expect(fallback.textContent).toContain('worker')
+    expect(fallback.textContent).toContain('无法确定父会话谱系')
+    fireEvent.click(within(fallback).getByRole('button', { name: '重试' }))
+    expect(input.refreshProjection).toHaveBeenCalledWith(claimant)
+    expect(input.refreshProjection).toHaveBeenCalledWith(other)
+    expect(screen.queryByRole('tree')).toBeNull()
+  })
+
+  it('keeps an open count menu stable while the root catalog transiently empties', () => {
+    const input = props(catalog())
+    const view = render(<HeaderCatalog {...input} />)
+    const trigger = screen.getByRole('button', { name: /1 个子智能体，正在运行/ })
+    fireEvent.click(trigger)
+    expect(screen.getAllByRole('treeitem')).toHaveLength(2)
+
+    view.rerender(<HeaderCatalog {...props(catalog({ entries: [], state: 'loading' }))} />)
+    expect(screen.getByRole('tree')).toBeTruthy()
+    expect(screen.getAllByRole('treeitem')).toHaveLength(2)
+    expect(screen.getByText('子智能体列表暂时不可用。')).toBeTruthy()
+    expect(screen.getByRole('button', { name: '重试' })).toBeTruthy()
+
+    view.rerender(<HeaderCatalog {...props(catalog({ entries: [], state: 'ready' }))} />)
+    expect(screen.queryByRole('tree')).toBeNull()
+    expect(screen.queryByRole('button', { name: /个子智能体/ })).toBeNull()
   })
 
   it('supports trigger/menu keyboard traversal, Escape focus restore, and outside close', async () => {

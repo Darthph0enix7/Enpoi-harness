@@ -19,7 +19,7 @@ import type {
 import { mergeOrderedBaseline } from '../ordered-baseline.ts'
 import { isRemoteFailure } from '@deepseek-ai/dsh-api-gateway/client'
 import { assertNever } from '@deepseek-ai/dsh-util-values'
-import type { RemoteFailure, RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
+import { RemoteError, type RemoteFailure, type RemoteResult } from '@deepseek-ai/dsh-typert-protocol'
 import type { SessionListEntry, TitledSessionSummary } from './lineage.ts'
 import { flattenLineage } from './lineage.ts'
 // Type-only merge edge: the title domain's client-namespace outlet declares
@@ -34,9 +34,32 @@ import type { SessionTarget } from '../contract/sessions.ts'
 
 /** Upper bound on window pulls one content search may trigger. */
 const SEARCH_WINDOW_PULL_LIMIT = 20
+/**
+ * Upper bound on one explicit projection read. A transport that never settles
+ * must still land the row in `error` so the UI can retry instead of spinning.
+ */
+const PROJECTION_READ_TIMEOUT_MS = 15_000
 
 function sessionSeqCursor(value: number): SessionSeqCursor {
   return value === -1 ? -1 : SessionSeq(value)
+}
+
+/** Describe one explicit projection read that exceeded its deadline. */
+function projectionTimeout(sessionId: SessionId): RemoteFailure {
+  return new RemoteError(
+    'session/projections-unavailable',
+    `session projections for "${sessionId}" timed out`,
+    {},
+  )
+}
+
+/** Fold an unexpected projection rejection into a retryable failure. */
+function projectionFailure(error: unknown): RemoteFailure {
+  return new RemoteError(
+    'session/projections-unavailable',
+    error instanceof Error ? error.message : String(error),
+    {},
+  )
 }
 
 /**
@@ -360,9 +383,15 @@ export class SessionManager {
     if (this.projectionLoads.get(sessionId)?.state === 'ready') return Promise.resolve()
     const controller = new AbortController()
     const store = this.projectionStore(sessionId)
-    const initialValues = store.values()
     this.projectionLoads.set(sessionId, { state: 'loading', error: null })
     this.notifier.markDirty()
+    const deadline = setTimeout(() => {
+      if (this.projectionLoads.get(sessionId)?.state !== 'loading') return
+      this.projectionLoads.set(sessionId, { state: 'error', error: projectionTimeout(sessionId) })
+      this.projectionInflight.delete(sessionId)
+      this.notifier.markDirty()
+      controller.abort()
+    }, PROJECTION_READ_TIMEOUT_MS)
     const operation = (async () => {
       try {
         const result = await this.remote.session.projections({ sessionId }, controller.signal)
@@ -370,20 +399,22 @@ export class SessionManager {
         if (result.ok) {
           if (result.value !== null) {
             store.seed({ ...result.value, asOfSeq: sessionSeqCursor(result.value.asOfSeq) })
-          } else if (store.values() === initialValues) {
-            // A later frame proves existence independently of an earlier missing read.
-            store.clear()
           }
+          // A null read says the Session is not live, not that its durable
+          // facts vanished: cached checkpoint values keep the row's catalog
+          // membership (and its expanded branch) instead of collapsing it.
           this.projectionLoads.set(sessionId, { state: 'ready', error: null })
         } else {
           this.projectionLoads.set(sessionId, { state: 'error', error: result.error })
         }
       } catch (error: unknown) {
         if (controller.signal.aborted) return
+        const failure = isRemoteFailure(error) ? error : projectionFailure(error)
+        this.projectionLoads.set(sessionId, { state: 'error', error: failure })
         if (!isRemoteFailure(error)) throw error
-        this.projectionLoads.set(sessionId, { state: 'error', error })
       } finally {
-        if (!controller.signal.aborted) {
+        clearTimeout(deadline)
+        if (this.projectionInflight.get(sessionId)?.controller === controller) {
           this.projectionInflight.delete(sessionId)
           this.notifier.markDirty()
         }

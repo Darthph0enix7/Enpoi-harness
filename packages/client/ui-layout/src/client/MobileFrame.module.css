@@ -35,12 +35,13 @@
   --dsh-mobile-bar-height: 0px;
 }
 
-/* Immersive hides both chrome rows; zero their geometry for the fullscreen
-   right panel and body-portalled overlays instead of leaving empty bands. */
+/* Immersive hides the header and collapses the 56px bar into the 44px
+   bottom handle row. The handle keeps a real grid row, so the composer and a
+   fullscreen panel end above it instead of being covered. */
 :global(html[data-mobile-shell][data-mobile-immersive]) {
   --dsh-mobile-header-height: 0px;
-  --dsh-mobile-bar-height: 0px;
-  --dsh-shell-inset-bottom: 0px;
+  --dsh-mobile-bar-height: calc(44px + var(--dsh-safe-area-inset-bottom, 0px));
+  --dsh-shell-inset-bottom: calc(44px + var(--dsh-safe-area-inset-bottom, 0px));
 }
 
 .header {
@@ -57,35 +58,46 @@
   border-bottom: 0.5px solid var(--dsw-alias-border-l3);
 }
 
-.frame[data-mobile-immersive] .header,
-.frame[data-mobile-immersive] .bar {
+.frame[data-mobile-immersive] .header {
   display: none;
 }
 
-/* Floating restore control while the chrome is hidden. A visible 44px target
-   replaces the old invisible edge strip, so the way back is discoverable and
-   the back gesture/Escape still run the same restore. */
-.immersiveRestore {
-  position: fixed;
-  top: calc(var(--dsh-safe-area-inset-top, 0px) + 8px);
-  right: calc(var(--dsh-safe-area-inset-right, 0px) + 8px);
-  z-index: 85;
+/* The collapsed bar row is the thumb-reachable handle. It keeps the same
+   bottom placement as the bar, reserves its own safe-area strip, and leaves
+   the composer above it rather than floating over the input. */
+.barCollapsed {
+  height: calc(44px + var(--dsh-safe-area-inset-bottom, 0px));
+  padding: 0 max(4px, var(--dsh-safe-area-inset-right, 0px)) var(--dsh-safe-area-inset-bottom, 0px) max(4px, var(--dsh-safe-area-inset-left, 0px));
+  justify-content: center;
+}
+
+.chromeHandle {
   display: inline-flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  width: 44px;
+  gap: 3px;
+  width: 72px;
   height: 44px;
   padding: 0;
   border: none;
   border-radius: var(--dsw-radius-md);
-  background: var(--dsw-alias-bg-layer-2);
-  box-shadow: var(--dsw-elevation-prominent);
-  color: var(--dsw-alias-label-primary);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
   cursor: pointer;
+  touch-action: none;
 }
 
-.immersiveRestore:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
+.chromeHandle:active {
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+.handleGrip {
+  width: 36px;
+  height: 4px;
+  border-radius: 999px;
+  corner-shape: round;
+  background: var(--dsw-alias-label-tertiary);
 }
 
 .title {
@@ -129,6 +141,15 @@
   background: var(--dsw-alias-interactive-bg-active);
 }
 
+@media (pointer: coarse) {
+  /* The top bar is a phone target row: nav, overflow, and back keep a full
+     44px hit area even though the visual glyph is 16–18px. */
+  .iconButton {
+    width: 44px;
+    height: 44px;
+  }
+}
+
 .content {
   grid-row: 2;
   grid-column: 1;
@@ -164,12 +185,24 @@
   min-width: 0;
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 2px;
   /* The bar is bounded to five 44px targets, which fit a 320px viewport with
-     its safe-area padding. A wider safe area shrinks the text labels instead
-     of turning the bar into a horizontal scroller. */
+     its safe-area padding. The surface owner spreads its entries across this
+     row; a wider safe area shrinks the text labels instead of scrolling. */
   overflow: hidden;
 }
+
+@media (min-width: 600px) {
+  /* The surface entries cap at 72px in the owner stylesheet; centre that
+     bounded group instead of stretching the phone distribution to a tablet. */
+  .barItems {
+    justify-content: center;
+    gap: 8px;
+  }
+}
+
+
 
 .barButton {
   flex: none;

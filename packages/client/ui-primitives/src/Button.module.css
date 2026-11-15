@@ -1,6 +1,8 @@
 /* Button sizes share the global control-radius scale. */
 .button {
   box-sizing: border-box;
+  position: relative;
+  touch-action: manipulation;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -74,4 +76,20 @@
   height: 16px;
   align-items: center;
   justify-content: center;
+}
+
+/* Coarse pointers: the painted height (28/36) is a desktop density, not a
+   thumb target. A centred transparent pseudo grows the tap box to 44x44
+   without moving the button or its neighbours, so dense rows keep their
+   rhythm while a tap no longer has to land inside a 28px band. */
+@media (pointer: coarse) {
+  .button::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, 44px);
+    height: max(100%, 44px);
+    transform: translate(-50%, -50%);
+  }
 }

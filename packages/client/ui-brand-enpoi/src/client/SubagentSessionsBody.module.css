@@ -46,6 +46,7 @@
   color: var(--dsw-alias-label-tertiary, #94a3b8);
   cursor: pointer;
   padding: 0;
+  touch-action: manipulation;
   transition: color 120ms ease, border-color 120ms ease;
 }
 
@@ -73,6 +74,7 @@
   min-height: 0;
   padding: 2px 2px 8px;
   scrollbar-gutter: stable;
+  overscroll-behavior: contain;
 }
 
 .row {
@@ -80,7 +82,7 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  min-height: 40px;
+  min-height: 44px;
   padding: 6px 9px;
   border-radius: 8px;
   border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.06));
@@ -88,6 +90,7 @@
   color: inherit;
   text-align: left;
   cursor: pointer;
+  touch-action: manipulation;
   transition: background 120ms ease, border-color 120ms ease;
 }
 

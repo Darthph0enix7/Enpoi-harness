@@ -388,6 +388,17 @@
   padding: 8px max(8px, var(--dsh-safe-area-inset-right, 0px)) calc(12px + var(--dsh-safe-area-inset-bottom, 0px)) max(8px, var(--dsh-safe-area-inset-left, 0px));
 }
 
+.mobileDetail *,
+.mobileList *,
+.options *,
+.content * {
+  /* Section registrants bring their own CSS modules. A width:100% child with
+     padding used to measure 437px inside a 407px scroll host (Skin Center);
+     the settings shell owns the scroll box, so it owns the box model there
+     too. No colours, no layout algorithm: just the sane border box. */
+  box-sizing: border-box;
+}
+
 .mobileRow {
   display: flex;
   align-items: center;

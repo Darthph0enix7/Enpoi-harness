@@ -201,6 +201,13 @@ function statusOf(node: LineageNode): 'running' | 'idle' | 'done' {
   return node.completed ? 'done' : 'idle'
 }
 
+/** Localized status label for one row; the dot carries the same discriminant. */
+function statusLabel(state: ReturnType<typeof statusOf>, t: BrandT): string {
+  return state === 'running'
+    ? t('subagentStatusRunning')
+    : state === 'done' ? t('subagentStatusDone') : t('subagentStatusIdle')
+}
+
 /**
  * Build the lineage tree rooted at the current session's top-most listed
  * ancestor. One root is resolved; a caller retains the previous tree while the
@@ -545,7 +552,7 @@ export function SubagentSessionsBody({
                   {cleanTitle !== label && <span className={css.rowSub}>{cleanTitle}</span>}
                 </span>
                 <span className={css.status} data-state={state}>
-                  {state}
+                  {statusLabel(state, t)}
                   <span className={css.age}>{ageLabel(row.updatedAt, now, t)}</span>
                 </span>
               </button>

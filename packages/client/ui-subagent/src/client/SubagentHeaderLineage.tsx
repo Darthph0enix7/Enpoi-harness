@@ -1,4 +1,7 @@
-import { useMemo, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type MouseEvent } from 'react'
+import {
+  useMemo, useEffect, useRef, useState,
+  type CSSProperties, type KeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent,
+} from 'react'
 import { createPortal } from 'react-dom'
 import {
   type SessionProjectionMap, type SessionSummary,
@@ -7,7 +10,8 @@ import {
 import type { SubagentAddress } from '@deepseek-ai/dsh-subagent/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import {
-  IconChevronDownOutlineRegular, IconChevronRightOutlineRegular, IconRefreshOutlineRegular, StateDot, Tooltip,
+  hitBlockTargetClass, IconChevronDownOutlineRegular, IconChevronRightOutlineRegular,
+  IconRefreshOutlineRegular, StateDot, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import { NS } from './locales.ts'
@@ -16,7 +20,11 @@ import type {} from '@deepseek-ai/dsh-token-meter/client'
 import css from './SubagentHeaderLineage.module.css'
 
 type SubagentCatalogSnapshot = Omit<SessionProjectionSnapshot, 'values' | 'state'> & {
-  state: 'loading' | 'ready' | 'error'
+  /**
+   * `pending` carries only cached values: no explicit read has started or
+   * settled. It is settled display state, never an in-flight load.
+   */
+  state: 'pending' | 'loading' | 'ready' | 'error'
   /** True when the entries are retained cached values rather than an explicit read. */
   stale: boolean
   entries: (SessionProjectionMap['subagentCatalog'][number] & { activity: 'running' | 'inactive' })[]
@@ -200,8 +208,9 @@ function CatalogLoadingRows({ t }: { t: TranslateNS<typeof NS> }) {
 type CatalogDisclosure = 'unknown' | 'loading' | 'error' | 'leaf' | 'branch'
 
 /**
- * Classify one child's catalog without treating an unloaded, loading, or
- * failed read as a known leaf or as an expandable branch.
+ * Classify one child's catalog: only an explicit read in flight is `loading`,
+ * and only a settled empty read is a leaf. Cached-only (pending) and absent
+ * catalogs stay `unknown` — they render a load affordance, never a spinner.
  * @param catalog - the child's catalog snapshot, absent before any projection.
  * @returns the disclosure kind the row must render.
  */
@@ -209,7 +218,25 @@ function catalogDisclosure(catalog: SubagentCatalogSnapshot | undefined): Catalo
   if (catalog === undefined) return 'unknown'
   if (catalog.state === 'error') return 'error'
   if (catalog.entries.length > 0) return 'branch'
-  return catalog.state === 'ready' ? 'leaf' : 'loading'
+  if (catalog.state === 'loading') return 'loading'
+  return catalog.state === 'ready' ? 'leaf' : 'unknown'
+}
+
+/** One child's renderable session status, shared by the dot and its label. */
+type CatalogActivity = 'running' | 'completed' | 'idle'
+
+/**
+ * Derive the display status from live activity and durable turn completion.
+ * @param entry - catalog entry with its observed activity.
+ * @param summary - the child's list row when the Host listed it.
+ * @returns running, completed, or idle.
+ */
+function catalogActivity(
+  entry: SubagentCatalogSnapshot['entries'][number],
+  summary: SessionSummary | undefined,
+): CatalogActivity {
+  if (entry.activity === 'running') return 'running'
+  return summary?.projectionValues?.subagentTiming?.lastTurnCompleted === true ? 'completed' : 'idle'
 }
 
 /**
@@ -277,18 +304,18 @@ function CatalogRows({
         const isCurrent = entry.id === currentSessionId
         const isExpanded = expanded.has(entry.id)
         const knownLeaf = disclosure === 'leaf'
-        const childLoading = disclosure === 'unknown' || disclosure === 'loading'
+        const childLoading = disclosure === 'loading' || (disclosure === 'unknown' && isExpanded)
         const canExpand = disclosure === 'branch' || disclosure === 'error'
+        const loadAffordance = disclosure === 'unknown' && !isExpanded
         const childAncestors = new Set([...ancestors, entry.id])
         const summary = summaries[entry.id]
         const label = entry.label ?? entry.id
         const mode = entry.mode === 'unknown' ? t('mode.unknown')
           : entry.mode === 'one-shot' ? t('mode.oneShot') : t('mode.continuable')
-        const completed = entry.activity === 'inactive'
-          && summary?.projectionValues?.subagentTiming?.lastTurnCompleted === true
-        const activity = entry.activity === 'running'
+        const status = catalogActivity(entry, summary)
+        const activity = status === 'running'
           ? t('activity.running')
-          : completed
+          : status === 'completed'
             ? t('activity.completed')
             : t('activity.inactive')
         const secondary = [summary?.title, mode, activity]
@@ -374,21 +401,27 @@ function CatalogRows({
                       <IconChevronRightOutlineRegular />
                     </button>
                   )
-                  : (
-                    <button
-                      type="button"
-                      tabIndex={-1}
-                      className={css.disclosure}
-                      aria-label={t('branch.load', { label })}
-                      title={t('branch.load', { label })}
-                      onClick={toggle}
-                    >
-                      <StateDot state="ongoing" size={10} />
-                    </button>
-                  )}
+                  : loadAffordance
+                    ? (
+                      <button
+                        type="button"
+                        tabIndex={-1}
+                        className={`${css.disclosure} ${css.disclosureLoad}`}
+                        aria-label={t('branch.load', { label })}
+                        title={t('branch.load', { label })}
+                        onClick={toggle}
+                      >
+                        <IconChevronRightOutlineRegular />
+                      </button>
+                    )
+                    : (
+                      <span className={css.disclosure} aria-hidden="true">
+                        <StateDot state="ongoing" size={10} />
+                      </span>
+                    )}
               <div className={css.clickarea}>
                 <span className={css.rowActivitySlot}>
-                  <StateDot state={entry.activity === 'running' ? 'ongoing' : completed ? 'done' : 'idle'} />
+                  <StateDot state={status === 'running' ? 'ongoing' : status === 'completed' ? 'done' : 'idle'} />
                 </span>
                 <span className={css.content}>
                   <span className={`${css.label} ${isCurrent ? css.currentLabel : ''}`}>{label}</span>
@@ -429,6 +462,7 @@ function CatalogRows({
                 aria-busy={childLoading || undefined}
               >
                 {childCatalog === undefined
+                  || (childCatalog.state === 'pending' && childCatalog.entries.length === 0)
                   ? <CatalogLoadingRows t={t} />
                   : (
                     <CatalogRows
@@ -515,10 +549,10 @@ function CatalogDropdown({
       ...entry, activity: (statuses.get(entry.id)?.running ?? summaries[entry.id]?.running) === true ? 'running' as const : 'inactive' as const,
     }))
     return [id, {
-      // An idle empty catalog is not authoritative evidence of a leaf: it may
-      // be a cold cache that predates later dispatches. A cached nonempty
-      // branch stays visible but keeps `stale` explicit.
-      state: cached ? entries.length > 0 ? 'ready' : 'loading' : snapshot.state,
+      // Cached values are settled display state: a cached empty catalog is
+      // not evidence of an in-flight read, and a cached nonempty branch stays
+      // visible with `stale` explicit.
+      state: cached ? 'pending' : snapshot.state,
       stale: cached,
       error: snapshot.error,
       entries,
@@ -535,20 +569,70 @@ function CatalogDropdown({
   const hoverCloseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   // A click-opened (pinned) menu ignores hover-out; only explicit dismissal closes it.
   const pinnedRef = useRef(false)
+  /**
+   * Last observed pointer kind. Initialized from the coarse media query because
+   * a touchscreen usually produces compatibility mouse events around a tap;
+   * those must never start a hover-open or hover-close countdown.
+   */
+  const pointerKind = useRef<'mouse' | 'touch'>(
+    typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches
+      ? 'touch' : 'mouse',
+  )
+  const notePointer = (event: ReactPointerEvent<HTMLElement>): void => {
+    pointerKind.current = event.pointerType === 'touch' || event.pointerType === 'pen' ? 'touch' : 'mouse'
+  }
+  /**
+   * Hover intent is a desk-pointer affordance only. A coarse device must never
+   * open (or dismiss) the menu from compatibility mouse events, even when the
+   * synthesized event claims a mouse pointer.
+   */
+  const fineHover = (): boolean => pointerKind.current === 'mouse'
+    && !(typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches)
+  /** A real tap, never a keyboard-generated activation (`detail === 0`). */
+  const touchActivation = (event: MouseEvent<HTMLButtonElement>): boolean =>
+    event.detail !== 0 && pointerKind.current === 'touch'
+
+  // The last non-empty catalog keeps an open menu stable while a refresh
+  // transiently empties it; a settled empty read still retires the level.
+  const lastEntries = useRef<SubagentCatalogSnapshot['entries']>([])
+  const lastEntriesRoot = useRef<SessionId | undefined>(undefined)
+  const presentedCatalog: SubagentCatalogSnapshot | undefined = catalog ?? (variant === 'switcher'
+    ? { entries: [], state: 'pending', stale: true, error: null }
+    : undefined)
+  useEffect(() => {
+    if (lastEntriesRoot.current !== rootSessionId) {
+      lastEntriesRoot.current = rootSessionId
+      lastEntries.current = []
+    }
+    const entries = catalog?.entries
+    if (entries !== undefined && entries.length > 0) lastEntries.current = entries
+  }, [catalog, rootSessionId])
+  const retainedEntries = lastEntriesRoot.current === rootSessionId ? lastEntries.current : []
+  const staleEmpty = presentedCatalog !== undefined
+    && presentedCatalog.entries.length === 0
+    && (presentedCatalog.state === 'pending' || presentedCatalog.state === 'loading')
+    && retainedEntries.length > 0
+  const shownCatalog: SubagentCatalogSnapshot | undefined = presentedCatalog !== undefined && staleEmpty
+    ? { ...presentedCatalog, entries: retainedEntries }
+    : presentedCatalog
+  const emptySettled = shownCatalog !== undefined
+    && shownCatalog.entries.length === 0
+    && shownCatalog.state === 'ready'
+  const emptyPending = shownCatalog !== undefined
+    && shownCatalog.entries.length === 0
+    && (shownCatalog.state === 'pending' || shownCatalog.state === 'loading')
+  const unavailable = staleEmpty || (variant === 'switcher' && emptySettled)
   const currentEntry = currentSessionId === undefined
     ? undefined
-    : catalog?.entries.find(entry => entry.id === currentSessionId)
+    : shownCatalog?.entries.find(entry => entry.id === currentSessionId)
   const switcherDisplayTitle = currentEntry !== undefined
     ? currentEntry.label ?? currentEntry.id
     : displayTitle
-  const directChildren = catalog?.entries ?? []
+  const directChildren = shownCatalog?.entries ?? []
   const directCount = directChildren.length
   const runningCount = directChildren.filter(entry => entry.activity === 'running').length
   const totalCountKey = directCount === 1 ? 'count.total.one' : 'count.total.other'
   const runningCountKey = runningCount === 1 ? 'count.running.one' : 'count.running.other'
-  const presentedCatalog: SubagentCatalogSnapshot | undefined = catalog ?? (variant === 'switcher'
-    ? { entries: [], state: 'loading', stale: true, error: null }
-    : undefined)
   const openedRefresh = useRef<SessionId | undefined>(undefined)
 
   // Opening a switcher over an unloaded/empty-loading parent catalog starts one
@@ -561,7 +645,7 @@ function CatalogDropdown({
     if (openedRefresh.current === rootSessionId) return
     if (presentedCatalog === undefined
       || presentedCatalog.entries.length > 0
-      || presentedCatalog.state !== 'loading') return
+      || presentedCatalog.state !== 'pending') return
     openedRefresh.current = rootSessionId
     refreshProjection(rootSessionId)
   }, [open, rootSessionId, presentedCatalog, refreshProjection])
@@ -676,12 +760,13 @@ function CatalogDropdown({
     cancelHoverClose()
   }, [])
 
-  // Visibility needs catalog evidence of children or a failed load worth retrying.
-  // An empty loading catalog is not evidence of children.
-  const visible = presentedCatalog !== undefined
+  // Visibility needs catalog evidence of children, a failed load worth
+  // retrying, or a transiently empty root whose last rows stay on screen.
+  // An empty pending catalog is not evidence of children.
+  const visible = shownCatalog !== undefined
     && (variant === 'switcher'
-      || presentedCatalog.state === 'error'
-      || presentedCatalog.entries.length > 0)
+      || shownCatalog.state === 'error'
+      || shownCatalog.entries.length > 0)
   useEffect(() => {
     if (visible) return
     cancelHoverOpen()
@@ -692,7 +777,8 @@ function CatalogDropdown({
     setExpanded(new Set())
   }, [visible, open])
 
-  if (!visible) return null
+  /* v8 ignore next -- `visible` already requires a presented catalog */
+  if (shownCatalog === undefined || !visible) return null
 
   const focusAt = (index: number): void => {
     const items = treeItems(menuRef.current)
@@ -726,15 +812,22 @@ function CatalogDropdown({
       className={`${css.root} ${variant === 'switcher' ? css.switcherRoot : ''}`}
       ref={rootRef}
       onKeyDown={navigate}
-      onMouseLeave={scheduleHoverClose}
+      onPointerDown={notePointer}
+      onPointerEnter={notePointer}
+      onMouseLeave={() => {
+        if (fineHover()) scheduleHoverClose()
+      }}
     >
       <button
         ref={triggerRef}
-        onMouseEnter={scheduleHoverOpen}
+        onPointerEnter={notePointer}
+        onMouseEnter={() => {
+          if (fineHover()) scheduleHoverOpen()
+        }}
         type="button"
         className={variant === 'switcher'
-          ? `${css.switcherTrigger} ${ancestorSwitcher ? css.ancestorSwitcherTrigger : ''}`
-          : css.trigger}
+          ? `${css.switcherTrigger} ${ancestorSwitcher ? css.ancestorSwitcherTrigger : ''} ${hitBlockTargetClass}`
+          : `${css.trigger} ${hitBlockTargetClass}`}
         aria-haspopup="tree"
         aria-expanded={open}
         aria-label={variant === 'switcher'
@@ -744,14 +837,25 @@ function CatalogDropdown({
             { count: runningCount > 0 ? runningCount : directCount },
           )}
         onClick={openTitle === undefined
-          ? () => {
+          ? (event) => {
             cancelHoverOpen()
             cancelHoverClose()
+            if (open && touchActivation(event)) {
+              changeOpen(false)
+              return
+            }
             pinnedRef.current = true
             if (!open) changeOpen(true)
           }
-          : () => {
+          : (event) => {
             cancelHoverOpen()
+            // A tap opens the sibling switcher on the first tap; only a fine
+            // pointer's click keeps the breadcrumb-navigation action.
+            if (touchActivation(event)) {
+              pinnedRef.current = true
+              changeOpen(!open)
+              return
+            }
             if (open) changeOpen(false)
             openTitle()
           }}
@@ -783,15 +887,34 @@ function CatalogDropdown({
           ref={menuRef}
           className={css.menu}
           style={menuPosition}
-          onMouseEnter={cancelHoverClose}
-          onMouseLeave={scheduleHoverClose}
+          onPointerEnter={notePointer}
+          onMouseEnter={() => {
+            if (fineHover()) cancelHoverClose()
+          }}
+          onMouseLeave={() => {
+            if (fineHover()) scheduleHoverClose()
+          }}
         >
+          {unavailable && (
+            <div className={css.unavailable} role="status">
+              <span>{t('catalog.unavailable')}</span>
+              <button
+                type="button"
+                className={`${css.refresh} ${hitBlockTargetClass}`}
+                onClick={() => { refreshProjection(rootSessionId) }}
+              >
+                <IconRefreshOutlineRegular size={12} />
+                {t('retry')}
+              </button>
+            </div>
+          )}
           <div className={css.menuBody} role="tree" aria-label={t('tree.aria')}>
+            {emptyPending && !staleEmpty && <CatalogLoadingRows t={t} />}
             <CatalogRows
               parentSessionId={rootSessionId}
               ancestors={new Set([rootSessionId])}
               currentSessionId={currentSessionId}
-              catalog={presentedCatalog}
+              catalog={shownCatalog}
               catalogs={catalogs}
               summaries={summaries}
               expanded={expanded}
@@ -842,36 +965,102 @@ export function SubagentCatalogAction({
   )
 }
 
+const PARENT_KEY_PREFIX = 'parent:'
+const AMBIGUOUS_KEY_PREFIX = 'ambiguous:'
+
+/**
+ * Resolve one breadcrumb's parent as a value-stable key (a fresh object would
+ * defeat the store hook's reference comparison): `root`, `parent:<id>`, or
+ * `ambiguous:<id,id,...>` carrying the competing catalog claimants.
+ * @param address - Provider-bound subagent address of the current session.
+ * @param lineageSessionId - the current session's identity.
+ * @param state - list rows and shared projection snapshots.
+ * @returns the resolved key.
+ */
+function lineageParentKey(
+  address: SubagentAddress | undefined,
+  lineageSessionId: SessionId,
+  state: {
+    byId: Readonly<Record<SessionId, SessionSummary>>
+    projectionsBySession: Readonly<Record<SessionId, SessionProjectionSnapshot>>
+  },
+): string {
+  if (address?.childSessionId === lineageSessionId) return `${PARENT_KEY_PREFIX}${address.parentSessionId}`
+  const row = state.byId[lineageSessionId]
+  const listed = row?.origin === 'subagent' ? row.parentId : undefined
+  if (listed !== undefined && listed !== lineageSessionId) return `${PARENT_KEY_PREFIX}${listed}`
+  const claims: SessionId[] = []
+  for (const [candidate, snapshot] of Object.entries(state.projectionsBySession)) {
+    if (candidate === lineageSessionId) continue
+    if (!snapshot.values.subagentCatalog?.some(entry => entry.id === lineageSessionId)) continue
+    claims.push(candidate as SessionId)
+  }
+  if (claims.length === 0) return 'root'
+  if (claims.length === 1) return `${PARENT_KEY_PREFIX}${claims[0]}`
+  return `${AMBIGUOUS_KEY_PREFIX}${claims.sort().join(',')}`
+}
+
+/**
+ * Visible bounded fallback for a breadcrumb whose parent cannot be resolved.
+ * It never expands: the title stays readable, the ambiguity is named, and the
+ * claimant catalogs can be re-read instead of the whole switcher vanishing.
+ * @param props - current title, competing claimants, retry callback, translator.
+ * @returns the inline status with its retry control.
+ */
+function LineageFallback({
+  title, claimants, refreshProjection, t,
+}: {
+  title: string
+  claimants: readonly SessionId[]
+  refreshProjection: (parentSessionId: SessionId) => void
+  t: TranslateNS<typeof NS>
+}) {
+  return (
+    <span className={css.lineageFallback} role="status">
+      <span className={css.lineageFallbackTitle}>{title}</span>
+      <span className={css.lineageFallbackHint}>{t('lineage.ambiguous')}</span>
+      <button
+        type="button"
+        className={`${css.lineageRetry} ${hitBlockTargetClass}`}
+        onClick={() => {
+          for (const claimant of claimants.slice(0, 4)) refreshProjection(claimant)
+        }}
+      >
+        <IconRefreshOutlineRegular size={12} />
+        {t('retry')}
+      </button>
+    </span>
+  )
+}
+
 /**
  * Render one breadcrumb title together with its subagent navigation.
  * @param props - Breadcrumb title, session standard props, and catalog actions.
- * @returns A title-and-chevron sibling switcher, or nothing on a root session.
+ * @returns A title-and-chevron sibling switcher, a bounded lineage fallback, or
+ *   nothing on a root session.
  */
 export function SubagentHeaderLineage({
   lineageSessionId, displayTitle, openTitle,
   useSessions, useSession, useSessionStatus, openChild, openChildAside, refreshProjection, t,
 }: SubagentHeaderLineageProps) {
   const address = useSession(session => session.subagent?.address)
-  const parentId = useSessions((state) => {
-    if (address?.childSessionId === lineageSessionId) return address.parentSessionId
-    const row = state.byId[lineageSessionId]
-    const listed = row?.origin === 'subagent' ? row.parentId : undefined
-    if (listed !== undefined && listed !== lineageSessionId) return listed
-    // Without a list parent, accept only one catalog claim; competing claims
-    // name no authoritative ancestry.
-    let claimed: SessionId | undefined
-    for (const [candidate, snapshot] of Object.entries(state.projectionsBySession)) {
-      if (candidate === lineageSessionId) continue
-      if (!snapshot.values.subagentCatalog?.some(entry => entry.id === lineageSessionId)) continue
-      if (claimed !== undefined && claimed !== candidate) return undefined
-      claimed = candidate as SessionId
-    }
-    return claimed
-  })
+  const parentKey = useSessions(state => lineageParentKey(address, lineageSessionId, state))
   const shared = { useSessions, useSessionStatus, openChild, openChildAside, refreshProjection, t }
+  if (parentKey.startsWith(AMBIGUOUS_KEY_PREFIX)) {
+    const claimants = parentKey.slice(AMBIGUOUS_KEY_PREFIX.length).split(',') as SessionId[]
+    return (
+      <LineageFallback
+        title={displayTitle}
+        claimants={claimants}
+        refreshProjection={refreshProjection}
+        t={t}
+      />
+    )
+  }
   // Root sessions carry no breadcrumb; their descendant count lives in the
   // header actions band (SubagentCatalogAction).
-  if (parentId === undefined) return null
+  if (!parentKey.startsWith(PARENT_KEY_PREFIX)) return null
+  const parentId = parentKey.slice(PARENT_KEY_PREFIX.length) as SessionId
   return (
     <>
       <CatalogDropdown

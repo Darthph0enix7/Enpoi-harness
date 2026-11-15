@@ -2223,22 +2223,36 @@ select.input {
     gap: 10px;
   }
 
+  /* The phone/tablet Models page is one vertical settings scroll. The old
+     provider strip was a 140px-card horizontal scroller (347px inside a
+     313px box at 320px); stack the providers and let the page own the scroll. */
   .providersSidebar {
     width: 100%;
-    max-height: 200px;
+    max-height: none;
+    overflow: visible;
   }
 
   .providerListScrollable {
-    flex-direction: row;
-    overflow-x: auto;
+    flex: none;
+    flex-direction: column;
     max-height: none;
+    overflow: visible;
     padding: 6px;
-    gap: 6px;
+    gap: 2px;
   }
 
   .providerListItem {
     flex-shrink: 0;
-    min-width: 140px;
+    min-width: 0;
+  }
+
+  /* Endpoint actions were 40×26 on phones: the text overflowed by 2px and the
+     target missed the coarse-pointer minimum. Keep the row's compact look but
+     give the action a full-width-safe 44px hit area. */
+  .testBtn {
+    box-sizing: border-box;
+    min-width: 44px;
+    min-height: 44px;
   }
 
   .fieldGrid {

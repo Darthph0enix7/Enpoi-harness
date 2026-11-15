@@ -230,12 +230,14 @@ export function apply(ctx: ClientContext): void {
       selectKind: (kind) => { controller.selectKind(kind) },
       setEditorWidth: (px) => { rail.setEditorWidth(px) },
       setOpen: (open) => { rail.setOpen(open) },
+      setCompactOpen: (open) => { rail.setCompactOpen(open) },
       setRightbarWidth: (px) => { layout.setRightbar(px) },
       hooks: {
         shortcuts: ctx.shortcuts.catalog,
         tabTypes: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.entries() },
         railItems: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.rail() },
         rail: rail.state,
+        compactOpen: rail.compactOpen,
       },
     }
 
@@ -312,7 +314,7 @@ export function apply(ctx: ClientContext): void {
         railItems: { subscribe: listener => tabs.subscribe(listener), getSnapshot: () => tabs.rail() },
         rail: rail.state,
       },
-      selectKind: (kind) => { controller.selectKind(kind) },
+      selectKind: (kind) => { controller.selectCompactKind(kind) },
       presentation,
     })
     const disposeMobileBar = ctx.slots.inject('shell.mobile.bar', () => ctx.slots.register({

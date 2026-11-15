@@ -1,0 +1,52 @@
+/*
+ * Coarse-pointer target geometry. Phones and tablets tap with a thumb, so a
+ * control's visual box (a 24–28px chip, a 13px tab line) is not its usable
+ * target: WCAG 2.5.8 and the platform guidelines ask for at least 44 by 44
+ * CSS px. The two utilities here are the shared mechanism every surface uses
+ * instead of re-deriving the numbers:
+ *
+ * - `.target` keeps the visual box and grows the hit box to the minimum via a
+ *   centred, transparent `::before`. Use it on controls whose painted size is
+ *   load-bearing (a tab label on a text baseline, a chip in a tight row).
+ * - `.blockTarget` makes the element itself the 44px target. Use it where the
+ *   control owns its row and may grow (segmented view switches, icon buttons).
+ *
+ * Both keep `touch-action: manipulation` so a double tap cannot zoom-wait the
+ * first tap, and neither adds paint. Media-query gated: fine pointers keep
+ * their desktop geometry exactly.
+ */
+
+.target {
+  position: relative;
+  touch-action: manipulation;
+}
+
+/* The hit layer is a child pseudo-element, so it inherits the button's stack
+   position and every pointer event lands on the owning control. A transparent
+   pseudo still participates in hit testing; `pointer-events` stays auto. */
+@media (pointer: coarse) {
+  .target::before {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: max(100%, 44px);
+    height: max(100%, 44px);
+    transform: translate(-50%, -50%);
+  }
+}
+
+.blockTarget {
+  touch-action: manipulation;
+}
+
+@media (pointer: coarse) {
+  .blockTarget {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

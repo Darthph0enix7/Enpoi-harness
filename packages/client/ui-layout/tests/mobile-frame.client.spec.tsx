@@ -281,21 +281,43 @@ describe('MobileFrame', () => {
     expect(frame.querySelector('[data-mobile-drawer]')?.getAttribute('data-mobile-drawer')).toBe('closed')
   })
 
-  it('restores the chrome from the immersive fold', () => {
+  it('collapses into a focused bottom-centre handle and reopens with one tap', () => {
     const { frame, getByRole } = mountMobile()
-    fireEvent.click(frame.querySelector('[data-mobile-immersive-toggle]')!)
+    const hide = frame.querySelector<HTMLButtonElement>('[data-mobile-immersive-toggle]')!
+    expect(hide.getAttribute('aria-expanded')).toBe('true')
+    fireEvent.click(hide)
     expect(frame.hasAttribute('data-mobile-immersive')).toBe(true)
     expect(document.documentElement.hasAttribute('data-mobile-immersive')).toBe(true)
-    fireEvent.click(getByRole('button', { name: 'mobile.showControls' }))
+    const bar = frame.querySelector('[data-mobile-bar]')!
+    expect(bar.hasAttribute('data-mobile-bar-collapsed')).toBe(true)
+    const handle = getByRole('button', { name: 'mobile.showControls' })
+    expect(bar.contains(handle)).toBe(true)
+    expect(handle.getAttribute('aria-expanded')).toBe('false')
+    expect(handle.getAttribute('aria-controls')).toBe('mobile-shell-header mobile-shell-bar')
+    expect(document.activeElement).toBe(handle)
+    fireEvent.click(handle)
     expect(frame.hasAttribute('data-mobile-immersive')).toBe(false)
     expect(document.documentElement.hasAttribute('data-mobile-immersive')).toBe(false)
+    const restored = frame.querySelector<HTMLButtonElement>('[data-mobile-immersive-toggle]')!
+    expect(restored.getAttribute('aria-expanded')).toBe('true')
+    expect(document.activeElement).toBe(restored)
   })
 
-  it('restores the chrome with Escape while immersive', () => {
+  it('reopens the chrome with an upward swipe on the bottom handle', () => {
+    const { frame, getByRole } = mountMobile()
+    fireEvent.click(frame.querySelector('[data-mobile-immersive-toggle]')!)
+    const handle = getByRole('button', { name: 'mobile.showControls' })
+    fireEvent.pointerDown(handle, { pointerType: 'touch', clientY: 600 })
+    fireEvent.pointerMove(handle, { pointerType: 'touch', clientY: 560 })
+    expect(frame.hasAttribute('data-mobile-immersive')).toBe(false)
+  })
+
+  it('restores the chrome and focus with Escape while immersive', () => {
     const { frame } = mountMobile()
     fireEvent.click(frame.querySelector('[data-mobile-immersive-toggle]')!)
     expect(frame.hasAttribute('data-mobile-immersive')).toBe(true)
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(frame.hasAttribute('data-mobile-immersive')).toBe(false)
+    expect(document.activeElement).toBe(frame.querySelector('[data-mobile-immersive-toggle]'))
   })
 })

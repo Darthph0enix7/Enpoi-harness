@@ -67,6 +67,14 @@ export class SidebarRightRail {
   readonly state: SnapshotStore<SidebarRightRailState>
 
   /**
+   * Compact-shell presentation only: whether the operator has explicitly
+   * opened a surface on this phone/portrait seat. It is intentionally not
+   * persisted with `state`, so a desktop `expanded` preference never seeds a
+   * compact paint and compact closes never rewrite that preference.
+   */
+  readonly compactOpen: SnapshotStore<boolean> = createSnapshotStore(false)
+
+  /**
    * Build the rail over the persisted state, normalizing whatever an older
    * generation stored before any reader sees it.
    */
@@ -99,6 +107,23 @@ export class SidebarRightRail {
    */
   setKind(kind: string): void {
     this.state.set({ ...this.state.getSnapshot(), kind, open: true })
+  }
+
+  /**
+   * Light a kind for the compact presentation without recording an open intent
+   * in the persisted rail record.
+   * @param kind - the page kind the compact bar selected.
+   */
+  setKindOnly(kind: string): void {
+    this.state.set({ ...this.state.getSnapshot(), kind })
+  }
+
+  /**
+   * Record the compact presentation's explicit open state; not persisted.
+   * @param open - whether the compact surface is shown.
+   */
+  setCompactOpen(open: boolean): void {
+    this.compactOpen.set(open)
   }
 
   /**

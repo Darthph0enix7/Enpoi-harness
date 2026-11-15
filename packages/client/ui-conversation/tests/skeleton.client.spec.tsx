@@ -7,7 +7,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SessionListState, SessionSnapshot } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { WorkspaceSnapshot, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
-import { FISH_LOGO_PATH } from '@deepseek-ai/dsh-client-ui-primitives'
+import { FISH_LOGO_PATH, hitTargetClass } from '@deepseek-ai/dsh-client-ui-primitives'
 import {
   bindSnapshotSelector, makeTranslate, RemoteError, sessionSnapshot as sessionFixture,
 } from '@deepseek-ai/dsh-client-test-runtime'
@@ -499,6 +499,14 @@ describe('ConversationRoot resident composer', () => {
     expect(b.open).toHaveBeenCalledWith(sid('root'))
   })
 
+  it('puts the shared coarse-pointer target class on navigable breadcrumbs', () => {
+    const b = mount(sessionSnapshotOf(), undefined, undefined, { summaryOrigin: 'subagent' })
+    const root = b.view.getByRole('button', { name: 'Root' })
+    // The shared primitive keeps the 28px crumb paint and grows its hit box on
+    // touch; it must reach every ancestor crumb, not just the view tabs.
+    expect(root.className).toContain(hitTargetClass)
+  })
+
   it('keeps intermediate subagent breadcrumbs at the compact title size', () => {
     const b = mount(sessionSnapshotOf(), undefined, undefined, {
       summaryOrigin: 'subagent',
@@ -671,6 +679,50 @@ describe('ConversationRoot resident composer', () => {
     expect(b.view.getByRole('tab', { name: 'New view' }).getAttribute('aria-selected')).toBe('false')
     // The browser drag lane anchors its header tab-strip probe on this marker.
     expect(b.view.getByRole('tablist').hasAttribute('data-conversation-tabs')).toBe(true)
+  })
+
+  it('activates a View on the first tap, before its render, and ignores the active tab', async () => {
+    const viewTabs: ViewTab[] = [
+      { id: 'chat', label: 'Chat' },
+      { id: 'trajectory', label: 'Trajectory' },
+    ]
+    const b = mount(sessionSnapshotOf(), undefined, undefined, { viewTabs })
+    const trajectory = b.view.getByRole('tab', { name: 'Trajectory' })
+    // A touch tap fires click without any preceding mouseenter/hover; the tab
+    // must flip its selected state on that first activation, not wait for the
+    // View's (potentially expensive) mount.
+    act(() => { fireEvent.click(trajectory) })
+    expect(trajectory.getAttribute('aria-selected')).toBe('true')
+    expect(b.store.store.getSnapshot().view).toBeNull()
+    expect(b.view.getByTestId('view-chat')).toBeTruthy()
+    // Two frames later the View store adopts the same selection.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 80)) })
+    expect(b.store.store.getSnapshot().view).toBe('trajectory')
+    expect(b.view.getByTestId('view-trajectory')).toBeTruthy()
+
+    // Tapping the already-selected tab is a no-op, not a re-mount request.
+    const chat = b.view.getByRole('tab', { name: 'Chat' })
+    act(() => { fireEvent.click(chat) })
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 80)) })
+    expect(chat.getAttribute('aria-selected')).toBe('true')
+    act(() => { fireEvent.click(chat) })
+    expect(b.store.store.getSnapshot().view).toBe('chat')
+  })
+
+  it('collapses a rapid second tab tap into one switch instead of leaving the first highlighted', async () => {
+    const viewTabs: ViewTab[] = [
+      { id: 'chat', label: 'Chat' },
+      { id: 'trajectory', label: 'Trajectory' },
+      { id: 'watchtower', label: 'Watchtower' },
+    ]
+    const b = mount(sessionSnapshotOf(), undefined, undefined, { viewTabs })
+    act(() => { fireEvent.click(b.view.getByRole('tab', { name: 'Trajectory' })) })
+    act(() => { fireEvent.click(b.view.getByRole('tab', { name: 'Watchtower' })) })
+    expect(b.view.getByRole('tab', { name: 'Watchtower' }).getAttribute('aria-selected')).toBe('true')
+    expect(b.view.getByRole('tab', { name: 'Trajectory' }).getAttribute('aria-selected')).toBe('false')
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 80)) })
+    expect(b.store.store.getSnapshot().view).toBe('watchtower')
+    expect(b.view.getByTestId('view-watchtower')).toBeTruthy()
   })
 
   it('rolls the pending workspace label back when switching fails', async () => {

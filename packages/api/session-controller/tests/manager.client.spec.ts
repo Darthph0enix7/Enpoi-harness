@@ -1111,6 +1111,58 @@ describe('subagent catalogs', () => {
       values: {}, state: 'ready', error: null,
     })
   })
+
+  it('keeps cached catalog rows when a non-live projection read reports the Session missing', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    const catalog = [{ id: S2, createdAt: 1, seq: SessionSeq(0), mode: 'continuable' as const, label: 'worker' }]
+    manager.handleSessionAdded(summary(S1, {
+      projections: { kind: 'cached', asOfSeq: 0, values: { subagentCatalog: catalog } },
+    }))
+    remote.session.projections.mockResolvedValue(ok(null))
+    await manager.refreshProjections(S1)
+    // The durable checkpoint keeps the child row: a non-live read is not proof
+    // that the catalog (or its expanded branch) vanished.
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      state: 'ready', error: null, values: { subagentCatalog: catalog },
+    })
+  })
+
+  it('bounds a projection read that never settles and retries after the error', async ({ mock, remote }) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    onTestFinished(() => { vi.useRealTimers() })
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    const stalled = Promise.withResolvers<Awaited<ReturnType<typeof remote.session.projections>>>()
+    remote.session.projections.mockImplementationOnce(() => stalled.promise)
+    const read = manager.refreshProjections(S1)
+    expect(manager.getListSnapshot().projectionsBySession[S1]?.state).toBe('loading')
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    const bounded = manager.getListSnapshot().projectionsBySession[S1]
+    expect(bounded?.state).toBe('error')
+    expect(bounded?.error?.code).toBe('session/projections-unavailable')
+
+    remote.session.projections.mockResolvedValue(ok({ asOfSeq: 0, values: { subagentCatalog: [] } }))
+    await manager.refreshProjections(S1)
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({ state: 'ready', error: null })
+    expect(remote.session.projections.mock.calls).toHaveLength(2)
+
+    stalled.resolve(ok({ asOfSeq: 0, values: {} }))
+    await read
+  })
+
+  it('records a retryable error when a projection read throws a transport error', async ({ mock, remote }) => {
+    const manager = makeManager(mock, remote)
+    onTestFinished(() => manager.dispose())
+    remote.session.projections.mockRejectedValueOnce(new Error('projection wire down'))
+    await expect(manager.refreshProjections(S1)).rejects.toThrow('projection wire down')
+    expect(manager.getListSnapshot().projectionsBySession[S1]).toMatchObject({
+      state: 'error',
+      error: { code: 'session/projections-unavailable', message: 'projection wire down' },
+      values: {},
+    })
+  })
 })
 
 describe('remaining branches', () => {

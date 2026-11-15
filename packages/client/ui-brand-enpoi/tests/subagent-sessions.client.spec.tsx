@@ -286,6 +286,39 @@ describe('SubagentSessionsBody — lineage tree', () => {
     expect((list().getByText('Completed child').closest('button') as HTMLElement).querySelector('[data-state="done"]')).toBeTruthy()
   })
 
+  it('labels running, completed, and idle rows with localized status text', () => {
+    const { list } = mount([
+      row('main', 'Main Session'),
+      row('live', 'Running child', { parentId: 'main', origin: 'subagent', running: true }),
+      row('done', 'Completed child', {
+        parentId: 'main', origin: 'subagent',
+        projectionValues: { subagentTiming: { lastTurnCompleted: true } },
+      }),
+      row('idle', 'Idle child', { parentId: 'main', origin: 'subagent' }),
+    ], 'main')
+
+    expect(list().getByText('Running')).toBeTruthy()
+    expect(list().getByText('Done')).toBeTruthy()
+    expect(list().getAllByText('Idle').length).toBeGreaterThan(0)
+    // The row carries the discriminant, never the raw machine token as copy.
+    expect(screen.queryByText('RUNNING')).toBeNull()
+    expect(screen.queryByText('running')).toBeNull()
+  })
+
+  it('keeps the tree when the selected child exists only in its parent catalog', () => {
+    const { list } = mount(
+      [row('main', 'Main Session')],
+      'ghost',
+      'ready',
+      { main: { values: { subagentCatalog: [childEntry('ghost', 'continuable', 'Explorer: Map the branch')] } } },
+    )
+
+    // The selected row is outside the loaded list window; durable catalog
+    // ancestry keeps the one root and the selected row on screen.
+    expect(list().getByText('Main Session')).toBeTruthy()
+    expect(list().getByText('Explorer').closest('button')?.getAttribute('aria-current')).toBe('true')
+  })
+
   it('never renders a forest when the selected session is missing', () => {
     mount([
       row('root-a', 'First root', { updatedAt: 2 }),

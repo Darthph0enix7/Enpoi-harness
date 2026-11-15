@@ -502,6 +502,10 @@ export class SidebarRightController implements ISidebarRight {
       if (filesAnchor) this.rail.setKind(FILES_KIND)
       else if (address === page || address.startsWith(`${page}/`)) this.rail.setKind(claim.kind)
       else this.rail.setOpen(true)
+      // An explicit content open on the compact shell (a bar page, a file
+      // push, a tab action) is the only thing that may reveal a compact
+      // surface; the persisted `expanded` value is not.
+      if (this.binding?.autoFullscreen === true) this.rail.setCompactOpen(true)
     }) }
     // Replacing a tab runs the replaced record's close handler in the same
     // step, so upstream's cleanup path frames our own commit. The adopted
@@ -552,6 +556,36 @@ export class SidebarRightController implements ISidebarRight {
     // and the navigation record all ride the one public path.
     this.placeTab(sessionId, actions, kind, {})
   }
+
+  /**
+   * The compact shell's surface gesture: show the stored page/tab without
+   * adopting a desktop `expanded` boot state. The desktop preference stays in
+   * the surface record; only the non-persisted compact presentation changes.
+   * @param kind - the page kind the bottom bar selected.
+   */
+  selectCompactKind(kind: string): void {
+    const { sessionId, actions } = this.require()
+    const rail = this.rail.state.getSnapshot()
+    const shownKind = rail.kind ?? this.tabs.rail()[0]?.kind ?? null
+    if (this.rail.compactOpen.getSnapshot() && shownKind === kind) {
+      this.rail.setCompactOpen(false)
+      return
+    }
+    const layout = this.mountedSurface()?.layout
+    const existing = layout === undefined
+      ? undefined
+      : Object.values(layout.tabs).find(tab => tab.kind === kind)
+    this.rail.setKindOnly(kind)
+    this.rail.setCompactOpen(true)
+    if (existing !== undefined) {
+      actions.focusTab(sessionId, existing.id)
+      return
+    }
+    // A page not yet materialized is an explicit user open; its placement and
+    // navigation still ride the ordinary public path.
+    this.placeTab(sessionId, actions, kind, {})
+  }
+
 
   /**
    * Close one tab of the mounted session; the sole docked guide remains open.

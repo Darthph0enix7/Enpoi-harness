@@ -15,7 +15,7 @@ import { apply, inject } from '../src/client/index.ts'
 import { intentsFor } from '../src/client/shell/SidebarRight.tsx'
 import { SeatLeaveReports } from '../src/client/shell/leave-report.ts'
 import { GUIDE_KIND } from '../src/client/contract/seed.ts'
-import { resolveRailOpen } from '../src/client/rail.ts'
+import { resolveRailOpen, SidebarRightRail } from '../src/client/rail.ts'
 import { SURFACES_STORAGE_KEY } from '../src/client/surface-storage.ts'
 import type { SidebarRightTabInfo, SidebarRightTabMenuOwnerProps } from '../src/client/contract/slots.ts'
 import type { createSidebarRightStore } from '../src/client/stores.ts'
@@ -222,6 +222,120 @@ describe('RightbarSeat presentation', () => {
     expect(h.layout().expanded).toBe(true)
     expect(element(h.view.container, '[data-sidebar-right-panel]').hasAttribute('data-sidebar-right-open')).toBe(true)
     expect(h.frame.closeRightbar).not.toHaveBeenCalled()
+  })
+
+  it('does not auto-open a host-restored desktop surface on the mobile seat', async () => {
+    // Real seeding path: the versioned per-session surface record.
+    localStorage.setItem(SURFACES_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      sessions: {
+        [SESSION]: {
+          layout: {
+            nodes: {
+              pane1: { kind: 'pane', id: 'pane1', host: 'dock', tabs: ['tab1'], activeTabId: 'tab1' },
+            },
+            tabs: {
+              tab1: { id: 'tab1', kind: 'text', contentId: 'sidebar://text', title: 'text' },
+            },
+            rootId: 'pane1', floats: [], activePaneId: 'pane1', expanded: true, mode: 'push',
+          },
+          minted: 2,
+          navigation: { tab1: { address: 'sidebar://text', revision: 1 } },
+          updatedAt: 1,
+        },
+      },
+    }))
+    const h = await mountSeat(390, true, 1, true)
+    // The host preference is still expanded, but compact paints the bar with
+    // the panel closed; the preference is not rewritten.
+    expect(h.layout().expanded).toBe(true)
+    const panel = element(h.view.container, '[data-sidebar-right-panel]')
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(false)
+    expect(h.frame.openRightbar).not.toHaveBeenCalledWith(false, true)
+
+    // The bar's explicit gesture opens the stored page without expanding (or
+    // collapsing) the desktop surface; a second tap closes the presentation.
+    act(() => { h.controller.selectCompactKind('text') })
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(true)
+    expect(panel.dataset['sidebarRightPanel']).toBe('fullscreen')
+    expect(h.layout().expanded).toBe(true)
+    expect(h.controller.rail.compactOpen.getSnapshot()).toBe(true)
+    expect(h.frame.openRightbar).toHaveBeenLastCalledWith(false, true)
+    act(() => { h.controller.selectCompactKind('text') })
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(false)
+    expect(h.layout().expanded).toBe(true)
+    expect(h.controller.rail.compactOpen.getSnapshot()).toBe(false)
+    expect(h.frame.closeRightbar).toHaveBeenCalled()
+
+    // Returning to the desktop frame restores the host's open preference; the
+    // compact presentation never rewrote it.
+    h.view.update({ width: 420, viewportWidth: 1440, canShow: true, mobile: false })
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(true)
+    expect(h.layout().expanded).toBe(true)
+    expect(Object.values(h.layout().tabs).some(tab => tab.kind === 'text')).toBe(true)
+  })
+
+  it('does not paint a host-restored expanded surface that arrives after the mobile first paint', async () => {
+    localStorage.setItem(SURFACES_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      sessions: {
+        [SESSION]: {
+          layout: {
+            nodes: {
+              pane1: { kind: 'pane', id: 'pane1', host: 'dock', tabs: ['tab1'], activeTabId: 'tab1' },
+            },
+            tabs: {
+              tab1: { id: 'tab1', kind: 'text', contentId: 'sidebar://text', title: 'text' },
+            },
+            rootId: 'pane1', floats: [], activePaneId: 'pane1', expanded: false, mode: 'push',
+          },
+          minted: 2,
+          navigation: { tab1: { address: 'sidebar://text', revision: 1 } },
+          updatedAt: 1,
+        },
+      },
+    }))
+    const h = await mountSeat(390, true, 1, true)
+    const panel = element(h.view.container, '[data-sidebar-right-panel]')
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(false)
+    // The server/local adoption commits expanded:true after mount; compact
+    // still starts from the bar and preserves the host value for desktop.
+    act(() => { h.actions.setExpanded(SESSION, true) })
+    expect(h.layout().expanded).toBe(true)
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(false)
+    h.view.update({ width: 420, viewportWidth: 1440, canShow: true, mobile: false })
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(true)
+  })
+
+  it('keeps a compact-opened page closed when the desktop preference was closed', async () => {
+    localStorage.setItem(SURFACES_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      sessions: {
+        [SESSION]: {
+          layout: {
+            nodes: {
+              pane1: { kind: 'pane', id: 'pane1', host: 'dock', tabs: ['tab1'], activeTabId: 'tab1' },
+            },
+            tabs: {
+              tab1: { id: 'tab1', kind: 'text', contentId: 'sidebar://text', title: 'text' },
+            },
+            rootId: 'pane1', floats: [], activePaneId: 'pane1', expanded: false, mode: 'push',
+          },
+          minted: 2,
+          navigation: { tab1: { address: 'sidebar://text', revision: 1 } },
+          updatedAt: 1,
+        },
+      },
+    }))
+    const h = await mountSeat(390, true, 1, true)
+    const panel = element(h.view.container, '[data-sidebar-right-panel]')
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(false)
+    act(() => { h.controller.selectCompactKind('text') })
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(true)
+    expect(h.layout().expanded).toBe(false)
+    h.view.update({ width: 420, viewportWidth: 1440, canShow: true, mobile: false })
+    expect(panel.hasAttribute('data-sidebar-right-open')).toBe(false)
+    expect(h.layout().expanded).toBe(false)
   })
 
   it('opens a stored open intent as the overlay when a normal push cannot fit', async () => {
@@ -1074,7 +1188,9 @@ describe('RightbarSeat on the mobile container', () => {
 
   it('pushes an opened document full-screen and returns to the tree through the file back control', async () => {
     const h = await mountSeat(390, true, 1, true)
-    // The seeded page stands in for the file tree the push drills out of.
+    // The compact seat starts closed; the explicit bar gesture opens the
+    // seeded page that stands in for the tree the push drills out of.
+    act(() => { h.controller.selectCompactKind('text') })
     expect(element(h.view.container, '[data-sidebar-right-body]')).toBeTruthy()
     h.open('a.txt')
     const editorTabId = h.instance.getSnapshot().bySession[SESSION]?.editorTabId
@@ -1135,6 +1251,19 @@ describe('resolveRailOpen', () => {
     expect(resolveRailOpen(null, true)).toBe(true)
     expect(resolveRailOpen(null, false)).toBe(false)
     expect(resolveRailOpen(null, undefined)).toBe(true)
+  })
+})
+
+describe('compact presentation storage', () => {
+  it('never persists the compact open flag or rewrites the desktop surface', () => {
+    const first = new SidebarRightRail()
+    first.setKindOnly('files')
+    first.setCompactOpen(true)
+    expect(first.compactOpen.getSnapshot()).toBe(true)
+    const second = new SidebarRightRail()
+    expect(second.compactOpen.getSnapshot()).toBe(false)
+    expect(second.state.getSnapshot().open).toBeNull()
+    expect(second.state.getSnapshot().kind).toBe('files')
   })
 })
 

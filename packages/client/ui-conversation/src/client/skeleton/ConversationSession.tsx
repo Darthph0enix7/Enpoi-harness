@@ -1,8 +1,10 @@
 /** Strict per-session header/body content inserted into the resident conversation layout. */
 
+import { useEffect, useRef, useState, useTransition } from 'react'
 import clsx from 'clsx'
 import type { SessionListState, SessionSummary } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import { hitTargetClass } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {
   ConversationSessionHeaderSlotProps, ConversationSessionSlotProps,
 } from '../contract/slots.ts'
@@ -62,6 +64,42 @@ export function ConversationSessionHeader({
   const tabs = useConversationViews(value => value)
   const selectedId = useStore(s => s.view)
   const active = resolveActiveView(tabs, selectedId)
+  // The tapped View is highlighted on this tap, then mounted after the paint
+  // that follows it. A View's first mount can be expensive (the Trajectory
+  // ledger builds its window synchronously); without the split, the tab's
+  // selected state and the whole view commit land in one long task, so the tap
+  // looks ignored until the next frame.
+  const [pendingView, setPendingView] = useState<string | null>(null)
+  const [, startViewSwitch] = useTransition()
+  const activeId = pendingView ?? active?.id
+  const deferredSwitch = useRef<number | null>(null)
+  useEffect(() => {
+    if (pendingView === null) return
+    // Adopt the real selection once it commits, or clear the highlight if the
+    // View disappeared from the roster between the tap and the deferred mount.
+    if (pendingView === active?.id || !tabs.some(tab => tab.id === pendingView)) setPendingView(null)
+  }, [pendingView, active?.id, tabs])
+  useEffect(() => () => {
+    if (deferredSwitch.current !== null) cancelAnimationFrame(deferredSwitch.current)
+  }, [])
+  const chooseView = (id: string): void => {
+    if (id === activeId) return
+    // First tap: select the tab now (a cheap, urgent render the next paint
+    // shows), then mount the View after that paint. The store update is an
+    // external-store notification — React 18 renders those synchronously even
+    // inside a transition — so a transition alone would still run the whole
+    // ledger mount inside the tap's task. Two frames guarantee the selected
+    // state reaches the screen before the heavy work starts; the transition
+    // then keeps the mount interruptible.
+    setPendingView(id)
+    if (deferredSwitch.current !== null) cancelAnimationFrame(deferredSwitch.current)
+    deferredSwitch.current = requestAnimationFrame(() => {
+      deferredSwitch.current = requestAnimationFrame(() => {
+        deferredSwitch.current = null
+        startViewSwitch(() => { selectView(id) })
+      })
+    })
+  }
   const ancestry = useSessions(s => deriveAncestry(s, sessionId), equalBreadcrumbs)
   const showTabs = !hideChrome && tabs.length > 1
   return (
@@ -86,7 +124,7 @@ export function ConversationSessionHeader({
                     : (
                       <button
                         type="button"
-                        className={clsx(css.crumb, summary.subagent && css.crumbSubagent)}
+                        className={clsx(css.crumb, hitTargetClass, summary.subagent && css.crumbSubagent)}
                         onClick={() => { open(summary.id) }}
                       >
                         {summary.displayTitle}
@@ -146,9 +184,9 @@ export function ConversationSessionHeader({
               key={viewTab.id}
               type="button"
               role="tab"
-              aria-selected={viewTab.id === active?.id}
-              className={clsx(css.tab, viewTab.id === active?.id && css.tabActive)}
-              onClick={() => { selectView(viewTab.id) }}
+              aria-selected={viewTab.id === activeId}
+              className={clsx(css.tab, viewTab.id === activeId && css.tabActive)}
+              onClick={() => { chooseView(viewTab.id) }}
             >
               {viewTab.label}
             </button>

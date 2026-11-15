@@ -46,13 +46,35 @@ describe('collapsed right sidebar', () => {
 })
 
 describe('compact surface bar', () => {
-  it('bounds each bar target so the first three, active pin, and More fit 320px', () => {
+  it('spreads each bar target across the phone and caps only the tablet width', () => {
     const item = declarationsFrom(css, '.barItem')
-    expect(item).toContain('flex: 1 1 44px')
+    expect(item).toContain('flex: 1 1 0')
     expect(item).toContain('box-sizing: border-box')
     expect(item).toContain('min-width: 44px')
-    expect(item).toContain('max-width: 50px')
+    expect(item).toContain('max-width: 88px')
     expect(item).toContain('min-height: 44px')
     expect(declarationsFrom(css, '.surfaceLabel')).toContain('max-width: 100%')
+    expect(css).toContain('@media (min-width: 600px)')
+    expect(css).toContain('max-width: 72px')
+  })
+
+  it('raises rail targets to 44px on coarse pointers', () => {
+    const block = /@media \(pointer: coarse\)[\s\S]*?\.railButton\s*\{([^}]*)\}/.exec(css)
+    expect(block).not.toBeNull()
+    expect(block?.[1]).toContain('width: 44px')
+    expect(block?.[1]).toContain('height: 44px')
+  })
+
+  it('wraps long surface labels to two full lines at 320px instead of clipping', () => {
+    const label = declarationsFrom(css, '.surfaceLabel')
+    expect(label).toContain('-webkit-line-clamp: 2')
+    expect(label).toContain('line-height: 1.15')
+    expect(label).not.toContain('white-space: nowrap')
+  })
+
+  it('removes the desktop rail and its centre reservation from the compact shell', () => {
+    expect(declarationsFrom(css, ':global([data-mobile-frame]) .rail')).toContain('display: none')
+    expect(css).toContain(':global(body[data-sidebar-right-rail-mounted]) :global([data-mobile-frame]) div:has(+ [data-rightbar-col])')
+    expect(css).toContain('padding-right: 0')
   })
 })

@@ -437,3 +437,37 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+
+/*
+ * Phone preset switcher: at 320–430px the title and the fixed-width switcher
+ * cannot share one line; the switcher's 205px pill overflowed the 315px
+ * settings scroll host (331px measured). Give the switcher its own full-width
+ * row and let its label ellipsize instead of creating a page-level sideways
+ * scroll.
+ */
+@media (max-width: 640px) {
+  .groupTitleRow {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    row-gap: 6px;
+  }
+
+  .headerEnd {
+    width: 100%;
+    margin-left: 0;
+    min-width: 0;
+  }
+
+  .switcher {
+    width: 100%;
+    justify-content: space-between;
+    max-width: 100%;
+  }
+
+  .switcherLabel {
+    min-width: 0;
+    max-width: none;
+    flex: 1 1 auto;
+  }
+}

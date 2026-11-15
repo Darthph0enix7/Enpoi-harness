@@ -18,7 +18,7 @@
  * root so a fullscreen right panel owns the complete frame.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { MouseEvent as ReactMouseEvent, ReactNode, RefObject } from 'react'
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject } from 'react'
 import {
   IconChevronDownOutlineMedium, IconChevronLeftOutlineRegular, IconChevronUpOutlineMedium,
   IconEllipsisOutlineMedium, IconPanelLeftOutlineMedium, Sheet, useBackHandler, useModalLayer,
@@ -78,6 +78,10 @@ export function MobileFrame({
   const [drawerMounted, setDrawerMounted] = useState(false)
   const [drawerRecordHeld, setDrawerRecordHeld] = useState(false)
   const overflowDialog = useRef<HTMLDivElement | null>(null)
+  const barHide = useRef<HTMLButtonElement | null>(null)
+  const handleRef = useRef<HTMLButtonElement | null>(null)
+  const restoreFocus = useRef(false)
+  const handleStartY = useRef<number | null>(null)
   const surfaceShown = useStore(state => state.layoutInfo.rightbarShown)
 
   // Publish the compact shell's overlay-safe geometry on the root (portalled
@@ -111,7 +115,10 @@ export function MobileFrame({
   const closeOverflow = useCallback(() => { setOverflowOpen(false) }, [])
   const openMore = useCallback(() => { setOverflowOpen(true) }, [])
   const selectSurface = useCallback((_kind: string) => { setOverflowOpen(false) }, [])
-  const restoreChrome = useCallback(() => { setImmersive(false) }, [])
+  const restoreChrome = useCallback(() => {
+    restoreFocus.current = true
+    setImmersive(false)
+  }, [])
   // The Sheet itself never owns focus; this compact caller adds the dialog
   // layer only for its own More sheet. Entry focus goes to the first control,
   // Tab stays inside, and every close path restores the control that opened it.
@@ -141,6 +148,32 @@ export function MobileFrame({
     document.addEventListener('keydown', onKeyDown)
     return () => { document.removeEventListener('keydown', onKeyDown) }
   }, [immersive, restoreChrome])
+
+  // Collapsing removes the focused hide button; move focus to the handle so
+  // the keyboard path does not fall back to the document. Restoring from the
+  // handle (tap, swipe up, Escape or back) returns it to the hide control.
+  useEffect(() => {
+    if (immersive) {
+      handleRef.current?.focus()
+      return
+    }
+    if (!restoreFocus.current) return
+    restoreFocus.current = false
+    barHide.current?.focus()
+  }, [immersive])
+
+  const onHandlePointerDown = (event: ReactPointerEvent<HTMLButtonElement>): void => {
+    if (event.pointerType === 'touch') handleStartY.current = event.clientY
+  }
+  const onHandlePointerMove = (event: ReactPointerEvent<HTMLButtonElement>): void => {
+    const start = handleStartY.current
+    if (start === null) return
+    if (start - event.clientY >= 20) {
+      handleStartY.current = null
+      restoreChrome()
+    }
+  }
+  const clearHandleGesture = (): void => { handleStartY.current = null }
 
   // Project the immersive state on both the frame (header/bar hiding) and the
   // root (zeroed chrome geometry for portalled overlays and the fullscreen
@@ -223,7 +256,7 @@ export function MobileFrame({
 
   return (
     <>
-      <header className={css.header} data-mobile-header="">
+      <header id="mobile-shell-header" className={css.header} data-mobile-header="">
         <button
           type="button"
           className={css.iconButton}
@@ -260,33 +293,53 @@ export function MobileFrame({
           </button>
         )}
       </header>
-      <nav className={css.bar} aria-label={t('mobile.surfaces')} data-mobile-bar="">
-        <div className={css.barItems}>
-          {renderSlot('shell.mobile.bar', {
-            open: overflowOpen, openMore, dismiss: closeOverflow, onSelect: selectSurface,
-          })}
-        </div>
-        <button
-          type="button"
-          className={css.barButton}
-          aria-label={t('mobile.hideControls')}
-          data-mobile-immersive-toggle=""
-          onClick={() => { setImmersive(true) }}
-        >
-          <IconChevronDownOutlineMedium size={16} />
-        </button>
+      <nav
+        id="mobile-shell-bar"
+        className={immersive ? `${css.bar} ${css.barCollapsed}` : css.bar}
+        aria-label={immersive ? t('mobile.showControls') : t('mobile.surfaces')}
+        data-mobile-bar=""
+        data-mobile-bar-collapsed={immersive ? '' : undefined}
+      >
+        {immersive ? (
+          <button
+            ref={handleRef}
+            type="button"
+            className={css.chromeHandle}
+            aria-label={t('mobile.showControls')}
+            aria-expanded={false}
+            aria-controls="mobile-shell-header mobile-shell-bar"
+            data-mobile-immersive-restore=""
+            onClick={restoreChrome}
+            onPointerDown={onHandlePointerDown}
+            onPointerMove={onHandlePointerMove}
+            onPointerUp={clearHandleGesture}
+            onPointerCancel={clearHandleGesture}
+          >
+            <IconChevronUpOutlineMedium size={18} />
+            <span className={css.handleGrip} aria-hidden="true" />
+          </button>
+        ) : (
+          <>
+            <div className={css.barItems}>
+              {renderSlot('shell.mobile.bar', {
+                open: overflowOpen, openMore, dismiss: closeOverflow, onSelect: selectSurface,
+              })}
+            </div>
+            <button
+              ref={barHide}
+              type="button"
+              className={css.barButton}
+              aria-label={t('mobile.hideControls')}
+              aria-expanded={true}
+              aria-controls="mobile-shell-header mobile-shell-bar"
+              data-mobile-immersive-toggle=""
+              onClick={() => { setImmersive(true) }}
+            >
+              <IconChevronDownOutlineMedium size={16} />
+            </button>
+          </>
+        )}
       </nav>
-      {immersive && (
-        <button
-          type="button"
-          className={css.immersiveRestore}
-          aria-label={t('mobile.showControls')}
-          data-mobile-immersive-restore=""
-          onClick={restoreChrome}
-        >
-          <IconChevronUpOutlineMedium size={18} />
-        </button>
-      )}
       <div className={css.drawerLayer} data-mobile-drawer={drawerOpen ? 'open' : 'closed'} aria-hidden={!drawerOpen}>
         <div className={css.scrim} aria-hidden="true" data-mobile-scrim="" onClick={closeDrawer} />
         <aside className={css.drawer} data-mobile-drawer-panel="" onClick={onDrawerAct}>
