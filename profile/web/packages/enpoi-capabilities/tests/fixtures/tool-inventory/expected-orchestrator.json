@@ -4,7 +4,7 @@
   "captureSource": "apps/web/tests/keyless-tool-inventory.e2e.ts",
   "captureReceipt": {
     "version": "0.1.7-enpoi.2",
-    "head": "b6c25d742bc616718f2d2e21b68e6f6d9b1e8e00",
+    "head": "737f91af1c21106df9d405aa92fbc0660b611a44",
     "profileFingerprints": {
       "dsh-enpoi-agent-switch": {
         "dir": "enpoi-agent-switch",
@@ -248,11 +248,11 @@
   "captureClientBuild": {
     "artifacts": {
       "fileCount": 378,
-      "sha256": "fba8958f128a1cda645cdc31825bb0cc1ef77d7347cb2dbab8902d597538ee9c"
+      "sha256": "b06f88053a044636c8962737b030283ab46280626e5c8c32b7fe115db5fb3ee0"
     },
     "environment": {
       "DSH_CLIENT_BUILD_PROFILE": "official",
-      "DSH_CLIENT_COMMIT_HASH": "b6c25d7",
+      "DSH_CLIENT_COMMIT_HASH": "737f91a",
       "DSH_CLIENT_TITLE": "DeepSeek Harness",
       "DSH_CLIENT_VERSION": "0.1.7-enpoi.2"
     }
