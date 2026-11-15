@@ -531,8 +531,10 @@ register(definition: ToolDefinition): () => void
 
 /**
  * Restrict global tools for the calling agent scope. Empty filters, unknown
- * names, scope-local names, and reserved transport names fail. Restrictions
- * intersect; scoped registrations remain visible.
+ * `allow` names, scope-local names, and a reserved transport name in `allow`
+ * fail. An explicit `deny` of the reserved transport is accepted and removes
+ * it from this scope; restrictions intersect and scoped registrations remain
+ * visible.
  * @param filter - global-tool mask: `allow` (keep only) and/or `deny` (remove).
  * @returns the exact disposer that lifts this restriction.
  */

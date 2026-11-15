@@ -107,6 +107,12 @@ var name = "enpoi-custom-tools";
 var inject = ["tools", "settings", "shell", "shellEnv"];
 var Config = Schema.object({});
 var DEFAULT_TIMEOUT_MS = 12e4;
+function snapshotKeyOf(toolName, identity) {
+  if (identity === void 0 || identity.sessionId === void 0 || identity.sessionId === "" || identity.callId === void 0) return void 0;
+  return `${identity.sessionId}\0${String(identity.callId)}\0${toolName}`;
+}
+var MAX_PENDING_SNAPSHOTS = 256;
+var MAX_REJECTED_SNAPSHOTS = 256;
 var OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -158,7 +164,31 @@ function readCustomToolRecords(settings) {
 function apply(ctx, _config) {
   const registered = /* @__PURE__ */ new Map();
   const live = /* @__PURE__ */ new Map();
+  const pending = /* @__PURE__ */ new Map();
+  const rejected = /* @__PURE__ */ new Map();
   let warned = "";
+  const rejectSnapshot = (key, reason) => {
+    pending.delete(key);
+    rejected.delete(key);
+    rejected.set(key, reason);
+    while (rejected.size > MAX_REJECTED_SNAPSHOTS) {
+      const oldest = rejected.keys().next().value;
+      if (oldest === void 0) break;
+      rejected.delete(oldest);
+    }
+  };
+  const rememberSnapshot = (key, snapshot) => {
+    if (rejected.has(key) || pending.has(key)) {
+      rejectSnapshot(key, "duplicate");
+      return;
+    }
+    pending.set(key, snapshot);
+    while (pending.size > MAX_PENDING_SNAPSHOTS) {
+      const oldest = pending.keys().next().value;
+      if (oldest === void 0) break;
+      rejectSnapshot(oldest, "capacity");
+    }
+  };
   const shell = () => ctx.get("shell");
   const register = (record) => {
     const executor = shell();
@@ -179,10 +209,27 @@ function apply(ctx, _config) {
       },
       isConcurrencySafe: () => true,
       async execute(args, exec) {
-        const rendered = renderCommand(record, args);
-        if (rendered.command === void 0) {
-          return { command: "", exitCode: null, signal: null, timedOut: false, stdout: "", stderr: "", error: `custom tool ${record.id}: ${rendered.error}` };
+        const sessionId = typeof exec.agent?.id === "string" ? exec.agent.id : typeof exec.agent?.session?.id === "string" ? exec.agent.session.id : typeof exec.agent?.session?.header?.id === "string" ? exec.agent.session.header.id : void 0;
+        const key = snapshotKeyOf(toolNameOf(record.id), sessionId === void 0 ? void 0 : {
+          sessionId,
+          ...exec.callId === void 0 ? {} : { callId: exec.callId }
+        });
+        const snapshot = key === void 0 ? void 0 : pending.get(key);
+        const rejection = key === void 0 ? void 0 : rejected.get(key);
+        if (key !== void 0) pending.delete(key);
+        if (snapshot === void 0 || snapshot.toolName !== toolNameOf(record.id) || snapshot.key !== key) {
+          return {
+            command: "",
+            exitCode: null,
+            signal: null,
+            timedOut: false,
+            stdout: "",
+            stderr: "",
+            error: rejection === void 0 ? `custom tool ${record.id}: no trusted execution snapshot for this call; refusing to run (policy approval and execution must share the same session/call identity)` : `custom tool ${record.id}: execution snapshot identity rejected (${rejection}); refusing to run`
+          };
         }
+        const active = snapshot.record;
+        const rendered = { command: snapshot.command };
         const value = {
           command: rendered.command,
           exitCode: null,
@@ -198,7 +245,7 @@ function apply(ctx, _config) {
           const dshEnv = ctx.get("shellEnv")?.collect(exec);
           const spec = executor.resolve({
             command: rendered.command,
-            description: record.name,
+            description: active.name,
             timeoutMs: DEFAULT_TIMEOUT_MS,
             ...exec.signal === void 0 ? {} : { signal: exec.signal },
             ...policy === void 0 ? {} : { sandboxPolicy: policy },
@@ -212,7 +259,7 @@ function apply(ctx, _config) {
           value.stdout = result.stdout.text;
           value.stderr = result.stderr.text;
         } catch (error) {
-          value.error = `custom tool ${record.id} could not execute: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`;
+          value.error = `custom tool ${active.id} could not execute: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`;
         }
         return value;
       }
@@ -249,13 +296,20 @@ function apply(ctx, _config) {
     }
   };
   ctx.provide("customToolCommands", {
-    render(toolName, args) {
+    render(toolName, args, identity) {
       const id = recordIdOf(toolName);
       if (id === void 0) return void 0;
       const record = live.get(id);
       if (record === void 0) return void 0;
       const rendered = renderCommand(record, args);
-      return rendered.command === void 0 ? void 0 : { command: rendered.command };
+      if (rendered.command === void 0) return void 0;
+      const key = snapshotKeyOf(toolName, identity);
+      if (key !== void 0) rememberSnapshot(key, { toolName, record, command: rendered.command, key });
+      return { command: rendered.command };
+    },
+    discard(toolName, identity) {
+      const key = snapshotKeyOf(toolName, identity);
+      if (key !== void 0) rejectSnapshot(key, "denied");
     }
   });
   const onNamespaceChange = ((ns) => {
@@ -268,6 +322,8 @@ function apply(ctx, _config) {
     for (const entry of registered.values()) entry.dispose();
     registered.clear();
     live.clear();
+    pending.clear();
+    rejected.clear();
   }, "enpoi-custom-tools: registered tools");
   sync();
   process.stderr.write("[enpoi-custom-tools] mounted\n");

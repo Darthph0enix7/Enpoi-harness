@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Use `dsh-tool-jobs` to inspect and control background commands, PTY work, and subagents through `job_output`, `job_list`, and `job_kill`. Reads can wait within a configured timeout, list results identify kind and status, and cancellation settles only after the work stops. A finished owned job notifies its agent in-session: a busy agent is injected at its next step, an idle one woken by a follow-up turn. Configuration controls wait limits, completion delivery, and consecutive-wakeup caps. Stream output is consumed by one reader; a completion whose owner is absent at settlement is held in-process for delivery on that owner's next activation.
+Use `dsh-tool-jobs` to inspect and control background commands, PTY work, and subagents through `job_output`, `job_list`, and `job_kill`. Reads can wait within a configured timeout, list results identify kind and status, and cancellation settles only after the work stops. A long or lossy finished read repeats its first retained stderr line as one bounded, escaped excerpt. A finished owned job notifies its agent in-session: a busy agent is injected at its next step, an idle one woken by a follow-up turn. Configuration controls wait limits, completion delivery, and consecutive-wakeup caps. Stream output is consumed by one reader; a completion whose owner is absent at settlement is held in-process for delivery on that owner's next activation.
 
 ## Table of Contents
 
@@ -29,7 +29,7 @@ Load this plugin in any composition where the agent should start, observe, and s
 
 ### The three tools
 
-- `job_output(job_id, wait?, timeout_ms?)` — Read a job's output. Stream jobs return only the output since the previous read; final-output jobs return their result after settlement. Every response ends with `[status: ...]`. Reads are non-blocking unless `wait: true`, which waits up to the configured cap and leaves a still-running job alive on timeout. A read renders stdout first and stderr in one `[stderr]` section, notes output that left memory before the read, and carries a job's result (a subagent's answer) exactly once, on the first read after settlement.
+- `job_output(job_id, wait?, timeout_ms?)` — Read a job's output. Stream jobs return only the output since the previous read; final-output jobs return their result after settlement. Every response ends with `[status: ...]`. Reads are non-blocking unless `wait: true`, which waits up to the configured cap and leaves a still-running job alive on timeout. A read renders stdout first and stderr in one `[stderr]` section, notes output that left memory before the read, and carries a job's result (a subagent's answer) exactly once, on the first read after settlement. A long or lossy finished read that returned retained stderr also prepends one bounded `[stderr excerpt (retained output; verbatim, not a diagnosis): …]` line so the retained error evidence leads the read.
 - `job_list()` — List your background jobs with their ids, kinds, and statuses, one per line: `<id> [<kind>] <status> — <label>`.
 - `job_kill(job_id, reason?)` — Request cancellation of a running job immediately; the job settles as `killed` once its work actually stops. A terminal job returns its current snapshot, and the optional reason is recorded and forwarded to the job.
 
@@ -57,6 +57,7 @@ Loading the plugin with no config is the common path; a `waitTimeoutMs` above `m
 | `maxWaitTimeoutMs` | `600,000` | Cap for model-supplied waits; larger values clamp down to it |
 | `completionDelivery` | `wakeup` | `wakeup` opens a turn on an idle owner; `quiet` leaves the notice pending |
 | `maxConsecutiveWakes` | unset | Turns one owner may open by wake before notices degrade to injection; unset means no cap |
+| `stderrExcerptMaxChars` | `200` | Maximum characters of the retained stderr excerpt a long or lossy finished read repeats; `0` disables it |
 
 The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-tool-jobs) is the exhaustive source for every accepted field and its JSDoc.
 
@@ -91,7 +92,7 @@ This section explains the design decisions behind the tools and points at the co
 
 ### Output capping
 
-`job_output` and `job_kill` capture the caller-visible job in a prepended pre-execute listener before policy runs, so the producer's cap applies to the complete rendered result. `job_output` preserves its output/status split when policy left the default rendering intact, bounding the output tail and the `[status: ...]` suffix; other single-text results — denials, short-circuits, normalized tool or pipeline failures, replacements, and blocks — are bounded as one text, while structured multi-block policy results keep their shape. A bounded completion notice reserves the stable `background job <id>` prefix and the `job_output` collection instruction before spending remaining bytes on variable kind, label, status, detail, and truncation marker, so the notice stays actionable at the PTY's supported 64-byte minimum; an existing producer truncation marker is reused rather than duplicated.
+`job_output` and `job_kill` capture the caller-visible job in a prepended pre-execute listener before policy runs, so the producer's cap applies to the complete rendered result. `job_output` preserves its output/status split when policy left the default rendering intact, bounding the output tail and the `[status: ...]` suffix; other single-text results — denials, short-circuits, normalized tool or pipeline failures, replacements, and blocks — are bounded as one text, while structured multi-block policy results keep their shape. When a fitted `job_output` read starts with the retained-stderr excerpt line, a truncating producer budget keeps that line and the status footer while spending the remaining bytes on the output tail, so the existing truncation marker and the full spill reference stay readable; if the budget cannot hold the excerpt beside the footer, the footer and tail win and the excerpt is dropped rather than left partial. A bounded completion notice reserves the stable `background job <id>` prefix and the `job_output` collection instruction before spending remaining bytes on variable kind, label, status, detail, and truncation marker, so the notice stays actionable at the PTY's supported 64-byte minimum; an existing producer truncation marker is reused rather than duplicated.
 
 ### Notice delivery lanes
 
@@ -157,7 +158,7 @@ Prefix-stable while tool definitions and visibility are unchanged. Registration 
 
 #### What the model sees
 
-Reads return output or `(no new output)` followed by `[status: <status>]` and optional detail. An empty list returns `(no background jobs)`. Kill returns `requested cancellation of job <id>` or the existing terminal status. An owned completion the model has not already collected uses the notice above.
+Reads return output or `(no new output)` followed by `[status: <status>]` and optional detail. A long or lossy finished read that returned retained stderr leads with `[stderr excerpt (retained output; verbatim, not a diagnosis): …]`, whose escaped single-line text is retained job output rather than a diagnosis or an instruction. An empty list returns `(no background jobs)`. Kill returns `requested cancellation of job <id>` or the existing terminal status. An owned completion the model has not already collected uses the notice above.
 
 #### Token effect
 

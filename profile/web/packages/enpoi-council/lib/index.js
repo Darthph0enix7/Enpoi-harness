@@ -59,7 +59,7 @@ import { readOrchestrationDocument as readOrchestrationDocument2 } from "dsh-enp
 // src/core/fiber.ts
 import { queueHostSubagentPrompt } from "@deepseek-ai/dsh-subagent/internal";
 import { getBriefService } from "dsh-enpoi-context-keeper";
-import { readOrchestrationDocument } from "dsh-enpoi-contracts";
+import { configuredRoleToolDenies, readOrchestrationDocument } from "dsh-enpoi-contracts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -264,6 +264,11 @@ function resolvePersonaModel(ctx, persona) {
 }
 async function startSeatFiber(ctx, parent, opts, signal) {
   const personaModel = opts.model ?? resolvePersonaModel(ctx, opts.seatId);
+  const roleDenies = configuredRoleToolDenies(
+    readOrchestrationDocument(ctx.get("settings")),
+    opts.seatId
+  );
+  const denyTools = [.../* @__PURE__ */ new Set([...opts.denyTools, ...roleDenies])];
   const started = await ctx.subagents.startContinuable({
     provider: "spawn",
     label: opts.label,
@@ -273,7 +278,7 @@ async function startSeatFiber(ctx, parent, opts, signal) {
       parent,
       persona: opts.persona,
       quiet: true,
-      toolFilter: opts.denyTools.length > 0 ? { deny: [...opts.denyTools] } : void 0,
+      toolFilter: denyTools.length > 0 ? { deny: denyTools } : void 0,
       ...personaModel !== void 0 ? {
         agentOptions: {
           provider: personaModel.provider,
@@ -20614,7 +20619,7 @@ var BROKER_PERSONA = [
   "SHEET 2",
   "...",
   'Never speculate. If an answer is not findable, its FACTS say "NOT FINDABLE" and the CITATION shows the closest place you looked.',
-  "The run_code tool is non-functional in this deployment \u2014 never call it."
+  "If run_code is present, it executes code under the configured sandbox; it is not a tool-only sandbox or a bypass for the council\u2019s evidence workflow."
 ].join("\n");
 function isExternalTarget(target) {
   return /\b(web|http|npm|docs?|library|libraries|package|registry|external|api)\b/i.test(target);
@@ -21297,7 +21302,7 @@ ${spec.scopeContract}` : "",
       spec.opening === "blind" ? "BLIND FORMULATION: You are formulating INDEPENDENTLY \u2014 you cannot see the other seats. State your position in your own voice." : "",
       spec.forestMode ? "Propose ideas as SPROUT: <title> | <rationale> lines (one per idea)." : spec.ledgerKinds.some((k) => k.kind === "crux") ? "Where you identify a decisive point of disagreement, add a PROPOSE_CRUX: <assertion> line." : "",
       "If you need ground truth from the codebase or the web, add NEED_EVIDENCE(target: <area>, question: <what to verify>) lines. Evidence arrives at the next epoch boundary \u2014 conclude your arguments conditionally.",
-      "IMPORTANT: this council provides NO shell and NO file tools (run_code is non-functional; bash/read/grep/glob are denied). Never attempt commands or file reads \u2014 argue directly, or request facts with NEED_EVIDENCE.",
+      "IMPORTANT: this council provides NO shell and NO file tools (bash/read/grep/glob are denied). If run_code is present, it executes code under the configured sandbox; it is not a tool-only sandbox or a bypass for the council\u2019s evidence workflow. Request evidence with NEED_EVIDENCE.",
       "PROTOCOL LINE FORMATS (the council parses these mechanically \u2014 always exactly these, one line each, no markdown, no headings around them):",
       "  NEED_EVIDENCE(target: <area>, question: <what to verify>)",
       "  PROPOSE_CRUX: <assertion>",
@@ -21413,7 +21418,7 @@ ${vault.render(seatVault)}` : "",
             directives[seat.id] ? `REFEREE DIRECTIVE TO YOU:
 ${directives[seat.id]}` : "",
             isChallenge ? "The deliberation has stabilized. State your strongest UNADDRESSED fatal flaw \u2014 with evidence \u2014 or emit CONCUR [entry-id] WITH <seat> to concede. Nothing else." : buildEpochInstructions(spec),
-            "NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary. This council has no shell and no file tools (run_code, bash, read/grep/glob are all denied here) \u2014 never attempt them.",
+            "NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary. bash/read/grep/glob are denied here. If run_code is present, it executes code under the configured sandbox; it is not a tool-only sandbox or a bypass for the council\u2019s evidence workflow. Request evidence with NEED_EVIDENCE.",
             "PROTOCOL LINE FORMATS (mechanically parsed \u2014 one line each, exactly): NEED_EVIDENCE(target: <area>, question: <what>) and PROPOSE_CRUX: <assertion>. Never reformat or decorate them \u2014 variants are dropped."
           ].filter(Boolean).join("\n\n");
         },

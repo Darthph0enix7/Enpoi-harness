@@ -49,6 +49,8 @@ kind: "package-reference"
 
 终端模拟器模块拥有 `@xterm/xterm`、`@xterm/addon-fit` 与 xterm 样式表。客户端打包预设将该全局 CSS 导入转换为标记为此插件的样式注入器，包内 `client.TerminalView.js` 分块只在终端标签页首次渲染时获取。`terminal/registry.ts` 中的注册表不导入 xterm：它独立于视图创建进程、连接套接字并重放转录。
 
+Subagent Sessions 标签页从所选会话最顶层的已列出 parent 解析出唯一根。parent 目录元数据只补齐缺失的 parent，并在列表行没有更新时间时提供创建时间；相互竞争的目录声明保持谱系未解析。同级行先排运行中的 child，再按最近更新时间或创建时间排序，并以稳定的 id 打破平局，同时每个子树保持连续。50 行上限会保留当前行及其祖先；所选行因列表快照处于 pending 而暂时缺失时，只保留同一会话的上一棵树。没有 `subagentTiming.lastTurnCompleted` 时空闲行不会被标记为完成。
+
 包内动态导入编译为 `require.async("./client.<name>.js")`；生成的入口只保留其静态导入的共享模块。`package.json` 发布 `lib/client.*.js`，使分块随包分发。
 
 </details>

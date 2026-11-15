@@ -22,7 +22,7 @@ Use this package to give the dsh web client a Settings panel, connection-recover
 
 -----
 
-The Settings panel uses a shared 760 × 500 layout, bounded by the viewport. Longer sections scroll inside the content column; the Account entry uses the account icon. The panel portals beside `#root` rather than inside it, so a macOS window drag region a chrome row declares later in document order cannot swallow its controls.
+Settings ownership is one trigger seat plus one stable root surface: `sidebar.settings` renders only the trigger row, while AppFrame renders the `settings.surface` slot once at the frame root, outside the desktop-column/compact-drawer swap. The single body-portalled surface is therefore not remounted when the chrome changes. Desktop keeps the shared bounded overlay; compact (`useLayoutMode() === 'compact'`, including portrait tablets and narrow fine-pointer windows) uses a 100dvh safe-area full page with a list -> detail step. Only chrome and classes toggle: the dialog, section content host, and mounted section remain the same DOM/component across a live 1440 <-> 800 <-> 390 resize, so draft text, selection, and scroll survive without a reload. `useModalLayer` is called once on that stable dialog and owns Escape, the focus trap, and focus return; `hidden`/`inert` semantics keep closed chrome out of the trap. The compact page keeps Back at a detail and Close at the list, focuses Back on drill, and returns focus to the originating row on back. The section content host is the single shell scroll owner; section-internal scroll remains owned by that section.
 
 <a id="use-this-package"></a>
 ## Use this package
@@ -73,7 +73,7 @@ The navigation is a projection of the `settings.section` ledger; nav labels may 
 
 ### Connection recovery
 
-The shell is an explicit recovery consumer, so it injects Connection directly rather than adding lifecycle controls to `ctx.remote`. Its private hooks compartment binds `ctx.connection.state`, while the component receives only the selected state and an injected callback for `ctx.connection.reconnect()`. `ConnectionIndicator` owns the inline presentation and receives all visible and accessible copy from the `settings` locale namespace; the shell owns the 800ms minimum-visible hold for the connecting state and the two-second recovered-state timer, which starts when the recovered pill becomes visible after the hold.
+The shell is an explicit recovery consumer, so it injects Connection directly rather than adding lifecycle controls to `ctx.remote`. Its private hooks compartment binds `ctx.connection.state` plus an optional diagnosis source over `connection.state.getDiagnosis?.()`; an older Host without that getter simply yields `undefined`. The component receives the selected state, the sanitized compact diagnosis, and an injected callback for `ctx.connection.reconnect()`. `ConnectionIndicator` owns the inline presentation and receives all visible and accessible copy from the `settings` locale namespace; a terminal diagnosis renders the concise **Connection stopped** pill with one warning-details control, the bounded core detail, and an explicit **Reload page** action that calls `window.location.reload()` only on user intent. The shell owns the 800ms minimum-visible hold for the connecting state and the two-second recovered-state timer, which starts when the recovered pill becomes visible after the hold; a later healthy generation clears the terminal surface.
 
 ### Document availability
 

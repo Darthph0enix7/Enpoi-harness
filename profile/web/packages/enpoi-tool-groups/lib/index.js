@@ -198,7 +198,12 @@ var SHIPPED_TOOL_GROUPS = Object.freeze([
     mode: "on-demand",
     preAttach: [],
     enabled: true,
-    members: ["peer_status", "peer_ask", "peer_asks", "peer_answer", "peer_cancel"]
+    // Every tool enpoi-peer-bridge registers belongs here, INCLUDING the
+    // read-only `peer_sessions` discovery listing: an ungrouped registration
+    // would stay presented after `detach peer`, so the family could never be
+    // hidden as a whole. The bridge's registration names are pinned against
+    // this list by tests/tool-groups.spec.ts (read from its source keylessly).
+    members: ["peer_status", "peer_sessions", "peer_ask", "peer_asks", "peer_answer", "peer_cancel"]
   },
   {
     id: "debug",
@@ -224,16 +229,16 @@ var SHIPPED_TOOL_GROUPS = Object.freeze([
     label: "Creator (harness authoring)",
     purpose: "inspect and manage the harness plugin composition",
     mode: "on-demand",
-    // Nothing pre-attaches by default; only the Creator seat can see or attach
-    // the group at all (`seats`): harness authoring is its specialty, so
-    // orchestrator and sysadmin never SEE the tools — the group's deny filter
-    // removes them from the advertised surface and their menu carries a
-    // seat-only notice instead of an attach state (the meta-tool listing omits
-    // it; the seat guard in `enpoi-capabilities` stays as the execution
-    // backstop). The per-seat menu line is a deliberate prompt-prefix
-    // difference: a cross-agent switch rebuilds the provider's prefix once;
-    // turns within one seat keep the prefix.
-    preAttach: [],
+    // The Creator seat starts with its authoring trio attached; every other
+    // seat would not even see the group (`seats`). Harness authoring is the
+    // creator's specialty, so orchestrator and sysadmin never SEE the tools —
+    // the group's deny filter removes them from the advertised surface and
+    // their menu carries a seat-only notice instead of an attach state (the
+    // meta-tool listing omits it; the seat guard in `enpoi-capabilities` stays
+    // as the execution backstop). The per-seat menu line is a deliberate
+    // prompt-prefix difference: a cross-agent switch rebuilds the provider's
+    // prefix once; turns within one seat keep the prefix.
+    preAttach: ["creator"],
     seats: ["creator"],
     enabled: true,
     members: ["cordis_inspect_list", "cordis_inspect_query", "plugin_manager"]

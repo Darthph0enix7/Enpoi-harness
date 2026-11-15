@@ -64,7 +64,7 @@ kind: "package-reference"
 
 ### 派发到报告的流程（绝不轮询）
 
-后台派发是交接，不是等待：工具立即返回 `started subagent <childId>`，并附上固定契约行 `You will be woken with its report when it settles — do not poll its status;`，随后 parent 的轮次正常结束，没有任何需要盯守的在途事项。子级结算时，outbox 恰好向 parent 的持久 inbox 投递一条通知，携带结果与子级的最终报告：空闲的 parent 被唤醒进入新一轮，忙碌的 parent 通过 Steer 收到它；无法放置的通知会被保留，并在 parent 下次激活或回到空闲时重试。投递以结算键为幂等单位，重复的结算不会产生第二条通知；通知就是这次派发的权威终点——轮询 `list_agents` 只能报告粗略的 `running`/`inactive` 活动状态，而这些都会被通知本身取代。同一条法则也写在 `list_agents` 的描述里（`You will be notified when a subagent finishes; there is no need to keep checking its status.`）；重复的相同 `list_agents` 调用会由通用的重复工具提醒应答。
+后台派发是交接，不是等待：工具立即返回 `started subagent <childId>`，并附上固定契约行 `You will be woken with its report when it settles — do not poll its status;`，随后 parent 的轮次正常结束，没有任何需要盯守的在途事项。子级结算时，outbox 会尝试向 parent 的持久 inbox 放置一条结算通知，携带结果与子级的最终报告：空闲的 parent 被唤醒进入新一轮，忙碌的 parent 通过 Steer 收到它；无法放置的通知会被保留，并在 parent 下次激活或回到空闲时重试。投递在保留窗口内按结算键去重，因此该窗口内的重复结算不会产生第二条通知。outbox 仅限进程内：重启可能丢失 held 通知，超出窗口的旧重复不会被拒绝。通知就是这次派发的权威终点——轮询 `list_agents` 只能报告粗略的 `running`/`inactive` 活动状态，而这些都会被通知本身取代。同一条法则也写在 `list_agents` 的描述里（`You will be notified when a subagent finishes; there is no need to keep checking its status.`）；重复的相同 `list_agents` 调用会由通用的重复工具提醒应答。
 
 ### 失败与恢复
 
@@ -95,7 +95,8 @@ kind: "package-reference"
 | [`src/continuation.ts`](src/continuation.ts) | 可继续子级编排：身份预留、提供方准备、冷恢复、授权与路由 |
 | [`src/continuation-activation.ts`](src/continuation-activation.ts) | 进程内 Activation 图、准入、结算与子级优先释放 |
 | [`src/settlement-outbox.ts`](src/settlement-outbox.ts) | 保留的结算通知：有界唤醒重试、held/parked 记录与认领退休 |
-| [`src/continuation-messages.ts`](src/continuation-messages.ts) | 相邻 Agent 消息、返回指引与结算通知 |
+| [`src/continuation-messages.ts`](src/continuation-messages.ts) | 相邻 Agent 消息、返回指引与有界结算诊断 |
+| [`src/lifecycle.ts`](src/lifecycle.ts) | 生命周期边发布与 epoch 终态诊断 |
 | [`src/internal.ts`](src/internal.ts) | Host 专用 Queue 与 Steer 适配器，以及标准相邻 Agent 消息标记 |
 | [`src/inbox.ts`](src/inbox.ts) | Activation 局部的 Queue 和 Steer 准入，以及同步 closing cutoff |
 | [`src/types.ts`](src/types.ts) | 公开的请求、结果与提供方约定 |
@@ -152,7 +153,7 @@ kind: "package-reference"
 
 #### 模型看到什么
 
-一条用户角色的父级消息，开头是结果本身——`Background subagent <child-id> finished.`；子级在得到最终结果前停止时，对应句子会写出原因并以 `— inspect its session <child-id> or continue it with a follow-up.` 结尾——随后是 `Its closing message:` 与子级最终 assistant 输出中的非空文本块，保留原始内容与顺序（若该轮因输出上限被截断后由 harness 继续，则报告每一轮的拼接答案，而不只是最后一轮）。推理与其他非文本块不会进入通知；若没有剩余的非空文本，通知会写明 `It left no closing message.`。这条由运行时生成的通知与模型编写的父子消息相互独立；后者使用 `sendMessage()` 与 `AgentMessageSource`。委派 schema 与模型控制工具归消费方包所有。
+一条用户角色的父级消息，开头是结果本身——`Background subagent <child-id> finished.`；子级在得到最终结果前停止时，对应句子会写出原因（`error` 结束会带上记录的错误码）并以 `— inspect its session <child-id> or continue it with a follow-up.` 结尾。随后停止的子级会收到一条有界的 `Diagnostic:` 行，写明结束代码、`recoverability=unknown`（当结束确实丢弃了已接受输入时为可证明的 `no`），以及日志记录到的最后一次成功工具结果的事件 seq；若其最终 assistant 消息不含文本，通知还会以未验证（unverified）标注引用其最后一条公开文本。之后通知会携带 `Its closing message:` 与子级最终 assistant 输出中的非空文本块，保留原始内容与顺序（若该轮因输出上限被截断后由 harness 继续，则报告每一轮的拼接答案，而不只是最后一轮）。推理与其他非文本块不会进入通知；诊断不包含提供方错误文本与工具流量，并尽力对常见凭据形式做脱敏，而不是充当安全扫描器。若没有剩余的非空文本，通知会写明 `It left no closing message.`。这条由运行时生成的通知与模型编写的父子消息相互独立；后者使用 `sendMessage()` 与 `AgentMessageSource`。委派 schema 与模型控制工具归消费方包所有。
 
 #### Token 影响
 
@@ -206,7 +207,7 @@ You are a delegated subagent: your permission scope was fixed when you were star
 - **后代读取串行执行**——每个可达目录（包括一次性子级）都需要一次观察。冷 Session 缺少有效的 prepared 观察时需要读取完整日志；大型冷会话树可能累积存储延迟。
 - **ACP 子级仍为一次性，且无法通过追踪枚举**——ACP 运行在父级会话语料中没有本地子会话，远程提供方需要 Activation 所有权约定才能支持可继续子级。
 - **仅允许相邻模型消息**——`sendMessage()` 要求确切在线 sender；每个 sender 都可以指定直接可继续 child，只有具备驻留可继续 Activation 的 sender 可以指定自己的直接 parent。浏览器提示使用独立的人类 Queue 或 Steer 控制路径。
-- **child 到 parent 的投递要求直接 parent 保持在线**——服务没有跨进程的持久 parent mailbox；parent 缺失时结算通知会保留在进程内 outbox 中，并在该 parent 下次激活时送达，但其他 child 到 parent 的消息在 parent 缺失时会被拒绝。
+- **child 到 parent 的投递要求直接 parent 保持在线**——服务没有跨进程的持久 parent mailbox；parent 缺失时结算通知会保留在进程内 outbox 中，并在该 parent 下次激活时送达，但其他 child 到 parent 的消息在 parent 缺失时会被拒绝。重启可能丢失 held 通知，保留的去重/取消窗口是有界的。
 - **取消收敛期间存在唤醒缺口**——中断信号发出后、driver 进入 idle 前被接受的后续消息会保持排队，直到另一条唤醒发送到达。
 - **待处理的注入上下文会保留 Activation**——settlement 会保守地把每个 Inbox occurrence 都视为未完成。Agent 进入 idle 后停放的上下文会让 child 及其在线祖先继续驻留，直到唤醒投递将其 claim、queue 变更将其移除，或 manager teardown 将其丢弃。
 - **驻留仅限进程内**——Activation inbox 与所有权图不会在两个 harness 进程之间协调；对单个持久化存储的并发访问需要持久化邮箱与跨进程租约协议。

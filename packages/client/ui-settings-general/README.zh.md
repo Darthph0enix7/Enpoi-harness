@@ -22,7 +22,7 @@ kind: "package-reference"
 
 -----
 
-设置面板采用各页面共享的 760 × 500 布局，并受视口大小约束。较长的页面在内容栏内部滚动；账号入口使用账号图标。面板挂载在 `#root` 之外而不是其内部，这样在文档序上更靠后的 chrome 行所声明的 macOS 窗口拖拽区不会吞掉它的控件。
+设置由一个触发座位与一个稳定根表面组成：`sidebar.settings` 只渲染触发行，AppFrame 在框架根渲染一次 `settings.surface` 座位，位于桌面栏/紧凑抽屉切换之外，因此切换 chrome 不会重新挂载这个唯一的 body portal 表面。桌面保留共享的有界覆盖层；紧凑模式（`useLayoutMode() === 'compact'`，包括竖向平板和窄精细指针窗口）使用 100dvh 安全区全屏页面与列表 → 详情步骤。切换的只是 chrome 与类名：对话框、分区内容宿主和已挂载分区在 1440 <-> 800 <-> 390 的实时缩放中保持同一 DOM/组件，因此草稿文本、选区和滚动无需刷新即可保留。`useModalLayer` 只在该稳定对话框上调用一次，负责 Escape、焦点陷阱和焦点归还；`hidden`/`inert` 语义让关闭的 chrome 不进入陷阱。紧凑页面在详情保留返回、在列表保留关闭；进入详情时聚焦返回，返回时把焦点还给来源行。分区内容宿主是外壳唯一的滚动所有者；分区内部的滚动仍由该分区自己拥有。
 
 <a id="use-this-package"></a>
 ## 使用本包
@@ -73,7 +73,7 @@ Web 与桌面端的通用设置底部显示当前发布版本，使用构建注�
 
 ### 连接恢复
 
-外壳是明确的恢复功能消费方，因此直接注入 Connection，而不把生命周期控制放进 `ctx.remote`。它的私有 hooks compartment 绑定 `ctx.connection.state`，组件只接收选出的状态与调用 `ctx.connection.reconnect()` 的注入回调。`ConnectionIndicator` 拥有内联展示并从 `settings` locale namespace 接收全部可见与无障碍文案；连接中状态的 800ms 最短可见驻留与 2 秒恢复确认计时器归外壳所有；恢复计时从驻留结束、恢复药丸实际可见时开始。
+外壳是明确的恢复功能消费方，因此直接注入 Connection，而不把生命周期控制放进 `ctx.remote`。它的私有 hooks compartment 绑定 `ctx.connection.state`，并额外提供基于 `connection.state.getDiagnosis?.()` 的可选诊断源；没有该 getter 的旧 Host 只会得到 `undefined`。组件接收选出的状态、经折叠与截断的诊断文本，以及调用 `ctx.connection.reconnect()` 的注入回调。`ConnectionIndicator` 拥有内联展示并从 `settings` locale namespace 接收全部可见与无障碍文案；终态诊断渲染简洁的 **连接已停止** 药丸、唯一的警告详情控件、限长的核心详情，以及仅在用户主动点击时调用 `window.location.reload()` 的显式 **重载页面** 操作。连接中状态的 800ms 最短可见驻留与 2 秒恢复确认计时器归外壳所有；恢复计时从驻留结束、恢复药丸实际可见时开始；后续健康代次会清除终态界面。
 
 ### 文档可用性
 

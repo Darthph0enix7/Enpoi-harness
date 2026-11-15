@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-使用 `dsh-tool-jobs`，可通过 `job_output`、`job_list` 与 `job_kill` 检查和控制后台命令、PTY 工作与 subagent。读取可在配置的超时内等待，列表结果标识 kind 与状态，取消只有在工作停止后才结算。有归属的任务完成时会以会话内通知告知其 agent：繁忙者在下一步收到注入，空闲者由 follow-up 轮次唤醒。配置控制等待上限、完成投递与连续唤醒上限。流输出仅供单一读取方消费；结算时所有者缺席的完成会在进程内保留，待该所有者下次激活时投递。
+使用 `dsh-tool-jobs`，可通过 `job_output`、`job_list` 与 `job_kill` 检查和控制后台命令、PTY 工作与 subagent。读取可在配置的超时内等待，列表结果标识 kind 与状态，取消只有在工作停止后才结算。长输出或有丢失的终态读取会把第一条保留的 stderr 行作为一段有界、转义后的摘录重复在开头。有归属的任务完成时会以会话内通知告知其 agent：繁忙者在下一步收到注入，空闲者由 follow-up 轮次唤醒。配置控制等待上限、完成投递与连续唤醒上限。流输出仅供单一读取方消费；结算时所有者缺席的完成会在进程内保留，待该所有者下次激活时投递。
 
 ## 目录
 
@@ -29,7 +29,7 @@ kind: "package-reference"
 
 ### 三个工具
 
-- `job_output(job_id, wait?, timeout_ms?)`——读取任务输出。流任务只返回自上次读取以来的输出；最终输出任务在结算后返回其结果。每个响应都以 `[status: ...]` 结尾。除非 `wait: true`，否则读取是非阻塞的；`wait: true` 最多等待到配置上限，超时时仍让运行中的任务保持存活。一次读取先渲染 stdout，再把 stderr 放进一段 `[stderr]`，标注读取前已离开内存的输出，并在结算后的第一次读取恰好携带一次任务的结果（subagent 的回答）。
+- `job_output(job_id, wait?, timeout_ms?)`——读取任务输出。流任务只返回自上次读取以来的输出；最终输出任务在结算后返回其结果。每个响应都以 `[status: ...]` 结尾。除非 `wait: true`，否则读取是非阻塞的；`wait: true` 最多等待到配置上限，超时时仍让运行中的任务保持存活。一次读取先渲染 stdout，再把 stderr 放进一段 `[stderr]`，标注读取前已离开内存的输出，并在结算后的第一次读取恰好携带一次任务的结果（subagent 的回答）。长输出或有丢失且返回了保留 stderr 的终态读取还会在开头加上一行有界的 `[stderr excerpt (retained output; verbatim, not a diagnosis): …]`，让保留的错误证据领读整段输出。
 - `job_list()`——列出你的后台任务及其 id、kind 与状态，每行一个：`<id> [<kind>] <status> — <label>`。
 - `job_kill(job_id, reason?)`——立即请求取消运行中的任务；任务在其工作真正停止后以 `killed` 结算。终止任务返回其当前快照，可选的原因会被记录并转发给任务。
 
@@ -57,6 +57,7 @@ kind: "package-reference"
 | `maxWaitTimeoutMs` | `600,000` | 模型所给等待时间的上限；更大的值向下收敛到它 |
 | `completionDelivery` | `wakeup` | `wakeup` 为空闲所有者开启一轮；`quiet` 让通知继续待领 |
 | `maxConsecutiveWakes` | 未设置 | 一个所有者可由唤醒开启的轮数，超出后通知降级为注入；未设置即不封顶 |
+| `stderrExcerptMaxChars` | `200` | 长输出或有丢失的终态读取重复保留 stderr 摘录时的最大字符数；`0` 表示关闭 |
 
 生成的[配置目录](../../../docs/config-catalog.zh.md#deepseek-aidsh-tool-jobs)是每个受支持字段及其 JSDoc 的穷尽式真源。
 
@@ -91,7 +92,7 @@ kind: "package-reference"
 
 ### 输出上限
 
-`job_output` 与 `job_kill` 会在策略运行前于前置的 pre-execute 监听器中捕获调用方可见任务，因此生产方上限适用于完整渲染结果。`job_output` 在策略保留默认渲染时保持其输出／状态拆分，对输出尾部与 `[status: ...]` 后缀设界；其他单文本结果——拒绝、短路、规范化工具或流水线失败、替换与阻止——按单个文本设界，而结构化多块策略结果保持自身形状。有界完成通知先为稳定的 `background job <id>` 前缀与 `job_output` 收集指令预留空间，再把剩余字节用于可变的 kind、label、status、detail 与截断标记，因此在 PTY 支持的 64 字节下限下通知仍可操作；已有的生产方截断标记会被复用，不会重复添加。
+`job_output` 与 `job_kill` 会在策略运行前于前置的 pre-execute 监听器中捕获调用方可见任务，因此生产方上限适用于完整渲染结果。`job_output` 在策略保留默认渲染时保持其输出／状态拆分，对输出尾部与 `[status: ...]` 后缀设界；其他单文本结果——拒绝、短路、规范化工具或流水线失败、替换与阻止——按单个文本设界，而结构化多块策略结果保持自身形状。当受界的 `job_output` 读取以保留 stderr 摘录行开头时，截断的生产方预算会保留该行与状态页脚，并把剩余字节用于输出尾部，因此既有截断标记与完整 spill 引用仍然可读；若预算无法在页脚之外容纳摘录，则页脚与尾部优先，摘录会被整体丢弃而不会留下片段。有界完成通知先为稳定的 `background job <id>` 前缀与 `job_output` 收集指令预留空间，再把剩余字节用于可变的 kind、label、status、detail 与截断标记，因此在 PTY 支持的 64 字节下限下通知仍可操作；已有的生产方截断标记会被复用，不会重复添加。
 
 ### 通知投递通道
 
@@ -157,7 +158,7 @@ Track every background job id you start. You are notified in-session when a job 
 
 #### 模型看到什么
 
-读取会返回输出或 `(no new output)`，随后是 `[status: <status>]` 和可选 detail。空列表返回 `(no background jobs)`。kill 返回 `requested cancellation of job <id>` 或现有终止状态。模型尚未收走且有所有者归属的完成使用上述通知。
+读取会返回输出或 `(no new output)`，随后是 `[status: <status>]` 和可选 detail。长输出或有丢失且返回了保留 stderr 的终态读取会以 `[stderr excerpt (retained output; verbatim, not a diagnosis): …]` 开头；其中转义后的单行文本是保留的任务输出，不是诊断，也不是指令。空列表返回 `(no background jobs)`。kill 返回 `requested cancellation of job <id>` 或现有终止状态。模型尚未收走且有所有者归属的完成使用上述通知。
 
 #### Token 影响
 

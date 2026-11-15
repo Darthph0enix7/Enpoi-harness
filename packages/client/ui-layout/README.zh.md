@@ -39,11 +39,11 @@ Windows Electron 的 `data-windows-titlebar` 标记在所有列上方预留顶�
 
 ### 自适应基础层
 
-`ui-layout` 安装自适应根层：启动 ui-primitives 的设备运行时，提供 `ctx.device`（共享 `DeviceRuntime`）与 `ctx.back`（共享 `BackStack`），并挂载 `adaptive.css`。该样式表的每条规则都限定在 `:root[data-device=…]`、`:root[data-keyboard=…]` 或指针/hover 媒体查询之下，拥有 `--dsh-safe-area-inset-*` 变量、触摸设备上的 `100dvh` 根高度与 `overscroll-behavior-y: none`、≥16px 的触摸输入规则（iOS 输入缩放），以及供后续移动端 lane 扩展的 `touch-action: manipulation` 交互配方。
+`ui-layout` 安装自适应根层：启动 ui-primitives 的设备运行时与布局模式运行时，提供 `ctx.device`（共享 `DeviceRuntime`）与 `ctx.back`（共享 `BackStack`），并挂载 `adaptive.css`。布局模式运行时是 `data-layout` 与 `useLayoutMode()` 的唯一来源；框架自身的 `ResizeObserver` 将测量宽度喂给它。该样式表拥有 `--dsh-safe-area-inset-*` 变量、紧凑外壳上的 `100dvh` 根高度与 `overscroll-behavior-y: none`、≥16px 的触摸输入规则（iOS 输入缩放），以及供后续移动端 lane 扩展的 `touch-action: manipulation` 交互配方。
 
-### 移动端外壳
+### 紧凑外壳
 
-触摸设备（`device.device !== 'desktop'`）会挂载 `MobileFrame`，而不是三栏网格：`AppFrame` 在根部进行分支，`columns.ts` 中的求解器保持不变。该容器拥有 48px、带安全区内边距的顶栏（导航开关、当前会话标题、由聊天 lane 注入视图分段的 `shell.mobile.header` 座位、`shell.mobile.more` 溢出面板，以及一个调用 `ctx.back.dismissTop()` 的返回控件）、内容列、由 `shell.mobile.bar` 提供的底部操作栏、作为左栏的滑出抽屉（264px，带遮罩与边缘滑动，可用遮罩、滑动或返回关闭），以及右栏既有的全屏面板。`rightbar` owner 共享新增 `mobile: true`，占用方因此不再渲染 44px 图标栏、始终采用全屏呈现，并把打开文档渲染为面板内的推入页。chrome 的显隐完全由样式表负责：`[data-keyboard='open']`、`(orientation: landscape)` 与矮视口会隐藏底栏并显示顶栏溢出按钮。
+`AppFrame` 保持单一持久框架根：当 `useLayoutMode()` 为 `compact` 时，紧凑 chrome 与同一组 main/rightbar 包装节点并列渲染，切换模式只改变 chrome 与类名，不会重新挂载对话、输入框或右侧面板。紧凑模式取决于测量后的框架宽度与宽高比，而不是输入设备：窄屏或竖向的精细指针窗口与触摸视口使用同一外壳。48px 安全区顶栏承载导航开关、当前会话标题、`shell.mobile.header` 座位、溢出开关，以及调用 `ctx.back.dismissTop()` 的返回控件；`shell.mobile.bar` 提供底部操作栏；底栏最多绘制注册表前三项、一个活跃固定项和 More；More 通过 owner 的类型化座位（`open` / `openMore` / `dismiss` / `onSelect`）打开顶栏溢出面板，外壳负责该面板的对话框焦点进入、Tab 陷阱、Escape/返回/遮罩关闭，以及把焦点还给打开它的控件。左栏是带遮罩与边缘滑动的抽屉（264px，可用遮罩、滑动或返回关闭）；持久 rightbar 通过 `mobile: true` 采用全屏呈现。chrome 显隐由样式表负责：`[data-keyboard='open']`、`(orientation: landscape)` 与矮视口会隐藏底栏并显示顶栏溢出按钮。隐藏控件动作会将 `--dsh-mobile-header-height`、`--dsh-mobile-bar-height` 与 `--dsh-shell-inset-bottom` 归零，并保留可见的 44px“显示控件”恢复按钮以及 Escape/返回关闭。
 
 ### 主题呈现
 

@@ -203,7 +203,7 @@ export interface Config {
 ## `@deepseek-ai/dsh-api-gateway`
 
 - `inject`: `typert`
-- `source`: [`packages/api/gateway/src/index.ts:159`](../packages/api/gateway/src/index.ts)
+- `source`: [`packages/api/gateway/src/index.ts:162`](../packages/api/gateway/src/index.ts)
 
 ```ts config-catalog
 /** Gateway transport configuration. */
@@ -251,6 +251,22 @@ export interface Config {
    * bound. @default 900000
    */
   readonly remoteEventReplayMaxAgeMs?: number
+  /**
+   * Concurrent forwarded-event listener tasks (Agent answers plus plain
+   * emits) one Client generation may launch before it fails as resource-
+   * exhausted. The failure is terminal until an explicit reconnect or reload;
+   * it is never retried automatically. @default 64
+   */
+  readonly remoteEventClientMaxActiveTasks?: number
+  /**
+   * Abandoned forwarded-event listener tasks tolerated behind the current
+   * Client generation. A task that ignores cancellation counts here until it
+   * settles; at or above this threshold a replacement Client generation is
+   * refused with a terminal diagnosis instead of stacking unbounded work. One
+   * teardown can retire up to the active-task budget, so this is a replacement
+   * threshold, not a hard ceiling on that burst. @default 4
+   */
+  readonly remoteEventClientMaxRetiredTasks?: number
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-api-gateway -->
@@ -557,6 +573,20 @@ export interface ConnectionRecoveryConfig {
   generationReadyWarnMs?: number
   /** Deadline in ms for readiness, including physical connection setup. Default: 15000. */
   generationReadyTimeoutMs?: number
+  /**
+   * Time in ms an aborted generation has to settle before it is counted as
+   * retired and a fresh generation may replace it. A retired source keeps its
+   * callbacks fenced; recovery pauses once the abandoned budget is exceeded.
+   * Default: 5000.
+   */
+  settleTimeoutMs?: number
+  /**
+   * Abandoned generation sources tolerated while a replacement runs. Past
+   * this budget recovery pauses in a terminal disconnected state and asks for
+   * a manual page reload rather than spawning unbounded unabortable work.
+   * Default: 1.
+   */
+  maxRetiredGenerations?: number
   /**
    * Continuous readiness in ms before a lost generation resets the retry
    * ladder. A generation that becomes ready and then dies sooner keeps
@@ -4119,6 +4149,12 @@ export interface Config {
    * the next user input.
    */
   maxConsecutiveWakes?: number
+  /**
+   * Maximum characters of retained stderr repeated above a long or lossy
+   * finished read, so the tail of a truncated read still leads with its error
+   * evidence (default 200). Set 0 to disable the excerpt.
+   */
+  stderrExcerptMaxChars?: number
 }
 
 /**

@@ -31,9 +31,9 @@ kind: "package-reference"
 
 ### 浏览目录
 
-悬停触发器 150ms 后打开目录；指针离开触发器和目录后，经过 120ms 关闭。点击后代数量触发器会固定目录，直到点击外部，或在触发器或树内按 Escape 关闭。点击面包屑标题会导航至对应会话。
+悬停触发器 150ms 后打开目录；指针离开触发器和目录后，经过 120ms 关闭。点击后代数量触发器会固定目录，直到点击外部，或在触发器或树内按 Escape 关闭。点击面包屑标题会导航至对应会话。同级行先排运行中的 child，再按最近一次持久更新排序（列表行没有更新时间时使用直接子项的创建时间），并以稳定的 id 打破平局；每个分支的后代仍紧跟在父项之下。
 
-行显示 mode、活动状态与由日志支撑的可选 title；running 使用共享 ongoing loading，最近一个已结束轮次正常完成的 inactive child 使用共享 success 绿点，其他 inactive child 使用共享 idle 灰点。每行都为状态图标预留相同的 14px 列宽，并将较小的圆点居中，使 title 与 loading 状态对齐。紧凑的页头触发器会垂直居中活动图标与数量，并保留 4px 水平间距。尾随列在上行显示提供方的持久化 token 用量总计，在下行显示活跃轮次耗时。键盘导航：ArrowRight/ArrowLeft 展开和折叠分支；ArrowUp/ArrowDown、Home、End 与 Escape 用于导航或关闭树。没有 label 的 one-shot 行回退到其会话 id。只有一行自身的目录加载为空后，它才是已知叶子。
+行显示 mode、活动状态与由日志支撑的可选 title；running 使用共享 ongoing loading，最近一个已结束轮次正常完成的 inactive child 使用共享 success 绿点，其他 inactive child 使用共享 idle 灰点。每行都为状态图标预留相同的 14px 列宽，并将较小的圆点居中，使 title 与 loading 状态对齐。紧凑的页头触发器会垂直居中活动图标与数量，并保留 4px 水平间距。尾随列在上行显示提供方的持久化 token 用量总计，在下行显示活跃轮次耗时。键盘导航：ArrowRight/ArrowLeft 展开和折叠分支；ArrowUp/ArrowDown、Home、End 与 Escape 用于导航或关闭树。没有 label 的 one-shot 行回退到其会话 id。未加载或空目录加载中的 child 显示加载控件，但不声明 `aria-expanded`；就绪的空目录是叶子，就绪的非空目录是带展开控件的分支，读取失败则使用分支展开控件进入其重试行。目录递归在遇到祖先时停止，因此循环或重复声明不会继续递归。
 
 ### 续接对话
 
@@ -55,11 +55,11 @@ kind: "package-reference"
 
 ### 目录派生
 
-页头谱系 renderer 通过标准 `useSessions` 钩子读取 `projectionsBySession`。renderer 从每个 Session 的共享值中选择 `subagentCatalog`，用于成员关系、展开控件与数量；活动状态优先使用统一 UI status，缺少时使用 Session 摘要；摘要提供标题与用量。展开行会按需加载初始目录。实时 projection 帧更新所有已加载层级，无需菜单订阅或重复成员查询。行在目录缺席、加载中或失败时保持可展开，并在目录就绪且为空后成为已知叶子。
+页头谱系 renderer 通过标准 `useSessions` 钩子读取 `projectionsBySession`。renderer 从每个 Session 的共享值中选择 `subagentCatalog`，用于成员关系、展开控件与数量；活动状态优先使用统一 UI status，缺少时使用 Session 摘要；摘要提供标题与用量。展开行会按需加载初始目录。实时 projection 帧更新所有已加载层级，无需菜单订阅或重复成员查询。展开状态区分未知或加载中目录、已知叶子、分支和读取失败；只有就绪且为空的目录才成为叶子。idle 的空值是缓存且非权威，因此保持加载中；idle 的非空值仍显示为可见的陈旧分支。
 
-打开目录下拉菜单不会请求其根目录。展开子节点目录或重试失败读取时调用 `refreshProjection`；共享投影值的变化会自动更新显示。
+打开数量下拉菜单不会请求其根目录。打开面包屑切换器时，如果 parent 目录缺席或空目录仍在加载，则发起一次受保护读取，因此不会永久停留在加载状态。展开子节点目录或重试失败读取时调用 `refreshProjection`；共享投影值的变化会自动更新显示，重复打开会复用 manager 的单飞读取。
 
-面包屑地址从 Provider 所绑定的 Session 地址和已加载的 parent 目录推导，也包括从未选中过的祖先。
+面包屑地址依次从 Provider 所绑定的 Session 地址、列表行中权威的 subagent parent、以及唯一无歧义的已加载目录声明推导，也包括从未选中过的祖先。相互竞争的目录声明不构成谱系。
 
 ### 耗时、完成状态与 token
 

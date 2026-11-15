@@ -4165,11 +4165,23 @@ function readSettingsDocument(settings, ns) {
 function readOrchestrationDocument(settings) {
   return readSettingsDocument(settings, ORCHESTRATION_NAMESPACE);
 }
+function configuredRoleToolDenies(document, role) {
+  const permissions = document?.permissions;
+  if (permissions === null || typeof permissions !== "object") return [];
+  const agents = permissions.agents;
+  if (agents === null || typeof agents !== "object") return [];
+  const entry = agents[role];
+  if (entry === null || typeof entry !== "object") return [];
+  const tools = entry.tools;
+  if (tools === null || typeof tools !== "object") return [];
+  return Object.entries(tools).filter(([, policy]) => policy === "deny").map(([name]) => name);
+}
 export {
   ORCHESTRATION_NAMESPACE,
   blockerSchema,
   briefEntrySchema,
   briefProseUpdatedSchema,
+  configuredRoleToolDenies,
   livingBriefStateSchema,
   livingBriefViewSchema,
   provenanceSchema,

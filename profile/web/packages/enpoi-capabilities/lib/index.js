@@ -96,6 +96,7 @@ var __callDispose = (stack, error62, hasError) => {
 };
 
 // src/policy.ts
+import { configuredRoleToolDenies } from "dsh-enpoi-contracts";
 function isFullAccessMode(approvalPolicy, sandboxMode) {
   return approvalPolicy === "never" && sandboxMode === "danger-full-access";
 }
@@ -110,7 +111,304 @@ function seatToolDenyFor(seat, document) {
   }
   return SHIPPED_SEAT_TOOL_DENY[seat] ?? [];
 }
+function heredocHeadersOnLine(line) {
+  const headers = [];
+  let quote = null;
+  let arithmetic = 0;
+  let i = 0;
+  while (i < line.length) {
+    const ch = line[i];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      i += 1;
+      continue;
+    }
+    if (arithmetic > 0) {
+      if (ch === "(") arithmetic += 1;
+      else if (ch === ")") arithmetic -= 1;
+      i += 1;
+      continue;
+    }
+    if (ch === "$" && line[i + 1] === "(" && line[i + 2] === "(") {
+      arithmetic = 2;
+      i += 3;
+      continue;
+    }
+    if (ch === "(" && line[i + 1] === "(" && (i === 0 || /[\s;|&(]/.test(line[i - 1] ?? ""))) {
+      arithmetic = 2;
+      i += 2;
+      continue;
+    }
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      i += 1;
+      continue;
+    }
+    if (ch === "#" && (i === 0 || /\s/.test(line[i - 1] ?? ""))) break;
+    if (ch !== "<" || line[i + 1] !== "<") {
+      i += 1;
+      continue;
+    }
+    const third = line[i + 2];
+    if (third === "<") {
+      i += 3;
+      continue;
+    }
+    let cursor = i + 2;
+    let stripTabs = false;
+    if (line[cursor] === "-") {
+      stripTabs = true;
+      cursor += 1;
+    }
+    while (line[cursor] === " " || line[cursor] === "	") cursor += 1;
+    const start = cursor;
+    let delimiter = "";
+    let quoted = false;
+    while (cursor < line.length) {
+      const wordChar = line[cursor];
+      if (wordChar === '"' || wordChar === "'") {
+        quoted = true;
+        const end = line.indexOf(wordChar, cursor + 1);
+        if (end === -1) return { headers, unsupported: true };
+        delimiter += line.slice(cursor + 1, end);
+        cursor = end + 1;
+        continue;
+      }
+      if (wordChar === "\\") {
+        quoted = true;
+        if (line[cursor + 1] !== void 0) delimiter += line[cursor + 1];
+        cursor += 2;
+        continue;
+      }
+      if (HEREDOC_WORD_END.has(wordChar)) break;
+      delimiter += wordChar;
+      cursor += 1;
+    }
+    if (cursor === start || delimiter === "") return { headers, unsupported: true };
+    if (/[$`]/.test(delimiter)) return { headers, unsupported: true };
+    headers.push({ delimiter, quoted, stripTabs });
+    i = cursor;
+  }
+  return { headers, unsupported: false };
+}
+function extractSubstitutions(text) {
+  const commands = [];
+  let unsupported = false;
+  const scan = (input2, depth) => {
+    if (depth > MAX_SUBSTITUTION_DEPTH) {
+      unsupported = true;
+      return;
+    }
+    let i = 0;
+    let quote = null;
+    while (i < input2.length) {
+      const ch = input2[i];
+      if (quote === "'") {
+        if (ch === "'") quote = null;
+        i += 1;
+        continue;
+      }
+      if (quote === '"') {
+        if (ch === '"') {
+          quote = null;
+          i += 1;
+          continue;
+        }
+        if (ch === "\\" && i + 1 < input2.length) {
+          i += 2;
+          continue;
+        }
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+        i += 1;
+        continue;
+      }
+      if (ch === "\\" && i + 1 < input2.length) {
+        i += 2;
+        continue;
+      }
+      if (ch === "`") {
+        let cursor = i + 1;
+        let inner = "";
+        let closed = false;
+        while (cursor < input2.length) {
+          const c = input2[cursor];
+          if (c === "\\" && cursor + 1 < input2.length) {
+            inner += input2[cursor + 1];
+            cursor += 2;
+            continue;
+          }
+          if (c === "`") {
+            closed = true;
+            break;
+          }
+          inner += c;
+          cursor += 1;
+        }
+        if (!closed) {
+          unsupported = true;
+          i += 1;
+          continue;
+        }
+        commands.push(inner);
+        scan(inner, depth + 1);
+        i = cursor + 1;
+        continue;
+      }
+      if (ch === "$" && input2[i + 1] === "(" && input2[i + 2] === "(") {
+        let cursor = i + 3;
+        let level = 2;
+        while (cursor < input2.length && level > 0) {
+          const c = input2[cursor];
+          if (c === "(") level += 1;
+          else if (c === ")") level -= 1;
+          cursor += 1;
+        }
+        if (level !== 0) unsupported = true;
+        else scan(input2.slice(i + 3, cursor - 2), depth + 1);
+        i = cursor;
+        continue;
+      }
+      if (ch === "$" && input2[i + 1] === "(") {
+        let cursor = i + 2;
+        let level = 1;
+        let inner = "";
+        while (cursor < input2.length) {
+          const c = input2[cursor];
+          if (c === "\\" && cursor + 1 < input2.length) {
+            inner += input2[cursor + 1];
+            cursor += 2;
+            continue;
+          }
+          if (c === '"' || c === "'") {
+            const end = input2.indexOf(c, cursor + 1);
+            if (end === -1) {
+              unsupported = true;
+              break;
+            }
+            inner += input2.slice(cursor, end + 1);
+            cursor = end + 1;
+            continue;
+          }
+          if (c === "(") level += 1;
+          else if (c === ")") {
+            level -= 1;
+            if (level === 0) break;
+          }
+          inner += c;
+          cursor += 1;
+        }
+        if (level !== 0) {
+          unsupported = true;
+          i += 1;
+          continue;
+        }
+        commands.push(inner);
+        scan(inner, depth + 1);
+        i = cursor + 1;
+        continue;
+      }
+      if (ch === "$" && input2[i + 1] === "{") {
+        let cursor = i + 2;
+        let level = 1;
+        while (cursor < input2.length) {
+          const c = input2[cursor];
+          if (c === "\\") {
+            cursor += 2;
+            continue;
+          }
+          if (c === "{") level += 1;
+          else if (c === "}") {
+            level -= 1;
+            if (level === 0) break;
+          }
+          cursor += 1;
+        }
+        if (level !== 0) {
+          unsupported = true;
+          i += 1;
+          continue;
+        }
+        scan(input2.slice(i + 2, cursor), depth + 1);
+        i = cursor + 1;
+        continue;
+      }
+      i += 1;
+    }
+  };
+  scan(text, 0);
+  return { commands, unsupported };
+}
+function analyzeHeredocs(command) {
+  const lines = command.split("\n");
+  const out = [];
+  const unquotedBodies = [];
+  const expandedCommands = [];
+  let unsupported = false;
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const found = heredocHeadersOnLine(line);
+    out.push(line);
+    if (found.unsupported) {
+      unsupported = true;
+      i += 1;
+      continue;
+    }
+    if (found.headers.length === 0) {
+      i += 1;
+      continue;
+    }
+    if (found.headers.length > 1) {
+      unsupported = true;
+      i += 1;
+      continue;
+    }
+    const header = found.headers[0];
+    let cursor = i + 1;
+    const body = [];
+    let terminated = false;
+    while (cursor < lines.length) {
+      const bodyLine = lines[cursor];
+      const compared = header.stripTabs ? bodyLine.replace(/^\t+/, "") : bodyLine;
+      if (compared === header.delimiter) {
+        terminated = true;
+        break;
+      }
+      body.push(bodyLine);
+      cursor += 1;
+    }
+    if (!terminated) {
+      unsupported = true;
+      i += 1;
+      continue;
+    }
+    if (!header.quoted) {
+      const bodyText = body.join("\n");
+      unquotedBodies.push(bodyText);
+      const extracted = extractSubstitutions(bodyText);
+      if (extracted.unsupported) unsupported = true;
+      expandedCommands.push(...extracted.commands);
+    }
+    for (let blank = i + 1; blank <= cursor; blank += 1) out.push("");
+    i = cursor + 1;
+  }
+  const masked = out.join("\n");
+  const ordinary = extractSubstitutions(masked);
+  if (ordinary.unsupported) unsupported = true;
+  expandedCommands.unshift(...ordinary.commands);
+  return { command: masked, unquotedBodies, expandedCommands, unsupported };
+}
 function splitCompoundCommand(command) {
+  const splitTarget = analyzeHeredocs(command).command;
+  return splitPlainCompoundCommand(splitTarget);
+}
+function splitPlainCompoundCommand(command) {
   const parts = [];
   let current = "";
   let quote = null;
@@ -159,6 +457,204 @@ function stripEnvPrefixes(subCommand) {
   let i = 0;
   while (i < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i] ?? "")) i += 1;
   return i > 0 ? tokens.slice(i).join(" ") : subCommand.trim();
+}
+function credentialPathOf(path) {
+  const value = path.replace(/^['"]+|['"]+$/g, "").trim();
+  if (value === "" || value.startsWith("-")) return void 0;
+  if (SAFE_ENV_TEMPLATE.test(value)) return void 0;
+  return CREDENTIAL_PATH.test(value) ? value : void 0;
+}
+function shellWordTokens(sub) {
+  const words = [];
+  let current = "";
+  let quoted = false;
+  let quote = null;
+  const flush = () => {
+    if (current !== "" || quoted) words.push({ value: current, quoted });
+    current = "";
+    quoted = false;
+  };
+  let i = 0;
+  while (i < sub.length) {
+    const ch = sub[i];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      else current += ch;
+      i += 1;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') {
+        quote = null;
+        i += 1;
+        continue;
+      }
+      if (ch === "\\" && (sub[i + 1] === '"' || sub[i + 1] === "\\")) {
+        current += sub[i + 1];
+        i += 2;
+        continue;
+      }
+      current += ch;
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      quoted = true;
+      i += 1;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < sub.length) {
+      current += sub[i + 1];
+      quoted = true;
+      i += 2;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      flush();
+      i += 1;
+      continue;
+    }
+    current += ch;
+    i += 1;
+  }
+  flush();
+  return words;
+}
+function credentialOperandOf(command, depth = 0) {
+  if (depth > MAX_WRAPPER_DEPTH) return void 0;
+  const analysis = analyzeHeredocs(command);
+  if (analysis.unsupported) return void 0;
+  for (const target of redirectionTargets(analysis.command)) {
+    const hit = credentialPathOf(target);
+    if (hit !== void 0) return hit;
+  }
+  for (const expanded of analysis.expandedCommands) {
+    const nested = credentialOperandOf(expanded, depth + 1);
+    if (nested !== void 0) return nested;
+  }
+  const sanitized = stripEnvPrefixes(analysis.command);
+  for (const sub of splitCompoundCommand(sanitized)) {
+    const words = shellWordTokens(stripEnvPrefixes(sub));
+    if (words.length === 0) continue;
+    const prefix = scanWrapperPrefix(words.map((word) => word.value), false);
+    if (prefix.query) continue;
+    const start = prefix.end > 0 && prefix.end < words.length ? prefix.end : 0;
+    const commandWord = words[start];
+    if (commandWord === void 0) continue;
+    const argv0 = commandWord.value.slice(commandWord.value.lastIndexOf("/") + 1);
+    if (DATA_COMMANDS.has(argv0)) continue;
+    if (SHELL_INTERPRETERS.has(argv0) && depth < MAX_WRAPPER_DEPTH) {
+      const inline = words.findIndex((word, index) => index > start && word.value === "-c");
+      const inner = inline === -1 ? void 0 : words[inline + 1];
+      if (inner !== void 0) {
+        const nested = credentialOperandOf(inner.value, depth + 1);
+        if (nested !== void 0) return nested;
+      }
+    }
+    const patternFirst = PATTERN_FIRST_COMMANDS.has(argv0);
+    const fileArgs = FILE_ARG_COMMANDS.has(argv0) || patternFirst;
+    let patternSkipped = !patternFirst;
+    for (let index = start + 1; index < words.length; index += 1) {
+      const word = words[index];
+      if (word === void 0) continue;
+      if (word.value.startsWith("-")) {
+        const eq = word.value.indexOf("=");
+        if (eq > 0) {
+          const inline = credentialPathOf(word.value.slice(eq + 1));
+          if (inline !== void 0) return inline;
+        }
+        if (FILE_VALUE_FLAGS.has(word.value)) {
+          const next = words[index + 1];
+          if (next !== void 0) {
+            const hit2 = credentialPathOf(next.value);
+            if (hit2 !== void 0) return hit2;
+            index += 1;
+          }
+        }
+        continue;
+      }
+      if (!patternSkipped) {
+        patternSkipped = true;
+        continue;
+      }
+      if (word.quoted && !fileArgs) continue;
+      const hit = credentialPathOf(word.value);
+      if (hit !== void 0) return hit;
+    }
+  }
+  return void 0;
+}
+function redirectionTargets(command) {
+  const targets = [];
+  let quote = null;
+  let i = 0;
+  while (i < command.length) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (ch === "\\" && quote === '"' && i + 1 < command.length) {
+        i += 2;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      i += 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      i += 1;
+      continue;
+    }
+    if (ch === "\\" && i + 1 < command.length) {
+      i += 2;
+      continue;
+    }
+    if (ch !== ">" && ch !== "<") {
+      i += 1;
+      continue;
+    }
+    if (ch === "<" && command[i + 1] === "<") {
+      i += command[i + 2] === "<" ? 3 : 2;
+      continue;
+    }
+    if (ch === "<" && command[i + 1] === "(") {
+      i += 2;
+      continue;
+    }
+    let cursor = i + 1;
+    if (ch === ">" && (command[cursor] === ">" || command[cursor] === "|")) cursor += 1;
+    else if (ch === "<" && command[cursor] === ">") cursor += 1;
+    while (command[cursor] === " " || command[cursor] === "	") cursor += 1;
+    let target = "";
+    if (command[cursor] === '"' || command[cursor] === "'") {
+      const quoteChar = command[cursor];
+      cursor += 1;
+      while (cursor < command.length) {
+        const c = command[cursor];
+        if (c === "\\" && quoteChar === '"' && cursor + 1 < command.length) {
+          target += command[cursor + 1];
+          cursor += 2;
+          continue;
+        }
+        if (c === quoteChar) {
+          cursor += 1;
+          break;
+        }
+        target += c;
+        cursor += 1;
+      }
+    } else {
+      while (cursor < command.length) {
+        const c = command[cursor];
+        if (/\s/.test(c) || c === ";" || c === "|" || c === "&") break;
+        target += c;
+        cursor += 1;
+      }
+    }
+    if (target !== "" && !target.startsWith("&")) targets.push(target);
+    i = cursor;
+  }
+  return targets;
 }
 function versionStem(word) {
   return word.includes(".") ? word.slice(0, word.indexOf(".")) : word;
@@ -277,17 +773,36 @@ function decideSubCommand(sub, config2, agent) {
     if (agentTool === "ask") return { kind: "ask", reason: `agent policy asks for bash`, source: `agent:${agent}`, grantTier: "tool" };
     return { kind: "allow", source: `agent:${agent}` };
   }
-  const globalPatterns = [...config2.bashPatterns ?? [], ...SHIPPED_BASH_PATTERNS];
-  for (const { pattern, policy } of globalPatterns) {
+  const operatorPatterns = config2.bashPatterns;
+  if (operatorPatterns !== void 0) {
+    for (const { pattern, policy } of operatorPatterns) {
+      if (!matchBashPattern(pattern, sub)) continue;
+      if (policy === "deny") return { kind: "deny", reason: `bash rule "${pattern}" denies this command`, source: `pattern:${pattern}` };
+      if (policy === "ask") return patternAsk(pattern, `bash rule "${pattern}" requires approval`, `pattern:${pattern}`);
+      return { kind: "allow", source: `pattern:${pattern}` };
+    }
+  }
+  const operatorTool = config2.tools?.bash;
+  if (operatorTool === "deny") return { kind: "deny", reason: "operator policy denies bash", source: "matrix:global" };
+  for (const { pattern, policy } of SHIPPED_BASH_PATTERNS) {
+    if (pattern === "*") continue;
     if (!matchBashPattern(pattern, sub)) continue;
     if (policy === "deny") return { kind: "deny", reason: `bash rule "${pattern}" denies this command`, source: `pattern:${pattern}` };
     if (policy === "ask") return patternAsk(pattern, `bash rule "${pattern}" requires approval`, `pattern:${pattern}`);
     return { kind: "allow", source: `pattern:${pattern}` };
   }
-  const globalTool = config2.tools?.bash ?? SHIPPED_TOOL_DEFAULTS.bash ?? "ask";
-  if (globalTool === "deny") return { kind: "deny", reason: "operator policy denies bash", source: "matrix:global" };
-  if (globalTool === "ask") return { kind: "ask", reason: "operator policy asks for bash", source: "matrix:global", grantTier: "tool" };
-  return { kind: "allow", source: "matrix:global" };
+  if (operatorTool === "ask") return { kind: "ask", reason: "operator policy asks for bash", source: "matrix:global", grantTier: "tool" };
+  if (operatorTool === "allow") return { kind: "allow", source: "matrix:global" };
+  for (const { pattern, policy } of SHIPPED_BASH_PATTERNS) {
+    if (pattern !== "*") continue;
+    if (policy === "deny") return { kind: "deny", reason: `bash rule "${pattern}" denies this command`, source: `pattern:${pattern}` };
+    if (policy === "ask") return patternAsk(pattern, `bash rule "${pattern}" requires approval`, `pattern:${pattern}`);
+    return { kind: "allow", source: `pattern:${pattern}` };
+  }
+  const shippedTool = SHIPPED_TOOL_DEFAULTS.bash ?? "ask";
+  if (shippedTool === "deny") return { kind: "deny", reason: "shipped policy denies bash", source: "matrix:shipped" };
+  if (shippedTool === "ask") return { kind: "ask", reason: "shipped policy asks for bash", source: "matrix:shipped", grantTier: "tool" };
+  return { kind: "allow", source: "matrix:shipped" };
 }
 function baseName(word) {
   return word.slice(word.lastIndexOf("/") + 1);
@@ -410,6 +925,13 @@ function hiddenDangerAsk(ctx) {
     source: "scan:hidden-danger",
     grantTier: "pattern",
     pattern: ctx.rawCommand
+  };
+}
+function analysisLimitRefusal(ctx, detail) {
+  return {
+    kind: "deny",
+    reason: `[ANALYSIS_LIMIT] ${detail}; refusing because the effect cannot be classified safely`,
+    source: "scan:analysis-limit"
   };
 }
 function privilegedShellAsk(ctx) {
@@ -553,10 +1075,36 @@ function resolvePolicy(input2) {
   }
   return resolveToolPolicy(toolName, input2);
 }
-function evaluateCommandPolicy(command, input2) {
+function evaluateCommandPolicy(command, input2, depth = 0) {
+  const ctx = { config: input2.config, agent: input2.agent, rawCommand: command };
+  if (depth > MAX_SUBSTITUTION_DEPTH || command.length > MAX_ANALYSIS_CHARS) {
+    return analysisLimitRefusal(ctx, depth > MAX_SUBSTITUTION_DEPTH ? "command substitution nesting exceeds the bounded policy analyzer" : "command exceeds the bounded policy-analysis size");
+  }
+  const heredocs = analyzeHeredocs(command);
+  if (heredocs.unsupported) {
+    const rawDeny = denyInRawSubcommands(command, input2);
+    if (rawDeny !== void 0) return rawDeny;
+    const extracted = extractSubstitutions(command);
+    for (const expanded of extracted.commands) {
+      const decision = evaluateCommandPolicy(expanded, input2, depth + 1);
+      if (decision.kind === "deny") return decision;
+    }
+    if (bashNeverRuns(input2.config, input2.agent)) {
+      return { kind: "deny", reason: "operator policy denies bash", source: "matrix:global" };
+    }
+    return analysisLimitRefusal(ctx, "command uses a heredoc/here-string shape the bounded analyzer cannot classify");
+  }
   const subs = splitCompoundCommand(command);
   if (subs.length === 0) return { kind: "deny", reason: "empty command", source: "policy:empty" };
-  const evalCtx = { config: input2.config, agent: input2.agent, rawCommand: command };
+  const evalCtx = ctx;
+  let expandedAsk = null;
+  for (const expanded of heredocs.expandedCommands) {
+    const decision = evaluateCommandPolicy(expanded, input2, depth + 1);
+    if (decision.kind === "deny") {
+      return { kind: "deny", reason: `${decision.reason} (in an unquoted heredoc substitution)`, source: decision.source };
+    }
+    if (decision.kind === "ask" && expandedAsk === null) expandedAsk = decision;
+  }
   let sawAsk = null;
   let firstAllow = null;
   for (const raw of subs) {
@@ -586,7 +1134,26 @@ function evaluateCommandPolicy(command, input2) {
     }
     return sawAsk;
   }
+  if (expandedAsk !== null) {
+    return {
+      kind: "ask",
+      reason: `unquoted heredoc substitution: ${expandedAsk.reason}`,
+      source: `heredoc:${expandedAsk.source}`,
+      grantTier: expandedAsk.grantTier,
+      ...expandedAsk.pattern !== void 0 ? { pattern: command } : {}
+    };
+  }
   return { kind: "allow", source: firstAllow?.source ?? "policy:all-subcommands-allowed" };
+}
+function denyInRawSubcommands(command, input2) {
+  const ctx = { config: input2.config, agent: input2.agent, rawCommand: command };
+  for (const raw of splitPlainCompoundCommand(command)) {
+    const sub = stripEnvPrefixes(raw);
+    if (sub === "") continue;
+    const decision = evaluateSubCommand(sub, 0, ctx);
+    if (decision.kind === "deny") return decision;
+  }
+  return void 0;
 }
 function resolveToolPolicy(toolName, input2) {
   const agent = input2.agent ?? "(unknown)";
@@ -640,12 +1207,28 @@ function advertisedToolNames(toolNames, approvalPolicy, input2) {
   void approvalPolicy;
   return toolNames.filter((toolName) => !neverRunsTool(toolName, input2));
 }
-function neverRunsTool(toolName, input2) {
-  if (toolName === "bash") {
-    const agentBash = input2.agent !== void 0 ? input2.config.agents?.[input2.agent]?.tools?.bash : void 0;
-    const policy = agentBash ?? input2.config.tools?.bash ?? SHIPPED_TOOL_DEFAULTS.bash ?? "ask";
-    return policy === "deny";
+function bashNeverRuns(config2, agent) {
+  const agentCfg = agent !== void 0 ? config2.agents?.[agent] : void 0;
+  const agentPatterns = agentCfg?.bashPatterns;
+  if (agentPatterns !== void 0 && agentPatterns.length > 0) {
+    if (agentPatterns[0]?.pattern === "*") return agentPatterns[0].policy === "deny";
+    if (agentPatterns.some((entry) => entry.policy !== "deny")) return false;
+    if (agentCfg?.tools?.bash === "deny") return true;
+  } else if (agentCfg?.tools?.bash === "deny") {
+    return true;
   }
+  if (agentCfg?.tools?.bash !== void 0) return false;
+  const operatorPatterns = config2.bashPatterns;
+  if (operatorPatterns !== void 0 && operatorPatterns.length > 0) {
+    if (operatorPatterns[0]?.pattern === "*") return operatorPatterns[0].policy === "deny";
+    if (operatorPatterns.some((entry) => entry.policy !== "deny")) return false;
+    return config2.tools?.bash === "deny";
+  }
+  if (config2.tools?.bash !== void 0) return config2.tools.bash === "deny";
+  return false;
+}
+function neverRunsTool(toolName, input2) {
+  if (toolName === "bash") return bashNeverRuns(input2.config, input2.agent);
   const decision = resolvePolicy({
     toolName,
     agent: input2.agent,
@@ -681,7 +1264,7 @@ function standingGrantRecord(id, proposal, createdAt) {
     createdAt
   };
 }
-var MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_SEAT_TOOL_DENY, SHIPPED_SEAT_TOOL_POLICY, SHIPPED_TOOL_DEFAULTS, SHIPPED_TOOL_DEFAULT_EXEMPTIONS, SHIPPED_BASH_PATTERNS, HIDDEN_SURFACE, DANGER_VERB_SET, SHELL_INTERPRETERS, INLINE_INTERPRETERS, SOURCE_BUILTINS, OPAQUE_EXECUTORS, VERSION_HELP_FLAGS, MAX_WRAPPER_DEPTH, WRAPPER_VALUE_FLAGS, COMMAND_WRAPPERS;
+var MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_SEAT_TOOL_DENY, SHIPPED_SEAT_TOOL_POLICY, SHIPPED_TOOL_DEFAULTS, SHIPPED_TOOL_DEFAULT_EXEMPTIONS, SHIPPED_BASH_PATTERNS, HEREDOC_WORD_END, SAFE_ENV_TEMPLATE, CREDENTIAL_PATH, DATA_COMMANDS, FILE_ARG_COMMANDS, FILE_VALUE_FLAGS, PATTERN_FIRST_COMMANDS, HIDDEN_SURFACE, DANGER_VERB_SET, SHELL_INTERPRETERS, INLINE_INTERPRETERS, SOURCE_BUILTINS, OPAQUE_EXECUTORS, VERSION_HELP_FLAGS, MAX_WRAPPER_DEPTH, MAX_ANALYSIS_CHARS, MAX_SUBSTITUTION_DEPTH, WRAPPER_VALUE_FLAGS, COMMAND_WRAPPERS;
 var init_policy = __esm({
   "src/policy.ts"() {
     "use strict";
@@ -897,6 +1480,59 @@ var init_policy = __esm({
       // Only the dangerous list above asks.
       { pattern: "*", policy: "allow" }
     ];
+    HEREDOC_WORD_END = /* @__PURE__ */ new Set([" ", "	", "\r", "\n", ";", "|", "&", "<", ">", "(", ")"]);
+    SAFE_ENV_TEMPLATE = /(?:^|[\\/])\.env\.(?:example|template|sample)$/i;
+    CREDENTIAL_PATH = /(?:^|[\s/'"=@])\.env(?:\.(?!example\b|template\b|sample\b)[A-Za-z0-9._-]+)?(?:$|[\s/'"])|(?:^|[\s/'"=@])\.ssh(?:\/|[\s'"]|$)|id_(?:rsa|ed25519|ecdsa)\b|\.pem\b|(?:^|[\s/'"=@])\.netrc\b|(?:^|[\s/'"=@])\.aws(?:\/|[\s'"]|$)|(?:^|[\s/'"=@])\.git-credentials\b|(?:^|[\s/'"=@])known_hosts\b|(?:^|[\s/'"=@])credentials\.json(?:$|[\s/'"])|(?:^|[\s/'"=@])\.credentials\.(?:yaml|yml)(?:$|[\s/'"])|(?:^|[\s/'"=@])auth\.json(?:$|[\s/'"])|\/\.config\/gcloud\/|\/\.kube\/config\b|\/\.docker\/config\.json\b|\/\.npmrc\b/i;
+    DATA_COMMANDS = /* @__PURE__ */ new Set(["echo", "printf", "logger", "true", "false", ":"]);
+    FILE_ARG_COMMANDS = /* @__PURE__ */ new Set([
+      "cat",
+      "tac",
+      "head",
+      "tail",
+      "less",
+      "more",
+      "wc",
+      "sort",
+      "uniq",
+      "cut",
+      "cp",
+      "mv",
+      "rm",
+      "rmdir",
+      "unlink",
+      "chmod",
+      "chown",
+      "chgrp",
+      "stat",
+      "file",
+      "du",
+      "tar",
+      "zip",
+      "unzip",
+      "gzip",
+      "gunzip",
+      "install",
+      "tee",
+      "source",
+      ".",
+      "vim",
+      "nvim",
+      "vi",
+      "nano",
+      "emacs",
+      "sed",
+      "awk"
+    ]);
+    FILE_VALUE_FLAGS = /* @__PURE__ */ new Set([
+      "-f",
+      "--file",
+      "--files-from",
+      "-T",
+      "-I",
+      "--include",
+      "--exclude-from"
+    ]);
+    PATTERN_FIRST_COMMANDS = /* @__PURE__ */ new Set(["grep", "egrep", "fgrep", "rg", "sed", "awk"]);
     HIDDEN_SURFACE = /\$\(|`|\bbash\s+-c\b|\bsh\s+-c\b|\beval\b|\bxargs\b|-exec(?:dir)?\b|<\(|<</;
     DANGER_VERB_SET = /* @__PURE__ */ new Set([
       "rm",
@@ -928,6 +1564,8 @@ var init_policy = __esm({
     OPAQUE_EXECUTORS = /* @__PURE__ */ new Set([...SHELL_INTERPRETERS, "eval", "source", "."]);
     VERSION_HELP_FLAGS = /* @__PURE__ */ new Set(["--version", "-V", "--help", "-h"]);
     MAX_WRAPPER_DEPTH = 3;
+    MAX_ANALYSIS_CHARS = 64e3;
+    MAX_SUBSTITUTION_DEPTH = 3;
     WRAPPER_VALUE_FLAGS = {
       timeout: /* @__PURE__ */ new Set(["-k", "--kill-after", "-s", "--signal"]),
       env: /* @__PURE__ */ new Set(["-u", "--unset", "-C", "--chdir", "-S", "--split-string"]),
@@ -21487,7 +22125,6 @@ init_policy();
 import { isAbsolute as isAbsolute2, relative, resolve as resolvePath } from "node:path";
 var REPARK = Symbol("approval-repark");
 var FORWARDED_ASK_MARKER = "[forwarded child ask]";
-var PARENT_JUDGEMENT_BUDGET_PER_TURN = 8;
 var DEFAULT_PARK_TTL_MS = 10 * 60 * 1e3;
 var MAX_PARKED_ASKS = 32;
 var PARK_JOURNAL_SETTLED_KEEP = 50;
@@ -21503,7 +22140,6 @@ var PATH_ARG_KEYS = [
   "dir",
   "directory"
 ];
-var CREDENTIAL_PATH = /(?:^|[\s/'"=@])\.env(?:\.|$|\s)|(?:^|[\s/'"=])\.ssh(?:\/|[\s'"]|$)|id_(?:rsa|ed25519|ecdsa)\b|\.pem\b|(?:^|[\s/'"=])\.netrc\b|(?:^|[\s/'"=])\.aws(?:\/|[\s'"]|$)|(?:^|[\s/'"=])\.git-credentials\b|(?:^|[\s/'"=])known_hosts\b|(?:^|[\s/'"=])credentials(?:\.json)?(?:\s|$)|\/\.config\/gcloud\/|\/\.kube\/config\b|\/\.docker\/config\.json\b|\/\.npmrc\b/i;
 var PRIVILEGE_ESCALATORS = /* @__PURE__ */ new Set(["sudo", "su", "doas", "pkexec"]);
 var EXFILTRATORS = /* @__PURE__ */ new Set(["scp", "sftp", "ftp", "lftp", "nc", "ncat", "socat", "telnet", "sshpass"]);
 var FS_PATH_TOOLS = /* @__PURE__ */ new Set([
@@ -21546,6 +22182,10 @@ function delegatedChildOf(agent) {
     ...cwd !== void 0 ? { cwd } : {}
   };
 }
+function commandOf(input2) {
+  if (input2.command !== void 0 && input2.command.trim() !== "") return input2.command;
+  return input2.toolName === "bash" && typeof input2.args?.command === "string" ? input2.args.command : void 0;
+}
 function pathArguments(args) {
   if (args === void 0) return [];
   const found = [];
@@ -21567,14 +22207,22 @@ function isOutsideWorkspace(path, cwd) {
 function baseName2(word) {
   return word.slice(word.lastIndexOf("/") + 1);
 }
-function isRecursiveDelete(argv) {
+function deleteRailOf(argv) {
   const argv0 = baseName2(argv[0] ?? "");
-  if (argv0 === "rmdir") return true;
-  return argv.slice(1).some((token) => {
-    if (token === "--") return false;
-    if (token.startsWith("--")) return token === "--recursive" || token === "--force";
-    return token.startsWith("-") && /[rRf]/.test(token.slice(1));
-  });
+  if (argv0 === "rmdir") return "directory-delete";
+  if (argv0 !== "rm") return void 0;
+  let recursive2 = false;
+  let force = false;
+  for (const token of argv.slice(1)) {
+    if (token === "--") break;
+    if (token === "--recursive") recursive2 = true;
+    else if (token === "--force") force = true;
+    else if (token.startsWith("-") && !token.startsWith("--")) {
+      if (/[rR]/.test(token.slice(1))) recursive2 = true;
+      if (/f/.test(token.slice(1))) force = true;
+    }
+  }
+  return recursive2 ? "recursive-delete" : force ? "force-delete" : void 0;
 }
 function isHistoryRewrite(argv) {
   const sub = argv[1];
@@ -21593,10 +22241,16 @@ function isPipeToShell(command) {
   if (/\|\s*(?:python[0-9.]*|perl|ruby|node|deno|bun|php)(?:\s|$)/.test(command)) return true;
   return /(?:ba|z|da|k)?sh\s+<\(|(?:python[0-9.]*|node)\s+<\(/.test(command);
 }
-function railOfBash(command) {
-  if (isPipeToShell(command)) return { rail: "pipe-to-shell", evidence: command.trim() };
-  const credential = CREDENTIAL_PATH.exec(command);
-  if (credential !== null) return { rail: "credentials", evidence: credential[0] };
+function railOfBash(command, depth = 0) {
+  if (depth > 3) return void 0;
+  const analyzed = analyzeHeredocs(command);
+  for (const expanded of analyzed.expandedCommands) {
+    const hit = railOfBash(expanded, depth + 1);
+    if (hit !== void 0) return hit;
+  }
+  if (isPipeToShell(analyzed.command)) return { rail: "pipe-to-shell", evidence: command.trim() };
+  const credential = credentialOperandOf(command);
+  if (credential !== void 0) return { rail: "credentials", evidence: credential };
   for (const rawSub of splitCompoundCommand(command)) {
     const sub = stripEnvPrefixes(rawSub).trim();
     if (sub === "") continue;
@@ -21607,7 +22261,8 @@ function railOfBash(command) {
     if (argv.length > 0) argv[0] = baseName2(argv[0] ?? "");
     const argv0 = argv[0] ?? "";
     if (PRIVILEGE_ESCALATORS.has(argv0)) return { rail: "privilege-escalation", evidence: sub };
-    if ((argv0 === "rm" || argv0 === "rmdir") && isRecursiveDelete(argv)) return { rail: "recursive-delete", evidence: sub };
+    const deleteRail = deleteRailOf(argv);
+    if (deleteRail !== void 0) return { rail: deleteRail, evidence: sub };
     if (argv0 === "find" && /(?:^|\s)(?:-delete|-exec(?:dir)?\s+rm\b)/.test(effective)) return { rail: "recursive-delete", evidence: sub };
     if (argv0 === "rsync" && /(?:^|\s)--delete\b/.test(effective)) return { rail: "recursive-delete", evidence: sub };
     if (argv0 === "git" && isHistoryRewrite(argv)) return { rail: "history-rewrite", evidence: sub };
@@ -21624,13 +22279,16 @@ function railOfBash(command) {
   return void 0;
 }
 function railHitOf(input2) {
-  if (input2.toolName === "bash") {
-    const command = typeof input2.args?.command === "string" ? input2.args.command : void 0;
-    return command === void 0 || command.trim() === "" ? void 0 : railOfBash(command);
+  const command = input2.command ?? (input2.toolName === "bash" && typeof input2.args?.command === "string" ? input2.args.command : void 0);
+  if (command !== void 0 && command.trim() !== "") {
+    const commandRail = railOfBash(command);
+    if (commandRail !== void 0) return commandRail;
   }
+  if (input2.toolName === "bash") return void 0;
   if (!FS_PATH_TOOLS.has(input2.toolName)) return void 0;
   for (const path of pathArguments(input2.args)) {
-    if (CREDENTIAL_PATH.test(path)) return { rail: "credentials", evidence: path };
+    const credential = credentialPathOf(path);
+    if (credential !== void 0) return { rail: "credentials", evidence: credential };
     if (isOutsideWorkspace(path, input2.cwd)) return { rail: "boundary", evidence: path };
   }
   return void 0;
@@ -21639,25 +22297,6 @@ function recommendationOf(input2) {
   const paths = input2.toolName === "bash" ? [] : pathArguments(input2.args);
   if (paths.length === 0) return "no filesystem path named";
   return "inside the workspace, looks safe";
-}
-function derivedRiskOf(input2) {
-  const rail = railHitOf(input2);
-  if (rail !== void 0) return `rail ${rail.rail} (${rail.evidence})`;
-  if (input2.toolName === "bash") {
-    const command = typeof input2.args?.command === "string" ? input2.args.command : "";
-    const adjacent = dangerVerbInText(command);
-    if (adjacent !== void 0) return `bash command is adjacent to a never-approvable class (${adjacent})`;
-    for (const token of command.split(/\s+/)) {
-      if (!token.startsWith("/") || token.startsWith("//")) continue;
-      if (isOutsideWorkspace(token, input2.cwd)) return `path ${token} outside the child workspace`;
-    }
-    return void 0;
-  }
-  const paths = pathArguments(input2.args);
-  for (const path of paths) {
-    if (isOutsideWorkspace(path, input2.cwd)) return `path ${path} outside the child workspace`;
-  }
-  return paths.length === 0 ? void 0 : `filesystem path ${paths[0]} named`;
 }
 function hasReasoningMaterial(args) {
   if (args === void 0) return false;
@@ -21696,15 +22335,17 @@ function workspaceRelationOf(childCwd, parentCwd) {
   if (childCwd === parentCwd) return `the child runs in the root's own workspace (${childCwd})`;
   return isOutsideWorkspace(childCwd, parentCwd) ? `the child workspace ${childCwd} is OUTSIDE the root workspace ${parentCwd}` : `the child workspace ${childCwd} is inside the root workspace ${parentCwd}`;
 }
-function forwardedAskReason(origin, decision, recommendation) {
+function forwardedAskReason(origin, decision, recommendation, command) {
   const label = recommendation.source === "model" ? `Root model recommendation (advisory${recommendation.suggestion !== void 0 ? `: ${recommendation.suggestion}` : ""})` : "Parent recommendation";
   const text = recommendation.text.replace(/[.\s]+$/, "");
-  return `${FORWARDED_ASK_MARKER} ${decision.reason}. Origin session ${shortId(origin.childSessionId)}, agent ${origin.label}, depth ${origin.depth}, matched rule ${decision.source}. ${label}: ${text}.`;
+  return `${FORWARDED_ASK_MARKER} ${decision.reason}. Origin session ${shortId(origin.childSessionId)}, agent ${origin.label}, depth ${origin.depth}, matched rule ${decision.source}. ${label}: ${text}.` + (command !== void 0 && command.trim() !== "" ? ` Command: ${command}` : "");
 }
-function forwardedAskDisplayReason(origin, decision) {
+function forwardedAskDisplayReason(origin, decision, command) {
+  const commandLine = command !== void 0 && command.trim() !== "" ? ` Command: ${command}` : "";
+  const commandLineZh = command !== void 0 && command.trim() !== "" ? ` \u547D\u4EE4\uFF1A${command}` : "";
   return {
-    en: `Forwarded from ${origin.label} (depth ${origin.depth}): ${decision.reason}.`,
-    zh: `\u6765\u81EA ${origin.label} \u7684\u8F6C\u53D1\u8BF7\u6C42\uFF08\u6DF1\u5EA6 ${origin.depth}\uFF09\uFF1A${decision.reason}\u3002`
+    en: `Forwarded from ${origin.label} (depth ${origin.depth}): ${decision.reason}.${commandLine}`,
+    zh: `\u6765\u81EA ${origin.label} \u7684\u8F6C\u53D1\u8BF7\u6C42\uFF08\u6DF1\u5EA6 ${origin.depth}\uFF09\uFF1A${decision.reason}\u3002${commandLineZh}`
   };
 }
 var ChildApprovalForwarder = class {
@@ -21716,8 +22357,6 @@ var ChildApprovalForwarder = class {
   pending = /* @__PURE__ */ new Map();
   /** Calls an allow resolution made final: child session id → call id → tool name. */
   allowedCalls = /* @__PURE__ */ new Map();
-  /** Per-root judgement budget: the turn it counts against and how much it spent. */
-  judgementBudget = /* @__PURE__ */ new Map();
   /** Parked asks by park id; Map order is park order. */
   parked = /* @__PURE__ */ new Map();
   /** Park order counter; restored records advance it past their own seq. */
@@ -21729,13 +22368,14 @@ var ChildApprovalForwarder = class {
   /**
    * Resolve one child ask through the parent. Rails run first and are never
    * card-approvable; then an existing subtree grant; then the root's mode:
-   * interactive dispatches the human card, Full access applies one bounded
-   * parent judgement (allow / corrective denial), unattended mode fails closed.
+   * interactive dispatches the human card, Full access matches the root's
+   * effective decision (standing consent unless an explicit deny wins), and
+   * unattended mode fails closed.
    * A rejection is returned as a corrective deny; nothing here kills the child.
    * An allow is final for the exact call identity: {@link resolvesFinalCall}
    * reports it so no later ask or reviewer denial can re-open what the human
-   * (or the parent's Full-access judgement) already allowed, and a call already
-   * on record resolves allow here without another judgement.
+   * (or the parent's Full-access consent) already allowed, and a call already
+   * on record resolves allow here without another decision.
    * @param input - the child agent, tool call, and the ask the child's policy produced.
    * @returns the allow/deny resolution for the pre-execute listener.
    */
@@ -21790,10 +22430,15 @@ var ChildApprovalForwarder = class {
         reason: `approval for ${input2.toolName} was denied: delegation depth ${child.depth} is past the cap ${depthCap}, so this ask is never forwarded to a human card`
       };
     }
-    const command = input2.toolName === "bash" && typeof input2.args?.command === "string" ? input2.args.command : void 0;
-    const rail = railHitOf({ toolName: input2.toolName, args: input2.args, cwd: child.cwd });
+    const command = commandOf(input2);
+    const rail = railHitOf({ toolName: input2.toolName, args: input2.args, cwd: child.cwd, ...command !== void 0 ? { command } : {} });
     if (rail !== void 0) {
-      const allowed = this.deps.parentAllowsRail({ root, toolName: input2.toolName, ...command !== void 0 ? { command } : {}, rail: rail.rail });
+      const allowed = this.deps.parentAllowsRail({
+        root,
+        toolName: input2.toolName,
+        ...command !== void 0 ? { command } : {},
+        rail: rail.rail
+      });
       this.deps.report(
         `${allowed ? "allow" : "deny"}: rail ${rail.rail} (${rail.evidence}) from child ${shortId(child.childSessionId)} resolved through the parent's own policy`
       );
@@ -21819,7 +22464,7 @@ var ChildApprovalForwarder = class {
     const batchKey = `${child.childSessionId}\0${input2.toolName}\0${command ?? stableJson(input2.args)}`;
     const inFlight = this.pending.get(batchKey);
     if (inFlight !== void 0) return await inFlight;
-    const run = this.deps.isRootIdle?.(root) ?? false ? this.parkAsk(input2, root, origin, mode, proposal, rail) : mode === "full-access" ? this.fullAccessDecision(input2, root, origin, rail) : this.askThroughCard(input2, root, origin, proposal, rail);
+    const run = this.deps.isRootIdle?.(root) ?? false ? this.parkAsk(input2, root, origin, mode, proposal, rail) : mode === "full-access" ? this.fullAccessDecision(input2, root, origin) : this.askThroughCard(input2, root, origin, proposal, rail);
     const settled = run.then((result) => result === REPARK ? this.failClosed(child.childSessionId, input2.toolName, "the root's turn closed while the ask was being delivered") : result);
     this.pending.set(batchKey, settled);
     try {
@@ -21828,12 +22473,8 @@ var ChildApprovalForwarder = class {
       this.pending.delete(batchKey);
     }
   }
-  /**
-   * The shared recommendation query both the card's advisory line and the
-   * Full-access judgement are built from, so the reasoner sees identical facts
-   * either way (`applied` is the only difference: it is the decision there).
-   */
-  recommendationQuery(input2, root, origin, rail, applied) {
+  /** The shared recommendation query for the card's advisory line. */
+  recommendationQuery(input2, root, origin, rail) {
     return {
       toolName: input2.toolName,
       ...input2.args !== void 0 ? { args: input2.args } : {},
@@ -21841,114 +22482,33 @@ var ChildApprovalForwarder = class {
       workspaceRelation: workspaceRelationOf(origin.cwd, root.cwd),
       ...rail !== void 0 ? { rail } : {},
       decision: input2.decision,
+      ...commandOf(input2) !== void 0 ? { command: commandOf(input2) } : {},
       sessionId: recommendationSessionId(input2, origin),
-      ...input2.signal !== void 0 ? { signal: input2.signal } : {},
-      ...applied === true ? { applied: true } : {}
+      ...input2.signal !== void 0 ? { signal: input2.signal } : {}
     };
   }
   /**
-   * FULL ACCESS = PARENT JUDGEMENT (doc 82 item 8). The operator's
-   * Full-access mode delegates the answer to the parent agent: the SAME bounded
-   * root-side one-shot the card path uses judges this ask and its suggestion is
-   * APPLIED in the operator's place — an allow resolves `allowed-once` with the
-   * parent's reason, a reject returns the corrective denial carrying that
-   * reason. A missed judgement falls back to {@link derivedRiskOf}: clean asks
-   * allow with a named reason, risk signals deny with the signal named — never
-   * a silent allow. Rails never reach here (they resolve above, through the
-   * parent's own policy). One judgement per ask (identical concurrent asks
-   * share it) and at most {@link PARENT_JUDGEMENT_BUDGET_PER_TURN} per root turn.
+   * FULL ACCESS = MATCH PARENT. The root's own Full-access mode is the
+   * operator's standing consent for the child's ask, so no model judgement or
+   * quota is spent. Explicit denies still win in `parentAllowsAsk`; the child
+   * cannot exceed the root's actual effective authority.
    */
-  async fullAccessDecision(input2, root, origin, rail) {
-    const child = shortId(origin.childSessionId);
-    if (!this.consumeJudgementBudget(root)) {
-      this.deps.report(
-        `audit: parent refused ${input2.toolName} for child ${child} (${origin.label}) because parent judgement budget exhausted this turn \u2014 Full access`
-      );
-      return {
-        kind: "deny",
-        reason: `approval for ${input2.toolName} was denied: parent judgement budget exhausted this turn (${PARENT_JUDGEMENT_BUDGET_PER_TURN} per root turn). Adapt the task or report the limitation instead of retrying.`
-      };
-    }
-    const judgement = await this.fullAccessJudgement(input2, root, origin, rail);
-    if (judgement !== void 0 && (judgement.suggestion === "allow" || judgement.suggestion === "allow-once")) {
-      const text = judgement.text.trim();
-      this.deps.report(
-        `audit: parent approved ${input2.toolName} for child ${child} (${origin.label}) because ${text} \u2014 Full access (model judgement)`
-      );
-      return { kind: "allow", reason: `parent approved (Full access): ${text}` };
-    }
-    if (judgement !== void 0 && judgement.suggestion === "reject") {
-      const text = judgement.text.trim();
-      this.deps.report(
-        `audit: parent refused ${input2.toolName} for child ${child} (${origin.label}) because ${text} \u2014 Full access (model judgement)`
-      );
-      return {
-        kind: "deny",
-        reason: `the parent (Full access) refused ${input2.toolName}: ${text.replace(/[.\s]+$/, "")}. It required approval because: ${input2.decision.reason}. Adapt the task or report the limitation instead of retrying.`
-      };
-    }
-    const risk = derivedRiskOf({
+  async fullAccessDecision(input2, root, origin) {
+    const command = commandOf(input2);
+    const allowed = this.deps.parentAllowsAsk({
+      root,
       toolName: input2.toolName,
-      ...input2.args !== void 0 ? { args: input2.args } : {},
-      cwd: origin.cwd
+      ...command !== void 0 ? { command } : {}
     });
-    if (risk === void 0) {
-      this.deps.report(
-        `audit: parent approved ${input2.toolName} for child ${child} (${origin.label}) because the derived check found no risk signal \u2014 Full access (derived fallback)`
-      );
-      return { kind: "allow", reason: "derived: no risk signal (Full access)" };
+    if (allowed) {
+      this.deps.report(`audit: parent Full access allows ${input2.toolName} for child ${shortId(origin.childSessionId)} (${origin.label}) \u2014 the root's effective decision`);
+      return { kind: "allow", reason: "parent Full access consent: the root would allow this action" };
     }
-    this.deps.report(
-      `audit: parent refused ${input2.toolName} for child ${child} (${origin.label}) because the derived check found a risk signal: ${risk} \u2014 Full access (derived fallback)`
-    );
+    this.deps.report(`audit: parent Full access denied ${input2.toolName} for child ${shortId(origin.childSessionId)} (${origin.label}) \u2014 the root's effective policy denies it`);
     return {
       kind: "deny",
-      reason: `the parent (Full access) could not judge ${input2.toolName}; the derived check found a risk signal: ${risk}. Adapt the task or report the limitation instead of retrying.`
+      reason: `[PARENT_EQUIVALENT_DENIED] the parent Full access cannot allow ${input2.toolName}: the root's effective policy denies it explicitly`
     };
-  }
-  /**
-   * ONE bounded root-side judgement for a Full-access ask. Unlike the card's
-   * advisory line it is not skipped for a bare ask: here the judgement IS the
-   * decision. A miss (absent seam, throw, undefined answer, empty text) returns
-   * undefined; an answer without a usable suggestion falls through to the same
-   * fallback in the caller. The caller then applies the derived risk check
-   * rather than any default.
-   */
-  async fullAccessJudgement(input2, root, origin, rail) {
-    if (this.deps.recommendation === void 0) {
-      this.deps.report(`judgement: no root-side reasoner is wired for ${input2.toolName}; applying the derived check (Full access)`);
-      return void 0;
-    }
-    try {
-      const answer = await this.deps.recommendation(this.recommendationQuery(input2, root, origin, rail, true));
-      if (answer === void 0 || answer.text.trim() === "") {
-        this.deps.report(`judgement: root reasoner produced nothing for ${input2.toolName}; applying the derived check (Full access)`);
-        return void 0;
-      }
-      return answer;
-    } catch (error62) {
-      this.deps.report(
-        `judgement: root reasoner failed for ${input2.toolName} (${error62 instanceof Error ? error62.message : String(error62)}); applying the derived check (Full access)`
-      );
-      return void 0;
-    }
-  }
-  /**
-   * Whether this root may spend another parent judgement in its current turn.
-   * The turn identity comes from the host ({@link ForwardingDeps.turnOf}); when
-   * the host provides none the budget stays per-root-session, so the cap holds
-   * rather than being lifted.
-   */
-  consumeJudgementBudget(root) {
-    const turn = this.deps.turnOf?.(root) ?? "current";
-    const record2 = this.judgementBudget.get(root.id);
-    if (record2 === void 0 || record2.turn !== turn) {
-      this.judgementBudget.set(root.id, { turn, count: 1 });
-      return true;
-    }
-    if (record2.count >= PARENT_JUDGEMENT_BUDGET_PER_TURN) return false;
-    record2.count += 1;
-    return true;
   }
   /**
    * The card's recommendation line: ONE bounded root-side model call when the
@@ -21989,14 +22549,15 @@ var ChildApprovalForwarder = class {
    */
   async askThroughCard(input2, root, origin, proposal, rail, reparkOnIdle = false) {
     const recommendation = await this.cardRecommendation(input2, root, origin, rail);
-    const reason = forwardedAskReason(origin, input2.decision, recommendation);
+    const reason = forwardedAskReason(origin, input2.decision, recommendation, commandOf(input2));
     let outcome;
     try {
       outcome = await this.deps.askRoot({
         root,
         toolName: input2.toolName,
         reason,
-        displayReason: forwardedAskDisplayReason(origin, input2.decision),
+        displayReason: forwardedAskDisplayReason(origin, input2.decision, commandOf(input2)),
+        ...commandOf(input2) !== void 0 ? { command: commandOf(input2) } : {},
         ...input2.decision.broadAllow !== void 0 ? { broadAllow: input2.decision.broadAllow } : {},
         ...input2.signal !== void 0 ? { signal: input2.signal } : {},
         recommendation,
@@ -22130,7 +22691,7 @@ var ChildApprovalForwarder = class {
     const now = Date.now();
     const ttl = this.parkTtlMs();
     this.parkSeq += 1;
-    const command = input2.toolName === "bash" && typeof input2.args?.command === "string" ? input2.args.command : void 0;
+    const command = commandOf(input2);
     const record2 = {
       id: `park-${now.toString(36)}-${this.parkSeq.toString(36)}`,
       seq: this.parkSeq,
@@ -22153,7 +22714,7 @@ var ChildApprovalForwarder = class {
     this.parked.set(record2.id, entry);
     this.appendJournal(record2);
     this.deps.report(
-      `park: ${input2.toolName} from child ${shortId(origin.childSessionId)} (${origin.label}, depth ${origin.depth}) for root ${shortId(root.id)} while it sits between turns \u2014 ${input2.decision.reason} (replays at the root's next turn as ${mode === "full-access" ? "a parent judgement, no card" : "the operator's card"}, expires in ${windowText(ttl)})`
+      `park: ${input2.toolName} from child ${shortId(origin.childSessionId)} (${origin.label}, depth ${origin.depth}) for root ${shortId(root.id)} while it sits between turns \u2014 ${input2.decision.reason} (replays at the root's next turn as ${mode === "full-access" ? "the root consent, no card" : "the operator's card"}, expires in ${windowText(ttl)})`
     );
     entry.timer = setTimeout(() => {
       this.expireParked(entry);
@@ -22181,8 +22742,8 @@ var ChildApprovalForwarder = class {
   }
   /**
    * Resolve every ask parked for one root at its turn start, in FIFO park
-   * order, one at a time. Full access applies the parent judgement (audit
-   * line, no card); every other resolvable mode dispatches the operator's
+   * order, one at a time. Full access matches the root consent (audit line,
+   * no card); every other resolvable mode dispatches the operator's
    * card. A replay that races the turn's end re-parks and stops; the remaining
    * asks stay parked for the next turn start.
    * @param rootSessionId - the root session whose turn just opened.
@@ -22226,7 +22787,7 @@ var ChildApprovalForwarder = class {
       const mode = this.deps.modeOf(root);
       let resolution;
       if (mode === "full-access") {
-        resolution = await this.fullAccessDecision(entry.input, root, entry.origin, entry.rail);
+        resolution = await this.fullAccessDecision(entry.input, root, entry.origin);
       } else if (mode === "interactive") {
         resolution = await this.askThroughCard(entry.input, root, entry.origin, entry.proposal, entry.rail, true);
       } else {
@@ -22444,7 +23005,7 @@ import { deadline } from "@deepseek-ai/dsh-timeout";
 var RECOMMENDATION_TIMEOUT_MS = 6e3;
 var RECOMMENDATION_MAX_TOKENS = 96;
 var RECOMMENDATION_MAX_CHARS = 240;
-var ARGUMENTS_MAX_CHARS = 600;
+var DISPLAY_MAX_CHARS = 16384;
 var SUGGESTIONS = ["allow", "reject", "allow-once"];
 var SYSTEM_PROMPT = [
   "You advise the root session on one approval request forwarded from a delegated subagent.",
@@ -22453,37 +23014,54 @@ var SYSTEM_PROMPT = [
   'Judge only from the facts given. "allow-once" = the action looks safe to run once; "allow" = safe and repeatable; "reject" = risky.',
   "Your answer is advisory: the human answers the card. Never output code, commands, or tool calls."
 ].join("\n");
-var APPLIED_PROMPT = [
-  "This request comes from a root session in Full access: there is no human card, and your suggestion is APPLIED as the decision in the operator's place.",
-  "Judge accordingly: reject anything you are not certain is safe."
-].join("\n");
 function shortId2(id) {
   return id.length > 8 ? id.slice(0, 8) : id;
 }
 function boundedArguments(args) {
-  if (args === void 0) return "(none)";
+  if (args === void 0) return { json: '{"_none":true}', truncated: false };
   let serialized;
   try {
-    serialized = JSON.stringify(args) ?? "(unserializable)";
+    serialized = JSON.stringify(args) ?? '{"_unserializable":true}';
   } catch {
-    serialized = "(unserializable)";
+    serialized = '{"_unserializable":true}';
   }
-  return serialized.length > ARGUMENTS_MAX_CHARS ? `${serialized.slice(0, ARGUMENTS_MAX_CHARS - 1)}\u2026` : serialized;
+  if (serialized.length <= DISPLAY_MAX_CHARS) return { json: serialized, truncated: false };
+  return {
+    json: JSON.stringify({
+      _truncated: true,
+      _originalCharacters: serialized.length,
+      preview: serialized.slice(0, DISPLAY_MAX_CHARS)
+    }),
+    truncated: true
+  };
+}
+function boundedCommand(command) {
+  if (command === void 0 || command.trim() === "") return void 0;
+  if (command.length <= DISPLAY_MAX_CHARS) return { text: command, truncated: false };
+  return { text: `${command.slice(0, DISPLAY_MAX_CHARS)}\u2026`, truncated: true };
 }
 function buildRecommendationPrompt(ask) {
   const rail = ask.rail === void 0 ? "no never-approvable class matched" : `matched ${ask.rail.rail} (${ask.rail.evidence})`;
-  const user = [
+  const args = boundedArguments(ask.args);
+  const command = boundedCommand(ask.command);
+  const lines = [
     "Forwarded child ask",
     `tool: ${ask.toolName}`,
-    `arguments: ${boundedArguments(ask.args)}`,
+    `arguments: ${args.json}`,
+    ...command === void 0 ? [] : [`command: ${command.text}`],
     `child: ${ask.origin.label} (depth ${ask.origin.depth}, session ${shortId2(ask.origin.childSessionId)})`,
     `why it asked: ${ask.decision.reason}`,
     `matched rule: ${ask.decision.source}`,
     `rails verdict: ${rail}`,
     `workspace: ${ask.workspaceRelation}`
-  ].join("\n");
-  return { system: ask.applied === true ? `${SYSTEM_PROMPT}
-${APPLIED_PROMPT}` : SYSTEM_PROMPT, user };
+  ];
+  if (args.truncated) {
+    lines.push("arguments display truncated outside the JSON body; the complete command was evaluated by policy and rails.");
+  }
+  if (command?.truncated === true) {
+    lines.push("command display clipped for length; the complete command was evaluated by policy and rails. Do not reject solely because this display is clipped.");
+  }
+  return { system: SYSTEM_PROMPT, user: lines.join("\n") };
 }
 function parseRecommendationAnswer(raw) {
   const start = raw.indexOf("{");
@@ -23402,19 +23980,32 @@ ${rows.map(renderMountRow).join("\n")}`;
     if (approval !== "never") return "interactive";
     return sandbox === "danger-full-access" ? "full-access" : "unattended";
   }
-  function parentAllowsRail(query) {
+  function rootPolicyDecision(query) {
     const agent = query.root.agent;
-    if (query.rail === "boundary") return readSandboxMode(agent) === "danger-full-access";
-    const decision = resolvePolicy({
+    const custom2 = query.toolName.startsWith("custom_") && query.command !== void 0;
+    const config3 = readPermissionConfig();
+    const sandboxMode = readSandboxMode(agent);
+    return resolvePolicy({
       toolName: query.toolName,
-      ...query.command !== void 0 ? { command: query.command } : {},
+      ...custom2 ? { customCommand: query.command } : query.command !== void 0 ? { command: query.command } : {},
       agent: askingAgentOf({ agent }),
       reviewer: false,
-      config: readPermissionConfig(),
-      sandboxMode: readSandboxMode(agent),
+      config: config3,
+      sandboxMode,
       mcpServerNames: readMcpServerNames() ?? []
     });
-    return decision.kind === "allow";
+  }
+  function parentAllowsRail(query) {
+    const agent = query.root.agent;
+    const decision = rootPolicyDecision(query);
+    if (decision.kind === "deny") return false;
+    if (query.rail === "boundary") return readSandboxMode(agent) === "danger-full-access";
+    return rootModeOf(query.root) === "full-access" || decision.kind === "allow";
+  }
+  function parentAllowsAsk(query) {
+    const decision = rootPolicyDecision(query);
+    if (decision.kind === "deny") return false;
+    return rootModeOf(query.root) === "full-access";
   }
   function requestRootApproval(query) {
     const approval = ctx.get("approval");
@@ -23449,9 +24040,9 @@ ${rows.map(renderMountRow).join("\n")}`;
         ...query.args !== void 0 ? { args: query.args } : {},
         origin: query.origin,
         workspaceRelation: query.workspaceRelation,
+        ...query.command !== void 0 ? { command: query.command } : {},
         ...query.rail !== void 0 ? { rail: query.rail } : {},
-        decision: query.decision,
-        ...query.applied === true ? { applied: true } : {}
+        decision: query.decision
       },
       {
         stream: (options) => llm.stream(options),
@@ -23471,7 +24062,6 @@ ${rows.map(renderMountRow).join("\n")}`;
       }
     );
   }
-  const rootTurns = /* @__PURE__ */ new Map();
   const approvalParks = createApprovalParkJournal();
   const approvalForwarding = new ChildApprovalForwarder({
     findRoot: liveRootOf,
@@ -23479,7 +24069,7 @@ ${rows.map(renderMountRow).join("\n")}`;
     parentAllowsRail,
     askRoot: requestRootApproval,
     recommendation: forwardedRecommendation,
-    turnOf: (root) => String(rootTurns.get(root.id) ?? 0),
+    parentAllowsAsk,
     isRootIdle: (root) => {
       const agent = root.agent;
       return agent?.session === void 0 ? false : !hasOpenTurn(agent.session);
@@ -23497,14 +24087,12 @@ ${rows.map(renderMountRow).join("\n")}`;
     const disposeTurn = ctx.on("session/event", ((session, event) => {
       if (typeof session?.id !== "string" || session.id === "") return void 0;
       if (event?.type === "turn/start") {
-        rootTurns.set(session.id, (rootTurns.get(session.id) ?? 0) + 1);
         approvalForwarding.replayParked(session.id);
       }
       return void 0;
     }));
     const disposeDisposed = ctx.on("session/disposed", ((session) => {
       if (typeof session?.id !== "string") return;
-      rootTurns.delete(session.id);
       approvalForwarding.releaseSession(session.id, "the session ended before the ask was resolved");
     }));
     return () => {
@@ -23512,7 +24100,7 @@ ${rows.map(renderMountRow).join("\n")}`;
       disposeDisposed();
       approvalForwarding.dispose();
     };
-  }, "enpoi-capabilities: forwarded-ask turn budget + park replay");
+  }, "enpoi-capabilities: forwarded-ask park replay");
   ctx.provide("forwardedApprovals", forwardedApprovalsSeam(approvalForwarding));
   const disposePolicy = ctx.on("tools/pre-execute", (async (exec, next) => {
     const capSession = exec.agent?.session;
@@ -23536,7 +24124,18 @@ ${rows.map(renderMountRow).join("\n")}`;
     }
     const config3 = readPermissionConfig();
     const isBash = exec.name === "bash";
-    const customCommand = !isBash && exec.name.startsWith("custom_") ? ctx.get("customToolCommands")?.render?.(exec.name, exec.arguments)?.command : void 0;
+    const customSeam = !isBash && exec.name.startsWith("custom_") ? ctx.get("customToolCommands") : void 0;
+    const agentSessionId = exec.agent?.id;
+    const execSessionId = typeof agentSessionId === "string" ? agentSessionId : typeof execSession?.id === "string" ? execSession.id : void 0;
+    const customIdentity = {
+      ...execSessionId === void 0 ? {} : { sessionId: execSessionId },
+      ...exec.callId === void 0 ? {} : { callId: exec.callId }
+    };
+    const customCommand = customSeam?.render?.(exec.name, exec.arguments, customIdentity)?.command;
+    const discardCustomSnapshot = () => {
+      if (customSeam !== void 0) customSeam.discard?.(exec.name, customIdentity);
+    };
+    const capturedCommand = customCommand ?? (isBash && typeof exec.arguments?.command === "string" ? exec.arguments.command : void 0);
     const delegated = delegatedChildOf(exec.agent);
     const decision = resolvePolicy({
       toolName: exec.name,
@@ -23554,7 +24153,10 @@ ${rows.map(renderMountRow).join("\n")}`;
       mcpServerNames: readMcpServerNames() ?? []
     });
     if (decision.kind === "allow") return await next();
-    if (decision.kind === "deny") return { kind: "deny", reason: decision.reason };
+    if (decision.kind === "deny") {
+      discardCustomSnapshot();
+      return { kind: "deny", reason: decision.reason };
+    }
     const approvalPolicy = readApprovalPolicy(exec.agent);
     if (approvalPolicy?.policy === "never") {
       if (delegated !== void 0) {
@@ -23563,17 +24165,23 @@ ${rows.map(renderMountRow).join("\n")}`;
           toolName: exec.name,
           args: exec.arguments,
           decision,
+          ...capturedCommand !== void 0 ? { command: capturedCommand } : {},
           ...exec.callId !== void 0 ? { callId: exec.callId } : {},
           ...exec.signal !== void 0 ? { signal: exec.signal } : {}
         });
-        if (resolution.kind === "deny") return { kind: "deny", reason: resolution.reason };
+        if (resolution.kind === "deny") {
+          discardCustomSnapshot();
+          return { kind: "deny", reason: resolution.reason };
+        }
         const downstream = await next();
         if (downstream.kind === "ask") {
           if (exec.callId !== void 0 && approvalForwarding.resolvesFinalCall(delegated.childSessionId, String(exec.callId), exec.name)) {
             return { kind: "allow", reason: "the forwarded parent decision is final for this call" };
           }
+          discardCustomSnapshot();
           return { kind: "deny", reason: `a downstream policy layer requires approval for ${exec.name}, which a delegated child's forwarded ask cannot satisfy` };
         }
+        if (downstream.kind === "deny") discardCustomSnapshot();
         return downstream;
       }
       if (isFullAccessMode(approvalPolicy.policy, readSandboxMode(exec.agent))) {
@@ -23582,9 +24190,13 @@ ${rows.map(renderMountRow).join("\n")}`;
 `
         );
         const downstream = await next();
-        if (downstream.kind === "deny") return downstream;
+        if (downstream.kind === "deny") {
+          discardCustomSnapshot();
+          return downstream;
+        }
         return { kind: "allow", reason: FULL_ACCESS_ASK_REASON };
       }
+      discardCustomSnapshot();
       return {
         kind: "deny",
         reason: `${exec.name} was denied automatically: this ${approvalPolicy.delegated ? "delegated subagent" : "session"} runs with approval prompts disabled, so the approval policy denied it without asking a user. It required approval because: ${decision.reason}.`

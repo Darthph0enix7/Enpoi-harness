@@ -73,14 +73,164 @@ function compactionScopeClause(scope) {
   };
 }
 function sanitizeFtsQuery(query) {
-  const terms = query.toLowerCase().split(/[^\p{L}\p{N}_-]+/u).map((t) => t.trim()).filter((t) => t.length >= 2);
+  const terms = queryTerms(query);
   if (terms.length === 0) return "";
   return terms.map((t) => `"${t.replace(/"/g, "")}"`).join(" AND ");
 }
+function rawTokens(text) {
+  return text.toLowerCase().split(/[^\p{L}\p{N}_-]+/u).map((t) => t.trim()).filter((t) => t.length >= 2);
+}
+var QUERY_STOPWORDS = /* @__PURE__ */ new Set([
+  "a",
+  "about",
+  "after",
+  "again",
+  "all",
+  "also",
+  "an",
+  "and",
+  "any",
+  "are",
+  "as",
+  "at",
+  "be",
+  "been",
+  "being",
+  "both",
+  "but",
+  "by",
+  "can",
+  "could",
+  "did",
+  "do",
+  "does",
+  "each",
+  "few",
+  "for",
+  "from",
+  "further",
+  "had",
+  "has",
+  "have",
+  "having",
+  "he",
+  "her",
+  "here",
+  "hers",
+  "him",
+  "his",
+  "how",
+  "i",
+  "if",
+  "in",
+  "into",
+  "is",
+  "it",
+  "its",
+  "just",
+  "may",
+  "me",
+  "might",
+  "more",
+  "most",
+  "must",
+  "my",
+  "no",
+  "not",
+  "now",
+  "of",
+  "off",
+  "on",
+  "once",
+  "only",
+  "or",
+  "other",
+  "our",
+  "out",
+  "over",
+  "own",
+  "same",
+  "she",
+  "should",
+  "so",
+  "some",
+  "such",
+  "than",
+  "that",
+  "the",
+  "their",
+  "them",
+  "then",
+  "there",
+  "these",
+  "they",
+  "this",
+  "those",
+  "through",
+  "to",
+  "too",
+  "under",
+  "up",
+  "us",
+  "very",
+  "was",
+  "we",
+  "were",
+  "what",
+  "when",
+  "where",
+  "which",
+  "while",
+  "who",
+  "why",
+  "will",
+  "with",
+  "would",
+  "you",
+  "your"
+]);
+function scoringTokens(text) {
+  return text.toLowerCase().normalize("NFD").replace(new RegExp("\\p{M}+", "gu"), "").split(/[^\p{L}\p{N}]+/u).filter((token) => token.length > 0);
+}
+function queryRankTokens(query) {
+  return scoringTokens(query).filter((token) => !QUERY_STOPWORDS.has(token));
+}
+function dedupeTerms(terms) {
+  const seen = /* @__PURE__ */ new Set();
+  const unique = [];
+  for (const term of terms) {
+    if (seen.has(term)) continue;
+    seen.add(term);
+    unique.push(term);
+  }
+  return unique;
+}
+var MAX_COVERAGE_FALLBACK_TERMS = 12;
+function quotedTerm(term) {
+  return `"${term.replace(/"/g, "")}"`;
+}
+function coverageFallbackMatch(terms) {
+  const quoted = terms.map(quotedTerm);
+  const pairs = [];
+  for (let left = 0; left < quoted.length; left += 1) {
+    for (let right = left + 1; right < quoted.length; right += 1) {
+      pairs.push(`(${quoted[left]} AND ${quoted[right]})`);
+    }
+  }
+  return pairs.join(" OR ");
+}
+function queryTerms(query) {
+  const seen = /* @__PURE__ */ new Set();
+  const terms = [];
+  for (const token of rawTokens(query)) {
+    if (QUERY_STOPWORDS.has(token) || seen.has(token)) continue;
+    seen.add(token);
+    terms.push(token);
+  }
+  return terms;
+}
 function tokenSet(text) {
-  return new Set(
-    text.toLowerCase().split(/[^\p{L}\p{N}_-]+/u).map((t) => t.trim()).filter((t) => t.length >= 2)
-  );
+  return new Set(rawTokens(text));
 }
 function jaccard(left, right) {
   const a = tokenSet(left);
@@ -100,19 +250,66 @@ function ftsRows(db, match, scope) {
     ORDER BY rank LIMIT 20
   `).all(match, ...filter.params);
 }
+var PROJECT_MATCH_BOOST = 1.1;
+var PROJECT_MISMATCH_FACTOR = 0.95;
+var RECENCY_TIE_BOOST = 0.05;
+var PHRASE_SCORE_BOOST = 1.5;
+var COVERAGE_SCORE_WEIGHT = 2;
+function provenanceCwd(provenance) {
+  if (provenance === "") return void 0;
+  try {
+    const parsed = JSON.parse(provenance);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
+    const cwd = parsed.cwd;
+    return typeof cwd === "string" && cwd.trim() !== "" ? cwd : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function projectFactor(provenance, scopeCwd) {
+  if (scopeCwd === void 0 || scopeCwd === "") return 1;
+  const cwd = provenanceCwd(provenance);
+  if (cwd === void 0) return 1;
+  return cwd === scopeCwd ? PROJECT_MATCH_BOOST : PROJECT_MISMATCH_FACTOR;
+}
+function recencyFactor(stamp, oldest, newest) {
+  if (newest <= oldest) return 1;
+  return 1 + RECENCY_TIE_BOOST * ((stamp - oldest) / (newest - oldest));
+}
 function searchMemory(db, query, limit = 10, scope) {
-  const terms = query.toLowerCase().split(/[^\p{L}\p{N}_-]+/u).map((t) => t.trim()).filter((t) => t.length >= 2);
+  const rankTerms = queryRankTokens(query);
+  const terms = dedupeTerms(rankTerms);
   const match = sanitizeFtsQuery(query);
-  if (match === "") return [];
+  if (match === "" || terms.length === 0) return [];
+  if (!Number.isFinite(limit) || limit < 1) return [];
+  const take = Math.floor(limit);
   let rows = ftsRows(db, match, scope);
   if (rows.length === 0 && terms.length > 1) {
-    const orMatch = terms.map((t) => `"${t.replace(/"/g, "")}"`).join(" OR ");
+    const fallbackTerms = terms.slice(0, MAX_COVERAGE_FALLBACK_TERMS);
+    const orMatch = terms.length === 2 ? fallbackTerms.map(quotedTerm).join(" OR ") : coverageFallbackMatch(fallbackTerms);
     rows = ftsRows(db, orMatch, scope);
   }
-  return rows.map((r) => ({
-    ...r,
-    score: -r.rank * getOriginWeight(r.origin, r.source_trust) * (CATEGORY_BOOST[r.category] ?? 1)
-  })).sort((a, b) => b.score - a.score).slice(0, limit);
+  if (rows.length === 0) return [];
+  const phrase = rankTerms.join(" ");
+  const stamps = rows.map((row) => row.committed_at ?? row.created_at);
+  const oldest = Math.min(...stamps);
+  const newest = Math.max(...stamps);
+  return rows.map((row) => {
+    const factTokens = scoringTokens(row.fact);
+    const factTermSet = new Set(factTokens);
+    const matched = terms.reduce((count, term) => count + (factTermSet.has(term) ? 1 : 0), 0);
+    const coverage = matched / terms.length;
+    const exactPhrase = ` ${factTokens.join(" ")} `.includes(` ${phrase} `);
+    const stamp = row.committed_at ?? row.created_at;
+    const relevance = -row.rank * getOriginWeight(row.origin, row.source_trust) * (CATEGORY_BOOST[row.category] ?? 1);
+    return {
+      ...row,
+      matched,
+      exactPhrase,
+      stamp,
+      score: relevance * (1 + COVERAGE_SCORE_WEIGHT * coverage) * (exactPhrase ? PHRASE_SCORE_BOOST : 1) * projectFactor(row.provenance, scope?.cwd) * recencyFactor(stamp, oldest, newest)
+    };
+  }).sort((a, b) => b.matched - a.matched || Number(b.exactPhrase) - Number(a.exactPhrase) || b.score - a.score || b.stamp - a.stamp).slice(0, take);
 }
 function nearDuplicateCandidates(db, fact, scope) {
   const terms = [...tokenSet(fact)];
@@ -480,6 +677,18 @@ function makePipeline(db) {
                       AND json_extract(provenance, '$.batchBasedOnSeq') >= 0
                       AND json_type(provenance, '$.settled') = 'true'
                     )
+                    OR
+                    (
+                      (origin = 'worker' OR substr(origin, 1, 7) = 'worker:')
+                      AND json_type(provenance, '$.source') = 'text'
+                      AND json_extract(provenance, '$.source') = 'memory_save'
+                      AND json_type(provenance, '$.sessionId') = 'text'
+                      AND length(trim(
+                        json_extract(provenance, '$.sessionId'),
+                        char(9) || char(10) || char(11) || char(12) || char(13) || ' '
+                      )) > 0
+                      AND json_type(provenance, '$.settled') = 'true'
+                    )
                   ),
                   0
                 )
@@ -515,11 +724,65 @@ function savedAt(claim) {
 function renderFact(fact) {
   return /[\r\n]/.test(fact) ? JSON.stringify(fact) : fact;
 }
+var DELEGATED_SESSION_DENIED = "delegated_session_denied";
+var ROOT_SESSION_REQUIRED = "root_session_required";
+function delegatedSession(exec) {
+  const header = exec?.agent?.session.header;
+  if (header === void 0) return false;
+  if (header.origin === "subagent" || (header.delegationDepth ?? 0) > 0) return true;
+  return header.parentSession !== void 0 && header.isSeeded !== true;
+}
+function rootOnlyDenial(exec, action) {
+  const header = exec?.agent?.session.header;
+  if (header === void 0) {
+    return {
+      code: ROOT_SESSION_REQUIRED,
+      note: `Memory ${action} requires a trusted root session context; no database write was made.`
+    };
+  }
+  if (!delegatedSession(exec)) return void 0;
+  return {
+    code: DELEGATED_SESSION_DENIED,
+    note: action === "confirmation" ? "Delegated sessions cannot confirm memory facts; the root session must accept the fact before it gains operator trust." : "Delegated sessions cannot rescind memory facts; the root session must decide whether to tombstone the fact."
+  };
+}
+function memorySearchLimit(value, max) {
+  if (value === void 0) return max;
+  const requested = Number(value);
+  if (!Number.isFinite(requested) || requested < 1) return max;
+  return Math.min(max, Math.floor(requested));
+}
+function memorySaveAuthority(exec) {
+  const session = exec?.agent?.session;
+  const header = session?.header;
+  const child = delegatedSession(exec);
+  const role = header?.agentPreset?.trim();
+  const provenance = {
+    source: "memory_save",
+    sessionId: session?.id ?? "",
+    cwd: header?.cwd ?? ""
+  };
+  if (!child) {
+    return { origin: "orchestrator", trust: "operator", provenance: JSON.stringify(provenance) };
+  }
+  provenance.parentSessionId = header?.parentSession ?? "";
+  const agentRole = role !== void 0 && role !== "" ? role : "worker";
+  provenance.agentRole = agentRole;
+  provenance.settled = true;
+  const callId = exec?.callId;
+  if (typeof callId === "string" && callId !== "") provenance.callId = callId;
+  return {
+    origin: agentRole === "worker" ? "worker" : `worker:${agentRole}`,
+    trust: "untrusted_external",
+    provenance: JSON.stringify(provenance)
+  };
+}
 function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(void 0)) {
   ctx.tools.register({
     name: "memory_save",
     description: [
-      "Save one durable project fact to cross-session memory (operator trust: authoritative).",
+      "Save one durable project fact to cross-session memory. A root session saves with operator trust (authoritative);",
+      "a subagent child saves as tentative worker:<role> until a root session confirms it.",
       "Call it when the session settles something a FUTURE session must know and would otherwise re-derive:",
       "a project rule, an architecture decision with its reason, a constraint, a config value, a naming convention,",
       "or an exact path/command/identifier. Compaction already saves the checkpoint's durable facts automatically;",
@@ -549,15 +812,10 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
     },
     isConcurrencySafe: () => true,
     async execute(args, exec) {
-      const session = exec?.agent?.session;
-      const provenance = JSON.stringify({
-        source: "memory_save",
-        sessionId: session?.id ?? "",
-        cwd: session?.header.cwd ?? ""
-      });
+      const authority = memorySaveAuthority(exec);
       const inserted = await pipeline.intake(
         [{ fact: String(args.fact ?? ""), category: String(args.category ?? "PROJECT"), tags: String(args.tags ?? "") }],
-        { origin: "orchestrator", trust: "operator", provenance }
+        { origin: authority.origin, trust: authority.trust, provenance: authority.provenance }
       );
       if (inserted.length === 0) return { saved: false, note: "Duplicate or invalid fact (already known / empty / >400 chars)" };
       const c = inserted[0];
@@ -569,15 +827,16 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
     description: [
       "Search cross-session memory. Call it when starting a task, returning to a subsystem,",
       "or before re-deriving a decision: it returns saved facts plus the durable facts each compaction extracted,",
-      "each with id, category, origin (memory_save | compaction | keeper), save date, state, and trust so you can weigh them.",
-      "Tentative claims are unconfirmed; verify before relying on them.",
+      "each with id, category, origin (memory_save | compaction | keeper | worker:<role>), save date, state, and trust so you can weigh them.",
+      "Hits are coverage-ranked: facts matching more query terms come first, exact phrases break ties, and the caller's",
+      "project cwd plus recency provide bounded tie-breaks. Tentative claims are unconfirmed; verify before relying on them.",
       "Nothing is injected \u2014 this is the only way memory reaches you. Compaction facts are scoped to the caller's workspace."
     ].join(" "),
     parameters: {
       type: "object",
       properties: {
         query: { type: "string", description: "What you are looking for \u2014 natural language or keywords" },
-        limit: { type: "number", description: "Max results (default 8, max 10)" }
+        limit: { type: "integer", description: "Max results (clamped to the configured top-K)" }
       },
       required: ["query"]
     },
@@ -619,8 +878,9 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const params = getMemoryParams(ctx);
+      const limit = memorySearchLimit(args.limit, params.retrieverTopK);
       const scope = { cwd: exec?.agent?.session.header.cwd, scopeCompaction: config.scopeCompactionFactsToWorkspace };
-      const hits = searchMemory(db, String(args.query ?? ""), Math.min(Number(args.limit ?? params.retrieverTopK) || params.retrieverTopK, params.retrieverTopK), scope);
+      const hits = searchMemory(db, String(args.query ?? ""), limit, scope);
       if (hits.length === 0) return { facts: [], note: "No matching memory." };
       return {
         facts: hits.map((h) => ({
@@ -638,7 +898,7 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
   });
   ctx.tools.register({
     name: "memory_rescind",
-    description: "Retract a saved memory fact (tombstone \u2014 it will never be injected into future turns).",
+    description: "Retract a saved memory fact (tombstone \u2014 it will never be injected into future turns). Root sessions only; a delegated subagent must report the fact to its parent instead.",
     parameters: {
       type: "object",
       properties: {
@@ -651,7 +911,7 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
       schema: {
         type: "object",
         additionalProperties: false,
-        properties: { rescinded: { type: "boolean" }, note: { type: "string" } },
+        properties: { rescinded: { type: "boolean" }, code: { type: "string" }, note: { type: "string" } },
         required: ["rescinded"]
       },
       render: (_a, raw) => {
@@ -660,14 +920,16 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
       }
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
+      const denial = rootOnlyDenial(exec, "rescission");
+      if (denial !== void 0) return { rescinded: false, ...denial };
       const ok = await pipeline.rescind(String(args.id ?? ""), String(args.reason ?? ""));
       return ok ? { rescinded: true } : { rescinded: false, note: `No active fact with id ${String(args.id)}` };
     }
   });
   ctx.tools.register({
     name: "memory_confirm",
-    description: "Explicitly confirm a tentative (untrusted) memory fact. Commits it with the operator trust label and a fresh commit time; use only after verifying the fact. Facts saved with memory_save are already committed; confirmation applies to tentative claims.",
+    description: "Explicitly confirm a tentative (untrusted) memory fact. Commits it with the operator trust label and a fresh commit time; use only after verifying the fact. Root sessions only: a delegated subagent must report the fact to its parent, which decides whether to confirm. Facts saved with memory_save in a root session are already committed; confirmation applies to tentative claims.",
     parameters: {
       type: "object",
       properties: {
@@ -679,7 +941,7 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
       schema: {
         type: "object",
         additionalProperties: false,
-        properties: { confirmed: { type: "boolean" }, id: { type: "string" }, state: { type: "string" }, note: { type: "string" } },
+        properties: { confirmed: { type: "boolean" }, id: { type: "string" }, state: { type: "string" }, code: { type: "string" }, note: { type: "string" } },
         required: ["confirmed"]
       },
       render: (_a, raw) => {
@@ -688,7 +950,9 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
       }
     },
     isConcurrencySafe: () => true,
-    async execute(args) {
+    async execute(args, exec) {
+      const denial = rootOnlyDenial(exec, "confirmation");
+      if (denial !== void 0) return { confirmed: false, ...denial };
       const id = String(args.id ?? "");
       const row = await pipeline.confirm(id);
       if (row !== null) return { confirmed: true, id: row.id, state: row.state };

@@ -41768,7 +41768,7 @@
         "packages/core/tools/src/index.ts#ToolRestriction"
       ],
       "sources": [
-        "packages/core/tools/src/index.ts:751"
+        "packages/core/tools/src/index.ts:753"
       ]
     },
     {
@@ -49912,7 +49912,7 @@
         "packages/subagent/subagent/src/continuation-messages.ts#AgentMessageSource"
       ],
       "sources": [
-        "packages/subagent/subagent/src/continuation-messages.ts:15"
+        "packages/subagent/subagent/src/continuation-messages.ts:19"
       ]
     },
     {
@@ -51671,7 +51671,7 @@
         "packages/subagent/subagent/src/continuation-messages.ts#SubagentSettledMessageSource"
       ],
       "sources": [
-        "packages/subagent/subagent/src/continuation-messages.ts:30"
+        "packages/subagent/subagent/src/continuation-messages.ts:34"
       ]
     },
     {

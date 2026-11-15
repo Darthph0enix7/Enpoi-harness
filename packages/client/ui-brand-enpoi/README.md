@@ -49,6 +49,8 @@ The terminal emulator is a package-local dynamic import (`terminal/lazy-terminal
 
 The terminal emulator module owns `@xterm/xterm`, `@xterm/addon-fit`, and the xterm stylesheet. The Client bundle preset converts that global CSS import into a style injector tagged for this plugin, and the package-local `client.TerminalView.js` chunk is fetched only when a terminal tab first renders. The registry in `terminal/registry.ts` imports no xterm: it opens the process, connects the socket, and replays the transcript independently of the view.
 
+The Subagent Sessions tab resolves exactly one root from the selected session's top-most listed parent. Parent catalog metadata fills an absent parent and supplies a creation time when the list row has none; competing catalog claims leave ancestry unresolved. Sibling rows order running children first, then the latest update or creation time, with a stable id tie-break, while each subtree stays contiguous. The 50-row cap keeps the current row and its ancestors visible, and a selected row missing during a pending list snapshot retains only the same session's last tree. Idle rows are not marked done without `subagentTiming.lastTurnCompleted`.
+
 Package-local dynamic imports compile to `require.async("./client.<name>.js")`; the emitted entry keeps only the shared modules it imports statically. `package.json` publishes `lib/client.*.js` so the chunks travel with the package.
 
 </details>
