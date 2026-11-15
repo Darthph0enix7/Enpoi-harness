@@ -1,8 +1,17 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-11-15T02:14:47.852Z",
+  "generatedAt": "2026-11-15T12:13:42.779Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.129",
+      "commit": "4aacaed",
+      "releasedAt": "2026-11-15T11:55:58.000Z",
+      "notes": [
+        "chore(harness): record translations and recapture tool inventory for phone wave",
+        "feat(ui): phone shell, tappable subagent lineage, hit targets, bounded session reads"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.128",
       "commit": "737f91a",
@@ -392,14 +401,6 @@
         "feat(update): in-app update surface — ui-update client + host run lifecycle (P3 + minimal P4)",
         "feat(update): per-channel update catalog + host update-check plugin (P1+P2)",
         "docs(plan): UI update manifest + in-app updates — design and open decisions"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.81",
-      "commit": "32ba66f",
-      "releasedAt": "2026-10-13T12:04:45.000Z",
-      "notes": [
-        "fix(update): reset the prebuilt flag on the channel-divergence fallback"
       ]
     }
   ]
