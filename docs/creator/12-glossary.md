@@ -40,7 +40,8 @@ One line per term, harness-specific meaning first. `$DSH_HOME` is the user's har
 - **referee / chair / arbiter** — fixed council roles: scoring, chairing, and neutral rulings; never seats.
 - **Oracle** — tool-only senior reviewer (`oracle_review`), scorecard + verdict contract; cannot be spawned as a worker.
 - **reviewer seat / `review_run`** — read-only test runner for reviewer roles; fixed runner enum, workspace read-only, scratch-only writes.
-- **settlement notice** — the runtime-owned parent message reporting a background child's outcome plus its closing report; one per settled child, distinct from model-authored relay messages.
+- **settlement notice** — the runtime-owned `subagent-settled` parent message reporting a background child's outcome plus its closing report (body bounded by `settlementReportMaxChars`/`settlementReportMaxImages`, with the full report left in the child's session); one per settled child, distinct from model-authored relay messages.
+- **goal round** — one automatic same-session continuation turn the goal driver queues for an idle, armed goal; `maxGoalRounds` caps it and `blocked` requires a minimum number started.
 - **turn / step** — one user-initiated model run / one model call inside it.
 - **session / session log** — durable JSONL event log under `$DSH_HOME/sessions/`; current format version 4 (v4).
 - **projection** — a derived, registered read over a session (`livingBrief`, `contextPressure`, `oracleScorecard`, …) published live.
@@ -49,7 +50,17 @@ One line per term, harness-specific meaning first. `$DSH_HOME` is the user's har
 - **verifyLog / repairLog** — the host remotes that walk a log's invariants and rebuild derivable state without rewriting durable events (01 §2).
 - **whiteboard** — operator-authored durable facts pinned per session/project/ global scope (`enpoi-whiteboard`), readable by the agent.
 - **memory** — durable project facts store (`enpoi-memory`, SQLite + FTS/backfill) with save/search/confirm/rescind tools.
-- **peer** — cross-device interconnect (`enpoi-peer-bridge`): status, ask, answer, cancel against another harness instance.
+- **peer** — cross-device interconnect (`enpoi-peer-bridge`) exposing eight on-demand tools over another harness instance's `peer` namespace: status, sessions, models, switch-model, ask, asks, answer, cancel.
+- **peer pairing / alias** — one entry in `$DSH_HOME/pairings.yaml`: the alias names the remote member (same string on both devices, unique per host), `exposure` and `create` are its serving defaults, and `endpoint` is its peer URL.
+- **routing policy** — a pairing's optional `routing` block (`allowChains`, `allowModels`, `requireZeroPrice`, `requireNoTraining`, `requireTools`, `allowReasoningEfforts`, `allowSwitch`, `maxTotalTokens`); absent keeps legacy create routing, present makes every create/adopt name a policy-approved route before any session exists.
+- **peerRouting service** — the profile service (`enpoi-peer-routing`, `ctx.peerRouting`) that owns the catalogue, chain registry, selector rules, and route health behind `peer.models` and `peer.selectModel`; its absence withholds the routing trio from the handshake.
+- **strict pairings parse** — closed key sets at pairing, `create`, and `routing` level plus type and pattern checks; a rejected reload keeps the previous valid snapshot and logs one bounded warning per distinct diagnostic.
+- **`ds peer models` / `ds peer switch`** — caller CLI commands (`scripts/dsh-peer.mjs`) that list a paired host's policy-filtered chains and models, and move one idle remote session's route (reusing `--request-id` replays instead of switching twice).
+- **token ceiling** — a create's `maxTotalTokens`, capped by the pairing policy; the watcher stops the turn after the crossing response commits (`stop: 'budget'`) and later peer prompts are refused with reason `budget`.
+- **metered** — whether the host actually read the durable `tokenUsage` projection for a budgeted session; false means the recorded ceiling is reported but not enforced.
+- **answer-only / debug exposure** — the pairing's event exposure, chosen host-side: `answer-only` carries dialogue, turn boundaries, approvals, and settlement notices; `debug` also carries tool, step, subagent, goal, and compaction records.
+- **waitForTreeWork** — the subagent service call that resolves when no descendant of a root is running and no admission is pending; the goal driver awaits it before reserving a round.
+- **stop-all vs detach** — Stop (✕) is `detach`: the turn stops, live continuable children keep running and later wake the parent; "Stop all agents" is `stop-all`: it interrupts the descendant tree, revokes queued goal rounds and human prompts, keeps settlement/job/relay observations, and parks late settlement notices until the next human turn.
 
 ## Providers and models
 
@@ -61,6 +72,7 @@ One line per term, harness-specific meaning first. `$DSH_HOME` is the user's har
 - **pool / identity** — embedded multi-key pool for one provider; each identity has `priority`, `enabled`, `credentialRef`, a cooldown, and a last status. Strategy `priority-sticky` (default) rides the top identity.
 - **heavy provider** — FreeLLMAPI / Antigravity / Command Code / Meridian: listed but nothing installed until the operator adds one; install/health/remove are manifest-driven, and removal cleans route, credential, pool, cache, chains.
 - **model group / chain** — ordered links (`provider/model`) with `attempts` and `onCut: failover`; assigning a chain to a seat routes through its first enabled link.
+- **model hop** — one peer-visible record of a failed chain attempt (`from`, `to?`, `reason`, `chain?`, `at`) projected from `llm/attempt-failed`; `peer.state.recentModelHops` keeps the newest 32, oldest first.
 - **rules engine** — `enpoi-catalog-rules`: evaluates `catalogRules` against every catalogue entry and publishes only non-default decisions.
 - **visibility decision** — per-model resolve: `visible|hidden`, `reason`, `source: default|manual|rule|gated`; precedence manual hidden > manual shown
   > gated > hide rules > visible.

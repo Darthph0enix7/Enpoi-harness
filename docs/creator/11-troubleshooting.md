@@ -40,7 +40,7 @@ Run from `$REPO`.
 | Gate | Command | Expected |
 |---|---|---|
 | Error ledger | `node scripts/error-audit.mjs --ack $EVIDENCE/error-audit/baseline/acknowledged.json` | `exit 0` (no unexplained signal; exit 2 = harness/usage failure) |
-| Tool rosters | `node scripts/tool-roster-diff.mjs` | Fixtures and the stored baseline are both 50/50/53 (orchestrator/sysadmin/creator), so the current run reports `MATCH`; a `DRIFT` names real roster changes — refresh the baseline only when the change is intended |
+| Tool rosters | `node scripts/tool-roster-diff.mjs` | Both sides carry 50/50/53 rows (orchestrator/sysadmin/creator), but the fixtures differ from the stored baseline by 5 added and 5 removed tools per preset (`compressor_retrieve`, `custom_research-fetch`, `custom_research-verify`, `run_code`, `web_fetch` in; `diagnostics_report`, `session_debug`, `session_event_trace`, `session_trace`, `web_search` out), so the run reports `DRIFT — 3 preset(s), 15 added, 15 removed vs baseline` and exits 1; refresh the baseline only when the roster change is intended |
 | Token contrast | `node "$PROFILE/scripts/dsh-token-contrast.mjs"` | `PASS`, drift `[]`; floor 4.5:1, both base modes |
 | Branding live | `node "$PROFILE/scripts/dsh-rebrand.mjs" --check --live` | `PASS (live)` — fork title + contrast, probes the served origin |
 
@@ -149,6 +149,76 @@ Also part of a rebuild: `pnpm run -s verify-cordis-catalog` (generated docs) and
 - Symptom: calling an `mcp__<server>__*` tool fails immediately with `[CAPABILITY_DISABLED] MCP Tool suite '<server>' is disabled by the operator`.
 - Cause: the MCP server's master capability switch is `false` (default-off / on-demand) and the calling session has not pulled it in via a skill `mcp: [...]` hint or explicit `mcp mount <server>`, or the agent explicitly unmounted it.
 - Fix: invoke the skill that declares the server, call `mcp mount <server>` to pull it into the active session, or turn on the server's toggle in the Capabilities Control Center.
+
+### A peer call is refused with `peer/forbidden` reason X
+- Symptom: `peer.create` / `peer.prompt` / `peer.models` / `peer.selectModel` (or the `peer_*` tools, `ds peer models` / `switch` / `ask`) answers `peer/forbidden` with `details.reason` and `details.denied`.
+- Cause and fix by reason (`packages/api/peer/src/host.ts`; `profile/web/packages/enpoi-peer-routing/src/engine.ts`):
+
+| Reason | Meaning | Where to look / fix |
+|---|---|---|
+| `routing-required` | the pairing has a `routing` policy and the create named neither `provider`+`model` nor `chain` | send a route; `ds peer models <alias>` lists what the policy allows |
+| `model-not-allowed` | the route is outside `allowModels`, gated, or a catalogue record marked `deprecated` | widen `allowModels` or pick an allowed model; discovery omits deprecated rows |
+| `chain-not-allowed` | the chain id is not in `allowChains` (exact ids, not globs) | add the exact id to the alias owner's fleet member and run `dsh update` |
+| `price-unproven` | `requireZeroPrice: true` and the catalogue price is unknown | prove the price or relax the guard |
+| `training-unproven` | `requireNoTraining: true` and `trainsOnData` is not `no` | pick a no-training route or relax the guard |
+| `tools-unproven` | `requireTools: true` and tool support is not `true` | pick a tools-proven route or relax the guard |
+| `effort-not-allowed` | the requested effort is outside `allowReasoningEfforts` or the model's ladder | choose an allowed effort |
+| `unknown-route` | the catalogue or chain registry lacks the route or one chain member | refresh the catalogue/chain; `ds peer models` shows live members |
+| `routing-unavailable` | no `peerRouting` service on the host, or the service threw | mount `dsh-enpoi-peer-routing`; `ds peer handshake` must list the routing capabilities |
+| `routing-not-configured` | `peer.models` or `peer.selectModel` on a pairing without `routing` | add a `routing` block to the alias owner's fleet member |
+| `switch-not-allowed` | the pairing's `allowSwitch` is `never` | set `allowSwitch: idle-only`, or create a session with the route |
+| `budget` | the token ceiling is reached (`prompt`), or a create asked for `maxTotalTokens` above the policy ceiling | raise the ceiling in the binding/policy; read `peer.state.budget` |
+| `budget-unmetered` | a create asked for a ceiling but the host cannot read the `tokenUsage` projection | mount the token meter (the base bundle mounts it) and create again |
+| `model-change` | an adopt-time route change without `allowModelChange` and without a `routing` policy | add `routing`, or set `allowModelChange: true` |
+| `busy` (`peer/conflict`) | the session is not idle for a model switch | wait for the latch to reach `idle`, then retry |
+| `request-id-reuse` (`peer/conflict`) | the same `requestId` arrived with a different payload | mint a fresh `requestId` per payload |
+
+- Where to look: the refusal names the reason and the denied identifier, never the allow list. `ds peer handshake <endpoint>` prints the host's capability set; `ds peer status <alias>` prints the latch, last turn route, and budget; the pairing policy is in `$DSH_HOME/pairings.yaml` (generated from `$PROFILE/fleet.yaml`); the service log carries `peer-api: pairings reload rejected; previous snapshot kept: …` and `peer-api: session … reached its token ceiling …`.
+
+### `pairings.yaml` edit has no effect / the peer ignores my change
+- Symptom: the host keeps the previous aliases, exposure, or routing policy after an edit, with no visible error.
+- Cause: the pairing document is strictly validated. An unknown pairing/create/routing key, a wrong type, an empty pattern, or a pattern outside `[A-Za-z0-9._:/@*+-]` fails the reload; the host keeps the previous valid snapshot and reports one bounded warning per distinct diagnostic (at most 16 per process, each line capped at 300 characters, parser code frames stripped). Only the first load, with no snapshot to keep, fails host load (`packages/api/peer/src/pairings.ts:50-53,123-161`).
+- Fix: correct the document against the parser rules (aliases are unique per host; `allowModels` globs use `*` as the only wildcard, spanning `/`; `allowChains` are exact ids). To regenerate, edit the fleet registry in the profile source that the release ships from and run `dsh update`, or for a local one-off edit `$PROFILE/fleet.yaml` and run `node $PROFILE/scripts/generate-pairings.mjs` — the generator validates with the same rules and leaves the existing document untouched when the registry is rejected. Check `ds peer status` for the table the host actually serves.
+
+### A session stopped itself with `stop: 'budget'`
+- Symptom: a peer-driven turn ends before its natural end; `peer.state.lastTurnEnd.stop` is `'budget'`; the log carries `peer-api: session <id> reached its token ceiling of <n>; stopped turn <t>`.
+- Cause: the binding records `maxTotalTokens` and the durable `tokenUsage` four-bucket total reached it. The host stops the running Agent once with `{ kind: 'hook', reason: 'peer/budget' }`, keeping queued inbox work; the request that crossed the ceiling always finishes first, so the stop lands on what follows (`packages/api/peer/src/host.ts:844-895`; `latch.ts:538-545`).
+- Fix: raise `maxTotalTokens` in the binding or the pairing policy, or create a new session with a higher ceiling. Budget at least about 40k total tokens for one short tool-using turn (13–17k input tokens each); on the keyless sandbox catalogue a 20k ceiling is crossed by the first turn, and the delivered answer still arrives before the stop.
+
+### `budget` shows `usedTokens: 0` but `metered: false`
+- Symptom: `peer.state.budget` (or `ds peer status`) reports `{ usedTokens: 0, exceeded: false, metered: false }` on a capped session.
+- Cause: the host could not read the durable `tokenUsage` projection — the token meter is not mounted, or the observation failed — so it reports zero and does not claim the ceiling is enforced. A binding that predates a restart into an unmetered host keeps this state (`packages/api/peer/src/latch.ts:470-480`).
+- Fix: mount `@deepseek-ai/dsh-token-meter` (the base bundle mounts it); `ds peer handshake` then advertises `token-ceiling`, a create that carries a ceiling is accepted instead of `budget-unmetered`, and an existing binding meters once the projection is readable. Do not read `usedTokens: 0` as an empty session.
+
+### A free chain is refused
+- Symptom: `peer.create` with `chain: free` (or `ds peer switch <alias> --chain free`) refuses with `chain-not-allowed`, `model-not-allowed`, `price-unproven`, `training-unproven`, `tools-unproven`, or `unknown-route`.
+- Cause: the chain is not in `allowChains`; or one member is deprecated, gated, outside `allowModels`, or fails a proof guard; or the catalogue/chain registry no longer carries a member, which answers `unknown-route`. A chain selection is not a bypass: every resolved member is re-checked against the policy (`enpoi-peer-routing/src/engine.ts:339-375`).
+- Fix: `ds peer models <alias>` prints each chain with member state (`ready`, `cooldown` with `cooldownUntil`, or `deprecated`) and the policy echo; widen the policy, pick a ready member, or refresh the catalogue. `requireNoTraining: true` refuses the whole shipped free group on the keyless sandbox catalogue because every free row there reports `trainsOnData: 'yes'`.
+
+### The orchestrator keeps starting goal rounds while children run
+- Symptom: a goal session reserves a new round while a delegated child is still running, spending the round allowance on waiting.
+- Cause: releases before v0.1.7-enpoi.2.130 reserved a round at whole-agent idle without joining descendant work.
+- Fix: confirm the running version (`dsh --version`, or `ds peer handshake` `harnessVersion`) is v0.1.7-enpoi.2.130 or later. The driver calls `subagents.waitForTreeWork(root)` before reserving and skips the round when the goal was paused during the wait; without a mounted subagent service the wait is skipped, which is expected (`packages/goal/goal-round-driver/src/index.ts:166-177`).
+
+### Stop did not stop the continuation / the session woke after Stop
+- Symptom: after Stop, a queued goal round starts, or a child settlement wakes the session.
+- Cause: `detach` abandons only the active turn and leaves live continuable descendants running; `stop-all` also parks them. A queued goal round is removed by the Stop's inbox clear, and the goal driver removes one still queued at idle. A settlement already claimed by a turn, or one produced by a schedule/job, is outside inbox revocation (`packages/api/session-controller/src/types.ts:830-833`; `packages/core/agent-loop/src/inbox.ts:81-86,130-140`).
+- Fix: use Stop-all (the UI Stop) rather than detach; the turn's `turn/end.reason` should be `aborted` with cancel cause `user` and `intent: 'stop-all'`. Settlements that land in the stop window park in the next-turn inbox and are claimed by the next human turn; a schedule/job wake must be cancelled at its owner.
+
+### A child report did not arrive after a restart
+- Symptom: a child finished around a restart and no settlement notice appears in the parent.
+- Cause: a held settlement notice lives only in the process-local outbox, and a queued copy reaches the parent log only when a turn claims it; neither survives a restart, and existing durable data cannot reconstruct the notice (`packages/subagent/subagent/README.md`, "Known Limitations").
+- Fix: find the child with `list_agents` (`scope: descendants`, `query` by id or label), then read its session directly with `session_event_read` (`session_event_search` to locate the closing text); `send_message` can continue the child. Treat the report as delivered only when it is in the parent's log.
+
+### `peer.handshake` reports an old `harnessVersion`
+- Symptom: the peer reports a harness version older than the installed release.
+- Cause: the host reports its configured `harnessVersion`, or the caller resolves a different installed identity; the field is advisory and each side reports its own build.
+- Fix: upgrade both sides. The host defaults to the running `@deepseek-ai/dsh-api-peer` manifest version; the profile bridge resolves the installed identity (adjacent manifest, then `$DSH_HOME/harness/install-state.json`) and fails closed rather than inventing one. `DSH_PEER_HARNESS_VERSION` overrides the caller only. `ds peer handshake <endpoint>` prints the reported version.
+
+### `ds peer models` says the host does not advertise `model-discovery`
+- Symptom: `ds peer models <alias>` fails with `peer/capability-missing`: "host does not advertise model-discovery; upgrade the host".
+- Cause: the host runs a release older than v0.1.7-enpoi.2.130, or its profile does not mount `dsh-enpoi-peer-routing` (the handshake advertises the routing three only while the `peerRouting` service is present), or the profile bundle list lacks the bundle.
+- Fix: upgrade the host; confirm `dsh.profile.bundles` in the profile `package.json` includes `dsh-enpoi-peer-routing` and `dsh --profile web --dump-config` shows the `enpoi-peer-routing` row; `ds peer handshake` must list `model-discovery`, `model-routing-at-create`, and `model-switch`. `model-attribution` and `token-ceiling` are build capabilities, not routing ones.
 
 ## 5. Where the evidence lives
 

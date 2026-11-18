@@ -68,6 +68,26 @@ This document is the authoritative reference for merging future upstream release
 | `packages/web/web-search-brave/`<br>`packages/web/web-search-tavily/`<br>`packages/web/web-search-searxng/`<br>`packages/web/web-fetch-jina/` | Did not exist upstream. | First-party search and fetch adapters in `packages/web/`. | Limits user to single search provider. |
 | `profile/web/skills/research/`<br>`scripts/research-fetch.mjs`<br>`scripts/research-verify.mjs` | Did not exist upstream. | Offloaded research system: `custom_research-fetch` archives pages without polluting model context; `custom_research-verify` performs mechanical 4-pass anchor & date verification. | Deep research blows up context window to 200k+ tokens. |
 
+### 7. Orchestration, memory, and peer model control (v0.1.7-enpoi.2.130)
+
+Every row is a fork change an upstream merge can silently undo. Run the re-check after the merge and reconcile, never stack two variants of the same fix.
+
+| File | Upstream Behavior | Enpoi Fork Contract | Re-check after a merge |
+|---|---|---|---|
+| `packages/core/agent-loop/src/inbox.ts` | `inbox.clear()` discards only user-authored input. | `revokesOnStop` also discards `source.kind: 'goal'` (the driver's own continuation request) while settlement, job, relay, and context observations stay pending. A user-only rewrite silently re-queues a round the operator refused. | `pnpm exec vitest run packages/core/agent-loop/tests/inbox.spec.ts -t 'goal continuation'` |
+| `packages/goal/goal-round-driver/src/index.ts` | Upstream carries its own variant of the descendant-wait fix; reconcile the semantics, do not keep both wait paths. | Before reserving a round the driver awaits `subagents.waitForTreeWork(root)`, races it against plugin unload, withdraws a still-queued round at idle, and pauses the goal. | `pnpm exec vitest run packages/goal/goal-round-driver/tests/goal-round-driver.spec.ts -t 'descendants'` |
+| `packages/subagent/subagent/src/continuation-activation.ts` | No Stop-all window; a settlement notice wakes whenever it lands. | A user Stop-all opens a window: a natural completion that races the stop queues in the parent's next-turn inbox and wakes nothing, and the next turn claims it once. `waitForTreeWork` joins running descendants and pending admissions, never idle members. | `pnpm exec vitest run packages/subagent/subagent/tests/continuation.spec.ts -t 'Stop-all'` |
+| `packages/subagent/subagent/src/continuation-messages.ts` | Copies the child's full closing report into the notice. | `settlementReportMaxChars` (12000) and `settlementReportMaxImages` (4) bound the copy; an over-bound report keeps a surrogate-safe head/tail and one omission line naming the child's session and the recall calls. | `pnpm exec vitest run packages/subagent/subagent/tests/continuation-messages.spec.ts -t 'bounded closing report'` |
+| `packages/subagent/tool-subagent-control/src/list-agents.ts` | Lists every row with `limit` only. | `status` and `query` filter before projection; `offset` pages only the rendered text; the structured result still carries every matching row. | `pnpm exec vitest run packages/subagent/tool-subagent-control/tests/list-agents.spec.ts` |
+| `packages/subagent/tool-subagent/src/index.ts` | A child surface may carry board mutations. | `SHARED_CHILD_DENY` carries `whiteboard_write`, `whiteboard_pin`, `whiteboard_unpin`, and `whiteboard_forget`; `SHARED_CHILD_KEEP` carries the read-only `whiteboard_read` and `compressor_retrieve`; the whiteboard plugin refusal stays the execution backstop. | `pnpm exec vitest run packages/subagent/tool-subagent/tests/child-tool-filter.spec.ts packages/subagent/tool-subagent/tests/child-keep-restrict.spec.ts` |
+| `profile/web/packages/enpoi-memory/src/session-authority.ts` | No shared root/child predicate. | One `isDelegatedSession` decides root-only actions and compaction-fact capture: a typed `origin: 'subagent'` or positive `delegationDepth` is a child; a bare `parentSession` is a child unless `isSeeded: true`. | `pnpm --dir profile/web exec vitest run packages/enpoi-memory/tests/tools.spec.ts packages/enpoi-memory/tests/compaction-facts.spec.ts` |
+| `profile/web/packages/enpoi-memory/src/pipeline.ts`<br>`profile/web/packages/enpoi-memory/src/retriever.ts` | Intake stores any fact; search returns the top-K unmodified. | The secret guard runs at intake for every origin, including keeper claims and compaction capture (skip, never throw); `memory_save` keeps near-matches and names the closest id; `memory_search` keeps whole facts in rank order under `retrieverCharBudget`, always returning the top fact and reporting omissions. | `pnpm --dir profile/web exec vitest run packages/enpoi-memory/tests` |
+| `profile/web/packages/enpoi-whiteboard/src/index.ts` | Mutations may return the board; a child may author. | Child mutations refuse; every mutation returns a short bounded receipt; identical writes and repeated pin/unpin are deterministic no-ops; `whiteboard_forget` returns the removed entry. | `pnpm --dir profile/web exec vitest run packages/enpoi-whiteboard/tests` |
+| `packages/api/peer/src/` | No model discovery, selection, attribution, or ceiling. | `peer.models`/`peer.selectModel` with durable idempotency receipts; the routing policy is evaluated before any session exists; the per-turn attribution fold (`lastTurnEnd.ran`) plus synthetic `model-hop`; the ceiling watcher stops with the existing `{ kind: 'hook', reason: 'peer/budget' }` cause (no `SESSION_FORMAT_VERSION` bump); the strict pairing parser keeps the previous snapshot with one bounded warning; the handshake version comes from the running manifest. | `pnpm exec vitest run packages/api/peer/tests` |
+| `profile/web/packages/enpoi-peer-routing/`<br>`profile/web/package.json` | No peer routing service. | The bundle provides `peerRouting` (catalogue, chain, and route-health evaluation) and is registered in `dsh.profile.bundles`; without it the handshake withholds `model-discovery`, `model-routing-at-create`, and `model-switch`. | `pnpm --dir profile/web exec vitest run packages/enpoi-peer-routing/tests`; `dsh --profile web --dump-config` lists the `enpoi-peer-routing` row |
+| `profile/web/scripts/generate-pairings.mjs`<br>`profile/web/fleet.yaml` | The generator renders aliases and endpoints only. | A member's `routing` block is validated with the peer parser's rules (closed fields, pattern charset, proof guards, `allowSwitch`, positive `maxTotalTokens`), rendered into that alias's entry, and the whole document is parsed by the peer package's own validator before the atomic write; a rejection leaves the existing document untouched. | `pnpm exec vitest run profile/web/tests/generate-pairings-routing.spec.ts` |
+| `profile/web/packages/enpoi-peer-bridge/`<br>`scripts/dsh-peer.mjs` | No model tools or CLI commands. | `peer_models`/`peer_switch_model` and the `ds peer models` / `ds peer switch` commands; the caller reports the installed harness identity and fails closed when it cannot resolve one. | `pnpm --dir profile/web exec vitest run packages/enpoi-peer-bridge/tests`; `pnpm exec vitest run scripts/dsh-peer.spec.ts` |
+
 ---
 
 ## Part 2: Step-by-Step Upstream Merge Runbook
@@ -142,6 +162,23 @@ node profile/web/scripts/dsh-rebrand.mjs --check
 # 7. Standalone Doctor Diagnostics
 ./scripts/doctor.mjs
 ```
+
+Post-merge peer probe (run on a host whose profile mounts `enpoi-peer-routing` and whose `$A` pairing carries a `routing` block with `allowSwitch: idle-only` and a ceiling of at least 40000; `$E` is that alias's endpoint, and the refusal pair runs before the alias has any binding — use a second unbound alias when re-running). A merge that drops the peer package, the routing bundle, or the bridge tools fails one of these lines:
+
+```bash
+ds peer handshake "$E"                                             # capabilities list model-discovery, model-routing-at-create, model-switch, model-attribution, token-ceiling
+ds peer models "$A"                                                # the free chain is present with per-member state and the policy echo
+ds peer list                                                       # record the bound session ids before the refusal probes
+ds peer ask "$A" --model kilo/not-a-real-model "probe"             # peer/forbidden unknown-route
+ds peer list                                                       # same bound session ids: the refusal created no session
+ds peer ask "$A" --chain free --max-tokens 40000 "reply with ok"   # creates/adopts on the free chain and answers
+ds peer status "$A"                                                # last turn ran a provider/model; budget metered=true and usedTokens>0
+ds peer switch "$A" --chain free --request-id merge-probe          # accepted on an idle session
+ds peer switch "$A" --chain free --request-id merge-probe          # replayed=true; no second selection
+ds peer switch "$A" --model kilo/poolside/laguna-s-2.1:free --request-id merge-probe   # peer/conflict request-id-reuse
+```
+
+A ceiling reached on a later `ds peer ask` must answer `peer/forbidden` reason `budget`, and a deliberately broken `routing` key in `$DSH_HOME/pairings.yaml` must leave the previous table serving with one `peer-api: pairings reload rejected; previous snapshot kept: …` line. The full keyless sandbox self-test recipe (HTTP/WS peer protocol, catalogue facts, ceiling guidance) lives in [07](07-agents-and-orchestration.md) §10; link it rather than copying it here.
 
 ### Step 6: Promotion Pipeline
 1. Commit the merge: `git commit -m "chore(upstream): merge v0.2.0 with Enpoi core invariants preserved"`.
