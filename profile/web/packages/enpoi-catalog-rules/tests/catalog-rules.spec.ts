@@ -203,6 +203,7 @@ describe('enpoi-catalog-rules visibility precedence', () => {
                   { id: 'kilo-auto/efficient', name: 'Auto Efficient', isFree: false, gated: true, gateReason: 'sign-in required' },
                   { id: 'kilo-auto/free', name: 'Auto Free', isFree: true },
                   { id: 'hand-added' },
+                  { id: 'kilo-auto/retired', source: 'pinned-in-use', deprecated: true },
                 ],
               },
             },
@@ -210,11 +211,15 @@ describe('enpoi-catalog-rules visibility precedence', () => {
         : undefined,
     }
     const entries = readCatalogue(settings)
-    expect(entries.map(item => item.id)).toEqual(['kilo-auto/efficient', 'kilo-auto/free', 'hand-added'])
+    expect(entries.map(item => item.id)).toEqual(['kilo-auto/efficient', 'kilo-auto/free', 'hand-added', 'kilo-auto/retired'])
     expect(entries[0]).toMatchObject({ provider: 'kilo', gated: true, gateReason: 'sign-in required' })
     expect(entries[1]?.gated).toBeUndefined()
     expect(entries[1]?.gateReason).toBeUndefined()
     expect(entries[2]?.gated).toBeUndefined()
+    // The provider sync's endpoint-dropped record is read through this same
+    // projection so a consumer can refuse it instead of offering it.
+    expect(entries[3]).toMatchObject({ provider: 'kilo', deprecated: true })
+    expect(entries[1]?.deprecated).toBeUndefined()
   })
 
   it('defaults to visible with a null reason', () => {

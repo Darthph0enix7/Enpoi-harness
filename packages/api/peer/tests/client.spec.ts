@@ -87,6 +87,64 @@ describe('peer client', () => {
     })).rejects.toThrow(/not paired/u)
   })
 
+  it('sends model discovery and switch requests through the unary envelope', async () => {
+    const seen: Array<{ method: string; request: unknown }> = []
+    const origin = await listen(createServer((request, response) => {
+      const chunks: Buffer[] = []
+      request.on('data', chunk => chunks.push(chunk as Buffer))
+      request.on('end', () => {
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+          method: string
+          payload: { args: { request: unknown } }
+        }
+        seen.push({ method: body.method, request: body.payload.args.request })
+        response.setHeader('content-type', 'application/json')
+        response.end(body.method === 'peer/models'
+          ? envelope({
+            chains: [],
+            models: [],
+            selectableByThisAlias: {
+              chains: ['free'],
+              models: ['kilo/*:free'],
+              requireZeroPrice: true,
+              requireNoTraining: false,
+              allowSwitch: 'idle-only',
+            },
+          })
+          : envelope({
+            accepted: true,
+            selected: { provider: 'scripted', model: 'switched' },
+            replayed: false,
+          }))
+      })
+    }))
+    const client = new PeerClient({ endpoint: origin, device: 'laptop' })
+    const participant = { kind: 'peer', name: 'laptop' } as const
+    const models = await client.models({ alias: 'x' as never, participant, limit: 10 })
+    expect(models.selectableByThisAlias).toMatchObject({ chains: ['free'], allowSwitch: 'idle-only' })
+    const selected = await client.selectModel({
+      target: { kind: 'alias', alias: 'x' as never },
+      participant,
+      requestId: 'r-1' as never,
+      provider: 'scripted',
+      model: 'switched',
+    })
+    expect(selected).toMatchObject({ accepted: true, selected: { model: 'switched' }, replayed: false })
+    expect(seen).toEqual([
+      { method: 'peer/models', request: { alias: 'x', participant, limit: 10 } },
+      {
+        method: 'peer/selectModel',
+        request: {
+          target: { kind: 'alias', alias: 'x' },
+          participant,
+          requestId: 'r-1',
+          provider: 'scripted',
+          model: 'switched',
+        },
+      },
+    ])
+  })
+
   it('reports target-unreachable when the host cannot be reached', async () => {
     const origin = await listen(createServer())
     // The listener closes before the call, so the connection is refused.

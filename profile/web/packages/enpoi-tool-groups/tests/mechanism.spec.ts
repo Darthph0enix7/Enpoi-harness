@@ -14,7 +14,7 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { apply } from '../src/index.js'
 
-const PEER = ['peer_status', 'peer_sessions', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']
+const PEER = ['peer_status', 'peer_sessions', 'peer_models', 'peer_switch_model', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']
 const DEBUG = ['diagnostics_report', 'session_debug', 'session_event_trace', 'session_trace']
 const RECALL = ['session_event_read', 'session_event_search', 'session_search']
 

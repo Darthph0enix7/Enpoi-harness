@@ -11,14 +11,23 @@
  *
  * Commands:
  *   handshake <endpoint>             Handshake only (no pairing needed)
- *   status [alias]                   Host summary; with alias: latch + model + asks
+ *   status [alias]                   Host summary; with alias: latch + model + budget + asks
  *   list [alias]                     Discover peer sessions (alias, remoteSessionId, latch summary)
+ *   models <alias>                   Policy-filtered chains and models this caller may select
+ *   switch <alias> <provider/model>  Switch an idle remote session's model for its next turn
+ *   switch <alias> --chain <id>      Switch by chain id instead of an explicit route
  *   ask <alias> <message>            Create/adopt, prompt, follow until the session settles
  *   follow <alias>                   Stream frames until the session settles (asks are printed loudly)
  *   asks <alias>                     List pending remote asks (questions show ids + options)
  *   answer <alias> <askId> <once|reject>
  *   answer <alias> <askId> --select <label> [--select <label> …]
  *   cancel <alias>
+ *
+ * `models` and `switch` need a host that advertises `model-discovery` and
+ * `model-switch` in its handshake; the command says so plainly when it does
+ * not, instead of forwarding an opaque refusal. `switch` mints a requestId
+ * per call (or takes `--request-id`) so a retry replays the same selection
+ * instead of switching twice.
  *
  * `ask`/`follow` return the FINAL assistant text: after the first `turn/end`
  * they keep following while the remote session is not settled — a live
@@ -46,7 +55,9 @@
  * Flags: --pairings <path> · --json · --header "k: v" (repeatable) ·
  *        --name <participant> · --wait <seconds> · --session <id> · --no-create ·
  *        --once · --settle-ms <ms> · --select <label> (repeatable;
- *        `questionId=label` for multi-question asks)
+ *        `questionId=label` for multi-question asks) · --cursor <c> ·
+ *        --limit <n> · --zero-price · --tools · --chain <id> · --effort <e> ·
+ *        --request-id <id> · --model <provider/model> · --max-tokens <n>
  */
 
 import { createHash } from 'node:crypto'
@@ -54,7 +65,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir, hostname } from 'node:os'
 import { dirname, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 
@@ -93,6 +104,82 @@ export const ASK_RETRY_TTL_MS = 60 * 60 * 1000
  */
 const CALLER_TERMINAL_CODES = new Set(['peer/version-skew', 'peer/not-paired', 'peer/not-found', 'peer/forbidden'])
 
+/**
+ * Env override for the caller identity this CLI reports in its handshake. The
+ * resolver below reads the installed harness identity first; this variable is
+ * the documented escape hatch for a copied script on a machine with no
+ * harness installation beside it.
+ */
+export const CALLER_HARNESS_VERSION_ENV = 'DSH_PEER_HARNESS_VERSION'
+
+/**
+ * Read one string `version` out of a JSON manifest.
+ * @param path - manifest path.
+ * @param key - field to read (defaults to `version`).
+ * @returns the trimmed value, or undefined when the file is absent, unreadable,
+ * malformed, or the field is not a non-empty string (advisory identity, so a
+ * broken manifest is skipped rather than fatal here).
+ */
+function manifestStringAt(path, key = 'version') {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    const value = parsed !== null && typeof parsed === 'object' ? parsed[key] : undefined
+    return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Find the `@deepseek-ai/dsh-api-peer` manifest the profile resolves, which is
+ * the same package manifest the library client reads its version from.
+ * @param profileRoot - profile root whose `node_modules` links the harness packages.
+ * @returns the manifest path, or undefined when it is not resolvable.
+ */
+function resolveProfileManifestPath(profileRoot) {
+  try {
+    return createRequire(join(profileRoot, 'package.json')).resolve('@deepseek-ai/dsh-api-peer/package.json')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Resolve the harness version this caller reports in `peer.handshake`.
+ *
+ * The value is advisory on the wire (the host checks the protocol version, not
+ * this string), but it must still be real: the resolver reads, in order, the
+ * installed identity the `dsh` shim itself reads
+ * (`<DSH_HOME>/harness/install-state.json`), the source checkout's root
+ * manifest beside this script, and the `@deepseek-ai/dsh-api-peer` manifest
+ * the library client would report. Only when none exists does it fail closed
+ * with the env override named, instead of inventing a version.
+ * @param options - explicit override plus test seams for the lookup roots.
+ * @returns the non-empty harness version string.
+ * @throws {PeerError} `gateway/internal` when no source resolves.
+ */
+export function resolveCallerHarnessVersion(options = {}) {
+  const explicit = options.harnessVersion ?? process.env[CALLER_HARNESS_VERSION_ENV]
+  if (typeof explicit === 'string' && explicit.trim() !== '') return explicit.trim()
+  const dshHome = options.dshHome ?? (process.env.DSH_HOME !== undefined && process.env.DSH_HOME !== '' ? process.env.DSH_HOME : join(homedir(), '.dsh'))
+  const state = manifestStringAt(join(dshHome, 'harness', 'install-state.json'))
+  if (state !== undefined) return state
+  const treeManifest = options.treeManifestPath ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json')
+  const tree = manifestStringAt(treeManifest)
+  if (tree !== undefined) return tree
+  const profileRoot = options.profileRoot ?? (process.env.DSH_PEER_PROFILE ?? join(homedir(), '.dsh', 'profiles', 'web'))
+  const profileManifest = options.profileManifestPath ?? resolveProfileManifestPath(profileRoot)
+  if (profileManifest !== undefined) {
+    const peer = manifestStringAt(profileManifest)
+    if (peer !== undefined) return peer
+  }
+  throw new PeerError(
+    'gateway/internal',
+    `cannot determine the caller harness version (no ${CALLER_HARNESS_VERSION_ENV}, no harness/install-state.json under ${dshHome}, no tree manifest at ${treeManifest}, and no resolvable @deepseek-ai/dsh-api-peer manifest under ${profileRoot}) — set ${CALLER_HARNESS_VERSION_ENV} to this build's version`,
+    '',
+  )
+}
+
 export class LocalPeerClient {
   constructor(options) {
     this.endpoint = options.endpoint.replace(/\/+$/u, '')
@@ -103,13 +190,14 @@ export class LocalPeerClient {
     this.maxReconnects = options.maxReconnects
     this.pageSize = options.pageSize ?? 50
     this.device = options.device ?? hostname()
+    this.harnessVersion = options.harnessVersion
     this.onWarning = options.onWarning
   }
 
   async handshake() {
     return this.rpc('handshake', {
       protocolVersion: 1,
-      harnessVersion: '0.1.6-alpha.2',
+      harnessVersion: resolveCallerHarnessVersion({ harnessVersion: this.harnessVersion }),
       schemaDigest: '',
       device: this.device,
     })
@@ -117,10 +205,12 @@ export class LocalPeerClient {
 
   state(target) { return this.rpc('state', { target }) }
   list(request) { return this.rpc('list', request ?? {}) }
+  models(request) { return this.rpc('models', request) }
   create(request) { return this.rpc('create', request) }
   prompt(request) { return this.rpc('prompt', request) }
   cancel(request) { return this.rpc('cancel', request) }
   answer(request) { return this.rpc('answer', request) }
+  selectModel(request) { return this.rpc('selectModel', request) }
   page(request) { return this.rpc('page', request) }
 
   async *followOnce(request, signal) {
@@ -475,10 +565,16 @@ function usage() {
   return [
     'usage: dsh-peer [--pairings PATH] [--json] [--header "k: v"] [--name NAME] <command> [args]',
     '  handshake <endpoint>            Handshake only (no pairing needed)',
-    '  status [alias]                  Host summary; with alias: latch + model + asks',
+    '  status [alias]                  Host summary; with alias: latch + model + budget + asks',
     '  list [alias]                    Discover peer sessions: alias, remoteSessionId, latch summary',
+    '  models <alias> [--cursor c] [--limit n] [--zero-price] [--tools]',
+    '                                  Chains (member states) and selectable models for this caller',
+    '  switch <alias> <provider/model> [--effort e] [--request-id id]',
+    '  switch <alias> --chain <id> [--effort e] [--request-id id]',
+    '                                  Switch an idle remote session’s model for its next turn',
     '  ask <alias> <message>           Create/adopt, prompt, follow until the session settles;',
     '                                  a same-message retry reuses the last requestId (host dedup)',
+    '                                  create-only route flags: --model p/m | --chain id, --effort e, --max-tokens n',
     '  follow <alias>                  Stream frames until the session settles (asks printed loudly)',
     '  asks <alias>                    List pending remote asks (question options included)',
     '  answer <alias> <askId> <once|reject>',
@@ -489,7 +585,11 @@ function usage() {
 }
 
 export function parseArgs(argv) {
-  const flags = { header: [], select: [], wait: undefined, session: undefined, create: true, json: false, pairings: undefined, name: undefined, once: false, settleMs: undefined }
+  const flags = {
+    header: [], select: [], wait: undefined, session: undefined, create: true, json: false, pairings: undefined,
+    name: undefined, once: false, settleMs: undefined, cursor: undefined, limit: undefined, zeroPrice: false,
+    tools: false, chain: undefined, effort: undefined, requestId: undefined, model: undefined, maxTokens: undefined,
+  }
   const positional = []
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
@@ -504,6 +604,15 @@ export function parseArgs(argv) {
       case '--no-create': flags.create = false; break
       case '--once': flags.once = true; break
       case '--settle-ms': flags.settleMs = Number(argv[++index]); break
+      case '--cursor': flags.cursor = argv[++index]; break
+      case '--limit': flags.limit = Number(argv[++index]); break
+      case '--zero-price': flags.zeroPrice = true; break
+      case '--tools': flags.tools = true; break
+      case '--chain': flags.chain = argv[++index]; break
+      case '--effort': flags.effort = argv[++index]; break
+      case '--request-id': flags.requestId = argv[++index]; break
+      case '--model': flags.model = argv[++index]; break
+      case '--max-tokens': flags.maxTokens = Number(argv[++index]); break
       case '--help': case '-h': flags.help = true; break
       default:
         if (arg.startsWith('--')) throw new Error(`unknown flag ${arg}`)
@@ -946,6 +1055,7 @@ async function commandStatus(flags, positional) {
       activeDescendants: value.state.activeDescendants,
       model: value.state.model ?? null,
       lastTurnEnd: value.state.lastTurnEnd ?? null,
+      budget: value.state.budget ?? null,
       pendingAsks: value.state.pendingAsks.map(askSummary),
       cursor: value.cursor,
     }
@@ -1102,6 +1212,149 @@ export function finishAsk(statePath, alias, requestId) {
   writeAskState(statePath, state)
 }
 
+// ── Model control (caller side) ─────────────────────────────────────────────
+
+/**
+ * Parse a `provider/model` route argument.
+ * @param value - the route string (the model id may itself contain `/`).
+ * @returns the provider and model identifiers.
+ * @throws Error when the value is not `<provider>/<model>`.
+ */
+export function parseModelRoute(value) {
+  const slash = typeof value === 'string' ? value.indexOf('/') : -1
+  if (slash <= 0 || slash === value.length - 1) {
+    throw new Error(`expected "provider/model" (received ${JSON.stringify(value)})`)
+  }
+  return { provider: value.slice(0, slash), model: value.slice(slash + 1) }
+}
+
+/**
+ * Turn the create-only `ask` flags into `peer.create` routing fields. Route
+ * flags (`--model`, `--chain`) replace the pairing's `create` route for this
+ * call; `--effort` and `--max-tokens` travel with whichever route applies.
+ * @param flags - parsed CLI flags.
+ * @returns the requested create fields; empty when no such flag was given.
+ * @throws Error on a malformed route or a non-positive token ceiling.
+ */
+export function createRoutingFlags(flags) {
+  const routing = {}
+  if (flags.model !== undefined) Object.assign(routing, parseModelRoute(flags.model))
+  if (flags.chain !== undefined) {
+    if (flags.chain === '') throw new Error('--chain needs a non-empty chain id')
+    routing.chain = flags.chain
+  }
+  if (flags.effort !== undefined) {
+    if (flags.effort === '') throw new Error('--effort needs a non-empty effort')
+    routing.reasoningEffort = flags.effort
+  }
+  if (flags.maxTokens !== undefined) {
+    if (!Number.isSafeInteger(flags.maxTokens) || flags.maxTokens <= 0) throw new Error('--max-tokens must be a positive integer')
+    routing.maxTotalTokens = flags.maxTokens
+  }
+  return routing
+}
+
+/**
+ * Read the routing fields a pairing's `create` block pins, per the parser's
+ * rule that `chain` and `reasoningEffort` travel only with `provider`+`model`.
+ * @param defaults - the pairing's `create` block.
+ * @returns the forwarded routing fields.
+ */
+function pairingCreateRouting(defaults) {
+  if (typeof defaults !== 'object' || defaults === null) return {}
+  const routing = {}
+  if (typeof defaults.provider === 'string' && typeof defaults.model === 'string') {
+    routing.provider = defaults.provider
+    routing.model = defaults.model
+    if (typeof defaults.chain === 'string') routing.chain = defaults.chain
+    if (typeof defaults.reasoningEffort === 'string') routing.reasoningEffort = defaults.reasoningEffort
+  }
+  return routing
+}
+
+/**
+ * The failure value a capability-gated command returns instead of forwarding
+ * an opaque refusal to a host that cannot serve the call.
+ * @param handshake - the host's handshake value.
+ * @param capability - the capability the command needs (`model-discovery` / `model-switch`).
+ * @returns the failure value, or undefined when the host advertises it.
+ */
+function capabilityFailure(handshake, capability) {
+  const capabilities = Array.isArray(handshake?.capabilities) ? handshake.capabilities : []
+  if (capabilities.includes(capability)) return undefined
+  return {
+    ok: false,
+    error: {
+      code: 'peer/capability-missing',
+      message: `host does not advertise ${capability}; upgrade the host`,
+    },
+    capabilities,
+  }
+}
+
+/** Parse a positive integer flag, or fail loudly instead of clamping silently. */
+function positiveIntegerFlag(value, name) {
+  if (value === undefined) return undefined
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`)
+  return value
+}
+
+export async function commandModels(flags, positional, deps = {}) {
+  const alias = positional[1]
+  if (alias === undefined) throw new Error('models needs an alias')
+  const document = loadPairings(flags.pairings ?? defaultPairingsPath())
+  const pairing = resolvePairing(document, alias)
+  const { PeerClient, source } = await loadPeerClient()
+  const clientOptions = { endpoint: pairing.endpoint, device: flags.name ?? document.device, headers: headersOf(flags, pairing), maxReconnects: 0 }
+  const client = deps.clientFactory === undefined ? new PeerClient(clientOptions) : deps.clientFactory(clientOptions)
+  const handshake = await client.handshake()
+  const unsupported = capabilityFailure(handshake, 'model-discovery')
+  if (unsupported !== undefined) return { ...unsupported, alias, client: source }
+  const request = {
+    alias,
+    participant: { kind: 'peer', name: flags.name ?? document.device, device: flags.name ?? document.device },
+    ...(flags.cursor === undefined ? {} : { cursor: flags.cursor }),
+    ...(positiveIntegerFlag(flags.limit, '--limit') === undefined ? {} : { limit: flags.limit }),
+    ...(flags.zeroPrice || flags.tools
+      ? { filter: { ...(flags.zeroPrice ? { zeroPrice: true } : {}), ...(flags.tools ? { tools: true } : {}) } }
+      : {}),
+  }
+  const value = await client.models(request)
+  return { ok: true, alias, client: source, ...value }
+}
+
+export async function commandSwitch(flags, positional, deps = {}) {
+  const alias = positional[1]
+  const route = positional[2]
+  if (alias === undefined || (route === undefined && flags.chain === undefined)) {
+    throw new Error('switch needs <alias> and either <provider/model> or --chain <id>')
+  }
+  const model = route === undefined ? undefined : parseModelRoute(route)
+  if (flags.chain !== undefined && flags.chain === '') throw new Error('--chain needs a non-empty chain id')
+  const requestId = flags.requestId ?? `peer-cli-${globalThis.crypto.randomUUID()}`
+  if (requestId === '') throw new Error('--request-id needs a non-empty id')
+  if (flags.effort !== undefined && flags.effort === '') throw new Error('--effort needs a non-empty effort')
+  const document = loadPairings(flags.pairings ?? defaultPairingsPath())
+  const pairing = resolvePairing(document, alias)
+  const { PeerClient, source } = await loadPeerClient()
+  const clientOptions = { endpoint: pairing.endpoint, device: flags.name ?? document.device, headers: headersOf(flags, pairing), maxReconnects: 0 }
+  const client = deps.clientFactory === undefined ? new PeerClient(clientOptions) : deps.clientFactory(clientOptions)
+  const handshake = await client.handshake()
+  const unsupported = capabilityFailure(handshake, 'model-switch')
+  if (unsupported !== undefined) return { ...unsupported, alias, client: source }
+  const target = flags.session !== undefined ? { kind: 'session', sessionId: flags.session } : pairing.remoteSessionId !== undefined ? { kind: 'session', sessionId: pairing.remoteSessionId } : { kind: 'alias', alias }
+  const value = await client.selectModel({
+    target,
+    participant: { kind: 'peer', name: flags.name ?? document.device, device: flags.name ?? document.device },
+    requestId,
+    provider: model?.provider ?? '',
+    model: model?.model ?? '',
+    ...(flags.chain === undefined ? {} : { chain: flags.chain }),
+    ...(flags.effort === undefined ? {} : { reasoningEffort: flags.effort }),
+  })
+  return { ok: true, alias, requestId, client: source, ...value }
+}
+
 export async function commandAsk(flags, positional, deps = {}) {
   const alias = positional[1]
   const message = positional[2]
@@ -1123,6 +1376,15 @@ export async function commandAsk(flags, positional, deps = {}) {
   const client = deps.clientFactory === undefined ? new PeerClient(clientOptions) : deps.clientFactory(clientOptions)
   await client.handshake()
   const target = flags.session !== undefined ? { kind: 'session', sessionId: flags.session } : pairing.remoteSessionId !== undefined ? { kind: 'session', sessionId: pairing.remoteSessionId } : { kind: 'alias', alias }
+  // Route and ceiling flags are create-only: a bound session's model changes
+  // through `switch`, never by silently dropping a flag on an existing turn.
+  const createFlags = createRoutingFlags(flags)
+  const routeFlags = createFlags.provider !== undefined || createFlags.chain !== undefined
+  const createRouting = { ...(routeFlags ? {} : pairingCreateRouting(pairing.create)), ...createFlags }
+  if (createRouting.reasoningEffort !== undefined && createRouting.provider === undefined && createRouting.chain === undefined) {
+    throw new Error('--effort needs --model or --chain (the pairing pins no route either)')
+  }
+  const createOnly = Object.keys(createRouting).length > 0
   let baseline
   let created = false
   try {
@@ -1135,9 +1397,13 @@ export async function commandAsk(flags, positional, deps = {}) {
       participant,
       ...(typeof defaults.cwd === 'string' ? { cwd: defaults.cwd } : {}),
       ...(typeof defaults.agentPreset === 'string' ? { agentPreset: defaults.agentPreset } : {}),
+      ...createRouting,
     })
     created = true
     baseline = await client.state(target)
+  }
+  if (!created && createOnly) {
+    throw new Error('ask --model/--chain/--effort/--max-tokens apply only when ask creates or adopts a session; this alias is already bound — use `switch` to change its model and `models` to list the allowed routes')
   }
   const statePath = deps.askStatePath ?? askStatePath(pairingsPath)
   const started = beginAsk({
@@ -1416,6 +1682,16 @@ function render(command, result, flags) {
       console.log(`peer ${result.alias} → ${result.host.device} @ ${result.endpoint} (client: ${result.client})`)
       console.log(`session ${result.sessionId} (${result.exposure}) · latch ${result.latch} (${result.latchSource}) · descendants ${String(result.activeDescendants)}`)
       console.log(`model ${result.model === null ? 'unknown' : `${result.model.provider}/${result.model.model}`} · cursor ${String(result.cursor)}`)
+      const lastTurn = result.lastTurnEnd
+      if (lastTurn !== null && lastTurn !== undefined && lastTurn.ran !== undefined && lastTurn.ran !== null) {
+        const ran = lastTurn.ran
+        const chain = ran.chain === undefined ? '' : ` (${String(ran.chain)})`
+        const hops = typeof ran.hops === 'number' && ran.hops > 0 ? ` · ${String(ran.hops)} hop(s)` : ''
+        console.log(`last turn ${String(lastTurn.turn)} ${String(lastTurn.reason)} · ran ${String(ran.provider)}/${String(ran.model)}${chain}${hops}`)
+      }
+      if (result.budget !== null && result.budget !== undefined) {
+        console.log(`budget ${String(result.budget.usedTokens)}/${String(result.budget.maxTotalTokens)} tokens · ${result.budget.metered === true ? 'metered' : 'UNMETERED'}${result.budget.exceeded === true ? ' · exceeded' : ''}`)
+      }
       if (result.pendingAsks.length > 0) console.log(`pending: ${result.pendingAsks.join('; ')}`)
     } else if (result.alias !== undefined) {
       console.log(`peer ${result.alias} → ${result.host.device} @ ${result.endpoint}: not bound to a session`)
@@ -1442,6 +1718,51 @@ function render(command, result, flags) {
       const target = session.remoteSessionId === '' ? 'not bound' : `session ${session.remoteSessionId}`
       console.log(`• ${session.alias} → ${session.peer} @ ${session.endpoint} · ${target} (${session.exposure}) bound=${String(session.bound)} latch=${session.latch ?? 'unknown'}${session.summary === '' ? '' : ` — ${session.summary}`}`)
     }
+    return
+  }
+  if (command === 'models') {
+    if (result.ok !== true) {
+      const error = result.error ?? {}
+      console.log(`models failed [${String(error.code ?? 'unknown')}]: ${String(error.message ?? '')}`)
+      return
+    }
+    const chains = Array.isArray(result.chains) ? result.chains : []
+    const models = Array.isArray(result.models) ? result.models : []
+    console.log(`peer ${result.alias} · ${String(chains.length)} chain(s) · ${String(models.length)} model(s) (client: ${String(result.client)})`)
+    for (const chain of chains) {
+      const members = (chain.members ?? []).map(member => {
+        const until = member.state === 'cooldown' && typeof member.cooldownUntil === 'number' ? ` until ${new Date(member.cooldownUntil).toISOString()}` : ''
+        return `${String(member.provider)}/${String(member.model)}=${String(member.state)}${until}`
+      })
+      console.log(`  chain ${String(chain.id)}${chain.label === undefined ? '' : ` (${String(chain.label)})`}${chain.dynamic === true ? ' dynamic' : ''}: ${members.join(', ')}`)
+    }
+    for (const model of models) {
+      const flags = [
+        model.tools === true ? 'tools' : model.tools === 'unknown' ? 'tools?' : '',
+        model.zeroPrice === true ? 'zero-price' : model.zeroPrice === 'unknown' ? 'zero-price?' : '',
+        model.gated === true ? 'gated' : '',
+        `trains=${String(model.trainsOnData)}`,
+        typeof model.contextWindow === 'number' ? `ctx=${String(model.contextWindow)}` : '',
+        Array.isArray(model.reasoningEfforts) && model.reasoningEfforts.length > 0 ? `efforts=${model.reasoningEfforts.join(',')}` : '',
+      ].filter(part => part !== '')
+      console.log(`  ${String(model.provider)}/${String(model.model)}${flags.length === 0 ? '' : ` · ${flags.join(' · ')}`}`)
+    }
+    const policy = result.selectableByThisAlias ?? {}
+    console.log(`selectable: chains=${(policy.chains ?? []).join(',') || '-'} models=${(policy.models ?? []).join(',') || '-'} switch=${String(policy.allowSwitch ?? 'never')}${policy.requireZeroPrice === true ? ' zero-price-only' : ''}${policy.requireNoTraining === true ? ' no-training-only' : ''}${policy.requireTools === true ? ' tools-only' : ''}`)
+    if (result.nextCursor !== undefined) console.log(`next cursor: ${String(result.nextCursor)} (pass --cursor)`)
+    return
+  }
+  if (command === 'switch') {
+    if (result.ok !== true) {
+      const error = result.error ?? {}
+      console.log(`switch failed [${String(error.code ?? 'unknown')}]: ${String(error.message ?? '')}`)
+      return
+    }
+    const selected = result.selected ?? {}
+    const chain = selected.chain === undefined ? '' : ` (chain ${String(selected.chain)})`
+    const effort = selected.reasoningEffort === undefined ? '' : ` effort=${String(selected.reasoningEffort)}`
+    console.log(`switched ${String(result.alias)} → ${String(selected.provider)}/${String(selected.model)}${chain}${effort} · replayed=${String(result.replayed === true)} · requestId ${String(result.requestId)}`)
+    if (result.previous !== undefined) console.log(`previous ${String(result.previous.provider)}/${String(result.previous.model)}${result.previous.chain === undefined ? '' : ` (chain ${String(result.previous.chain)})`}`)
     return
   }
   if (command === 'ask' || command === 'follow') {
@@ -1485,6 +1806,8 @@ async function main() {
     handshake: commandHandshake,
     status: commandStatus,
     list: commandList,
+    models: commandModels,
+    switch: commandSwitch,
     ask: commandAsk,
     follow: commandFollow,
     asks: commandAsks,

@@ -59,7 +59,7 @@ const INTEGRATED_TOOLS = [
 const CREATOR_ONLY: readonly string[] = ['cordis_inspect_list', 'cordis_inspect_query', 'plugin_manager']
 
 /** The first-party on-demand peer family the host documents as exempt. */
-const PEER_TOOLS = ['peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel', 'peer_status'] as const
+const PEER_TOOLS = ['peer_status', 'peer_sessions', 'peer_models', 'peer_switch_model', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel'] as const
 
 const HOST_PRESENT = existsSync(mirrorPaths().hostPolicy) && existsSync(mirrorPaths().roleSource)
 

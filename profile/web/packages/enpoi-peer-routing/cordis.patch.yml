@@ -1,0 +1,7 @@
+# dsh-enpoi-peer-routing — policy-gated model discovery and selection for the
+# device-to-device peer API (peerRouting service). The service is inert until a
+# pairing carries a `routing` block, but it must be mounted for the peer host to
+# advertise `model-discovery` / `model-routing-at-create` / `model-switch`.
+- insert:
+    - id: enpoi-peer-routing
+      name: 'dsh-enpoi-peer-routing'

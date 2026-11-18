@@ -13,7 +13,9 @@
 |---|---|
 | `peer_status {alias}` | 握手（对端身份、能力、协议）+ `peer.state`：暴露级别、目标会话、闩锁状态、子代理数、待决询问、当前模型。 |
 | `peer_sessions {alias?}` | 跨所有调用方配对发现：alias、对端、endpoint、绑定的远端会话 id（本地 `remoteSessionId` 固定或主机上报的会话）、暴露级别、闩锁摘要与最近活动；不可达主机即为该行的错误。只读。 |
-| `peer_ask {alias, message?, waitMs?, resume?}` | 必要时采纳/创建会话，以带归属的 peer 回合发送提示，带重连与 `peer.page` 修复地跟踪，直到会话真正静默（无活动子代理或询问且静默窗口结束）后返回**最终**回合；否则返回结构化 pending/失败结果。被跟踪回合进入 `waiting_approval` 时**提前**返回 `status: 'waiting_approval'` 与待决询问（`askId`、`kind`、`toolName`、`reason` 及提问选项）；`resume: <requestId>` 可续跟同一回合直到终态，不会重发消息。主机在跟踪中途停止应答时，在 `probeIntervalMs` 之后返回 `status: 'host_unreachable'`（绝不取消远端回合）。 |
+| `peer_models {alias, limit?, cursor?, zeroPrice?, tools?}` | 对端允许本调用方选择的模型与链（已按策略过滤），附带每条路由的能力事实（工具、视觉、上下文窗口、零价、受限、训练、推理强度）与每个链成员的实时状态（`ready`、带 `cooldownUntil` 的 `cooldown`、`deprecated`）；策略通过 `selectable` 回显。只读。不声明模型发现能力的主机会返回 `peer/capability-missing`，并提示 "host does not advertise model-discovery; upgrade the host"。 |
+| `peer_switch_model {alias, provider?, model?, chain?, reasoningEffort?, requestId?}` | 把空闲的远端会话在下个回合切换到另一条路由（`provider`+`model`，或仅链 id 以取其首个就绪成员；也可在链内指定具体路由）。此处命名的 `chain` 或路由只替换本次调用中配对固定的 create 路由。返回已应用的路由、先前路由，以及同一 `requestId` 重试时的 `replayed`。对端执行自己的允许列表；拒绝会带 `peer/forbidden` 与策略原因（`model-not-allowed`、`chain-not-allowed`、`price-unproven` 等），忙碌会话返回带闩锁的 `peer/conflict`。不声明模型切换能力的主机会返回 `peer/capability-missing`，并提示 "host does not advertise model-switch; upgrade the host"。 |
+| `peer_ask {alias, message?, waitMs?, resume?, provider?, model?, chain?, reasoningEffort?, maxTotalTokens?}` | 必要时采纳/创建会话，以带归属的 peer 回合发送提示，带重连与 `peer.page` 修复地跟踪，直到会话真正静默（无活动子代理或询问且静默窗口结束）后返回**最终**回合；否则返回结构化 pending/失败结果。路由选项仅在本调用**创建**会话时生效（此处命名的路由会替换配对固定的 `create` 路由），`maxTotalTokens` 记录该会话的 token 上限；对已绑定的会话这些选项会被拒绝并指向 `peer_switch_model`，而不是被静默丢弃。被跟踪回合进入 `waiting_approval` 时**提前**返回 `status: 'waiting_approval'` 与待决询问（`askId`、`kind`、`toolName`、`reason` 及提问选项）；`resume: <requestId>` 可续跟同一回合直到终态，不会重发消息。主机在跟踪中途停止应答时，在 `probeIntervalMs` 之后返回 `status: 'host_unreachable'`（绝不取消远端回合）。 |
 | `peer_asks {alias}` | 远端待决询问（审批与提问两种）。 |
 | `peer_answer {alias, askId, outcome \| answers[]}` | 解决审批询问（`allowed-once` \| `rejected`）或提问询问（`answers: [{id, selected[], custom?}]`）。先到先得。非法选择在本地被拒绝并给出原因，绝不调用主机。传输失败时重读 `peer.state`：询问已消失则报告 `confirmation: 'lost'`，而不是诱使盲目重试的失败。 |
 | `peer_cancel {alias}` | 取消远端当前回合，归属为本调用方。传输失败时重读闩锁：无活动回合时报 `confirmation: 'lost'`。 |
@@ -111,6 +113,10 @@ request id 以及结构化的待决询问 `pendingAsks[]`（另含摘要 `asks[]
   `AskUserQuestionAnswer` 词表）。
 - `hopCount` 固定发送 0：本桥不跟踪自主交换链（doc 69 §9.3 视其为遥测）。
 - 主机侧 `peer.create` 绑定与主机配对是两件事；本包只读取调用方条目。
+- 调用方握手报告已安装的 harness 版本：解析 profile 旁的
+  `@deepseek-ai/dsh-api-peer` 清单，或 `$DSH_HOME` 下安装器的
+  `harness/install-state.json`；`DSH_PEER_HARNESS_VERSION` 可覆盖，两者都不存在时
+  会明确报错（fail closed），不会发送伪造身份。
 - 因 `@deepseek-ai/dsh-api-peer` 不是 profile 依赖，这里保留一份本地
   peer 客户端副本（`src/peer-client.ts`）；帧协议需与
   `packages/api/peer/src/client.ts` 保持同步。本地副本额外在调用方终态错误帧上

@@ -188,6 +188,8 @@ export const SHIPPED_SEAT_TOOL_POLICY: Readonly<Record<string, Readonly<Record<s
   orchestrator: Object.freeze({
     peer_status: 'allow',
     peer_sessions: 'allow',
+    peer_models: 'allow',
+    peer_switch_model: 'allow',
     peer_ask: 'allow',
     peer_asks: 'allow',
     peer_answer: 'allow',
@@ -303,7 +305,7 @@ export const SHIPPED_TOOL_DEFAULT_EXEMPTIONS: readonly { prefix: string; except?
   },
   {
     prefix: 'peer_',
-    reason: 'first-party on-demand fleet tools (peer_ask, peer_asks, peer_answer, peer_cancel, peer_status) mount from enpoi-peer-bridge only while the peer driver runs; a call reaches another device\'s agent, so until the operator sets a row the unknown-tools ask is the intended gate',
+    reason: 'first-party on-demand fleet tools (peer_status, peer_sessions, peer_models, peer_switch_model, peer_ask, peer_asks, peer_answer, peer_cancel) mount from enpoi-peer-bridge only while the peer driver runs; a call reaches another device\'s agent, so until the operator sets a row the unknown-tools ask is the intended gate',
   },
 ])
 

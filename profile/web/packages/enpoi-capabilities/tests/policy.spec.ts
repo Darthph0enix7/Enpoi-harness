@@ -1105,7 +1105,7 @@ describe('per-seat execution restrictions (backstop behind the creator tool grou
 })
 
 describe('shipped seat tool policy (peer family, battery fix-36)', () => {
-  const PEER_TOOLS = ['peer_status', 'peer_sessions', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel'] as const
+  const PEER_TOOLS = ['peer_status', 'peer_sessions', 'peer_models', 'peer_switch_model', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel'] as const
 
   it('allows the whole peer family on the orchestrator seat without an approval card', () => {
     const config: PermissionPolicyConfig = { defaults: { unknownTools: 'ask' } }

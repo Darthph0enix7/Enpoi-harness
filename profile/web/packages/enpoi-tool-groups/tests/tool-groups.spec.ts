@@ -6,7 +6,7 @@ import {
 import { applyToolGroupsProjection, toolGroupsProjection } from '../src/projection.js'
 import { apply, TOOL_GROUPS_TOOL } from '../src/index.js'
 
-const PEER = ['peer_status', 'peer_sessions', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']
+const PEER = ['peer_status', 'peer_sessions', 'peer_models', 'peer_switch_model', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']
 const DEBUG = ['diagnostics_report', 'session_debug', 'session_event_trace', 'session_trace']
 const RECALL = ['session_event_read', 'session_event_search', 'session_search']
 const CORE = ['read', 'write', 'edit', 'bash', 'glob', 'grep', 'subagent']
@@ -353,7 +353,7 @@ describe('tool-group catalog', () => {
     expect(text).toContain('attach')
     expect(text).toContain('- peer —')
     expect(text).toContain('cross-device peer sessions')
-    expect(text).toContain('(6 tools, attached)')
+    expect(text).toContain('(8 tools, attached)')
     expect(text).toContain('- debug —')
     expect(text).toContain('session log, event trace, and diagnostics inspection')
     expect(text).toContain('(4 tools, not attached)')
@@ -374,7 +374,7 @@ describe('tool-group catalog', () => {
 
   it('lists every on-demand family in the fresh menu: visible ones with state, hidden ones as a notice', () => {
     const text = renderMenuText(catalogWith(), new Set(), [], 'orchestrator')
-    expect(text).toContain('- peer — cross-device peer sessions: status, ask, answer, cancel (6 tools, not attached)')
+    expect(text).toContain('- peer — cross-device peer sessions: status, models, switch, ask, answer, cancel (8 tools, not attached)')
     expect(text).toContain('- debug — session log, event trace, and diagnostics inspection (4 tools, not attached)')
     expect(text).toContain('- creator — Creator-seat-only family (3 tools)')
     // A disabled family is offered nowhere, notice included.
@@ -592,7 +592,7 @@ describe('tool-group operator overrides', () => {
     expect(catalog.byId.get('core')).toMatchObject({ label: '核心', purpose: '日常实现所需的工具面' })
     expect(catalog.byId.get('house')).toMatchObject({ label: 'House rules', purpose: 'owner-authored surface' })
     expect(renderMenuText(catalog, new Set(), [], 'orchestrator'))
-      .toContain('- peer — 跨设备对等会话：状态、提问、回答、取消')
+      .toContain('- peer — 跨设备对等会话：状态、模型、切换、提问、回答、取消')
     // The default locale keeps every shipped string byte-identical.
     expect(catalogWith(undefined).byId.get('core')).toMatchObject({
       label: SHIPPED_TOOL_GROUPS.find(group => group.id === 'core')?.label,
@@ -778,7 +778,7 @@ describe('tool_groups plugin', () => {
     expect(text).toContain('- debug —')
     // Aware of the hidden family, with no attach state for it.
     expect(text).toContain('- creator — Creator-seat-only family (3 tools)')
-    expect(text).toContain('(6 tools, not attached)')
+    expect(text).toContain('(8 tools, not attached)')
     expect(menu.text({ scope: undefined })).toBe('')
   })
 

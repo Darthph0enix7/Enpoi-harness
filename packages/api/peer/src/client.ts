@@ -12,6 +12,7 @@
 import { brandNumber } from '@deepseek-ai/dsh-brand'
 import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
 import { RemoteError, remoteErrorOf, type RemoteErrorCode } from '@deepseek-ai/dsh-typert-protocol'
+import { HARNESS_VERSION } from './version.ts'
 import type {
   PeerCreateRequest,
   PeerCreateValue,
@@ -22,6 +23,8 @@ import type {
   PeerHandshakeValue,
   PeerListRequest,
   PeerListValue,
+  PeerModelsRequest,
+  PeerModelsValue,
   PeerPageRequest,
   PeerPageValue,
   PeerPromptRequest,
@@ -30,6 +33,8 @@ import type {
   PeerAnswerValue,
   PeerCancelRequest,
   PeerCancelValue,
+  PeerSelectModelRequest,
+  PeerSelectModelValue,
   PeerStateRequest,
   PeerStateValue,
   PeerTarget,
@@ -58,7 +63,7 @@ export interface PeerClientOptions {
   readonly device: PeerDeviceName
   /** Extra HTTP headers (loopback launch-token cookie, or a pairing bearer token). */
   readonly headers?: Readonly<Record<string, string>>
-  /** Harness version reported in the handshake. */
+  /** Harness version reported in the handshake; defaults to the running package manifest version. */
   readonly harnessVersion?: string
   /** Schema digest reported in the handshake; defaults to the caller's protocol digest. */
   readonly schemaDigest?: string
@@ -114,7 +119,7 @@ export class PeerClient {
   async handshake(): Promise<PeerHandshakeValue> {
     const request: PeerHandshakeRequest = {
       protocolVersion: 1,
-      harnessVersion: this.options.harnessVersion ?? '0.1.6-alpha.2',
+      harnessVersion: this.options.harnessVersion ?? HARNESS_VERSION,
       schemaDigest: this.options.schemaDigest ?? '',
       device: this.options.device,
     }
@@ -129,6 +134,15 @@ export class PeerClient {
   /** List the pairings the host exposes, optionally narrowed to one resolved target. */
   list(request: PeerListRequest = {}): Promise<PeerListValue> {
     return this.rpc('list', request)
+  }
+
+  /**
+   * Read the policy-filtered chains and models one alias may select.
+   * @param request - alias, participant, optional filter, cursor, and page limit.
+   * @returns selectable chains/models with the policy echoed for the controller.
+   */
+  models(request: PeerModelsRequest): Promise<PeerModelsValue> {
+    return this.rpc('models', request)
   }
 
   /** Create or adopt a Session under a pairing alias. */
@@ -149,6 +163,15 @@ export class PeerClient {
   /** Settle a pending ask. */
   answer(request: PeerAnswerRequest): Promise<PeerAnswerValue> {
     return this.rpc('answer', request)
+  }
+
+  /**
+   * Switch one idle Session's routing for its next turn.
+   * @param request - alias, participant, request id, target route or chain, and optional effort.
+   * @returns the applied selection, any previous one, and whether this was a replay.
+   */
+  selectModel(request: PeerSelectModelRequest): Promise<PeerSelectModelValue> {
+    return this.rpc('selectModel', request)
   }
 
   /** Read one backwards history window for repair. */

@@ -10,8 +10,14 @@
  * `packages/api/peer/src/client.ts` (same frame contract); keep the two in
  * step when the contract changes.
  *
+ * The handshake's `harnessVersion` is resolved at call time (see
+ * `caller-version.ts`) instead of carrying a literal that drifts from the
+ * shipped release.
+ *
  * @module dsh-enpoi-peer-bridge/peer-client
  */
+
+import { resolveCallerHarnessVersion } from './caller-version.js'
 
 /** One structured peer failure, mirroring the harness `RemoteError` surface. */
 export class PeerBridgeError extends Error {
@@ -141,8 +147,88 @@ export interface PeerExecutionState {
   readonly activeDescendants: number
   readonly descendantsExact: boolean
   readonly pendingAsks: readonly PeerPendingAsk[]
-  readonly lastTurnEnd?: { readonly turn: number; readonly reason: string; readonly at: number; readonly error?: Record<string, unknown> }
+  readonly lastTurnEnd?: {
+    readonly turn: number
+    readonly reason: string
+    readonly at: number
+    readonly error?: Record<string, unknown>
+    /** Route that actually answered the turn (may differ from `model` on a rolling chain). */
+    readonly ran?: { readonly provider: string; readonly model: string; readonly chain?: string; readonly hops: number }
+    /** Present only on the turn the host's token ceiling stopped. */
+    readonly stop?: string
+  }
   readonly model?: { readonly provider: string; readonly model: string; readonly chain?: string }
+  /** Token ceiling and spend; absent when the session records no ceiling. */
+  readonly budget?: { readonly maxTotalTokens: number; readonly usedTokens: number; readonly exceeded: boolean; readonly metered: boolean }
+}
+
+/** Tri-state capability fact the catalogue may not know; never guessed. */
+export type PeerKnown = boolean | 'unknown'
+
+/** One selectable route with the facts a controller needs to choose it. */
+export interface PeerModelInfo {
+  readonly provider: string
+  readonly model: string
+  readonly tools: PeerKnown
+  readonly vision: PeerKnown
+  readonly contextWindow?: number
+  readonly zeroPrice: PeerKnown
+  readonly gated: PeerKnown
+  readonly trainsOnData: 'yes' | 'no' | 'unknown'
+  readonly reasoningEfforts: readonly string[]
+}
+
+/** One chain a controller may select, with its live member state. */
+export interface PeerChainInfo {
+  readonly id: string
+  readonly label?: string
+  readonly dynamic: boolean
+  readonly members: readonly {
+    readonly provider: string
+    readonly model: string
+    readonly state: 'ready' | 'cooldown' | 'deprecated'
+    readonly cooldownUntil?: number
+  }[]
+}
+
+/** Optional narrowing a caller may apply on top of the pairing policy. */
+export interface PeerModelsFilter {
+  readonly zeroPrice?: boolean
+  readonly tools?: boolean
+  readonly gated?: boolean
+  readonly minContextWindow?: number
+}
+
+/** `peer.models` value: the policy-filtered page plus the policy echo. */
+export interface PeerModelsValue {
+  readonly chains: readonly PeerChainInfo[]
+  readonly models: readonly PeerModelInfo[]
+  readonly nextCursor?: string
+  readonly selectableByThisAlias: {
+    readonly chains: readonly string[]
+    readonly models: readonly string[]
+    readonly reasoningEfforts?: readonly string[]
+    readonly requireZeroPrice: boolean
+    readonly requireNoTraining: boolean
+    readonly requireTools: boolean
+    readonly allowSwitch: 'never' | 'idle-only'
+  }
+}
+
+/** One applied model selection. */
+export interface PeerModelSelection {
+  readonly provider: string
+  readonly model: string
+  readonly chain?: string
+  readonly reasoningEffort?: string
+}
+
+/** `peer.selectModel` value; a same-request replay reports `replayed: true`. */
+export interface PeerSelectModelValue {
+  readonly accepted: true
+  readonly selected: PeerModelSelection
+  readonly previous?: PeerModelSelection
+  readonly replayed: boolean
 }
 
 /** One durable event record on the peer wire. */
@@ -277,7 +363,7 @@ export class PeerClient {
   async handshake(): Promise<PeerHandshakeValue> {
     return this.rpc('handshake', {
       protocolVersion: 1,
-      harnessVersion: this.options.harnessVersion ?? '0.1.6-alpha.2',
+      harnessVersion: this.options.harnessVersion ?? resolveCallerHarnessVersion(),
       schemaDigest: this.options.schemaDigest ?? '',
       device: this.options.device,
     })
@@ -291,6 +377,21 @@ export class PeerClient {
   /** List the pairings the host exposes, optionally narrowed to one resolved target. */
   list(request: { readonly target?: PeerTarget } = {}): Promise<PeerListValue> {
     return this.rpc('list', request)
+  }
+
+  /**
+   * Read the policy-filtered chains and models one alias may select.
+   * @param request - alias, participant, optional filter, cursor, and page limit.
+   * @returns selectable chains/models with the policy echoed for the controller.
+   */
+  models(request: {
+    readonly alias: string
+    readonly participant: PeerParticipant
+    readonly filter?: PeerModelsFilter
+    readonly cursor?: string
+    readonly limit?: number
+  }): Promise<PeerModelsValue> {
+    return this.rpc('models', request)
   }
 
   /** Create or adopt a Session under a pairing alias. */
@@ -336,6 +437,23 @@ export class PeerClient {
     readonly answer: { readonly kind: 'approval'; readonly outcome: 'allowed-once' | 'rejected' } | { readonly kind: 'question'; readonly answer: PeerQuestionAnswer }
   }): Promise<{ readonly accepted: boolean; readonly settled: boolean }> {
     return this.rpc('answer', request)
+  }
+
+  /**
+   * Switch one idle Session's routing for its next turn.
+   * @param request - target, participant, request id, requested route or chain, and optional effort.
+   * @returns the applied selection, the previous one when known, and replay status.
+   */
+  selectModel(request: {
+    readonly target: PeerTarget
+    readonly participant: PeerParticipant
+    readonly requestId: string
+    readonly provider: string
+    readonly model: string
+    readonly chain?: string
+    readonly reasoningEffort?: string
+  }): Promise<PeerSelectModelValue> {
+    return this.rpc('selectModel', request)
   }
 
   /** Read one backwards history window for repair. */

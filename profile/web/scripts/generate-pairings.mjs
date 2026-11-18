@@ -57,6 +57,14 @@ const ALIAS_PATTERN = /^[A-Za-z0-9._-]+$/
 const DEFAULT_CREATE_PRESET = 'orchestrator'
 /** Default web port of a managed install; a member record may override it. */
 const DEFAULT_PORT = 3080
+/** Every field a member's optional `routing` block may declare. */
+const ROUTING_FIELDS = ['allowChains', 'allowModels', 'requireZeroPrice', 'requireNoTraining', 'requireTools', 'allowReasoningEfforts', 'allowSwitch', 'maxTotalTokens']
+/** Routing fields whose value is a list of patterns. */
+const ROUTING_LIST_FIELDS = ['allowChains', 'allowModels', 'allowReasoningEfforts']
+/** Routing fields whose value is a boolean. */
+const ROUTING_BOOLEAN_FIELDS = ['requireZeroPrice', 'requireNoTraining', 'requireTools']
+/** Characters the peer routing parser accepts in a pattern or chain id. */
+const ROUTING_PATTERN = /^[A-Za-z0-9._:/@*+-]+$/u
 
 /** The registry path shipped beside this script. */
 export const DEFAULT_REGISTRY_PATH = fileURLToPath(new URL('../fleet.yaml', import.meta.url))
@@ -98,6 +106,51 @@ function optionalString(value, subject) {
 }
 
 /**
+ * Validate one member's optional `routing` block with the peer parser's rules:
+ * the field set is closed, patterns use the routing charset, the proof guards
+ * (`requireZeroPrice`, `requireNoTraining`, `requireTools`) are booleans,
+ * `allowSwitch` is a closed pair, and `maxTotalTokens` is a positive integer.
+ * An empty block is kept: it selects nothing, which is a deliberate deny-all
+ * policy.
+ * @param value - raw `routing` value.
+ * @param subject - diagnostic subject.
+ * @returns the normalized policy.
+ */
+export function validateRouting(value, subject) {
+  assert(isRecord(value), `${subject} must be a mapping`)
+  const routing = {}
+  for (const key of Object.keys(value)) {
+    assert(ROUTING_FIELDS.includes(key), `${subject} has unknown key ${JSON.stringify(key)}`)
+  }
+  for (const field of ROUTING_LIST_FIELDS) {
+    const list = value[field]
+    if (list === undefined || list === null) continue
+    assert(Array.isArray(list), `${subject}.${field} must be a list`)
+    routing[field] = list.map((item) => {
+      assert(typeof item === 'string' && ROUTING_PATTERN.test(item), `${subject}.${field} entries must match [A-Za-z0-9._:/@*+-] (received ${JSON.stringify(item)})`)
+      return item
+    })
+  }
+  for (const field of ROUTING_BOOLEAN_FIELDS) {
+    const flag = value[field]
+    if (flag === undefined || flag === null) continue
+    assert(typeof flag === 'boolean', `${subject}.${field} must be a boolean`)
+    routing[field] = flag
+  }
+  const allowSwitch = value.allowSwitch
+  if (allowSwitch !== undefined && allowSwitch !== null) {
+    assert(allowSwitch === 'never' || allowSwitch === 'idle-only', `${subject}.allowSwitch must be never or idle-only (received ${JSON.stringify(allowSwitch)})`)
+    routing.allowSwitch = allowSwitch
+  }
+  const maxTotalTokens = value.maxTotalTokens
+  if (maxTotalTokens !== undefined && maxTotalTokens !== null) {
+    assert(Number.isSafeInteger(maxTotalTokens) && maxTotalTokens > 0, `${subject}.maxTotalTokens must be a positive integer`)
+    routing.maxTotalTokens = maxTotalTokens
+  }
+  return routing
+}
+
+/**
  * Validate one parsed fleet registry document. The schema is strict so a typo
  * degrades to "pairings left untouched plus a warning", never to a partial or
  * differently-addressed table.
@@ -127,7 +180,14 @@ export function validateRegistry(parsed, path) {
     const ip = optionalString(member.ip, `${subject}: ip`)
     const port = member.port
     assert(port === undefined || port === null || (Number.isSafeInteger(port) && port > 0 && port < 65536), `${subject}: port must be an integer in 1..65535 when present`)
-    return { name, alias, exposure, create, hostnames, ip, ...(port === undefined || port === null ? {} : { port }) }
+    const routing = member.routing === undefined || member.routing === null
+      ? undefined
+      : validateRouting(member.routing, `${subject}: routing`)
+    return {
+      name, alias, exposure, create, hostnames, ip,
+      ...(port === undefined || port === null ? {} : { port }),
+      ...(routing === undefined ? {} : { routing }),
+    }
   })
   const names = new Set()
   const aliases = new Set()
@@ -288,6 +348,14 @@ export function aliasOwnerFor(local, remote, hub) {
   return remote
 }
 
+/** Render one routing field value as a YAML scalar or inline list. */
+function renderRoutingValue(value) {
+  if (Array.isArray(value)) return `[${value.map(item => yamlScalar(item)).join(', ')}]`
+  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  if (typeof value === 'number') return String(value)
+  return yamlScalar(value)
+}
+
 /**
  * Render the pairing document for one device. Entries keep registry order so a
  * re-run is byte-identical; the caller must already have resolved every
@@ -321,6 +389,16 @@ export function renderPairingsDocument(registry, options) {
       '    create:',
       `      agentPreset: ${yamlScalar(owner.create)}`,
     )
+    if (owner.routing !== undefined && Object.keys(owner.routing).length === 0) {
+      lines.push('    routing: {}')
+    } else if (owner.routing !== undefined) {
+      lines.push('    routing:')
+      for (const field of ROUTING_FIELDS) {
+        const value = owner.routing[field]
+        if (value === undefined) continue
+        lines.push(`      ${field}: ${renderRoutingValue(value)}`)
+      }
+    }
   }
   return `${lines.join('\n')}\n`
 }

@@ -1,7 +1,7 @@
 # dsh-enpoi-peer-bridge bundle patch — the caller side of the device-to-device
-# peer API (doc 69 P2). Registers six model-facing tools (peer_status,
-# peer_sessions, peer_ask, peer_asks, peer_answer, peer_cancel) and reads
-# caller-role entries (`peer` + `endpoint`, optionally `remoteSessionId`/`token`)
+# peer API (doc 69 P2). Registers eight model-facing tools (peer_status,
+# peer_sessions, peer_models, peer_switch_model, peer_ask, peer_asks,
+# peer_answer, peer_cancel) and reads caller-role entries (`peer` + `endpoint`, optionally `remoteSessionId`/`token`)
 # from the pairing document. Inert until such an entry exists; the default
 # document is `$DSH_HOME/pairings.yaml`. Set `pairingsPath` (and optionally
 # `noticesPath`) to point a test or a second document at a scratch file:

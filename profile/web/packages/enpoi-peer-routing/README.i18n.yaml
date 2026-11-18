@@ -1,0 +1,31 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write profile/web/packages/enpoi-peer-routing/README.md
+/dsh-enpoi-peer-routing:
+  en: 17280c8fb53d35f6
+  zh: a930045c3641c235
+/dsh-enpoi-peer-routing/service:
+  en: de6081943e0105bf
+  zh: eec113e26942dbc1
+/dsh-enpoi-peer-routing/policy-evaluation:
+  en: e7d0dda8a499e13b
+  zh: 02b9be3e25cde7a0
+/dsh-enpoi-peer-routing/discovery:
+  en: c73ed104dc5031b8
+  zh: 34ce9106e91ac4e2
+/dsh-enpoi-peer-routing/pairing-usage-free-only-worker:
+  en: 0236d07584de1ee9
+  zh: ea9da9650a8c597f
+/dsh-enpoi-peer-routing/pairing-usage-free-only-worker/create-request:
+  en: 597b80afe6a2b9e5
+  zh: f5905665aa6579a5
+/dsh-enpoi-peer-routing/pairing-usage-free-only-worker/chain-versus-pinned-route:
+  en: 164327b3e1e63d44
+  zh: 120b402ec31d2370
+/dsh-enpoi-peer-routing/failure-posture:
+  en: ba16007a8de20008
+  zh: 95e87a09bc31db30
+/dsh-enpoi-peer-routing/tests:
+  en: e7f50df68ef140df
+  zh: 02ecb35568360178

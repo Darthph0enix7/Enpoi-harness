@@ -101,6 +101,12 @@ interface HostOptions {
   readonly unbound?: boolean
   /** Pairing document override (defaults to {@link PAIRING_DOC}). */
   readonly pairingDoc?: string
+  /** Capabilities the scripted host advertises (default just `state-latch`). */
+  readonly capabilities?: readonly string[]
+  /** Fail `peer.create` with this peer error instead of binding. */
+  readonly createFailure?: { readonly code: string; readonly message: string }
+  /** Report this latch from a `peer/selectModel` call (a busy session). */
+  readonly switchBusy?: boolean
 }
 
 interface RegisteredTool {
@@ -139,7 +145,43 @@ function createHarness(options: HostOptions = {}) {
     const fail = (code: string, message: string): Response => rpcResponse({ code, message }, false)
     switch (method) {
       case 'handshake':
-        return ok({ protocolVersion: 1, harnessVersion: '0.1.6-alpha.2', schemaDigest: '', hostDevice: 'serverlocal', capabilities: ['state-latch'], pairings: [] })
+        return ok({
+          protocolVersion: 1,
+          harnessVersion: '0.1.6-alpha.2',
+          schemaDigest: '',
+          hostDevice: 'serverlocal',
+          capabilities: options.capabilities ?? ['state-latch'],
+          pairings: [],
+        })
+      case 'models':
+        return ok({
+          chains: [{
+            id: 'free',
+            dynamic: true,
+            members: [
+              { provider: 'antigravity', model: 'a', state: 'ready' },
+              { provider: 'antigravity', model: 'b', state: 'cooldown', cooldownUntil: 1_700_000_000_000 },
+              { provider: 'antigravity', model: 'c', state: 'deprecated' },
+            ],
+          }],
+          models: [{
+            provider: 'antigravity', model: 'a', tools: true, vision: 'unknown', contextWindow: 1_000_000,
+            zeroPrice: true, gated: false, trainsOnData: 'no', reasoningEfforts: ['high', 'low'],
+          }],
+          nextCursor: 'more',
+          selectableByThisAlias: {
+            chains: ['free'], models: ['antigravity/*'], reasoningEfforts: ['high'],
+            requireZeroPrice: true, requireNoTraining: false, requireTools: false, allowSwitch: 'idle-only',
+          },
+        })
+      case 'selectModel':
+        if (options.switchBusy === true) return fail('peer/conflict', 'the session is running')
+        return ok({
+          accepted: true,
+          selected: { provider: String(args.provider), model: String(args.model), ...(typeof args.chain === 'string' ? { chain: args.chain } : {}), ...(typeof args.reasoningEffort === 'string' ? { reasoningEffort: args.reasoningEffort } : {}) },
+          previous: { provider: 'antigravity', model: 'old' },
+          replayed: args.requestId === 'sw-replay',
+        })
       case 'state':
         if (followStarted) probeCalls += 1
         if (probeDown) throw new Error('econnrefused')
@@ -156,6 +198,7 @@ function createHarness(options: HostOptions = {}) {
           cursor: 0,
         })
       case 'create':
+        if (options.createFailure !== undefined) return fail(options.createFailure.code, options.createFailure.message)
         boundNow = true
         return ok({
           target: { device: 'serverlocal', sessionId: 'sess-1', exposure: 'debug', alias: 'scratch' },
@@ -479,9 +522,12 @@ const QUESTION_ASK: PeerPendingAsk = {
 }
 
 describe('enpoi-peer-bridge tools', () => {
-  it('registers the six bridge tools with model-facing descriptions and renders', () => {
+  it('registers the eight bridge tools with model-facing descriptions and renders', () => {
     const harness = createHarness()
-    expect([...harness.tools.keys()]).toEqual(['peer_status', 'peer_sessions', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel'])
+    expect([...harness.tools.keys()]).toEqual([
+      'peer_status', 'peer_sessions', 'peer_models', 'peer_switch_model',
+      'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel',
+    ])
     for (const tool of harness.tools.values()) {
       expect(tool.description.length).toBeGreaterThan(40)
       expect(typeof tool.output.render).toBe('function')
@@ -1061,4 +1107,189 @@ describe('enpoi-peer-bridge tools', () => {
     expect(description).toContain('resume set to the returned requestId')
     expect(description).toContain('host_unreachable')
   })
+
+  it('peer_models refuses a host without model discovery with a clear upgrade message', async () => {
+    const harness = createHarness()
+    const result = await harness.tools.get('peer_models')!.execute({ alias: 'scratch' }, harness.exec)
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'peer/capability-missing', message: 'host does not advertise model-discovery; upgrade the host' },
+    })
+    expect(harness.calls.some(call => call.method === 'models')).toBe(false)
+  })
+
+  it('peer_models forwards the filter, cursor, and limit and reports chain states and policy', async () => {
+    const harness = createHarness({ capabilities: ['state-latch', 'model-discovery'] })
+    const result = await harness.tools.get('peer_models')!.execute(
+      { alias: 'scratch', cursor: 'c1', limit: 5, zeroPrice: true, tools: true },
+      harness.exec,
+    )
+    expect(result).toMatchObject({ ok: true, alias: 'scratch', nextCursor: 'more' })
+    expect(harness.calls.find(call => call.method === 'models')!.args).toMatchObject({
+      alias: 'scratch',
+      participant: { kind: 'peer', name: 'serverlocal', device: 'serverlocal' },
+      filter: { zeroPrice: true, tools: true },
+      cursor: 'c1',
+      limit: 5,
+    })
+    const rendered = harness.tools.get('peer_models')!.output.render({}, result)[0]!.text
+    expect(rendered).toContain('antigravity/b cooldown until')
+    expect(rendered).toContain('antigravity/c deprecated')
+    expect(rendered).toContain('free routes only')
+    expect(rendered).toContain('more routes available')
+  })
+
+  it('peer_models rejects malformed arguments without calling the host', async () => {
+    const harness = createHarness({ capabilities: ['model-discovery'] })
+    const badLimit = await harness.tools.get('peer_models')!.execute({ alias: 'scratch', limit: -1 }, harness.exec)
+    expect(badLimit).toMatchObject({ ok: false, error: { code: 'gateway/bad-request' } })
+    const badFilter = await harness.tools.get('peer_models')!.execute({ alias: 'scratch', tools: 'yes' }, harness.exec)
+    expect(badFilter.ok).toBe(false)
+    expect(harness.calls.some(call => call.method === 'models')).toBe(false)
+  })
+
+  it('peer_switch_model refuses a host without model switching with a clear upgrade message', async () => {
+    const harness = createHarness()
+    const result = await harness.tools.get('peer_switch_model')!.execute({ alias: 'scratch', provider: 'antigravity', model: 'a' }, harness.exec)
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'peer/capability-missing', message: 'host does not advertise model-switch; upgrade the host' },
+    })
+    expect(harness.calls.some(call => call.method === 'selectModel')).toBe(false)
+  })
+
+  it('peer_switch_model switches a route with a generated requestId and reports previous and replay', async () => {
+    const harness = createHarness({ capabilities: ['model-switch'] })
+    const result = await harness.tools.get('peer_switch_model')!.execute(
+      { alias: 'scratch', provider: 'antigravity', model: 'a', reasoningEffort: 'high' },
+      harness.exec,
+    )
+    expect(result).toMatchObject({
+      ok: true,
+      alias: 'scratch',
+      selection: { provider: 'antigravity', model: 'a', reasoningEffort: 'high' },
+      previous: { provider: 'antigravity', model: 'old' },
+      replayed: false,
+    })
+    expect(String(result.requestId)).toMatch(/^peer-bridge-/u)
+    expect(harness.calls.find(call => call.method === 'selectModel')!.args).toMatchObject({
+      target: { kind: 'alias', alias: 'scratch' },
+      participant: { kind: 'peer', name: 'serverlocal', device: 'serverlocal' },
+      requestId: result.requestId,
+      provider: 'antigravity',
+      model: 'a',
+      reasoningEffort: 'high',
+    })
+    const rendered = harness.tools.get('peer_switch_model')!.output.render({}, result)[0]!.text
+    expect(rendered).toContain('switched scratch to antigravity/a')
+    expect(rendered).toContain('previous route antigravity/old')
+  })
+
+  it('peer_switch_model switches by chain and reuses a supplied requestId', async () => {
+    const harness = createHarness({ capabilities: ['model-switch'] })
+    const result = await harness.tools.get('peer_switch_model')!.execute(
+      { alias: 'scratch', chain: 'free', requestId: 'sw-replay' },
+      harness.exec,
+    )
+    expect(result).toMatchObject({ ok: true, requestId: 'sw-replay', replayed: true })
+    expect(harness.calls.find(call => call.method === 'selectModel')!.args).toMatchObject({
+      requestId: 'sw-replay', provider: '', model: '', chain: 'free',
+    })
+  })
+
+  it('peer_switch_model reports a busy session conflict verbatim', async () => {
+    const harness = createHarness({ capabilities: ['model-switch'], switchBusy: true })
+    const result = await harness.tools.get('peer_switch_model')!.execute({ alias: 'scratch', provider: 'p', model: 'm' }, harness.exec)
+    expect(result).toMatchObject({ ok: false, error: { code: 'peer/conflict', message: 'the session is running' } })
+  })
+
+  it('peer_switch_model validates provider/model pairing and requires a route or chain', async () => {
+    const harness = createHarness({ capabilities: ['model-switch'] })
+    const lone = await harness.tools.get('peer_switch_model')!.execute({ alias: 'scratch', provider: 'p' }, harness.exec)
+    expect(String((lone.error as Record<string, unknown>).message)).toBe('peer_switch_model needs provider and model together')
+    const none = await harness.tools.get('peer_switch_model')!.execute({ alias: 'scratch' }, harness.exec)
+    expect(String((none.error as Record<string, unknown>).message)).toBe('peer_switch_model needs provider+model or a chain')
+    expect(harness.calls.some(call => call.method === 'selectModel')).toBe(false)
+  })
+
+  it('peer_ask forwards model options and a token ceiling on create, replacing the pairing route', async () => {
+    const harness = createHarness({ unbound: true, pairingDoc: ROUTED_PAIRING_DOC })
+    const result = await harness.tools.get('peer_ask')!.execute(
+      { alias: 'scratch', message: 'hi', chain: 'free', reasoningEffort: 'low', maxTotalTokens: 5000 },
+      harness.exec,
+    )
+    expect(result).toMatchObject({ ok: true, created: true })
+    const create = harness.calls.find(call => call.method === 'create')!.args
+    expect(create).toMatchObject({ chain: 'free', reasoningEffort: 'low', maxTotalTokens: 5000 })
+    // The named chain replaced the pairing's pinned provider/model route.
+    expect(create).not.toHaveProperty('provider')
+    expect(create).not.toHaveProperty('model')
+  })
+
+  it('peer_ask refuses model options on an already bound session and points at peer_switch_model', async () => {
+    const harness = createHarness()
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'hi', provider: 'p', model: 'm' }, harness.exec)
+    expect(result.ok).toBe(false)
+    expect(String((result.error as Record<string, unknown>).message)).toContain('use peer_switch_model')
+    expect(harness.calls.some(call => call.method === 'create')).toBe(false)
+    expect(harness.calls.some(call => call.method === 'prompt')).toBe(false)
+  })
+
+  it('peer_models rejects an empty cursor and a non-boolean zeroPrice', async () => {
+    const harness = createHarness({ capabilities: ['model-discovery'] })
+    const cursor = await harness.tools.get('peer_models')!.execute({ alias: 'scratch', cursor: '  ' }, harness.exec)
+    expect(String((cursor.error as Record<string, unknown>).message)).toBe('cursor must be a non-empty string')
+    const zero = await harness.tools.get('peer_models')!.execute({ alias: 'scratch', zeroPrice: 1 }, harness.exec)
+    expect(String((zero.error as Record<string, unknown>).message)).toBe('zeroPrice must be a boolean')
+    expect(harness.calls.some(call => call.method === 'models')).toBe(false)
+  })
+
+  it('peer_switch_model rejects a blank route, an effort without a route, and renders a replay', async () => {
+    const harness = createHarness({ capabilities: ['model-switch'] })
+    const blank = await harness.tools.get('peer_switch_model')!.execute({ alias: 'scratch', provider: ' ', model: 'm' }, harness.exec)
+    expect(String((blank.error as Record<string, unknown>).message)).toBe('provider must be a non-empty string')
+    const effort = await harness.tools.get('peer_switch_model')!.execute({ alias: 'scratch', reasoningEffort: 'high' }, harness.exec)
+    expect(String((effort.error as Record<string, unknown>).message)).toBe('peer_switch_model needs provider+model or a chain')
+    const replayed = await harness.tools.get('peer_switch_model')!.execute(
+      { alias: 'scratch', chain: 'free', requestId: 'sw-replay' },
+      harness.exec,
+    )
+    const rendered = harness.tools.get('peer_switch_model')!.output.render({}, replayed)[0]!.text
+    expect(rendered).toContain('this exact switch was already applied')
+  })
+
+  it('peer_ask rejects create-time options that name no route', async () => {
+    const harness = createHarness({ unbound: true })
+    const effort = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'hi', reasoningEffort: 'high' }, harness.exec)
+    expect(String((effort.error as Record<string, unknown>).message)).toBe('a reasoning effort needs provider+model or a chain to apply to')
+    const lone = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'hi', provider: 'p' }, harness.exec)
+    expect(String((lone.error as Record<string, unknown>).message)).toBe('peer_ask needs provider and model together')
+    const ceiling = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'hi', maxTotalTokens: 0 }, harness.exec)
+    expect(String((ceiling.error as Record<string, unknown>).message)).toBe('maxTotalTokens must be a positive integer')
+    expect(harness.calls.some(call => call.method === 'create')).toBe(false)
+  })
+
+  it('peer_ask refuses create-time options on a resume', async () => {
+    const harness = createHarness()
+    const result = await harness.tools.get('peer_ask')!.execute(
+      { alias: 'scratch', resume: 'peer-bridge-prior', chain: 'free' },
+      harness.exec,
+    )
+    expect(result.ok).toBe(false)
+    expect(String((result.error as Record<string, unknown>).message)).toContain('resume cannot change the model')
+    expect(harness.calls.some(call => call.method === 'prompt')).toBe(false)
+  })
+
+  it('peer_ask surfaces a host routing refusal verbatim', async () => {
+    const harness = createHarness({
+      unbound: true,
+      createFailure: { code: 'peer/forbidden', message: 'routing policy refused the requested model (model-not-allowed)' },
+    })
+    const result = await harness.tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'hi', provider: 'p', model: 'm' }, harness.exec)
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'peer/forbidden', message: 'routing policy refused the requested model (model-not-allowed)' },
+    })
+  })
+
 })

@@ -15,10 +15,14 @@ import type {
   PeerActor,
   PeerExecutionState,
   PeerLatch,
+  PeerModelHopData,
+  PeerModelHopReason,
   PeerModelSelection,
   PeerParticipant,
   PeerPendingAsk,
+  PeerTokenUsage,
   PeerTurnError,
+  PeerTurnModelReport,
   PeerTurnTerminal,
 } from './types.ts'
 
@@ -42,6 +46,22 @@ export interface HostLatchFacts {
 }
 
 const LATCH_VALUES: readonly PeerLatch[] = ['running', 'waiting_approval', 'waiting_subagents', 'idle']
+
+/**
+ * Cap on the recent chain-hop window the fold retains. The wire state needs
+ * only the newest hops of the current rolling run; older hops stay available
+ * as durable `model-hop` stream records and through `peer.page`, and the fold
+ * never holds a whole Session log to serve them.
+ */
+export const RECENT_MODEL_HOPS_LIMIT = 32
+
+/**
+ * Durable cancel-cause reason the host's ceiling watcher writes when it stops
+ * a running turn. The Agent's `hook` cancel cause and its string `reason`
+ * already exist in the session format, so the marker is a durable record that
+ * older builds parse without a `SESSION_FORMAT_VERSION` bump.
+ */
+export const PEER_BUDGET_STOP_REASON = 'peer/budget'
 
 /**
  * Read a host-published execution latch from projection values when one
@@ -96,17 +116,22 @@ function hostLatchFactsOf(candidate: Record<string, unknown>): HostLatchFacts | 
 
 /**
  * Read the current model selection from the durable `modelSelection`
- * projection (`pending` wins over `lastUsed`), for Sessions with no explicit
- * `model/selection` event yet (doc 69 §10.3).
+ * projection (doc 69 §10.3). The projection's wire view publishes
+ * `{ lastUsed, next }`, where `next` is already `pending ?? lastUsed`; the
+ * fold therefore prefers `next` and only falls back to a raw projection state
+ * (`pending` before `lastUsed`) for hosts that publish state instead of the
+ * view.
  * @param projections - projection values at one observation cut.
- * @returns the selection, or `undefined` when the projection is absent.
+ * @returns the effective selection, or `undefined` when the projection is absent.
  */
 export function readModelSelectionProjection(
   projections: Readonly<Record<string, unknown>> | undefined,
 ): PeerModelSelection | undefined {
   const candidate = projections?.modelSelection
   if (!isRecord(candidate)) return undefined
-  const pick = isRecord(candidate.pending) ? candidate.pending : candidate.lastUsed
+  const pick = isRecord(candidate.next)
+    ? candidate.next
+    : isRecord(candidate.pending) ? candidate.pending : candidate.lastUsed
   return parseModelSelection(pick)
 }
 
@@ -117,6 +142,14 @@ export class PeerLatchFold {
   private readonly settledChildren = new Set<SessionId>()
   private openTurn: number | undefined
   private openTurnStartSeq: number | undefined
+  /** Failed routes seen since this turn opened; attributed by log position. */
+  private turnHops = 0
+  /** Answering route of the newest assistant message in this turn, without the hop count. */
+  private turnRan: Omit<PeerTurnModelReport, 'hops'> | undefined
+  /** Bounded window of chain hops; oldest first, capped at the newest {@link RECENT_MODEL_HOPS_LIMIT}. */
+  private readonly recentHops: PeerModelHopData[] = []
+  /** Newest turn whose durable `aborted` terminal carries {@link PEER_BUDGET_STOP_REASON}. */
+  private budgetStopTurn: number | undefined
   private lastTurnEnd: PeerTurnTerminal | undefined
   private model: PeerModelSelection | undefined
   private lastHumanAction: PeerExecutionState['lastParticipantAction']
@@ -134,6 +167,8 @@ export class PeerLatchFold {
     switch (event.type) {
       case 'turn/start': {
         const turn = numberField(event.data, 'turn')
+        this.turnHops = 0
+        this.turnRan = undefined
         if (turn !== undefined) {
           this.openTurn = turn
           this.openTurnStartSeq = event.seq
@@ -153,9 +188,16 @@ export class PeerLatchFold {
             reason: kind as PeerTurnTerminal['reason'],
             at: event.time,
             ...(error === undefined ? {} : { error }),
+            ...(this.turnRan === undefined ? {} : { ran: { ...this.turnRan, hops: this.turnHops } }),
           }
           if (kind === 'aborted') {
             const cancelReason = recordField(reason, 'reason')
+            // The ceiling watcher's stop is the one marker that survives a
+            // restart; a human or peer cancel records `kind: 'user'` and is
+            // never stamped `stop: 'budget'`.
+            if (cancelReason?.kind === 'hook' && cancelReason.reason === PEER_BUDGET_STOP_REASON) {
+              this.budgetStopTurn = turn
+            }
             if (cancelReason?.kind === 'user') {
               this.lastHumanAction = {
                 action: 'cancel',
@@ -167,8 +209,31 @@ export class PeerLatchFold {
         }
         this.openTurn = undefined
         this.openTurnStartSeq = undefined
+        this.turnHops = 0
+        this.turnRan = undefined
         this.settledChildren.clear()
         this.pendingApprovals.clear()
+        break
+      }
+      case 'llm/attempt-failed': {
+        // A failed attempt carries no turn identity, so the fold attributes it
+        // by log position: everything between this turn's start and end.
+        if (this.openTurn !== undefined) this.turnHops += 1
+        const hop = modelHopOf(event)
+        if (hop !== undefined) {
+          this.recentHops.push(hop)
+          if (this.recentHops.length > RECENT_MODEL_HOPS_LIMIT) {
+            this.recentHops.splice(0, this.recentHops.length - RECENT_MODEL_HOPS_LIMIT)
+          }
+        }
+        break
+      }
+      case 'assistant/message': {
+        // Only a message inside the open turn answers it; the newest one is the
+        // step that produced the turn's final output.
+        if (this.openTurn === undefined) break
+        const ran = modelReportOf(event)
+        if (ran !== undefined) this.turnRan = ran
         break
       }
       case 'approval/asked': {
@@ -245,16 +310,23 @@ export class PeerLatchFold {
    * Assemble the peer-visible state.
    * @param pendingAsks - asks the host registry currently exposes for this Session.
    * @param hostLatch - host-published latch facts overriding the derived fold.
-   * @returns the aggregate execution state.
+   * @returns the aggregate execution state; `stop: 'budget'` is stamped only on
+   * the turn whose durable `aborted` terminal carries the watcher marker.
    */
-  snapshot(pendingAsks: readonly PeerPendingAsk[], hostLatch?: HostLatchFacts): PeerExecutionState {
+  snapshot(
+    pendingAsks: readonly PeerPendingAsk[],
+    hostLatch?: HostLatchFacts,
+  ): PeerExecutionState {
     const activeDescendants = hostLatch?.activeDescendants ?? this.activeDescendants()
     const latch = hostLatch?.latch ?? this.derivedLatch(pendingAsks)
     if (latch !== this.latch) {
       this.latch = latch
       this.latchSince = this.lastEventTime
     }
-    const lastTurnEnd = hostLatch?.lastTurnEnd ?? this.lastTurnEnd
+    const lastTurnEnd = stampBudgetStop(
+      mergeTerminalRan(hostLatch?.lastTurnEnd, this.lastTurnEnd),
+      this.budgetStopTurn,
+    )
     const model = hostLatch?.model ?? this.model
     const lastParticipantAction = this.lastPeerAction ?? hostLatch?.lastParticipantAction ?? this.lastHumanAction
     return {
@@ -269,6 +341,7 @@ export class PeerLatchFold {
       ...(lastTurnEnd === undefined ? {} : { lastTurnEnd }),
       ...(lastParticipantAction === undefined ? {} : { lastParticipantAction }),
       ...(model === undefined ? {} : { model }),
+      ...(this.recentHops.length === 0 ? {} : { recentModelHops: [...this.recentHops] }),
     }
   }
 
@@ -285,7 +358,7 @@ export class PeerLatchFold {
  * Fold a complete durable prefix into one derived state.
  * @param events - durable events in log order.
  * @param pendingAsks - asks the host registry currently exposes for this Session.
- * @returns the derived aggregate state.
+ * @returns the derived aggregate state, including the watcher's `stop: 'budget'` marker.
  */
 export function foldExecutionState(
   events: readonly PeerFoldEvent[],
@@ -294,6 +367,181 @@ export function foldExecutionState(
   const fold = new PeerLatchFold()
   for (const event of events) fold.apply(event)
   return fold.snapshot(pendingAsks)
+}
+
+/**
+ * Classify one durable chain-failure code into the closed peer hop
+ * vocabulary. Transient rate-limit codes answer `rate-limit`; credential,
+ * entitlement, quota, and route-capability codes answer `unavailable`;
+ * everything else — a transient server failure, an empty response, a policy
+ * refusal, an unknown adapter code — answers `error`. No durable code
+ * represents skipping a cooling route, so `cooldown` is reserved for that
+ * future record shape and never produced today.
+ * @param code - stable provider-neutral failure code from `llm/attempt-failed`.
+ * @returns the peer-facing reason; never provider prose.
+ */
+export function modelHopReasonOf(code: string): PeerModelHopReason {
+  switch (code) {
+    case 'RATE_LIMIT':
+    case 'PROVIDER_POOL_EXHAUSTED':
+      return 'rate-limit'
+    case 'AUTH':
+    case 'FREE_TIER_GATED':
+    case 'ENTITLEMENT_GATED':
+    case 'INVALID_CREDENTIAL':
+    case 'MISSING_CREDENTIAL':
+    case 'QUOTA':
+    case 'ACCOUNT_QUOTA':
+    case 'NO_ADAPTER':
+    case 'UNKNOWN_MODEL':
+    case 'PROVIDER_MODEL_OUTAGE':
+      return 'unavailable'
+    default:
+      return 'error'
+  }
+}
+
+/**
+ * Derive the peer hop payload from one durable `llm/attempt-failed` record.
+ * Only the route pair, the closed reason, the group id, and the event time
+ * cross the boundary; the record's `message`, `status`, and `requestId` are
+ * deliberately dropped because provider prose can carry request text and URLs.
+ * A credential-pool rotation names no next route, so `to` repeats the same
+ * provider/model the rotated identity retried; a record with no `next` object
+ * carries no `to` at all.
+ * @param event - durable event time and payload.
+ * @returns the hop payload, or `undefined` when the record lacks route facts.
+ */
+export function modelHopOf(event: { readonly time: number; readonly data: unknown }): PeerModelHopData | undefined {
+  const data = event.data
+  if (!isRecord(data)) return undefined
+  const provider = stringField(data, 'provider')
+  const model = stringField(data, 'model')
+  const code = stringField(data, 'code')
+  if (provider === undefined || model === undefined || code === undefined) return undefined
+  const chain = stringField(data, 'chain')
+  const next = recordField(data, 'next')
+  const nextProvider = next === undefined ? undefined : stringField(next, 'provider')
+  const nextModel = next === undefined ? undefined : stringField(next, 'model')
+  const to = next === undefined
+    ? undefined
+    : nextProvider !== undefined && nextModel !== undefined
+      ? { provider: nextProvider, model: nextModel }
+      : { provider, model }
+  return {
+    from: { provider, model },
+    ...(to === undefined ? {} : { to }),
+    reason: modelHopReasonOf(code),
+    ...(chain === undefined ? {} : { chain }),
+    at: event.time,
+  }
+}
+
+/**
+ * Read the session token totals from the durable `tokenUsage` projection.
+ * @param projections - projection values at one observation cut.
+ * @returns the four disjoint buckets, or `undefined` when the projection is absent or malformed.
+ */
+export function readTokenUsageProjection(
+  projections: Readonly<Record<string, unknown>> | undefined,
+): PeerTokenUsage | undefined {
+  const usage = projections?.tokenUsage
+  if (!isRecord(usage)) return undefined
+  const input = tokenCount(usage.uncachedInputTokens)
+  const output = tokenCount(usage.outputTokens)
+  const cacheRead = tokenCount(usage.cacheReadTokens)
+  const cacheWrite = tokenCount(usage.cacheWriteTokens)
+  if (input === undefined || output === undefined || cacheRead === undefined || cacheWrite === undefined) {
+    return undefined
+  }
+  return { inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite }
+}
+
+/**
+ * Compute the session's token ceiling view. The harness has no billing data,
+ * so this reports tokens and never a cost. `metered` is true only when the
+ * durable `tokenUsage` projection was actually read: an unreadable projection
+ * reports zero usage and `exceeded: false` rather than pretending the ceiling
+ * is enforced.
+ * @param usage - session totals, absent before the first reported sample or when the projection is not mounted.
+ * @param ceiling - configured total-token ceiling, if any.
+ * @returns the budget facts, or `undefined` when no valid ceiling is configured.
+ */
+export function tokenBudgetOf(
+  usage: PeerTokenUsage | undefined,
+  ceiling: number | undefined,
+): PeerExecutionState['budget'] | undefined {
+  if (ceiling === undefined || !Number.isSafeInteger(ceiling) || ceiling < 0) return undefined
+  if (usage === undefined) {
+    return { maxTotalTokens: ceiling, usedTokens: 0, exceeded: false, metered: false }
+  }
+  const usedTokens = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+  return { maxTotalTokens: ceiling, usedTokens, exceeded: usedTokens >= ceiling, metered: true }
+}
+
+/** Read the answering route and usage sample carried by one durable assistant message. */
+function modelReportOf(event: PeerFoldEvent): Omit<PeerTurnModelReport, 'hops'> | undefined {
+  const source = recordField(recordField(event.data, 'message'), 'source')
+  if (source?.kind !== 'model') return undefined
+  const provider = stringField(source, 'provider')
+  const model = stringField(source, 'model')
+  if (provider === undefined || model === undefined) return undefined
+  const chain = stringField(source, 'chain')
+  const usage = recordField(event.data, 'usage')
+  const mapped = usage === undefined ? undefined : parseTokenUsage(usage)
+  return {
+    provider,
+    model,
+    ...chain === undefined ? {} : { chain },
+    ...mapped === undefined ? {} : { usage: mapped },
+  }
+}
+
+/** Map one provider usage sample into the peer's four disjoint buckets. */
+function parseTokenUsage(value: Record<string, unknown>): PeerTokenUsage | undefined {
+  const input = tokenCount(value.inputTokens)
+  const output = tokenCount(value.outputTokens)
+  if (input === undefined || output === undefined) return undefined
+  const cacheRead = value.cacheReadTokens === undefined ? 0 : tokenCount(value.cacheReadTokens)
+  const cacheWrite = value.cacheWriteTokens === undefined ? 0 : tokenCount(value.cacheWriteTokens)
+  if (cacheRead === undefined || cacheWrite === undefined) return undefined
+  return { inputTokens: input, outputTokens: output, cacheReadTokens: cacheRead, cacheWriteTokens: cacheWrite }
+}
+
+/** Accept one non-negative finite token count. */
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/**
+ * Prefer the host latch's terminal facts but keep this fold's route
+ * attribution: the host execution-state projection carries no `ran`, and the
+ * derived fold is what saw the answering message and the preceding hops.
+ */
+function mergeTerminalRan(
+  hostTerminal: PeerTurnTerminal | undefined,
+  derivedTerminal: PeerTurnTerminal | undefined,
+): PeerTurnTerminal | undefined {
+  if (hostTerminal === undefined) return derivedTerminal
+  if (hostTerminal.ran !== undefined || derivedTerminal === undefined) return hostTerminal
+  if (hostTerminal.turn !== derivedTerminal.turn || derivedTerminal.ran === undefined) return hostTerminal
+  return { ...hostTerminal, ran: derivedTerminal.ran }
+}
+
+/**
+ * Stamp the budget stop onto the reported terminal: only the turn whose durable
+ * `aborted` terminal carries {@link PEER_BUDGET_STOP_REASON} becomes
+ * `stop: 'budget'`. The marker is durable, so the classification survives a
+ * host restart; a human or peer cancel records a `user` cause and is never
+ * stamped, even when the session is over budget.
+ */
+function stampBudgetStop(
+  terminal: PeerTurnTerminal | undefined,
+  budgetStopTurn: number | undefined,
+): PeerTurnTerminal | undefined {
+  if (terminal === undefined || budgetStopTurn === undefined) return terminal
+  if (terminal.turn !== budgetStopTurn) return terminal
+  return { ...terminal, stop: 'budget' }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

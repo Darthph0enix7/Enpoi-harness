@@ -1,0 +1,58 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write packages/api/peer/README.md
+/:
+  en: 7d959fe70aca8f2d
+  zh: 978b4d8598b01e68
+/deepseek-ai-dsh-api-peer:
+  en: 08063506f457abe7
+  zh: 58bf87c854711e5b
+/deepseek-ai-dsh-api-peer/summary:
+  en: e9b9c7fe382db15a
+  zh: 87ab00d5fb047678
+/deepseek-ai-dsh-api-peer/table-of-contents:
+  en: 58cc0cb146c0ed2d
+  zh: 184ea8c4997e46b4
+/deepseek-ai-dsh-api-peer/use-this-package:
+  en: cab563dff21bad20
+  zh: 6c478fdc204a87c8
+/deepseek-ai-dsh-api-peer/pairing-file:
+  en: e7d34e76a9758077
+  zh: 6cd02e4654a2bc2e
+/deepseek-ai-dsh-api-peer/host-surface:
+  en: 16025f455d5aa405
+  zh: 8d049fb5313d539d
+/deepseek-ai-dsh-api-peer/host-surface/model-attribution-and-usage:
+  en: 8c562a2f3ba33f10
+  zh: 116e9e84710c35e0
+/deepseek-ai-dsh-api-peer/host-surface/token-ceiling-enforcement:
+  en: 43295ceabd9f5024
+  zh: 4e8f0e19585b1bc8
+/deepseek-ai-dsh-api-peer/host-surface/measured-catalogue-facts-keyless-sandbox-self-test-2026-11-17:
+  en: 82d20746550c8ea0
+  zh: 16c3b893741d4c1c
+/deepseek-ai-dsh-api-peer/caller-bridge:
+  en: db18d36314b11535
+  zh: cd8e25c5f3cd1b52
+/deepseek-ai-dsh-api-peer/model-experience:
+  en: 215e7ba838619b7b
+  zh: a311da3843709f90
+/deepseek-ai-dsh-api-peer/model-experience/peer-originated-turns:
+  en: 79ef1e8dbc1487c9
+  zh: 3deb405cec145139
+/deepseek-ai-dsh-api-peer/model-experience/peer-originated-turns/what-the-model-sees:
+  en: e443bf017640cf48
+  zh: ac498e8741dc5d0c
+/deepseek-ai-dsh-api-peer/model-experience/peer-originated-turns/token-effect:
+  en: 36b7a05a903a3e0e
+  zh: 7a4a0959bb8b1517
+/deepseek-ai-dsh-api-peer/model-experience/peer-originated-turns/kv-cache-effect:
+  en: 55057a42ccc5595f
+  zh: 6300de65135c5fb9
+/deepseek-ai-dsh-api-peer/known-limitations-and-deferred-work:
+  en: 0d652d1f2d9984d3
+  zh: aa62f8f944841ff4
+/deepseek-ai-dsh-api-peer/known-limitations-and-deferred-work/dev-note:
+  en: 09bedbd4834c008c
+  zh: 7888eca671c3dddd

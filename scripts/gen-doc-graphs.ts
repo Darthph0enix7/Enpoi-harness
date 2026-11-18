@@ -835,6 +835,13 @@ const SERVICE_ROLES: ServiceRole[] = [
     consumers: ['tool-cordis'],
     note: 'Registers host inspect providers, mirrors the client provider manifest, and routes client queries through the dynamic Cordis transport.',
   },
+  {
+    key: 'peerRouting',
+    pkg: 'peer',
+    title: 'Peer routing policy seam',
+    mode: 'seam',
+    note: 'The peer host reads this structural seam through `ctx.get(\'peerRouting\')`; the deployed profile plugin owns the catalogue, selector rules, chain registry, and route health, while the peer package keeps transport, pairing, and exposure. Without a mounted implementation every routing request fails closed.',
+  },
 ]
 
 function generatedHeader(title: string): string[] {

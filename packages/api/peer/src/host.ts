@@ -15,10 +15,13 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { brandNumber, brandString } from '@deepseek-ai/dsh-brand'
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionQueryError, type SessionObservation } from '@deepseek-ai/dsh-session-query'
 import type { SessionId, SessionSeq } from '@deepseek-ai/dsh-session/types'
 import { Remote, RemoteError, TypertRemoteService } from '@deepseek-ai/dsh-typert-protocol'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
+// Type-only: the `ctx.tokenMeter` Context merge for the usage-seam probe.
+import type {} from '@deepseek-ai/dsh-token-meter'
 import type {
   SessionCreateRequest,
   SessionHistoryRecord,
@@ -26,12 +29,15 @@ import type {
   SessionRequestId,
 } from '@deepseek-ai/dsh-api-session-controller/types'
 import z from '@deepseek-ai/schemastery'
-import { toPeerRecord } from './exposure.ts'
+import { toPeerRecords } from './exposure.ts'
 import {
+  PEER_BUDGET_STOP_REASON,
   PeerLatchFold,
   readExecutionStateValue,
   readHostLatch,
   readModelSelectionProjection,
+  readTokenUsageProjection,
+  tokenBudgetOf,
   type HostLatchFacts,
   type PeerFoldEvent,
 } from './latch.ts'
@@ -40,8 +46,12 @@ import {
   DEFAULT_PAIRINGS_PATH,
   DEFAULT_WATCHDOG_MS,
   PeerPairingsStore,
+  type LoadedPeerPairings,
   type ResolvedPeerPairing,
 } from './pairings.ts'
+import { DEFAULT_RECEIPTS_PATH, PeerReceiptStore, receiptKey } from './receipts.ts'
+import { clampTokenCeiling } from './routing-policy.ts'
+import { HARNESS_VERSION } from './version.ts'
 import { PeerAskRegistry } from './registry.ts'
 import type {
   PeerAlias,
@@ -62,6 +72,9 @@ import type {
   PeerListEntry,
   PeerListRequest,
   PeerListValue,
+  PeerModelSelection,
+  PeerModelsRequest,
+  PeerModelsValue,
   PeerPageRequest,
   PeerPageValue,
   PeerPairing,
@@ -71,6 +84,11 @@ import type {
   PeerPromptRequest,
   PeerPromptValue,
   PeerProtocolVersion,
+  PeerRoutingPolicy,
+  PeerRoutingService,
+  PeerRoutingVerdict,
+  PeerSelectModelRequest,
+  PeerSelectModelValue,
   PeerStateRequest,
   PeerStateValue,
   PeerTarget,
@@ -79,8 +97,14 @@ import type {
 /** Peer protocol generation this build serves. */
 export const PEER_PROTOCOL_VERSION: PeerProtocolVersion = 1
 
-/** Version reported in the handshake when the deployment configures none. */
-export const DEFAULT_HARNESS_VERSION = '0.1.6-alpha.2'
+/**
+ * Version reported in the handshake when the deployment configures none. It is
+ * the running package manifest's version, the runtime version plugin
+ * compatibility reads through `getDshRuntimeVersion()`; a managed `dsh
+ * --version` line adds the installer's release identity around it. The
+ * handshake therefore identifies the shipped build without a drifting literal.
+ */
+export const DEFAULT_HARNESS_VERSION = HARNESS_VERSION
 
 const PEER_METHODS = [
   'peer.answer',
@@ -89,8 +113,10 @@ const PEER_METHODS = [
   'peer.follow',
   'peer.handshake',
   'peer.list',
+  'peer.models',
   'peer.page',
   'peer.prompt',
+  'peer.selectModel',
   'peer.state',
 ] as const
 
@@ -105,11 +131,17 @@ const FOLLOW_SNAPSHOT_MAX_MESSAGES = 50
  * Capability ledger: every `PeerCapability` the contract names, marked with
  * whether this build serves it. The `Record` key set is the union, so a new
  * union member fails the build here until it is explicitly marked; the
- * handshake advertises exactly the `served` entries.
+ * handshake advertises the `served` entries this deployment can actually
+ * answer.
  *
  * `assistant-stream` is served: `peer.follow` yields
  * `assistant-stream` frames when the pairing's exposure is `debug` and the
  * caller opts in, and refuses the opt-in otherwise with `peer/forbidden`.
+ * The routing three are served only while a `peerRouting` service is mounted
+ * (see {@link ROUTING_CAPABILITIES}); `token-ceiling` is served only while the
+ * host can read the durable usage projection (see
+ * {@link TOKEN_CEILING_CAPABILITIES}); model-attribution is served by this
+ * build's contract whenever a create carries it.
  */
 export const PEER_CAPABILITY_LEDGER: Readonly<Record<PeerCapability, 'served' | 'planned'>> = {
   'state-latch': 'served',
@@ -118,9 +150,36 @@ export const PEER_CAPABILITY_LEDGER: Readonly<Record<PeerCapability, 'served' | 
   'answer-routing': 'served',
   'runaway-ceiling': 'served',
   'session-create': 'served',
+  'model-discovery': 'served',
+  'model-routing-at-create': 'served',
+  'model-switch': 'served',
+  'model-attribution': 'served',
+  'token-ceiling': 'served',
 }
 
-/** Capabilities this build serves and the handshake advertises. */
+/**
+ * Capabilities that need a mounted `peerRouting` service at handshake time.
+ * Without it the host refuses every routing request, so advertising these
+ * would promise a switch it cannot serve.
+ */
+const ROUTING_CAPABILITIES: readonly PeerCapability[] = [
+  'model-discovery',
+  'model-routing-at-create',
+  'model-switch',
+]
+
+/**
+ * Capabilities that need the durable token-usage seam at handshake time.
+ * Without it the host cannot report `budget.metered`, cannot enforce a
+ * ceiling, and refuses a create that asks for one, so advertising
+ * `token-ceiling` would promise a cost guard that silently does nothing.
+ */
+const TOKEN_CEILING_CAPABILITIES: readonly PeerCapability[] = ['token-ceiling']
+
+/**
+ * Capabilities this build serves. The handshake advertises this set minus the
+ * members whose seam is not mounted on the current host.
+ */
 export const PEER_CAPABILITIES: readonly PeerCapability[] =
   (Object.keys(PEER_CAPABILITY_LEDGER) as PeerCapability[])
     .filter(capability => PEER_CAPABILITY_LEDGER[capability] === 'served')
@@ -142,16 +201,30 @@ export interface Config {
   readonly bindingsPath?: string
   /** Orphan watchdog in milliseconds; defaults to 15 minutes. */
   readonly watchdogMs?: number
-  /** Harness version reported by `peer.handshake`. */
+  /** Harness version reported by `peer.handshake`; defaults to the running package manifest version. */
   readonly harnessVersion?: string
   /** Schema digest reported by `peer.handshake`. */
   readonly schemaDigest?: string
+  /** Idempotency receipt document path; defaults to `~/.dsh/peer-receipts.json`. */
+  readonly receiptsPath?: string
+  /** Most `peer.selectModel` receipts retained; oldest evicted first. */
+  readonly receiptLimit?: number
+  /** `peer.models` page size when the caller names none. */
+  readonly modelsLimit?: number
+  /** Hard `peer.models` page cap, whatever the caller asks for. */
+  readonly modelsLimitMax?: number
 }
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
     /** Narrow device-to-device peer API surface (namespace `peer`). */
     peerService: PeerService
+    /**
+     * Optional routing seam the profile provides. The peer host reads it with
+     * `ctx.get` at call time and never injects it, because a deployment without
+     * a catalogue still serves the non-routing surface.
+     */
+    peerRouting: PeerRoutingService
   }
 }
 
@@ -175,17 +248,32 @@ export class PeerService extends TypertRemoteService {
     watchdogMs: z.number().step(1).min(1).default(DEFAULT_WATCHDOG_MS),
     harnessVersion: z.string().default(DEFAULT_HARNESS_VERSION),
     schemaDigest: z.string().default(PEER_SCHEMA_DIGEST),
+    receiptsPath: z.string(),
+    receiptLimit: z.number().step(1).min(1).default(512),
+    modelsLimit: z.number().step(1).min(1).default(100),
+    modelsLimitMax: z.number().step(1).min(1).default(500),
   })
 
   /** Pairing table and created-session bindings. */
   readonly pairings: PeerPairingsStore
   /** Ask registry resolving the local-versus-peer answer race. */
   readonly registry: PeerAskRegistry
+  /** Restart-safe idempotency receipts for `peer.selectModel`. */
+  readonly receipts: PeerReceiptStore
 
   private readonly resolved: Required<Config>
   private readonly followers = new Map<SessionId, number>()
   private readonly peerActions = new Map<SessionId, PeerParticipantAction>()
   private readonly orphans = new Map<SessionId, ReturnType<typeof setTimeout>>()
+  /** Turn each Session was last stopped at for its ceiling; a later turn stops again. */
+  private readonly budgetStopped = new Map<SessionId, number>()
+  /** Single-flight guard for the ceiling observation, with the newest pending turn. */
+  private readonly budgetChecks = new Map<SessionId, { again: boolean; turn: number; ceiling: number }>()
+  /** In-memory reverse index of binding ceilings, rebuilt when the bindings change. */
+  private ceilingIndex: {
+    readonly bindings: LoadedPeerPairings['bindings']
+    readonly ceilings: ReadonlyMap<SessionId, number>
+  } | undefined
 
   /**
    * @param ctx - host context with agents, session query, and Session Controller active.
@@ -199,8 +287,18 @@ export class PeerService extends TypertRemoteService {
       watchdogMs: config.watchdogMs ?? DEFAULT_WATCHDOG_MS,
       harnessVersion: config.harnessVersion ?? DEFAULT_HARNESS_VERSION,
       schemaDigest: config.schemaDigest ?? PEER_SCHEMA_DIGEST,
+      receiptsPath: config.receiptsPath ?? DEFAULT_RECEIPTS_PATH,
+      receiptLimit: config.receiptLimit ?? 512,
+      modelsLimit: config.modelsLimit ?? 100,
+      modelsLimitMax: config.modelsLimitMax ?? 500,
     }
-    this.pairings = new PeerPairingsStore(this.resolved.pairingsPath, this.resolved.bindingsPath)
+    this.pairings = new PeerPairingsStore(this.resolved.pairingsPath, this.resolved.bindingsPath, {
+      // A rejected reload keeps the previous valid snapshot; without this sink
+      // the host would run a stale policy silently. The store dedupes by
+      // diagnostic and strips parser code frames before the message arrives.
+      onConfigError: (message) => { ctx.logger.warn(`peer-api: pairings reload rejected; previous snapshot kept: ${message}`) },
+    })
+    this.receipts = new PeerReceiptStore(this.resolved.receiptsPath, this.resolved.receiptLimit)
     // Fail loud at load when the operator's pairing document is malformed.
     this.pairings.load()
     this.registry = new PeerAskRegistry(ctx, this.pairings)
@@ -209,6 +307,14 @@ export class PeerService extends TypertRemoteService {
       for (const timer of this.orphans.values()) clearTimeout(timer)
       this.orphans.clear()
     }, 'peer-api: orphan watchdog')
+    // The ceiling watcher is an effect like every other registration: it rides
+    // this plugin's fiber and never survives its disposal.
+    ctx.on('session/event', (session, event) => { this.onSessionEvent(session, event) })
+    // Per-session ceiling bookkeeping must not outlive the Session or its
+    // Agent: a detached agent cannot be stopped, and a later attach starts a
+    // fresh turn sequence that must be allowed to stop again.
+    ctx.on('agent/disposed', ({ agent }) => { this.forgetBudgetStop(agent.id) })
+    ctx.on('session/disposed', (session) => { this.forgetBudgetStop(session.id) })
   }
 
   /**
@@ -246,7 +352,7 @@ export class PeerService extends TypertRemoteService {
       harnessVersion: this.resolved.harnessVersion,
       schemaDigest: this.resolved.schemaDigest,
       hostDevice: loaded.device,
-      capabilities: [...PEER_CAPABILITIES],
+      capabilities: [...this.advertisedCapabilities()],
       pairings: loaded.pairings.map(pairing => this.describePairing(pairing)),
     }
   }
@@ -331,11 +437,18 @@ export class PeerService extends TypertRemoteService {
 
   /**
    * Create or explicitly adopt a Session and bind it to a pairing alias.
-   * @param request - pairing alias, participant, optional explicit session and routing.
+   *
+   * A pairing with a `routing` policy is authoritative: every create (new or
+   * adopt) must name a route, the policy is evaluated before any session or
+   * selection exists, and the applied selection is the verdict's `selection`
+   * (a chain-only request is resolved there). Without a policy the legacy
+   * behavior is unchanged and `allowModelChange` gates adopt-time routing.
+   * @param request - pairing alias, participant, optional explicit session, routing, and token ceiling.
    * @returns the resolved target and whether a new Session was created.
-   * @throws {@link RemoteError} `peer/not-paired`, `peer/forbidden`, or
-   * `peer/not-found` (a deeper create failure such as `agent-preset/not-found`
-   * is mapped into the peer vocabulary).
+   * @throws {@link RemoteError} `peer/not-paired`; `peer/forbidden` for a policy
+   * refusal, a missing routing service, a ceiling on a host without the usage
+   * seam (reason `budget-unmetered`), or an adopt without `allowModelChange`;
+   * `peer/not-found` for a deeper create failure.
    */
   @Remote('create')
   async create(request: PeerCreateRequest): Promise<PeerCreateValue> {
@@ -346,16 +459,47 @@ export class PeerService extends TypertRemoteService {
       })
     }
     const participant = requireParticipant(request.participant)
+    const policy = pairing.routing
     const routingRequested = request.provider !== undefined
       || request.model !== undefined
       || request.chain !== undefined
       || request.reasoningEffort !== undefined
+    // Policy decisions run before any create/adopt/select: a refusal must leave
+    // no Session and no selection event behind.
+    const policySelection = policy === undefined
+      ? undefined
+      : await this.evaluateCreateRouting(policy, request)
+    // A ceiling that is not a positive safe integer would disable enforcement
+    // (negative, NaN) or make the stored binding unreadable on the next load.
+    if (request.maxTotalTokens !== undefined
+      && (!Number.isSafeInteger(request.maxTotalTokens) || request.maxTotalTokens <= 0)) {
+      throw new RemoteError('gateway/bad-request', 'maxTotalTokens must be a positive integer', {})
+    }
+    const clamped = clampTokenCeiling(policy, request.maxTotalTokens)
+    if (clamped === 'over') {
+      throw routingForbidden(
+        'budget',
+        `maxTotalTokens exceeds the pairing ceiling of ${String(policy?.maxTotalTokens)}`,
+        String(request.maxTotalTokens),
+      )
+    }
+    const ceiling = clamped
+    // A ceiling without the usage seam would record a guard that can never
+    // read its own spend. Refuse before any Session exists so a caller never
+    // believes it capped the worker.
+    if (ceiling !== undefined && !this.hasTokenUsageSeam()) {
+      throw routingForbidden(
+        'budget-unmetered',
+        'this host cannot read token usage, so it cannot enforce a token ceiling',
+        String(ceiling),
+      )
+    }
     let created = true
     let sessionId = request.sessionId
     try {
       if (sessionId !== undefined && await this.sessionExists(sessionId)) {
         created = false
-        if (routingRequested && pairing.allowModelChange !== true) {
+        if (policy === undefined && routingRequested && pairing.allowModelChange !== true) {
           throw new RemoteError(
             'peer/forbidden',
             'adopting an existing Session may not change its routing without allowModelChange',
@@ -374,7 +518,9 @@ export class PeerService extends TypertRemoteService {
         }
         sessionId = (await this.ctx.sessionController.create(createRequest)).sessionId
       }
-      if (routingRequested) {
+      if (policySelection !== undefined) {
+        await this.applySelection(sessionId, policySelection)
+      } else if (routingRequested) {
         await this.applySessionRouting(sessionId, request)
       }
     } catch (error) {
@@ -383,7 +529,12 @@ export class PeerService extends TypertRemoteService {
       // with the original code preserved as `reason` and the cause.
       throw createFailure(error, pairing.alias)
     }
-    await this.pairings.bind(pairing.alias, pairing.peer, sessionId)
+    await this.pairings.bind(
+      pairing.alias,
+      pairing.peer,
+      sessionId,
+      ceiling === undefined ? {} : { maxTotalTokens: ceiling },
+    )
     this.recordPeerAction(sessionId, { action: 'create', actor: participant, at: Date.now() })
     return {
       target: {
@@ -397,26 +548,465 @@ export class PeerService extends TypertRemoteService {
   }
 
   /**
+   * Evaluate one create request against a pairing's routing policy, before any
+   * Session exists.
+   * @param policy - the pairing's authoritative routing policy.
+   * @param request - create request naming the route.
+   * @returns the exact selection the verdict resolved.
+   * @throws {@link RemoteError} `peer/forbidden` for a missing service, a
+   * request that names no route, or a policy refusal.
+   */
+  private async evaluateCreateRouting(
+    policy: PeerRoutingPolicy,
+    request: PeerCreateRequest,
+  ): Promise<PeerModelSelection> {
+    const pinned = request.provider !== undefined || request.model !== undefined
+    if (!pinned && request.chain === undefined) {
+      throw routingForbidden(
+        'routing-required',
+        'this pairing requires provider/model or chain on every create',
+      )
+    }
+    const routing = this.routingService()
+    if (routing === undefined) {
+      throw routingForbidden('routing-unavailable', 'this host has no model routing service')
+    }
+    if (pinned && (request.provider === undefined || request.model === undefined)) {
+      throw new RemoteError('gateway/bad-request', 'provider and model must be provided together', {})
+    }
+    // A chain-only request uses the routing service's empty-route encoding
+    // (`provider`/`model` empty); the verdict resolves the concrete selection.
+    const selection: PeerModelSelection = {
+      provider: request.provider ?? '',
+      model: request.model ?? '',
+      ...(request.chain === undefined ? {} : { chain: request.chain }),
+      ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
+    }
+    const verdict = await this.evaluateRoutes(routing, policy, selection)
+    if (!verdict.allowed) {
+      throw routingForbidden(
+        verdict.reason,
+        `routing policy refused the requested model (${verdict.reason})`,
+        verdict.denied,
+      )
+    }
+    return verdict.selection
+  }
+
+  /**
+   * Policy-filtered model and chain discovery for one alias.
+   * @param request - alias, participant, optional filter, cursor, and page limit.
+   * @returns selectable chains/models with the policy echoed for the caller.
+   * @throws {@link RemoteError} `peer/not-paired` for an unknown alias,
+   * `peer/forbidden` when the pairing configures no policy or the host mounts
+   * no routing service, `gateway/bad-request` for an invalid page cursor, and
+   * `peer/forbidden` reason `routing-unavailable` when the service throws.
+   */
+  @Remote('models')
+  async models(request: PeerModelsRequest): Promise<PeerModelsValue> {
+    if (request === null || typeof request !== 'object') {
+      throw new RemoteError('gateway/bad-request', 'models requires a request object', {})
+    }
+    requireParticipant(request.participant)
+    const pairing = this.pairings.load().pairings.find(candidate => candidate.alias === request.alias)
+    if (pairing === undefined) {
+      throw new RemoteError('peer/not-paired', `alias ${JSON.stringify(request.alias)} is not paired`, {
+        alias: request.alias,
+      })
+    }
+    const policy = pairing.routing
+    if (policy === undefined) {
+      throw routingForbidden('routing-not-configured', 'this pairing configures no routing policy')
+    }
+    const routing = this.routingService()
+    if (routing === undefined) {
+      throw routingForbidden('routing-unavailable', 'this host has no model routing service')
+    }
+    const discovered = await this.discoverRoutes(routing, policy, request)
+    return {
+      ...discovered,
+      selectableByThisAlias: {
+        chains: policy.allowChains ?? [],
+        models: policy.allowModels ?? [],
+        ...(policy.allowReasoningEfforts === undefined
+          ? {}
+          : { reasoningEfforts: policy.allowReasoningEfforts }),
+        requireZeroPrice: policy.requireZeroPrice === true,
+        requireNoTraining: policy.requireNoTraining === true,
+        requireTools: policy.requireTools === true,
+        allowSwitch: policy.allowSwitch ?? 'never',
+      },
+    }
+  }
+
+  /** Clamp one discovery page size to the deployment bounds. */
+  private modelsLimitOf(requested: number | undefined): number {
+    const max = this.resolved.modelsLimitMax
+    const fallback = Math.min(this.resolved.modelsLimit, max)
+    if (requested === undefined || !Number.isSafeInteger(requested) || requested <= 0) return fallback
+    return Math.min(requested, max)
+  }
+
+  /**
+   * Run one discovery call and translate the routing service's failures into
+   * the peer vocabulary. The service signals an unusable cursor with a plain
+   * `Error('invalid cursor')`; every other throw is a service fault and fails
+   * closed without the raw message or stack reaching the caller.
+   * @param routing - mounted routing seam.
+   * @param policy - the pairing's routing policy.
+   * @param request - caller filter, cursor, and clamped page limit.
+   * @returns the service's discovery page.
+   * @throws {@link RemoteError} `gateway/bad-request` for an invalid cursor,
+   * `peer/forbidden` reason `routing-unavailable` for any other throw.
+   */
+  private async discoverRoutes(
+    routing: PeerRoutingService,
+    policy: PeerRoutingPolicy,
+    request: PeerModelsRequest,
+  ): Promise<{
+    readonly chains: PeerModelsValue['chains']
+    readonly models: PeerModelsValue['models']
+    readonly nextCursor?: string
+  }> {
+    try {
+      return await routing.discover(policy, {
+        ...(request.filter === undefined ? {} : { filter: request.filter }),
+        ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+        limit: this.modelsLimitOf(request.limit),
+      })
+    } catch (error) {
+      throw routingFailure(error)
+    }
+  }
+
+  /**
+   * Run one selection evaluation and translate a service throw like
+   * {@link discoverRoutes}; a verdict, allowed or refused, is passed through.
+   * @param routing - mounted routing seam.
+   * @param policy - the pairing's routing policy.
+   * @param selection - the requested route or chain.
+   * @returns the service's verdict.
+   * @throws {@link RemoteError} `peer/forbidden` reason `routing-unavailable`.
+   */
+  private async evaluateRoutes(
+    routing: PeerRoutingService,
+    policy: PeerRoutingPolicy,
+    selection: PeerModelSelection,
+  ): Promise<PeerRoutingVerdict> {
+    try {
+      return await routing.evaluate(policy, selection)
+    } catch (error) {
+      throw routingFailure(error)
+    }
+  }
+
+  /**
+   * Switch one idle Session's routing for its next turn. The policy decides the
+   * exact selection; the caller's request is only an input. A replay of the
+   * same `requestId` with the same payload returns the original value without
+   * appending another selection.
+   * @param request - target, participant, request id, and requested route.
+   * @returns the applied selection, the previous one when known, and replay status.
+   * @throws {@link RemoteError} `peer/forbidden` for a policy refusal or a
+   * disallowed switch, `peer/conflict` for a busy Session or a reused request
+   * id, `peer/not-paired` for an unresolved target.
+   */
+  @Remote('selectModel')
+  async selectModel(request: PeerSelectModelRequest): Promise<PeerSelectModelValue> {
+    if (request === null || typeof request !== 'object') {
+      throw new RemoteError('gateway/bad-request', 'selectModel requires a request object', {})
+    }
+    const participant = requireParticipant(request.participant)
+    const resolved = this.resolveTarget(request.target)
+    const policy = resolved.pairing.routing
+    if (policy === undefined) {
+      throw routingForbidden('routing-not-configured', 'this pairing configures no routing policy')
+    }
+    const routing = this.routingService()
+    if (routing === undefined) {
+      throw routingForbidden('routing-unavailable', 'this host has no model routing service')
+    }
+    if (policy.allowSwitch !== 'idle-only') {
+      throw routingForbidden('switch-not-allowed', 'this pairing does not allow mid-session switches')
+    }
+    const requestId = requireRequestId(request.requestId)
+    const key = receiptKey(resolved.sessionId, requestId)
+    const hash = selectionHash(request)
+    const receipt = this.receipts.get(key)
+    if (receipt !== undefined) {
+      if (receipt.hash !== hash) {
+        throw new RemoteError(
+          'peer/conflict',
+          `requestId ${JSON.stringify(requestId)} was already used with a different payload`,
+          { reason: 'request-id-reuse' },
+        )
+      }
+      return { ...receipt.value, replayed: true }
+    }
+    this.requireIdleForSwitch(resolved.sessionId)
+    const verdict = await this.evaluateRoutes(routing, policy, {
+      provider: request.provider,
+      model: request.model,
+      ...(request.chain === undefined ? {} : { chain: request.chain }),
+      ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
+    })
+    if (!verdict.allowed) {
+      throw routingForbidden(
+        verdict.reason,
+        `routing policy refused the requested model (${verdict.reason})`,
+        verdict.denied,
+      )
+    }
+    const previous = await this.currentSelectionOf(resolved.sessionId)
+    // The evaluation and the durable read awaited; a turn may have started in
+    // that window, so re-prove idleness immediately before applying.
+    this.requireIdleForSwitch(resolved.sessionId)
+    await this.applySelection(resolved.sessionId, verdict.selection)
+    const value: PeerSelectModelValue = {
+      accepted: true,
+      selected: verdict.selection,
+      ...(previous === undefined ? {} : { previous }),
+      replayed: false,
+    }
+    // In-memory attribution: the Session Controller's `model/selection` event
+    // carries the selection but no participant, and widening that durable
+    // payload would change the persisted format.
+    this.recordPeerAction(resolved.sessionId, {
+      action: 'model-change',
+      actor: participant,
+      at: Date.now(),
+      detail: `${verdict.selection.provider}/${verdict.selection.model}`,
+    })
+    try {
+      await this.receipts.put(key, hash, value)
+    } catch (error) {
+      // The switch already applied; the idempotency receipt is an accelerator.
+      // A retry re-applies the identical selection, which is harmless.
+      this.ctx.logger.warn(
+        `peer-api: model selection applied but its receipt was not persisted: ${String(error)}`,
+      )
+    }
+    return value
+  }
+
+  /**
+   * The total-token ceiling recorded for one created Session, for the
+   * enforcement lane that stops a Session at its budget.
+   *
+   * The answer comes from an in-memory reverse index so the per-append
+   * watcher check never reads the pairing document; the index is rebuilt
+   * whenever a `bind` republishes the binding snapshot. Ceilings themselves
+   * only change through `peer.create`.
+   * @param sessionId - Session to look up.
+   * @returns the ceiling, or `undefined` when none was requested or clamped.
+   */
+  ceilingOf(sessionId: SessionId): number | undefined {
+    const loaded = this.pairings.current()
+    if (this.ceilingIndex?.bindings !== loaded.bindings) {
+      this.ceilingIndex = { bindings: loaded.bindings, ceilings: ceilingsOf(loaded.bindings) }
+    }
+    return this.ceilingIndex.ceilings.get(sessionId)
+  }
+
+  /**
+   * Watch one committed Session event for the token-ceiling enforcement lane.
+   *
+   * The durable `tokenUsage` projection advances only when an Assistant
+   * message carrying provider usage commits, so checking on
+   * `assistant/message` lets the in-flight request finish before the host
+   * stops what follows. `turn/end` is the second trigger because a turn can
+   * cross the ceiling on its final response with no later checkpoint. A
+   * Session without a binding ceiling costs one in-memory lookup and returns
+   * before any durable read.
+   * @param session - the Session whose append produced the event.
+   * @param event - the committed durable event.
+   */
+  private onSessionEvent(session: Session, event: SessionEvent): void {
+    if (event.type !== 'assistant/message' && event.type !== 'turn/end') return
+    const sessionId = session.id
+    const ceiling = this.ceilingOf(sessionId)
+    if (ceiling === undefined) return
+    void this.checkBudget(sessionId, ceiling, event.data.turn)
+  }
+
+  /**
+   * Enforce one Session's ceiling with at most one observation in flight.
+   *
+   * Events that arrive while the durable read is open collapse into one
+   * trailing re-check, so a burst cannot multiply observations and the newest
+   * read still decides. A turn already stopped is skipped, which keeps the
+   * stop to one cancel per turn even when several events observe the same
+   * over-budget state.
+   * @param sessionId - Session to check.
+   * @param ceiling - the Session's configured total-token ceiling.
+   * @param turn - the turn the triggering event belongs to.
+   */
+  private async checkBudget(sessionId: SessionId, ceiling: number, turn: number): Promise<void> {
+    if (this.budgetStopped.get(sessionId) === turn) return
+    const inFlight = this.budgetChecks.get(sessionId)
+    if (inFlight !== undefined) {
+      inFlight.again = true
+      inFlight.turn = turn
+      return
+    }
+    const state = { again: true, turn, ceiling }
+    this.budgetChecks.set(sessionId, state)
+    try {
+      while (state.again) {
+        state.again = false
+        await this.enforceBudget(sessionId, state.ceiling, state.turn)
+      }
+    } finally {
+      this.budgetChecks.delete(sessionId)
+    }
+  }
+
+  /**
+   * Observe one Session's usage and stop its running turn when the ceiling is
+   * reached. The stop is the Agent's own cancel with the durable
+   * {@link PEER_BUDGET_STOP_REASON} hook cause, so the terminal it produces is
+   * indistinguishable from a human stop only until the log is read: the fold
+   * stamps `stop: 'budget'` solely from that marker.
+   * @param sessionId - Session to check.
+   * @param ceiling - the Session's configured total-token ceiling.
+   * @param turn - the turn the triggering event belongs to.
+   */
+  private async enforceBudget(sessionId: SessionId, ceiling: number, turn: number): Promise<void> {
+    if (this.budgetStopped.get(sessionId) === turn) return
+    const budget = await this.budgetOf(sessionId, ceiling)
+    if (budget?.exceeded !== true) return
+    const agent = this.ctx.agents.get(sessionId)
+    if (agent?.status !== 'running') return
+    this.budgetStopped.set(sessionId, turn)
+    try {
+      agent.cancel({ kind: 'hook', reason: PEER_BUDGET_STOP_REASON }, { keepInbox: true })
+    } catch {
+      // The Agent detached between the status read and the stop: the turn is
+      // already over, so there is nothing left to cancel.
+      return
+    }
+    this.ctx.logger.warn(
+      `peer-api: session ${sessionId} reached its token ceiling of ${String(ceiling)}; stopped turn ${String(turn)}`,
+    )
+  }
+
+  /** Drop one Session's watcher bookkeeping when its Agent or Session is disposed. */
+  private forgetBudgetStop(sessionId: SessionId): void {
+    this.budgetStopped.delete(sessionId)
+    this.budgetChecks.delete(sessionId)
+  }
+
+  /**
+   * Read one Session's ceiling facts through a durable observation without
+   * materializing its event log.
+   * @param sessionId - Session to read.
+   * @param ceiling - the Session's configured total-token ceiling.
+   * @param signal - optional carrier cancellation for the read.
+   * @returns the budget view, or `undefined` when the read or projection fails.
+   */
+  private async budgetOf(
+    sessionId: SessionId,
+    ceiling: number,
+    signal?: AbortSignal,
+  ): Promise<PeerExecutionState['budget']> {
+    let observation: SessionObservation
+    try {
+      observation = await this.ctx.sessionQuery.observeSession(sessionId, {
+        projectionMode: 'all',
+        ...(signal === undefined ? {} : { signal }),
+      })
+    } catch {
+      // The watcher guards committed appends and the prompt gate guards spend:
+      // a transient observation failure must not become a host error. A prompt
+      // falls through to the controller, which owns its own refusals.
+      return undefined
+    }
+    try {
+      return tokenBudgetOf(readTokenUsageProjection(observation.projections?.values), ceiling)
+    } finally {
+      observation[Symbol.dispose]()
+    }
+  }
+
+  /** Install one resolved selection on a Session without touching the default. */
+  private async applySelection(sessionId: SessionId, selection: PeerModelSelection): Promise<void> {
+    await this.ctx.sessionController.selectModel({
+      sessionId,
+      provider: selection.provider,
+      model: selection.model,
+      ...(selection.chain === undefined ? {} : { chain: selection.chain }),
+      ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+      persistDefault: false,
+    })
+  }
+
+  /**
+   * Refuse a switch on a Session that is not provably idle. The host latch is
+   * authoritative when it answers; a cold Session falls back to the agent's
+   * live status, because a running agent is never a safe switch target.
+   */
+  private requireIdleForSwitch(sessionId: SessionId): void {
+    const hostLatch = this.hostLatchOf(sessionId)
+    if (hostLatch !== undefined) {
+      if (hostLatch.latch === 'idle') return
+      throw new RemoteError(
+        'peer/conflict',
+        `session is ${hostLatch.latch}; a model switch requires an idle session`,
+        { reason: 'busy', latch: hostLatch.latch },
+      )
+    }
+    if (this.ctx.agents.get(sessionId)?.status === 'running') {
+      throw new RemoteError(
+        'peer/conflict',
+        'session is running; a model switch requires an idle session',
+        { reason: 'busy', latch: 'running' },
+      )
+    }
+  }
+
+  /** The Session's durable selection, when its log records one. */
+  private async currentSelectionOf(sessionId: SessionId): Promise<PeerModelSelection | undefined> {
+    const observation = await this.observe(sessionId)
+    return readModelSelectionProjection(observation.projections)
+  }
+
+  /**
    * Admit one queued peer turn into a paired Session.
    * @param request - target, participant, dedupe id, text content, and hop telemetry.
    * @param signal - carrier cancellation before prompt admission begins.
    * @returns acceptance and the incremented hop count.
-   * @throws {@link RemoteError} `peer/hop-limit` only when the pairing configures a ceiling.
+   * @throws {@link RemoteError} `peer/hop-limit` only when the pairing
+   * configures a ceiling; `peer/forbidden` with reason `budget` once the
+   * Session's token ceiling is reached.
    */
   @Remote('prompt')
   async prompt(request: PeerPromptRequest, signal: AbortSignal): Promise<PeerPromptValue> {
     const resolved = this.resolveTarget(request.target)
     const participant = requireParticipant(request.participant)
     const hopCount = request.hopCount ?? 0
-    const ceiling = resolved.pairing.runawayCeiling
-    if (ceiling !== undefined && hopCount >= ceiling) {
+    const hopCeiling = resolved.pairing.runawayCeiling
+    if (hopCeiling !== undefined && hopCount >= hopCeiling) {
       throw new RemoteError(
         'peer/hop-limit',
-        `peer hop budget ${String(hopCount)} reached the configured ceiling ${String(ceiling)}`,
-        { hopCount, ceiling },
+        `peer hop budget ${String(hopCount)} reached the configured ceiling ${String(hopCeiling)}`,
+        { hopCount, ceiling: hopCeiling },
       )
     }
     const content = requirePromptContent(request.content)
+    // Refuse new peer spend once the binding's ceiling is reached. The check
+    // costs one in-memory lookup for an uncapped Session; an unreadable
+    // projection falls through to the Session Controller's own admission, so
+    // the read can never become a second refusal authority.
+    const ceiling = this.ceilingOf(resolved.sessionId)
+    if (ceiling !== undefined) {
+      const budget = await this.budgetOf(resolved.sessionId, ceiling, signal)
+      if (budget?.exceeded === true) {
+        throw new RemoteError('peer/forbidden', 'session token ceiling reached', {
+          reason: 'budget',
+          denied: String(ceiling),
+        })
+      }
+    }
     const promptRequest: SessionPromptRequest = {
       requestId: brandString<SessionRequestId>(request.requestId),
       sessionId: resolved.sessionId,
@@ -449,7 +1039,9 @@ export class PeerService extends TypertRemoteService {
   }
 
   /**
-   * Settle a pending ask for a paired Session.
+   * Settle a pending ask for a paired Session. An answer may resume a turn
+   * the host paused on that ask; the ceiling watcher stops it after the next
+   * response when the Session is already over budget.
    * @param request - target, participant, ask id, and answer payload.
    * @returns acceptance after the ask settled.
    */
@@ -488,9 +1080,7 @@ export class PeerService extends TypertRemoteService {
         : { beforeSeq: request.beforeSeq }),
       ...(request.maxMessages === undefined ? {} : { maxMessages: request.maxMessages }),
     }, signal)
-    const records = page.records
-      .map(record => toPeerRecord(record.event, resolved.exposure))
-      .filter((record): record is NonNullable<typeof record> => record !== undefined)
+    const records = page.records.flatMap(record => toPeerRecords(record.event, resolved.exposure))
     return { records, hasMore: page.hasMore }
   }
 
@@ -586,9 +1176,7 @@ export class PeerService extends TypertRemoteService {
             },
             cursor: brandNumber<SessionSeq>(current.cursor),
             state,
-            records: current.records
-              .map(record => toPeerRecord(record.event, resolved.exposure))
-              .filter((record): record is NonNullable<typeof record> => record !== undefined),
+            records: current.records.flatMap(record => toPeerRecords(record.event, resolved.exposure)),
             hasMore: current.hasMore,
           }
           opened = true
@@ -611,8 +1199,9 @@ export class PeerService extends TypertRemoteService {
         fold.apply(entry.event)
         scanned = entry.event.seq
         const cursor = brandNumber<SessionSeq>(entry.event.seq)
-        const record = toPeerRecord(entry.event, resolved.exposure)
-        if (record !== undefined) yield { type: 'event', record, cursor }
+        for (const peerRecord of toPeerRecords(entry.event, resolved.exposure)) {
+          yield { type: 'event', record: peerRecord, cursor }
+        }
         const state = this.snapshotState(resolved.sessionId, fold, hostLatch, observation.projections)
         const nextKey = latchKey(state)
         if (nextKey !== stateKey) {
@@ -634,6 +1223,35 @@ export class PeerService extends TypertRemoteService {
       void durable.return?.()
       this.decrementFollowers(resolved.sessionId)
     }
+  }
+
+  /**
+   * Capabilities this host can serve right now. The ledger is build-wide, but
+   * the routing trio needs a mounted `peerRouting` service and `token-ceiling`
+   * needs the usage seam: advertising either without its seam would promise a
+   * call the host refuses.
+   */
+  private advertisedCapabilities(): readonly PeerCapability[] {
+    const routingServed = this.routingService() !== undefined
+    const usageServed = this.hasTokenUsageSeam()
+    return PEER_CAPABILITIES.filter(capability =>
+      (routingServed || !ROUTING_CAPABILITIES.includes(capability))
+      && (usageServed || !TOKEN_CEILING_CAPABILITIES.includes(capability)))
+  }
+
+  /**
+   * Whether this host can read the durable `tokenUsage` projection. The token
+   * meter registers that projection in its constructor, so the mounted service
+   * is the cheapest honest probe: the registry exposes no key lookup and the
+   * handshake has no Session to read.
+   */
+  private hasTokenUsageSeam(): boolean {
+    return this.ctx.get('tokenMeter') !== undefined
+  }
+
+  /** The mounted routing seam, if this deployment has one. */
+  private routingService(): PeerRoutingService | undefined {
+    return this.ctx.get('peerRouting')
   }
 
   private describePairing(pairing: PeerPairing): PeerPairingSummary {
@@ -667,12 +1285,20 @@ export class PeerService extends TypertRemoteService {
     hostLatch: HostLatchFacts | undefined,
     projections: Readonly<Record<string, unknown>> | undefined,
   ): PeerExecutionState {
+    const usage = readTokenUsageProjection(projections)
+    const budget = tokenBudgetOf(usage, this.ceilingOf(sessionId))
     const state = fold.snapshot(this.registry.pendingFor(sessionId), hostLatch)
     // Durable selection, else the target's own default; peers never invent one.
+    // `state.lastTurnEnd.ran` says which route actually answered the turn.
     const model = state.model
       ?? readModelSelectionProjection(projections)
       ?? this.ctx.agentDefaultModel.currentSelection()
-    return { ...state, model }
+    return {
+      ...state,
+      model,
+      ...(usage === undefined ? {} : { usage }),
+      ...(budget === undefined ? {} : { budget }),
+    }
   }
 
   /**
@@ -867,6 +1493,51 @@ function createFailure(error: unknown, alias: PeerAlias): unknown {
   )
 }
 
+/**
+ * One routing refusal in the peer vocabulary. `denied` is only the offending
+ * identifier, never an allow list; the message stays route-agnostic.
+ */
+function routingForbidden(reason: string, message: string, denied?: string): RemoteError {
+  return new RemoteError('peer/forbidden', message, {
+    reason,
+    ...(denied === undefined ? {} : { denied }),
+  })
+}
+
+/**
+ * Translate a throw from the routing service into the peer vocabulary. The
+ * only error with caller meaning is the service's plain `Error('invalid
+ * cursor')`; everything else is a service fault that fails closed. The raw
+ * message and stack never cross the wire because they can carry catalogue or
+ * provider internals.
+ */
+function routingFailure(error: unknown): RemoteError {
+  if (error instanceof Error && error.message === 'invalid cursor') {
+    return new RemoteError('gateway/bad-request', 'invalid cursor', {})
+  }
+  return routingForbidden('routing-unavailable', 'the model routing service failed on this host')
+}
+
+/** Require the caller-minted request identity a switch dedupes on. */
+function requireRequestId(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new RemoteError('gateway/bad-request', 'selectModel requires a non-empty requestId', {})
+  }
+  return value
+}
+
+/** Canonical SHA-256 of the four payload fields a switch hash covers. */
+function selectionHash(request: PeerSelectModelRequest): string {
+  return createHash('sha256')
+    .update(JSON.stringify([
+      request.provider,
+      request.model,
+      request.chain ?? null,
+      request.reasoningEffort ?? null,
+    ]))
+    .digest('hex')
+}
+
 /** Read one thrown value's stable error code structurally; no class is assumed. */
 function errorCodeOf(error: unknown): string | undefined {
   if (typeof error !== 'object' || error === null) return undefined
@@ -914,6 +1585,25 @@ class AskChangeSignal {
     for (const wake of [...this.waiters]) wake()
     this.waiters.clear()
   }
+}
+
+/**
+ * Reverse the binding document into one ceiling per Session, including a
+ * Session a later create retired. The first recorded ceiling wins, matching
+ * the pairing store's own lookup order.
+ * @param bindings - the loaded created-session bindings.
+ * @returns Session id to recorded ceiling; Sessions without one are absent.
+ */
+function ceilingsOf(bindings: LoadedPeerPairings['bindings']): Map<SessionId, number> {
+  const ceilings = new Map<SessionId, number>()
+  const record = (sessionId: SessionId, ceiling: number | undefined): void => {
+    if (ceiling !== undefined && !ceilings.has(sessionId)) ceilings.set(sessionId, ceiling)
+  }
+  for (const binding of Object.values(bindings)) {
+    record(binding.sessionId, binding.maxTotalTokens)
+    for (const retired of binding.retired ?? []) record(retired.sessionId, retired.maxTotalTokens)
+  }
+  return ceilings
 }
 
 function requireParticipant(value: unknown): PeerParticipant {

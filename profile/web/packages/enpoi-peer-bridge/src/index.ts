@@ -2,12 +2,13 @@
  * enpoi-peer-bridge — the caller side of the device-to-device peer API
  * (doc 69 P2, doc 70, doc 27's thin bridge).
  *
- * A local agent uses six tools to work with a *remote* harness session:
- * `peer_status` (handshake + latch + model), `peer_ask` (prompt the remote as
- * an attributed peer turn, follow to a terminal state, return the answer),
- * `peer_sessions` (discover bound sessions across the caller-role pairings),
- * `peer_asks` (pending remote asks), `peer_answer` (settle one), and
- * `peer_cancel`. A remote approval ask raised while following is surfaced to
+ * A local agent uses eight tools to work with a *remote* harness session:
+ * `peer_status` (handshake + latch + model), `peer_sessions` (discover bound
+ * sessions across the caller-role pairings), `peer_models` (the routes the
+ * peer lets this caller select), `peer_switch_model` (move an idle remote
+ * session to another route), `peer_ask` (prompt the remote as an attributed
+ * peer turn, follow to a terminal state, return the answer), `peer_asks`
+ * (pending remote asks), `peer_answer` (settle one), and `peer_cancel`. A remote approval ask raised while following is surfaced to
  * the local operator through the local approval service when that is usable,
  * and the local decision is relayed back with `peer.answer` — first answer
  * wins; a `peer/conflict` is reported, never retried blind. When the remote
@@ -176,7 +177,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 }
 
 /**
- * Register the five bridge tools.
+ * Register the eight bridge tools.
  * @param ctx - context providing `tools` (and optionally `approval`).
  * @param config - plugin configuration.
  * @param deps - carrier replacements for tests.
@@ -402,6 +403,247 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
   })
 
   ctx.tools.register({
+    name: 'peer_models',
+    description: [
+      'List the models and chains a paired peer lets you select for its sessions, with each route\'s',
+      'capabilities (tool calling, vision, context window, zero price, gating, whether prompts train on',
+      'it, and the reasoning efforts it accepts) and each chain member\'s live state (ready, cooling',
+      'down until a time, or retired). Read-only. Use it before choosing a route for peer_ask or',
+      'peer_switch_model. The peer enforces its own allow list, so the result already excludes what you',
+      'may not use; when the peer cannot offer model choice at all, the result says to upgrade the host.',
+      'The alias names the pairing (the member device in the fleet convention) and is the same string',
+      'on both devices — it is NOT the target host name.',
+    ].join(' '),
+    parameters: {
+      type: 'object',
+      properties: {
+        alias: { type: 'string', description: 'Pairing alias of the peer session.' },
+        limit: { type: 'number', description: 'Maximum rows in this page; the peer clamps it.' },
+        cursor: { type: 'string', description: 'Opaque cursor from a previous page\'s nextCursor.' },
+        zeroPrice: { type: 'boolean', description: 'Only routes the peer can prove are free of charge.' },
+        tools: { type: 'boolean', description: 'Only routes the peer can prove support tool calling.' },
+      },
+      required: ['alias'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          alias: { type: 'string' },
+          chains: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string' },
+                label: { type: 'string' },
+                dynamic: { type: 'boolean' },
+                members: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      provider: { type: 'string' },
+                      model: { type: 'string' },
+                      state: { type: 'string', enum: ['ready', 'cooldown', 'deprecated'] },
+                      cooldownUntil: { type: 'number' },
+                    },
+                    required: ['provider', 'model', 'state'],
+                  },
+                },
+              },
+              required: ['id', 'dynamic', 'members'],
+            },
+          },
+          models: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                provider: { type: 'string' },
+                model: { type: 'string' },
+                tools: { oneOf: [{ type: 'boolean' }, { type: 'string' }] },
+                vision: { oneOf: [{ type: 'boolean' }, { type: 'string' }] },
+                contextWindow: { type: 'number' },
+                zeroPrice: { oneOf: [{ type: 'boolean' }, { type: 'string' }] },
+                gated: { oneOf: [{ type: 'boolean' }, { type: 'string' }] },
+                trainsOnData: { type: 'string', enum: ['yes', 'no', 'unknown'] },
+                reasoningEfforts: { type: 'array', items: { type: 'string' } },
+              },
+              required: ['provider', 'model', 'tools', 'vision', 'zeroPrice', 'gated', 'trainsOnData', 'reasoningEfforts'],
+            },
+          },
+          nextCursor: { type: 'string' },
+          selectable: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              chains: { type: 'array', items: { type: 'string' } },
+              models: { type: 'array', items: { type: 'string' } },
+              reasoningEfforts: { type: 'array', items: { type: 'string' } },
+              requireZeroPrice: { type: 'boolean' },
+              requireNoTraining: { type: 'boolean' },
+              requireTools: { type: 'boolean' },
+              allowSwitch: { type: 'string', enum: ['never', 'idle-only'] },
+            },
+            required: ['chains', 'models', 'requireZeroPrice', 'requireNoTraining', 'requireTools', 'allowSwitch'],
+          },
+          error: failureSchema(),
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) => [{ type: 'text', text: renderModels(value) }],
+    },
+    isConcurrencySafe: () => true,
+    async execute(args) {
+      const request = narrow(args)
+      const alias = requireAlias(request.alias)
+      const filter = modelsFilterOf(request)
+      if (filter !== undefined && !filter.ok) return badRequest(filter.message)
+      const limit = positiveIntegerOf('limit', request.limit)
+      if (limit !== undefined && !limit.ok) return badRequest(limit.message)
+      const cursor = nonEmptyTextOf('cursor', request.cursor)
+      if (cursor !== undefined && !cursor.ok) return badRequest(cursor.message)
+      const { pairing, document } = resolveEntry(pairingsPath, alias)
+      const client = makeClient(pairing, config, document.device, effectiveDeps)
+      try {
+        const handshake = await client.handshake()
+        const gap = capabilityGap(handshake.capabilities, 'model-discovery')
+        if (gap !== undefined) return gap
+        const value = await client.models({
+          alias,
+          participant: participantOf(config, document),
+          ...(filter === undefined ? {} : { filter: filter.value }),
+          ...(cursor === undefined ? {} : { cursor: cursor.value }),
+          ...(limit === undefined ? {} : { limit: limit.value }),
+        })
+        return {
+          ok: true,
+          alias,
+          chains: value.chains,
+          models: value.models,
+          ...(value.nextCursor === undefined ? {} : { nextCursor: value.nextCursor }),
+          selectable: value.selectableByThisAlias,
+        }
+      } catch (error) {
+        return failureFrom(error, pairing.endpoint)
+      }
+    },
+  })
+
+  ctx.tools.register({
+    name: 'peer_switch_model',
+    description: [
+      'Move a paired peer session to another model or chain for its next turn. The session must be',
+      'idle; a running or waiting session refuses the switch. Name provider and model, or a chain id',
+      '(a chain alone runs its first ready member), optionally with a reasoning effort. The peer',
+      'enforces its own allow list, so a refusal names the reason and the refused route; read',
+      'peer_models first to see what is selectable. Mutating: this changes the remote session, not',
+      'this one. The result reports the applied route, the previous one when known, and whether this',
+      'call was an already-applied retry.',
+      'The alias names the pairing (the member device in the fleet convention) and is the same string',
+      'on both devices — it is NOT the target host name.',
+    ].join(' '),
+    parameters: {
+      type: 'object',
+      properties: {
+        alias: { type: 'string', description: 'Pairing alias of the peer session.' },
+        provider: { type: 'string', description: 'Provider id of the route to run (with model).' },
+        model: { type: 'string', description: 'Model id of the route to run (with provider).' },
+        chain: { type: 'string', description: 'Chain id to run instead of, or narrowing, an explicit route.' },
+        reasoningEffort: { type: 'string', description: 'Adapter-supported reasoning effort for the chosen route.' },
+        requestId: {
+          type: 'string',
+          description: 'Optional retry key: reuse the value from a failed attempt to replay it instead of switching twice.',
+        },
+      },
+      required: ['alias'],
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean' },
+          alias: { type: 'string' },
+          requestId: { type: 'string' },
+          selection: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              provider: { type: 'string' },
+              model: { type: 'string' },
+              chain: { type: 'string' },
+              reasoningEffort: { type: 'string' },
+            },
+            required: ['provider', 'model'],
+          },
+          previous: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              provider: { type: 'string' },
+              model: { type: 'string' },
+              chain: { type: 'string' },
+              reasoningEffort: { type: 'string' },
+            },
+            required: ['provider', 'model'],
+          },
+          replayed: { type: 'boolean' },
+          note: { type: 'string' },
+          error: failureSchema(),
+        },
+        required: ['ok'],
+      },
+      render: (_args, value) => [{ type: 'text', text: renderSwitch(value) }],
+    },
+    async execute(args) {
+      const request = narrow(args)
+      const alias = requireAlias(request.alias)
+      const route = switchRouteOf(request)
+      if (!route.ok) return badRequest(route.message)
+      const requestId = nonEmptyTextOf('requestId', request.requestId)
+      if (requestId !== undefined && !requestId.ok) return badRequest(requestId.message)
+      const { pairing, document } = resolveEntry(pairingsPath, alias)
+      const client = makeClient(pairing, config, document.device, effectiveDeps)
+      const id = requestId === undefined ? `peer-bridge-${randomUUID()}` : requestId.value
+      try {
+        const handshake = await client.handshake()
+        const gap = capabilityGap(handshake.capabilities, 'model-switch')
+        if (gap !== undefined) return gap
+        const value = await client.selectModel({
+          target: targetOf(pairing),
+          participant: participantOf(config, document),
+          requestId: id,
+          provider: route.value.provider ?? '',
+          model: route.value.model ?? '',
+          ...(route.value.chain === undefined ? {} : { chain: route.value.chain }),
+          ...(route.value.reasoningEffort === undefined ? {} : { reasoningEffort: route.value.reasoningEffort }),
+        })
+        return {
+          ok: true,
+          alias,
+          requestId: id,
+          selection: value.selected,
+          ...(value.previous === undefined ? {} : { previous: value.previous }),
+          replayed: value.replayed === true,
+          note: value.replayed === true
+            ? 'this switch was already applied; the result is the original one'
+            : 'the remote session will run the selected route on its next turn',
+        }
+      } catch (error) {
+        const failure = failureFrom(error, pairing.endpoint)
+        return { ...failure, alias, requestId: id }
+      }
+    },
+  })
+
+  ctx.tools.register({
     name: 'peer_ask',
     description: [
       'Send a message to a paired peer session as an attributed peer turn, then follow the remote',
@@ -431,6 +673,11 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
             'following that same remote turn to its terminal state without sending the message again.',
           ].join(' '),
         },
+        provider: { type: 'string', description: 'When this call creates the session: provider of the route it starts on (with model).' },
+        model: { type: 'string', description: 'When this call creates the session: model it starts on (with provider).' },
+        chain: { type: 'string', description: 'When this call creates the session: chain id it starts on (its first ready member runs).' },
+        reasoningEffort: { type: 'string', description: 'When this call creates the session: reasoning effort for the chosen route or chain.' },
+        maxTotalTokens: { type: 'number', description: 'When this call creates the session: token ceiling; the peer stops the session when it is reached.' },
       },
       required: ['alias'],
     },
@@ -491,6 +738,8 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       if (message.length > MAX_MESSAGE_CHARS) {
         return { ok: false, error: { code: 'gateway/bad-request', message: `peer_ask message exceeds ${String(MAX_MESSAGE_CHARS)} characters` } }
       }
+      const createRouting = askCreateRoutingOf(request)
+      if (!createRouting.ok) return badRequest(createRouting.message)
       const requestedWait = typeof request.waitMs === 'number' && Number.isFinite(request.waitMs) && request.waitMs > 0
         ? Math.trunc(request.waitMs)
         : waitMs
@@ -506,6 +755,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
         alias,
         message,
         ...(resume === undefined ? {} : { resume }),
+        createRouting: createRouting.value,
         allowCreate: true,
         deps: effectiveDeps,
       })
@@ -785,6 +1035,14 @@ interface AskRunOptions {
   readonly message: string
   /** RequestId of a prior result to resume; no prompt is sent when set. */
   readonly resume?: string
+  /** Create-time routing and ceiling; only ever applied when this call creates the session. */
+  readonly createRouting: {
+    readonly provider?: string
+    readonly model?: string
+    readonly chain?: string
+    readonly reasoningEffort?: string
+    readonly maxTotalTokens?: number
+  }
   readonly allowCreate: boolean
   readonly deps: BridgeDeps
 }
@@ -815,6 +1073,9 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
     }
     try {
       const defaults = pairing.create ?? {}
+      // A route named on this call replaces the pairing's pinned route; the
+      // ceiling and effort ride whichever route applies.
+      const routeOverride = options.createRouting.provider !== undefined || options.createRouting.chain !== undefined
       await client.create({
         alias: pairing.alias,
         participant,
@@ -822,13 +1083,19 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
         ...(typeof defaults.agentPreset === 'string' ? { agentPreset: defaults.agentPreset } : {}),
         // The host pins this route on the created Session only; the parser
         // already guarantees provider+model travel together.
-        ...(pairing.createRouting ?? {}),
+        ...(routeOverride ? {} : pairing.createRouting ?? {}),
+        ...options.createRouting,
       })
       created = true
       baseline = await client.state(requestedTarget)
     } catch (createError) {
       return failureFrom(createError, pairing.endpoint)
     }
+  }
+  if (!created && Object.keys(options.createRouting).length > 0) {
+    return badRequest(resumed
+      ? 'peer_ask resume cannot change the model; call peer_switch_model first if the turn needs another route'
+      : 'peer_ask model options apply only when this call creates the session; this session already exists — use peer_switch_model to change its model')
   }
   const baselineTurn = baseline.state.lastTurnEnd?.turn ?? 0
   const requestId = options.resume ?? `peer-bridge-${randomUUID()}`
@@ -1500,6 +1767,139 @@ function narrow(args: unknown): Record<string, unknown> {
   return typeof args === 'object' && args !== null ? args as Record<string, unknown> : {}
 }
 
+/**
+ * The failure value a capability-gated tool returns when the peer host does not
+ * advertise what the call needs, instead of forwarding an opaque refusal.
+ * @param capabilities - the host's advertised capabilities.
+ * @param capability - the capability the tool needs (`model-discovery` / `model-switch`).
+ * @returns the failure value, or undefined when the host advertises it.
+ */
+function capabilityGap(capabilities: readonly string[], capability: string): ToolFailure | undefined {
+  if (capabilities.includes(capability)) return undefined
+  return { ok: false, error: { code: 'peer/capability-missing', message: `host does not advertise ${capability}; upgrade the host` } }
+}
+
+/** One validated tool argument: the value, or the reason it is malformed. */
+type Parsed<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly message: string }
+
+/**
+ * Read an optional non-empty string argument.
+ * @param name - argument name for the failure text.
+ * @param value - the raw tool argument.
+ * @returns the parsed value, undefined when absent, or the malformed reason.
+ */
+function nonEmptyTextOf(name: string, value: unknown): Parsed<string> | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'string' || value.trim() === '') return { ok: false, message: `${name} must be a non-empty string` }
+  return { ok: true, value: value.trim() }
+}
+
+/**
+ * Read an optional positive-integer argument; the peer clamps an oversized one.
+ * @param name - argument name for the failure text.
+ * @param value - the raw tool argument.
+ * @returns the parsed value, undefined when absent, or the malformed reason.
+ */
+function positiveIntegerOf(name: string, value: unknown): Parsed<number> | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) return { ok: false, message: `${name} must be a positive integer` }
+  return { ok: true, value }
+}
+
+/**
+ * Build the optional discovery filter from the raw arguments.
+ * @param request - the raw tool arguments.
+ * @returns the filter (absent when neither flag was set) or the malformed reason.
+ */
+function modelsFilterOf(request: Record<string, unknown>): Parsed<{ readonly zeroPrice?: boolean; readonly tools?: boolean }> | undefined {
+  const filter: { zeroPrice?: boolean; tools?: boolean } = {}
+  for (const name of ['zeroPrice', 'tools'] as const) {
+    const raw = request[name]
+    if (raw === undefined) continue
+    if (typeof raw !== 'boolean') return { ok: false, message: `${name} must be a boolean` }
+    if (raw) filter[name] = true
+  }
+  return Object.keys(filter).length === 0 ? undefined : { ok: true, value: filter }
+}
+
+/**
+ * Validate the switch tool's route arguments: provider and model travel
+ * together, and at least one of a route or a chain is required.
+ * @param request - the raw tool arguments.
+ * @returns the route fields, or the malformed reason.
+ */
+function switchRouteOf(request: Record<string, unknown>):
+  Parsed<{ readonly provider?: string; readonly model?: string; readonly chain?: string; readonly reasoningEffort?: string }> {
+  const provider = nonEmptyTextOf('provider', request.provider)
+  const model = nonEmptyTextOf('model', request.model)
+  const chain = nonEmptyTextOf('chain', request.chain)
+  const effort = nonEmptyTextOf('reasoningEffort', request.reasoningEffort)
+  for (const parsed of [provider, model, chain, effort]) {
+    if (parsed !== undefined && !parsed.ok) return parsed
+  }
+  const providerValue = provider?.ok === true ? provider.value : undefined
+  const modelValue = model?.ok === true ? model.value : undefined
+  const chainValue = chain?.ok === true ? chain.value : undefined
+  const effortValue = effort?.ok === true ? effort.value : undefined
+  if ((providerValue === undefined) !== (modelValue === undefined)) {
+    return { ok: false, message: 'peer_switch_model needs provider and model together' }
+  }
+  if (providerValue === undefined && chainValue === undefined) {
+    return { ok: false, message: 'peer_switch_model needs provider+model or a chain' }
+  }
+  if (effortValue !== undefined && providerValue === undefined && chainValue === undefined) {
+    return { ok: false, message: 'a reasoning effort needs a route or a chain to apply to' }
+  }
+  return {
+    ok: true,
+    value: {
+      ...(providerValue === undefined ? {} : { provider: providerValue }),
+      ...(modelValue === undefined ? {} : { model: modelValue }),
+      ...(chainValue === undefined ? {} : { chain: chainValue }),
+      ...(effortValue === undefined ? {} : { reasoningEffort: effortValue }),
+    },
+  }
+}
+
+/**
+ * Validate the optional create-time routing arguments `peer_ask` forwards when
+ * it creates a session.
+ * @param request - the raw tool arguments.
+ * @returns the create fields (empty when none were named), or the malformed reason.
+ */
+function askCreateRoutingOf(request: Record<string, unknown>):
+  Parsed<{ readonly provider?: string; readonly model?: string; readonly chain?: string; readonly reasoningEffort?: string; readonly maxTotalTokens?: number }> {
+  const provider = nonEmptyTextOf('provider', request.provider)
+  const model = nonEmptyTextOf('model', request.model)
+  const chain = nonEmptyTextOf('chain', request.chain)
+  const effort = nonEmptyTextOf('reasoningEffort', request.reasoningEffort)
+  const ceiling = positiveIntegerOf('maxTotalTokens', request.maxTotalTokens)
+  for (const parsed of [provider, model, chain, effort, ceiling]) {
+    if (parsed !== undefined && !parsed.ok) return parsed
+  }
+  const providerValue = provider?.ok === true ? provider.value : undefined
+  const modelValue = model?.ok === true ? model.value : undefined
+  const chainValue = chain?.ok === true ? chain.value : undefined
+  const effortValue = effort?.ok === true ? effort.value : undefined
+  const ceilingValue = ceiling?.ok === true ? ceiling.value : undefined
+  if ((providerValue === undefined) !== (modelValue === undefined)) {
+    return { ok: false, message: 'peer_ask needs provider and model together' }
+  }
+  if (effortValue !== undefined && providerValue === undefined && chainValue === undefined) {
+    return { ok: false, message: 'a reasoning effort needs provider+model or a chain to apply to' }
+  }
+  return {
+    ok: true,
+    value: {
+      ...(providerValue === undefined ? {} : { provider: providerValue }),
+      ...(modelValue === undefined ? {} : { model: modelValue }),
+      ...(chainValue === undefined ? {} : { chain: chainValue }),
+      ...(effortValue === undefined ? {} : { reasoningEffort: effortValue }),
+      ...(ceilingValue === undefined ? {} : { maxTotalTokens: ceilingValue }),
+    },
+  }
+}
+
 function badRequest(message: string): ToolFailure {
   return { ok: false, error: { code: 'gateway/bad-request', message } }
 }
@@ -1702,6 +2102,85 @@ function renderSessions(value: unknown): string {
       return `• ${String(session.alias)} → ${String(session.peer)} @ ${String(session.endpoint)} · ${state}`
     }),
   ].join('\n')
+}
+
+/** One route's capability facts as a compact human line. */
+function routeFacts(model: Record<string, unknown>): string {
+  const known = (value: unknown): string => value === true ? 'yes' : value === 'unknown' ? 'unknown' : 'no'
+  const facts = [
+    `tools=${known(model.tools)}`,
+    `vision=${known(model.vision)}`,
+    `free=${known(model.zeroPrice)}`,
+    `gated=${known(model.gated)}`,
+    `trains=${String(model.trainsOnData ?? 'unknown')}`,
+  ]
+  if (typeof model.contextWindow === 'number') facts.push(`context=${String(model.contextWindow)}`)
+  const efforts = Array.isArray(model.reasoningEfforts) ? model.reasoningEfforts as string[] : []
+  if (efforts.length > 0) facts.push(`efforts=${efforts.join(',')}`)
+  return facts.join(', ')
+}
+
+/** Render one string list, or a dash when empty. */
+function listOrNone(value: unknown): string {
+  const items = Array.isArray(value) ? value.map(item => String(item)) : []
+  return items.length === 0 ? 'none' : items.join(', ')
+}
+
+function renderModels(value: unknown): string {
+  const record = narrow(value)
+  if (record.ok !== true) {
+    const error = narrow(record.error)
+    return `peer_models failed [${String(error.code ?? 'unknown')}]: ${String(error.message ?? '')}`
+  }
+  const chains = Array.isArray(record.chains) ? record.chains as Record<string, unknown>[] : []
+  const models = Array.isArray(record.models) ? record.models as Record<string, unknown>[] : []
+  const lines = [`peer ${String(record.alias)} — ${String(models.length)} route(s), ${String(chains.length)} chain(s)`]
+  for (const chain of chains) {
+    const members = Array.isArray(chain.members) ? chain.members as Record<string, unknown>[] : []
+    const rendered = members.map(member => {
+      const until = member.state === 'cooldown' && typeof member.cooldownUntil === 'number'
+        ? ` until ${new Date(member.cooldownUntil).toISOString()}`
+        : ''
+      return `${String(member.provider)}/${String(member.model)} ${String(member.state)}${until}`
+    })
+    lines.push(`chain ${String(chain.id)}${chain.dynamic === true ? ' (dynamic)' : ''}: ${rendered.join('; ')}`)
+  }
+  if (models.length === 0 && chains.length === 0) lines.push('no route is selectable on this peer')
+  for (const model of models) lines.push(`• ${String(model.provider)}/${String(model.model)} — ${routeFacts(model)}`)
+  const selectable = narrow(record.selectable)
+  lines.push([
+    `selectable: chains ${listOrNone(selectable.chains)}`,
+    `models ${listOrNone(selectable.models)}`,
+    `switching ${String(selectable.allowSwitch ?? 'never')}`,
+    selectable.requireZeroPrice === true ? 'free routes only' : '',
+    selectable.requireNoTraining === true ? 'no-training routes only' : '',
+    selectable.requireTools === true ? 'tool-calling routes only' : '',
+  ].filter(part => part !== '').join(', '))
+  if (typeof record.nextCursor === 'string') {
+    lines.push(`more routes available — call again with cursor ${JSON.stringify(record.nextCursor)}`)
+  }
+  return lines.join('\n')
+}
+
+function renderSwitch(value: unknown): string {
+  const record = narrow(value)
+  if (record.ok !== true) {
+    const error = narrow(record.error)
+    return `peer_switch_model failed [${String(error.code ?? 'unknown')}]: ${String(error.message ?? '')}`
+  }
+  const selection = narrow(record.selection)
+  const details = [
+    selection.chain === undefined ? undefined : `chain ${String(selection.chain)}`,
+    selection.reasoningEffort === undefined ? undefined : `effort ${String(selection.reasoningEffort)}`,
+  ].filter((part): part is string => part !== undefined)
+  const lines = [`switched ${String(record.alias)} to ${String(selection.provider)}/${String(selection.model)}${details.length === 0 ? '' : ` (${details.join(', ')})`}`]
+  const previous = record.previous === undefined ? undefined : narrow(record.previous)
+  if (previous !== undefined) {
+    lines.push(`previous route ${String(previous.provider)}/${String(previous.model)}${previous.chain === undefined ? '' : ` (chain ${String(previous.chain)})`}`)
+  }
+  if (record.replayed === true) lines.push('this exact switch was already applied; the session is unchanged')
+  else if (typeof record.note === 'string' && record.note !== '') lines.push(record.note)
+  return lines.join('\n')
 }
 
 function renderAsk(value: unknown): string {

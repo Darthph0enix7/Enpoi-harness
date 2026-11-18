@@ -12,6 +12,18 @@ export const OPT_OUT_MARKER: string
 /** The registry path shipped beside the script (`profile/web/fleet.yaml`). */
 export const DEFAULT_REGISTRY_PATH: string
 
+/** One member's optional remote model-selection policy (`routing` block). */
+export interface FleetRoutingPolicy {
+  readonly allowChains?: readonly string[]
+  readonly allowModels?: readonly string[]
+  readonly requireZeroPrice?: boolean
+  readonly requireNoTraining?: boolean
+  readonly requireTools?: boolean
+  readonly allowReasoningEfforts?: readonly string[]
+  readonly allowSwitch?: 'never' | 'idle-only'
+  readonly maxTotalTokens?: number
+}
+
 /** One fleet member as normalized by {@link validateRegistry}. */
 export interface FleetMember {
   readonly name: string
@@ -21,6 +33,7 @@ export interface FleetMember {
   readonly hostnames: readonly string[]
   readonly ip?: string
   readonly port?: number
+  readonly routing?: FleetRoutingPolicy
 }
 
 /** A validated fleet registry document. */
@@ -81,6 +94,12 @@ export interface GeneratePairingsOptions {
  * @throws when the document is not a valid version-1 registry.
  */
 export function validateRegistry(parsed: unknown, path: string): FleetRegistry
+
+/**
+ * Validate one member's optional `routing` block with the peer parser's rules.
+ * @throws when the block carries an unknown key, a malformed value, or no field.
+ */
+export function validateRouting(value: unknown, subject: string): FleetRoutingPolicy
 
 /**
  * Identify this device's member from `DSH_PEER_DEVICE` or hostname candidates.

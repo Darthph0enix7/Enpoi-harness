@@ -45,6 +45,9 @@
       "path": "../../core/scope"
     },
     {
+      "path": "../../llm/token-meter"
+    },
+    {
       "path": "../../session-query/session-query"
     },
     {

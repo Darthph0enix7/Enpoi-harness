@@ -141,7 +141,7 @@ describe('tool-defaults completeness guard', () => {
   })
 
   it('accounts for the first-party on-demand peer tools: orchestrator seat allows, every other seat asks', () => {
-    const peerTools = ['peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel', 'peer_status', 'peer_sessions'] as const
+    const peerTools = ['peer_status', 'peer_sessions', 'peer_models', 'peer_switch_model', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel'] as const
     const config = { defaults: { unknownTools: 'ask' as const } }
     for (const tool of peerTools) {
       expect(SHIPPED_TOOL_DEFAULTS[tool], `${tool} must stay on the documented exemption, not a hand row`).toBeUndefined()

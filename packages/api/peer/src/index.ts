@@ -20,9 +20,23 @@ export {
   PeerPairingsStore,
   parsePairingsDocument,
   type LoadedPeerPairings,
+  type PeerPairingsStoreOptions,
   type ResolvedPeerPairing,
 } from './pairings.ts'
 export { PeerAskRegistry } from './registry.ts'
+export {
+  DEFAULT_RECEIPTS_PATH,
+  PeerReceiptStore,
+  receiptKey,
+  type PeerReceipt,
+} from './receipts.ts'
+export {
+  clampTokenCeiling,
+  isRoutingPattern,
+  matchesPattern,
+  policyAllowsChain,
+  policyAllowsModel,
+} from './routing-policy.ts'
 export {
   PeerLatchFold,
   foldExecutionState,
@@ -31,13 +45,20 @@ export {
   type HostLatchFacts,
   type PeerFoldEvent,
 } from './latch.ts'
-export { isDebugOnlyType, isExposedEvent, toPeerRecord } from './exposure.ts'
+export {
+  MODEL_HOP_RECORD_TYPE,
+  isDebugOnlyType,
+  isExposedEvent,
+  toPeerRecord,
+  toPeerRecords,
+} from './exposure.ts'
 export {
   PeerClient,
   type PeerBackoff,
   type PeerClientOptions,
   type PeerWebSocket,
 } from './client.ts'
+export { HARNESS_VERSION } from './version.ts'
 export type * from './types.ts'
 
 export { PeerService as default } from './host.ts'

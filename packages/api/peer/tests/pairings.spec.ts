@@ -198,6 +198,149 @@ pairings:
     expect(() => store.load()).toThrow(PeerConfigError)
   })
 
+  it('parses a routing policy and round-trips it through load', () => {
+    const root = tempRoot()
+    const pairingsPath = join(root, 'pairings.yaml')
+    write(pairingsPath, `
+version: 1
+device: serverlocal
+pairings:
+  - alias: routed
+    peer: laptop
+    exposure: answer-only
+    create:
+      cwd: ${root}
+    routing:
+      allowChains: [free]
+      allowModels: ["kilo/*:free", "openrouter/*:free"]
+      requireZeroPrice: true
+      requireNoTraining: true
+      requireTools: true
+      allowReasoningEfforts: [minimal, medium]
+      allowSwitch: idle-only
+      maxTotalTokens: 5000
+`)
+    const store = new PeerPairingsStore(pairingsPath, join(root, 'peer-state.json'))
+    const routing = store.load().pairings[0]?.routing
+    expect(routing).toEqual({
+      allowChains: ['free'],
+      allowModels: ['kilo/*:free', 'openrouter/*:free'],
+      requireZeroPrice: true,
+      requireNoTraining: true,
+      requireTools: true,
+      allowReasoningEfforts: ['minimal', 'medium'],
+      allowSwitch: 'idle-only',
+      maxTotalTokens: 5000,
+    })
+    // An absent policy stays absent: no silent default.
+    write(pairingsPath, 'version: 1\ndevice: serverlocal\npairings:\n  - alias: plain\n    peer: laptop\n    exposure: debug\n    sessionId: s')
+    expect(new PeerPairingsStore(pairingsPath, join(root, 'peer-state.json')).load().pairings[0]?.routing)
+      .toBeUndefined()
+  })
+
+  it.each([
+    ['a non-mapping routing policy', 'routing: 42'],
+    ['an unknown routing key', 'routing:\n      allowChain: [free]'],
+    ['a non-list allowModels', 'routing:\n      allowModels: scripted/*'],
+    ['an empty pattern', 'routing:\n      allowModels: [""]'],
+    ['a pattern outside the routing charset', 'routing:\n      allowModels: ["kilo free"]'],
+    ['a non-list reasoning effort list', 'routing:\n      allowReasoningEfforts: minimal'],
+    ['an unknown allowSwitch value', 'routing:\n      allowSwitch: always'],
+    ['a zero token ceiling', 'routing:\n      maxTotalTokens: 0'],
+    ['a fractional token ceiling', 'routing:\n      maxTotalTokens: 1.5'],
+    ['a non-boolean price guard', 'routing:\n      requireZeroPrice: "yes"'],
+    ['a non-boolean tools guard', 'routing:\n      requireTools: "yes"'],
+  ])('rejects a routing policy with %s', (_label, block) => {
+    const root = tempRoot()
+    const pairingsPath = join(root, 'pairings.yaml')
+    write(pairingsPath, `
+version: 1
+device: serverlocal
+pairings:
+  - alias: routed
+    peer: laptop
+    exposure: debug
+    create:
+      cwd: ${root}
+    ${block.replace(/\n/gu, '\n    ')}
+`)
+    expect(() => parsePairingsDocument(readFileSync(pairingsPath, 'utf8'), pairingsPath)).toThrow(PeerConfigError)
+  })
+
+  it.each([
+    ['a mistyped routing key at the pairing level', 'routng:\n      allowChains: [free]'],
+    ['an unknown pairing key', 'exposur: debug'],
+    ['an unknown create key', 'create:\n      cwd: /tmp\n      agentPrset: x'],
+  ])('rejects %s instead of silently dropping it', (_label, block) => {
+    const root = tempRoot()
+    const pairingsPath = join(root, 'pairings.yaml')
+    write(pairingsPath, `
+version: 1
+device: serverlocal
+pairings:
+  - alias: typo
+    peer: laptop
+    exposure: debug
+    sessionId: sess-typo
+    ${block.replace(/\n/gu, '\n    ')}
+`)
+    expect(() => parsePairingsDocument(readFileSync(pairingsPath, 'utf8'), pairingsPath)).toThrow(/unknown key/u)
+  })
+
+  it('serves the cached snapshot without re-reading the pairing file', async () => {
+    const root = tempRoot()
+    const pairingsPath = join(root, 'pairings.yaml')
+    const bindingsPath = join(root, 'peer-state.json')
+    write(pairingsPath, 'version: 1\ndevice: a\npairings: []')
+    const store = new PeerPairingsStore(pairingsPath, bindingsPath)
+    // Before the first load the accessor pays for one load, then the cached
+    // snapshot is stable until a bind republishes it.
+    const first = store.current()
+    expect(store.current()).toBe(first)
+    await store.bind('bound' as never, 'laptop', 'sess-current' as never, { maxTotalTokens: 25 })
+    const next = store.current()
+    expect(next).not.toBe(first)
+    expect(next.bindings.bound?.maxTotalTokens).toBe(25)
+    expect(store.current()).toBe(next)
+  })
+
+  it('reads and writes a per-binding token ceiling without breaking older documents', async () => {
+    const root = tempRoot()
+    const pairingsPath = join(root, 'pairings.yaml')
+    const bindingsPath = join(root, 'peer-state.json')
+    write(pairingsPath, 'version: 1\ndevice: a\npairings: []')
+    // A document written before the ceiling field loads unchanged.
+    write(bindingsPath, JSON.stringify({
+      version: 1,
+      bindings: { old: { sessionId: 'sess-old', device: 'laptop', createdAt: 1 } },
+    }))
+    const store = new PeerPairingsStore(pairingsPath, bindingsPath)
+    expect(store.ceilingOf('sess-old' as never)).toBeUndefined()
+    await store.bind('bound' as never, 'laptop', 'sess-first' as never, { maxTotalTokens: 900 })
+    expect(store.ceilingOf('sess-first' as never)).toBe(900)
+    // Re-adopting the same session without a value keeps the recorded ceiling.
+    await store.bind('bound' as never, 'laptop', 'sess-first' as never)
+    expect(store.ceilingOf('sess-first' as never)).toBe(900)
+    // A rebind retires the session with its ceiling still readable.
+    await store.bind('bound' as never, 'laptop', 'sess-second' as never, { maxTotalTokens: 100 })
+    expect(store.ceilingOf('sess-second' as never)).toBe(100)
+    expect(store.ceilingOf('sess-first' as never)).toBe(900)
+    expect(store.ceilingOf('sess-unknown' as never)).toBeUndefined()
+    const restarted = new PeerPairingsStore(pairingsPath, bindingsPath)
+    expect(restarted.ceilingOf('sess-first' as never)).toBe(900)
+    const file = JSON.parse(readFileSync(bindingsPath, 'utf8')) as {
+      bindings: Record<string, { maxTotalTokens?: number; retired?: { sessionId: string; maxTotalTokens?: number }[] }>
+    }
+    expect(file.bindings.bound?.maxTotalTokens).toBe(100)
+    expect(file.bindings.bound?.retired?.[0]).toMatchObject({ sessionId: 'sess-first', maxTotalTokens: 900 })
+    // A malformed ceiling is a configuration error, not a silently dropped guard.
+    write(bindingsPath, JSON.stringify({
+      version: 1,
+      bindings: { bound: { sessionId: 's', device: 'laptop', createdAt: 1, maxTotalTokens: -1 } },
+    }))
+    expect(() => new PeerPairingsStore(pairingsPath, bindingsPath).load()).toThrow(PeerConfigError)
+  })
+
   it('rejects a malformed retired-binding entry', () => {
     const root = tempRoot()
     const pairingsPath = join(root, 'pairings.yaml')
@@ -215,5 +358,72 @@ pairings:
     }))
     const store = new PeerPairingsStore(pairingsPath, join(root, 'peer-state.json'))
     expect(() => store.load()).toThrow(PeerConfigError)
+  })
+})
+
+describe('pairing store reload diagnostics', () => {
+  const GOOD = 'version: 1\ndevice: a\npairings: []'
+
+  it('warns once per distinct rejected reload without echoing file contents', async () => {
+    const root = tempRoot()
+    const pairingsPath = join(root, 'pairings.yaml')
+    write(pairingsPath, GOOD)
+    const warnings: string[] = []
+    const store = new PeerPairingsStore(pairingsPath, join(root, 'peer-state.json'), {
+      onConfigError: (message) => { warnings.push(message) },
+    })
+    expect(store.load().device).toBe('a')
+    // A YAML syntax error can carry a parser code frame; only the first line,
+    // which names the fault and position, may reach the sink.
+    write(pairingsPath, 'version: 1\ndevice: a\npairings:\n  - alias: [unclosed\n    peer: secret-value')
+    expect(store.load().device).toBe('a')
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatch(/^peer pairings .* is not valid YAML:/u)
+    expect(warnings[0]).not.toContain('secret-value')
+    expect(warnings[0]).not.toContain('\n')
+    // The same bad document growing in size retries the reload; the repeated
+    // diagnostic is suppressed rather than logged again.
+    write(pairingsPath, `version: 1\ndevice: a\npairings:\n  - alias: [unclosed\n    peer: secret-value\n# ${'x'.repeat(64)}`)
+    expect(store.load().device).toBe('a')
+    expect(warnings).toHaveLength(1)
+    // A distinct rejection is worth one warning of its own.
+    write(pairingsPath, 'version: 1\ndevice: a\npairings:\n  - alias: "bad alias"\n    peer: b\n    exposure: debug\n    sessionId: s')
+    expect(store.load().device).toBe('a')
+    expect(warnings).toHaveLength(2)
+    expect(warnings[1]).toMatch(/alias must match/u)
+  })
+
+  it('reports at most sixteen distinct diagnostics for the store lifetime', async () => {
+    const root = tempRoot()
+    const pairingsPath = join(root, 'pairings.yaml')
+    write(pairingsPath, GOOD)
+    const warnings: string[] = []
+    const store = new PeerPairingsStore(pairingsPath, join(root, 'peer-state.json'), {
+      onConfigError: (message) => { warnings.push(message) },
+    })
+    store.load()
+    for (let index = 0; index < 20; index += 1) {
+      write(pairingsPath, `version: 1\ndevice: a\npairings:\n  - alias: "bad ${String(index)}"\n    peer: b\n    exposure: debug\n    sessionId: s`)
+      expect(store.load().device).toBe('a')
+    }
+    expect(warnings).toHaveLength(16)
+    expect(new Set(warnings).size).toBe(16)
+  })
+
+  it('still fails loud on the first load and tolerates a store without a sink', async () => {
+    const root = tempRoot()
+    const pairingsPath = join(root, 'pairings.yaml')
+    const warnings: string[] = []
+    write(pairingsPath, 'version: 2\ndevice: a\npairings: []')
+    expect(() => new PeerPairingsStore(pairingsPath, join(root, 'peer-state.json'), {
+      onConfigError: (message) => { warnings.push(message) },
+    }).load()).toThrow(PeerConfigError)
+    expect(warnings).toEqual([])
+    // A subsequent reload without a sink keeps the snapshot and stays silent.
+    write(pairingsPath, GOOD)
+    const silent = new PeerPairingsStore(pairingsPath, join(root, 'peer-state.json'))
+    silent.load()
+    write(pairingsPath, 'version: 2\ndevice: a\npairings: []')
+    expect(silent.load().device).toBe('a')
   })
 })

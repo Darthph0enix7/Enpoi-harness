@@ -16,6 +16,12 @@
 # Local identity: the member whose `name` or a `hostnames` wildcard matches the
 # OS hostname or a Tailscale self name is this device. `DSH_PEER_DEVICE`
 # overrides the match when a host is ambiguous or unknown.
+#
+# Optional per-alias routing: a member record may carry a `routing` block
+# (allowChains, allowModels, requireZeroPrice, requireNoTraining, requireTools,
+# allowReasoningEfforts, allowSwitch, maxTotalTokens). It renders into that
+# alias owner's pairing entry and is validated here with the peer parser's
+# rules; no routing block ships for the human entries below.
 version: 1
 hub: serverlocal
 members:

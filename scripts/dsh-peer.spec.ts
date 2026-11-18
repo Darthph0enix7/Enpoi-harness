@@ -18,13 +18,17 @@
  * default.
  */
 
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
+import {
+  ASK_RETRY_TTL_MS, CALLER_HARNESS_VERSION_ENV, DEFAULT_SETTLE_QUIET_MS, LocalPeerClient, askStatePath, beginAsk,
+  commandAnswer, commandAsk, commandCancel, commandModels, commandSwitch, createRoutingFlags, finishAsk, followToSettled,
+  isPeerSessionSettled, parseArgs, parseModelRoute, resolveCallerHarnessVersion,
 // @ts-expect-error The CLI is a plain runtime script with no declaration artifact.
-import { ASK_RETRY_TTL_MS, DEFAULT_SETTLE_QUIET_MS, LocalPeerClient, askStatePath, beginAsk, commandAnswer, commandAsk, commandCancel, finishAsk, followToSettled, isPeerSessionSettled, parseArgs } from './dsh-peer.mjs'
+} from './dsh-peer.mjs'
 
 interface ScriptedState {
   latch: string
@@ -676,5 +680,351 @@ describe('LocalPeerClient reliability', () => {
     }
     expect(warnings).toEqual([{ from: 6, to: 7 }])
     expect(frames.map(frame => frame.record.seq)).toEqual([7])
+  })
+})
+
+// ── Caller identity and model-control parity ────────────────────────────────
+
+function tmpDir(prefix: string): string {
+  return mkdtempSync(join(tmpdir(), prefix))
+}
+
+describe('caller harness version', () => {
+  it('prefers the explicit option, then the env override', () => {
+    const saved = process.env[CALLER_HARNESS_VERSION_ENV]
+    try {
+      process.env[CALLER_HARNESS_VERSION_ENV] = '9.9.9-env'
+      expect(resolveCallerHarnessVersion({ harnessVersion: '9.9.9-option' })).toBe('9.9.9-option')
+      expect(resolveCallerHarnessVersion()).toBe('9.9.9-env')
+    } finally {
+      if (saved === undefined) Reflect.deleteProperty(process.env, CALLER_HARNESS_VERSION_ENV)
+      else process.env[CALLER_HARNESS_VERSION_ENV] = saved
+    }
+  })
+
+  it('reads the installed identity `dsh --version` reports, then the tree manifest', () => {
+    const home = tmpDir('dsh-peer-version-')
+    mkdirSync(join(home, 'harness'), { recursive: true })
+    writeFileSync(join(home, 'harness', 'install-state.json'), JSON.stringify({ version: '9.9.9-installed' }))
+    expect(resolveCallerHarnessVersion({ dshHome: home, profileRoot: home })).toBe('9.9.9-installed')
+    // Absent install state falls through to the source tree's root manifest.
+    const rootManifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
+    expect(resolveCallerHarnessVersion({ dshHome: tmpDir('dsh-peer-version-none-'), profileRoot: tmpDir('dsh-peer-profile-none-') })).toBe(rootManifest.version)
+  })
+
+  it('falls back to the profile peer manifest, and skips a malformed one', () => {
+    const home = tmpDir('dsh-peer-profile-home-')
+    const profile = tmpDir('dsh-peer-profile-root-')
+    const manifest = join(profile, '@deepseek-ai-dsh-api-peer.json')
+    writeFileSync(manifest, JSON.stringify({ version: '9.9.9-profile' }))
+    expect(resolveCallerHarnessVersion({
+      dshHome: home,
+      treeManifestPath: join(home, 'missing-package.json'),
+      profileManifestPath: manifest,
+    })).toBe('9.9.9-profile')
+    writeFileSync(manifest, '{ not json')
+    expect(() => resolveCallerHarnessVersion({
+      dshHome: home,
+      treeManifestPath: join(home, 'missing-package.json'),
+      profileManifestPath: manifest,
+    })).toThrowError(/cannot determine the caller harness version/u)
+  })
+
+  it('fails closed naming the env override instead of inventing a version', () => {
+    const saved = process.env[CALLER_HARNESS_VERSION_ENV]
+    Reflect.deleteProperty(process.env, CALLER_HARNESS_VERSION_ENV)
+    try {
+      const dir = tmpDir('dsh-peer-version-missing-')
+      expect(() => resolveCallerHarnessVersion({
+        dshHome: dir,
+        profileRoot: dir,
+        treeManifestPath: join(dir, 'missing-package.json'),
+        profileManifestPath: join(dir, 'missing-peer-package.json'),
+      })).toThrowError(new RegExp(`cannot determine the caller harness version.*${CALLER_HARNESS_VERSION_ENV}`, 'u'))
+    } finally {
+      if (saved !== undefined) process.env[CALLER_HARNESS_VERSION_ENV] = saved
+    }
+  })
+})
+
+describe('LocalPeerClient model control', () => {
+  it('handshakes with the resolved version and posts models/selectModel in the same envelope', async () => {
+    const calls: Array<{ url: string; body: Record<string, unknown> }> = []
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown> })
+      return okResponse({ chains: [], models: [], selectableByThisAlias: {}, accepted: true, selected: { provider: 'p', model: 'm' }, replayed: false })
+    }) as unknown as typeof fetch
+    const client = new LocalPeerClient({ endpoint: 'https://peer.test:8443', device: 'caller', fetch: fetchImpl, harnessVersion: '9.9.9-cli' })
+    await client.handshake()
+    await client.models({ alias: 'co-dev', participant: { kind: 'peer', name: 'caller' } })
+    await client.selectModel({
+      target: { kind: 'alias', alias: 'co-dev' },
+      participant: { kind: 'peer', name: 'caller' },
+      requestId: 'sw-1',
+      provider: 'p',
+      model: 'm',
+    })
+    const requestOf = (index: number): Record<string, unknown> => {
+      const payload = calls[index]!.body.payload as { args: { request: Record<string, unknown> } }
+      return payload.args.request
+    }
+    expect(requestOf(0).harnessVersion).toBe('9.9.9-cli')
+    expect(calls.map(call => call.url)).toEqual([
+      'https://peer.test:8443/api/peer/handshake',
+      'https://peer.test:8443/api/peer/models',
+      'https://peer.test:8443/api/peer/selectModel',
+    ])
+    expect(requestOf(1)).toEqual({ alias: 'co-dev', participant: { kind: 'peer', name: 'caller' } })
+    expect(requestOf(2)).toMatchObject({ requestId: 'sw-1', provider: 'p', model: 'm' })
+  })
+})
+
+describe('model-control flags', () => {
+  it('parses provider/model keeping every slash in the model id', () => {
+    expect(parseModelRoute('openrouter/meta/llama-3')).toEqual({ provider: 'openrouter', model: 'meta/llama-3' })
+    expect(() => parseModelRoute('no-slash')).toThrowError('expected "provider/model"')
+    expect(() => parseModelRoute('/model')).toThrowError('expected "provider/model"')
+    expect(() => parseModelRoute('provider/')).toThrowError('expected "provider/model"')
+  })
+
+  it('validates the create-only flags and keeps a positive ceiling', () => {
+    expect(createRoutingFlags({})).toEqual({})
+    expect(createRoutingFlags({ maxTokens: 4096 })).toEqual({ maxTotalTokens: 4096 })
+    expect(createRoutingFlags({ model: 'antigravity/gemini', chain: 'free', effort: 'high', maxTokens: 10 })).toEqual({
+      provider: 'antigravity', model: 'gemini', chain: 'free', reasoningEffort: 'high', maxTotalTokens: 10,
+    })
+    expect(() => createRoutingFlags({ maxTokens: 0 })).toThrowError('--max-tokens must be a positive integer')
+    expect(() => createRoutingFlags({ maxTokens: Number.NaN })).toThrowError('--max-tokens must be a positive integer')
+    expect(() => createRoutingFlags({ chain: '' })).toThrowError('--chain needs a non-empty chain id')
+    expect(() => createRoutingFlags({ effort: '' })).toThrowError('--effort needs a non-empty effort')
+  })
+
+  it('parses --cursor, --limit, --zero-price, --tools, --chain, --effort, --request-id, --model and --max-tokens', () => {
+    const { flags } = parseArgs([
+      'models', 'co-dev', '--cursor', 'c1', '--limit', '7', '--zero-price', '--tools',
+      '--chain', 'free', '--effort', 'high', '--request-id', 'sw-1', '--model', 'p/m', '--max-tokens', '99',
+    ])
+    expect(flags).toMatchObject({
+      cursor: 'c1', limit: 7, zeroPrice: true, tools: true, chain: 'free', effort: 'high',
+      requestId: 'sw-1', model: 'p/m', maxTokens: 99,
+    })
+  })
+})
+
+const MODELS_VALUE = {
+  chains: [{ id: 'free', dynamic: true, members: [
+    { provider: 'antigravity', model: 'a', state: 'ready' },
+    { provider: 'antigravity', model: 'b', state: 'cooldown', cooldownUntil: 1_700_000_000_000 },
+    { provider: 'antigravity', model: 'c', state: 'deprecated' },
+  ] }],
+  models: [{ provider: 'antigravity', model: 'a', tools: true, vision: 'unknown', zeroPrice: true, gated: false, trainsOnData: 'no', reasoningEfforts: ['high'] }],
+  nextCursor: 'more',
+  selectableByThisAlias: {
+    chains: ['free'], models: ['antigravity/*'], reasoningEfforts: ['high'],
+    requireZeroPrice: true, requireNoTraining: false, requireTools: false, allowSwitch: 'idle-only',
+  },
+}
+
+const SWITCH_VALUE = {
+  accepted: true,
+  selected: { provider: 'antigravity', model: 'switched', chain: 'free', reasoningEffort: 'high' },
+  previous: { provider: 'antigravity', model: 'old' },
+  replayed: false,
+}
+
+function modelClient(
+  capabilities: readonly string[],
+  calls: Array<{ method: string; request: Record<string, unknown> }>,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    handshake: async () => ({ protocolVersion: 1, harnessVersion: 'host-1', schemaDigest: '', hostDevice: 'host', capabilities, pairings: [] }),
+    models: async (request: Record<string, unknown>) => { calls.push({ method: 'models', request }); return MODELS_VALUE },
+    selectModel: async (request: Record<string, unknown>) => { calls.push({ method: 'selectModel', request }); return overrides.selectModel ?? SWITCH_VALUE },
+  }
+}
+
+describe('commandModels', () => {
+  it('refuses a host that does not advertise model discovery with a clear message', async () => {
+    const calls: Array<{ method: string; request: Record<string, unknown> }> = []
+    const { flags, positional } = commandArgs(['models', 'co-dev'], pairingFile())
+    const result = await commandModels(flags, positional, { clientFactory: () => modelClient(['state-latch'], calls) }) as Record<string, unknown>
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatchObject({ code: 'peer/capability-missing', message: 'host does not advertise model-discovery; upgrade the host' })
+    expect(calls).toEqual([])
+  })
+
+  it('forwards the filter, cursor, and page limit and returns the policy echo', async () => {
+    const calls: Array<{ method: string; request: Record<string, unknown> }> = []
+    const { flags, positional } = commandArgs(['models', 'co-dev', '--cursor', 'c1', '--limit', '7', '--zero-price', '--tools'], pairingFile())
+    const result = await commandModels(flags, positional, { clientFactory: () => modelClient(['model-discovery'], calls) }) as Record<string, unknown>
+    expect(result).toMatchObject({ ok: true, alias: 'co-dev', nextCursor: 'more' })
+    expect(calls[0]).toEqual({
+      method: 'models',
+      request: {
+        alias: 'co-dev',
+        participant: { kind: 'peer', name: 'caller', device: 'caller' },
+        cursor: 'c1',
+        limit: 7,
+        filter: { zeroPrice: true, tools: true },
+      },
+    })
+  })
+
+  it('rejects a non-positive page limit instead of clamping silently', async () => {
+    const { flags, positional } = commandArgs(['models', 'co-dev', '--limit', '0'], pairingFile())
+    await expect(commandModels(flags, positional, { clientFactory: () => modelClient(['model-discovery'], []) }))
+      .rejects.toThrowError('--limit must be a positive integer')
+  })
+})
+
+describe('commandSwitch', () => {
+  it('refuses a host that does not advertise model switching with a clear message', async () => {
+    const calls: Array<{ method: string; request: Record<string, unknown> }> = []
+    const { flags, positional } = commandArgs(['switch', 'co-dev', 'antigravity/x'], pairingFile())
+    const result = await commandSwitch(flags, positional, { clientFactory: () => modelClient(['model-discovery'], calls) }) as Record<string, unknown>
+    expect(result.ok).toBe(false)
+    expect(result.error).toMatchObject({ code: 'peer/capability-missing', message: 'host does not advertise model-switch; upgrade the host' })
+    expect(calls).toEqual([])
+  })
+
+  it('switches an explicit route with a generated requestId and reports replay/previous', async () => {
+    const calls: Array<{ method: string; request: Record<string, unknown> }> = []
+    const { flags, positional } = commandArgs(['switch', 'co-dev', 'antigravity/a', '--effort', 'high'], pairingFile())
+    const result = await commandSwitch(flags, positional, { clientFactory: () => modelClient(['model-switch'], calls) }) as Record<string, unknown>
+    expect(result).toMatchObject({ ok: true, replayed: false, selected: SWITCH_VALUE.selected })
+    expect(String(result.requestId)).toMatch(/^peer-cli-/u)
+    expect(calls[0]!.request).toMatchObject({
+      target: { kind: 'alias', alias: 'co-dev' },
+      participant: { kind: 'peer', name: 'caller', device: 'caller' },
+      requestId: result.requestId,
+      provider: 'antigravity',
+      model: 'a',
+      reasoningEffort: 'high',
+    })
+  })
+
+  it('switches by chain and reuses an explicit requestId', async () => {
+    const calls: Array<{ method: string; request: Record<string, unknown> }> = []
+    const { flags, positional } = commandArgs(['switch', 'co-dev', '--chain', 'free', '--request-id', 'sw-1'], pairingFile())
+    await commandSwitch(flags, positional, { clientFactory: () => modelClient(['model-switch'], calls) })
+    expect(calls[0]!.request).toMatchObject({ requestId: 'sw-1', provider: '', model: '', chain: 'free' })
+  })
+
+  it('surfaces the host refusal reason verbatim', async () => {
+    const failure = Object.assign(new Error('routing policy refused the requested model (model-not-allowed)'), { code: 'peer/forbidden', endpoint: 'https://peer.test:8443' })
+    const client = {
+      handshake: async () => ({ protocolVersion: 1, harnessVersion: 'h', schemaDigest: '', hostDevice: 'host', capabilities: ['model-switch'], pairings: [] }),
+      selectModel: async () => { throw failure },
+    }
+    const { flags, positional } = commandArgs(['switch', 'co-dev', 'antigravity/x'], pairingFile())
+    await expect(commandSwitch(flags, positional, { clientFactory: () => client }))
+      .rejects.toThrowError('routing policy refused the requested model (model-not-allowed)')
+  })
+
+  it('requires a route or a chain and a valid provider/model positional', async () => {
+    const { flags, positional } = commandArgs(['switch', 'co-dev'], pairingFile())
+    await expect(commandSwitch(flags, positional, { clientFactory: () => modelClient(['model-switch'], []) }))
+      .rejects.toThrowError('switch needs <alias> and either <provider/model> or --chain <id>')
+    const invalid = commandArgs(['switch', 'co-dev', 'no-slash'], pairingFile())
+    await expect(commandSwitch(invalid.flags, invalid.positional, { clientFactory: () => modelClient(['model-switch'], []) }))
+      .rejects.toThrowError('expected "provider/model"')
+    const blankChain = commandArgs(['switch', 'co-dev', '--chain', ''], pairingFile())
+    await expect(commandSwitch(blankChain.flags, blankChain.positional, { clientFactory: () => modelClient(['model-switch'], []) }))
+      .rejects.toThrowError('--chain needs a non-empty chain id')
+  })
+})
+
+describe('commandAsk create routing', () => {
+  const ROUTED_DOC = [
+    'version: 1',
+    'device: caller',
+    'pairings:',
+    '  - alias: co-dev',
+    '    peer: serverlocal',
+    '    exposure: debug',
+    '    endpoint: https://peer.test:8443',
+    '    create:',
+    '      cwd: /work/scratch',
+    '      provider: antigravity',
+    '      model: gemini-x',
+    '      chain: loopback',
+    '      reasoningEffort: low',
+    '',
+  ].join('\n')
+
+  function createHarness(): { calls: Array<{ method: string; request: Record<string, unknown> }>; client: Record<string, unknown> } {
+    const calls: Array<{ method: string; request: Record<string, unknown> }> = []
+    let bound = false
+    const client: Record<string, unknown> = {
+      handshake: async () => ({ protocolVersion: 1, harnessVersion: '0.1.6-alpha.2', schemaDigest: '', hostDevice: 'serverlocal', capabilities: [], pairings: [] }),
+      state: async () => {
+        if (!bound) {
+          const error = Object.assign(new Error('no session bound'), { code: 'peer/not-paired', endpoint: 'https://peer.test:8443' })
+          throw error
+        }
+        return {
+          target: { device: 'serverlocal', sessionId: 'sess-1', exposure: 'debug', alias: 'co-dev' },
+          state: { latch: 'idle', since: 0, source: 'host-latch', activeDescendants: 0, descendantsExact: true, pendingAsks: [], lastTurnEnd: { turn: 0, reason: 'completed', at: 0 } },
+          cursor: 0,
+        }
+      },
+      create: async (request: Record<string, unknown>) => { calls.push({ method: 'create', request }); bound = true; return { created: true } },
+      prompt: async (request: Record<string, unknown>) => { calls.push({ method: 'prompt', request }); return { accepted: true, queued: true, hopCount: 1 } },
+      follow: async function* (): AsyncGenerator<unknown> {
+        yield {
+          type: 'snapshot',
+          cursor: 4,
+          state: { latch: 'idle', since: 0, source: 'host-latch', activeDescendants: 0, descendantsExact: true, pendingAsks: [] },
+          records: [
+            { seq: 3, time: 1, type: 'turn/start', data: { turn: 1 } },
+            { seq: 4, time: 1, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+          ],
+        }
+      },
+    }
+    return { calls, client }
+  }
+
+  function routedPairingFile(doc = ROUTED_DOC): string {
+    const dir = tmpDir('dsh-peer-routed-')
+    const path = join(dir, 'pairings.yaml')
+    writeFileSync(path, doc)
+    return path
+  }
+
+  it('forwards --model/--chain/--effort/--max-tokens on the create call', async () => {
+    const harness = createHarness()
+    const { flags, positional } = commandArgs(['ask', 'co-dev', 'hello', '--chain', 'free', '--effort', 'high', '--max-tokens', '5000'], routedPairingFile())
+    const result = await commandAsk(flags, positional, { clientFactory: () => harness.client }) as Record<string, unknown>
+    expect(result).toMatchObject({ created: true })
+    expect(harness.calls.find(call => call.method === 'create')!.request).toMatchObject({
+      alias: 'co-dev',
+      cwd: '/work/scratch',
+      chain: 'free',
+      reasoningEffort: 'high',
+      maxTotalTokens: 5000,
+    })
+    // --chain replaced the pairing route instead of merging with it.
+    expect(harness.calls.find(call => call.method === 'create')!.request).not.toHaveProperty('provider')
+  })
+
+  it('forwards the pairing create route when no route flag overrides it', async () => {
+    const harness = createHarness()
+    const { flags, positional } = commandArgs(['ask', 'co-dev', 'hello'], routedPairingFile())
+    await commandAsk(flags, positional, { clientFactory: () => harness.client })
+    expect(harness.calls.find(call => call.method === 'create')!.request).toMatchObject({
+      provider: 'antigravity', model: 'gemini-x', chain: 'loopback', reasoningEffort: 'low',
+    })
+  })
+
+  it('refuses a create-only flag on an already bound session and points at switch', async () => {
+    const harness = createHarness()
+    const path = routedPairingFile()
+    const { flags, positional } = commandArgs(['ask', 'co-dev', 'hello', '--chain', 'free'], path)
+    // Bind the alias first with a plain ask (no route flags), then retry with one.
+    await commandAsk(commandArgs(['ask', 'co-dev', 'hello'], path).flags, positional, { clientFactory: () => harness.client })
+    await expect(commandAsk(flags, positional, { clientFactory: () => harness.client }))
+      .rejects.toThrowError('use `switch` to change its model')
   })
 })

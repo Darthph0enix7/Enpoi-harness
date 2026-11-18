@@ -112,6 +112,52 @@ export interface PeerTurnTerminal {
   readonly reason: 'completed' | 'aborted' | 'blocked' | 'error' | 'max-tokens' | 'interrupted'
   readonly at: number
   readonly error?: PeerTurnError
+  /** The route that produced this turn's output, folded from the durable stream; absent when no model answered. */
+  readonly ran?: PeerTurnModelReport
+  /**
+   * Set to `budget` only when the host's ceiling watcher stopped this turn.
+   * The classification comes from the durable cancel marker, so it survives a
+   * restart; a human or peer cancel of an over-budget turn is never stamped.
+   */
+  readonly stop?: 'budget'
+}
+
+/**
+ * The model that actually answered one turn. With a rolling chain this can
+ * differ from the selection: `model` is the route that produced the final
+ * output and `hops` counts the failed routes tried before it in the same turn.
+ */
+export interface PeerTurnModelReport {
+  readonly provider: string
+  readonly model: string
+  readonly chain?: string
+  readonly hops: number
+  readonly usage?: PeerTokenUsage
+}
+
+/** Token totals in the host's four disjoint buckets. The harness has no billing data, so cost is never reported. */
+export interface PeerTokenUsage {
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly cacheReadTokens: number
+  readonly cacheWriteTokens: number
+}
+
+/** Why one route in a chain was left; closed vocabulary, never provider prose. */
+export type PeerModelHopReason = 'rate-limit' | 'error' | 'cooldown' | 'unavailable'
+
+/**
+ * Payload of the synthetic `model-hop` record the peer stream carries (all
+ * exposures). Derived from the durable chain-failure records; it never carries
+ * provider messages, URLs, or request ids.
+ */
+export interface PeerModelHopData {
+  readonly from: { readonly provider: string; readonly model: string }
+  /** The next route tried; absent when the chain was exhausted. */
+  readonly to?: { readonly provider: string; readonly model: string }
+  readonly reason: PeerModelHopReason
+  readonly chain?: string
+  readonly at: number
 }
 
 /** One model selection in the target's own routing vocabulary (doc 69 §10.3). */
@@ -162,10 +208,43 @@ export interface PeerExecutionState {
   readonly pendingAsks: readonly PeerPendingAsk[]
   readonly lastTurnEnd?: PeerTurnTerminal
   readonly lastParticipantAction?: PeerParticipantAction
+  /**
+   * The Session's current model selection (what the next request is configured
+   * to run). The route that actually produced the last turn is
+   * `lastTurnEnd.ran`; a rolling chain can make the two differ.
+   */
   readonly model?: PeerModelSelection
+  /** Session token totals from the durable usage projection; absent when none is recorded. */
+  readonly usage?: PeerTokenUsage
+  /**
+   * The session's token ceiling and whether it was reached; absent without a
+   * ceiling. `metered` is true only when the durable `tokenUsage` projection
+   * was actually read for this session: with a ceiling but no readable usage
+   * the host reports `{ usedTokens: 0, exceeded: false, metered: false }`
+   * instead of claiming the ceiling is enforced. A host without the usage seam
+   * refuses a create that asks for a ceiling (`peer/forbidden` reason
+   * `budget-unmetered`).
+   */
+  readonly budget?: {
+    readonly maxTotalTokens: number
+    readonly usedTokens: number
+    readonly exceeded: boolean
+    readonly metered: boolean
+  }
+  /**
+   * Newest chain hops the fold retains (bounded; see `RECENT_MODEL_HOPS_LIMIT`),
+   * oldest first. Hops older than the window stay available as durable
+   * `model-hop` records through `peer.follow`/`peer.page`.
+   */
+  readonly recentModelHops?: readonly PeerModelHopData[]
 }
 
-/** One durable event as the peer wire carries it; `seq` is contiguous per stream. */
+/**
+ * One durable event as the peer wire carries it. `seq` is the durable position
+ * of the source event; a derived record such as `model-hop` shares the seq of
+ * the event it was projected from, so a `debug` window can carry two records at
+ * one position (the raw failure and its synthetic hop).
+ */
 export interface PeerEventRecord {
   readonly seq: SessionSeq
   readonly time: number
@@ -187,6 +266,21 @@ export type PeerCapability =
   | 'answer-routing'
   | 'runaway-ceiling'
   | 'session-create'
+  /** `peer.models`: policy-filtered provider/model/chain discovery. Served only when a routing service exists. */
+  | 'model-discovery'
+  /** `peer.create` accepts routing fields, evaluated against the pairing's `routing` policy. */
+  | 'model-routing-at-create'
+  /** `peer.selectModel`: idle-only switch between tasks. Served only when a routing service exists. */
+  | 'model-switch'
+  /** Turn terminals carry the model that ran and `model-hop` records are streamed. */
+  | 'model-attribution'
+  /**
+   * `peer.create` accepts `maxTotalTokens`; the host stops the session at the
+   * ceiling. Advertised only while the host can read the durable `tokenUsage`
+   * projection (the token-meter service); a host without it refuses a create
+   * that needs a ceiling.
+   */
+  | 'token-ceiling'
 
 /** One pairing as the serving host reports it; never carries a token. */
 export interface PeerPairingSummary {
@@ -275,6 +369,13 @@ export interface PeerCreateRequest {
   readonly model?: string
   readonly chain?: string
   readonly reasoningEffort?: string
+  /**
+   * Total-token ceiling for the created session (sum of the four usage
+   * buckets). Enforced by the host after each model response: an in-flight
+   * request may finish, then the session is stopped with `stop: 'budget'`.
+   * There is deliberately no cost ceiling: the harness has no billing data.
+   */
+  readonly maxTotalTokens?: number
 }
 
 /** `peer.create` value: `created` is false when an existing session was adopted. */
@@ -448,8 +549,171 @@ export interface PeerPairing {
   readonly token?: string
   /** Optional emergency stop (doc 69 §9.3); absent means unbounded agent-to-agent exchange. */
   readonly runawayCeiling?: number
-  /** Allows an adopting `peer.create` to change routing (doc 69 §10.1); default off. */
+  /** Allows an adopting `peer.create` to change routing (doc 69 §10.1); default off. Legacy: ignored when `routing` is present. */
   readonly allowModelChange?: boolean
+  /** Remote model-selection policy. When present it is authoritative for create, adopt, discovery, and switch. */
+  readonly routing?: PeerRoutingPolicy
+}
+
+/**
+ * What a paired controller may select. Validated strictly (unknown keys are a
+ * configuration error). An empty `allowChains` and `allowModels` selects
+ * nothing. Patterns match `provider/model` with `*` as the only wildcard
+ * (any run of characters, `/` included), anchored at both ends.
+ */
+export interface PeerRoutingPolicy {
+  readonly allowChains?: readonly string[]
+  readonly allowModels?: readonly string[]
+  /** Refuse any route the catalogue cannot prove is zero-price (unknown price is refused). */
+  readonly requireZeroPrice?: boolean
+  /** Refuse any route not proven to avoid training on prompts (`unknown` is refused). */
+  readonly requireNoTraining?: boolean
+  /** Refuse any route the catalogue cannot prove has tool calling (`unknown` is refused as `tools-unproven`). */
+  readonly requireTools?: boolean
+  /** Reasoning efforts a caller may name; absent allows any effort the model supports. */
+  readonly allowReasoningEfforts?: readonly string[]
+  /** `idle-only` lets `peer.selectModel` switch an idle session; `never` (default) refuses it. */
+  readonly allowSwitch?: 'never' | 'idle-only'
+  /** Upper bound on a caller's `maxTotalTokens`; a create above it is refused, one without it is capped to it. */
+  readonly maxTotalTokens?: number
+}
+
+// ── Model discovery and switch ───────────────────────────────────────────────
+
+/** Tri-state fact the catalogue may not know; never guessed. */
+export type PeerKnown = boolean | 'unknown'
+
+/** One selectable route with the facts a controller needs to choose it. */
+export interface PeerModelInfo {
+  readonly provider: string
+  readonly model: string
+  readonly tools: PeerKnown
+  readonly vision: PeerKnown
+  readonly contextWindow?: number
+  readonly zeroPrice: PeerKnown
+  readonly gated: PeerKnown
+  readonly trainsOnData: 'yes' | 'no' | 'unknown'
+  readonly reasoningEfforts: readonly string[]
+}
+
+/** One chain a controller may select, with its currently resolved members. */
+export interface PeerChainInfo {
+  readonly id: string
+  readonly label?: string
+  /** True when membership is re-resolved from the catalogue (adopt chains). */
+  readonly dynamic: boolean
+  readonly members: readonly {
+    readonly provider: string
+    readonly model: string
+    /**
+     * Live member state. `deprecated` means the catalogue kept the record only
+     * for a route-local reference after the endpoint dropped it, so selecting
+     * the chain is refused and naming this member is `model-not-allowed`;
+     * `cooldown` is temporary and ready again once `cooldownUntil` passes.
+     */
+    readonly state: 'ready' | 'cooldown' | 'deprecated'
+    readonly cooldownUntil?: number
+  }[]
+}
+
+/** Optional narrowing a caller may apply on top of the pairing policy. */
+export interface PeerModelsFilter {
+  readonly zeroPrice?: boolean
+  readonly tools?: boolean
+  readonly gated?: boolean
+  readonly minContextWindow?: number
+}
+
+/** `peer.models` request: policy-filtered discovery for one alias. */
+export interface PeerModelsRequest {
+  readonly alias: PeerAlias
+  readonly participant: PeerParticipant
+  readonly filter?: PeerModelsFilter
+  /** Opaque cursor from a previous page. */
+  readonly cursor?: string
+  /** Page size for `models`; clamped by the host. */
+  readonly limit?: number
+}
+
+/** `peer.models` value. Only routes the alias may select are returned; no credentials, URLs, or error text. */
+export interface PeerModelsValue {
+  readonly chains: readonly PeerChainInfo[]
+  readonly models: readonly PeerModelInfo[]
+  readonly nextCursor?: string
+  /** The policy as configured, echoed so the controller sees what it may choose. */
+  readonly selectableByThisAlias: {
+    readonly chains: readonly string[]
+    readonly models: readonly string[]
+    readonly reasoningEfforts?: readonly string[]
+    readonly requireZeroPrice: boolean
+    readonly requireNoTraining: boolean
+    readonly requireTools: boolean
+    readonly allowSwitch: 'never' | 'idle-only'
+  }
+}
+
+/** `peer.selectModel` request: switch one idle session's routing for its next turn. */
+export interface PeerSelectModelRequest {
+  readonly target: PeerTarget
+  readonly participant: PeerParticipant
+  /** Dedupes the call; the same id with a changed payload is a `peer/conflict`. */
+  readonly requestId: PeerRequestId
+  readonly provider: string
+  readonly model: string
+  readonly chain?: string
+  readonly reasoningEffort?: string
+}
+
+/** `peer.selectModel` value; a replay of the same request returns the original with `replayed: true`. */
+export interface PeerSelectModelValue {
+  readonly accepted: true
+  readonly selected: PeerModelSelection
+  readonly previous?: PeerModelSelection
+  readonly replayed: boolean
+}
+
+/** Verdict of evaluating one selection against a pairing's routing policy. */
+export type PeerRoutingVerdict =
+  | { readonly allowed: true; readonly selection: PeerModelSelection }
+  | {
+    readonly allowed: false
+    readonly reason: 'chain-not-allowed' | 'model-not-allowed' | 'price-unproven' | 'training-unproven' | 'tools-unproven' | 'effort-not-allowed' | 'unknown-route'
+    /** The identifier that was refused (`provider/model` or chain id); never the allow list. */
+    readonly denied: string
+  }
+
+/**
+ * Structural seam the peer host consumes through `ctx.get('peerRouting')`. The
+ * profile owns the catalogue, selector rules, chain registry, and route health;
+ * the peer package owns transport, pairing, and exposure. A host without this
+ * service serves neither `model-discovery` nor `model-switch`, and refuses any
+ * routing request on a pairing that carries a `routing` policy.
+ */
+export interface PeerRoutingService {
+  /**
+   * Policy-filtered discovery. Must not return credentials, URLs, or provider error text.
+   * @param policy - the pairing's routing policy; runtime selection uses the host-attested copy.
+   * @param request - optional filters plus opaque pagination cursor and page size.
+   * @returns allowed chains and models, with the next cursor when more rows follow.
+   */
+  discover(policy: PeerRoutingPolicy, request: {
+    readonly filter?: PeerModelsFilter
+    readonly cursor?: string
+    readonly limit?: number
+  }): Promise<{
+    readonly chains: readonly PeerChainInfo[]
+    readonly models: readonly PeerModelInfo[]
+    readonly nextCursor?: string
+  }>
+  /**
+   * Evaluate one requested selection; resolves chain members and catalogue
+   * facts at call time. A chain-only request carries empty `provider` and
+   * `model` strings, and the verdict answers the concrete route to apply.
+   * @param policy - the pairing's routing policy; runtime selection uses the host-attested copy.
+   * @param selection - the requested route or chain, as the controller sent it.
+   * @returns the applied route, or a closed refusal reason naming the denied identifier.
+   */
+  evaluate(policy: PeerRoutingPolicy, selection: PeerModelSelection): Promise<PeerRoutingVerdict>
 }
 
 /**
@@ -496,9 +760,12 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
     /** A paired target has no such session, or the ask id is unknown or expired. */
     'peer/not-found': { readonly sessionId?: SessionId; readonly askId?: string; readonly alias?: string; readonly reason?: string }
     /** Exposure or pairing permission refuses the operation. */
-    'peer/forbidden': { readonly reason?: string }
-    /** An answer raced another participant's settled answer. */
-    'peer/conflict': { readonly askId?: string }
+    'peer/forbidden': { readonly reason?: string; readonly denied?: string }
+    /**
+     * An answer raced another participant's settled answer, a switch hit a busy
+     * session, or a request id was reused with a different payload.
+     */
+    'peer/conflict': { readonly askId?: string; readonly reason?: string; readonly latch?: string }
     /** A follow generation cannot prove durable contiguity; repair with `peer.page`. */
     'peer/gap': { readonly expectedSeq?: number; readonly observedSeq?: number }
     /** The pairing's configured emergency hop ceiling refused the prompt. */
@@ -510,7 +777,6 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
   }
 }
 
-/** One created-session binding persisted by the serving host (`~/.dsh/peer-state.json`). */
 /**
  * One superseded alias binding. `peer.create` replaces the alias's current
  * binding; the previous session is retained here so an explicit `PeerTarget`
@@ -521,15 +787,26 @@ export interface RetiredPeerBinding {
   readonly device: PeerDeviceName
   readonly createdAt: number
   readonly retiredAt: number
+  /** Token ceiling the retired session was created with; absent when none was set. */
+  readonly maxTotalTokens?: number
 }
 
-/** One alias's current created-session binding plus the sessions it replaced. */
+/**
+ * One alias's current created-session binding, persisted by the serving host
+ * in `~/.dsh/peer-state.json`, plus the sessions it replaced.
+ */
 export interface PeerBinding {
   readonly sessionId: SessionId
   readonly device: PeerDeviceName
   readonly createdAt: number
   /** Earlier sessions this alias was bound to, newest last; empty when never rebound. */
   readonly retired?: readonly RetiredPeerBinding[]
+  /**
+   * Total-token ceiling recorded for the bound session, requested or clamped at
+   * create time. Absent when the create named none and the pairing policy caps
+   * none; `PeerService.ceilingOf` reads it for the enforcement lane.
+   */
+  readonly maxTotalTokens?: number
 }
 
 /**

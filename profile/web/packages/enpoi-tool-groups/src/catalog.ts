@@ -185,7 +185,7 @@ export const SHIPPED_TOOL_GROUPS: readonly ToolGroupDefinition[] = Object.freeze
   {
     id: 'peer',
     label: 'Peer interconnect',
-    purpose: 'cross-device peer sessions: status, ask, answer, cancel',
+    purpose: 'cross-device peer sessions: status, models, switch, ask, answer, cancel',
     mode: 'on-demand',
     preAttach: [],
     enabled: true,
@@ -194,7 +194,7 @@ export const SHIPPED_TOOL_GROUPS: readonly ToolGroupDefinition[] = Object.freeze
     // would stay presented after `detach peer`, so the family could never be
     // hidden as a whole. The bridge's registration names are pinned against
     // this list by tests/tool-groups.spec.ts (read from its source keylessly).
-    members: ['peer_status', 'peer_sessions', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel'],
+    members: ['peer_status', 'peer_sessions', 'peer_models', 'peer_switch_model', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel'],
   },
   {
     id: 'debug',

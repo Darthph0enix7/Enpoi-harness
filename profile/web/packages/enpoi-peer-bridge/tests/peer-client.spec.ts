@@ -34,6 +34,54 @@ describe('PeerClient envelope', () => {
     await expect(offline.handshake()).rejects.toMatchObject({ code: 'peer/target-unreachable' })
   })
 
+  it('sends models and selectModel in the same envelope', async () => {
+    const bodies: Array<{ url: string; body: Record<string, unknown> }> = []
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push({ url: String(input), body: JSON.parse(String(init?.body)) as Record<string, unknown> })
+      return rpcResponse({ chains: [], models: [], selectableByThisAlias: { chains: [], models: [], requireZeroPrice: false, requireNoTraining: false, requireTools: false, allowSwitch: 'never' } })
+    }) as typeof fetch
+    const client = new PeerClient({ endpoint: 'https://host:8443', device: 'caller', fetch: fetchImpl })
+    await client.models({ alias: 'co-dev', participant: { kind: 'peer', name: 'caller' }, filter: { zeroPrice: true }, cursor: 'c1', limit: 7 })
+    await client.selectModel({
+      target: { kind: 'alias', alias: 'co-dev' },
+      participant: { kind: 'peer', name: 'caller' },
+      requestId: 'sw-1',
+      provider: 'antigravity',
+      model: 'a',
+      reasoningEffort: 'high',
+    })
+    expect(bodies.map(entry => entry.url)).toEqual([
+      'https://host:8443/api/peer/models',
+      'https://host:8443/api/peer/selectModel',
+    ])
+    expect(bodies[0]!.body).toMatchObject({
+      method: 'peer/models',
+      payload: { args: { request: { alias: 'co-dev', filter: { zeroPrice: true }, cursor: 'c1', limit: 7 } } },
+    })
+    expect(bodies[1]!.body).toMatchObject({
+      method: 'peer/selectModel',
+      payload: { args: { request: { requestId: 'sw-1', provider: 'antigravity', model: 'a', reasoningEffort: 'high' } } },
+    })
+  })
+
+  it('reports the configured caller version and never a drifting literal', async () => {
+    const requests: Record<string, unknown>[] = []
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { payload: { args: { request: Record<string, unknown> } } }
+      requests.push(body.payload.args.request)
+      return rpcResponse({ protocolVersion: 1, harnessVersion: 'host', schemaDigest: '', hostDevice: 'h', capabilities: [], pairings: [] })
+    }) as typeof fetch
+    const explicit = new PeerClient({ endpoint: 'https://host', device: 'caller', fetch: fetchImpl, harnessVersion: '9.9.9-caller' })
+    await explicit.handshake()
+    expect(requests[0]!.harnessVersion).toBe('9.9.9-caller')
+    // The default comes from the installed identity, so it is a real version,
+    // not the retired hardcoded '0.1.6-alpha.2' literal.
+    const resolved = new PeerClient({ endpoint: 'https://host', device: 'caller', fetch: fetchImpl })
+    await resolved.handshake()
+    expect(requests[1]!.harnessVersion).not.toBe('0.1.6-alpha.2')
+    expect(String(requests[1]!.harnessVersion)).toMatch(/^\d+\.\d+\.\d+/u)
+  })
+
   it('sends Authorization when a token is configured', async () => {
     const headers: Array<Record<string, string>> = []
     const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {

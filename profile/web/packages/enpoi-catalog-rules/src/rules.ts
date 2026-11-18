@@ -51,6 +51,14 @@ export interface CatalogEntry {
    * a gate with no known reason falls back to `gated`.
    */
   gateReason?: string
+  /**
+   * True when the provider sync kept a record only because a route-local
+   * reference (a default, chain, persona, or favorite) still names it after the
+   * endpoint stopped advertising it (`source: 'pinned-in-use'`). The record
+   * remains so the reference does not break silently, but it is no longer a
+   * selectable model.
+   */
+  deprecated?: boolean
 }
 
 /** Effective training policy for one provider/model. */
