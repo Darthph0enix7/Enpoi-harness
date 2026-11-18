@@ -4,7 +4,7 @@
  * @module @deepseek-ai/dsh-agent-loop/inbox
  */
 
-import type { MessageId } from '@deepseek-ai/dsh-llm'
+import type { MessageId, MessageSource } from '@deepseek-ai/dsh-llm'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import type SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import type { Session, SessionEventMap, UserMessage } from '@deepseek-ai/dsh-session'
@@ -65,6 +65,27 @@ export const inboxProjectionDefinition = {
 } satisfies ProjectionDefinition<'inbox', InboxState>
 
 /**
+ * Whether a pending message dies with an operator Stop.
+ *
+ * Human prompts belong to the stopped turn. An automatic goal round is not
+ * input from anybody: it is the harness's own request for another turn, so the
+ * same Stop must withdraw it — a refusal that left it queued would claim and
+ * admit the round anyway. Other producers are left alone: settlement and job
+ * notices, relays, and injected context record work that already happened (or
+ * context a later turn still needs), so those stay pending for a later turn
+ * instead of vanishing with the stop. No other pending source is an autonomous
+ * continuation request today; a new one must add itself here deliberately.
+ * @param source - the pending message's recorded producer and kind.
+ * @returns whether the pending message must be discarded.
+ */
+function revokesOnStop(source: MessageSource): boolean {
+  // `MessageSourceMap` is merge-extensible and this core package cannot import
+  // the producer's augmentation, so the kind is compared as a plain string.
+  const kind: string = source.kind
+  return kind === 'user' || kind === 'goal'
+}
+
+/**
  * Driver-owned durable Inbox implementation used by ReactLoopAgent and focused
  * provider tests.
  * @param projections - registry with the standard Inbox projection registered by AgentLoop.
@@ -95,11 +116,13 @@ export class ReactLoopInbox implements InboxContract {
   }
 
   /**
-   * Durably cancel pending operator input, clearing next-step before
-   * next-turn. Only user-authored input is discarded: system-generated
+   * Durably cancel pending operator input and autonomous continuation
+   * requests, clearing next-step before next-turn. Only messages that ask for
+   * a turn die with the Stop: human-authored input, and the driver's own
+   * goal-round request, whose turn the operator just refused. System-generated
    * observations (settlement notices, adjacent-agent relays, completion
    * notices) record work that already happened, so they stay pending for a
-   * later turn instead of vanishing with the stop. Each user message is
+   * later turn instead of vanishing with the stop. Each discarded message is
    * spliced on its own, so its durable `outcome: canceled` record and
    * `agent/inbox/discarded` notification keep the same meaning they had when
    * the whole list was cleared at once.
@@ -109,7 +132,8 @@ export class ReactLoopInbox implements InboxContract {
       const pending = this.current()[target]
       // Walk backwards so removing one index never shifts an unvisited one.
       for (let index = pending.length - 1; index >= 0; index -= 1) {
-        if (pending[index]?.source.kind === 'user') this.splice(target, index, 1, [])
+        const message = pending[index]
+        if (message !== undefined && revokesOnStop(message.source)) this.splice(target, index, 1, [])
       }
     }
   }

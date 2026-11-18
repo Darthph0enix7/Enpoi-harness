@@ -27,8 +27,8 @@
   en: 01dd41fe11f294d7
   zh: f45a2e4073c0b206
 /deepseek-ai-dsh-tool-subagent-control/use-this-package/list-agents:
-  en: ecc9ed911a65c7cb
-  zh: 5ddfb478349788a9
+  en: c01a36aa2dee9e60
+  zh: 37c6e932d12335e2
 /deepseek-ai-dsh-tool-subagent-control/understand-the-implementation:
   en: c5cdf01a78c990f2
   zh: 53c180d726ce4502
@@ -39,11 +39,11 @@
   en: 4c7698ccea49a60b
   zh: fbf129ff583e6ab9
 /deepseek-ai-dsh-tool-subagent-control/understand-the-implementation/listing-projection:
-  en: 9877bb5583439d49
-  zh: c796244ece4380a4
+  en: 07c308b1bee06d8e
+  zh: 3ed566217baa73ea
 /deepseek-ai-dsh-tool-subagent-control/understand-the-implementation/source-map:
-  en: a2a918cbad1a8313
-  zh: 5bcddba1b2bdd26e
+  en: f719bdbabf3b262b
+  zh: c4acfce5c565043c
 /deepseek-ai-dsh-tool-subagent-control/further-exploration:
   en: df2bf39d0ffffd43
   zh: 4cd02551f7433c90
@@ -54,8 +54,8 @@
   en: e4c7376d4f29dbd5
   zh: 6b7a9eaf69c9ea53
 /deepseek-ai-dsh-tool-subagent-control/model-experience/tool-schema/what-the-model-sees:
-  en: 035d7fad557fe90f
-  zh: d6bf853c0e321fda
+  en: ae99e131aa68dcf8
+  zh: ace68e897a39546d
 /deepseek-ai-dsh-tool-subagent-control/model-experience/tool-schema/token-effect:
   en: db207dc8d5860684
   zh: ad2663b4967fbca9
@@ -90,17 +90,17 @@
   en: 094e55d258f2ec2e
   zh: f364bc9046530bff
 /deepseek-ai-dsh-tool-subagent-control/model-experience/listing-result/what-the-model-sees:
-  en: 3270cab47a84dfba
-  zh: 3d20dabb8fc94295
+  en: 1a411d3bdc6dcfb4
+  zh: 5ca5d612d3962f62
 /deepseek-ai-dsh-tool-subagent-control/model-experience/listing-result/token-effect:
-  en: 6852457c47e55d80
-  zh: 4feceaeb7a058e8e
+  en: b30bf5ee415a4bdf
+  zh: c779b029c4a08b1f
 /deepseek-ai-dsh-tool-subagent-control/model-experience/listing-result/kv-cache-effect:
   en: 4a629edb36a17e32
   zh: 5a7539cfbf404c54
 /deepseek-ai-dsh-tool-subagent-control/known-limitations-and-deferred-work:
-  en: 31cd8a1934cf0093
-  zh: 2fd07e05c8e58e9a
+  en: ed3eb38146dcd9e1
+  zh: 769c8046e7593e1d
 /deepseek-ai-dsh-tool-subagent-control/known-limitations-and-deferred-work/dev-note:
   en: e67f633dc6fe7773
   zh: 3bb0c20c93f16f98

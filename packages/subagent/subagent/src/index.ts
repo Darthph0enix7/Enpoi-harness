@@ -79,6 +79,10 @@ import { subagentIdentityProjectionDefinition, subagentTimingProjectionDefinitio
 import { establishCatalogChild, subagentCatalogProjectionDefinition } from './catalog.ts'
 import type { SubagentCatalogEntry } from './projection-types.ts'
 import { deliverSubagentPrompt } from './internal.ts'
+import {
+  DEFAULT_SETTLEMENT_REPORT_MAX_CHARS,
+  DEFAULT_SETTLEMENT_REPORT_MAX_IMAGES,
+} from './continuation-messages.ts'
 
 export type {} from './catalog.ts'
 export * from './out-of-process.ts'
@@ -190,12 +194,21 @@ interface BrowserPromptSource {
   readonly clientTimeZone?: string
 }
 
-/** Host configuration for continuable subagent capacity. */
+/** Host configuration for continuable subagent capacity and settlement notices. */
 export interface Config {
   /** Maximum live children sharing uninterrupted continuable parent links; defaults to 8. */
   maxActiveSubagents: Volatile<number>
   /** Default delegation depth for tools without an explicit limit; defaults to 1. */
   maxDepth: Volatile<number>
+  /**
+   * Maximum UTF-16 code units of a settled child's closing report copied into
+   * its parent's notice; defaults to 12000. The complete report always stays in
+   * the child's own durable session, and a shortened notice states the exact
+   * omission and how to read it there.
+   */
+  settlementReportMaxChars: Volatile<number>
+  /** Maximum image blocks of a settled child's closing report copied into its parent's notice; defaults to 4. */
+  settlementReportMaxImages: Volatile<number>
 }
 
 /** Named provider registry with one-shot runs, durable discovery, and continuable-child operations. */
@@ -203,6 +216,10 @@ export class SubagentRuntime extends TypertRemoteService {
   static Config = z.object({
     maxDepth: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER).default(1).volatile(),
     maxActiveSubagents: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(8).volatile(),
+    settlementReportMaxChars: z.number().step(1).min(256).max(Number.MAX_SAFE_INTEGER)
+      .default(DEFAULT_SETTLEMENT_REPORT_MAX_CHARS).volatile(),
+    settlementReportMaxImages: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+      .default(DEFAULT_SETTLEMENT_REPORT_MAX_IMAGES).volatile(),
   })
   private providers = new Map<string, SubagentProvider>()
   private continuations: SubagentContinuationManager | undefined
@@ -220,7 +237,10 @@ export class SubagentRuntime extends TypertRemoteService {
       const manager = new SubagentContinuationManager(childCtx, {
         prepareContinuable: (name, request) => this.prepareContinuable(name, request),
         observeActivation: (provider, childId, parent) => this.observeActivation(provider, childId, parent),
-      }, () => this.config.maxActiveSubagents.get())
+      }, () => this.config.maxActiveSubagents.get(), () => ({
+        maxChars: this.config.settlementReportMaxChars.get(),
+        maxImages: this.config.settlementReportMaxImages.get(),
+      }))
       this.continuations = manager
       childCtx.effect(() => () => {
         /* v8 ignore else -- one injected binding owns the slot until its fiber disposes. */
@@ -362,6 +382,20 @@ export class SubagentRuntime extends TypertRemoteService {
     const manager = this.continuations
     if (manager === undefined) return
     await manager.drainChildren(parent, childIds)
+  }
+
+  /**
+   * Join progressing continuable work in one exact subagent tree for its root.
+   * A running descendant delays resolution; an idle member stays resident with
+   * whatever its own inbox already holds. A continuable member is not a tree
+   * root, so its host awaits only the members below it, and an Agent that left
+   * the registry resolves immediately. Hosts that must not wait forever (a
+   * plugin unloading, a teardown) race this promise with their own stop.
+   * @param root - exact live Agent whose continuable descendant work is awaited.
+   * @returns once no descendant of `root` is running and no admission is pending.
+   */
+  async waitForTreeWork(root: Agent): Promise<void> {
+    await this.continuations?.waitForTreeWork(root)
   }
 
   /**

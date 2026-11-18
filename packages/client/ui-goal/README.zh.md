@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-Web GUI 的 goal 界面同时显示持久 goal 状态及当前的进程本地激活状态，供用户编辑、暂停、恢复或清除 goal；被拒绝的变更所产生的错误会内联显示。它把持久的 `/goal` 运行显示为 `Command input` 气泡，让用户或模型发出的命令在重新加载后仍然可见。goal 创建仍不归本包。除 `minimal` 外，随附的 Web preset 都会向 agent（智能体）提供 `/goal`。
+Web GUI 的 goal 界面同时显示持久 goal 状态及当前的进程本地激活状态，供用户编辑、暂停、恢复或清除 goal；被拒绝的变更所产生的错误会内联显示。它把持久的 `/goal` 运行显示为 `Command input` 气泡，让用户或模型发出的命令在重新加载后仍然可见。goal 创建仍不归本包：由 agent（智能体）通过其 goal 工具创建，部署也可以另外提供 `/goal` 命令。
 
 ## 目录
 
@@ -25,7 +25,7 @@ Web GUI 的 goal 界面同时显示持久 goal 状态及当前的进程本地激
 <a id="use-this-package"></a>
 ## 使用本包
 
-与 `ui-conversation` 及 goal 领域包一起挂载本插件；只要会话存在目标，条带就会作为 composer 上下文堆栈的第二张卡片出现（位于 Todo 之后、Queue 之前）。Todo 与 Goal 使用相同的面板 elevation，使其位于 composer 层级之上。已 armed 的 active goal 提供暂停动作；active-but-disarmed 或 paused 的 goal 提供恢复；编辑重写目标文本；清除移除目标，并在投影追上之前抑制条带。
+与 `ui-conversation` 及 goal 领域包一起挂载本插件；只要会话存在目标，条带就会作为 composer 上下文堆栈的第二张卡片出现（位于 Todo 之后、Queue 之前）。Todo 与 Goal 使用相同的面板 elevation，使其位于 composer 层级之上。已 armed 的 active goal 提供暂停动作；active-but-disarmed、paused 或 blocked 的 goal 在轮次预算仍有容量时提供恢复；编辑重写目标文本；清除移除目标，并在投影追上之前抑制条带。
 
 ### 指令输入气泡
 
@@ -56,7 +56,7 @@ Web GUI 的 goal 界面同时显示持久 goal 状态及当前的进程本地激
 
 当 goal 界面不够用时阅读以下页面。它们从浏览器条带进入 goal 领域与它所填充的 slot。
 
-- [dsh-goal](../../goal/goal/README.zh.md)——本界面读取并变更的 goal 领域、投影与 `/goal` 命令。
+- [dsh-goal](../../goal/goal/README.zh.md)——本界面读取并变更的 goal 领域与投影。
 - [ui-conversation](../ui-conversation/README.zh.md)——声明 `conversation.input.dock` slot 并拥有 composer。
 - [客户端包映射](../README.zh.md)——相邻的浏览器 UI 包。
 
@@ -78,7 +78,7 @@ Web GUI 的 goal 界面同时显示持久 goal 状态及当前的进程本地激
 
 这些限制界定了当前 goal 界面。它们是当前包约束，不是 goal 领域对比或任务积压。
 
-- **Host 状态与 preset 无关**——把活跃会话切换到 `minimal` 后，Host 拥有的 goal 仍会保留。`/goal` 与 goal 工具会消失，但该条带仍可编辑、暂停、恢复或清除 goal。
+- **Host 状态与 preset 无关**——把活跃会话切换到 `minimal` 后，Host 拥有的 goal 仍会保留。goal 工具会消失，但该条带仍可编辑、暂停、恢复或清除 goal。
 
 <a id="dev-note"></a>
 ### 开发备注

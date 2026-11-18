@@ -159,7 +159,7 @@ describe('goal tool registration and presentation', () => {
     }
     const section = (await ctx.systemPrompt.assemble()).sections.find(item => item.name === 'tool:goal')
     expect(section?.text).toContain('infer goal intent')
-    expect(section?.text).toContain('at least 5 consecutive goal rounds')
+    expect(section?.text).toContain('at least 5 goal rounds have started in this goal')
 
     await fiber.dispose()
     expect(ctx.tools.get('get_goal')).toBeUndefined()
@@ -222,7 +222,7 @@ describe('goal tool registration and presentation', () => {
     await ctx.plugin(GoalService)
     toolGoal.apply(ctx, {})
     const section = (await ctx.systemPrompt.assemble()).sections.find(item => item.name === 'tool:goal')
-    expect(section?.text).toContain('at least 3 consecutive goal rounds')
+    expect(section?.text).toContain('at least 3 goal rounds have started in this goal')
   })
 })
 
@@ -615,6 +615,7 @@ describe('goal tool state transitions', () => {
         blocked_reason: 'The required credential is still unavailable.',
       }, root.agent)
       expect(result.error?.info?.code).toBe('GOAL_TOOL_BLOCK_THRESHOLD')
+      expect(result.error?.message).toContain(`blocked requires at least 3 goal rounds started in this goal; ${round} started so far`)
       closeTurn(root, turn)
     }
     openTurn(root, { kind: 'goal', goalId: ref.id, revision: ref.revision, round: 3 })
@@ -637,6 +638,40 @@ describe('goal tool state transitions', () => {
     expect(block.text).toContain('<goal_blocked>')
     expect(block.text).toContain('The required credential is still unavailable.')
     expect(block.text).toContain("Do not call any more tools in this run; further work waits for the user's next instruction.")
+  })
+
+  it('counts goal rounds started in the goal across a human pause and resume', async () => {
+    const { ctx, root } = await harness({ blockedAfterConsecutiveRounds: 3 })
+    let turn = openTurn(root, { kind: 'user' })
+    const created = ctx.goals.create(root.agent, { objective: 'count rounds' })
+    closeTurn(root, turn)
+    let ref: GoalRef = { id: GoalId(created.id), revision: created.revision }
+
+    for (let round = 1; round <= 2; round += 1) {
+      turn = openTurn(root, { kind: 'goal', goalId: ref.id, revision: ref.revision, round })
+      closeTurn(root, turn)
+    }
+
+    turn = openTurn(root, { kind: 'user' }, 'pause and resume')
+    const paused = resultGoal(await execute(ctx, 'update_goal', {
+      goal_id: ref.id, revision: ref.revision, action: 'pause',
+    }, root.agent))
+    const resumed = ctx.goals.resume(root.agent, {
+      id: GoalId(String(paused['id'])),
+      revision: Number(paused['revision']),
+    })
+    expect(resumed.roundsStarted).toBe(2)
+    ref = { id: GoalId(resumed.id), revision: resumed.revision }
+    closeTurn(root, turn)
+
+    turn = openTurn(root, { kind: 'goal', goalId: ref.id, revision: ref.revision, round: 3 })
+    const blocked = await execute(ctx, 'update_goal', {
+      goal_id: ref.id,
+      revision: ref.revision,
+      action: 'blocked',
+      blocked_reason: 'The same prerequisite stayed unavailable across three goal rounds.',
+    }, root.agent)
+    expect(resultGoal(blocked)).toMatchObject({ phase: 'blocked', roundsStarted: 3 })
   })
 
   it('lets direct human authority block before the model threshold', async () => {

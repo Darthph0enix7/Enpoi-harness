@@ -3,8 +3,11 @@
  * Agent messages, return guidance, and settlement notices. A stopped epoch's
  * notice carries one bounded diagnostic line built from the child's own log —
  * ending code, known recoverability, last successful tool-result seq, and an
- * unverified public-text excerpt. Provider error text and reasoning never enter
- * it; common credential forms are redacted best-effort, not a security scanner.
+ * unverified public-text excerpt. The closing report copied from the child is
+ * bounded by its own character and image limits; a truncated report states the
+ * exact omission and names the child's durable session. Provider error text and
+ * reasoning never enter it; common credential forms are redacted best-effort,
+ * not a security scanner.
  *
  * @module @deepseek-ai/dsh-subagent/continuation-messages
  */
@@ -130,6 +133,182 @@ const PUBLIC_TEXT_MAX_BYTES = 512
 const PUBLIC_TEXT_TRUNCATION_SUFFIX = '…'
 const utf8Encoder = new TextEncoder()
 const utf8Decoder = new TextDecoder()
+
+/** Default character ceiling for a settled child's closing report in a notice. */
+export const DEFAULT_SETTLEMENT_REPORT_MAX_CHARS = 12_000
+/** Default image-block ceiling for a settled child's closing report in a notice. */
+export const DEFAULT_SETTLEMENT_REPORT_MAX_IMAGES = 4
+
+/**
+ * Bounds applied to the closing report a settlement notice copies into the
+ * parent context. The complete report always remains in the child's own
+ * durable session; these limits only decide how much of it rides the notice.
+ */
+export interface SettlementReportLimits {
+  /** Maximum UTF-16 code units of closing report text retained in the notice. */
+  readonly maxChars: number
+  /** Maximum image blocks retained in the notice, in report order. */
+  readonly maxImages: number
+}
+
+/** Inputs for {@link createSettlementMessage}. */
+export interface SettlementMessageOptions {
+  /** Bounds applied to the child's closing report. */
+  readonly limits: SettlementReportLimits
+  /** Whether the epoch's final session flush failed; the notice then states that persisted state may be stale. Defaults to false. */
+  readonly flushFailed?: boolean
+}
+
+/**
+ * Whether a UTF-16 code unit begins a surrogate pair.
+ * @param code - one UTF-16 code unit.
+ * @returns whether the unit is a high surrogate.
+ */
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xD800 && code <= 0xDBFF
+}
+
+/**
+ * Whether a UTF-16 code unit ends a surrogate pair.
+ * @param code - one UTF-16 code unit.
+ * @returns whether the unit is a low surrogate.
+ */
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xDC00 && code <= 0xDFFF
+}
+
+/**
+ * Move a prefix end left when it would split a surrogate pair.
+ * @param text - text being cut.
+ * @param end - proposed exclusive prefix end.
+ * @returns a prefix end that does not split a pair.
+ */
+function headCutIndex(text: string, end: number): number {
+  if (end <= 0 || end >= text.length) return Math.max(0, Math.min(end, text.length))
+  return isHighSurrogate(text.charCodeAt(end - 1)) && isLowSurrogate(text.charCodeAt(end))
+    ? end - 1
+    : end
+}
+
+/**
+ * Move a suffix start right when it would split a surrogate pair.
+ * @param text - text being cut.
+ * @param start - proposed inclusive suffix start.
+ * @returns a suffix start that does not split a pair.
+ */
+function tailCutIndex(text: string, start: number): number {
+  if (start <= 0 || start >= text.length) return Math.max(0, Math.min(start, text.length))
+  return isLowSurrogate(text.charCodeAt(start)) && isHighSurrogate(text.charCodeAt(start - 1))
+    ? start + 1
+    : start
+}
+
+/**
+ * Keep a bounded prefix, preferring the last whole line inside the budget.
+ * @param text - the complete closing report.
+ * @param budget - maximum retained UTF-16 code units.
+ * @returns the retained prefix, never splitting a surrogate pair.
+ */
+function headBound(text: string, budget: number): string {
+  const end = headCutIndex(text, budget)
+  const newline = text.lastIndexOf('\n', end - 1)
+  return text.slice(0, newline > 0 ? newline + 1 : end)
+}
+
+/**
+ * Keep a bounded suffix, preferring the first whole line inside the budget.
+ * @param text - the complete closing report.
+ * @param budget - maximum retained UTF-16 code units.
+ * @returns the retained suffix, never splitting a surrogate pair.
+ */
+function tailBound(text: string, budget: number): string {
+  const start = tailCutIndex(text, text.length - budget)
+  const newline = text.indexOf('\n', start)
+  return newline !== -1 && newline + 1 < text.length
+    ? text.slice(newline + 1)
+    : text.slice(start)
+}
+
+/**
+ * The closing report blocks a notice carries after applying its bounds, plus
+ * the one model-facing line that states what was left out.
+ */
+interface BoundedClosingReport {
+  /** Retained report content in notice order: head text, tail text, images. */
+  readonly content: readonly ContentBlock[]
+  /** Omission line, absent when every report block fits. */
+  readonly truncation: string | undefined
+}
+
+/**
+ * Apply the notice bounds to one closing report. Untouched reports keep their
+ * original blocks and order; a bounded report keeps a head and tail excerpt of
+ * the joined text and the first images, and states the exact omission.
+ * @param childId - durable child session named by the omission line.
+ * @param output - the child's final assistant content blocks.
+ * @param limits - character and image ceilings for the notice.
+ * @returns retained content and the omission line when anything was left out.
+ */
+function boundClosingReport(
+  childId: SessionId,
+  output: readonly ContentBlock[],
+  limits: SettlementReportLimits,
+): BoundedClosingReport {
+  const texts = output.flatMap(block => block.type === 'text' && block.text.length > 0 ? [block.text] : [])
+  const images = output.flatMap(block => block.type === 'image' ? [block] : [])
+  const retainedImages = images.slice(0, Math.max(0, limits.maxImages))
+  const omittedImages = images.length - retainedImages.length
+  const report = texts.join('\n')
+  if (report.length <= limits.maxChars && omittedImages === 0) {
+    return {
+      content: output.filter(
+        (block): block is Extract<ContentBlock, { type: 'text' | 'image' }> =>
+          block.type === 'text' || block.type === 'image',
+      ),
+      truncation: undefined,
+    }
+  }
+  const headBudget = Math.ceil(limits.maxChars / 2)
+  const tailBudget = limits.maxChars - headBudget
+  const head = report.length <= limits.maxChars ? report : headBound(report, headBudget)
+  const tail = report.length <= limits.maxChars ? '' : tailBound(report, tailBudget)
+  const omittedChars = report.length - head.length - tail.length
+  const parts: string[] = []
+  if (omittedChars > 0) parts.push(`${String(omittedChars)} of ${String(report.length)} characters omitted`)
+  if (omittedImages > 0) parts.push(`${String(omittedImages)} of ${String(images.length)} images omitted`)
+  const child = JSON.stringify(childId)
+  return {
+    content: [
+      ...head.length === 0 ? [] : [{ type: 'text' as const, text: head }],
+      ...tail.length === 0 ? [] : [{ type: 'text' as const, text: tail }],
+      ...retainedImages,
+    ],
+    truncation: `The closing report was shortened for this notice: ${parts.join(' and ')}. `
+      + `The child's complete report is durable in its session ${child}; read it with `
+      + `session_event_search({ session_id: ${child}, query: "<distinctive phrase>" }) and open a hit with `
+      + `session_event_read({ session_id: ${child}, seq: <hit event seq> }).`,
+  }
+}
+
+/**
+ * Build the `Its closing message:` section for a report that has nonempty text.
+ * @param childId - durable child session named by a shortened report's line.
+ * @param output - the child's final assistant content blocks.
+ * @param limits - character and image ceilings for the notice.
+ * @returns the section heading, retained report content, and any omission line.
+ */
+function closingReportBlocks(
+  childId: SessionId,
+  output: readonly ContentBlock[],
+  limits: SettlementReportLimits,
+): ContentBlock[] {
+  const report = boundClosingReport(childId, output, limits)
+  return [
+    { type: 'text', text: 'Its closing message:' },
+    ...report.content,
+    ...report.truncation === undefined ? [] : [{ type: 'text' as const, text: report.truncation }],
+  ]
+}
 
 /**
  * Limit diagnostic text to a UTF-8 byte budget without splitting a sequence.
@@ -257,16 +436,17 @@ function settlementSummary(
  * Build the runtime-owned settlement notice from the child's nonempty closing text.
  * @param childId - durable child session id named in the notice.
  * @param terminal - recorded terminal state for the settled Activation.
- * @param flushFailed - whether the epoch's final session flush failed; the
- *   notice then states that the persisted child state may be stale.
+ * @param options - closing-report bounds and whether the epoch's final flush
+ *   failed; a failed flush makes the notice state that persisted child state
+ *   may be stale.
  * @returns the durable user-message representation delivered to the parent.
  */
 export function createSettlementMessage(
   childId: SessionId,
   terminal: ActivationTerminal,
-  flushFailed = false,
+  options: SettlementMessageOptions,
 ): ReturnType<typeof createUserMessage> {
-  const summary = settlementSummary(childId, terminal, flushFailed)
+  const summary = settlementSummary(childId, terminal, options.flushFailed ?? false)
   // Parent providers receive this notice as a user message and may reject
   // nontext assistant blocks. Keep this conversion local so SDK/UI consumers
   // retain the complete child output.
@@ -282,31 +462,26 @@ export function createSettlementMessage(
     && terminal.lastPublicText !== undefined
     ? publicTextExcerpt(terminal.lastPublicText)
     : ''
+  // Only the child's final REPORT reaches the parent: reasoning and tool-call
+  // blocks (its thinking and intermediate actions) are stripped, mirroring the
+  // foreground path. Images ride along: they are legitimate report content,
+  // bounded by the notice limits.
+  const closing: ContentBlock[] = closingText.length === 0
+    ? [
+      ...excerpt === ''
+        ? []
+        : [
+          { type: 'text' as const, text: 'Last public text before the ending (unverified):' },
+          { type: 'text' as const, text: excerpt },
+        ],
+      { type: 'text' as const, text: 'It left no closing message.' },
+    ]
+    : closingReportBlocks(childId, output, options.limits)
   return createUserMessage({
     content: [
       { type: 'text' as const, text: summary },
       ...diagnostic === undefined ? [] : [{ type: 'text' as const, text: diagnostic }],
-      ...closingText.length === 0
-        ? [
-          ...excerpt === ''
-            ? []
-            : [
-              { type: 'text' as const, text: 'Last public text before the ending (unverified):' },
-              { type: 'text' as const, text: excerpt },
-            ],
-          { type: 'text' as const, text: 'It left no closing message.' },
-        ]
-        : [
-          { type: 'text' as const, text: 'Its closing message:' },
-          // Only the child's final REPORT reaches the parent: reasoning and
-          // tool-call blocks (its thinking and intermediate actions) are
-          // stripped, mirroring the foreground path. Images ride along: they
-          // are legitimate report content.
-          ...output.filter(
-            (block): block is Extract<ContentBlock, { type: 'text' | 'image' }> =>
-              block.type === 'text' || block.type === 'image',
-          ),
-        ],
+      ...closing,
     ],
     source: {
       kind: 'subagent-settled' as const,

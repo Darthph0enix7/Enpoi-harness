@@ -26,12 +26,15 @@
 /deepseek-ai-dsh-subagent/use-this-package/continuable-capacity:
   en: 762e83adeb79bebd
   zh: 9dd1d926790e5e8c
+/deepseek-ai-dsh-subagent/use-this-package/settlement-report-bounds:
+  en: 1ade82b9a1d9d1e1
+  zh: 9e1df0bf70b3f81c
 /deepseek-ai-dsh-subagent/use-this-package/one-shot-and-continuable-children:
   en: 10d0a7e0513bf04b
   zh: 0cf2c2d81e85d7a9
 /deepseek-ai-dsh-subagent/use-this-package/messaging-interrupting-and-discovering:
-  en: ff41ac0e770ed865
-  zh: 27dcf055badf217d
+  en: fd5281034ec15a47
+  zh: 27dab06d6c6780e1
 /deepseek-ai-dsh-subagent/use-this-package/the-dispatch-to-report-workflow-never-poll:
   en: 0c4315dab5f89b32
   zh: 829e04882db0f7a9
@@ -51,8 +54,8 @@
   en: 9439bd15ee2129c9
   zh: 6c275cf484efa0cf
 /deepseek-ai-dsh-subagent/understand-the-implementation/continuable-flow:
-  en: ccabba0fb2391fa1
-  zh: 2cff3cf2ce55e0fe
+  en: 4c3a4dab6715302c
+  zh: eb49290541b02cfe
 /deepseek-ai-dsh-subagent/understand-the-implementation/ownership-and-invariants:
   en: 7384d01be46a2f0a
   zh: 83373486ad10d6d5
@@ -66,11 +69,11 @@
   en: f7cec22ba9d3fb4f
   zh: 67b1d40f9b136f71
 /deepseek-ai-dsh-subagent/model-experience/settlement-notice/what-the-model-sees:
-  en: 46e74d75fd2a032d
-  zh: 121534c1b11fe3eb
+  en: e68d68aff79200ac
+  zh: 4ffc0d95950f97c4
 /deepseek-ai-dsh-subagent/model-experience/settlement-notice/token-effect:
-  en: 45dc428c61f606f5
-  zh: 7e9a2587e98c8ca6
+  en: 2c862cb0d8f1c293
+  zh: a3432eb560ad1c3d
 /deepseek-ai-dsh-subagent/model-experience/settlement-notice/kv-cache-effect:
   en: d6b1d618083da79b
   zh: 9a28942b7d53c382
@@ -102,8 +105,8 @@
   en: 59e848fca82a46fb
   zh: fcd6a8a2bb58609f
 /deepseek-ai-dsh-subagent/known-limitations-and-deferred-work:
-  en: a23487c1fd25df74
-  zh: cdd8e3a3a918f490
+  en: 012493769b67f866
+  zh: b095c436b47611fe
 /deepseek-ai-dsh-subagent/known-limitations-and-deferred-work/dev-note:
   en: 25cc0909348666bb
   zh: 95517f12de100049

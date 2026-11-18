@@ -54,15 +54,22 @@ function emit(name: string, ...args: unknown[]): void {
 
 interface FakeSession {
   id: string
-  header: { cwd?: string; parentSession?: string }
+  header: { cwd?: string; parentSession?: string; origin?: 'subagent'; delegationDepth?: number; isSeeded?: boolean }
 }
 
-function session(id = 's1', cwd: string | undefined = '/work/ws', parentSession?: string, headerCwd = true): FakeSession {
+function session(
+  id = 's1',
+  cwd: string | undefined = '/work/ws',
+  parentSession?: string,
+  headerCwd = true,
+  header: FakeSession['header'] = {},
+): FakeSession {
   return {
     id,
     header: {
       ...(headerCwd ? { cwd } : {}),
       ...(parentSession === undefined ? {} : { parentSession }),
+      ...header,
     },
   }
 }
@@ -184,6 +191,22 @@ describe('compaction facts subscriber — C2 trigger matrix', () => {
     emit('session/event', session('child', '/work/ws', 'parent-1'), endEvent('c2'))
     await settle()
     expect(pipeline.list()).toHaveLength(3)
+  })
+
+  it('captures a seeded root fork with the child option off', async () => {
+    register()
+    emit('session/event', session('fork', '/work/ws', 'origin-1', true, { isSeeded: true }), summaryEvent('c1'))
+    emit('session/event', session('fork', '/work/ws', 'origin-1', true, { isSeeded: true }), endEvent())
+    await settle()
+    expect(pipeline.list()).toHaveLength(3)
+  })
+
+  it('skips a seeded session whose typed origin is subagent', async () => {
+    register()
+    emit('session/event', session('child', '/work/ws', 'parent-1', true, { isSeeded: true, origin: 'subagent', delegationDepth: 1 }), summaryEvent('c1'))
+    emit('session/event', session('child', '/work/ws', 'parent-1', true, { isSeeded: true, origin: 'subagent', delegationDepth: 1 }), endEvent())
+    await settle()
+    expect(pipeline.list()).toHaveLength(0)
   })
 
   it('drops held facts on a failed compaction/end and never writes them later', async () => {

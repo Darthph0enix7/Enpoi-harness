@@ -11,6 +11,7 @@ import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
+import type { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import * as goalSession from '../src/index.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -903,6 +904,107 @@ describe('same-session goal driving', () => {
 
     expect(goal?.roundsStarted).toBe(0)
     expect(test.adapter.requests).toHaveLength(0)
+  })
+
+  /** Provide a subagent service whose tree work settles only when the test says so. */
+  function provideDescendants(ctx: Context): { settle(): void; waitForTreeWork: ReturnType<typeof vi.fn> } {
+    const settled = Promise.withResolvers<undefined>()
+    const waitForTreeWork = vi.fn((_root: Agent): Promise<void> => settled.promise)
+    const service: Pick<SubagentRuntime, 'waitForTreeWork'> = { waitForTreeWork }
+    ctx.provide('subagents', service as SubagentRuntime)
+    return {
+      settle: () => { settled.resolve(undefined) },
+      waitForTreeWork,
+    }
+  }
+
+  it('reserves a round only after progressing descendants settle', async () => {
+    const test = await harness([textResponse('round one')])
+    const descendants = provideDescendants(test.ctx)
+    test.ctx.goals.create(test.agent, { objective: 'wait for delegates', maxGoalRounds: 1 })
+
+    await vi.waitFor(() => { expect(descendants.waitForTreeWork).toHaveBeenCalledWith(test.agent) })
+    expect(test.adapter.requests).toHaveLength(0)
+
+    descendants.settle()
+    await waitForGoal(test.ctx, test.agent, goal => goal?.roundsStarted === 1)
+    await waitForRequests(test.adapter, 1)
+  })
+
+  it('does not join descendants without an armed goal', async () => {
+    const test = await harness([textResponse('plain answer')])
+    const descendants = provideDescendants(test.ctx)
+
+    test.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'no goal here' }], source: { kind: 'user' } }))
+    await waitForRequests(test.adapter, 1)
+    await test.agent.whenIdle()
+
+    expect(descendants.waitForTreeWork).not.toHaveBeenCalled()
+  })
+
+  it('runs human work that arrives while descendants progress before the next round', async () => {
+    const test = await harness([textResponse('human answer'), textResponse('goal answer')])
+    const descendants = provideDescendants(test.ctx)
+    test.ctx.goals.create(test.agent, { objective: 'yield to human input', maxGoalRounds: 1 })
+    await vi.waitFor(() => { expect(descendants.waitForTreeWork).toHaveBeenCalled() })
+
+    test.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'human during the wait' }], source: { kind: 'user' } }))
+    await waitForRequests(test.adapter, 1)
+    descendants.settle()
+
+    await waitForGoal(test.ctx, test.agent, goal => goal?.roundsStarted === 1)
+    await waitForRequests(test.adapter, 2)
+    expect(requestText(test.adapter.requests[0]!)).not.toContain('<goal_round>')
+    expect(requestText(test.adapter.requests[1]!)).toContain('<goal_round>')
+  })
+
+  it('reserves no round for a goal paused while descendants progress', async () => {
+    const test = await harness([])
+    const descendants = provideDescendants(test.ctx)
+    const created = test.ctx.goals.create(test.agent, { objective: 'pause during the wait' })
+    await vi.waitFor(() => { expect(descendants.waitForTreeWork).toHaveBeenCalled() })
+
+    test.ctx.goals.pause(test.agent, { id: created.id, revision: created.revision })
+    descendants.settle()
+
+    const goal = await waitForGoal(test.ctx, test.agent, current => current?.phase === 'paused')
+    await test.agent.whenIdle()
+    expect(goal).toMatchObject({ roundsStarted: 0 })
+    expect(test.adapter.requests).toHaveLength(0)
+  })
+
+  it('lets the driver unload while descendants progress', async () => {
+    const test = await harness([])
+    const descendants = provideDescendants(test.ctx)
+    test.ctx.goals.create(test.agent, { objective: 'unload while delegates run' })
+    await vi.waitFor(() => { expect(descendants.waitForTreeWork).toHaveBeenCalled() })
+
+    await test.driver.dispose()
+
+    expect(test.ctx.goals.get(test.agent)).toMatchObject({ roundsStarted: 0 })
+    expect(test.adapter.requests).toHaveLength(0)
+  })
+
+  it('withdraws a round parked behind cancelled human work so later input runs', async () => {
+    const test = await harness(['hang', 'hang', textResponse('answered 1')])
+    test.ctx.goals.create(test.agent, { objective: 'park behind human work' })
+    await waitForRequests(test.adapter, 1)
+    test.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'human X' }], source: { kind: 'user' } }))
+    test.agent.cancel({ kind: 'user' }, { keepInbox: true })
+    const paused = await waitForGoal(test.ctx, test.agent, goal => goal?.phase === 'paused')
+    // Resuming reserves the next round behind the parked human prompt.
+    test.ctx.goals.resume(test.agent, { id: paused!.id, revision: paused!.revision })
+    await waitForRequests(test.adapter, 2)
+    expect(test.agent.inbox.nextTurn.map(message => message.source.kind)).toEqual(['goal'])
+
+    test.agent.cancel({ kind: 'user' }, { keepInbox: true })
+    await test.agent.whenIdle()
+    expect(test.agent.inbox.nextTurn).toEqual([])
+    test.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'human 1' }], source: { kind: 'user' } }))
+    await waitForRequests(test.adapter, 3)
+
+    expect(requestText(test.adapter.requests[2]!)).toContain('human 1')
+    expect(test.agent.inbox.nextTurn).toEqual([])
   })
 
   it('disarms and cancels an admitted round before driver teardown completes', async () => {

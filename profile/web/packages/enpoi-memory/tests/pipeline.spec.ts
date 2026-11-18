@@ -475,3 +475,29 @@ describe('pipeline — CBDC state machine (I10)', () => {
     expect(p.get('claim-historical')).toMatchObject({ state: 'committed', source_trust: 'untrusted_external' })
   })
 })
+
+describe('pipeline — secret guard for every intake origin', () => {
+  it('skips a credential-shaped fact for operator, keeper, compaction, and worker origins', async () => {
+    const p = makePipeline(db)
+    const secret = 'sk-TESTONLY-DO-NOT-USE-0000000000000000'
+    const origins = ['orchestrator', 'keeper', 'compaction', 'worker:fixer'] as const
+
+    for (const origin of origins) {
+      const inserted = await p.intake(
+        [{ fact: `${origin} recorded the deploy token ${secret}`, category: 'PROJECT' }],
+        { origin, trust: origin === 'orchestrator' ? 'operator' : 'untrusted_external' },
+      )
+      expect(inserted).toEqual([])
+    }
+    expect(p.list()).toHaveLength(0)
+  })
+
+  it('keeps ordinary config values that merely look long', async () => {
+    const p = makePipeline(db)
+    const inserted = await p.intake(
+      [{ fact: 'the tunnel id is 9db9e1f7-657e-4278-8c94-c02143d066fe', category: 'CONFIG_VALUES' }],
+      { origin: 'orchestrator', trust: 'operator' },
+    )
+    expect(inserted).toHaveLength(1)
+  })
+})

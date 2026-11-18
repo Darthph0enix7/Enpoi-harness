@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { DatabaseSync } from 'node:sqlite'
 import { openMemoryDb } from '../src/db'
 import { makePipeline } from '../src/pipeline'
-import { jaccard, nearDuplicateCandidates, sanitizeFtsQuery, searchMemory, tokenSet } from '../src/retriever'
+import { jaccard, closestNearDuplicate, fitToCharBudget, nearDuplicateCandidates, sanitizeFtsQuery, searchMemory, tokenSet } from '../src/retriever'
 
 let db: DatabaseSync
 
@@ -202,6 +202,57 @@ describe('retriever — near-duplicate primitives', () => {
     expect(local).toContain('the archive bucket is eu-central-3')
     const foreign = nearDuplicateCandidates(db, 'the archive bucket is eu-central-3', { cwd: '/work/b', scopeCompaction: true })
     expect(foreign).toEqual([])
+  })
+
+  it('closestNearDuplicate names the closest active fact above the threshold', async () => {
+    const p = makePipeline(db)
+    const saved = await p.intake([
+      { fact: 'the archive bucket is eu-central-3 with version 4 stored in the vault', category: 'PROJECT' },
+      { fact: 'the archive bucket is eu-central-3 with version 9 stored in the vault', category: 'PROJECT' },
+    ], { origin: 'orchestrator', trust: 'operator' })
+
+    const near = closestNearDuplicate(
+      db,
+      'the archive bucket is eu-central-3 with version 4 stored in the vault',
+      undefined,
+      0.8,
+      saved[0]!.id,
+    )
+    expect(near?.id).toBe(saved[1]!.id)
+    expect(near?.similarity).toBeGreaterThanOrEqual(0.8)
+
+    expect(closestNearDuplicate(db, 'the archive bucket is eu-central-3 with version 4 stored in the vault', undefined, 0.8, saved[1]!.id)?.id)
+      .toBe(saved[0]!.id)
+    expect(closestNearDuplicate(db, 'unrelated cloudflare tunnel note', undefined, 0.8)).toBeUndefined()
+    expect(closestNearDuplicate(db, '', undefined, 0.8)).toBeUndefined()
+  })
+
+  it('closestNearDuplicate respects the workspace scope filter', async () => {
+    const p = makePipeline(db)
+    await p.intake([{ fact: 'the archive bucket is eu-central-3', category: 'PROJECT' }],
+      { origin: 'compaction', trust: 'verified_execution', provenance: compactionProvenance('/work/a') })
+
+    expect(closestNearDuplicate(db, 'the archive bucket is eu-central-3', { cwd: '/work/a', scopeCompaction: true }, 0.8))
+      .toMatchObject({ fact: 'the archive bucket is eu-central-3' })
+    expect(closestNearDuplicate(db, 'the archive bucket is eu-central-3', { cwd: '/work/b', scopeCompaction: true }, 0.8))
+      .toBeUndefined()
+  })
+})
+
+describe('retriever — character budget', () => {
+  it('keeps whole facts in rank order while the budget lasts', () => {
+    const hits = [{ fact: 'aaaa' }, { fact: 'bbbb' }, { fact: 'cccc' }]
+    expect(fitToCharBudget(hits, 8)).toEqual({ hits: hits.slice(0, 2), omitted: 1 })
+    expect(fitToCharBudget(hits, 12)).toEqual({ hits, omitted: 0 })
+    expect(fitToCharBudget(hits, 0)).toEqual({ hits: hits.slice(0, 1), omitted: 2 })
+    expect(fitToCharBudget([], 100)).toEqual({ hits: [], omitted: 0 })
+  })
+
+  it('always keeps the top-ranked fact and never truncates it', () => {
+    const hits = [{ fact: 'x'.repeat(500) }, { fact: 'short' }]
+    expect(fitToCharBudget(hits, 200)).toEqual({ hits: [hits[0]], omitted: 1 })
+    expect(fitToCharBudget(hits, Number.NaN)).toEqual({ hits: [hits[0]], omitted: 1 })
+    expect(fitToCharBudget(hits, -5)).toEqual({ hits: [hits[0]], omitted: 1 })
   })
 })
 

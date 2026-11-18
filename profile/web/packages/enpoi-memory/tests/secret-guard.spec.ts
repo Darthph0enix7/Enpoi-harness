@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { containsSecret } from '../src/secret-guard'
 
-describe('secret guard — compaction-derived facts', () => {
+describe('secret guard — durable facts from every origin', () => {
   it('rejects every copied key shape', () => {
     for (const secret of [
       'api key sk-live-abcdefghijklmnop',

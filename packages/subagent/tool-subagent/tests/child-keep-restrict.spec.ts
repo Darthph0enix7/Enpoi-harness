@@ -81,7 +81,8 @@ describe('shared keep list against the child tool restriction', () => {
     applyChildComposition(childCtx, fakeAgent('parent'), { toolFilter: filter })
     const names = ctx.tools.schemas(child).map(row => row.name)
     expect(names).not.toContain('whiteboard_read')
-    expect(names).toContain('whiteboard_write')
+    expect(names).toContain('compressor_retrieve')
+    expect(names).not.toContain('whiteboard_write')
   })
 
   it('audits the keep union on a code-authored configured allow list too', async () => {

@@ -9,10 +9,15 @@ import {
   type SessionEventMap,
   type SessionEventType,
 } from '@deepseek-ai/dsh-session'
-import { createSettlementMessage } from '../src/continuation-messages.ts'
+import {
+  DEFAULT_SETTLEMENT_REPORT_MAX_CHARS,
+  DEFAULT_SETTLEMENT_REPORT_MAX_IMAGES,
+  createSettlementMessage,
+} from '../src/continuation-messages.ts'
 import { createActivationObserver, type LifecycleEmitter } from '../src/lifecycle.ts'
 
 const CHILD = SessionId('diagnostic-child')
+const limits = { maxChars: DEFAULT_SETTLEMENT_REPORT_MAX_CHARS, maxImages: DEFAULT_SETTLEMENT_REPORT_MAX_IMAGES }
 
 const SURFACE_TYPES = new Set<SessionEventType>(['user/message', 'assistant/message', 'tool/result'])
 
@@ -134,7 +139,7 @@ describe('activation terminal diagnostics', () => {
     expect(terminal.lastSuccessfulOperation).toEqual({ seq: SessionSeq(3) })
     expect(terminal.lastPublicText).toBe('I checked the builder.')
 
-    const notice = createSettlementMessage(CHILD, terminal)
+    const notice = createSettlementMessage(CHILD, terminal, { limits })
     expect(notice.content[0]).toEqual({
       type: 'text',
       text: `Background subagent ${CHILD} failed before it finished (code: PROVIDER_TIMEOUT) — `
@@ -196,7 +201,7 @@ describe('activation terminal diagnostics', () => {
     const { terminal } = terminalOf([userPrompt, stepStart(1), assistantText(2, 'done'), turnEnd(3, { kind: 'completed' })])
     expect(terminal.failure).toBeUndefined()
     expect(terminal.stopReason).toBe('completed')
-    const notice = createSettlementMessage(CHILD, terminal)
+    const notice = createSettlementMessage(CHILD, terminal, { limits })
     expect(notice.content.some(block => block.type === 'text' && block.text.startsWith('Diagnostic:'))).toBe(false)
   })
 
@@ -210,7 +215,7 @@ describe('activation terminal diagnostics', () => {
     expect(terminal.output).toBeUndefined()
     expect(terminal.lastPublicText).toBe('the answer')
 
-    const notice = createSettlementMessage(CHILD, terminal)
+    const notice = createSettlementMessage(CHILD, terminal, { limits })
     expect(notice.content).toContainEqual({
       type: 'text',
       text: 'Last public text before the ending (unverified):',

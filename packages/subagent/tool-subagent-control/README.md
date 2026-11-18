@@ -54,7 +54,7 @@ Stops only the target's current turn: queued messages stay parked until a later 
 
 ### list_agents
 
-Lists the continuable children below the calling agent: `children` (default) reads direct children from the parent catalog without opening child logs; `descendants` recursively reads child catalogs in stable pre-order, annotating each entry with its durable direct-parent session id and depth. Status comes from the live Agent registry — `running` or `inactive`. Readable one-shot children are omitted from output but their catalogs remain traversal nodes. Unknown modes and unreadable child catalogs, including one-shot children, appear as diagnostics only in `descendants` scope. Ordinary Session forks are not catalog entries, so neither those forks nor their descendants are listed from the source Session. A listing renders at most `limit` rows (`20` by default, `100` max); `children` order is running first, then inactive by most recent creation, and a capped listing ends with the shown/total counts. `descendants` keeps the tree's pre-order.
+Lists the continuable children below the calling agent: `children` (default) reads direct children from the parent catalog without opening child logs; `descendants` recursively reads child catalogs in stable pre-order, annotating each entry with its durable direct-parent session id and depth. Status comes from the live Agent registry — `running` or `inactive`. Readable one-shot children are omitted from output but their catalogs remain traversal nodes. Unknown modes and unreadable child catalogs, including one-shot children, appear as diagnostics only in `descendants` scope. Ordinary Session forks are not catalog entries, so neither those forks nor their descendants are listed from the source Session. `status` (`running`/`inactive`) and `query` (case-insensitive id or label substring) filter the listing before either projection; a filtered empty result reads `(no matching subagents)`. `limit` (`20` default, `100` max) and `offset` page only the rendered text: `children` order is running first, then inactive by most recent creation, and a paged listing ends with the displayed range, the running/inactive totals, and the next offset; `descendants` keeps the tree's pre-order. The structured result always carries every matching row, so code can filter it and return its own selection.
 
 -----
 
@@ -76,14 +76,14 @@ The tool forwards its execution signal, which owns admission only until inbox ac
 
 ### Listing projection
 
-`list_agents` derives the root id from the calling agent, reads the service catalog without a cursor, refines each candidate's status through the live Agent registry, and omits one-shot children because they cannot accept `send_message`. Direct children are ordered running-first then newest-first (a stable sort keeps catalog order within equal creation times); descendant traversal preserves each parent catalog's event order. The renderer pages the ordered list at `limit` and appends the shown/total and running/inactive counts only when it omits rows, so the structured result still carries every projected row. Unknown modes produce diagnostics while their catalogs remain traversable; unreadable catalogs produce diagnostics and stop that branch. Descendants absent from reachable catalogs cannot be discovered.
+`list_agents` derives the root id from the calling agent, reads the service catalog without a cursor, refines each candidate's status through the live Agent registry, and omits one-shot children because they cannot accept `send_message`. Direct children are ordered running-first then newest-first (a stable sort keeps catalog order within equal creation times); descendant traversal preserves each parent catalog's event order. The renderer pages the ordered list at `limit` and `offset` and appends the displayed range and running/inactive counts only when the page is not the whole filtered list, so the structured result still carries every matching row. Unknown modes produce diagnostics while their catalogs remain traversable; unreadable catalogs produce diagnostics and stop that branch. Descendants absent from reachable catalogs cannot be discovered.
 
 ### Source map
 
 | File | Role |
 |---|---|
 | [`src/index.ts`](src/index.ts) | `send_message` and `interrupt_agent` registration |
-| [`src/list-agents.ts`](src/list-agents.ts) | `list_agents` registration: scopes, status refinement, projection |
+| [`src/list-agents.ts`](src/list-agents.ts) | `list_agents` registration: scopes, filters, status refinement, projection, paging |
 | — | No runtime invariant companion is published; this model-facing adapter has no independent lifecycle stream; delivery and activation relations are owned by the subagent service it calls. |
 
 </details>
@@ -108,7 +108,7 @@ Read these pages when the package-level contract is not enough; they move from t
 
 #### What the model sees
 
-The generated [schemas](../../../docs/tool-catalog.md#deepseek-aidsh-tool-subagent-control): `send_message` takes `agent_id` and `message`; `interrupt_agent` takes `agent_id`; `list_agents` takes the optional `scope` enum and the optional `limit` number (default 20, max 100).
+The generated [schemas](../../../docs/tool-catalog.md#deepseek-aidsh-tool-subagent-control): `send_message` takes `agent_id` and `message`; `interrupt_agent` takes `agent_id`; `list_agents` takes the optional `scope` enum, the optional `status` enum, the optional `query` string, the optional `limit` number (default 20, max 100), and the optional `offset` number (default 0).
 
 #### Token effect
 
@@ -150,11 +150,11 @@ Append-only; newly visible content follows the reusable request prefix and does 
 
 #### What the model sees
 
-One line per continuable child: `<id> [<status>] — <label>` (`running` = executing a turn; `inactive` = no turn executing, whether loaded or stored; neither status describes task completion or outcome). `children` scope orders running rows first, then inactive rows by descending creation time; `descendants` scope keeps the catalog pre-order. Only `descendants` scope adds `<id> [diagnostic: <reason>]` for an unknown mode or unreadable child catalog, including an unreadable one-shot child, and inserts ` parent=<id> depth=<n>` before the label dash. Beyond `limit` rows the text ends with a `… showing <n> of <total> children (<running> running, <inactive> inactive);` line and a hint to raise `limit` or narrow `scope`. Readable one-shot children are omitted; `(no subagents)` means no continuable child or diagnostic survived the projection.
+One line per continuable child: `<id> [<status>] — <label>` (`running` = executing a turn; `inactive` = no turn executing, whether loaded or stored; neither status describes task completion or outcome). `children` scope orders running rows first, then inactive rows by descending creation time; `descendants` scope keeps the catalog pre-order. Only `descendants` scope adds `<id> [diagnostic: <reason>]` for an unknown mode or unreadable child catalog, including an unreadable one-shot child, and inserts ` parent=<id> depth=<n>` before the label dash. Beyond the displayed page the text ends with `… showing <first>–<last> of <total> children (<running> running, <inactive> inactive);` and `Use offset <next> for the next page.` when more rows follow; a page past the last row reports zero shown and suggests offset 0. With a filter active the footer says `matching children`, and an all-filtered result renders `(no matching subagents)`. Readable one-shot children are omitted; `(no subagents)` means no continuable child or diagnostic survived the projection.
 
 #### Token effect
 
-Bounded by `limit` (default 20, max 100) rendered rows plus one footer line when rows are omitted, so a long-lived parent with many persisted children pays a constant page per call. The structured result value still carries every projected row for UI consumers.
+Bounded by `limit` (default 20, max 100) rendered rows plus the paging footer, so a long-lived parent with many persisted children pays a constant page per call. Filters narrow the matching set inside the call; the structured result value still carries every matching row for code and UI consumers.
 
 #### KV Cache effect
 
@@ -170,7 +170,7 @@ These limits define what the control tools cannot observe or steer; they are cur
 - **A delivered message has no independent result** — acceptance returns only its inbox `messageId`; later target work lands in that target's durable Session and is never collected through this tool. A reply is another explicitly addressed `send_message`, not this call's result.
 - **Only supported adjacent Agents can communicate** — every sender may target a direct continuable child, only a sender with a resident continuable Activation may target its direct parent, and that parent must remain live; siblings and deeper descendants are not message targets, and only direct-child delivery supports cold activation.
 - **Listing is a snapshot, not a delivery promise** — it may race publication, disposal, or a later message, and another process may activate a child this process reports as `inactive`; cross-process accuracy requires a shared lease. `interrupt_agent` performs the authoritative live-lineage check itself, so discovery staleness cannot grant authority.
-- **No pagination or deletion** — the complete stably ordered set is returned, and persisted children remain listed for as long as their sessions remain in persistence; a service-level bound or delete operation is a later product decision.
+- **Paging bounds the text, not the structured value** — `limit` and `offset` page only the rendered listing; inside `run_code` the call returns every matching row, so a parent with hundreds of children must filter or slice in its own program. Persisted children remain listed for as long as their sessions remain in persistence; a service-level retention bound or delete operation is a later product decision.
 
 <a id="dev-note"></a>
 ### Dev Note

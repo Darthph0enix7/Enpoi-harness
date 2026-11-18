@@ -93,13 +93,15 @@ describe('registry role surfaces', () => {
     expect(builtRoleAvailability('ghost', 'edit')).toBeUndefined()
   })
 
-  it('roleSurfaceFor resolves a registry-only role surface and unions the kept whiteboard tools', () => {
+  it('roleSurfaceFor resolves a registry-only role surface and unions the kept read-only tools', () => {
     expect(roleSurfaceFor('muse', mergeRoleRegistry({ muse: { tools: { available: ['read'] } } })))
-      .toEqual(['read', 'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'compressor_retrieve'])
+      .toEqual(['read', 'whiteboard_read', 'compressor_retrieve'])
     expect(roleSurfaceFor('muse')).toBeUndefined()
     expect(roleSurfaceFor(undefined)).toBeUndefined()
-    // The child-keep list is a floor, not an override: the role still keeps them.
-    expect(builtRoleAvailability('oracle', 'whiteboard_write', mergeRoleRegistry({ oracle: { tools: { available: [] } } }))).toBe(true)
+    // The child-keep list is a floor, not an override: the role still keeps
+    // the read-only board tool and the compressor rescue.
+    expect(builtRoleAvailability('oracle', 'whiteboard_read', mergeRoleRegistry({ oracle: { tools: { available: [] } } }))).toBe(true)
+    expect(builtRoleAvailability('oracle', 'whiteboard_write', mergeRoleRegistry({ oracle: { tools: { available: [] } } }))).toBe(false)
   })
 
   it('reads the whiteboard family row checked for the operator agents, children keep only the host keep floor', () => {
@@ -110,14 +112,15 @@ describe('registry role surfaces', () => {
       expect(roleSurfaceFor(agent)).toContain('whiteboard_forget')
       expect(roleRowChecked(family, roleSurfaceFor(agent)!)).toBe(true)
     }
-    // A child mirrors the subagent runtime's keep list: the four pinned tools,
-    // never `whiteboard_forget` (`SHARED_CHILD_KEEP` in tool-subagent).
+    // A child mirrors the subagent runtime's read-only keep list: only
+    // `whiteboard_read`, never a board mutation (`SHARED_CHILD_KEEP` in
+    // tool-subagent; the plugin refuses child mutations at execution).
     for (const agent of ['fixer', 'oracle', 'librarian']) {
       const child = roleSurfaceFor(agent)!
-      expect(child).toEqual(expect.arrayContaining([
-        'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin',
-      ]))
-      expect(child).not.toContain('whiteboard_forget')
+      expect(child).toContain('whiteboard_read')
+      for (const mutation of ['whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'whiteboard_forget']) {
+        expect(child).not.toContain(mutation)
+      }
     }
   })
 })

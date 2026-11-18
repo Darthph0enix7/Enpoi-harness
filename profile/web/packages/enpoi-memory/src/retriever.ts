@@ -348,6 +348,34 @@ export function searchMemory(db: DatabaseSync, query: string, limit = 10, scope?
     .slice(0, take)
 }
 
+/** One active fact considered by the near-duplicate scan. */
+interface NearDuplicateRow {
+  readonly id: string
+  readonly fact: string
+}
+
+/**
+ * Active facts sharing FTS terms with `fact`, under the same workspace scope.
+ * The candidate window is capped (newest first) so one write never scans the
+ * whole table.
+ */
+function nearDuplicateRows(db: DatabaseSync, fact: string, scope?: MemoryScope): NearDuplicateRow[] {
+  const terms = [...tokenSet(fact)]
+  if (terms.length === 0) return []
+  const match = terms.map(t => `"${t.replace(/"/g, '')}"`).join(' OR ')
+  const filter = compactionScopeClause(scope)
+  try {
+    return db.prepare(`
+      SELECT c.id, c.fact FROM claims_fts JOIN claims c ON c.rowid = claims_fts.rowid
+      WHERE claims_fts MATCH ? AND c.state IN ('committed','tentative')${filter.sql === '' ? '' : ` AND ${filter.sql}`}
+      ORDER BY c.created_at DESC LIMIT 50
+    `).all(match, ...filter.params) as unknown as NearDuplicateRow[]
+  } catch {
+    // A hostile query must never fail the host write path.
+    return []
+  }
+}
+
 /**
  * Existing facts that share FTS terms with `fact`, under the same workspace
  * scope. Used by the compaction-facts subscriber for near-duplicate
@@ -359,19 +387,76 @@ export function searchMemory(db: DatabaseSync, query: string, limit = 10, scope?
  * @returns candidate fact texts (committed + tentative claims).
  */
 export function nearDuplicateCandidates(db: DatabaseSync, fact: string, scope?: MemoryScope): string[] {
-  const terms = [...tokenSet(fact)]
-  if (terms.length === 0) return []
-  const match = terms.map(t => `"${t.replace(/"/g, '')}"`).join(' OR ')
-  const filter = compactionScopeClause(scope)
-  try {
-    const rows = db.prepare(`
-      SELECT c.fact FROM claims_fts JOIN claims c ON c.rowid = claims_fts.rowid
-      WHERE claims_fts MATCH ? AND c.state IN ('committed','tentative')${filter.sql === '' ? '' : ` AND ${filter.sql}`}
-      ORDER BY c.created_at DESC LIMIT 50
-    `).all(match, ...filter.params) as unknown as Array<{ fact: string }>
-    return rows.map(row => row.fact)
-  } catch {
-    // A hostile query must never fail the host write path.
-    return []
+  return nearDuplicateRows(db, fact, scope).map(row => row.fact)
+}
+
+/** Closest active fact at or above the near-duplicate threshold. */
+export interface NearDuplicateMatch {
+  readonly id: string
+  readonly fact: string
+  /** Token-set Jaccard similarity to the candidate text, in [0, 1]. */
+  readonly similarity: number
+}
+
+/**
+ * Closest active fact to `fact` when its token-set Jaccard similarity reaches
+ * `threshold`. Candidates come from the same bounded FTS window as
+ * {@link nearDuplicateCandidates}; ties keep the newest row.
+ * @param db - the memory database.
+ * @param fact - the candidate fact text.
+ * @param scope - workspace scope for compaction-origin rows.
+ * @param threshold - minimum Jaccard similarity for a match.
+ * @param excludeId - active row to ignore (the caller's own just-written fact).
+ * @returns the closest match, or undefined when none reaches the threshold.
+ */
+export function closestNearDuplicate(
+  db: DatabaseSync,
+  fact: string,
+  scope: MemoryScope | undefined,
+  threshold: number,
+  excludeId?: string,
+): NearDuplicateMatch | undefined {
+  let best: NearDuplicateMatch | undefined
+  for (const row of nearDuplicateRows(db, fact, scope)) {
+    if (row.id === excludeId) continue
+    const similarity = jaccard(row.fact, fact)
+    if (similarity < threshold) continue
+    if (best === undefined || similarity > best.similarity) best = { id: row.id, fact: row.fact, similarity }
   }
+  return best
+}
+
+/** Ranked hits kept under the retrieval character budget. */
+export interface CharBudgetFit<T> {
+  /** Hits included in rank order. */
+  readonly hits: T[]
+  /** Ranked hits left out because the budget was already spent. */
+  readonly omitted: number
+}
+
+/**
+ * Apply the retrieval character budget to ranked hits. Hits are included in
+ * rank order while their cumulative fact length stays within `budget`; the
+ * top-ranked hit is always included, even when it alone exceeds the budget,
+ * and no fact is truncated. A non-finite or non-positive budget behaves like
+ * zero: only the top-ranked hit is kept.
+ * @param hits - ranked hits, best first.
+ * @param budget - maximum total fact characters to include.
+ * @returns the included hits and the number of ranked hits omitted.
+ */
+export function fitToCharBudget<T extends { readonly fact: string }>(
+  hits: readonly T[],
+  budget: number,
+): CharBudgetFit<T> {
+  if (hits.length === 0) return { hits: [], omitted: 0 }
+  const limit = Number.isFinite(budget) && budget > 0 ? budget : 0
+  const kept: T[] = []
+  let used = 0
+  for (const hit of hits) {
+    const cost = hit.fact.length
+    if (kept.length > 0 && used + cost > limit) break
+    kept.push(hit)
+    used += cost
+  }
+  return { hits: kept, omitted: hits.length - kept.length }
 }

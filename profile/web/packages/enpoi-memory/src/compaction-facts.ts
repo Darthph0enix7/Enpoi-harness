@@ -39,6 +39,7 @@ import type { MemoryConfig } from './config'
 import type { ClaimInput, IntakeOptions, Pipeline } from './pipeline'
 import { jaccard, nearDuplicateCandidates } from './retriever'
 import { containsSecret } from './secret-guard'
+import { isDelegatedSession } from './session-authority'
 
 /** C3 category mapping: decisions are architecture, everything else project knowledge. */
 const CATEGORY_BY_KIND: Readonly<Record<DurableFactKind, string>> = {
@@ -148,8 +149,9 @@ export function registerCompactionFacts(
     // failure. A custom summarizer may report no route at all while still
     // writing real facts; the clean matching end decides whether they persist.
     if (data.summarizationFailure !== undefined && data.provider === '' && data.model === '') return
-    // Subagent children are scratch work unless the operator opts in.
-    if (session.header.parentSession !== undefined && !config.compactionFactsIncludeChildSessions) return
+    // Subagent children are scratch work unless the operator opts in. A seeded
+    // root fork records `parentSession` but is not a delegated child.
+    if (isDelegatedSession(session.header) && !config.compactionFactsIncludeChildSessions) return
     const facts = parseDurableFacts(summaryText(data.summary)).slice(0, config.compactionFactsMax)
     if (facts.length === 0) return
     held.set(keyOf(session.id, data.compactionId), {

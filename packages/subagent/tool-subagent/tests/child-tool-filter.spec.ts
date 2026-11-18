@@ -34,6 +34,13 @@ const SHARED_DENY = [
   'send_message',
   'interrupt_agent',
   'list_agents',
+  // Board mutations belong to the main session; the whiteboard plugin refuses
+  // every child mutation, so the child catalog drops them instead of offering
+  // a tool that can only error. `whiteboard_read` stays in the keep list.
+  'whiteboard_write',
+  'whiteboard_pin',
+  'whiteboard_unpin',
+  'whiteboard_forget',
   'plugin_manager',
   'cordis_inspect_list',
   'cordis_inspect_query',
@@ -192,10 +199,11 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     expect(new Set(deny).size).toBe(deny.length)
   })
 
-  it('keeps the whiteboard in every role surface and never names it in a deny map', async () => {
-    // Structural: the pinned board is available to every delegated child
-    // (allowlisted and deny-only alike), so no built-in role deny map may
-    // strip it.
+  it('advertises the read-only whiteboard to every role and denies its mutations', async () => {
+    // The board is read-only for delegated children: the keep floor carries
+    // `whiteboard_read`, and every mutation is on the shared deny floor so no
+    // child catalog offers a tool the plugin refuses at execution.
+    expect(SHARED_CHILD_KEEP).toEqual(['whiteboard_read', 'compressor_retrieve'])
     const requests = [
       await captureRequest('fixer', 'Fixer: patch the parser bug'),
       await captureRequest('librarian', 'Librarian: research the API documentation'),
@@ -208,6 +216,15 @@ describe('dsh-tool-subagent per-child tool filter', () => {
       for (const tool of SHARED_CHILD_KEEP) {
         expect(request.toolFilter?.deny ?? []).not.toContain(tool)
       }
+      for (const tool of ['whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'whiteboard_forget']) {
+        expect(request.toolFilter?.deny ?? []).toContain(tool)
+      }
+    }
+    // An allowlisted surface keeps only the read tool; a deny-only surface has
+    // no allow mask, so the shared deny is what removes the mutations.
+    for (const request of requests.filter(request => request.toolFilter?.allow !== undefined)) {
+      expect(request.toolFilter?.allow).toContain('whiteboard_read')
+      expect(request.toolFilter?.allow).not.toContain('whiteboard_write')
     }
   })
 
@@ -300,10 +317,10 @@ describe('dsh-tool-subagent per-child tool filter', () => {
     const request = await captureRequest('explorer', 'Explorer: map the delegation surface', {
       toolFilter: { allow: ['read'] },
       settingsDocument: {
-        extendBuiltins: { sharedKeep: { remove: ['whiteboard_pin'] } },
+        extendBuiltins: { sharedKeep: { remove: ['whiteboard_read'] } },
       },
     })
-    expect(request.toolFilter?.allow).toEqual(['read', 'whiteboard_read', 'whiteboard_write', 'whiteboard_unpin', 'compressor_retrieve'])
+    expect(request.toolFilter?.allow).toEqual(['read', 'compressor_retrieve'])
   })
 
   it('audits extendBuiltins sharedKeep additions against the live registry', async () => {

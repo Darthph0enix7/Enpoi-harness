@@ -177,12 +177,12 @@ describe('RolesPanel', () => {
     expect(mutations[0]?.payload.args.ops[0]?.value).toEqual({
       label: 'Fixer', group: 'specialists', seat: true,
       tools: {
-        // The built-in fixer surface plus the child-keep whiteboard floor
-        // (SHARED_CHILD_KEEP in tool-subagent).
+        // The built-in fixer surface plus the read-only child-keep whiteboard
+        // floor (SHARED_CHILD_KEEP in tool-subagent).
         available: [
           'bash', 'compressor_retrieve', 'edit', 'glob', 'grep', 'memory_save', 'memory_search', 'read_image', 'skill',
           'todo_write', 'web_search',
-          'whiteboard_pin', 'whiteboard_read', 'whiteboard_unpin', 'whiteboard_write', 'write',
+          'whiteboard_read', 'write',
         ],
       },
     })

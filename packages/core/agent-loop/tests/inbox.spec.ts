@@ -303,6 +303,35 @@ describe('ReactLoopInbox', () => {
     expect(session.snapshotEvents()).toHaveLength(beforeClear + 2)
   })
 
+  it('withdraws a pending goal continuation round and keeps its observations', async () => {
+    const { ctx, session, agent } = await inboxAgent('clear-goal-round')
+    const discarded: UserMessage[] = []
+    // The goal-round producer's own source kind, as the merge-extensible map
+    // accepts it. An autonomous round asks for a turn; a stop refuses it.
+    const round = createUserMessage({
+      content: [{ type: 'text', text: '<goal_round>' }],
+      source: { kind: 'goal', goalId: 'goal-1', revision: 1, round: 1 } as never,
+    })
+    const notice = createUserMessage({
+      content: [{ type: 'text', text: 'Background subagent child-1 finished.' }],
+      source: { kind: 'subagent-settled', form: 'notice', summary: 'finished', senderSessionId: SessionId('child-1') } as never,
+    })
+    agent.inbox.append('next-turn', round)
+    agent.inbox.append('next-step', notice)
+    ctx.on('agent/inbox/discarded', ({ message }) => void discarded.push(message))
+
+    agent.inbox.clear()
+
+    expect(agent.inbox.nextTurn).toEqual([])
+    expect(agent.inbox.nextStep).toEqual([notice])
+    expect(discarded).toEqual([round])
+    expect(session.snapshotEvents()
+      .flatMap(event => event.type === 'agent/inbox/spliced' ? [event.data] : [])
+      .filter(data => data.outcome === 'canceled')
+      .map(data => ({ target: data.target, removedCount: data.removedCount })))
+      .toEqual([{ target: 'next-turn', removedCount: 1 }])
+  })
+
   it('preserves system-generated observations and discards only operator input', async () => {
     const { ctx, session, agent } = await inboxAgent('clear-preserve')
     const discarded: UserMessage[] = []

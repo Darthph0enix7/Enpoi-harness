@@ -522,6 +522,14 @@ export const SHARED_CHILD_DENY: readonly string[] = [
   'send_message',
   'interrupt_agent',
   'list_agents',
+  // Board mutations belong to the main session: the whiteboard plugin refuses
+  // every mutation from a session with a durable parent, so a child catalog
+  // must not offer tools whose only outcome is that refusal. Reads stay in
+  // SHARED_CHILD_KEEP.
+  'whiteboard_write',
+  'whiteboard_pin',
+  'whiteboard_unpin',
+  'whiteboard_forget',
   // Harness authoring (creator seat) and reviewer-exec (reviewer seats): the
   // pre-execute guards refuse them for delegated children, so no child catalog
   // may carry them.
@@ -532,26 +540,25 @@ export const SHARED_CHILD_DENY: readonly string[] = [
 ]
 
 /**
- * Tools every child keeps regardless of role surface: the pinned whiteboard
- * and the tool-result rescue. A delegated child may be sent precisely to read
- * or record the board, so the keep list is unioned into every explicit allow
- * surface (operator-configured or role-registry) and stripped from the
- * built-in role deny maps. `compressor_retrieve` joins it because a child that
- * can read a crushed tool result (the dsh-compressor locator form) must be
- * able to restore its original text instead of failing on the locator; the
- * retrieval is read-only and session-scoped. Only an explicit operator `deny`
- * entry can still remove them — deny is the operator's voice and always wins
- * in `tools.restrict()`. An operator edits the list through
- * `enpoi-orchestration.extendBuiltins.sharedKeep`. A keep name the live
- * registry does not resolve is dropped with a warning like every other
- * profile-provided name, so a composition that mounts no whiteboard or
- * compressor still spawns children.
+ * Tools every child keeps regardless of role surface: the read-only whiteboard
+ * entry and the tool-result rescue. A delegated child may be sent precisely to
+ * read the board, so the keep list is unioned into every explicit allow surface
+ * (operator-configured or role-registry) and stripped from the built-in role
+ * deny maps. Board mutations are not kept: the whiteboard plugin refuses them
+ * for every child session, and {@link SHARED_CHILD_DENY} removes them from the
+ * advertised child catalog (the plugin refusal stays the execution backstop).
+ * `compressor_retrieve` joins the read because a child that can read a crushed
+ * tool result (the dsh-compressor locator form) must be able to restore its
+ * original text instead of failing on the locator; the retrieval is read-only
+ * and session-scoped. Only an explicit operator `deny` entry can still remove
+ * these — deny is the operator's voice and always wins in `tools.restrict()`.
+ * An operator edits the list through `enpoi-orchestration.extendBuiltins.sharedKeep`.
+ * A keep name the live registry does not resolve is dropped with a warning like
+ * every other profile-provided name, so a composition that mounts no whiteboard
+ * or compressor still spawns children.
  */
 export const SHARED_CHILD_KEEP: readonly string[] = [
   'whiteboard_read',
-  'whiteboard_write',
-  'whiteboard_pin',
-  'whiteboard_unpin',
   'compressor_retrieve',
 ]
 
@@ -602,9 +609,9 @@ const ROLE_CHILD_DENY: Record<string, readonly string[]> = {
  * `web_search`, the custom tools, and `request_evidence` exist only in
  * compositions that register them, so the caller audits these names against the
  * live registry like an operator list: an unknown name is dropped with a
- * warning instead of aborting the child's spawn. The whiteboard keep list
- * survives through {@link childToolFilter}'s union, and {@link SHARED_CHILD_DENY}
- * still wins over every allow entry.
+ * warning instead of aborting the child's spawn. The read-only whiteboard keep
+ * list survives through {@link childToolFilter}'s union, and
+ * {@link SHARED_CHILD_DENY} still wins over every allow entry.
  */
 export const ROLE_CHILD_ALLOW: Readonly<Record<string, readonly string[]>> = Object.freeze({
   librarian: Object.freeze([
@@ -1037,7 +1044,7 @@ export function childToolFilter(
   // server's live surfaces as code defaults), extended in place by an
   // `extendBuiltins.roles` edit; absent all three, the registry entry's
   // built-in deny extras apply. The shared anti-leak floor is always unioned
-  // in, and the whiteboard keep list survives every surface.
+  // in, and the read-only whiteboard keep list survives every surface.
   const builtinAllow = ROLE_CHILD_ALLOW[role]
   const stored = roleAvailableAllowlist(document, role)
     ?? roleEntry.available

@@ -26,9 +26,14 @@ afterEach(() => {
   delete process.env.DSH_MEMORY_DB
 })
 
-function captureTools(): CapturedTool[] {
+function captureTools(parameters?: unknown): CapturedTool[] {
   const tools: CapturedTool[] = []
-  const ctx = { tools: { register: (definition: CapturedTool) => void tools.push(definition) } }
+  const ctx = {
+    tools: { register: (definition: CapturedTool) => void tools.push(definition) },
+    ...parameters === undefined ? {} : {
+      get: (ns: string) => ns === 'settings' ? { get: () => ({ parameters }) } : undefined,
+    },
+  }
   registerMemoryTools(ctx as never, db, makePipeline(db))
   return tools
 }
@@ -214,6 +219,16 @@ describe('enpoi-memory tools — memory_save provenance', () => {
     expect(JSON.parse(row.provenance)).toEqual({ source: 'memory_save', sessionId: 'session-9', cwd: '/work/a' })
     expect(row.origin).toBe('orchestrator')
     expect(row.source_trust).toBe('operator')
+  })
+
+  it('saves without a calling session as root authority', async () => {
+    const pipeline = makePipeline(db)
+    const save = captureTools().find(tool => tool.name === 'memory_save')!
+
+    const result = await save.execute({ fact: 'saved with no execution scope', category: 'PROJECT' })
+
+    expect(result.saved).toBe(true)
+    expect(pipeline.get(String(result.id))).toMatchObject({ origin: 'orchestrator', source_trust: 'operator', state: 'committed' })
   })
 
   it('keeps a fork with seed lineage at root authority', async () => {
@@ -524,5 +539,109 @@ describe('enpoi-memory tools — bounded memory_search limit', () => {
     expect((negative.facts as unknown[]).length).toBe(2)
     expect((nonFinite.facts as unknown[]).length).toBe(2)
     expect((fractional.facts as unknown[]).length).toBe(1)
+  })
+})
+
+describe('enpoi-memory tools — retrieval character budget', () => {
+  it('omits whole facts over the configured budget and names the omission in the render', async () => {
+    const pipeline = makePipeline(db)
+    const longFact = 'budget probe archive bucket '.padEnd(120, 'x')
+    await pipeline.intake([
+      { fact: `${longFact} alpha`, category: 'PROJECT' },
+      { fact: `${longFact} beta`, category: 'PROJECT' },
+      { fact: `${longFact} gamma`, category: 'PROJECT' },
+    ], { origin: 'orchestrator', trust: 'operator' })
+    const search = captureTools({ memory: { retrieverTopK: 3, retrieverCharBudget: 200 } })
+      .find(tool => tool.name === 'memory_search')!
+
+    const result = await search.execute({ query: 'budget probe archive bucket' }, execScope('root-1', '/work/a'))
+    const facts = result.facts as Array<{ fact: string }>
+    expect(facts).toHaveLength(1)
+    expect(facts[0]!.fact.length).toBeGreaterThan(120)
+    expect(result.omitted).toBe(2)
+    expect(String(result.note)).toContain('2 omitted by the character budget')
+
+    const text = search.output.render(undefined, result)[0]!.text
+    expect(text).toContain('… 2 more matches omitted by the character budget; refine the query')
+  })
+
+  it('always returns the top-ranked fact even when it alone exceeds the budget', async () => {
+    const pipeline = makePipeline(db)
+    const fact = 'oversized budget probe archive bucket '.padEnd(300, 'y')
+    await pipeline.intake([{ fact, category: 'PROJECT' }], { origin: 'orchestrator', trust: 'operator' })
+    const search = captureTools({ memory: { retrieverTopK: 3, retrieverCharBudget: 200 } })
+      .find(tool => tool.name === 'memory_search')!
+
+    const result = await search.execute({ query: 'oversized budget probe archive bucket' }, execScope('root-1', '/work/a'))
+    expect((result.facts as Array<{ fact: string }>).map(row => row.fact)).toEqual([fact])
+    expect(result.omitted).toBeUndefined()
+    expect(search.output.render(undefined, result)[0]!.text).not.toContain('omitted by the character budget')
+  })
+})
+
+describe('enpoi-memory tools — secret guard at intake', () => {
+  it('rejects a credential-shaped memory_save without storing it', async () => {
+    const pipeline = makePipeline(db)
+    const save = captureTools().find(tool => tool.name === 'memory_save')!
+    const secret = 'sk-TESTONLY-DO-NOT-USE-0000000000000000'
+
+    const result = await save.execute({ fact: `the deploy key is ${secret}`, category: 'CONFIG_VALUES' }, execScope('root-1', '/work/a'))
+
+    expect(result.saved).toBe(false)
+    expect(String(result.note)).toContain('rejected: looks like a credential or secret')
+    expect(pipeline.list()).toHaveLength(0)
+    expect(save.output.render(undefined, result)[0]!.text).toContain('Memory NOT saved')
+  })
+
+  it('rejects the same shape from keeper and compaction intake without throwing', async () => {
+    const pipeline = makePipeline(db)
+    const secret = 'sk-TESTONLY-DO-NOT-USE-0000000000000000'
+
+    await expect(pipeline.intake(
+      [{ fact: `keeper quoted ${secret}`, category: 'PROJECT' }],
+      { origin: 'keeper', trust: 'untrusted_external' },
+    )).resolves.toEqual([])
+    await expect(pipeline.intake(
+      [{ fact: `compaction quoted ${secret}`, category: 'PROJECT' }],
+      { origin: 'compaction', trust: 'untrusted_external' },
+    )).resolves.toEqual([])
+    expect(pipeline.list()).toHaveLength(0)
+  })
+})
+
+describe('enpoi-memory tools — near-duplicate save note', () => {
+  it('keeps both facts and names the closest existing id when the threshold is reached', async () => {
+    const pipeline = makePipeline(db)
+    const save = captureTools().find(tool => tool.name === 'memory_save')!
+    const first = await save.execute(
+      { fact: 'the archive bucket is eu-central-3 with version 4 stored in the vault', category: 'PROJECT' },
+      execScope('root-1', '/work/a'),
+    )
+    const second = await save.execute(
+      { fact: 'the archive bucket is eu-central-3 with version 9 stored in the vault', category: 'PROJECT' },
+      execScope('root-1', '/work/a'),
+    )
+
+    expect(first.saved).toBe(true)
+    expect(second.saved).toBe(true)
+    expect(String(second.note)).toContain(`closest existing fact ${String(first.id)}`)
+    expect(String(second.note)).not.toContain(`closest existing fact ${String(second.id)}`)
+    expect(pipeline.list()).toHaveLength(2)
+  })
+
+  it('keeps a distinct fact note free of a near-match pointer', async () => {
+    const pipeline = makePipeline(db)
+    const save = captureTools().find(tool => tool.name === 'memory_save')!
+    await save.execute(
+      { fact: 'the archive bucket is eu-central-3 with version 4 stored in the vault', category: 'PROJECT' },
+      execScope('root-1', '/work/a'),
+    )
+    const distinct = await save.execute(
+      { fact: 'cloudflare tunnel routes web traffic to the local webserver', category: 'PROJECT' },
+      execScope('root-1', '/work/a'),
+    )
+
+    expect(distinct.saved).toBe(true)
+    expect(String(distinct.note)).not.toContain('near-match')
   })
 })

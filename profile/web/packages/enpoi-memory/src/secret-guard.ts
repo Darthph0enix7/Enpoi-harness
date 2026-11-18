@@ -1,13 +1,17 @@
 /**
- * enpoi-memory — secret guard for compaction-derived facts.
+ * enpoi-memory — secret guard for durable facts.
  *
- * Compaction summaries are model-written, so a durable fact can accidentally
- * quote a credential that appeared in the conversation. The first eight
- * patterns of `feedback-collect` cover the key shapes worth blocking:
+ * Facts reach memory from model-written compaction summaries, keeper claims,
+ * and `memory_save`, so a durable fact can accidentally quote a credential
+ * that appeared in the conversation. The first eight patterns of
+ * `feedback-collect` cover the key shapes worth blocking:
  * `sk-`, `ghp_`, `github_pat_`, `AKIA`, `xox`, JWT, `Bearer`, and
  * `key = value` assignments. The generic 40-char base64 rule is deliberately
  * excluded — it matches ordinary hashes, ids, and long identifiers that are
  * exactly the config values durable facts are meant to keep.
+ *
+ * The pipeline applies this guard to every intake origin; a rejected fact is
+ * never stored and never throws into the producer.
  *
  * The patterns are stateless (no `g` flag) so repeated `.test()` calls never
  * depend on `lastIndex`.

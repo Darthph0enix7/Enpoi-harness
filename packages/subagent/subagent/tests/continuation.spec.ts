@@ -105,7 +105,13 @@ async function mountScheduleForOwnership(ctx: Context): Promise<void> {
 /** Boot the full continuable stack: loop, persistence, providers, and subagents. */
 async function setupWith(
   adapter: LlmAdapter,
-  options: { persistence?: boolean; schedule?: boolean; sessionQuery?: boolean; maxActiveSubagents?: number } = {},
+  options: {
+    persistence?: boolean
+    schedule?: boolean
+    sessionQuery?: boolean
+    maxActiveSubagents?: number
+    settlementReportMaxChars?: number
+  } = {},
 ) {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx)
@@ -124,8 +130,10 @@ async function setupWith(
   await ctx.plugin(AgentLoop, { agents: [] })
   if (options.schedule) await mountScheduleForOwnership(ctx)
   if (options.sessionQuery !== false) await ctx.plugin(TestSessionQuery)
-  subagentConfigs.set(ctx, await liveConfig(ctx, SubagentRuntime,
-    options.maxActiveSubagents === undefined ? {} : { maxActiveSubagents: options.maxActiveSubagents }))
+  subagentConfigs.set(ctx, await liveConfig(ctx, SubagentRuntime, {
+    ...options.maxActiveSubagents === undefined ? {} : { maxActiveSubagents: options.maxActiveSubagents },
+    ...options.settlementReportMaxChars === undefined ? {} : { settlementReportMaxChars: options.settlementReportMaxChars },
+  }))
   await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
   await ctx.plugin(SubagentFork, { providerName: 'fork' })
   ctx.llm.registerAdapter(['mock'], adapter)
@@ -3515,6 +3523,27 @@ describe('continuable settlement delivery', () => {
     })
   })
 
+  it('bounds a large closing report and names the durable child session', async () => {
+    const report = `HEAD${'x'.repeat(2_000)}TAIL`
+    const { ctx, parent } = await setupWith(new MockAdapter([textResponse(report), textResponse('parent ack')]), {
+      settlementReportMaxChars: 1_000,
+    })
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+
+    const notice = settlementNotices(parent)[0]!
+    expect(notice.text).toContain('HEAD')
+    expect(notice.text).toContain('TAIL')
+    expect(notice.text).toContain('1008 of 2008 characters omitted')
+    expect(notice.text).not.toContain('x'.repeat(501))
+    expect(notice.text.length).toBeLessThan(1_000 + 1_000)
+    // The model learns exactly where the complete report lives and how to read it.
+    expect(notice.text).toContain(`durable in its session "${started.childId}"`)
+    expect(notice.text).toContain('session_event_search({ session_id:')
+    expect(notice.text).toContain('session_event_read({ session_id:')
+  })
+
   it('logs a rejected notice instead of failing the child\'s teardown', async () => {
     const { ctx, parent } = await setup([textResponse('the answer')])
     const warnings: string[] = []
@@ -4247,5 +4276,184 @@ describe('continuable settlement notice deferral', () => {
     expect(adapter.requests).toHaveLength(1)
     expect(parent.status).toBe('idle')
     expect(parent.inbox.nextTurn[0]?.source.kind).toBe('subagent-settled')
+  })
+})
+
+describe('continuable tree work', () => {
+  it('joins a running descendant and resolves once the whole tree is idle', async () => {
+    const childGate = Promise.withResolvers<undefined>()
+    const grandchildGate = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('child working'), gate: childGate.promise },
+      { chunks: textResponse('grandchild working'), gate: grandchildGate.promise },
+      { chunks: textResponse('grandchild done') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const child = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    const childAgent = ctx.agents.get(child.childId)!
+    const grandchild = await ctx.subagents.startContinuable(startSpec(childAgent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
+
+    let joined = false
+    const settled = ctx.subagents.waitForTreeWork(parent).then(() => { joined = true })
+    await new Promise((resolve) => { setImmediate(resolve) })
+    expect(joined).toBe(false)
+
+    // The child's own turn ends, but its owned grandchild still progresses, so
+    // the root keeps waiting for the deeper member.
+    childGate.resolve(undefined)
+    await new Promise((resolve) => { setImmediate(resolve) })
+    expect(joined).toBe(false)
+
+    grandchildGate.resolve(undefined)
+    await waitNoActivation(ctx, grandchild.childId)
+    await waitNoActivation(ctx, child.childId)
+    await settled
+  })
+
+  it('resolves immediately for a continuable member and for an agent that left the registry', async () => {
+    const gate = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([{ chunks: textResponse('child working'), gate: gate.promise }])
+    const { ctx, parent } = await setupWith(adapter)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    const child = ctx.agents.get(started.childId)!
+
+    // A continuable member is not a tree root: its host awaits the members
+    // below it, not this member's own running turn.
+    await ctx.subagents.waitForTreeWork(child)
+
+    gate.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+    await ctx.subagents.waitForTreeWork(parent)
+    // The disposed child no longer resolves as a live Agent.
+    await ctx.subagents.waitForTreeWork(child)
+  })
+
+  it('waits for an admission that is still publishing', async () => {
+    const { ctx, parent } = await setup([textResponse('child done')])
+    const observed: Promise<void>[] = []
+    // A host that asks during child creation observes the in-flight admission
+    // as tree work, not an empty tree.
+    ctx.on('agent/created', ({ agent }) => {
+      if (agent.session.header.parentSession === parent.id) observed.push(ctx.subagents.waitForTreeWork(parent))
+    })
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+
+    expect(observed).toHaveLength(1)
+    await observed[0]
+  })
+
+  it('resolves without members for a root with no continuable work', async () => {
+    const { ctx, parent } = await setupWith(new MockAdapter([]))
+    await ctx.subagents.waitForTreeWork(parent)
+  })
+})
+
+describe('continuable stops under a user Stop-all', () => {
+  it('parks a natural completion that races the stop and delivers it once on the next human turn', async () => {
+    const childGate = Promise.withResolvers<undefined>()
+    const parentGate = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('child done'), gate: childGate.promise },
+      { chunks: textResponse('parent turn'), gate: parentGate.promise },
+      { chunks: textResponse('operator next turn') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+
+    parent.followup(createUserMessage({ content: message('operator ask'), source: { kind: 'user' } }))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
+    parent.cancel({ kind: 'user', intent: 'stop-all' })
+    // Release the aborted model stream so its turn can converge.
+    parentGate.resolve(undefined)
+    await parent.whenIdle()
+
+    // The child's interrupt was in flight when its turn finished naturally.
+    childGate.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(parent.inbox.nextTurn).toHaveLength(1) })
+
+    // Stop-all refused further turns: the report waits in the inbox instead of
+    // opening one, and it has not reached the model surface yet.
+    expect(adapter.requests).toHaveLength(2)
+    expect(parent.status).toBe('idle')
+    expect(parent.inbox.nextTurn[0]?.source.kind).toBe('subagent-settled')
+    expect(parent.session.snapshotEvents().some(event =>
+      event.type === 'user/message' && event.data.source.kind === 'subagent-settled')).toBe(false)
+
+    // The operator's next turn claims exactly one copy of the report. The
+    // report occupies that turn, and the operator prompt follows in its own.
+    parent.followup(createUserMessage({ content: message('operator next'), source: { kind: 'user' } }))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(4) })
+    await parent.whenIdle()
+    expect(parent.inbox.nextTurn).toEqual([])
+    expect(parent.session.snapshotEvents().filter(event =>
+      event.type === 'user/message' && event.data.source.kind === 'subagent-settled')).toHaveLength(1)
+  })
+
+  it('keeps a detach stop waking the parent when the child completes naturally', async () => {
+    const childGate = Promise.withResolvers<undefined>()
+    const parentGate = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('child done'), gate: childGate.promise },
+      { chunks: textResponse('parent turn'), gate: parentGate.promise },
+      { chunks: textResponse('parent wake') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+
+    parent.followup(createUserMessage({ content: message('operator ask'), source: { kind: 'user' } }))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
+    parent.cancel({ kind: 'user', intent: 'detach' })
+    parentGate.resolve(undefined)
+    await parent.whenIdle()
+
+    childGate.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(3) })
+    await parent.whenIdle()
+    expect(parent.session.snapshotEvents().filter(event =>
+      event.type === 'user/message' && event.data.source.kind === 'subagent-settled')).toHaveLength(1)
+  })
+
+  it('wakes normally once the operator has started another turn after the stop', async () => {
+    const childGate = Promise.withResolvers<undefined>()
+    const parentGate = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('child done'), gate: childGate.promise },
+      { chunks: textResponse('parent turn'), gate: parentGate.promise },
+      { chunks: textResponse('operator next turn') },
+      { chunks: textResponse('operator prompt turn') },
+      { chunks: textResponse('second child done') },
+      { chunks: textResponse('parent wake') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const first = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    parent.followup(createUserMessage({ content: message('operator ask'), source: { kind: 'user' } }))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
+    parent.cancel({ kind: 'user', intent: 'stop-all' })
+    parentGate.resolve(undefined)
+    await parent.whenIdle()
+    childGate.resolve(undefined)
+    await waitNoActivation(ctx, first.childId)
+    await vi.waitFor(() => { expect(parent.inbox.nextTurn).toHaveLength(1) })
+
+    // The operator's next turn ends; a later natural settlement is ordinary
+    // work again and wakes the parent as before.
+    parent.followup(createUserMessage({ content: message('operator next'), source: { kind: 'user' } }))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(4) })
+    await parent.whenIdle()
+    const second = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, second.childId)
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(6) })
+    await parent.whenIdle()
+    expect(parent.session.snapshotEvents().filter(event =>
+      event.type === 'user/message' && event.data.source.kind === 'subagent-settled')).toHaveLength(2)
   })
 })

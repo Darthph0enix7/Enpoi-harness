@@ -9,7 +9,7 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-tool-goal` 让模型读取持久 goal，并根据人类直接请求推断和创建长期 goal。创建、编辑、暂停或恢复要求该直接请求出现在顶层 agent（智能体）轮次中；完成或阻塞也可以在自主 Goal Round 中执行。更新必须使用先前读取到的精确 goal id 和 revision。`resume` 会重新启用 active-but-disarmed 或 blocked 的 goal，而持久的 paused goal 由用户通过 Web 或 `/goal resume` 恢复。自主阻塞要求同一条件持续达到可配置阈值，默认是连续三个 Round。
+`dsh-tool-goal` 让模型读取持久 goal，并根据人类直接请求推断和创建长期 goal。创建、编辑、暂停或恢复要求该直接请求出现在顶层 agent（智能体）轮次中；完成或阻塞也可以在自主 Goal Round 中执行。更新必须使用先前读取到的精确 goal id 和 revision。`resume` 会重新启用 active-but-disarmed 或 blocked 的 goal，而持久的 paused goal 由用户通过 Web 或 `/goal resume` 恢复。自主阻塞要求该 goal 中至少已开始可配置数量（默认三个）的 goal Round；模型仍需判断同一条件是否持续存在。
 
 ## 目录
 
@@ -52,7 +52,7 @@ kind: "package-reference"
 
 ### 权限规则
 
-工具只为活跃驱动器内、处于开放轮次中的精确活跃调用 agent 执行。`create`、`edit`、`pause` 和 `resume` 还要求运行时根 agent 的当前轮次中存在人类直接消息——subagent 或非人类生产方不能创建或编辑 goal。`resume` 会在 goal 服务执行前拒绝持久的 paused goal；该状态只属于面向用户的恢复路径。`complete` 和 `blocked` 还接受完全一致的当前 Goal Round：来源为 goal 的 Round 可以立即完成 goal，但 `blocked` 调用在达到配置的连续 Round 数量之前会被机械拒绝——模型判断同一条件是否确实持续，并必须在 `blocked_reason` 中说明。人类直接请求可以立即停止 goal。
+工具只为活跃驱动器内、处于开放轮次中的精确活跃调用 agent 执行。`create`、`edit`、`pause` 和 `resume` 还要求运行时根 agent 的当前轮次中存在人类直接消息——subagent 或非人类生产方不能创建或编辑 goal。`resume` 会在 goal 服务执行前拒绝持久的 paused goal；该状态只属于面向用户的恢复路径。`complete` 和 `blocked` 还接受完全一致的当前 Goal Round：来源为 goal 的 Round 可以立即完成 goal，但 `blocked` 调用在该 goal 中至少已开始配置数量的 goal Round 之前会被机械拒绝——计数是该 goal 中已开始的总 Round 数，resume 不会重置；模型判断同一条件是否确实持续，并必须在 `blocked_reason` 中说明。人类直接请求可以立即停止 goal。
 
 成功报告 `complete` 或 `blocked` 的自主 Round 还会在该步骤后结束物理轮次，模型会收到一条结束指令，要求向用户写出最终消息。人类直接变更绝不会触发这种停止：assistant 可以确认变更，循环仍可接收并发的人类 steering（中途引导）。
 
@@ -70,7 +70,7 @@ kind: "package-reference"
 
 - **执行时权限。** 每次调用都解析精确活跃 agent、其继承的 `AgentRegistry` initiator、running 状态与开放轮次；`create`、`edit`、`pause` 和 `resume` 还要求运行时根 agent 的当前轮次中存在已接受的 `{ kind: 'user' }` 消息或 steering 事件。持久的 paused goal 会让 `resume` 以 `GOAL_TOOL_RESUME_PAUSED` 失败；面向用户的命令或 Web 控件拥有该转换。持久 fork 谱系不会降低已恢复根 agent 的等级；活跃 subagent 所有权会降低。
 - **人类输入的宿主证明。** `Agent.followup()` 与 `steer()` 会在调用方省略 source 时分配 `{ kind: 'user' }`，因此插件、调度器与其他非人类生产方必须传入自己的 source，不能继承人类权限。
-- **带配置阈值的系统提示词指引。** 本包注册一个 `tool:goal` 系统提示词章节，其固定文本插入 `blockedAfterConsecutiveRounds`；同一数值就是执行时强制执行的硬下限。
+- **带配置阈值的系统提示词指引。** 本包注册一个 `tool:goal` 系统提示词章节，其固定文本插入 `blockedAfterConsecutiveRounds`；同一数值就是该 goal 中已开始 goal Round 数的硬下限，并在执行时强制执行。
 - **终局 Round 的结束上下文。** 成功的自主 `complete` 或 `blocked` 会延后一条 `<goal_complete>` 或 `<goal_blocked>` 结束指令，让模型在轮次结束前向用户做一次交代；人类直接变更绝不会延后该上下文。
 
 ### 源码地图
@@ -114,7 +114,7 @@ kind: "package-reference"
 ##### Goal 策略
 
 ```markdown
-create_goal may infer goal intent from a direct human request in any language. After session resume or fork, an active goal is disarmed: when a human asks to continue or resume in any wording or language, use update_goal action resume to rearm it. Mark complete only when the objective is actually achieved. Mark blocked only after the same blocking condition persists for at least 3 consecutive goal rounds, and report that concrete condition in blocked_reason; difficulty, uncertainty, or useful remaining work is not blocked.
+create_goal may infer goal intent from a direct human request in any language. After session resume or fork, an active goal is disarmed: when a human asks to continue or resume in any wording or language, use update_goal action resume to rearm it. Mark complete only when the objective is actually achieved. Mark blocked only after at least 3 goal rounds have started in this goal, and report the concrete condition that persisted across them in blocked_reason; difficulty, uncertainty, or useful remaining work is not blocked.
 ```
 
 #### Token 影响
@@ -147,7 +147,7 @@ schema 的定义与可见性不变时，前缀保持稳定。调用和结果会�
 这些限制说明 goal 工具何时不合适或需要特别注意。它们是当前包约束，不是任务积压。
 
 - **语义意图仍由模型判断**——执行只能证明当前轮次包含一条人类直接发送的消息，无法证明请求是否足够重大而值得创建 goal。
-- **阻塞条件是否相同仍由模型判断**——运行时强制统计互不重复的已准入 Goal Round，而不判断障碍在语义上是否等价；独立评估器的实现暂缓。
+- **阻塞条件是否相同仍由模型判断**——运行时强制统计该 goal 中已开始的 Goal Round 数，而不判断有多少 Round 共享同一障碍；独立评估器的实现暂缓。
 - **不负责调度或直接面向人类呈现**——这些工具只变更状态；同会话驱动器与 `dsh-command-goal` 是同一领域的独立消费方。
 - **Goal Round 权限需要驱动器**——除非续行驱动器准入 goal 来源的用户轮次，否则自主 `complete`／`blocked` 路径不会启用；只挂载这个包不会创建这些轮次。
 - **提示词注册与过滤相互独立**——某个范围可能隐藏工具，却保留指引，除非部署将两项注册限定在同一范围。

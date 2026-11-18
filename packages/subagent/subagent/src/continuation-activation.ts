@@ -31,6 +31,7 @@ import {
 } from './child-agent.ts'
 import type { DelegatedPolicyOverrides } from './child-agent.ts'
 import { createSettlementMessage } from './continuation-messages.ts'
+import type { SettlementReportLimits } from './continuation-messages.ts'
 import type { SubagentDescriptorData } from './descriptor.ts'
 import { SubagentError } from './error.ts'
 import { SubagentInbox } from './inbox.ts'
@@ -247,6 +248,13 @@ export class ContinuableActivationRegistry {
    * poisoning a later same-id replacement.
    */
   private readonly closingScopes = new Map<Agent, Set<Agent>>()
+  /**
+   * Parent sessions whose latest durable turn boundary is a user Stop-all, so
+   * settlements that land before the operator's next turn queue without
+   * waking. Process-local on purpose: after a restart no entry exists and the
+   * first notice wakes as usual, which costs one turn, never a dropped report.
+   */
+  private readonly stoppedAllSessions = new Set<SessionId>()
   private draining = false
   /** Retained settlement notices that still owe a parent a wake. */
   private readonly notices: SettlementNoticeOutbox
@@ -273,6 +281,7 @@ export class ContinuableActivationRegistry {
       parent: Agent,
     ) => ActivationObserver,
     private readonly maxActiveSubagents: () => number,
+    private readonly settlementReportLimits: () => SettlementReportLimits,
   ) {
     // Ordinary Cordis owner effects unwind in reverse registration order, which
     // cannot express the dynamic child graph. Register the private scope's
@@ -284,6 +293,22 @@ export class ContinuableActivationRegistry {
     this.ownerCtx = scope.ctx
     ctx.on('agent/disposed', ({ agent }) => {
       this.closingScopes.delete(agent)
+      this.stoppedAllSessions.delete(agent.id)
+    })
+    // The exact turn boundary is the authority for the stop window: a turn
+    // start closes it, and only a user Stop-all ending opens it.
+    ctx.on('session/event', (session, event) => {
+      if (event.type === 'turn/start') {
+        this.stoppedAllSessions.delete(session.id)
+        return
+      }
+      if (event.type !== 'turn/end') return
+      const reason = event.data.reason
+      if (reason.kind === 'aborted' && reason.reason.kind === 'user' && reason.reason.intent === 'stop-all') {
+        this.stoppedAllSessions.add(session.id)
+        return
+      }
+      this.stoppedAllSessions.delete(session.id)
     })
     this.notices = new SettlementNoticeOutbox(
       ctx,
@@ -616,6 +641,45 @@ export class ContinuableActivationRegistry {
       this.wake(activation)
     }
     return message.id
+  }
+
+  /**
+   * Join progressing work in one subagent tree for its root. A descendant that
+   * is running delays the caller; an idle member stays resident with whatever
+   * its Activation inbox already holds, because that input belongs to the
+   * member's own settlement loop. A continuable member is not a tree root and
+   * returns immediately, as does an Agent that left the registry.
+   * @param root - exact live subagent-tree root whose descendant work is awaited.
+   * @returns once no descendant of `root` is running and no admission is pending.
+   */
+  async waitForTreeWork(root: Agent): Promise<void> {
+    if (this.ctx.agents.get(root.id) !== root) return
+    // The root of a subagent tree is never itself a continuable Activation.
+    if (this.resident.has(root.id)) return
+    while (true) {
+      const waits = this.treeWork(root)
+      // An empty pass observed the whole tree quiet: every member is idle, no
+      // admission is in flight, and idle members keep their parked input.
+      if (waits.length === 0) return
+      await Promise.all(waits)
+    }
+  }
+
+  /**
+   * Promises for every progressing piece of one subagent tree. A descendant
+   * that is running must reach idle; an admission must publish or roll back.
+   * Idle members are omitted on purpose: their parked input belongs to their
+   * own settlement loop and would otherwise hold the root forever.
+   */
+  private treeWork(root: Agent): Promise<unknown>[] {
+    const admissions = [...this.materializations]
+      .filter(materialization => materialization.lineage.includes(root))
+      .map(materialization => materialization.settled)
+    const running = [...this.resident.values()]
+      .filter(activation => activation.handle.agent !== root && activation.ancestry.has(root))
+      .filter(activation => activation.handle.agent.status !== 'idle')
+      .map(activation => activation.handle.agent.whenIdle())
+    return [...admissions, ...running]
   }
 
   /**
@@ -1023,7 +1087,10 @@ export class ContinuableActivationRegistry {
     // Quiet fibers deliver nothing to the parent: the orchestrating tool
     // (council/oracle) reads the final synthesis from the child session itself.
     if (activation.quiet) return
-    const message = createSettlementMessage(activation.childId, terminal, activation.finalFlushFailed)
+    const message = createSettlementMessage(activation.childId, terminal, {
+      limits: this.settlementReportLimits(),
+      flushFailed: activation.finalFlushFailed,
+    })
     this.notices.notify(
       activation.parentSession,
       activation.childId,
@@ -1052,16 +1119,25 @@ export class ContinuableActivationRegistry {
       if (!alreadyQueued) parent.send(message, 'next-turn', false)
       return 'held'
     }
+    // A resident (nested) parent keeps the waking flow: a quiet hold there
+    // would leave its Activation waiting on unclaimed inbox work forever.
+    const parentActivation = this.resident.get(parent.id)
+    const rootParent = parentActivation === undefined || parentActivation.handle.agent !== parent
+    // A user Stop-all is a refusal of further turns, not just of the running
+    // one: a child that finished naturally while its interrupt was in flight is
+    // an observation for the operator's next turn, so it queues there without
+    // opening one. The window closes as soon as that turn begins.
+    if (rootParent && this.stoppedAllSinceLastTurn(parent)) {
+      if (!alreadyQueued) parent.send(message, 'next-turn', false)
+      return 'parked'
+    }
     // A user-initiated park (`aborted` epoch) and any settlement landing
     // while a revert/edit is in flight queue quietly: the notice waits in
     // the root parent's durable inbox for the operator's next send instead
     // of waking a turn that would inject into the message being rewritten.
-    // A resident (nested) parent keeps the existing waking flow: a quiet
-    // hold there would leave its Activation waiting on unclaimed inbox work
-    // forever. Ordinary completions keep the wake/steer flow either way.
+    // Ordinary completions keep the wake/steer flow.
     if (!alreadyQueued && (stopReason === 'aborted' || revertBoundaryOf(parent) !== undefined)) {
-      const parentActivation = this.resident.get(parent.id)
-      if (parentActivation === undefined || parentActivation.handle.agent !== parent) {
+      if (rootParent) {
         parent.send(message, 'next-turn', false)
         return 'parked'
       }
@@ -1071,6 +1147,16 @@ export class ContinuableActivationRegistry {
     if (alreadyQueued) parent.inbox.remove(message.id)
     this.sendWaking(parent, message, parent.status === 'idle' ? 'queue' : 'steer')
     return 'waking'
+  }
+
+  /**
+   * Whether this parent's latest turn boundary is a user Stop-all, i.e. the
+   * operator refused further turns and has not started another one since.
+   * @param parent - live parent whose observed turn boundaries are consulted.
+   * @returns whether the newest turn boundary is the stop-all turn ending.
+   */
+  private stoppedAllSinceLastTurn(parent: Agent): boolean {
+    return this.stoppedAllSessions.has(parent.id)
   }
 
   /**

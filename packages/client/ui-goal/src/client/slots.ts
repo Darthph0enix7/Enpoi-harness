@@ -53,7 +53,7 @@ export interface GoalBarActions {
   onEdit: (objective: string) => Promise<GoalActionResult>
   /** Pause an active goal. */
   onPause: () => Promise<GoalActionResult>
-  /** Resume a paused goal. */
+  /** Resume a paused or blocked goal, or rearm an active-but-disarmed goal. */
   onResume: () => Promise<GoalActionResult>
   /** Clear the current goal (tombstone). */
   onClear: () => Promise<GoalActionResult>

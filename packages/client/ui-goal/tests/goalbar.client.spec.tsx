@@ -136,7 +136,7 @@ describe('GoalBar', () => {
 
   it('active disarmed goal: "未运行的目标" with a resume action instead of pause', () => {
     const actions = makeActions()
-    render(<GoalBar goal={makeGoal()} activation="disarmed" {...actions} t={t} />)
+    render(<GoalBar goal={makeGoal()} activation="disarmed" roundsStarted={1} {...actions} t={t} />)
     expect(screen.getByText('未运行的目标')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '恢复目标' }))
     expect(actions.onResume).toHaveBeenCalledTimes(1)
@@ -145,7 +145,7 @@ describe('GoalBar', () => {
 
   it('paused goal: "已暂停的目标" with a resume action before edit', () => {
     const actions = makeActions()
-    render(<GoalBar goal={makeGoal({ phase: 'paused' })} {...actions} t={t} />)
+    render(<GoalBar goal={makeGoal({ phase: 'paused' })} roundsStarted={1} {...actions} t={t} />)
     expect(screen.getByText('已暂停的目标')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: '恢复目标' }))
     expect(actions.onResume).toHaveBeenCalledTimes(1)
@@ -188,6 +188,49 @@ describe('GoalBar', () => {
     expect(screen.getByText('受阻的目标').closest('[title]')?.getAttribute('title')).toBe('No progress in 3 rounds')
   })
 
+  it('blocked goal with round capacity offers resume', () => {
+    const actions = makeActions()
+    render(<GoalBar goal={makeGoal({ phase: 'blocked' })} roundsStarted={1} {...actions} t={t} />)
+    expect(screen.getByText('受阻的目标')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '恢复目标' }))
+    expect(actions.onResume).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: '暂停目标' })).toBeNull()
+  })
+
+  it('blocked goal at its round cap hides resume, matching the service transition', () => {
+    const actions = makeActions()
+    render(<GoalBar goal={makeGoal({ phase: 'blocked', maxGoalRounds: 4 })} roundsStarted={4} {...actions} t={t} />)
+    expect(screen.getByText('受阻的目标')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '恢复目标' })).toBeNull()
+  })
+
+  it('blocked goal with an unknown round count hides resume', () => {
+    const actions = makeActions()
+    render(<GoalBar goal={makeGoal({ phase: 'blocked' })} {...actions} t={t} />)
+    expect(screen.queryByRole('button', { name: '恢复目标' })).toBeNull()
+  })
+
+  it('paused goal at its round cap hides resume, matching the service transition', () => {
+    const actions = makeActions()
+    render(<GoalBar goal={makeGoal({ phase: 'paused', maxGoalRounds: 4 })} roundsStarted={4} {...actions} t={t} />)
+    expect(screen.getByText('已暂停的目标')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '恢复目标' })).toBeNull()
+    expect(screen.getByRole('button', { name: '编辑目标' })).toBeTruthy()
+  })
+
+  it('paused goal with an unknown round count hides resume', () => {
+    const actions = makeActions()
+    render(<GoalBar goal={makeGoal({ phase: 'paused' })} {...actions} t={t} />)
+    expect(screen.queryByRole('button', { name: '恢复目标' })).toBeNull()
+  })
+
+  it('active disarmed goal at its round cap hides resume, matching the service transition', () => {
+    const actions = makeActions()
+    render(<GoalBar goal={makeGoal({ maxGoalRounds: 4 })} activation="disarmed" roundsStarted={4} {...actions} t={t} />)
+    expect(screen.getByText('未运行的目标')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '恢复目标' })).toBeNull()
+  })
+
   it('blocked goal without a reason carries no tooltip', () => {
     const actions = makeActions()
     render(<GoalBar goal={makeGoal({ phase: 'blocked' })} {...actions} t={t} />)
@@ -213,7 +256,7 @@ describe('GoalBar', () => {
   it('reports resume and clear failures without hiding the goal', async () => {
     const actions = makeActions()
     actions.onResume.mockResolvedValue({ ok: false, error: new RemoteError('gateway/internal', 'resume failed', {}) })
-    const { rerender } = render(<GoalBar goal={makeGoal({ phase: 'paused' })} {...actions} t={t} />)
+    const { rerender } = render(<GoalBar goal={makeGoal({ phase: 'paused' })} roundsStarted={1} {...actions} t={t} />)
     fireEvent.click(screen.getByRole('button', { name: '恢复目标' }))
     expect((await screen.findByRole('alert')).textContent).toBe('resume failed (gateway/internal)')
 

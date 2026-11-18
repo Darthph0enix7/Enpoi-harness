@@ -6,7 +6,8 @@
  * hook plus the four mutation verbs through the generated Goal Remote API.
  * Activation reads retain the Client Session through completion and wait
  * for its initial history open to succeed before contacting the Host.
- * This plugin does not create goals; deployments may expose /goal separately.
+ * This plugin does not create goals; the agent creates them through its goal
+ * tool, and a deployment may expose `/goal` separately.
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'

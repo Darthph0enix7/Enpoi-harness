@@ -8,6 +8,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { createHash } from 'node:crypto'
 import { AUTOMATED_ORIGINS, CATEGORIES, KEEPER_ALLOWED, type ClaimRow, type Origin, type State, type Trust } from './db'
+import { containsSecret } from './secret-guard'
 
 export interface ClaimInput {
   fact: string
@@ -63,7 +64,11 @@ export function makePipeline(db: DatabaseSync) {
     return get(id)?.state
   }
 
-  /** Stage 1+2+3: intake claims from any source with the trust gate + living-owner rule. */
+  /**
+   * Stage 1+2+3: intake claims from any source with the trust gate + living-owner
+   * rule. Every origin passes the secret guard first: a credential-shaped fact is
+   * skipped, never stored, and never fails the caller.
+   */
   async function intake(claims: ClaimInput[], opts: IntakeOptions): Promise<ClaimRow[]> {
     return mutex.run(() => {
       const inserted: ClaimRow[] = []
@@ -71,6 +76,7 @@ export function makePipeline(db: DatabaseSync) {
         for (const c of claims) {
           const fact = String(c.fact ?? '').trim()
           if (fact.length === 0 || fact.length > FACT_CAP) continue
+          if (containsSecret(fact)) continue
           let category = String(c.category ?? 'PROJECT').toUpperCase()
           if (!(CATEGORIES as readonly string[]).includes(category)) category = 'PROJECT'
 

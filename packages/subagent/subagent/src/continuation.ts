@@ -38,6 +38,7 @@ import {
   withChildBudgetGuidance,
   withContinuableReturnGuidance,
 } from './continuation-messages.ts'
+import type { SettlementReportLimits } from './continuation-messages.ts'
 import { assertSubagentMaxDepth } from './depth.ts'
 import { foldSubagentDescriptor, snapshotSubagentDescriptor } from './descriptor.ts'
 import { establishCatalogChild } from './catalog.ts'
@@ -87,11 +88,13 @@ export class SubagentContinuationManager {
     private readonly ctx: Context,
     private readonly host: ContinuationHost,
     maxActiveSubagents: () => number,
+    settlementReportLimits: () => SettlementReportLimits,
   ) {
     this.activations = new ContinuableActivationRegistry(
       ctx,
       (provider, childId, parent) => host.observeActivation(provider, childId, parent),
       maxActiveSubagents,
+      settlementReportLimits,
     )
   }
 
@@ -408,6 +411,14 @@ export class SubagentContinuationManager {
    */
   async drainChildren(parent: Agent, childIds: readonly SessionId[]): Promise<void> {
     await this.activations.drainChildren(parent, childIds)
+  }
+
+  /**
+   * Join progressing continuable work in one exact subagent tree for its root.
+   * @param root - exact live subagent-tree root whose descendant work is awaited.
+   */
+  async waitForTreeWork(root: Agent): Promise<void> {
+    await this.activations.waitForTreeWork(root)
   }
 
   /**

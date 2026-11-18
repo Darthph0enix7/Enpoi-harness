@@ -12,7 +12,9 @@ import type { DatabaseSync } from 'node:sqlite'
 import { resolveMemoryConfig, type MemoryConfig } from './config'
 import { CATEGORIES } from './db'
 import type { Pipeline } from './pipeline'
-import { getMemoryParams, searchMemory } from './retriever'
+import { closestNearDuplicate, fitToCharBudget, getMemoryParams, searchMemory } from './retriever'
+import { containsSecret } from './secret-guard'
+import { isDelegatedSession } from './session-authority'
 
 /** `YYYY-MM-DD` in UTC from one epoch-millisecond stamp. */
 function savedAt(claim: { committed_at: number | null; created_at: number }): string {
@@ -43,10 +45,7 @@ const ROOT_SESSION_REQUIRED = 'root_session_required'
  * @returns true when root-only memory actions must be denied.
  */
 function delegatedSession(exec?: ToolRunContext): boolean {
-  const header = exec?.agent?.session.header
-  if (header === undefined) return false
-  if (header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0) return true
-  return header.parentSession !== undefined && header.isSeeded !== true
+  return isDelegatedSession(exec?.agent?.session.header)
 }
 
 /**
@@ -147,6 +146,8 @@ export function registerMemoryTools(
       'or an exact path/command/identifier. Compaction already saves the checkpoint\'s durable facts automatically;',
       'save what it cannot see — a decision you just made, a correction from the operator, a verified command.',
       'One self-contained sentence, ≤400 chars, no secrets or personal data.',
+      'A fact that looks like a credential or secret is rejected and never stored; the same fact text and category are stored once.',
+      'A saved fact whose tokens closely match an existing active fact is still saved, and the result names the closest existing id.',
     ].join(' '),
     parameters: {
       type: 'object',
@@ -173,13 +174,25 @@ export function registerMemoryTools(
       // The source record scopes child saves and ranks same-project hits; a
       // root save stays authoritative operator memory.
       const authority = memorySaveAuthority(exec)
+      const fact = String(args.fact ?? '').trim()
+      // The pipeline rejects the same shape for every origin; naming the reason
+      // here is what lets the model correct the save instead of guessing.
+      if (containsSecret(fact)) return { saved: false, note: 'rejected: looks like a credential or secret' }
       const inserted = await pipeline.intake(
-        [{ fact: String(args.fact ?? ''), category: String(args.category ?? 'PROJECT'), tags: String(args.tags ?? '') }],
+        [{ fact, category: String(args.category ?? 'PROJECT'), tags: String(args.tags ?? '') }],
         { origin: authority.origin, trust: authority.trust, provenance: authority.provenance },
       )
-      if (inserted.length === 0) return { saved: false, note: 'Duplicate or invalid fact (already known / empty / >400 chars)' }
+      if (inserted.length === 0) return { saved: false, note: 'Duplicate or invalid fact (already known / empty / >400 chars / rejected)' }
       const c = inserted[0]!
-      return { saved: true, id: c.id, state: c.state, note: `Saved as ${c.id} (${c.category})` }
+      // A near-match is a note, not a merge: facts that differ in one number
+      // must both survive. The scan reuses the compaction threshold and its
+      // bounded FTS window, and ignores the row this save just produced.
+      const scope = { cwd: exec?.agent?.session.header.cwd, scopeCompaction: config.scopeCompactionFactsToWorkspace }
+      const near = closestNearDuplicate(db, fact, scope, config.compactionFactsNearDuplicate, c.id)
+      const note = near === undefined
+        ? `Saved as ${c.id} (${c.category})`
+        : `Saved as ${c.id} (${c.category}); closest existing fact ${near.id} is a near-match (Jaccard ${near.similarity.toFixed(2)}) — confirm both should stay`
+      return { saved: true, id: c.id, state: c.state, note }
     },
   })
 
@@ -190,7 +203,9 @@ export function registerMemoryTools(
       'or before re-deriving a decision: it returns saved facts plus the durable facts each compaction extracted,',
       'each with id, category, origin (memory_save | compaction | keeper | worker:<role>), save date, state, and trust so you can weigh them.',
       'Hits are coverage-ranked: facts matching more query terms come first, exact phrases break ties, and the caller\'s',
-      'project cwd plus recency provide bounded tie-breaks. Tentative claims are unconfirmed; verify before relying on them.',
+      'project cwd plus recency provide bounded tie-breaks. Results are capped by the configured top-K and by a',
+      'character budget over the fact text; the render names how many matches the budget left out, so refine the query',
+      'instead of assuming the omitted facts do not exist. Tentative claims are unconfirmed; verify before relying on them.',
       'Nothing is injected — this is the only way memory reaches you. Compaction facts are scoped to the caller\'s workspace.',
     ].join(' '),
     parameters: {
@@ -221,32 +236,40 @@ export function registerMemoryTools(
               required: ['id', 'fact'],
             },
           },
+          omitted: { type: 'integer' },
           note: { type: 'string' },
         },
         required: ['facts'],
       },
       // C4: `• <id> <category> [<origin> <savedAt>] state=<state> trust=<trust> — <fact>`.
       render: (_a, raw) => {
-        const v = raw as { facts?: MemoryFactRow[] }
-        return [{
-          type: 'text',
-          text: (Array.isArray(v.facts) ? v.facts.map(f => `• ${f.id} ${f.category} [${f.origin} ${f.savedAt}] state=${f.state} trust=${f.trust} — ${renderFact(f.fact)}`) : []).join('\n')
-            || 'No matching memory.',
-        }]
+        const v = raw as { facts?: MemoryFactRow[]; omitted?: number }
+        const lines = Array.isArray(v.facts)
+          ? v.facts.map(f => `• ${f.id} ${f.category} [${f.origin} ${f.savedAt}] state=${f.state} trust=${f.trust} — ${renderFact(f.fact)}`)
+          : []
+        const text = lines.join('\n') || 'No matching memory.'
+        const omitted = typeof v.omitted === 'number' ? v.omitted : 0
+        return [{ type: 'text', text: omitted > 0
+          ? `${text}\n… ${omitted} more matches omitted by the character budget; refine the query`
+          : text }]
       },
     },
     isConcurrencySafe: () => true,
     async execute(args: Record<string, unknown>, exec?: ToolRunContext) {
-      // Doc 38: retriever top-K resolved fresh per call (hot-swap). The parser
-      // rejects non-integers; a direct caller gets the same clamp here.
+      // Doc 38: retriever top-K and character budget resolved fresh per call
+      // (hot-swap). The parser rejects non-integers; a direct caller gets the
+      // same clamp here.
       const params = getMemoryParams(ctx)
       const limit = memorySearchLimit(args.limit, params.retrieverTopK)
       // L2: compaction-derived facts are workspace-scoped to the caller's cwd.
       const scope = { cwd: exec?.agent?.session.header.cwd, scopeCompaction: config.scopeCompactionFactsToWorkspace }
       const hits = searchMemory(db, String(args.query ?? ''), limit, scope)
       if (hits.length === 0) return { facts: [], note: 'No matching memory.' }
+      // The budget applies after ranking: keep whole facts in rank order, and
+      // always return the top-ranked row even when it alone exceeds the budget.
+      const fit = fitToCharBudget(hits, params.retrieverCharBudget)
       return {
-        facts: hits.map(h => ({
+        facts: fit.hits.map(h => ({
           id: h.id,
           category: h.category,
           origin: h.origin,
@@ -255,7 +278,10 @@ export function registerMemoryTools(
           trust: h.source_trust,
           fact: h.fact,
         })),
-        note: `${hits.length} fact(s)`,
+        ...fit.omitted > 0 ? { omitted: fit.omitted } : {},
+        note: fit.omitted > 0
+          ? `${fit.hits.length} fact(s); ${fit.omitted} omitted by the character budget`
+          : `${fit.hits.length} fact(s)`,
       }
     },
   })

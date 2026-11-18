@@ -13,7 +13,11 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { MockAdapter, textResponse } from '../../../core/agent-loop/tests/mock-adapter.ts'
-import { createSettlementMessage } from '../src/continuation-messages.ts'
+import {
+  DEFAULT_SETTLEMENT_REPORT_MAX_CHARS,
+  DEFAULT_SETTLEMENT_REPORT_MAX_IMAGES,
+  createSettlementMessage,
+} from '../src/continuation-messages.ts'
 
 const contexts = new Set<Context>()
 afterEach(async () => {
@@ -46,6 +50,8 @@ function operatorMessage(text: string) {
   return createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } })
 }
 
+const limits = { maxChars: DEFAULT_SETTLEMENT_REPORT_MAX_CHARS, maxImages: DEFAULT_SETTLEMENT_REPORT_MAX_IMAGES }
+
 describe('Agent.cancel preserves queued settlement notices', () => {
   it('keeps the notice, drops operator steering, and delivers the notice on the next turn', async () => {
     const adapter = new MockAdapter(['hang', textResponse('notice processed')])
@@ -59,7 +65,7 @@ describe('Agent.cancel preserves queued settlement notices', () => {
     const notice = createSettlementMessage(SessionId('child-1'), {
       stopReason: 'completed',
       output: [{ type: 'text', text: 'CHILD DONE' }],
-    })
+    }, { limits })
     parent.steer(notice)
     parent.steer(operatorMessage('operator steer'))
 

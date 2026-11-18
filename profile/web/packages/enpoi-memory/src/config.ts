@@ -15,7 +15,7 @@ export interface MemoryConfig {
   compactionFactsIncludeChildSessions: boolean
   /** Maximum facts captured from one compaction (clamped 1–40). */
   compactionFactsMax: number
-  /** Token-set Jaccard threshold above which a candidate is a near-duplicate (clamped 0.5–1). */
+  /** Token-set Jaccard threshold for compaction-fact suppression and the `memory_save` near-match note (clamped 0.5–1). */
   compactionFactsNearDuplicate: number
   /** Restrict `origin = 'compaction'` rows in `memory_search` to the caller's workspace cwd. */
   scopeCompactionFactsToWorkspace: boolean

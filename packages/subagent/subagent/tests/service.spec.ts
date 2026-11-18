@@ -575,3 +575,17 @@ describe('subagent descriptors', () => {
     expect(() => foldSubagentDescriptor([event(data)])).toThrow(detail)
   })
 })
+
+describe('subagent configuration', () => {
+  it('defaults and validates the settlement report bounds', () => {
+    const defaults = SubagentRuntime.Config({})
+    expect(defaults.settlementReportMaxChars.get()).toBe(12_000)
+    expect(defaults.settlementReportMaxImages.get()).toBe(4)
+    expect(SubagentRuntime.Config({ settlementReportMaxChars: 512 }).settlementReportMaxChars.get()).toBe(512)
+    expect(SubagentRuntime.Config({ settlementReportMaxImages: 2 }).settlementReportMaxImages.get()).toBe(2)
+    expect(() => SubagentRuntime.Config({ settlementReportMaxChars: 0 })).toThrow()
+    expect(() => SubagentRuntime.Config({ settlementReportMaxChars: 1.5 })).toThrow()
+    expect(() => SubagentRuntime.Config({ settlementReportMaxImages: 0 })).toThrow()
+    expect(() => SubagentRuntime.Config({ settlementReportMaxImages: 2.5 })).toThrow()
+  })
+})

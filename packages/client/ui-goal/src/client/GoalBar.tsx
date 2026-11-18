@@ -1,11 +1,13 @@
 /**
  * GoalBar: the goal indicator docked above the message composer (input dock
  * strip). A present goal shows a goal glyph, a phase label, the truncated
- * objective, and icon actions — resume when active-disarmed or paused, edit
- * (inline form in the same strip), and clear. Goal creation lives on the
- * `/goal` command, not here: loading (undefined), no goal (null), and complete
- * goals render nothing. Durable state arrives as the projected whole snapshot;
- * process-local activation arrives through the injected activation hook.
+ * objective, and icon actions — resume when active-disarmed, paused, or
+ * blocked and the round budget still has capacity, edit (inline form in the
+ * same strip), and clear. Goals
+ * are created by the agent through its goal tool, not here: loading
+ * (undefined), no goal (null), and complete goals render nothing. Durable state
+ * arrives as the projected whole snapshot; process-local activation arrives
+ * through the injected activation hook.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -24,6 +26,8 @@ export interface GoalBarProps extends GoalBarActions {
   goal: GoalSnapshot | null | undefined
   /** Process-local continuation activation; absent while the live read is pending. */
   activation?: GoalActivation
+  /** Highest admitted goal round from the projection; absent while the projection is unknown. */
+  roundsStarted?: number
 }
 
 /** Strip label keys per visible phase; complete goals render nothing. */
@@ -33,13 +37,16 @@ const PHASE_LABELS = {
   blocked: 'phase.blocked',
 } as const satisfies Record<string, GoalKey>
 
+/** Phases the goal service resumes without a process-local activation check. */
+const RESUMABLE_PHASES = new Set<GoalSnapshot['phase']>(['paused', 'blocked'])
+
 /** Strip label for an active goal using its process-local activation. */
 function activeLabel(activation: GoalActivation | undefined, t: TranslateNS<'goal'>): string {
   if (activation === 'disarmed') return t('phase.active.disarmed')
   return t(PHASE_LABELS.active)
 }
 
-export function GoalBar({ goal, activation, onEdit, onPause, onResume, onClear, t }: GoalBarProps & PropsLocale<'goal'>) {
+export function GoalBar({ goal, activation, roundsStarted, onEdit, onPause, onResume, onClear, t }: GoalBarProps & PropsLocale<'goal'>) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const [pending, setPending] = useState(false)
@@ -133,8 +140,11 @@ export function GoalBar({ goal, activation, onEdit, onPause, onResume, onClear, 
 
   const title = goal.phase === 'blocked' ? goal.blockedReason?.message : undefined
   const label = goal.phase === 'active' ? activeLabel(activation, t) : t(PHASE_LABELS[goal.phase])
-  const showResume = goal.phase === 'paused'
-    || (goal.phase === 'active' && activation === 'disarmed')
+  // The goal service resumes only while its round budget has capacity. An
+  // unknown round count cannot prove that, so no control claims it.
+  const hasRoundCapacity = roundsStarted !== undefined && roundsStarted < goal.maxGoalRounds
+  const showResume = hasRoundCapacity
+    && (RESUMABLE_PHASES.has(goal.phase) || (goal.phase === 'active' && activation === 'disarmed'))
   return (
     <div className={css.dock} data-goal-bar>
       <div className={css.bar} title={title}>
@@ -193,6 +203,7 @@ export function GoalDock({
   const goal = projection === undefined || projection === null ? projection : projection.goal
   const goalId = goal?.id
   const revision = goal?.revision
+  const roundsStarted = projection === undefined || projection === null ? undefined : projection.roundsStarted
   const activation = useGoalActivation(next => (
     next.id === goalId && next.revision === revision ? next.activation : undefined
   ))
@@ -201,6 +212,7 @@ export function GoalDock({
     <GoalBar
       goal={goal}
       {...activation === undefined ? {} : { activation }}
+      {...roundsStarted === undefined ? {} : { roundsStarted }}
       onEdit={onEdit}
       onPause={onPause}
       onResume={onResume}

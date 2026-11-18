@@ -560,7 +560,7 @@ export async function fetchMcpToolNames(): Promise<string[] | undefined> {
 export type PermissionProvenance = 'agent rule' | 'global rule' | 'standing grant' | 'inherit (default)'
 
 /**
- * Tools every child keeps regardless of role surface: the pinned whiteboard
+ * Tools every child keeps regardless of role surface: the read-only whiteboard
  * keep list of the subagent runtime (`SHARED_CHILD_KEEP` in tool-subagent).
  * Generated from that host table, so the availability eye tells the truth for
  * roles whose shipped surface predates the keep list.

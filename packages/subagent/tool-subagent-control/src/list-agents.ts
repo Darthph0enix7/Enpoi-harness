@@ -30,11 +30,17 @@ export const MAX_LIST_AGENTS_LIMIT = 100
 interface ListAgentsRequest {
   readonly scope?: ListAgentsScope
   readonly limit?: number
+  readonly offset?: number
+  readonly status?: 'running' | 'inactive'
+  readonly query?: string
 }
 
 interface ListAgentsSpec {
   readonly scope: ListAgentsScope
   readonly limit: number
+  readonly offset: number
+  readonly status?: 'running' | 'inactive'
+  readonly query?: string
 }
 
 type ListAgentsEntry =
@@ -62,13 +68,52 @@ interface OrderedRow {
   readonly running: boolean
 }
 
-/** Resolve the optional model request into an internal required spec. */
+/**
+ * Resolve the optional model request into an internal required spec. `limit`
+ * and `offset` clamp to their page bounds; `status` accepts the closed enum
+ * and `query` normalizes to a case-insensitive substring. The display paging
+ * (`limit`/`offset`) never reaches `execute`, so structured output carries
+ * every row that survives the filters.
+ * @param request - the model-supplied arguments.
+ * @returns the normalized listing request.
+ */
 function resolveListAgentsRequest(request: ListAgentsRequest): ListAgentsSpec {
   const requested = request.limit
   const limit = requested === undefined || !Number.isFinite(requested)
     ? DEFAULT_LIST_AGENTS_LIMIT
     : Math.min(Math.max(Math.trunc(requested), 1), MAX_LIST_AGENTS_LIMIT)
-  return { scope: request.scope ?? 'children', limit }
+  const requestedOffset = request.offset
+  const offset = requestedOffset === undefined || !Number.isFinite(requestedOffset)
+    ? 0
+    : Math.max(Math.trunc(requestedOffset), 0)
+  const status = request.status === 'running' || request.status === 'inactive' ? request.status : undefined
+  const trimmedQuery = typeof request.query === 'string' ? request.query.trim().toLowerCase() : ''
+  return {
+    scope: request.scope ?? 'children',
+    limit,
+    offset,
+    ...status === undefined ? {} : { status },
+    ...trimmedQuery === '' ? {} : { query: trimmedQuery },
+  }
+}
+
+/**
+ * Whether one projected row survives the `status` and `query` filters.
+ * Diagnostics carry no status or label, so a status filter drops them while a
+ * query can still select one by id.
+ * @param row - the projected row.
+ * @param spec - the normalized request.
+ * @returns true when the row matches every active filter.
+ */
+function matchesFilters(row: OrderedRow, spec: ListAgentsSpec): boolean {
+  if (spec.status !== undefined) {
+    if (row.entry.kind !== 'child' || row.entry.status !== spec.status) return false
+  }
+  if (spec.query !== undefined) {
+    const label = row.entry.kind === 'child' ? row.entry.label : ''
+    if (!row.entry.id.toLowerCase().includes(spec.query) && !label.toLowerCase().includes(spec.query)) return false
+  }
+  return true
 }
 
 /** Report turn activity without exposing whether the child is loaded. */
@@ -128,7 +173,9 @@ export function apply(ctx: Context): void {
       'List the continuable subagents you started, with their ids, labels, and status; one-shot delegations are not listed. '
       + 'running means it is working; inactive means it is not currently working. '
       + 'Running children are listed first, then inactive ones by most recent creation. '
-      + `The result shows at most ${String(DEFAULT_LIST_AGENTS_LIMIT)} rows (set \`limit\`, max ${String(MAX_LIST_AGENTS_LIMIT)}) and a footer with the totals when rows are omitted. `
+      + 'Optional `status` and `query` filters narrow the matching set: `query` matches the id or label, case-insensitively. '
+      + `\`limit\` (default ${String(DEFAULT_LIST_AGENTS_LIMIT)}, max ${String(MAX_LIST_AGENTS_LIMIT)}) and \`offset\` bound only the displayed text; the call returns every matching row to code, so inside run_code filter that array and return only what you need, e.g. \`(await tools.list_agents({ query: "parser" })).filter(child => child.status === "running")\`. `
+      + 'A footer gives the displayed range, the running/inactive totals, and the next offset when more rows follow. '
       + 'You will be notified when a subagent finishes; there is no need to keep checking its status. NEVER call this tool repeatedly to poll or wait for running children — the settlement notice will wake you automatically. '
       + 'Use send_message to continue the conversation.',
     parameters: {
@@ -138,10 +185,24 @@ export function apply(ctx: Context): void {
         description: 'children (default) lists direct children, which accept send_message in any status. '
           + 'descendants lists the whole tree below you with each entry\'s parent session id and depth; entries deeper than 1 accept only interrupt_agent.',
       },
+      status: {
+        type: 'string',
+        enum: ['running', 'inactive'],
+        description: 'Only match children in this state. Diagnostics carry no state and are omitted by a status filter.',
+      },
+      query: {
+        type: 'string',
+        description: 'Case-insensitive substring match over the child id and label.',
+      },
       limit: {
         type: 'number',
-        description: `Maximum child rows to show (default ${String(DEFAULT_LIST_AGENTS_LIMIT)}, max ${String(MAX_LIST_AGENTS_LIMIT)}). `
-          + 'Running children are always shown first; omitted inactive rows are counted in the footer.',
+        description: `Maximum child rows to display (default ${String(DEFAULT_LIST_AGENTS_LIMIT)}, max ${String(MAX_LIST_AGENTS_LIMIT)}). `
+          + 'Applies only to the rendered text; `offset` selects later pages.',
+      },
+      offset: {
+        type: 'number',
+        description: 'Rows to skip before the displayed page (default 0, negative values clamp to 0). '
+          + 'Applies only to the rendered text; code receives every matching row.',
       },
     },
     output: {
@@ -177,8 +238,24 @@ export function apply(ctx: Context): void {
       },
       render: (args, entries) => {
         const request = resolveListAgentsRequest(args)
-        if (entries.length === 0) return [{ type: 'text', text: '(no subagents)' }]
-        const shown = entries.slice(0, request.limit)
+        const filtered = request.status !== undefined || request.query !== undefined
+        if (entries.length === 0) {
+          return [{ type: 'text', text: filtered ? '(no matching subagents)' : '(no subagents)' }]
+        }
+        const total = entries.length
+        const shown = entries.slice(request.offset, request.offset + request.limit)
+        const running = entries.filter(entry => entry.kind === 'child' && entry.status === 'running').length
+        const counts = `(${String(running)} running, ${String(total - running)} inactive)`
+        const noun = filtered ? 'matching children' : 'children'
+        if (shown.length === 0) {
+          // The page window starts past the last row: report the totals and the
+          // only useful recovery rather than an empty body.
+          return [{
+            type: 'text',
+            text: `… showing 0 of ${String(total)} ${noun} ${counts}; `
+              + `offset ${String(request.offset)} is past the last child. Use offset 0 to return to the first page.`,
+          }]
+        }
         const lines = shown.map((entry) => {
           // A descendants row always carries its position; children rows
           // never render it. String() spans the schema-optional shape
@@ -190,13 +267,14 @@ export function apply(ctx: Context): void {
             ? `${entry.id} [${entry.status}]${at} — ${entry.label}`
             : `${entry.id} [diagnostic: ${entry.reason}]${at}`
         })
-        if (entries.length > shown.length) {
-          const running = entries.filter(entry => entry.kind === 'child' && entry.status === 'running').length
+        const last = request.offset + shown.length
+        if (request.offset > 0 || last < total) {
+          const first = request.offset + 1
+          const range = first === last ? String(last) : `${String(first)}–${String(last)}`
           lines.push(
-            `… showing ${String(shown.length)} of ${String(entries.length)} children`
-            + ` (${String(running)} running, ${String(entries.length - running)} inactive);`,
-            'raise `limit` or narrow `scope` to see more.',
+            `… showing ${range} of ${String(total)} ${noun} ${counts};`,
           )
+          if (last < total) lines.push(`Use offset ${String(last)} for the next page.`)
         }
         return [{ type: 'text', text: lines.join('\n') }]
       },
@@ -213,7 +291,8 @@ export function apply(ctx: Context): void {
           const entries = await ctx.subagents.listChildren(parent.id, exec.signal)
           return orderRows(entries
             .map(entry => project(ctx.agents, entry))
-            .filter(entry => entry !== undefined))
+            .filter(entry => entry !== undefined)
+            .filter(row => matchesFilters(row, request)))
         }
         case 'descendants': {
           const entries = await ctx.subagents.listDescendants(parent.id, exec.signal)
@@ -223,6 +302,7 @@ export function apply(ctx: Context): void {
           return entries
             .map(entry => project(ctx.agents, entry, entry))
             .filter(entry => entry !== undefined)
+            .filter(row => matchesFilters(row, request))
             .map(row => row.entry)
         }
         /* v8 ignore next 2 -- the resolver normalizes the schema-validated closed scope before dispatch. */

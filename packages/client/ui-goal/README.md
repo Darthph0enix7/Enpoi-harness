@@ -9,7 +9,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-The Web GUI goal surface shows both the durable goal state and its current process-local activation, and lets users edit, pause, resume, or clear the goal; rejected changes appear inline. It displays durable `/goal` runs as `Command input` bubbles so commands from users or the model remain visible after reload. Goal creation remains outside this package. Shipped Web presets other than `minimal` make `/goal` available to agents.
+The Web GUI goal surface shows both the durable goal state and its current process-local activation, and lets users edit, pause, resume, or clear the goal; rejected changes appear inline. It displays durable `/goal` runs as `Command input` bubbles so commands from users or the model remain visible after reload. Goal creation remains outside this package: the agent creates goals through its goal tool, and a deployment may expose a `/goal` command separately.
 
 ## Table of Contents
 
@@ -25,7 +25,7 @@ The Web GUI goal surface shows both the durable goal state and its current proce
 <a id="use-this-package"></a>
 ## Use this package
 
-Mount this plugin alongside `ui-conversation` and the goal domain package; the strip then appears as the second card in the composer-context stack (after Todo, before Queue) whenever the session has a goal. Todo and Goal use the same panel elevation above the composer. An armed active goal offers pause; an active-but-disarmed or paused goal offers resume; edit rewrites the objective; clear removes the goal and suppresses the strip until the projection catches up.
+Mount this plugin alongside `ui-conversation` and the goal domain package; the strip then appears as the second card in the composer-context stack (after Todo, before Queue) whenever the session has a goal. Todo and Goal use the same panel elevation above the composer. An armed active goal offers pause; an active-but-disarmed, paused, or blocked goal offers resume while its round budget still has capacity; edit rewrites the objective; clear removes the goal and suppresses the strip until the projection catches up.
 
 ### The command-input bubble
 
@@ -56,7 +56,7 @@ Activation reads hold a temporary `goalActivation` Client reference and send `go
 
 Read these pages when the goal surface is not enough. They move from the browser strip to the goal domain and the slots it fills.
 
-- [dsh-goal](../../goal/goal/README.md) — the goal domain, projection, and `/goal` command this surface reads and mutates.
+- [dsh-goal](../../goal/goal/README.md) — the goal domain and projection this surface reads and mutates.
 - [ui-conversation](../ui-conversation/README.md) — declares the `conversation.input.dock` slot and owns the composer.
 - [Client package map](../README.md) — adjacent browser UI packages.
 
@@ -78,7 +78,7 @@ None unless the queued goal context is admitted. An admitted context extends the
 
 These limits define the current goal surface. They are current package constraints, not a goal-domain comparison or a task backlog.
 
-- **Preset-independent host state** — switching an active session to `minimal` leaves its host-owned goal intact. `/goal` and goal tools disappear, while this strip can still edit, pause, resume, or clear the goal.
+- **Preset-independent host state** — switching an active session to `minimal` leaves its host-owned goal intact. The goal tools disappear, while this strip can still edit, pause, resume, or clear the goal.
 
 <a id="dev-note"></a>
 ### Dev Note

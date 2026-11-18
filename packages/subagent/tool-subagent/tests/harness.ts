@@ -70,7 +70,7 @@ export const TEST_REGISTERED_TOOLS = [
  * without them is the headless profile the keep-list audit must survive.
  */
 export const TEST_KEEP_TOOLS = [
-  'whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'compressor_retrieve',
+  'whiteboard_read', 'compressor_retrieve',
 ] as const
 
 /** Register the stub surface after the ToolRuntime is active. */

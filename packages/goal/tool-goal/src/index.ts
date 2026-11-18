@@ -30,7 +30,7 @@ export const inject = ['agents', 'goals', 'tools', 'systemPrompt', 'sessionProje
 
 /** Model policy and hard lower bounds for goal-state updates. */
 export interface Config {
-  /** Minimum admitted goal rounds before the model may self-report `blocked`. */
+  /** Minimum goal rounds started in this goal before the model may self-report `blocked`. */
   blockedAfterConsecutiveRounds?: number
 }
 
@@ -117,8 +117,8 @@ function guidance(blockedAfter: number): string {
     + 'After session resume or fork, an active goal is disarmed: when '
     + 'a human asks to continue or resume in any wording or language, use update_goal action '
     + 'resume to rearm it. Mark complete only when the objective is actually achieved. Mark '
-    + `blocked only after the same blocking condition persists for at least ${blockedAfter} `
-    + 'consecutive goal rounds, and report that concrete condition in blocked_reason; difficulty, uncertainty, '
+    + `blocked only after at least ${blockedAfter} goal rounds have started in this goal, and report `
+    + 'the concrete condition that persisted across them in blocked_reason; difficulty, uncertainty, '
     + 'or useful remaining work is not blocked.'
 }
 
@@ -242,7 +242,8 @@ export function apply(ctx: Context, config: Config): void {
         required: true,
         enum: UPDATE_ACTIONS,
         description: 'edit, pause, and resume require a direct top-level human request. complete and blocked are also allowed '
-          + 'during an automatic continuation of this goal; blocked is rejected before the configured minimum round count.',
+          + 'during an automatic continuation of this goal; blocked is rejected until at least the configured number of goal '
+          + 'rounds have started in this goal.',
       },
       objective: { type: 'string', description: 'Replacement objective; valid only with action edit.' },
       max_goal_rounds: { type: 'number', description: 'Replacement cap; valid only with action edit.' },
@@ -305,8 +306,8 @@ export function apply(ctx: Context, config: Config): void {
       if (args.action === 'blocked' && authority.kind === 'goal-round'
         && authority.goal.roundsStarted < resolved.blockedAfterConsecutiveRounds) {
         throw new HarnessError(
-          `blocked requires at least ${resolved.blockedAfterConsecutiveRounds} consecutive goal rounds; `
-          + `current round is ${authority.goal.roundsStarted}`,
+          `blocked requires at least ${resolved.blockedAfterConsecutiveRounds} goal rounds started in this goal; `
+          + `${authority.goal.roundsStarted} started so far`,
           'GOAL_TOOL_BLOCK_THRESHOLD',
         )
       }
