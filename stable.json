@@ -1,8 +1,18 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-11-15T12:13:42.742Z",
+  "generatedAt": "2026-11-18T01:49:11.752Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.130",
+      "commit": "efb29f2",
+      "releasedAt": "2026-11-18T01:28:10.000Z",
+      "notes": [
+        "chore(harness): regenerate catalogs, translations, profile bundles and tool inventory for the orchestration and peer release",
+        "feat(peer): policy-gated model discovery, selection, attribution and token ceilings",
+        "fix(orchestration): goal rounds wait for children, Stop revokes continuation, bounded settlements, scalable discovery"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.129",
       "commit": "4aacaed",
@@ -390,17 +400,6 @@
         "fix(update): live defects + two-phase prepare/apply surface",
         "fix(update): re-validate the staged record under the update lock before applying",
         "feat(update): two-phase engine — prepare stages, apply switches"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.82",
-      "commit": "587fffe",
-      "releasedAt": "2026-10-13T15:05:40.000Z",
-      "notes": [
-        "fix(ui-update): omit `latest` in the current-state test fixture (exactOptionalPropertyTypes)",
-        "feat(update): in-app update surface — ui-update client + host run lifecycle (P3 + minimal P4)",
-        "feat(update): per-channel update catalog + host update-check plugin (P1+P2)",
-        "docs(plan): UI update manifest + in-app updates — design and open decisions"
       ]
     }
   ]
