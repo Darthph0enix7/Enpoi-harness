@@ -1,8 +1,16 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
-  "generatedAt": "2026-11-18T01:49:11.798Z",
+  "generatedAt": "2026-11-18T09:41:02.922Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.131",
+      "commit": "72d7f94",
+      "releasedAt": "2026-11-18T09:20:55.000Z",
+      "notes": [
+        "docs(creator): document orchestration behavior and peer model control for the Creator"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.130",
       "commit": "efb29f2",
@@ -388,18 +396,6 @@
         "feat(update): version-free Update pill + General-settings update row (skips stay updatable)",
         "fix(update): normalize legacy run.json records across the rung/launcher split",
         "feat(update): engine capability probe + one-shot fallback for pre-two-phase installs"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.83",
-      "commit": "fac60db",
-      "releasedAt": "2026-10-13T15:59:48.000Z",
-      "notes": [
-        "fix(update): recognize the engine's apply success line (Update applied:)",
-        "docs(plan): record the implemented phases, launch environment, and overlay geometry",
-        "fix(update): live defects + two-phase prepare/apply surface",
-        "fix(update): re-validate the staged record under the update lock before applying",
-        "feat(update): two-phase engine — prepare stages, apply switches"
       ]
     }
   ]
