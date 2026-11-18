@@ -4,7 +4,7 @@
   "captureSource": "apps/web/tests/keyless-tool-inventory.e2e.ts",
   "captureReceipt": {
     "version": "0.1.7-enpoi.2",
-    "head": "737f91af1c21106df9d405aa92fbc0660b611a44",
+    "head": "4aacaed75c2518bc6a8723e78db2747ff53a07dd",
     "profileFingerprints": {
       "dsh-enpoi-agent-switch": {
         "dir": "enpoi-agent-switch",
@@ -13,8 +13,8 @@
       },
       "dsh-enpoi-capabilities": {
         "dir": "enpoi-capabilities",
-        "sourceInputs": "f4ba1a1a456da07a27e821b350c2b445be88153ca19965aa170862dbc17693fe",
-        "outputSha": "d4baf14d588fc8df3aac0b5f17c6edc37f8c1380eaa40f0941bd9d3f2805a666"
+        "sourceInputs": "c24dce09ce18e8a4e2f68056ddb20c3bd03027e49943a0209dccc17853eff9bc",
+        "outputSha": "d31349876a108272656b8fb83279dccaf428117e85171c9ffdfaf15a75c069c4"
       },
       "dsh-enpoi-cascade": {
         "dir": "enpoi-cascade",
@@ -23,8 +23,8 @@
       },
       "dsh-enpoi-catalog-rules": {
         "dir": "enpoi-catalog-rules",
-        "sourceInputs": "c3effcd0215b1d541b22a6ee3002450640785768996c25b6246cace9eef75fea",
-        "outputSha": "3a1ec24f494d2aa41605f0b0929ba68ef3fb7db2ab310e11b93e1629eef52456"
+        "sourceInputs": "631a62a30ce65a38c46fef61d702d2fa9aa1da1af617fcb90ea69572d7d162a3",
+        "outputSha": "fd641411ee9aa4352cb1cc3838f104dee0732b8110d2c09a8565fafcb5c84e1c"
       },
       "dsh-enpoi-commandcode-provider": {
         "dir": "enpoi-commandcode-provider",
@@ -88,8 +88,8 @@
       },
       "dsh-enpoi-memory": {
         "dir": "enpoi-memory",
-        "sourceInputs": "6f1f325c94b53d99d61089c1c50beafc0394271d43d0a86dae599c4c6671c82f",
-        "outputSha": "1669f9b45aebc30caa71b79bb2ef71da4b86294753c4346a13e6e2e9865cd7e1"
+        "sourceInputs": "3b2110d210f21e3e742b28a1e5554fa5a23206d5a54a364f22ff7a20e7b5e8f7",
+        "outputSha": "15bb10dada1879d1add172c411ccbc20bfef86b3563d5df5433b6db8d7f1f91f"
       },
       "dsh-enpoi-model-chains": {
         "dir": "enpoi-model-chains",
@@ -103,8 +103,13 @@
       },
       "dsh-enpoi-peer-bridge": {
         "dir": "enpoi-peer-bridge",
-        "sourceInputs": "be879ee804f9d44cfc79332ebb25e2b75f4459940c108e8a7f0da3985a839a65",
-        "outputSha": "73d040c70e62f28cda656fc760ec16f039313023a60c540b0c5463964763d76d"
+        "sourceInputs": "0c16b2e9869f9fede86c1e91225e5be785f20ae91fbf24c4faa1185c3636e547",
+        "outputSha": "f0e5baa2c665ca023ae02019c18f1082f188c0f45de205ad81ad24a789c488b1"
+      },
+      "dsh-enpoi-peer-routing": {
+        "dir": "enpoi-peer-routing",
+        "sourceInputs": "ae9b6d1134debb3dfa4984ba8f62363855cd221e17bb07784a1bbb77e4d5788d",
+        "outputSha": "2744d42a8a9f5cc8604420fc91523eca8ae1365daeb9ef48ce000e291f2b9586"
       },
       "dsh-enpoi-preset-authoring": {
         "dir": "enpoi-preset-authoring",
@@ -133,8 +138,8 @@
       },
       "dsh-enpoi-tool-groups": {
         "dir": "enpoi-tool-groups",
-        "sourceInputs": "e61647874f72a2c54beef10d6737cc2d662cc0d6281b4638fd5d801b8b09ff88",
-        "outputSha": "2f67a113695e08da89719c51d6030e73f6d8e0f18667377592c6218a51715f53"
+        "sourceInputs": "ead8dd8d19164bac106a89400bdff5baa6f0348afaf8b021c8bffdb1c4add521",
+        "outputSha": "47ea25d6a47be6a7cbc2af97943ada4753009d1f54f93b65147181418414fbaf"
       },
       "dsh-enpoi-ui-state": {
         "dir": "enpoi-ui-state",
@@ -243,16 +248,16 @@
         "entry": "83b1e4e90a82ef3c0b15eb9ff49c630cf061f33dbf6f98854fa884ee7665c8a5"
       }
     },
-    "combinedDigest": "05b81939832f14b108d53a566619a2e8850019f229dbd31d78940b6aef3c558a"
+    "combinedDigest": "65775058127d76f2c03b9606c1d77a723b0e749aa403ca108ff24acdb9d10a8e"
   },
   "captureClientBuild": {
     "artifacts": {
       "fileCount": 378,
-      "sha256": "b06f88053a044636c8962737b030283ab46280626e5c8c32b7fe115db5fb3ee0"
+      "sha256": "d1658d7b37bd49e5dd8dd4f7df9582fc6d7bab1398bc5ec6e63acaa2e1ee390d"
     },
     "environment": {
       "DSH_CLIENT_BUILD_PROFILE": "official",
-      "DSH_CLIENT_COMMIT_HASH": "737f91a",
+      "DSH_CLIENT_COMMIT_HASH": "4aacaed",
       "DSH_CLIENT_TITLE": "DeepSeek Harness",
       "DSH_CLIENT_VERSION": "0.1.7-enpoi.2"
     }

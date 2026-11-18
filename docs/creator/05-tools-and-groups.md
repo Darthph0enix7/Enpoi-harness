@@ -32,7 +32,7 @@ The shipped group catalog is data (`packages/enpoi-tool-groups/src/catalog.ts:86
 | `whiteboard` | static | whiteboard_forget, whiteboard_pin, whiteboard_read, whiteboard_unpin, whiteboard_write |
 | `memory` | static | memory_confirm, memory_rescind, memory_save, memory_search |
 | `recall` | static | session_event_read, session_event_search, session_search |
-| `peer` | on-demand | peer_status, peer_sessions, peer_ask, peer_asks, peer_answer, peer_cancel |
+| `peer` | on-demand | peer_status, peer_sessions, peer_models, peer_switch_model, peer_ask, peer_asks, peer_answer, peer_cancel |
 | `debug` | on-demand | diagnostics_report, session_debug, session_event_trace, session_trace |
 | `creator` | on-demand | cordis_inspect_list, cordis_inspect_query, plugin_manager (pre-attached to the `creator` seat only) |
 

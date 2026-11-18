@@ -21,6 +21,7 @@ This directory is the Creator's knowledge base: everything needed to diagnose, c
 | `12-glossary.md` | Every harness term in one line (seat, fiber, profile, overlay, heavy provider, gate, group, grant, rail, preset, council, broker, vault, projection, …). | A word in another file is unclear. |
 | `13-upstream-merge-runbook-and-fork-deltas.md` | Authoritative merge runbook, core fork modifications vs upstream (session core, PTC, MCP lifecycle, web search, permissions), conflict resolution rules, and post-merge verification probes. | Merging a new upstream release (e.g. 0.2.0+) without breaking Enpoi features. |
 | `14-update-maintenance.md` | Update-system maintenance: on-disk footprint, retention and disk hygiene, reading a dry-run and a report, pins/tombstones how-to, interrupted updates, rollback steps, the update failure table. | Updating a device, changing what an update preserves, or diagnosing an update that misbehaved. |
+| [15-jarvis-worker-integration-discovery.md](15-jarvis-worker-integration-discovery.md) | Jarvis worker integration discovery: supported control interfaces, lifecycle and authority limits, evidence, and a staged integration proposal. | Integrating an external assistant without commandeering human sessions or mistaking worker completion for verified success. |
 
 ## The rules (non-negotiable)
 

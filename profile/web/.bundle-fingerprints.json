@@ -7,8 +7,8 @@
       "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
     },
     "enpoi-capabilities": {
-      "sourceInputs": "f4ba1a1a456da07a27e821b350c2b445be88153ca19965aa170862dbc17693fe",
-      "outputSha": "d4baf14d588fc8df3aac0b5f17c6edc37f8c1380eaa40f0941bd9d3f2805a666",
+      "sourceInputs": "c24dce09ce18e8a4e2f68056ddb20c3bd03027e49943a0209dccc17853eff9bc",
+      "outputSha": "d31349876a108272656b8fb83279dccaf428117e85171c9ffdfaf15a75c069c4",
       "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
     },
     "enpoi-cascade": {
@@ -17,8 +17,8 @@
       "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
     },
     "enpoi-catalog-rules": {
-      "sourceInputs": "c3effcd0215b1d541b22a6ee3002450640785768996c25b6246cace9eef75fea",
-      "outputSha": "3a1ec24f494d2aa41605f0b0929ba68ef3fb7db2ab310e11b93e1629eef52456",
+      "sourceInputs": "631a62a30ce65a38c46fef61d702d2fa9aa1da1af617fcb90ea69572d7d162a3",
+      "outputSha": "fd641411ee9aa4352cb1cc3838f104dee0732b8110d2c09a8565fafcb5c84e1c",
       "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
     },
     "enpoi-commandcode-provider": {
@@ -83,8 +83,8 @@
       "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
     },
     "enpoi-memory": {
-      "sourceInputs": "6f1f325c94b53d99d61089c1c50beafc0394271d43d0a86dae599c4c6671c82f",
-      "outputSha": "1669f9b45aebc30caa71b79bb2ef71da4b86294753c4346a13e6e2e9865cd7e1",
+      "sourceInputs": "3b2110d210f21e3e742b28a1e5554fa5a23206d5a54a364f22ff7a20e7b5e8f7",
+      "outputSha": "15bb10dada1879d1add172c411ccbc20bfef86b3563d5df5433b6db8d7f1f91f",
       "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
     },
     "enpoi-model-chains": {
@@ -98,8 +98,13 @@
       "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
     },
     "enpoi-peer-bridge": {
-      "sourceInputs": "be879ee804f9d44cfc79332ebb25e2b75f4459940c108e8a7f0da3985a839a65",
-      "outputSha": "73d040c70e62f28cda656fc760ec16f039313023a60c540b0c5463964763d76d",
+      "sourceInputs": "0c16b2e9869f9fede86c1e91225e5be785f20ae91fbf24c4faa1185c3636e547",
+      "outputSha": "f0e5baa2c665ca023ae02019c18f1082f188c0f45de205ad81ad24a789c488b1",
+      "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
+    },
+    "enpoi-peer-routing": {
+      "sourceInputs": "ae9b6d1134debb3dfa4984ba8f62363855cd221e17bb07784a1bbb77e4d5788d",
+      "outputSha": "2744d42a8a9f5cc8604420fc91523eca8ae1365daeb9ef48ce000e291f2b9586",
       "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
     },
     "enpoi-preset-authoring": {
@@ -128,8 +133,8 @@
       "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
     },
     "enpoi-tool-groups": {
-      "sourceInputs": "e61647874f72a2c54beef10d6737cc2d662cc0d6281b4638fd5d801b8b09ff88",
-      "outputSha": "2f67a113695e08da89719c51d6030e73f6d8e0f18667377592c6218a51715f53",
+      "sourceInputs": "ead8dd8d19164bac106a89400bdff5baa6f0348afaf8b021c8bffdb1c4add521",
+      "outputSha": "47ea25d6a47be6a7cbc2af97943ada4753009d1f54f93b65147181418414fbaf",
       "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
     },
     "enpoi-ui-state": {

@@ -26,7 +26,7 @@ interface Config {
 }
 ```
 
-运行时常量为 `PEER_PROTOCOL_VERSION = 1`、`DEFAULT_WATCHDOG_MS = 15 * 60 * 1000` 与 `DEFAULT_HARNESS_VERSION = '0.1.6-alpha.2'`；`PEER_SCHEMA_DIGEST` 是协议版本加固定方法列表的 SHA-256 摘要。握手宣告的能力为 `state-latch`、`derived-latch`、`answer-routing`、`session-create` 与 `runaway-ceiling`。`PeerCapability` 词汇还包含 `assistant-stream`，但本构建不宣告它——该特性只能通过 `follow` 请求标志触达。
+运行时常量为 `PEER_PROTOCOL_VERSION = 1`、`DEFAULT_WATCHDOG_MS = 15 * 60 * 1000` 与 `DEFAULT_HARNESS_VERSION`——后者是运行中包清单的版本，即插件兼容性通过 `getDshRuntimeVersion()` 读取的运行时版本，`dsh --version` 在其外层补充托管安装的发布标识；`PEER_SCHEMA_DIGEST` 是协议版本加固定方法列表的 SHA-256 摘要。握手宣告本构建已服务的能力：`state-latch`、`derived-latch`、`assistant-stream`、`answer-routing`、`runaway-ceiling`、`session-create` 与 `model-attribution` 无条件宣告；挂载 `peerRouting` 服务时追加 `model-discovery`、`model-routing-at-create` 与 `model-switch`；token meter 发布持久化 `tokenUsage` 投影时追加 `token-ceiling`。缺少这些接缝时，主机会收回相应能力并拒绝对应请求。`assistant-stream` 帧仅在 `debug` 暴露且调用方主动选择时由 `peer.follow` 承载。
 
 ## 配对模型
 
@@ -381,6 +381,34 @@ type PeerFollowFrame =
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
 
+<a id="ctxpeerrouting--peerroutingservice"></a>
+
+### `ctx.peerRouting` — `PeerRoutingService`
+
+Structural seam the peer host consumes through `ctx.get('peerRouting')`. The profile owns the catalogue, selector rules, chain registry, and route health; the peer package owns transport, pairing, and exposure. A host without this service serves neither `model-discovery` nor `model-switch`, and refuses any routing request on a pairing that carries a `routing` policy.
+
+```ts cordis-catalog
+/**
+ * Policy-filtered discovery. Must not return credentials, URLs, or provider error text.
+ * @param policy - the pairing's routing policy; runtime selection uses the host-attested copy.
+ * @param request - optional filters plus opaque pagination cursor and page size.
+ * @returns allowed chains and models, with the next cursor when more rows follow.
+ */
+discover(policy: PeerRoutingPolicy, request: { readonly filter?: PeerModelsFilter readonly cursor?: string readonly limit?: number }): Promise<{ readonly chains: readonly PeerChainInfo[] readonly models: readonly PeerModelInfo[] readonly nextCursor?: string }>
+
+/**
+ * Evaluate one requested selection; resolves chain members and catalogue
+ * facts at call time. A chain-only request carries empty `provider` and
+ * `model` strings, and the verdict answers the concrete route to apply.
+ * @param policy - the pairing's routing policy; runtime selection uses the host-attested copy.
+ * @param selection - the requested route or chain, as the controller sent it.
+ * @returns the applied route, or a closed refusal reason naming the denied identifier.
+ */
+evaluate(policy: PeerRoutingPolicy, selection: PeerModelSelection): Promise<PeerRoutingVerdict>
+```
+
+Source: [`packages/api/peer/src/types.ts`](../../packages/api/peer/src/types.ts)
+
 <a id="ctxpeerservice--peerservice"></a>
 
 ### `ctx.peerService` — `PeerService`
@@ -419,20 +447,66 @@ Host service backing the generated `ctx.remote.peer` namespace.
 
 /**
  * Create or explicitly adopt a Session and bind it to a pairing alias.
- * @param request - pairing alias, participant, optional explicit session and routing.
+ *
+ * A pairing with a `routing` policy is authoritative: every create (new or
+ * adopt) must name a route, the policy is evaluated before any session or
+ * selection exists, and the applied selection is the verdict's `selection`
+ * (a chain-only request is resolved there). Without a policy the legacy
+ * behavior is unchanged and `allowModelChange` gates adopt-time routing.
+ * @param request - pairing alias, participant, optional explicit session, routing, and token ceiling.
  * @returns the resolved target and whether a new Session was created.
- * @throws {@link RemoteError} `peer/not-paired`, `peer/forbidden`, or
- * `peer/not-found` (a deeper create failure such as `agent-preset/not-found`
- * is mapped into the peer vocabulary).
+ * @throws {@link RemoteError} `peer/not-paired`; `peer/forbidden` for a policy
+ * refusal, a missing routing service, a ceiling on a host without the usage
+ * seam (reason `budget-unmetered`), or an adopt without `allowModelChange`;
+ * `peer/not-found` for a deeper create failure.
  */
 @Remote('create') async create(request: PeerCreateRequest): Promise<PeerCreateValue>
+
+/**
+ * Policy-filtered model and chain discovery for one alias.
+ * @param request - alias, participant, optional filter, cursor, and page limit.
+ * @returns selectable chains/models with the policy echoed for the caller.
+ * @throws {@link RemoteError} `peer/not-paired` for an unknown alias,
+ * `peer/forbidden` when the pairing configures no policy or the host mounts
+ * no routing service, `gateway/bad-request` for an invalid page cursor, and
+ * `peer/forbidden` reason `routing-unavailable` when the service throws.
+ */
+@Remote('models') async models(request: PeerModelsRequest): Promise<PeerModelsValue>
+
+/**
+ * Switch one idle Session's routing for its next turn. The policy decides the
+ * exact selection; the caller's request is only an input. A replay of the
+ * same `requestId` with the same payload returns the original value without
+ * appending another selection.
+ * @param request - target, participant, request id, and requested route.
+ * @returns the applied selection, the previous one when known, and replay status.
+ * @throws {@link RemoteError} `peer/forbidden` for a policy refusal or a
+ * disallowed switch, `peer/conflict` for a busy Session or a reused request
+ * id, `peer/not-paired` for an unresolved target.
+ */
+@Remote('selectModel') async selectModel(request: PeerSelectModelRequest): Promise<PeerSelectModelValue>
+
+/**
+ * The total-token ceiling recorded for one created Session, for the
+ * enforcement lane that stops a Session at its budget.
+ *
+ * The answer comes from an in-memory reverse index so the per-append
+ * watcher check never reads the pairing document; the index is rebuilt
+ * whenever a `bind` republishes the binding snapshot. Ceilings themselves
+ * only change through `peer.create`.
+ * @param sessionId - Session to look up.
+ * @returns the ceiling, or `undefined` when none was requested or clamped.
+ */
+ceilingOf(sessionId: SessionId): number | undefined
 
 /**
  * Admit one queued peer turn into a paired Session.
  * @param request - target, participant, dedupe id, text content, and hop telemetry.
  * @param signal - carrier cancellation before prompt admission begins.
  * @returns acceptance and the incremented hop count.
- * @throws {@link RemoteError} `peer/hop-limit` only when the pairing configures a ceiling.
+ * @throws {@link RemoteError} `peer/hop-limit` only when the pairing
+ * configures a ceiling; `peer/forbidden` with reason `budget` once the
+ * Session's token ceiling is reached.
  */
 @Remote('prompt') async prompt(request: PeerPromptRequest, signal: AbortSignal): Promise<PeerPromptValue>
 
@@ -444,7 +518,9 @@ Host service backing the generated `ctx.remote.peer` namespace.
 @Remote('cancel') cancel(request: PeerCancelRequest): PeerCancelValue
 
 /**
- * Settle a pending ask for a paired Session.
+ * Settle a pending ask for a paired Session. An answer may resume a turn
+ * the host paused on that ask; the ceiling watcher stops it after the next
+ * response when the Session is already over budget.
  * @param request - target, participant, ask id, and answer payload.
  * @returns acceptance after the ask settled.
  */
@@ -466,6 +542,8 @@ Host service backing the generated `ctx.remote.peer` namespace.
  */
 @Remote({ mode: 'stream' }) async *follow(request: PeerFollowRequest, signal: AbortSignal): AsyncIterable<PeerFollowFrame>
 ```
+
+Types: [SessionId](core.zh.md)
 
 Source: [`packages/api/peer/src/host.ts`](../../packages/api/peer/src/host.ts)
 <!-- END GENERATED cordis-surface -->

@@ -18,9 +18,9 @@
  * tool-defaults completeness spec verifies it from the other side.
  */
 
-export const HOST_DEFAULTS_DIGEST = 'fa311fad760a1c2298a21c7d5722c4377521527122a2f78fc5e5b9257d168cd1'
+export const HOST_DEFAULTS_DIGEST = '48ea9fa9c1ea41b0380a2cd3b3213adc7df7fe59a3a228c997d8c9ee624bb8e6'
 
-export const MIRROR_SOURCE_DIGEST = 'ebe930db72378bfc449ae0e9810a0117d0147abf7795462cf19d80245b3ae07f'
+export const MIRROR_SOURCE_DIGEST = '3edf8e472b7e11fc3a37beb6d9308d17df5aee2214cff740e9f6b348d2b9a44e'
 
 /** Shipped per-tool defaults from the host policy resolver. */
 export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'deny'>> = Object.freeze({
@@ -90,7 +90,7 @@ export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'd
 export const SHIPPED_TOOL_DEFAULT_EXEMPTIONS: readonly { prefix: string; except?: readonly string[]; reason: string }[] = Object.freeze([
   { prefix: 'custom_', except: ['custom_research-fetch', 'custom_research-verify'], reason: 'operator-defined custom tools are configured per tool; each renders a command that runs through the bash evaluator, and until the operator sets a row the unknown-tools ask is the intended gate. The first-party research tools (doc 88) are the documented exception: their commands are fixed, local, and read-only, and they carry explicit allow rows above so an unattended research run never parks on a card' },
   { prefix: 'mcp__', reason: 'tools of mounted MCP servers are third-party surface; the MCP wildcard ladder and the unknown-tools ask gate them until the operator trusts a row or a server wildcard' },
-  { prefix: 'peer_', reason: "first-party on-demand fleet tools (peer_ask, peer_asks, peer_answer, peer_cancel, peer_status) mount from enpoi-peer-bridge only while the peer driver runs; a call reaches another device's agent, so until the operator sets a row the unknown-tools ask is the intended gate" },
+  { prefix: 'peer_', reason: "first-party on-demand fleet tools (peer_status, peer_sessions, peer_models, peer_switch_model, peer_ask, peer_asks, peer_answer, peer_cancel) mount from enpoi-peer-bridge only while the peer driver runs; a call reaches another device's agent, so until the operator sets a row the unknown-tools ask is the intended gate" },
 ])
 
 /** One shipped tool group (profile `enpoi-tool-groups` catalog). */
@@ -200,9 +200,9 @@ export const SHIPPED_TOOL_GROUP_CATALOG: readonly ShippedToolGroupMirror[] = Obj
   Object.freeze({
     id: 'peer',
     label: 'Peer interconnect',
-    purpose: 'cross-device peer sessions: status, ask, answer, cancel',
+    purpose: 'cross-device peer sessions: status, models, switch, ask, answer, cancel',
     mode: 'on-demand',
-    members: Object.freeze(['peer_status', 'peer_sessions', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']),
+    members: Object.freeze(['peer_status', 'peer_sessions', 'peer_models', 'peer_switch_model', 'peer_ask', 'peer_asks', 'peer_answer', 'peer_cancel']),
     preAttach: Object.freeze([]),
     enabled: true,
   }),
@@ -234,10 +234,10 @@ export const SHIPPED_SEAT_TOOL_DENY: Readonly<Record<string, readonly string[]>>
 })
 
 /** Tools every child keeps regardless of role surface (host keep list). */
-export const SHARED_CHILD_KEEP: readonly string[] = Object.freeze(['whiteboard_read', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'compressor_retrieve'])
+export const SHARED_CHILD_KEEP: readonly string[] = Object.freeze(['whiteboard_read', 'compressor_retrieve'])
 
 /** Tools denied to every child (host anti-leak floor). */
-export const SHARED_CHILD_DENY: readonly string[] = Object.freeze(['subagent', 'subagent_fork', 'subagent_codex', 'subagent_claude_code', 'roundtable', 'chorus', 'oracle_review', 'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode', 'plan_mode', 'goal', 'ralph', 'workflow', 'ask_user_question', 'send_message', 'interrupt_agent', 'list_agents', 'plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query', 'review_run'])
+export const SHARED_CHILD_DENY: readonly string[] = Object.freeze(['subagent', 'subagent_fork', 'subagent_codex', 'subagent_claude_code', 'roundtable', 'chorus', 'oracle_review', 'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode', 'plan_mode', 'goal', 'ralph', 'workflow', 'ask_user_question', 'send_message', 'interrupt_agent', 'list_agents', 'whiteboard_write', 'whiteboard_pin', 'whiteboard_unpin', 'whiteboard_forget', 'plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query', 'review_run'])
 
 /** Extra per-role child denials (host role table). */
 export const ROLE_CHILD_DENY: Readonly<Record<string, readonly string[]>> = Object.freeze({

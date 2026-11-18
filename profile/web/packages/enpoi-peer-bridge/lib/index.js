@@ -1,7 +1,7 @@
 // src/index.ts
 import Schema from "@deepseek-ai/schemastery";
 import { randomUUID } from "node:crypto";
-import { dirname as dirname2 } from "node:path";
+import { dirname as dirname3 } from "node:path";
 
 // src/asks.ts
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -91,6 +91,60 @@ function defaultNoticesPath(dshHome) {
   return `${dshHome.replace(/\/+$/u, "")}/peer-bridge/asks.jsonl`;
 }
 
+// src/caller-version.ts
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname as dirname2, join } from "node:path";
+import { fileURLToPath } from "node:url";
+var CALLER_HARNESS_VERSION_ENV = "DSH_PEER_HARNESS_VERSION";
+var ADJACENT_WALK_DEPTH = 6;
+var CallerVersionError = class extends Error {
+  /** Peer error code the tool layer reports for this failure. */
+  code = "gateway/internal";
+  /**
+   * @param message - the failure, naming every source and the env override.
+   */
+  constructor(message) {
+    super(message);
+    this.name = "CallerVersionError";
+  }
+};
+function manifestStringAt(path, key = "version") {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof parsed !== "object" || parsed === null) return void 0;
+    const value = parsed[key];
+    return typeof value === "string" && value.trim() !== "" ? value.trim() : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function adjacentPeerManifest(moduleUrl) {
+  let dir = dirname2(fileURLToPath(moduleUrl));
+  for (let depth = 0; depth < ADJACENT_WALK_DEPTH; depth += 1) {
+    const candidate = join(dir, "node_modules", "@deepseek-ai", "dsh-api-peer", "package.json");
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname2(dir);
+    if (parent === dir) return void 0;
+    dir = parent;
+  }
+  return void 0;
+}
+function resolveCallerHarnessVersion(sources = {}) {
+  const env = sources.env ?? process.env;
+  const explicit = sources.harnessVersion ?? env[CALLER_HARNESS_VERSION_ENV];
+  if (typeof explicit === "string" && explicit.trim() !== "") return explicit.trim();
+  const manifest = sources.peerManifestPath ?? adjacentPeerManifest(import.meta.url);
+  const adjacent = manifest === void 0 ? void 0 : manifestStringAt(manifest);
+  if (adjacent !== void 0) return adjacent;
+  const home = sources.dshHome ?? (env.DSH_HOME !== void 0 && env.DSH_HOME !== "" ? env.DSH_HOME : join(homedir(), ".dsh"));
+  const installed = manifestStringAt(join(home, "harness", "install-state.json"));
+  if (installed !== void 0) return installed;
+  throw new CallerVersionError(
+    `cannot determine the caller harness version (no ${CALLER_HARNESS_VERSION_ENV}, no @deepseek-ai/dsh-api-peer manifest beside this plugin, and no harness/install-state.json under ${home}) \u2014 set ${CALLER_HARNESS_VERSION_ENV} to this build's version`
+  );
+}
+
 // src/peer-client.ts
 var PeerBridgeError = class extends Error {
   /** Stable peer error code (`peer/*`, `gateway/*`). */
@@ -146,7 +200,7 @@ var PeerClient = class {
   async handshake() {
     return this.rpc("handshake", {
       protocolVersion: 1,
-      harnessVersion: this.options.harnessVersion ?? "0.1.6-alpha.2",
+      harnessVersion: this.options.harnessVersion ?? resolveCallerHarnessVersion(),
       schemaDigest: this.options.schemaDigest ?? "",
       device: this.options.device
     });
@@ -158,6 +212,14 @@ var PeerClient = class {
   /** List the pairings the host exposes, optionally narrowed to one resolved target. */
   list(request = {}) {
     return this.rpc("list", request);
+  }
+  /**
+   * Read the policy-filtered chains and models one alias may select.
+   * @param request - alias, participant, optional filter, cursor, and page limit.
+   * @returns selectable chains/models with the policy echoed for the controller.
+   */
+  models(request) {
+    return this.rpc("models", request);
   }
   /** Create or adopt a Session under a pairing alias. */
   create(request) {
@@ -174,6 +236,14 @@ var PeerClient = class {
   /** Settle a pending ask. */
   answer(request) {
     return this.rpc("answer", request);
+  }
+  /**
+   * Switch one idle Session's routing for its next turn.
+   * @param request - target, participant, request id, requested route or chain, and optional effort.
+   * @returns the applied selection, the previous one when known, and replay status.
+   */
+  selectModel(request) {
+    return this.rpc("selectModel", request);
   }
   /** Read one backwards history window for repair. */
   page(request) {
@@ -517,12 +587,12 @@ function field(value, key) {
 }
 
 // src/pairings.ts
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { readFileSync as readFileSync2 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join as join2 } from "node:path";
 function defaultPairingsPath(env = process.env) {
-  const home = env.DSH_HOME !== void 0 && env.DSH_HOME !== "" ? env.DSH_HOME : join(homedir(), ".dsh");
-  return join(home, "pairings.yaml");
+  const home = env.DSH_HOME !== void 0 && env.DSH_HOME !== "" ? env.DSH_HOME : join2(homedir2(), ".dsh");
+  return join2(home, "pairings.yaml");
 }
 var PairingDocumentError = class extends Error {
   /** Line number (1-based) the failure points at; 0 when the document is empty. */
@@ -559,7 +629,7 @@ function parsePairingDocument(raw, path) {
 function readPairingDocument(path) {
   let raw;
   try {
-    raw = readFileSync(path, "utf8");
+    raw = readFileSync2(path, "utf8");
   } catch (error) {
     throw new PairingDocumentError(
       `peer pairings ${path} could not be read: ${error instanceof Error ? error.message : String(error)}`,
@@ -858,7 +928,7 @@ function apply(ctx, config = {}) {
 }
 function registerTools(ctx, config, deps = {}) {
   const pairingsPath = config.pairingsPath ?? defaultPairingsPath();
-  const noticesPath = config.noticesPath ?? defaultNoticesPath(dirname2(pairingsPath));
+  const noticesPath = config.noticesPath ?? defaultNoticesPath(dirname3(pairingsPath));
   const waitMs = config.waitMs ?? DEFAULT_WAIT_MS;
   const settleMs = config.settleMs ?? DEFAULT_SETTLE_QUIET_MS;
   const probeIntervalMs = config.probeIntervalMs ?? DEFAULT_PROBE_INTERVAL_MS;
@@ -1070,6 +1140,243 @@ function registerTools(ctx, config, deps = {}) {
     }
   });
   ctx.tools.register({
+    name: "peer_models",
+    description: [
+      "List the models and chains a paired peer lets you select for its sessions, with each route's",
+      "capabilities (tool calling, vision, context window, zero price, gating, whether prompts train on",
+      "it, and the reasoning efforts it accepts) and each chain member's live state (ready, cooling",
+      "down until a time, or retired). Read-only. Use it before choosing a route for peer_ask or",
+      "peer_switch_model. The peer enforces its own allow list, so the result already excludes what you",
+      "may not use; when the peer cannot offer model choice at all, the result says to upgrade the host.",
+      "The alias names the pairing (the member device in the fleet convention) and is the same string",
+      "on both devices \u2014 it is NOT the target host name."
+    ].join(" "),
+    parameters: {
+      type: "object",
+      properties: {
+        alias: { type: "string", description: "Pairing alias of the peer session." },
+        limit: { type: "number", description: "Maximum rows in this page; the peer clamps it." },
+        cursor: { type: "string", description: "Opaque cursor from a previous page's nextCursor." },
+        zeroPrice: { type: "boolean", description: "Only routes the peer can prove are free of charge." },
+        tools: { type: "boolean", description: "Only routes the peer can prove support tool calling." }
+      },
+      required: ["alias"]
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean" },
+          alias: { type: "string" },
+          chains: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                id: { type: "string" },
+                label: { type: "string" },
+                dynamic: { type: "boolean" },
+                members: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      provider: { type: "string" },
+                      model: { type: "string" },
+                      state: { type: "string", enum: ["ready", "cooldown", "deprecated"] },
+                      cooldownUntil: { type: "number" }
+                    },
+                    required: ["provider", "model", "state"]
+                  }
+                }
+              },
+              required: ["id", "dynamic", "members"]
+            }
+          },
+          models: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                provider: { type: "string" },
+                model: { type: "string" },
+                tools: { oneOf: [{ type: "boolean" }, { type: "string" }] },
+                vision: { oneOf: [{ type: "boolean" }, { type: "string" }] },
+                contextWindow: { type: "number" },
+                zeroPrice: { oneOf: [{ type: "boolean" }, { type: "string" }] },
+                gated: { oneOf: [{ type: "boolean" }, { type: "string" }] },
+                trainsOnData: { type: "string", enum: ["yes", "no", "unknown"] },
+                reasoningEfforts: { type: "array", items: { type: "string" } }
+              },
+              required: ["provider", "model", "tools", "vision", "zeroPrice", "gated", "trainsOnData", "reasoningEfforts"]
+            }
+          },
+          nextCursor: { type: "string" },
+          selectable: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              chains: { type: "array", items: { type: "string" } },
+              models: { type: "array", items: { type: "string" } },
+              reasoningEfforts: { type: "array", items: { type: "string" } },
+              requireZeroPrice: { type: "boolean" },
+              requireNoTraining: { type: "boolean" },
+              requireTools: { type: "boolean" },
+              allowSwitch: { type: "string", enum: ["never", "idle-only"] }
+            },
+            required: ["chains", "models", "requireZeroPrice", "requireNoTraining", "requireTools", "allowSwitch"]
+          },
+          error: failureSchema()
+        },
+        required: ["ok"]
+      },
+      render: (_args, value) => [{ type: "text", text: renderModels(value) }]
+    },
+    isConcurrencySafe: () => true,
+    async execute(args) {
+      const request = narrow(args);
+      const alias = requireAlias(request.alias);
+      const filter = modelsFilterOf(request);
+      if (filter !== void 0 && !filter.ok) return badRequest(filter.message);
+      const limit = positiveIntegerOf("limit", request.limit);
+      if (limit !== void 0 && !limit.ok) return badRequest(limit.message);
+      const cursor = nonEmptyTextOf("cursor", request.cursor);
+      if (cursor !== void 0 && !cursor.ok) return badRequest(cursor.message);
+      const { pairing, document } = resolveEntry(pairingsPath, alias);
+      const client = makeClient(pairing, config, document.device, effectiveDeps);
+      try {
+        const handshake = await client.handshake();
+        const gap = capabilityGap(handshake.capabilities, "model-discovery");
+        if (gap !== void 0) return gap;
+        const value = await client.models({
+          alias,
+          participant: participantOf(config, document),
+          ...filter === void 0 ? {} : { filter: filter.value },
+          ...cursor === void 0 ? {} : { cursor: cursor.value },
+          ...limit === void 0 ? {} : { limit: limit.value }
+        });
+        return {
+          ok: true,
+          alias,
+          chains: value.chains,
+          models: value.models,
+          ...value.nextCursor === void 0 ? {} : { nextCursor: value.nextCursor },
+          selectable: value.selectableByThisAlias
+        };
+      } catch (error) {
+        return failureFrom(error, pairing.endpoint);
+      }
+    }
+  });
+  ctx.tools.register({
+    name: "peer_switch_model",
+    description: [
+      "Move a paired peer session to another model or chain for its next turn. The session must be",
+      "idle; a running or waiting session refuses the switch. Name provider and model, or a chain id",
+      "(a chain alone runs its first ready member), optionally with a reasoning effort. The peer",
+      "enforces its own allow list, so a refusal names the reason and the refused route; read",
+      "peer_models first to see what is selectable. Mutating: this changes the remote session, not",
+      "this one. The result reports the applied route, the previous one when known, and whether this",
+      "call was an already-applied retry.",
+      "The alias names the pairing (the member device in the fleet convention) and is the same string",
+      "on both devices \u2014 it is NOT the target host name."
+    ].join(" "),
+    parameters: {
+      type: "object",
+      properties: {
+        alias: { type: "string", description: "Pairing alias of the peer session." },
+        provider: { type: "string", description: "Provider id of the route to run (with model)." },
+        model: { type: "string", description: "Model id of the route to run (with provider)." },
+        chain: { type: "string", description: "Chain id to run instead of, or narrowing, an explicit route." },
+        reasoningEffort: { type: "string", description: "Adapter-supported reasoning effort for the chosen route." },
+        requestId: {
+          type: "string",
+          description: "Optional retry key: reuse the value from a failed attempt to replay it instead of switching twice."
+        }
+      },
+      required: ["alias"]
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          ok: { type: "boolean" },
+          alias: { type: "string" },
+          requestId: { type: "string" },
+          selection: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              provider: { type: "string" },
+              model: { type: "string" },
+              chain: { type: "string" },
+              reasoningEffort: { type: "string" }
+            },
+            required: ["provider", "model"]
+          },
+          previous: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              provider: { type: "string" },
+              model: { type: "string" },
+              chain: { type: "string" },
+              reasoningEffort: { type: "string" }
+            },
+            required: ["provider", "model"]
+          },
+          replayed: { type: "boolean" },
+          note: { type: "string" },
+          error: failureSchema()
+        },
+        required: ["ok"]
+      },
+      render: (_args, value) => [{ type: "text", text: renderSwitch(value) }]
+    },
+    async execute(args) {
+      const request = narrow(args);
+      const alias = requireAlias(request.alias);
+      const route = switchRouteOf(request);
+      if (!route.ok) return badRequest(route.message);
+      const requestId = nonEmptyTextOf("requestId", request.requestId);
+      if (requestId !== void 0 && !requestId.ok) return badRequest(requestId.message);
+      const { pairing, document } = resolveEntry(pairingsPath, alias);
+      const client = makeClient(pairing, config, document.device, effectiveDeps);
+      const id = requestId === void 0 ? `peer-bridge-${randomUUID()}` : requestId.value;
+      try {
+        const handshake = await client.handshake();
+        const gap = capabilityGap(handshake.capabilities, "model-switch");
+        if (gap !== void 0) return gap;
+        const value = await client.selectModel({
+          target: targetOf(pairing),
+          participant: participantOf(config, document),
+          requestId: id,
+          provider: route.value.provider ?? "",
+          model: route.value.model ?? "",
+          ...route.value.chain === void 0 ? {} : { chain: route.value.chain },
+          ...route.value.reasoningEffort === void 0 ? {} : { reasoningEffort: route.value.reasoningEffort }
+        });
+        return {
+          ok: true,
+          alias,
+          requestId: id,
+          selection: value.selected,
+          ...value.previous === void 0 ? {} : { previous: value.previous },
+          replayed: value.replayed === true,
+          note: value.replayed === true ? "this switch was already applied; the result is the original one" : "the remote session will run the selected route on its next turn"
+        };
+      } catch (error) {
+        const failure = failureFrom(error, pairing.endpoint);
+        return { ...failure, alias, requestId: id };
+      }
+    }
+  });
+  ctx.tools.register({
     name: "peer_ask",
     description: [
       "Send a message to a paired peer session as an attributed peer turn, then follow the remote",
@@ -1098,7 +1405,12 @@ function registerTools(ctx, config, deps = {}) {
             "A requestId from a prior peer_ask result (waiting_approval or pending): continues",
             "following that same remote turn to its terminal state without sending the message again."
           ].join(" ")
-        }
+        },
+        provider: { type: "string", description: "When this call creates the session: provider of the route it starts on (with model)." },
+        model: { type: "string", description: "When this call creates the session: model it starts on (with provider)." },
+        chain: { type: "string", description: "When this call creates the session: chain id it starts on (its first ready member runs)." },
+        reasoningEffort: { type: "string", description: "When this call creates the session: reasoning effort for the chosen route or chain." },
+        maxTotalTokens: { type: "number", description: "When this call creates the session: token ceiling; the peer stops the session when it is reached." }
       },
       required: ["alias"]
     },
@@ -1159,6 +1471,8 @@ function registerTools(ctx, config, deps = {}) {
       if (message.length > MAX_MESSAGE_CHARS) {
         return { ok: false, error: { code: "gateway/bad-request", message: `peer_ask message exceeds ${String(MAX_MESSAGE_CHARS)} characters` } };
       }
+      const createRouting = askCreateRoutingOf(request);
+      if (!createRouting.ok) return badRequest(createRouting.message);
       const requestedWait = typeof request.waitMs === "number" && Number.isFinite(request.waitMs) && request.waitMs > 0 ? Math.trunc(request.waitMs) : waitMs;
       return runAsk(ctx, {
         pairingsPath,
@@ -1172,6 +1486,7 @@ function registerTools(ctx, config, deps = {}) {
         alias,
         message,
         ...resume === void 0 ? {} : { resume },
+        createRouting: createRouting.value,
         allowCreate: true,
         deps: effectiveDeps
       });
@@ -1444,6 +1759,7 @@ async function runAsk(ctx, options) {
     }
     try {
       const defaults = pairing.create ?? {};
+      const routeOverride = options.createRouting.provider !== void 0 || options.createRouting.chain !== void 0;
       await client.create({
         alias: pairing.alias,
         participant,
@@ -1451,13 +1767,17 @@ async function runAsk(ctx, options) {
         ...typeof defaults.agentPreset === "string" ? { agentPreset: defaults.agentPreset } : {},
         // The host pins this route on the created Session only; the parser
         // already guarantees provider+model travel together.
-        ...pairing.createRouting ?? {}
+        ...routeOverride ? {} : pairing.createRouting ?? {},
+        ...options.createRouting
       });
       created = true;
       baseline = await client.state(requestedTarget);
     } catch (createError) {
       return failureFrom(createError, pairing.endpoint);
     }
+  }
+  if (!created && Object.keys(options.createRouting).length > 0) {
+    return badRequest(resumed ? "peer_ask resume cannot change the model; call peer_switch_model first if the turn needs another route" : "peer_ask model options apply only when this call creates the session; this session already exists \u2014 use peer_switch_model to change its model");
   }
   const baselineTurn = baseline.state.lastTurnEnd?.turn ?? 0;
   const requestId = options.resume ?? `peer-bridge-${randomUUID()}`;
@@ -2025,6 +2345,92 @@ function makeClient(pairing, config, device, deps = {}) {
 function narrow(args) {
   return typeof args === "object" && args !== null ? args : {};
 }
+function capabilityGap(capabilities, capability) {
+  if (capabilities.includes(capability)) return void 0;
+  return { ok: false, error: { code: "peer/capability-missing", message: `host does not advertise ${capability}; upgrade the host` } };
+}
+function nonEmptyTextOf(name2, value) {
+  if (value === void 0 || value === null) return void 0;
+  if (typeof value !== "string" || value.trim() === "") return { ok: false, message: `${name2} must be a non-empty string` };
+  return { ok: true, value: value.trim() };
+}
+function positiveIntegerOf(name2, value) {
+  if (value === void 0 || value === null) return void 0;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) return { ok: false, message: `${name2} must be a positive integer` };
+  return { ok: true, value };
+}
+function modelsFilterOf(request) {
+  const filter = {};
+  for (const name2 of ["zeroPrice", "tools"]) {
+    const raw = request[name2];
+    if (raw === void 0) continue;
+    if (typeof raw !== "boolean") return { ok: false, message: `${name2} must be a boolean` };
+    if (raw) filter[name2] = true;
+  }
+  return Object.keys(filter).length === 0 ? void 0 : { ok: true, value: filter };
+}
+function switchRouteOf(request) {
+  const provider = nonEmptyTextOf("provider", request.provider);
+  const model = nonEmptyTextOf("model", request.model);
+  const chain = nonEmptyTextOf("chain", request.chain);
+  const effort = nonEmptyTextOf("reasoningEffort", request.reasoningEffort);
+  for (const parsed of [provider, model, chain, effort]) {
+    if (parsed !== void 0 && !parsed.ok) return parsed;
+  }
+  const providerValue = provider?.ok === true ? provider.value : void 0;
+  const modelValue = model?.ok === true ? model.value : void 0;
+  const chainValue = chain?.ok === true ? chain.value : void 0;
+  const effortValue = effort?.ok === true ? effort.value : void 0;
+  if (providerValue === void 0 !== (modelValue === void 0)) {
+    return { ok: false, message: "peer_switch_model needs provider and model together" };
+  }
+  if (providerValue === void 0 && chainValue === void 0) {
+    return { ok: false, message: "peer_switch_model needs provider+model or a chain" };
+  }
+  if (effortValue !== void 0 && providerValue === void 0 && chainValue === void 0) {
+    return { ok: false, message: "a reasoning effort needs a route or a chain to apply to" };
+  }
+  return {
+    ok: true,
+    value: {
+      ...providerValue === void 0 ? {} : { provider: providerValue },
+      ...modelValue === void 0 ? {} : { model: modelValue },
+      ...chainValue === void 0 ? {} : { chain: chainValue },
+      ...effortValue === void 0 ? {} : { reasoningEffort: effortValue }
+    }
+  };
+}
+function askCreateRoutingOf(request) {
+  const provider = nonEmptyTextOf("provider", request.provider);
+  const model = nonEmptyTextOf("model", request.model);
+  const chain = nonEmptyTextOf("chain", request.chain);
+  const effort = nonEmptyTextOf("reasoningEffort", request.reasoningEffort);
+  const ceiling = positiveIntegerOf("maxTotalTokens", request.maxTotalTokens);
+  for (const parsed of [provider, model, chain, effort, ceiling]) {
+    if (parsed !== void 0 && !parsed.ok) return parsed;
+  }
+  const providerValue = provider?.ok === true ? provider.value : void 0;
+  const modelValue = model?.ok === true ? model.value : void 0;
+  const chainValue = chain?.ok === true ? chain.value : void 0;
+  const effortValue = effort?.ok === true ? effort.value : void 0;
+  const ceilingValue = ceiling?.ok === true ? ceiling.value : void 0;
+  if (providerValue === void 0 !== (modelValue === void 0)) {
+    return { ok: false, message: "peer_ask needs provider and model together" };
+  }
+  if (effortValue !== void 0 && providerValue === void 0 && chainValue === void 0) {
+    return { ok: false, message: "a reasoning effort needs provider+model or a chain to apply to" };
+  }
+  return {
+    ok: true,
+    value: {
+      ...providerValue === void 0 ? {} : { provider: providerValue },
+      ...modelValue === void 0 ? {} : { model: modelValue },
+      ...chainValue === void 0 ? {} : { chain: chainValue },
+      ...effortValue === void 0 ? {} : { reasoningEffort: effortValue },
+      ...ceilingValue === void 0 ? {} : { maxTotalTokens: ceilingValue }
+    }
+  };
+}
 function badRequest(message) {
   return { ok: false, error: { code: "gateway/bad-request", message } };
 }
@@ -2196,6 +2602,77 @@ function renderSessions(value) {
       return `\u2022 ${String(session.alias)} \u2192 ${String(session.peer)} @ ${String(session.endpoint)} \xB7 ${state}`;
     })
   ].join("\n");
+}
+function routeFacts(model) {
+  const known = (value) => value === true ? "yes" : value === "unknown" ? "unknown" : "no";
+  const facts = [
+    `tools=${known(model.tools)}`,
+    `vision=${known(model.vision)}`,
+    `free=${known(model.zeroPrice)}`,
+    `gated=${known(model.gated)}`,
+    `trains=${String(model.trainsOnData ?? "unknown")}`
+  ];
+  if (typeof model.contextWindow === "number") facts.push(`context=${String(model.contextWindow)}`);
+  const efforts = Array.isArray(model.reasoningEfforts) ? model.reasoningEfforts : [];
+  if (efforts.length > 0) facts.push(`efforts=${efforts.join(",")}`);
+  return facts.join(", ");
+}
+function listOrNone(value) {
+  const items = Array.isArray(value) ? value.map((item) => String(item)) : [];
+  return items.length === 0 ? "none" : items.join(", ");
+}
+function renderModels(value) {
+  const record = narrow(value);
+  if (record.ok !== true) {
+    const error = narrow(record.error);
+    return `peer_models failed [${String(error.code ?? "unknown")}]: ${String(error.message ?? "")}`;
+  }
+  const chains = Array.isArray(record.chains) ? record.chains : [];
+  const models = Array.isArray(record.models) ? record.models : [];
+  const lines = [`peer ${String(record.alias)} \u2014 ${String(models.length)} route(s), ${String(chains.length)} chain(s)`];
+  for (const chain of chains) {
+    const members = Array.isArray(chain.members) ? chain.members : [];
+    const rendered = members.map((member) => {
+      const until = member.state === "cooldown" && typeof member.cooldownUntil === "number" ? ` until ${new Date(member.cooldownUntil).toISOString()}` : "";
+      return `${String(member.provider)}/${String(member.model)} ${String(member.state)}${until}`;
+    });
+    lines.push(`chain ${String(chain.id)}${chain.dynamic === true ? " (dynamic)" : ""}: ${rendered.join("; ")}`);
+  }
+  if (models.length === 0 && chains.length === 0) lines.push("no route is selectable on this peer");
+  for (const model of models) lines.push(`\u2022 ${String(model.provider)}/${String(model.model)} \u2014 ${routeFacts(model)}`);
+  const selectable = narrow(record.selectable);
+  lines.push([
+    `selectable: chains ${listOrNone(selectable.chains)}`,
+    `models ${listOrNone(selectable.models)}`,
+    `switching ${String(selectable.allowSwitch ?? "never")}`,
+    selectable.requireZeroPrice === true ? "free routes only" : "",
+    selectable.requireNoTraining === true ? "no-training routes only" : "",
+    selectable.requireTools === true ? "tool-calling routes only" : ""
+  ].filter((part) => part !== "").join(", "));
+  if (typeof record.nextCursor === "string") {
+    lines.push(`more routes available \u2014 call again with cursor ${JSON.stringify(record.nextCursor)}`);
+  }
+  return lines.join("\n");
+}
+function renderSwitch(value) {
+  const record = narrow(value);
+  if (record.ok !== true) {
+    const error = narrow(record.error);
+    return `peer_switch_model failed [${String(error.code ?? "unknown")}]: ${String(error.message ?? "")}`;
+  }
+  const selection = narrow(record.selection);
+  const details = [
+    selection.chain === void 0 ? void 0 : `chain ${String(selection.chain)}`,
+    selection.reasoningEffort === void 0 ? void 0 : `effort ${String(selection.reasoningEffort)}`
+  ].filter((part) => part !== void 0);
+  const lines = [`switched ${String(record.alias)} to ${String(selection.provider)}/${String(selection.model)}${details.length === 0 ? "" : ` (${details.join(", ")})`}`];
+  const previous = record.previous === void 0 ? void 0 : narrow(record.previous);
+  if (previous !== void 0) {
+    lines.push(`previous route ${String(previous.provider)}/${String(previous.model)}${previous.chain === void 0 ? "" : ` (chain ${String(previous.chain)})`}`);
+  }
+  if (record.replayed === true) lines.push("this exact switch was already applied; the session is unchanged");
+  else if (typeof record.note === "string" && record.note !== "") lines.push(record.note);
+  return lines.join("\n");
 }
 function renderAsk(value) {
   const record = narrow(value);

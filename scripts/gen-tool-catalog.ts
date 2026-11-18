@@ -444,7 +444,7 @@ const TOOL_PACKAGES: ToolPackage[] = [
       await ctx.plugin(ToolGoal)
     },
     note:
-      'create, edit, pause, and resume require direct-human root authority; complete and blocked also accept the exact current goal round. The default blocked lower bound is three admitted rounds.',
+      'create, edit, pause, and resume require direct-human root authority; complete and blocked also accept the exact current goal round. The default blocked lower bound is three goal rounds started in the goal.',
   },
   {
     pkg: '@deepseek-ai/dsh-schedule',

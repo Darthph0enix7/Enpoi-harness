@@ -311,21 +311,46 @@ function searchMemory(db, query, limit = 10, scope) {
     };
   }).sort((a, b) => b.matched - a.matched || Number(b.exactPhrase) - Number(a.exactPhrase) || b.score - a.score || b.stamp - a.stamp).slice(0, take);
 }
-function nearDuplicateCandidates(db, fact, scope) {
+function nearDuplicateRows(db, fact, scope) {
   const terms = [...tokenSet(fact)];
   if (terms.length === 0) return [];
   const match = terms.map((t) => `"${t.replace(/"/g, "")}"`).join(" OR ");
   const filter = compactionScopeClause(scope);
   try {
-    const rows = db.prepare(`
-      SELECT c.fact FROM claims_fts JOIN claims c ON c.rowid = claims_fts.rowid
+    return db.prepare(`
+      SELECT c.id, c.fact FROM claims_fts JOIN claims c ON c.rowid = claims_fts.rowid
       WHERE claims_fts MATCH ? AND c.state IN ('committed','tentative')${filter.sql === "" ? "" : ` AND ${filter.sql}`}
       ORDER BY c.created_at DESC LIMIT 50
     `).all(match, ...filter.params);
-    return rows.map((row) => row.fact);
   } catch {
     return [];
   }
+}
+function nearDuplicateCandidates(db, fact, scope) {
+  return nearDuplicateRows(db, fact, scope).map((row) => row.fact);
+}
+function closestNearDuplicate(db, fact, scope, threshold, excludeId) {
+  let best;
+  for (const row of nearDuplicateRows(db, fact, scope)) {
+    if (row.id === excludeId) continue;
+    const similarity = jaccard(row.fact, fact);
+    if (similarity < threshold) continue;
+    if (best === void 0 || similarity > best.similarity) best = { id: row.id, fact: row.fact, similarity };
+  }
+  return best;
+}
+function fitToCharBudget(hits, budget) {
+  if (hits.length === 0) return { hits: [], omitted: 0 };
+  const limit = Number.isFinite(budget) && budget > 0 ? budget : 0;
+  const kept = [];
+  let used = 0;
+  for (const hit of hits) {
+    const cost = hit.fact.length;
+    if (kept.length > 0 && used + cost > limit) break;
+    kept.push(hit);
+    used += cost;
+  }
+  return { hits: kept, omitted: hits.length - kept.length };
 }
 
 // src/secret-guard.ts
@@ -346,6 +371,13 @@ function containsSecret(text) {
   } catch {
     return false;
   }
+}
+
+// src/session-authority.ts
+function isDelegatedSession(header) {
+  if (header === void 0) return false;
+  if (header.origin === "subagent" || (header.delegationDepth ?? 0) > 0) return true;
+  return header.parentSession !== void 0 && header.isSeeded !== true;
 }
 
 // src/compaction-facts.ts
@@ -415,7 +447,7 @@ function registerCompactionFacts(ctx, db, pipeline, config) {
     if (!config.compactionFacts) return;
     const data = event.data;
     if (data.summarizationFailure !== void 0 && data.provider === "" && data.model === "") return;
-    if (session.header.parentSession !== void 0 && !config.compactionFactsIncludeChildSessions) return;
+    if (isDelegatedSession(session.header) && !config.compactionFactsIncludeChildSessions) return;
     const facts = parseDurableFacts(summaryText(data.summary)).slice(0, config.compactionFactsMax);
     if (facts.length === 0) return;
     held.set(keyOf(session.id, data.compactionId), {
@@ -555,6 +587,7 @@ function makePipeline(db) {
         for (const c of claims) {
           const fact = String(c.fact ?? "").trim();
           if (fact.length === 0 || fact.length > FACT_CAP) continue;
+          if (containsSecret(fact)) continue;
           let category = String(c.category ?? "PROJECT").toUpperCase();
           if (!CATEGORIES.includes(category)) category = "PROJECT";
           if (AUTOMATED_ORIGINS.has(opts.origin) && !KEEPER_ALLOWED.has(category)) category = "PROJECT";
@@ -727,10 +760,7 @@ function renderFact(fact) {
 var DELEGATED_SESSION_DENIED = "delegated_session_denied";
 var ROOT_SESSION_REQUIRED = "root_session_required";
 function delegatedSession(exec) {
-  const header = exec?.agent?.session.header;
-  if (header === void 0) return false;
-  if (header.origin === "subagent" || (header.delegationDepth ?? 0) > 0) return true;
-  return header.parentSession !== void 0 && header.isSeeded !== true;
+  return isDelegatedSession(exec?.agent?.session.header);
 }
 function rootOnlyDenial(exec, action) {
   const header = exec?.agent?.session.header;
@@ -787,7 +817,9 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
       "a project rule, an architecture decision with its reason, a constraint, a config value, a naming convention,",
       "or an exact path/command/identifier. Compaction already saves the checkpoint's durable facts automatically;",
       "save what it cannot see \u2014 a decision you just made, a correction from the operator, a verified command.",
-      "One self-contained sentence, \u2264400 chars, no secrets or personal data."
+      "One self-contained sentence, \u2264400 chars, no secrets or personal data.",
+      "A fact that looks like a credential or secret is rejected and never stored; the same fact text and category are stored once.",
+      "A saved fact whose tokens closely match an existing active fact is still saved, and the result names the closest existing id."
     ].join(" "),
     parameters: {
       type: "object",
@@ -813,13 +845,18 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const authority = memorySaveAuthority(exec);
+      const fact = String(args.fact ?? "").trim();
+      if (containsSecret(fact)) return { saved: false, note: "rejected: looks like a credential or secret" };
       const inserted = await pipeline.intake(
-        [{ fact: String(args.fact ?? ""), category: String(args.category ?? "PROJECT"), tags: String(args.tags ?? "") }],
+        [{ fact, category: String(args.category ?? "PROJECT"), tags: String(args.tags ?? "") }],
         { origin: authority.origin, trust: authority.trust, provenance: authority.provenance }
       );
-      if (inserted.length === 0) return { saved: false, note: "Duplicate or invalid fact (already known / empty / >400 chars)" };
+      if (inserted.length === 0) return { saved: false, note: "Duplicate or invalid fact (already known / empty / >400 chars / rejected)" };
       const c = inserted[0];
-      return { saved: true, id: c.id, state: c.state, note: `Saved as ${c.id} (${c.category})` };
+      const scope = { cwd: exec?.agent?.session.header.cwd, scopeCompaction: config.scopeCompactionFactsToWorkspace };
+      const near = closestNearDuplicate(db, fact, scope, config.compactionFactsNearDuplicate, c.id);
+      const note = near === void 0 ? `Saved as ${c.id} (${c.category})` : `Saved as ${c.id} (${c.category}); closest existing fact ${near.id} is a near-match (Jaccard ${near.similarity.toFixed(2)}) \u2014 confirm both should stay`;
+      return { saved: true, id: c.id, state: c.state, note };
     }
   });
   ctx.tools.register({
@@ -829,7 +866,9 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
       "or before re-deriving a decision: it returns saved facts plus the durable facts each compaction extracted,",
       "each with id, category, origin (memory_save | compaction | keeper | worker:<role>), save date, state, and trust so you can weigh them.",
       "Hits are coverage-ranked: facts matching more query terms come first, exact phrases break ties, and the caller's",
-      "project cwd plus recency provide bounded tie-breaks. Tentative claims are unconfirmed; verify before relying on them.",
+      "project cwd plus recency provide bounded tie-breaks. Results are capped by the configured top-K and by a",
+      "character budget over the fact text; the render names how many matches the budget left out, so refine the query",
+      "instead of assuming the omitted facts do not exist. Tentative claims are unconfirmed; verify before relying on them.",
       "Nothing is injected \u2014 this is the only way memory reaches you. Compaction facts are scoped to the caller's workspace."
     ].join(" "),
     parameters: {
@@ -862,6 +901,7 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
               required: ["id", "fact"]
             }
           },
+          omitted: { type: "integer" },
           note: { type: "string" }
         },
         required: ["facts"]
@@ -869,10 +909,11 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
       // C4: `• <id> <category> [<origin> <savedAt>] state=<state> trust=<trust> — <fact>`.
       render: (_a, raw) => {
         const v = raw;
-        return [{
-          type: "text",
-          text: (Array.isArray(v.facts) ? v.facts.map((f) => `\u2022 ${f.id} ${f.category} [${f.origin} ${f.savedAt}] state=${f.state} trust=${f.trust} \u2014 ${renderFact(f.fact)}`) : []).join("\n") || "No matching memory."
-        }];
+        const lines = Array.isArray(v.facts) ? v.facts.map((f) => `\u2022 ${f.id} ${f.category} [${f.origin} ${f.savedAt}] state=${f.state} trust=${f.trust} \u2014 ${renderFact(f.fact)}`) : [];
+        const text = lines.join("\n") || "No matching memory.";
+        const omitted = typeof v.omitted === "number" ? v.omitted : 0;
+        return [{ type: "text", text: omitted > 0 ? `${text}
+\u2026 ${omitted} more matches omitted by the character budget; refine the query` : text }];
       }
     },
     isConcurrencySafe: () => true,
@@ -882,8 +923,9 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
       const scope = { cwd: exec?.agent?.session.header.cwd, scopeCompaction: config.scopeCompactionFactsToWorkspace };
       const hits = searchMemory(db, String(args.query ?? ""), limit, scope);
       if (hits.length === 0) return { facts: [], note: "No matching memory." };
+      const fit = fitToCharBudget(hits, params.retrieverCharBudget);
       return {
-        facts: hits.map((h) => ({
+        facts: fit.hits.map((h) => ({
           id: h.id,
           category: h.category,
           origin: h.origin,
@@ -892,7 +934,8 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
           trust: h.source_trust,
           fact: h.fact
         })),
-        note: `${hits.length} fact(s)`
+        ...fit.omitted > 0 ? { omitted: fit.omitted } : {},
+        note: fit.omitted > 0 ? `${fit.hits.length} fact(s); ${fit.omitted} omitted by the character budget` : `${fit.hits.length} fact(s)`
       };
     }
   });

@@ -168,7 +168,7 @@ type SubagentInterruptAuthority =
 
 Every Activation owns its `AgentHandle` and an `ownedChildren: Set<SessionId>`; because one Session has at most one live Activation, the child Session id identifies the live child without another runtime-incarnation reference. Starting a child or submitting parent-originated work registers the child in a continuation-managed parent's set before the child can run, and that parent cannot settle while the set is non-empty. A top-level or other non-continuation Agent has no Activation and stays outside the waiting graph. Child release happens only after the child has no active Agent work, its Inbox is empty, every child of that child is disposed, the best-effort final session flush settles, and the child's `AgentHandle` completes disposal.
 
-Final settlement awaits `ctx.sessions.flush(session)` but ignores its participation boolean because an arbitrary listener cannot prove that a persistence backend stored the state. Rejection is logged without failing the Activation, and the manager still disposes the handle and releases ownership; the persisted child state may then be missing or stale on a later resume. Manager unload invokes an internal manager-wide drain that closes admission and disposes every live forest; `drainContinuableDescendants(parents)` closes admission only below exact live host-owned Agents and disposes their continuable descendants while unrelated forests remain live. Both await already-admitted materializations in their scope, propagate cancellation top-down, release handles child-first, and await every selected branch despite individual failures. Durable child Sessions survive that process-local teardown.
+Final settlement awaits `ctx.sessions.flush(session)` but ignores its participation boolean because an arbitrary listener cannot prove that a persistence backend stored the state. Rejection is logged without failing the Activation, and the manager still disposes the handle and releases ownership; the persisted child state may then be missing or stale on a later resume. Manager unload invokes an internal manager-wide drain that closes admission and disposes every live forest; `drainContinuableDescendants(parents)` closes admission only below exact live host-owned Agents and disposes their continuable descendants while unrelated forests remain live. `waitForTreeWork(root)` is the cooperative join a host uses when it must not start new automatic work while the root's continuable descendants still progress: it resolves once no descendant of that exact live tree root is running and no admission is pending, while idle members stay resident with whatever their own inbox already holds. Both await already-admitted materializations in their scope, propagate cancellation top-down, release handles child-first, and await every selected branch despite individual failures. Durable child Sessions survive that process-local teardown.
 
 ```ts type-equiv
 /** Durable attribution for one model-authored message between adjacent Agents. */
@@ -568,6 +568,18 @@ async drainContinuableDescendants(parents: readonly Agent[]): Promise<void>
  *   different parent or the supplied parent identity is stale.
  */
 async drainContinuableChildren(parent: Agent, childIds: readonly SessionId[]): Promise<void>
+
+/**
+ * Join progressing continuable work in one exact subagent tree for its root.
+ * A running descendant delays resolution; an idle member stays resident with
+ * whatever its own inbox already holds. A continuable member is not a tree
+ * root, so its host awaits only the members below it, and an Agent that left
+ * the registry resolves immediately. Hosts that must not wait forever (a
+ * plugin unloading, a teardown) race this promise with their own stop.
+ * @param root - exact live Agent whose continuable descendant work is awaited.
+ * @returns once no descendant of `root` is running and no admission is pending.
+ */
+async waitForTreeWork(root: Agent): Promise<void>
 
 /**
  * Read the parent's durable direct-child catalog without loading or resuming an Agent.

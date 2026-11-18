@@ -31,7 +31,7 @@ This table connects model-visible tool names to the plugin package and service s
 | `@deepseek-ai/dsh-tool-fs` | `edit`, `read`, `read_image`, `write` | `ctx.tools`, `ctx.fs`, `ctx.systemPrompt`, `ctx.attachments (image-tool registration)`, `ctx.llm + an image-capable route (image-tool execution)` | `tool/call`, `fs/write-intent or fs/edit-intent for mutations`, `fs/observed after read presence/absence or successful file operation`, `durable attachment (read_image)`, `tool/result` | - | The read-before-write/edit policy is added by `@deepseek-ai/dsh-fs-observation-policy` (an `fs/*` event-gate plugin, no schema change); a deployment that loads these tools is expected to also load it. The image tool is not registered without `ctx.attachments`; its schema is route-independent, and execution refuses unless the exact routed model declares image input. |
 | `@deepseek-ai/dsh-tool-fs-search` | `glob`, `grep` | `ctx.tools`, `ctx.subprocess`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | glob and grep are unconditional discovery tools that spawn the packaged ripgrep binary (`@vscode/ripgrep`) through ctx.subprocess as ordinary foreground calls (never background jobs) — no host `rg` install and no shell layer. The catalog uses `sampleOverCapGlobResults: true`; deployments must choose that behavior explicitly. Capped results save the complete formatted list through the optional ctx.spillStore backend; returned locators are follow-up-readable/searchable when the backend exposes local paths in co-located deployments. |
 | `@deepseek-ai/dsh-tool-terminal` | `terminal_close`, `terminal_list`, `terminal_open`, `terminal_read`, `terminal_send`, `terminal_signal` | `ctx.tools`, `ctx.terminals`, `ctx.systemPrompt`, `ctx.jobs at call time for run_in_background` | `tool/call`, `tool/result` | - | The six terminal tools are opt-in and complement one-shot shell/filesystem tools. `terminal_send(run_in_background: true)` registers with `ctx.jobs`; TUI, named key sequences, BEL, resize, auto-start, and cross-agent sharing are absent from the schema. |
-| `@deepseek-ai/dsh-tool-goal` | `create_goal`, `get_goal`, `update_goal` | `ctx.tools`, `ctx.agents`, `ctx.goals`, `ctx.systemPrompt`, `a calling Agent in an authorized open turn` | `tool/call`, `goal/change for mutations`, `tool/result` | - | create, edit, pause, and resume require direct-human root authority; complete and blocked also accept the exact current goal round. The default blocked lower bound is three admitted rounds. |
+| `@deepseek-ai/dsh-tool-goal` | `create_goal`, `get_goal`, `update_goal` | `ctx.tools`, `ctx.agents`, `ctx.goals`, `ctx.systemPrompt`, `a calling Agent in an authorized open turn` | `tool/call`, `goal/change for mutations`, `tool/result` | - | create, edit, pause, and resume require direct-human root authority; complete and blocked also accept the exact current goal round. The default blocked lower bound is three goal rounds started in the goal. |
 | `@deepseek-ai/dsh-schedule` | `schedule_create`, `schedule_delete`, `schedule_list`, `schedule_update` | `ctx.tools`, `ctx.schedule`, `a live root Agent` | `tool/call`, `Schedule storage domain create, update, or delete`, `tool/result` | - | Registered in live root Agent scopes while the Schedule service is loaded. Accepts after_seconds, explicit absolute at, bounded fixed-rate every_seconds, daily and weekly local times in an explicit IANA zone, and cron as a five-field expression. Management uses the Host storage domain; due messages resume the original Session. |
 | `@deepseek-ai/dsh-tool-lsp` | `lsp` | `ctx.tools`, `ctx.lsp`, `ctx.systemPrompt` | `tool/call`, `tool/result` | - | The lsp tool keeps provider selection and language-server subprocesses behind ctx.lsp, so its model-visible schema stays stable across providers. Requires a registered provider (e.g. `@deepseek-ai/dsh-lsp-stdio`) at runtime; without one, a query returns the structured `LSP_UNAVAILABLE` error rather than changing the schema. |
 | `@deepseek-ai/dsh-tool-ralph` | `ralph` | `ctx.tools`, `ctx.workflowEngine`, `ctx.subagents`, `ctx.systemPrompt`, `a calling Agent (exec.agent parents every fresh round)` | `tool/call`, `tool/result`, `workflow and child session events during execution` | - | A fixed foreground workflow starts one fresh structured child per round; the model selects only the immutable objective and an optional round cap. |
@@ -1343,7 +1343,7 @@ Update the current goal.
     },
     "action": {
       "type": "string",
-      "description": "edit, pause, and resume require a direct top-level human request. complete and blocked are also allowed during an automatic continuation of this goal; blocked is rejected before the configured minimum round count.",
+      "description": "edit, pause, and resume require a direct top-level human request. complete and blocked are also allowed during an automatic continuation of this goal; blocked is rejected until at least the configured number of goal rounds have started in this goal.",
       "enum": [
         "edit",
         "pause",
@@ -1375,7 +1375,7 @@ Update the current goal.
 
 Source: [`packages/goal/tool-goal/src/index.ts`](../packages/goal/tool-goal/src/index.ts)
 
-create, edit, pause, and resume require direct-human root authority; complete and blocked also accept the exact current goal round. The default blocked lower bound is three admitted rounds.
+create, edit, pause, and resume require direct-human root authority; complete and blocked also accept the exact current goal round. The default blocked lower bound is three goal rounds started in the goal.
 
 <a id="deepseek-aidsh-schedule"></a>
 
@@ -2099,7 +2099,7 @@ Source: [`packages/subagent/tool-subagent-control/src/index.ts`](../packages/sub
 
 ### `list_agents`
 
-List the continuable subagents you started, with their ids, labels, and status; one-shot delegations are not listed. running means it is working; inactive means it is not currently working. Running children are listed first, then inactive ones by most recent creation. The result shows at most 20 rows (set `limit`, max 100) and a footer with the totals when rows are omitted. You will be notified when a subagent finishes; there is no need to keep checking its status. NEVER call this tool repeatedly to poll or wait for running children — the settlement notice will wake you automatically. Use send_message to continue the conversation.
+List the continuable subagents you started, with their ids, labels, and status; one-shot delegations are not listed. running means it is working; inactive means it is not currently working. Running children are listed first, then inactive ones by most recent creation. Optional `status` and `query` filters narrow the matching set: `query` matches the id or label, case-insensitively. `limit` (default 20, max 100) and `offset` bound only the displayed text; the call returns every matching row to code, so inside run_code filter that array and return only what you need, e.g. `(await tools.list_agents({ query: "parser" })).filter(child => child.status === "running")`. A footer gives the displayed range, the running/inactive totals, and the next offset when more rows follow. You will be notified when a subagent finishes; there is no need to keep checking its status. NEVER call this tool repeatedly to poll or wait for running children — the settlement notice will wake you automatically. Use send_message to continue the conversation.
 
 ```json
 {
@@ -2113,9 +2113,25 @@ List the continuable subagents you started, with their ids, labels, and status; 
         "descendants"
       ]
     },
+    "status": {
+      "type": "string",
+      "description": "Only match children in this state. Diagnostics carry no state and are omitted by a status filter.",
+      "enum": [
+        "running",
+        "inactive"
+      ]
+    },
+    "query": {
+      "type": "string",
+      "description": "Case-insensitive substring match over the child id and label."
+    },
     "limit": {
       "type": "number",
-      "description": "Maximum child rows to show (default 20, max 100). Running children are always shown first; omitted inactive rows are counted in the footer."
+      "description": "Maximum child rows to display (default 20, max 100). Applies only to the rendered text; `offset` selects later pages."
+    },
+    "offset": {
+      "type": "number",
+      "description": "Rows to skip before the displayed page (default 0, negative values clamp to 0). Applies only to the rendered text; code receives every matching row."
     }
   }
 }

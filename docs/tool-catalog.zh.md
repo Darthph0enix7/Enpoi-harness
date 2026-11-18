@@ -35,7 +35,7 @@
 | `@deepseek-ai/dsh-tool-fs` | `edit`、`read`、`read_image`、`write` | `ctx.tools`、`ctx.fs`、`ctx.systemPrompt`、`ctx.attachments (image-tool registration)`、`ctx.llm + an image-capable route (image-tool execution)` | `tool/call`、`fs/write-intent or fs/edit-intent for mutations`、`fs/observed after read presence/absence or successful file operation`、`durable attachment (read_image)`、`tool/result` | - | 先读后写／编辑策略由 `@deepseek-ai/dsh-fs-observation-policy` 添加；它是一个 `fs/*` 事件门禁插件，不会改变 schema。加载这些工具的部署按预期也应加载该插件。没有 `ctx.attachments` 时图片工具不会注册；其 schema 与路由无关，执行时除非确切路由的模型声明图片输入，否则拒绝。 |
 | `@deepseek-ai/dsh-tool-fs-search` | `glob`、`grep` | `ctx.tools`、`ctx.subprocess`、`ctx.systemPrompt` | `tool/call`、`tool/result` | - | glob 和 grep 是无条件可用的发现工具，通过 ctx.subprocess spawn 随包提供的 ripgrep 二进制文件（`@vscode/ripgrep`），并作为普通前台调用运行，绝不作为后台任务；无需在宿主机安装 `rg`，也不经过 shell 层。本目录使用 `sampleOverCapGlobResults: true`；部署必须显式选择该行为。结果超过上限时，会通过可选的 ctx.spillStore 后端保存完整的格式化列表；在共置部署中，如果后端公开本地路径，返回的定位信息可供后续读取／搜索。 |
 | `@deepseek-ai/dsh-tool-terminal` | `terminal_close`、`terminal_list`、`terminal_open`、`terminal_read`、`terminal_send`、`terminal_signal` | `ctx.tools`、`ctx.terminals`、`ctx.systemPrompt`、`ctx.jobs at call time for run_in_background` | `tool/call`、`tool/result` | - | 这 6 个终端工具需要选择启用，用于补充一次性 bash／文件系统工具。`terminal_send(run_in_background: true)` 会注册到 `ctx.jobs`；schema 不包含 TUI、具名按键序列、BEL、调整尺寸、自动启动和跨 agent 共享。 |
-| `@deepseek-ai/dsh-tool-goal` | `create_goal`、`get_goal`、`update_goal` | `ctx.tools`、`ctx.agents`、`ctx.goals`、`ctx.systemPrompt`、`a calling Agent in an authorized open turn` | `tool/call`、`goal/change for mutations`、`tool/result` | - | create、edit、pause 和 resume 要求直接来自人类的根权限；complete 和 blocked 也接受确切的当前 Goal Round。blocked 的默认下限是 3 个获准的 Round。 |
+| `@deepseek-ai/dsh-tool-goal` | `create_goal`、`get_goal`、`update_goal` | `ctx.tools`、`ctx.agents`、`ctx.goals`、`ctx.systemPrompt`、`a calling Agent in an authorized open turn` | `tool/call`、`goal/change for mutations`、`tool/result` | - | create、edit、pause 和 resume 要求直接来自人类的根权限；complete 和 blocked 也接受确切的当前 Goal Round。blocked 的默认下限是该 goal 中已开始 3 个 goal Round。 |
 | `@deepseek-ai/dsh-schedule` | `schedule_create`、`schedule_delete`、`schedule_list`、`schedule_update` | `ctx.tools`、`ctx.schedule`、live 根 Agent | `tool/call`、Schedule storage domain 创建、更新或删除、`tool/result` | - | Schedule 服务加载期间，在 live 根 Agent scope 内注册。接受 after_seconds、显式绝对 at、有界固定速率 every_seconds、带显式 IANA 时区的每日与每周本地时间，以及作为五字段表达式的 cron。管理使用宿主 storage domain；到期消息会恢复原 Session。 |
 | `@deepseek-ai/dsh-tool-lsp` | `lsp` | `ctx.tools`、`ctx.lsp`、`ctx.systemPrompt` | `tool/call`、`tool/result` | - | lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，因此其模型可见 schema 在更换提供方时保持稳定。运行时要求已注册提供方，例如 `@deepseek-ai/dsh-lsp-stdio`；如果没有提供方，查询会返回结构化 `LSP_UNAVAILABLE` 错误，而不会改变 schema。 |
 | `@deepseek-ai/dsh-tool-ralph` | `ralph` | `ctx.tools`、`ctx.workflowEngine`、`ctx.subagents`、`ctx.systemPrompt`、`a calling Agent (exec.agent parents every fresh round)` | `tool/call`、`tool/result`、`workflow and child session events during execution` | - | 固定的前台工作流会在每个 Round 启动一个全新的结构化子级；模型只能选择不可变目标和可选的 Round 上限。 |
@@ -1349,7 +1349,7 @@ glob 和 grep 是无条件可用的发现工具，通过 ctx.subprocess spawn �
     },
     "action": {
       "type": "string",
-      "description": "edit, pause, and resume require a direct top-level human request. complete and blocked are also allowed during an automatic continuation of this goal; blocked is rejected before the configured minimum round count.",
+      "description": "edit, pause, and resume require a direct top-level human request. complete and blocked are also allowed during an automatic continuation of this goal; blocked is rejected until at least the configured number of goal rounds have started in this goal.",
       "enum": [
         "edit",
         "pause",
@@ -1381,7 +1381,7 @@ glob 和 grep 是无条件可用的发现工具，通过 ctx.subprocess spawn �
 
 来源：[`packages/goal/tool-goal/src/index.ts`](../packages/goal/tool-goal/src/index.ts)
 
-create、edit、pause 和 resume 要求直接来自人类的根权限；complete 和 blocked 也接受确切的当前 Goal Round。blocked 的默认下限是 3 个获准的 Round。
+create、edit、pause 和 resume 要求直接来自人类的根权限；complete 和 blocked 也接受确切的当前 Goal Round。blocked 的默认下限是该 goal 中已开始 3 个 goal Round。
 
 <a id="deepseek-aidsh-schedule"></a>
 
@@ -2109,7 +2109,7 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
 
 ### `list_agents`
 
-列出你启动的 continuable subagent 及其 id、标签和状态；一次性委派不会列出。running 表示正在工作；inactive 表示当前未在工作。运行中的子级排在最前，随后按最近创建时间排列非活动子级。结果最多显示 20 行（可设置 `limit`，上限 100），并在省略行时显示带总计的页脚。subagent 完成时你会收到通知，无需反复查看状态。绝不要反复调用此工具来轮询或等待运行中的子级——结算通知会自动唤醒你。使用 send_message 继续对话。
+列出你启动的 continuable subagent 及其 id、标签和状态；一次性委派不会列出。running 表示正在工作；inactive 表示当前未在工作。运行中的子级排在最前，随后按最近创建时间排列非活动子级。可选的 `status` 与 `query` 过滤会缩小匹配集合：`query` 以大小写不敏感的方式匹配 id 或标签。`limit`（默认 20，上限 100）和 `offset` 只限制显示的文本；调用仍会向代码返回每个匹配行，因此在 run_code 中可直接筛选该数组、只返回所需内容，例如 `(await tools.list_agents({ query: "parser" })).filter(child => child.status === "running")`。页脚会给出显示范围、running/inactive 总数，以及还有更多行时的下一个 offset。subagent 完成时你会收到通知，无需反复查看状态。绝不要反复调用此工具来轮询或等待运行中的子级——结算通知会自动唤醒你。使用 send_message 继续对话。
 
 ```json
 {
@@ -2123,9 +2123,25 @@ lsp 工具将提供方选择和语言服务器子进程置于 ctx.lsp 之后，�
         "descendants"
       ]
     },
+    "status": {
+      "type": "string",
+      "description": "Only match children in this state. Diagnostics carry no state and are omitted by a status filter.",
+      "enum": [
+        "running",
+        "inactive"
+      ]
+    },
+    "query": {
+      "type": "string",
+      "description": "Case-insensitive substring match over the child id and label."
+    },
     "limit": {
       "type": "number",
-      "description": "Maximum child rows to show (default 20, max 100). Running children are always shown first; omitted inactive rows are counted in the footer."
+      "description": "Maximum child rows to display (default 20, max 100). Applies only to the rendered text; `offset` selects later pages."
+    },
+    "offset": {
+      "type": "number",
+      "description": "Rows to skip before the displayed page (default 0, negative values clamp to 0). Applies only to the rendered text; code receives every matching row."
     }
   }
 }

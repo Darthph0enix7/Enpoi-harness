@@ -3633,15 +3633,24 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 ## `@deepseek-ai/dsh-subagent`
 
 - `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/subagent/subagent/src/index.ts:194`](../packages/subagent/subagent/src/index.ts)
+- `source`: [`packages/subagent/subagent/src/index.ts:198`](../packages/subagent/subagent/src/index.ts)
 
 ```ts config-catalog
-/** Host configuration for continuable subagent capacity. */
+/** Host configuration for continuable subagent capacity and settlement notices. */
 export interface Config {
   /** Maximum live children sharing uninterrupted continuable parent links; defaults to 8. */
   maxActiveSubagents: Volatile<number>
   /** Default delegation depth for tools without an explicit limit; defaults to 1. */
   maxDepth: Volatile<number>
+  /**
+   * Maximum UTF-16 code units of a settled child's closing report copied into
+   * its parent's notice; defaults to 12000. The complete report always stays in
+   * the child's own durable session, and a shortened notice states the exact
+   * omission and how to read it there.
+   */
+  settlementReportMaxChars: Volatile<number>
+  /** Maximum image blocks of a settled child's closing report copied into its parent's notice; defaults to 4. */
+  settlementReportMaxImages: Volatile<number>
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-subagent -->
@@ -4119,7 +4128,7 @@ export interface Config {
 ```ts config-catalog
 /** Model policy and hard lower bounds for goal-state updates. */
 export interface Config {
-  /** Minimum admitted goal rounds before the model may self-report `blocked`. */
+  /** Minimum goal rounds started in this goal before the model may self-report `blocked`. */
   blockedAfterConsecutiveRounds?: number
 }
 ```

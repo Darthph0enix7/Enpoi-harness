@@ -168,7 +168,7 @@ type SubagentInterruptAuthority =
 
 每个 Activation 都拥有自己的 `AgentHandle` 和一个 `ownedChildren: Set<SessionId>`；由于一份会话至多有一个存活 Activation，子会话 id 无需另一个运行时化身引用即可标识存活的子 agent。启动子 agent 或提交源自 parent 的工作，会在子 agent 能够运行之前将其注册到受继续执行管理的父级集合中；只要该集合非空，该父级就无法 settle。顶层或其他非继续执行的 Agent 没有 Activation，处于 waiting 图之外。只有当子 Agent 没有活跃工作、其 Inbox 为空、该子 agent 的每个子级都已 dispose、best-effort 的最终会话 flush 结算完毕，且子 agent 的 `AgentHandle` 完成 dispose 之后，才会释放子 agent。
 
-最终结算会等待 `ctx.sessions.flush(session)`，但会忽略其参与布尔值，因为任意 listener 都无法证明某个持久化后端已存储该状态。rejection 会被记录，但不会使 Activation 失败；管理器仍会 dispose 该 handle 并释放所有权，此后持久化的子 agent 状态在后续恢复时可能缺失或陈旧。管理器卸载会调用内部的管理器全局 drain，关闭准入并 dispose 每片在线森林；`drainContinuableDescendants(parents)` 只关闭由 host 确切拥有的在线 Agent 之下的准入，并 dispose 其可继续后代，而无关森林保持在线。两者都会等待各自作用域内已获准的物化过程，自顶向下传播取消，按 child-first 顺序释放 handle，并且即使个别分支失败也会等待所有选中分支。持久化子会话不受该进程内拆卸的影响。
+最终结算会等待 `ctx.sessions.flush(session)`，但会忽略其参与布尔值，因为任意 listener 都无法证明某个持久化后端已存储该状态。rejection 会被记录，但不会使 Activation 失败；管理器仍会 dispose 该 handle 并释放所有权，此后持久化的子 agent 状态在后续恢复时可能缺失或陈旧。管理器卸载会调用内部的管理器全局 drain，关闭准入并 dispose 每片在线森林；`drainContinuableDescendants(parents)` 只关闭由 host 确切拥有的在线 Agent 之下的准入，并 dispose 其可继续后代，而无关森林保持在线。两者都会等待各自作用域内已获准的物化过程，自顶向下传播取消，按 child-first 顺序释放 handle，并且即使个别分支失败也会等待所有选中分支。持久化子会话不受该进程内拆卸的影响。`waitForTreeWork(root)` 是宿主在不得于可继续后代仍在推进时启动新的自动工作时使用的协作式汇合：当该确切在线树根没有任何后代在运行、且没有进行中的准入时它才完成，而空闲成员会连同其自身 inbox 中已有的内容继续驻留。
 
 ```ts type-equiv
 /** Durable attribution for one model-authored message between adjacent Agents. */
@@ -572,6 +572,18 @@ async drainContinuableDescendants(parents: readonly Agent[]): Promise<void>
  *   different parent or the supplied parent identity is stale.
  */
 async drainContinuableChildren(parent: Agent, childIds: readonly SessionId[]): Promise<void>
+
+/**
+ * Join progressing continuable work in one exact subagent tree for its root.
+ * A running descendant delays resolution; an idle member stays resident with
+ * whatever its own inbox already holds. A continuable member is not a tree
+ * root, so its host awaits only the members below it, and an Agent that left
+ * the registry resolves immediately. Hosts that must not wait forever (a
+ * plugin unloading, a teardown) race this promise with their own stop.
+ * @param root - exact live Agent whose continuable descendant work is awaited.
+ * @returns once no descendant of `root` is running and no admission is pending.
+ */
+async waitForTreeWork(root: Agent): Promise<void>
 
 /**
  * Read the parent's durable direct-child catalog without loading or resuming an Agent.

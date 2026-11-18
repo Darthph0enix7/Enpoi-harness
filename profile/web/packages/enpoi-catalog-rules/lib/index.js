@@ -568,7 +568,11 @@ function parseModel(provider, raw) {
     ...tools !== void 0 ? { tools } : {},
     ...cost !== void 0 && Object.keys(cost).length > 0 ? { cost } : {},
     ...raw.gated === true ? { gated: true } : {},
-    ...gateReason === void 0 ? {} : { gateReason }
+    ...gateReason === void 0 ? {} : { gateReason },
+    // The provider sync keeps an endpoint-dropped model only while a route
+    // reference still names it and stamps `deprecated: true`; the marker is
+    // read through this same projection so a consumer can refuse it.
+    ...raw.deprecated === true ? { deprecated: true } : {}
   };
 }
 function readCatalogue(settings) {

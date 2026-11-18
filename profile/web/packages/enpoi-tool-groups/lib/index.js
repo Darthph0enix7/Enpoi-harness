@@ -40,7 +40,7 @@ var zh = {
   "group.recall.label": "\u56DE\u6EAF",
   "group.recall.purpose": "\u641C\u7D22\u5E76\u8BFB\u53D6\u672C\u4F1A\u8BDD\u53CA\u5176\u4ED6\u4F1A\u8BDD\u7684\u65E9\u671F\u6D88\u606F",
   "group.peer.label": "\u5BF9\u7B49\u4E92\u8054",
-  "group.peer.purpose": "\u8DE8\u8BBE\u5907\u5BF9\u7B49\u4F1A\u8BDD\uFF1A\u72B6\u6001\u3001\u63D0\u95EE\u3001\u56DE\u7B54\u3001\u53D6\u6D88",
+  "group.peer.purpose": "\u8DE8\u8BBE\u5907\u5BF9\u7B49\u4F1A\u8BDD\uFF1A\u72B6\u6001\u3001\u6A21\u578B\u3001\u5207\u6362\u3001\u63D0\u95EE\u3001\u56DE\u7B54\u3001\u53D6\u6D88",
   "group.debug.label": "\u8C03\u8BD5\u4E0E\u53EF\u89C2\u6D4B\u6027",
   "group.debug.purpose": "\u4F1A\u8BDD\u65E5\u5FD7\u3001\u4E8B\u4EF6\u8F68\u8FF9\u4E0E\u8BCA\u65AD\u68C0\u67E5",
   "group.creator.label": "\u521B\u5EFA\u8005\uFF08harness \u7F16\u5199\uFF09",
@@ -68,7 +68,7 @@ var en = {
   "group.recall.label": "Recall",
   "group.recall.purpose": "search and read earlier messages of this and other sessions",
   "group.peer.label": "Peer interconnect",
-  "group.peer.purpose": "cross-device peer sessions: status, ask, answer, cancel",
+  "group.peer.purpose": "cross-device peer sessions: status, models, switch, ask, answer, cancel",
   "group.debug.label": "Debug & observability",
   "group.debug.purpose": "session log, event trace, and diagnostics inspection",
   "group.creator.label": "Creator (harness authoring)",
@@ -194,7 +194,7 @@ var SHIPPED_TOOL_GROUPS = Object.freeze([
   {
     id: "peer",
     label: "Peer interconnect",
-    purpose: "cross-device peer sessions: status, ask, answer, cancel",
+    purpose: "cross-device peer sessions: status, models, switch, ask, answer, cancel",
     mode: "on-demand",
     preAttach: [],
     enabled: true,
@@ -203,7 +203,7 @@ var SHIPPED_TOOL_GROUPS = Object.freeze([
     // would stay presented after `detach peer`, so the family could never be
     // hidden as a whole. The bridge's registration names are pinned against
     // this list by tests/tool-groups.spec.ts (read from its source keylessly).
-    members: ["peer_status", "peer_sessions", "peer_ask", "peer_asks", "peer_answer", "peer_cancel"]
+    members: ["peer_status", "peer_sessions", "peer_models", "peer_switch_model", "peer_ask", "peer_asks", "peer_answer", "peer_cancel"]
   },
   {
     id: "debug",

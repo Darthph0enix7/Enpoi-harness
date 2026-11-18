@@ -69,3 +69,10 @@ packages/*/*/*/src/*.d.ts
 
 # Research skill run directories (never commit archived sources)
 .research/
+
+# The client build environment script is compiled in place for the tests and
+# demographic bootstrap that import its built JS boundary; never commit it.
+scripts/client-build-environment.js
+scripts/client-build-environment.js.map
+scripts/client-build-environment.d.ts
+scripts/client-build-environment.d.ts.map

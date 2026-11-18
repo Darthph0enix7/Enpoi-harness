@@ -49912,7 +49912,7 @@
         "packages/subagent/subagent/src/continuation-messages.ts#AgentMessageSource"
       ],
       "sources": [
-        "packages/subagent/subagent/src/continuation-messages.ts:19"
+        "packages/subagent/subagent/src/continuation-messages.ts:22"
       ]
     },
     {
@@ -51671,7 +51671,7 @@
         "packages/subagent/subagent/src/continuation-messages.ts#SubagentSettledMessageSource"
       ],
       "sources": [
-        "packages/subagent/subagent/src/continuation-messages.ts:34"
+        "packages/subagent/subagent/src/continuation-messages.ts:37"
       ]
     },
     {
