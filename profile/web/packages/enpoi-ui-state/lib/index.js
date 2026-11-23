@@ -19729,6 +19729,8 @@ var name = "enpoi-ui-state";
 var inject = [];
 var MAX_SESSION_ID_CHARS = 200;
 var MAX_DRAFT_TEXT_CHARS = 1e5;
+var MAX_DRAFT_ATTACHMENTS = 256;
+var MAX_DRAFT_ATTACHMENTS_JSON_CHARS = 256e3;
 var MAX_SURFACE_JSON_CHARS = 64e3;
 var SESSION_ID_RE = /^[a-zA-Z0-9_-]+$/;
 var LAYOUT_KEY = "layout";
@@ -19736,6 +19738,10 @@ var MAX_WIDTH_PX = 2e4;
 var uiStateRecordSchema = external_exports.object({
   draft: external_exports.object({
     text: external_exports.string(),
+    attachments: external_exports.array(external_exports.object({
+      kind: external_exports.enum(["image", "file"]),
+      attachment: external_exports.object({ attachmentId: external_exports.string() }).passthrough()
+    }).passthrough()).max(MAX_DRAFT_ATTACHMENTS).optional(),
     updatedAt: external_exports.number(),
     clientId: external_exports.string()
   }).optional(),
@@ -19784,7 +19790,7 @@ function requireDraft(value) {
   if (!isRecord(value)) {
     throw new TypeError("enpoiUiState: patch.draft must be an object");
   }
-  const { text, updatedAt, clientId } = value;
+  const { text, updatedAt, clientId, attachments } = value;
   if (typeof text !== "string") {
     throw new TypeError("enpoiUiState: patch.draft.text must be a string");
   }
@@ -19797,7 +19803,43 @@ function requireDraft(value) {
   if (typeof clientId !== "string" || clientId === "") {
     throw new TypeError("enpoiUiState: patch.draft.clientId must be a non-empty string");
   }
-  return { text, updatedAt, clientId };
+  return { text, updatedAt, clientId, ...requireDraftAttachments(attachments) };
+}
+function requireDraftAttachments(value) {
+  if (value === void 0) return {};
+  if (!Array.isArray(value)) {
+    throw new TypeError("enpoiUiState: patch.draft.attachments must be an array");
+  }
+  if (value.length > MAX_DRAFT_ATTACHMENTS) {
+    throw new RangeError(`enpoiUiState: patch.draft.attachments must hold at most ${MAX_DRAFT_ATTACHMENTS} entries`);
+  }
+  const attachments = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || !isRecord(entry.attachment)) {
+      throw new TypeError("enpoiUiState: patch.draft.attachments entries must be objects with an attachment");
+    }
+    const kind = entry.kind;
+    if (kind !== "image" && kind !== "file") {
+      throw new TypeError('enpoiUiState: patch.draft.attachments[].kind must be "image" or "file"');
+    }
+    const attachmentId = entry.attachment.attachmentId;
+    if (typeof attachmentId !== "string" || attachmentId === "") {
+      throw new TypeError("enpoiUiState: patch.draft.attachments[].attachment.attachmentId must be a non-empty string");
+    }
+    attachments.push({ kind, attachment: entry.attachment });
+  }
+  let serialized;
+  try {
+    serialized = JSON.stringify(attachments);
+  } catch (error62) {
+    throw new TypeError(`enpoiUiState: patch.draft.attachments is not JSON-serializable: ${String(error62)}`);
+  }
+  if (serialized.length > MAX_DRAFT_ATTACHMENTS_JSON_CHARS) {
+    throw new RangeError(
+      `enpoiUiState: patch.draft.attachments must serialize to at most ${MAX_DRAFT_ATTACHMENTS_JSON_CHARS} characters`
+    );
+  }
+  return { attachments };
 }
 function requireSurface(value) {
   let serialized;
@@ -19931,5 +19973,6 @@ export {
   apply,
   inject,
   name,
+  requireDraft,
   requireLayoutWidths
 };

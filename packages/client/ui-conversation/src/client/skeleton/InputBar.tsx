@@ -108,8 +108,11 @@ export const InputBar = memo(function InputBar({
   const uploads = useFileUploads(snapshot => snapshot)
   // Send waits for every picked file: uploading and failed drafts both hold
   // the gate (a failed upload is retried or removed, never silently dropped).
+  // Restored files cite durable bytes and have no upload gate to wait for.
   const uploadsPending = attachments.some(
-    attachment => attachment.kind === 'file' && uploads[attachment.id]?.status !== 'ready',
+    attachment => attachment.kind === 'file'
+      && attachment.file !== undefined
+      && uploads[attachment.id]?.status !== 'ready',
   )
   // Transient error banner (machine notices, image-intake rejections, and
   // prompt failures): the seq keys the Toast so an identical repeated message
@@ -424,7 +427,10 @@ export const InputBar = memo(function InputBar({
         if (images.some(file => file.size > imageLimits.maxImageBytes)) {
           return t('image.fileTooLarge', { size: imageSizeText(imageLimits.maxImageBytes) })
         }
-        const total = imageAttachments.reduce((sum, attachment) => sum + attachment.file.size, 0)
+        const total = imageAttachments.reduce(
+          (sum, attachment) => sum + (attachment.file?.size ?? attachment.attachment?.bytes ?? 0),
+          0,
+        )
           + images.reduce((sum, file) => sum + file.size, 0)
         if (total > imageLimits.maxMessageImageBytes) {
           return t('image.totalTooLarge', { size: imageSizeText(imageLimits.maxMessageImageBytes) })

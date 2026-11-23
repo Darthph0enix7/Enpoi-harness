@@ -158,6 +158,7 @@ function bench(over?: BenchOptions) {
   }))
   type ShellDeps = ConstructorParameters<typeof SessionInputShell>[0]
   const shell = new SessionInputShell({
+    restorePendingNotice: () => 'attachments are still restoring',
     actx: SCTX,
     defaultSink: sink,
     commandAttachments: { serialize: () => Promise.resolve([]), release: () => {}, unsupportedNotice: (token: string) => `${token.trim()} attachments-unsupported` },
@@ -743,8 +744,11 @@ describe('image draft rail', () => {
     const model = bench({ promptError: attachmentError('MODEL_DOES_NOT_SUPPORT_IMAGES') })
     expect(model.view.getByRole('alert').textContent).toContain('当前模型不支持图片，请切换支持图片的模型')
     cleanup()
-    const unknown = bench({ promptError: attachmentError('ATTACHMENT_NOT_REFERENCED') })
-    expect(unknown.view.getByRole('alert').textContent).toContain('图片发送失败（ATTACHMENT_NOT_REFERENCED）')
+    const unavailable = bench({ promptError: attachmentError('ATTACHMENT_NOT_REFERENCED') })
+    expect(unavailable.view.getByRole('alert').textContent).toContain('部分附件已不可用，请移除后再发送')
+    cleanup()
+    const unknown = bench({ promptError: attachmentError('ATTACHMENT_UNKNOWN_REASON') })
+    expect(unknown.view.getByRole('alert').textContent).toContain('图片发送失败（ATTACHMENT_UNKNOWN_REASON）')
     cleanup()
     // A subagent refusal uses the same product copy for the same reason.
     const subagent = bench({
@@ -1188,7 +1192,7 @@ describe('running and lock semantics', () => {
       ids: rows.map(row => row.id),
       phase: 'ready',
       projectionsBySession: {},
-      byId: Object.fromEntries(rows.map(row => [row.id, row])) as SessionListState['byId'],
+      byId: Object.fromEntries(rows.map(row => [row.id, row])),
     }
     // The hook status wins over the row fallback; parked rows stay uncounted.
     const statuses = new Map<SessionId, SessionStatus>([
@@ -1215,7 +1219,7 @@ describe('running and lock semantics', () => {
       ids: parkedRows.map(row => row.id),
       phase: 'ready',
       projectionsBySession: {},
-      byId: Object.fromEntries(parkedRows.map(row => [row.id, row])) as SessionListState['byId'],
+      byId: Object.fromEntries(parkedRows.map(row => [row.id, row])),
     }
     const { view, stopAll } = bench({ running: true, sessions: parked })
     expect(view.queryByRole('button', { name: /停止全部智能体/ })).toBeNull()
@@ -1230,7 +1234,7 @@ describe('running and lock semantics', () => {
       ids: rows.map(row => row.id),
       phase: 'ready',
       projectionsBySession: {},
-      byId: Object.fromEntries(rows.map(row => [row.id, row])) as SessionListState['byId'],
+      byId: Object.fromEntries(rows.map(row => [row.id, row])),
     }
     const live = new Map<SessionId, SessionStatus>([
       ['child-a' as SessionId, { running: true, pendingInteraction: undefined, completionUnread: false }],
@@ -1329,6 +1333,17 @@ describe('running and lock semantics', () => {
     })
     expect(ready.button.getAttribute('aria-label')).toBe('插话发送')
     expect(ready.button.disabled).toBe(false)
+  })
+
+  it('does not wait for an upload on a restored file that cites durable bytes', () => {
+    const restoredFile = {
+      kind: 'file' as const,
+      id: 'restored-file' as DraftAttachmentId,
+      attachment: { attachmentId: 'file-1' as never, name: 'notes.txt', bytes: 4 },
+    }
+    const restored = bench({ draft: 'resend', attachments: [restoredFile] })
+    expect(restored.button.disabled).toBe(false)
+    expect(restored.button.getAttribute('aria-label')).toBe('发送消息')
   })
 
   it('idle Send keeps the plain label regardless of the busy-state preference', () => {

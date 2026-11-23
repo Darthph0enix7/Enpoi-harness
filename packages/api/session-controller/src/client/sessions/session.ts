@@ -298,19 +298,22 @@ export class Session implements SessionFace {
         clientTimeZone,
         ...(this.revertFold.revertFromSeq === null ? {} : { revertFromSeq: this.revertFold.revertFromSeq }),
       }, signal)
-    } else if (content.some(part => part.type === 'file')) {
+    } else if (content.some(part => part.type === 'file' || part.type === 'file-ref' || part.type === 'image-ref')) {
       result = {
         ok: false,
         error: new RemoteError(
           'subagent/attachment-invalid',
-          'subagent continuation does not accept files',
+          'subagent continuation does not accept durable attachments',
           { reason: 'SUBAGENT_FILE_UNSUPPORTED' },
         ),
       }
     } else {
-      // The preceding branch rejects file parts before the narrower subagent
-      // wire type is used; this array is not filtered or reordered.
-      const routedContent = content as Exclude<PromptContentPart, { readonly type: 'file' }>[]
+      // The preceding branch rejects file and durable references before the
+      // narrower subagent wire type is used; this array is not filtered or reordered.
+      const routedContent = content as Exclude<
+        PromptContentPart,
+        { readonly type: 'file' } | { readonly type: 'file-ref' } | { readonly type: 'image-ref' }
+      >[]
       const routed = await this.remote.subagents.prompt({
         requestId: randomUUID() as SessionRequestId,
         parentSessionId: this.address.parentSessionId,

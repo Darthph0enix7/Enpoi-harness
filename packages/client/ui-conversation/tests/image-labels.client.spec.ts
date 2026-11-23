@@ -31,6 +31,8 @@ describe('attachment rejection copy', () => {
     expect(attachmentErrorText(t, 'IMAGE_TOO_LARGE', limits)).toBe('单张图片不能超过 5MB')
     expect(attachmentErrorText(t, 'IMAGES_TOO_LARGE', limits)).toBe('图片总大小超过 100MB，请移除部分图片')
     expect(attachmentErrorText(t, 'IMAGE_DIMENSION_TOO_LARGE', limits)).toBe('图片宽高不能超过 2000px，请缩小后重试')
+    expect(attachmentErrorText(t, 'DUPLICATE_ATTACHMENT_REF')).toBe('同一条消息重复引用了同一附件，请移除重复项后再试')
+    expect(attachmentErrorText(t, 'TOO_MANY_FILES')).toBe('一条消息的文件附件过多，请移除部分文件后再试')
     expect(attachmentErrorText(enT, 'TOO_MANY_IMAGES', limits)).toBe('A message can include up to 20 images')
   })
 

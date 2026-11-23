@@ -11,12 +11,14 @@ export interface FileCardLabels {
   readonly uploading: string
   /** Status line and retry affordance after a failed upload. */
   readonly failed: string
+  /** Status line for a restored attachment whose durable bytes are gone. */
+  readonly unavailable: string
   /** Retry-button label. */
   readonly retry: string
 }
 
 /** Upload display state resolved by the owner. */
-export type FileCardState = 'uploading' | 'ready' | 'error'
+export type FileCardState = 'uploading' | 'ready' | 'error' | 'unavailable'
 
 /** One pending file card: type glyph, name, size or upload status, remove, retry. */
 export function FileCard({
@@ -28,18 +30,21 @@ export function FileCard({
   progress?: number
   labels: FileCardLabels
   onRemove: () => void
-  onRetry: () => void
+  onRetry?: (() => void) | undefined
 }) {
   const extension = fileExtension(name).toUpperCase().slice(0, 8)
   const meta = state === 'uploading'
     ? labels.uploading
     : state === 'error'
       ? labels.failed
-      : [extension, fileSizeText(bytes)].filter(part => part !== '').join(' ')
+      : state === 'unavailable'
+        ? labels.unavailable
+        : [extension, fileSizeText(bytes)].filter(part => part !== '').join(' ')
   const retryable = state === 'error'
+  const failed = retryable || state === 'unavailable'
   return (
     <div
-      className={`${css.card}${retryable ? ` ${css.failed}` : ''}`}
+      className={`${css.card}${failed ? ` ${css.failed}` : ''}`}
       title={name}
     >
       <span className={css.icon} aria-hidden>
@@ -62,7 +67,7 @@ export function FileCard({
         )}
       <button
         type="button"
-        className={retryable ? `${css.remove} ${css.removeFailed}` : css.remove}
+        className={failed ? `${css.remove} ${css.removeFailed}` : css.remove}
         aria-label={labels.remove}
         onClick={onRemove}
       >

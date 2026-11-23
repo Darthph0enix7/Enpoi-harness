@@ -310,7 +310,9 @@ async function setup(options: {
       const admitted: AdmittedPromptContentPart[] = []
       for (const part of content) {
         if (part.type === 'image') throw new Error('test does not configure images')
-        admitted.push(part)
+        if (part.type === 'image-ref') admitted.push({ type: 'image', attachment: part.attachment })
+        else if (part.type === 'file-ref') admitted.push({ type: 'file', attachment: part.attachment })
+        else admitted.push(part)
       }
       return admitted
     },

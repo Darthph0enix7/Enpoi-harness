@@ -2,7 +2,7 @@
 import type { NativeFileApplication } from '@deepseek-ai/dsh-native-command/types'
 
 import type {
-  AttachmentIdType, ImageAttachmentLimits, ImageAttachmentRef, ImageMediaType,
+  AttachmentIdType, FileAttachmentRef, ImageAttachmentLimits, ImageAttachmentRef, ImageMediaType,
 } from '@deepseek-ai/dsh-attachment'
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import type { LlmAttemptId, MessageId } from '@deepseek-ai/dsh-llm/brand'
@@ -93,7 +93,10 @@ export type SessionProjectionValues = Partial<SessionProjectionMap>
 /**
  * Browser-submitted prompt content; the Host promotes image bytes to durable
  * references. File parts carry the opaque receipt returned by a preceding
- * `uploadFile` call on the same Session.
+ * `uploadFile` call on the same Session. The `image-ref` and `file-ref` arms
+ * cite attachments already referenced by the target Session's log (the
+ * composer's restored drafts); the Host authorizes both against that log and
+ * never re-reads or re-copies their bytes through an upload.
  */
 export type PromptContentPart =
   | { readonly type: 'text'; readonly text: string }
@@ -104,6 +107,8 @@ export type PromptContentPart =
     readonly name?: string
   }
   | { readonly type: 'file'; readonly receiptId: Branded<'file-upload-receipt-id'> }
+  | { readonly type: 'image-ref'; readonly attachment: ImageAttachmentRef }
+  | { readonly type: 'file-ref'; readonly attachment: FileAttachmentRef }
 
 /** Complete model selection for one Session. */
 export interface ModelSelection {
@@ -846,10 +851,21 @@ export interface SessionRevertRequest {
   readonly participant?: ParticipantTag
 }
 
-/** Revert receipt with the reverted query text for the input card. */
+/** One durable text or attachment block restored to the composer with a reverted query. */
+export type SessionRevertContentPart =
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'image'; readonly attachment: ImageAttachmentRef }
+  | { readonly type: 'file'; readonly attachment: FileAttachmentRef }
+
+/** Revert receipt with the reverted query text and durable content for the input card. */
 export interface SessionRevertValue {
   readonly accepted: true
   readonly revertedText: string
+  /**
+   * Reverted query content in original block order; attachments cite durable
+   * references, never bytes. An older host omits it, leaving only text.
+   */
+  readonly revertedContent?: readonly SessionRevertContentPart[]
   readonly revertedCount: number
   /**
    * Set only when the host could not arm a boundary. Current hosts reject an

@@ -154,7 +154,7 @@ export class FakeApiClient {
     }))
   onRename: (payload: unknown) => Promise<RemoteResult<{ title: string; seq: number }>> = () => Promise.resolve(ok({ title: 'fk-renamed', seq: 0 }))
   onFork: (payload: unknown) => Promise<RemoteResult<{ sessionId: SessionId }>> = () => Promise.resolve(ok({ sessionId: 'fk-fork' as SessionId }))
-  onRevert: (payload: unknown) => Promise<RemoteResult<SessionRevertValue>> = () => Promise.resolve(ok({ accepted: true, revertedText: 'fk-reverted', revertedCount: 1 }))
+  onRevert: (payload: unknown) => Promise<RemoteResult<SessionRevertValue>> = () => Promise.resolve(ok({ accepted: true, revertedText: 'fk-reverted', revertedContent: [{ type: 'text', text: 'fk-reverted' }], revertedCount: 1 }))
   onRevertIterations: (payload: unknown) => Promise<RemoteResult<{ groups: readonly never[] }>> =
     () => Promise.resolve(ok({ groups: [] }))
   onRevertIterationRestore: (payload: unknown) => Promise<RemoteResult<{ accepted: true }>> =

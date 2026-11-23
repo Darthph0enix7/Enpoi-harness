@@ -17,7 +17,10 @@ import { InputHub } from '../src/client/input/hub.ts'
 import { ConversationController } from '../src/client/service.ts'
 import { zh } from '../src/client/locales.ts'
 
-async function bench(maxConcurrentFileUploads = 2) {
+async function bench(
+  maxConcurrentFileUploads = 2,
+  resolveImageUrl: () => Promise<string> = () => Promise.resolve('blob:restored'),
+) {
   const runtime = await SlotTestRuntime.create()
   runtime.fileUpload.upload = (sessionId: SessionId, ...args: unknown[]) => {
     const session = runtime.sessions.behavior(sessionId) as {
@@ -45,6 +48,8 @@ async function bench(maxConcurrentFileUploads = 2) {
     input: hub,
     blocks: new ComposerBlockRegistry(),
     maxConcurrentFileUploads,
+    resolveImageUrl,
+    unavailableAttachmentText: () => 'attachment unavailable',
   })
   await fiber.await()
   const root = runtime.ctx.get('conversation') as ConversationController
@@ -222,6 +227,63 @@ describe('ConversationController', () => {
       vi.unstubAllGlobals()
     }
     await b.runtime.dispose()
+  })
+
+  it('creates restored drafts from durable references without reading browser bytes', async () => {
+    const b = await bench()
+    try {
+      const session = b.runtime.sessions.binding('s1')!.session
+      const image = {
+        attachmentId: 'image-restored' as never,
+        mediaType: 'image/png' as const,
+        bytes: 6,
+        width: 2,
+        height: 2,
+        name: 'shot.png',
+      }
+      const file = { attachmentId: 'file-restored' as never, name: 'notes.txt', bytes: 4 }
+      const drafts = await b.root.createRestoredDrafts(session.sessionId, [
+        { kind: 'image', attachment: image },
+        { kind: 'file', attachment: file },
+      ])
+      expect(drafts.map(draft => draft.kind)).toEqual(['image', 'file'])
+      expect(drafts[0]).toMatchObject({
+        kind: 'image', attachment: image, previewUrl: 'blob:restored', width: 2, height: 2,
+      })
+      expect(drafts[0]).not.toHaveProperty('file')
+      expect(drafts[1]).toMatchObject({ kind: 'file', attachment: file })
+      expect(drafts[1]).not.toHaveProperty('file')
+      expect(b.root.resolveDraftAttachments(drafts.map(draft => draft.id))).toEqual(drafts)
+      // Command submissions stay byte-only; a durable reference is refused
+      // instead of silently dropped.
+      await expect(b.root.serializeDraftAttachments([drafts[0]!.id]))
+        .rejects.toThrow(/command submissions do not accept restored attachments/)
+      await expect(b.root.serializeDraftAttachments([drafts[1]!.id]))
+        .rejects.toThrow(/command submissions do not accept restored attachments/)
+    } finally {
+      await b.runtime.dispose()
+    }
+  })
+
+  it('marks a restored image unavailable when the Session can no longer serve it', async () => {
+    const b = await bench(2, () => Promise.reject(new Error('blob expired')))
+    try {
+      const session = b.runtime.sessions.binding('s1')!.session
+      const image = {
+        attachmentId: 'image-lost' as never,
+        mediaType: 'image/png' as const,
+        bytes: 1,
+        width: 1,
+        height: 1,
+        name: 'gone.png',
+      }
+      const [draft] = await b.root.createRestoredDrafts(session.sessionId, [{ kind: 'image', attachment: image }])
+      expect(draft).toMatchObject({ kind: 'unavailable', attachment: image, name: 'gone.png' })
+      await expect(b.root.sendSession(session, 'text', [draft!.id], 'queue'))
+        .resolves.toEqual({ kind: 'error', text: 'attachment unavailable' })
+    } finally {
+      await b.runtime.dispose()
+    }
   })
 
   it('bounds upload Workers, advances on settlement, and skips a queued file removed by the user', async () => {
@@ -480,6 +542,8 @@ describe('ConversationController', () => {
       input: new InputHub(bare, makeTranslate(zh, {})),
       blocks: new ComposerBlockRegistry(),
       maxConcurrentFileUploads: 2,
+      resolveImageUrl: () => Promise.resolve('blob:restored'),
+      unavailableAttachmentText: () => 'attachment unavailable',
     }).await()
     const orphan = bare.get('conversation') as ConversationController
     await expect(orphan.send('x')).rejects.toThrow(/sessions service unavailable/)
@@ -782,6 +846,82 @@ describe('sendSession submission echo', () => {
     await b.runtime.dispose()
   })
 
+  it('sends restored drafts by durable reference and keeps their preview after retirement', async () => {
+    const b = await echoBench()
+    try {
+      const session = b.runtime.sessions.binding('s1')!.session
+      const image = {
+        attachmentId: 'image-restored' as never,
+        mediaType: 'image/png' as const,
+        bytes: 6,
+        width: 2,
+        height: 2,
+        name: 'shot.png',
+      }
+      const file = { attachmentId: 'file-restored' as never, name: 'notes.txt', bytes: 4 }
+      const drafts = await b.root.createRestoredDrafts(session.sessionId, [
+        { kind: 'image', attachment: image },
+        { kind: 'file', attachment: file },
+      ])
+      const sending = b.root.sendSession(session, 'again', drafts.map(draft => draft.id), 'queue')
+      const echo = await b.begun
+      expect(echo.attachments).toEqual([
+        { type: 'image', value: { previewUrl: 'blob:restored', name: 'shot.png', width: 2, height: 2 } },
+        { type: 'file', value: file },
+      ])
+      await vi.waitFor(() => { expect(b.prompt).toHaveBeenCalledOnce() })
+      expect(b.prompt).toHaveBeenCalledWith(
+        [
+          { type: 'image-ref', attachment: image },
+          { type: 'file-ref', attachment: file },
+          { type: 'text', text: 'again' },
+        ],
+        'queue',
+        undefined,
+        'req-echo',
+      )
+      b.retire.onRetire?.({ reason: 'observed', attachments: [image, file] })
+      await expect(sending).resolves.toEqual({ kind: 'success' })
+      // Restored previews are cache-owned; retirement must not revoke them.
+      expect(b.revoked).not.toHaveBeenCalled()
+      expect(b.root.resolveDraftAttachments(drafts.map(draft => draft.id))).toEqual([])
+    } finally {
+      b.restore()
+      await b.runtime.dispose()
+    }
+  })
+
+  it('round-trips an attachment-only reverted draft through restore and send', async () => {
+    const b = await echoBench()
+    try {
+      const scope = b.runtime.sessions.scope('s1')!
+      const input = b.runtime.ctx.conversation.input.for(scope)
+      const file = { attachmentId: 'file-only' as never, name: 'notes.txt', bytes: 4 }
+      // The revert receipt restores text and durable references; an
+      // attachment-only message restores empty text.
+      input.restoreDraft('', [{ kind: 'file', attachment: file }])
+      await vi.waitFor(() => { expect(input.state.getSnapshot().attachmentIds).toHaveLength(1) })
+      expect(input.state.getSnapshot().draft).toBe('')
+
+      input.submit('queue')
+      const echo = await b.begun
+      expect(echo.text).toBe('')
+      expect(echo.attachments).toEqual([{ type: 'file', value: file }])
+      await vi.waitFor(() => { expect(b.prompt).toHaveBeenCalledOnce() })
+      expect(b.prompt).toHaveBeenCalledWith(
+        [{ type: 'file-ref', attachment: file }],
+        'queue',
+        expect.any(AbortSignal),
+        'req-echo',
+      )
+      b.retire.onRetire?.({ reason: 'observed', attachments: [file] })
+      await vi.waitFor(() => { expect(input.state.getSnapshot().attachmentIds).toEqual([]) })
+    } finally {
+      b.restore()
+      await b.runtime.dispose()
+    }
+  })
+
   it('sends a subagent continuation without registering an unobservable echo', async () => {
     const b = await bench()
     const session = b.runtime.sessions.binding('s1')!.session
@@ -902,4 +1042,5 @@ describe('InputHub queue steering (empty-draft accelerated Enter)', () => {
     expect(b.updateQueue).not.toHaveBeenCalled()
     await b.runtime.dispose()
   })
+
 })

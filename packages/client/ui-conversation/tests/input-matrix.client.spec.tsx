@@ -17,10 +17,11 @@ import {
 } from '@deepseek-ai/dsh-client-test-runtime'
 import type { SessionStatusSnapshot } from '@deepseek-ai/dsh-client-ui-session/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
-import type { SubmitAttachment, SubmitOutcome } from '../src/client/contract/input.ts'
+import type {
+  DraftAttachmentId, RestoredDraftAttachment, SubmitAttachment, SubmitOutcome,
+} from '../src/client/contract/input.ts'
 import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
-import type { DraftAttachmentId } from '../src/client/contract/input.ts'
 import { SessionInputShell } from '../src/client/input/facade.ts'
 import { InputBar } from '../src/client/skeleton/InputBar.tsx'
 import type { InputBarProps } from '../src/client/skeleton/InputBar.tsx'
@@ -105,7 +106,14 @@ function bench(over?: {
   const sink = vi.fn(() => Promise.resolve<SubmitOutcome>({ kind: 'success' }))
   const serialize = vi.fn(over?.serialize ?? (() => Promise.resolve<readonly SubmitAttachment[]>([])))
   const release = vi.fn()
-  const shell = new SessionInputShell({ actx: SCTX, defaultSink: sink, commandAttachments: { serialize, release, unsupportedNotice: (token: string) => `${token.trim()} attachments-unsupported` } })
+  const shell = new SessionInputShell({
+    restorePendingNotice: () => 'attachments are still restoring',
+    actx: SCTX,
+    defaultSink: sink,
+    commandAttachments: {
+      serialize, release, unsupportedNotice: (token: string) => `${token.trim()} attachments-unsupported`,
+    },
+  })
   const wiring = shell
   const view = mountBar(shell, over)
   const textarea = view.container.querySelector<HTMLDivElement>('[data-composer-input]')!
@@ -130,6 +138,7 @@ describe('matrix row: plain', () => {
     const unsubscribe = vi.fn()
     const subscribe = vi.fn(() => unsubscribe)
     const shell = new SessionInputShell({
+      restorePendingNotice: () => 'attachments are still restoring',
       actx: SCTX,
       defaultSink: () => Promise.resolve({ kind: 'success' }),
       inbox: { getSnapshot: () => undefined, subscribe },
@@ -368,5 +377,187 @@ describe('matrix row: takeover (orthogonal axis)', () => {
     expect(shell.snapshot.phase).toBe('claimed')
     expect(shell.snapshot.claim?.token).toBe('/goal ')
     expect(shell.snapshot.draft).toBe('/goal ')
+  })
+})
+
+describe('restoreDraft', () => {
+  const IMAGE_REF = {
+    attachmentId: 'image-restored' as never,
+    mediaType: 'image/png' as const,
+    bytes: 3,
+    width: 1,
+    height: 1,
+  }
+  const FILE_REF = { attachmentId: 'file-restored' as never, name: 'notes.txt', bytes: 4 }
+  const REFS: readonly RestoredDraftAttachment[] = [
+    { kind: 'image', attachment: IMAGE_REF },
+    { kind: 'file', attachment: FILE_REF },
+  ]
+
+  it('replaces the draft and mirrors durable references as chips are added and removed', async () => {
+    const released = vi.fn()
+    const restoredIds = ['restored-1' as DraftAttachmentId, 'restored-2' as DraftAttachmentId]
+    const shell = new SessionInputShell({
+      restorePendingNotice: () => 'attachments are still restoring',
+      actx: SCTX,
+      defaultSink: () => Promise.resolve<SubmitOutcome>({ kind: 'success' }),
+      restoreAttachments: () => Promise.resolve(restoredIds),
+      releaseAttachments: released,
+      commandAttachments: {
+        serialize: () => Promise.resolve([]),
+        release: () => {},
+        unsupportedNotice: token => `${token.trim()} attachments-unsupported`,
+      },
+    })
+    const mirrored: Array<{ text: string; attachments: readonly RestoredDraftAttachment[] }> = []
+    shell.bindMirror((text, attachments) => { mirrored.push({ text, attachments }) })
+    shell.setDraft('old draft')
+    shell.addAttachments(['browser-1' as DraftAttachmentId])
+
+    shell.restoreDraft('reverted text', REFS)
+
+    expect(shell.snapshot.draft).toBe('reverted text')
+    expect(released).toHaveBeenCalledWith(['browser-1'])
+    await vi.waitFor(() => { expect(shell.snapshot.attachmentIds).toEqual(restoredIds) })
+    expect(mirrored.at(-1)).toEqual({ text: 'reverted text', attachments: REFS })
+
+    shell.removeAttachment(restoredIds[0]!)
+    expect(mirrored.at(-1)).toEqual({ text: 'reverted text', attachments: [REFS[1]] })
+  })
+
+  it('releases a superseded restore generation instead of merging its chips', async () => {
+    const released = vi.fn()
+    const first = Promise.withResolvers<readonly DraftAttachmentId[]>()
+    const second = Promise.withResolvers<readonly DraftAttachmentId[]>()
+    const pending = [first, second]
+    const shell = new SessionInputShell({
+      restorePendingNotice: () => 'attachments are still restoring',
+      actx: SCTX,
+      defaultSink: () => Promise.resolve<SubmitOutcome>({ kind: 'success' }),
+      restoreAttachments: () => pending.shift()!.promise,
+      releaseAttachments: released,
+      commandAttachments: {
+        serialize: () => Promise.resolve([]),
+        release: () => {},
+        unsupportedNotice: token => `${token.trim()} attachments-unsupported`,
+      },
+    })
+
+    shell.restoreDraft('first', REFS)
+    shell.restoreDraft('second', [REFS[1]!])
+    first.resolve(['stale' as DraftAttachmentId])
+    await vi.waitFor(() => { expect(released).toHaveBeenCalledWith(['stale']) })
+    second.resolve(['current' as DraftAttachmentId])
+    await vi.waitFor(() => { expect(shell.snapshot.attachmentIds).toEqual(['current']) })
+    expect(shell.snapshot.draft).toBe('second')
+  })
+
+  it('refuses submit while restored attachments are still being created', async () => {
+    const gate = Promise.withResolvers<readonly DraftAttachmentId[]>()
+    const sink = vi.fn(() => Promise.resolve<SubmitOutcome>({ kind: 'success' }))
+    const shell = new SessionInputShell({
+      restorePendingNotice: () => 'attachments are still restoring',
+      actx: SCTX,
+      defaultSink: sink,
+      restoreAttachments: () => gate.promise,
+      releaseAttachments: () => {},
+      commandAttachments: {
+        serialize: () => Promise.resolve([]),
+        release: () => {},
+        unsupportedNotice: token => `${token.trim()} attachments-unsupported`,
+      },
+    })
+
+    shell.setDraft('discarded draft')
+    shell.restoreDraft('reverted text', REFS)
+    expect(shell.snapshot.attachmentIds).toEqual([])
+
+    shell.submit('queue')
+    expect(sink).not.toHaveBeenCalled()
+    expect(shell.notices.getSnapshot()).toMatchObject({ level: 'error', text: 'attachments are still restoring' })
+    expect(shell.snapshot.draft).toBe('reverted text')
+
+    gate.resolve(['restored-1' as DraftAttachmentId, 'restored-2' as DraftAttachmentId])
+    await vi.waitFor(() => {
+      expect(shell.snapshot.attachmentIds).toEqual(['restored-1', 'restored-2'])
+    })
+    // The refused gesture left no phantom draft: the restored content is intact.
+    expect(shell.snapshot.draft).toBe('reverted text')
+  })
+
+  it('honors the busy submit guard on a draft replacement', async () => {
+    const submit = vi.fn(() => new Promise<SubmitOutcome>(() => {}))
+    const { shell, textarea, claim } = bench({ submit, serialize: () => Promise.resolve([]) })
+    claim('/goal ', '目标', true)
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(shell.snapshot.phase).toBe('submitting')
+    const before = shell.snapshot.draft
+
+    shell.restoreDraft('revert during submit', REFS)
+
+    expect(shell.snapshot.draft).toBe(before)
+    expect(shell.snapshot.attachmentIds).toEqual([])
+  })
+
+  it('a failed send does not merge attachments into a draft replaced after its snapshot', async () => {
+    let rejectSink!: (error: Error) => void
+    const sink = vi.fn(() => new Promise<SubmitOutcome>((_resolve, reject) => { rejectSink = reject }))
+    const restoredIds = ['restored-1' as DraftAttachmentId]
+    const shell = new SessionInputShell({
+      restorePendingNotice: () => 'attachments are still restoring',
+      actx: SCTX,
+      defaultSink: sink,
+      restoreAttachments: () => Promise.resolve(restoredIds),
+      releaseAttachments: () => {},
+      commandAttachments: {
+        serialize: () => Promise.resolve([]),
+        release: () => {},
+        unsupportedNotice: token => `${token.trim()} attachments-unsupported`,
+      },
+    })
+
+    shell.setDraft('send me')
+    shell.addAttachments(['sent-image' as DraftAttachmentId])
+    shell.submit('queue')
+    expect(shell.snapshot.draft).toBe('')
+    expect(shell.snapshot.attachmentIds).toEqual([])
+
+    // The revert replaces the draft while the send is still in flight.
+    shell.restoreDraft('reverted text', [REFS[0]!])
+    await vi.waitFor(() => { expect(shell.snapshot.attachmentIds).toEqual(restoredIds) })
+
+    rejectSink(new Error('late failure'))
+    await vi.waitFor(() => { expect(shell.notices.getSnapshot()?.text).toBe('late failure') })
+    expect(shell.snapshot.draft).toBe('reverted text')
+    expect(shell.snapshot.attachmentIds).toEqual(restoredIds)
+  })
+
+  it('a failed attachment-only send does not restore its id into a replaced draft', async () => {
+    let rejectSink!: (error: Error) => void
+    const sink = vi.fn(() => new Promise<SubmitOutcome>((_resolve, reject) => { rejectSink = reject }))
+    const restoredIds = ['restored-file' as DraftAttachmentId]
+    const shell = new SessionInputShell({
+      restorePendingNotice: () => 'attachments are still restoring',
+      actx: SCTX,
+      defaultSink: sink,
+      restoreAttachments: () => Promise.resolve(restoredIds),
+      releaseAttachments: () => {},
+      commandAttachments: {
+        serialize: () => Promise.resolve([]),
+        release: () => {},
+        unsupportedNotice: token => `${token.trim()} attachments-unsupported`,
+      },
+    })
+
+    shell.addAttachments(['sent-file' as DraftAttachmentId])
+    shell.submit('queue')
+    expect(shell.snapshot.attachmentIds).toEqual([])
+
+    shell.restoreDraft('', [REFS[1]!])
+    await vi.waitFor(() => { expect(shell.snapshot.attachmentIds).toEqual(restoredIds) })
+
+    rejectSink(new Error('attachment send failed'))
+    await vi.waitFor(() => { expect(shell.notices.getSnapshot()?.text).toBe('attachment send failed') })
+    expect(shell.snapshot.attachmentIds).toEqual(restoredIds)
   })
 })

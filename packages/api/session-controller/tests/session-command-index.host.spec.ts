@@ -2,7 +2,7 @@
 import { describe, expect, it, onTestFinished } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore from '@deepseek-ai/dsh-session'
-import { AttachmentId, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { AttachmentId, type FileAttachmentRef, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { SessionCommandIndex } from '../src/session-command-index.ts'
@@ -58,5 +58,26 @@ describe('SessionCommandIndex', () => {
     }), { surfaceOp: 'append' })
     index.ingest(late)
     expect(index.hasPromptRequest('rpc-3')).toBe(true)
+  })
+
+  it('resolves verbatim-file references only from committed user messages', async () => {
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    onTestFinished(() => ctx.fiber.dispose())
+    const session = ctx.sessions.create(undefined, { meta: { cwd: '/workspace' } })
+    const ref: FileAttachmentRef = { attachmentId: AttachmentId('file-1'), name: 'notes.txt', bytes: 7 }
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'attached' }, { type: 'file', attachment: ref }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    // A later message citing the same file keeps the first logged reference.
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'file', attachment: { ...ref, name: 'renamed.txt' } }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    const index = SessionCommandIndex.fromEvents(session.snapshotEvents())
+
+    expect(index.referencedFile('file-1')).toEqual(ref)
+    expect(index.referencedFile('file-missing')).toBeUndefined()
   })
 })

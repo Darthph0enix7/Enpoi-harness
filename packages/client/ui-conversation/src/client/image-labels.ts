@@ -35,6 +35,11 @@ export function attachmentErrorText(
     // A prompt cited a file the Host has no staged upload for (expired
     // process, foreign id): solvable by re-adding the file.
     case 'FILE_NOT_STAGED': return t('file.notStaged')
+    // A restored draft cites an attachment this Session no longer logs
+    // (foreign, pruned, or a stale client): re-adding the file is the fix.
+    case 'ATTACHMENT_NOT_REFERENCED': return t('attachment.unavailableSend')
+    case 'DUPLICATE_ATTACHMENT_REF': return t('attachment.duplicateRef')
+    case 'TOO_MANY_FILES': return t('attachment.tooManyFiles')
     case 'IMAGE_TOO_MANY_PIXELS': return t('image.tooManyPixels')
     case 'IMAGE_DIMENSION_TOO_LARGE':
       if (limits !== undefined) return t('image.dimensionTooLarge', { size: limits.maxImageDimension })

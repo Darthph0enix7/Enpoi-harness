@@ -49,6 +49,19 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
+/**
+ * Service-wide cap on durable file references one prompt may cite, used by
+ * providers that do not resolve a deployment value. `attachment-local`
+ * exposes the same bound as validated configuration.
+ */
+export const DEFAULT_MAX_FILE_REFERENCES_PER_MESSAGE = 64
+
+/** Exact decoded byte length of one canonical base64 payload, computed without decoding. */
+function encodedBase64Bytes(data: string): number {
+  const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0
+  return Math.max(0, Math.floor(data.length / 4) * 3 - padding)
+}
+
 /** Immutable binary attachment service. Implementations validate bytes before publishing a reference. */
 export abstract class AttachmentStore extends Service {
   constructor(ctx: Context) {
@@ -57,6 +70,13 @@ export abstract class AttachmentStore extends Service {
 
   /** Deployment-resolved image policy used by authoritative and fast-path validation. */
   abstract readonly imageLimits: ImageAttachmentLimits
+
+  /**
+   * Maximum durable file references (`file` or `file-ref` parts) one admitted
+   * prompt may cite. Deployment backends override this from validated
+   * configuration; the service bound applies when a provider names none.
+   */
+  readonly maxFileReferencesPerMessage: number = DEFAULT_MAX_FILE_REFERENCES_PER_MESSAGE
 
   /**
    * Validate one image without persisting it.
@@ -105,27 +125,104 @@ export abstract class AttachmentStore extends Service {
   }
 
   /**
-   * Admit one Host prompt and replace each uploaded image with its durable reference.
-   * Text and durable file references pass through unchanged. A prompt without image parts performs no storage operation.
+   * Admit one Host prompt and replace each uploaded image with its durable
+   * reference. Text and durable image/file citations pass through unchanged.
+   * Uploads and citations are charged together against the per-message image
+   * count, aggregate image bytes, media types, and file-reference count; a
+   * durable object cited more than once is refused. A prompt without image
+   * parts performs no storage operation.
    * @param content - prompt parts in message order after file receipt resolution.
    * @returns admitted prompt parts in the same order as `content`.
-   * @throws AttachmentError when the image batch is refused.
+   * @throws AttachmentError when the image batch, a citation, or the
+   *   file-reference count is refused.
    */
   async admitPromptContent(
     content: readonly AttachmentAdmissionPart[],
   ): Promise<AdmittedPromptContentPart[]> {
-    if (content.every(part => part.type !== 'image')) {
-      return content.map(part => part.type === 'text'
-        ? { type: 'text', text: part.text }
-        : { type: 'file', attachment: part.attachment })
-    }
-    const refs = await admitEncodedImages(this, content.filter(part => part.type === 'image'))
+    this.validatePromptReferences(content)
+    const refs = content.some(part => part.type === 'image')
+      ? await admitEncodedImages(this, content.filter(part => part.type === 'image'))
+      : []
     let next = 0
-    return content.map((part) => {
-      if (part.type === 'text') return { type: 'text', text: part.text }
-      if (part.type === 'file') return { type: 'file', attachment: part.attachment }
-      return { type: 'image', attachment: refs[next++] as ImageAttachmentRef }
+    return content.map((part): AdmittedPromptContentPart => {
+      switch (part.type) {
+        case 'text': return { type: 'text', text: part.text }
+        case 'image-ref': return { type: 'image', attachment: part.attachment }
+        case 'file':
+        case 'file-ref': return { type: 'file', attachment: part.attachment }
+        case 'image': return { type: 'image', attachment: refs[next++] as ImageAttachmentRef }
+      }
     })
+  }
+
+  /**
+   * Charge the complete prompt against the deployment batch limits before any
+   * storage: uploaded image bytes and durable image citations share the image
+   * count and aggregate-byte budgets, and every file citation counts against
+   * {@link maxFileReferencesPerMessage}. A repeated durable-object id is
+   * refused so repeats cannot multiply a limit.
+   * @param content - prompt parts in message order.
+   * @throws AttachmentError for an over-limit batch or a repeated citation.
+   */
+  private validatePromptReferences(content: readonly AttachmentAdmissionPart[]): void {
+    const imageRefs = content.filter(
+      (part): part is Extract<AttachmentAdmissionPart, { type: 'image-ref' }> => part.type === 'image-ref',
+    )
+    // Upload-only prompts keep the saveImages batch validation; a citation
+    // additionally charges the uploads so the combined batch respects the
+    // same per-message budgets.
+    if (imageRefs.length > 0) {
+      const { maxImagesPerMessage, maxMessageImageBytes, mediaTypes } = this.imageLimits
+      const uploads = content.filter(
+        (part): part is Extract<AttachmentAdmissionPart, { type: 'image' }> => part.type === 'image',
+      )
+      if (uploads.length + imageRefs.length > maxImagesPerMessage) {
+        throw new AttachmentError('Image batch exceeds the configured image-count limit.', 'TOO_MANY_IMAGES')
+      }
+      const imageBytes = uploads.reduce((sum, part) => sum + encodedBase64Bytes(part.data), 0)
+        + imageRefs.reduce((sum, part) => sum + part.attachment.bytes, 0)
+      if (imageBytes > maxMessageImageBytes) {
+        throw new AttachmentError('Image batch exceeds the configured aggregate image-byte limit.', 'IMAGES_TOO_LARGE')
+      }
+      for (const part of imageRefs) {
+        if (!mediaTypes.includes(part.attachment.mediaType)) {
+          throw new AttachmentError(
+            `Image type ${part.attachment.mediaType} is not accepted by this deployment.`,
+            'UNSUPPORTED_IMAGE_TYPE',
+          )
+        }
+      }
+    }
+    const imageIds = new Set<string>()
+    for (const part of imageRefs) this.assertNewCitation(imageIds, String(part.attachment.attachmentId))
+    const fileIds = new Set<string>()
+    let files = 0
+    for (const part of content) {
+      if (part.type !== 'file' && part.type !== 'file-ref') continue
+      // A receipt-resolved `file` part is this prompt's own upload, so identical
+      // bytes uploaded twice stay two entries; only durable citations dedupe.
+      if (part.type === 'file-ref') this.assertNewCitation(fileIds, String(part.attachment.attachmentId))
+      files += 1
+    }
+    if (files > this.maxFileReferencesPerMessage) {
+      throw new AttachmentError(
+        'Prompt cites more file references than the configured per-message limit.',
+        'TOO_MANY_FILES',
+      )
+    }
+  }
+
+  /**
+   * Record one durable citation and refuse a repeated id in the same prompt.
+   * @param seen - ids already cited for this attachment kind.
+   * @param id - candidate opaque attachment id.
+   * @throws AttachmentError with `DUPLICATE_ATTACHMENT_REF` for a repeated id.
+   */
+  private assertNewCitation(seen: Set<string>, id: string): void {
+    if (seen.has(id)) {
+      throw new AttachmentError(`Prompt cites attachment "${id}" more than once.`, 'DUPLICATE_ATTACHMENT_REF')
+    }
+    seen.add(id)
   }
 
   /**

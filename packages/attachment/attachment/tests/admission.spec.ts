@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import AttachmentStore, { admitEncodedFile, admitEncodedImages } from '@deepseek-ai/dsh-attachment'
 import type {
-  FileAttachmentRef, ImageAttachmentRef, SaveImageAttachment,
+  FileAttachmentRef, ImageAttachmentRef, ImageAttachmentLimits, SaveImageAttachment,
 } from '@deepseek-ai/dsh-attachment/types'
 
 const PNG = 'AAAA' // canonical base64, 3 bytes
@@ -10,10 +10,34 @@ const FILE_REF: FileAttachmentRef = {
   name: 'notes.md',
   bytes: 12,
 }
+const SECOND_FILE_REF: FileAttachmentRef = {
+  attachmentId: 'file-2' as FileAttachmentRef['attachmentId'],
+  name: 'second.md',
+  bytes: 6,
+}
+const IMAGE_REF: ImageAttachmentRef = {
+  attachmentId: 'image-1' as ImageAttachmentRef['attachmentId'],
+  mediaType: 'image/png',
+  bytes: 3,
+  width: 1,
+  height: 1,
+  name: 'photo.png',
+}
+
+/** Prompt-admission limits generous enough for the pass-through cases. */
+const LIMITS = {
+  maxImageBytes: 16,
+  maxImagesPerMessage: 20,
+  maxMessageImageBytes: 100,
+  maxImagePixels: 4,
+  maxImageDimension: 2000,
+  mediaTypes: ['image/png'] as const,
+}
 
 /** Delegation double: records the exact saveImages batch and answers ordered refs. */
-function storeOf() {
+function storeOf(limits: ImageAttachmentLimits = LIMITS) {
   const mocks = {
+    imageLimits: limits,
     saveImages: vi.fn((inputs: readonly SaveImageAttachment[]) => Promise.resolve(inputs.map((input, index): ImageAttachmentRef => ({
       attachmentId: `att-${index + 1}` as ImageAttachmentRef['attachmentId'],
       mediaType: input.mediaType,
@@ -113,14 +137,19 @@ describe('admitEncodedFile', () => {
 describe('AttachmentStore.admitPromptContent', () => {
   it('passes through text and durable files without touching image storage', async () => {
     const store = Object.setPrototypeOf({
+      imageLimits: LIMITS,
       saveImages: () => { throw new Error('prompts without image uploads must not reach the store') },
     }, AttachmentStore.prototype) as AttachmentStore
     await expect(store.admitPromptContent([
       { type: 'text', text: 'hello' },
       { type: 'file', attachment: FILE_REF },
+      { type: 'file-ref', attachment: SECOND_FILE_REF },
+      { type: 'image-ref', attachment: IMAGE_REF },
     ])).resolves.toEqual([
       { type: 'text', text: 'hello' },
       { type: 'file', attachment: FILE_REF },
+      { type: 'file', attachment: SECOND_FILE_REF },
+      { type: 'image', attachment: IMAGE_REF },
     ])
   })
 
@@ -129,13 +158,71 @@ describe('AttachmentStore.admitPromptContent', () => {
     await expect(store.admitPromptContent([
       { type: 'image', mediaType: 'image/png', data: 'AQ==' },
       { type: 'file', attachment: FILE_REF },
+      { type: 'image-ref', attachment: IMAGE_REF },
       { type: 'text', text: 'between' },
+      { type: 'file-ref', attachment: SECOND_FILE_REF },
       { type: 'image', mediaType: 'image/png', data: 'Ag==' },
     ])).resolves.toEqual([
       { type: 'image', attachment: { attachmentId: 'att-1', mediaType: 'image/png', bytes: 1, width: 1, height: 1 } },
       { type: 'file', attachment: FILE_REF },
+      { type: 'image', attachment: IMAGE_REF },
       { type: 'text', text: 'between' },
+      { type: 'file', attachment: SECOND_FILE_REF },
       { type: 'image', attachment: { attachmentId: 'att-2', mediaType: 'image/png', bytes: 1, width: 1, height: 1 } },
     ])
+  })
+
+  it('charges durable image citations against the upload count and aggregate bytes', async () => {
+    const tight = storeOf({ ...LIMITS, maxImagesPerMessage: 1 })
+    await expect(tight.store.admitPromptContent([
+      { type: 'image-ref', attachment: IMAGE_REF },
+      { type: 'image', mediaType: 'image/png', data: 'AQ==' },
+    ])).rejects.toMatchObject({ code: 'TOO_MANY_IMAGES' })
+    expect(tight.mocks.saveImages).not.toHaveBeenCalled()
+
+    const bytes = storeOf({ ...LIMITS, maxMessageImageBytes: 2 })
+    await expect(bytes.store.admitPromptContent([
+      { type: 'image-ref', attachment: { ...IMAGE_REF, bytes: 3 } },
+    ])).rejects.toMatchObject({ code: 'IMAGES_TOO_LARGE' })
+    expect(bytes.mocks.saveImages).not.toHaveBeenCalled()
+
+    // A combined batch counts every canonical base64 padding form exactly.
+    for (const data of ['AAAA', 'AAE=', 'AQ==']) {
+      const padded = storeOf({ ...LIMITS, maxMessageImageBytes: 100 })
+      await expect(padded.store.admitPromptContent([
+        { type: 'image-ref', attachment: { ...IMAGE_REF, bytes: 3 } },
+        { type: 'image', mediaType: 'image/png', data },
+      ])).resolves.toHaveLength(2)
+      expect(padded.mocks.saveImages).toHaveBeenCalledOnce()
+    }
+  })
+
+  it('refuses a repeated durable citation and a deployment-rejected cited media type', async () => {
+    const { store, mocks } = storeOf()
+    await expect(store.admitPromptContent([
+      { type: 'image-ref', attachment: IMAGE_REF },
+      { type: 'text', text: 'twice' },
+      { type: 'image-ref', attachment: IMAGE_REF },
+    ])).rejects.toMatchObject({ code: 'DUPLICATE_ATTACHMENT_REF' })
+    await expect(store.admitPromptContent([
+      { type: 'file-ref', attachment: FILE_REF },
+      { type: 'file-ref', attachment: FILE_REF },
+    ])).rejects.toMatchObject({ code: 'DUPLICATE_ATTACHMENT_REF' })
+    const rejected = storeOf({ ...LIMITS, mediaTypes: ['image/webp'] as const })
+    await expect(rejected.store.admitPromptContent([
+      { type: 'image-ref', attachment: IMAGE_REF },
+    ])).rejects.toMatchObject({ code: 'UNSUPPORTED_IMAGE_TYPE' })
+    expect(mocks.saveImages).not.toHaveBeenCalled()
+  })
+
+  it('caps the number of durable file references per prompt', async () => {
+    const { store, mocks } = storeOf()
+    Object.defineProperty(store, 'maxFileReferencesPerMessage', { value: 2 })
+    await expect(store.admitPromptContent([
+      { type: 'file-ref', attachment: FILE_REF },
+      { type: 'file', attachment: SECOND_FILE_REF },
+      { type: 'file-ref', attachment: { attachmentId: 'file-3' as FileAttachmentRef['attachmentId'], name: 'third', bytes: 1 } },
+    ])).rejects.toMatchObject({ code: 'TOO_MANY_FILES' })
+    expect(mocks.saveImages).not.toHaveBeenCalled()
   })
 })

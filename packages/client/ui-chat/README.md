@@ -8,7 +8,7 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-Use this package to render a browser chat from recorded Session conversations, including historical images, localized actions, and restored scroll position. Work-details modes control reasoning previews and process visibility without hiding final answers; Verbose keeps completed-turn process rows visible. Local transcript and steering submissions appear immediately, remain in their original surface, and disappear atomically when authoritative Session records arrive, while queued submissions stay outside Chat. The package does not assemble or modify model requests.
+Use this package to render a browser chat from recorded Session conversations, with historical images, localized actions, and restored scroll. A take-back gesture — revert icon, swipe, or the Revert tray's restore — returns the message text and durable attachment references to the composer as removable chips re-sent by reference. Work-details modes control reasoning previews and process visibility. Local transcript and steering submissions appear immediately and vanish when authoritative records arrive; queued ones stay outside Chat.
 
 File-mention providers receive the viewed Session ID with the closing-turn owner, so links into inherited history can address the fork itself.
 

@@ -8,6 +8,7 @@ import { Sheet, useSheetPresentation } from '@deepseek-ai/dsh-client-ui-primitiv
 import type { ContentBlock } from '@deepseek-ai/dsh-llm/types'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { RevertFileConflict, RevertFileOutcome } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { RestoredDraftAttachment } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import css from './RevertTray.module.css'
 
 /** Injected action face for the input-dock registration. */
@@ -20,13 +21,19 @@ export type RevertTrayProps = PropsRuntime<'conversation.input.dock'> & RevertDo
 function nodeText(content: readonly ContentBlock[]): string {
   const parts: string[] = []
   for (const block of content) {
-    if (typeof block === 'string') {
-      parts.push(block)
-    } else if (block !== null && typeof block === 'object' && 'text' in block && typeof block.text === 'string') {
-      parts.push(block.text)
-    }
+    if ('text' in block && typeof block.text === 'string') parts.push(block.text)
   }
   return parts.join(' ').trim()
+}
+
+/** Durable attachment references carried by a node's content blocks, in order. */
+function nodeAttachments(content: readonly ContentBlock[]): readonly RestoredDraftAttachment[] {
+  const attachments: RestoredDraftAttachment[] = []
+  for (const block of content) {
+    if (block.type === 'image') attachments.push({ kind: 'image', attachment: block.attachment })
+    else if (block.type === 'file') attachments.push({ kind: 'file', attachment: block.attachment })
+  }
+  return attachments
 }
 
 /** Extract clean basename from full or relative path. */
@@ -46,17 +53,23 @@ export const RevertTray = memo(function RevertTray({
 
   const revertFromSeq = useSession(s => s.revertFromSeq)
   const nodes = useChat(s => s.nodes)
-  const conflicts = useSession(s => s.revertFileConflicts ?? [])
-  const outcomes = useSession(s => s.revertFileOutcomes ?? {})
+  const conflicts = useSession(s => s.revertFileConflicts)
+  const outcomes = useSession(s => s.revertFileOutcomes)
 
   const reverted = useMemo(() => {
     if (revertFromSeq === null) return []
-    const list: { seq: number; text: string }[] = []
+    const list: Array<{
+      seq: number
+      text: string
+      attachments: readonly RestoredDraftAttachment[]
+    }> = []
     for (const node of nodes.values()) {
       if (node.kind !== 'user' && node.kind !== 'steering') continue
       if (node.anchorSeq < revertFromSeq) continue
-      const text = nodeText((node.data as { content?: readonly ContentBlock[] }).content ?? [])
-      if (text.length > 0) list.push({ seq: node.anchorSeq, text })
+      const content = (node.data as { content?: readonly ContentBlock[] }).content ?? []
+      const text = nodeText(content)
+      const attachments = nodeAttachments(content)
+      if (text.length > 0 || attachments.length > 0) list.push({ seq: node.anchorSeq, text, attachments })
     }
     return list.sort((left, right) => left.seq - right.seq)
   }, [revertFromSeq, nodes])
@@ -66,10 +79,8 @@ export const RevertTray = memo(function RevertTray({
     // trashed, saved_beside, kept, conflicts, errors. A no_op file (disk
     // already at the target) is not affected — with hundreds of edited files
     // in a session the tray must not list every untouched one.
-    return Object.entries(outcomes).filter(([_, out]) => {
-      if (!out || typeof out.status !== 'string') return false
-      return out.status !== 'no_op' && out.status !== 'already_clean'
-    })
+    return Object.entries(outcomes).filter(([_, out]) =>
+      out.status !== 'no_op' && out.status !== 'already_clean')
   }, [outcomes])
 
   // Auto-scroll to bottom of query list when expanded
@@ -84,14 +95,17 @@ export const RevertTray = memo(function RevertTray({
     return null
   }
 
-  const handleRestore = (_item: { seq: number; text: string }, index: number) => {
+  const handleRestore = (
+    _item: { seq: number; text: string; attachments: readonly RestoredDraftAttachment[] },
+    index: number,
+  ) => {
     if (index === reverted.length - 1) {
       revertRestore()
     } else {
       const nextItem = reverted[index + 1]
       if (nextItem !== undefined) {
         revertRestore(nextItem.seq)
-        inputActions.setDraft(nextItem.text)
+        inputActions.restoreDraft(nextItem.text, nextItem.attachments)
       }
     }
   }
@@ -176,7 +190,7 @@ export const RevertTray = memo(function RevertTray({
               </div>
 
               <div className={css.conflictActions}>
-                {(c.state === 'conflict' || (c.state !== 'missing' && c.state !== 'unavailable')) && (
+                {(c.state !== 'missing' && c.state !== 'unavailable') && (
                   <>
                     <button
                       type="button"
@@ -253,14 +267,14 @@ export const RevertTray = memo(function RevertTray({
             <button
               type="button"
               className={css.actionBtn}
-              onClick={() => handleRestore(item, index)}
+              onClick={() => { handleRestore(item, index) }}
             >
               {t('revert.restore')}
             </button>
             <button
               type="button"
               className={css.actionBtn}
-              onClick={() => forkAt(item.seq)}
+              onClick={() => { forkAt(item.seq) }}
             >
               {t('revert.fork')}
             </button>
@@ -364,7 +378,7 @@ export const RevertTray = memo(function RevertTray({
             <button
               type="button"
               className={css.header}
-              onClick={() => setExpanded(!expanded)}
+              onClick={() => { setExpanded(!expanded) }}
               aria-expanded={expanded}
             >
               <div className={css.headerLeft}>

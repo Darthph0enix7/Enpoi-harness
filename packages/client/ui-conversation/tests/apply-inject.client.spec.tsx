@@ -19,6 +19,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
+import type { ConversationController } from '../src/client/service.ts'
 import { createConversationStore } from '../src/client/stores.ts'
 import { RemoteError } from '@deepseek-ai/dsh-client-test-runtime'
 
@@ -541,6 +542,35 @@ describe('Conversation inject API', () => {
     expect(b.inputApi(other).state.getSnapshot().draft).toBe('carry me')
     await vi.waitFor(() => { expect(targetUpload).toHaveBeenCalledOnce() })
     expect(b.inputApi(other).state.getSnapshot().attachmentIds).toHaveLength(1)
+    await b.runtime.dispose()
+  })
+
+  it('drops durable references authorized by the source Session instead of moving unauthorized chips', async () => {
+    const b = await bench()
+    const resident = b.residentApi(ROOT)
+    const { state, actions } = b.inputApi(ROOT)
+    const fileRef = { attachmentId: 'file-restored' as never, name: 'notes.txt', bytes: 4 }
+    actions.restoreDraft('carry durable media', [{ kind: 'file', attachment: fileRef }])
+    await vi.waitFor(() => { expect(state.getSnapshot().attachmentIds).toHaveLength(1) })
+    const sourceIds = [...state.getSnapshot().attachmentIds]
+
+    const other = 'other-1' as SessionId
+    await b.runtime.sessions.add({ id: other, session: {} })
+    b.connectWorkspace.mockResolvedValueOnce(other)
+    await resident.selectWorkspace('workspace-2' as WorkspaceId)
+
+    expect(b.opened).toHaveBeenCalledWith(other)
+    // Text still moves; the unauthorized file reference does not.
+    expect(b.inputApi(other).state.getSnapshot().draft).toBe('carry durable media')
+    expect(b.inputApi(other).state.getSnapshot().attachmentIds).toEqual([])
+    expect(b.composerApi(other).hooks.notices.getSnapshot()).toMatchObject({
+      level: 'info',
+      text: '已切换工作区，来自其他会话的附件已移除',
+    })
+    // The source descriptor is released with the source draft.
+    const conversation = b.runtime.ctx.conversation as ConversationController
+    expect(conversation.resolveDraftAttachments(sourceIds)).toEqual([])
+    expect(state.getSnapshot().attachmentIds).toEqual([])
     await b.runtime.dispose()
   })
 

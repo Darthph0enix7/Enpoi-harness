@@ -424,7 +424,7 @@ describe('Chat inject API', () => {
   it('lands the reverted text in the draft and hands older-host no-op receipts back', async () => {
     const b = await bench()
     const revert = vi.spyOn(b.runtime.sessions, 'revert').mockResolvedValue({
-      accepted: true, revertedText: 'take me back', revertedCount: 2,
+      accepted: true, revertedText: 'take me back', revertedContent: [{ type: 'text', text: 'take me back' }], revertedCount: 2,
     })
     try {
       const { injected } = b.chatViewApi(b.rootReference)
@@ -437,12 +437,85 @@ describe('Chat inject API', () => {
       // An older host reports an unusable anchor as a receipt instead of
       // rejecting; the Chat view must receive it to surface the notice.
       revert.mockResolvedValueOnce({
-        accepted: true, revertedText: '', revertedCount: 0, noop: true, notice: 'nothing to shadow',
+        accepted: true, revertedText: '', revertedContent: [], revertedCount: 0, noop: true, notice: 'nothing to shadow',
       })
       await expect(injected.revertAt(8)).resolves.toEqual({ noop: true, notice: 'nothing to shadow' })
 
-      revert.mockResolvedValueOnce({ accepted: true, revertedText: '', revertedCount: 0, noop: true })
+      revert.mockResolvedValueOnce({ accepted: true, revertedText: '', revertedContent: [], revertedCount: 0, noop: true })
       await expect(injected.revertAt(9)).resolves.toEqual({ noop: true })
+    } finally {
+      revert.mockRestore()
+      await b.runtime.dispose()
+    }
+  })
+
+  it('restores text alone when an older host sends no reverted content', async () => {
+    const b = await bench()
+    const revert = vi.spyOn(b.runtime.sessions, 'revert').mockResolvedValue({
+      accepted: true, revertedText: 'text only', revertedCount: 0,
+    })
+    try {
+      const { injected } = b.chatViewApi(b.rootReference)
+      await expect(injected.revertAt(11)).resolves.toEqual({ noop: false })
+      const scope = b.runtime.sessions.scope(ROOT)!
+      expect(b.runtime.ctx.conversation.input.for(scope).state.getSnapshot().draft).toBe('text only')
+    } finally {
+      revert.mockRestore()
+      await b.runtime.dispose()
+    }
+  })
+
+  it('seeds the reverted query attachments into the composer beside the text', async () => {
+    const b = await bench()
+    const image = { ...ATTACHMENT, name: 'shot.png' }
+    const file = { attachmentId: AttachmentId('file-1'), name: 'notes.txt', bytes: 4 }
+    const revert = vi.spyOn(b.runtime.sessions, 'revert').mockResolvedValue({
+      accepted: true,
+      revertedText: 'with media',
+      revertedContent: [
+        { type: 'text', text: 'with media' },
+        { type: 'image', attachment: image },
+        { type: 'file', attachment: file },
+      ],
+      revertedCount: 0,
+    })
+    try {
+      const { injected } = b.chatViewApi(b.rootReference)
+      await expect(injected.revertAt(12)).resolves.toEqual({ noop: false })
+      const scope = b.runtime.sessions.scope(ROOT)!
+      const input = b.runtime.ctx.conversation.input.for(scope)
+      expect(input.state.getSnapshot().draft).toBe('with media')
+      await vi.waitFor(() => {
+        expect(input.state.getSnapshot().attachmentIds).toHaveLength(2)
+      })
+    } finally {
+      revert.mockRestore()
+      await b.runtime.dispose()
+    }
+  })
+
+  it('still restores the text when a reverted image can no longer be read', async () => {
+    const b = await bench()
+    b.session.readAttachment.mockRejectedValueOnce(new Error('image blob is gone'))
+    const revert = vi.spyOn(b.runtime.sessions, 'revert').mockResolvedValue({
+      accepted: true,
+      revertedText: 'lost its picture',
+      revertedContent: [
+        { type: 'text', text: 'lost its picture' },
+        { type: 'image', attachment: ATTACHMENT },
+      ],
+      revertedCount: 0,
+    })
+    try {
+      const { injected } = b.chatViewApi(b.rootReference)
+      await injected.revertAt(13)
+      const scope = b.runtime.sessions.scope(ROOT)!
+      const input = b.runtime.ctx.conversation.input.for(scope)
+      expect(input.state.getSnapshot().draft).toBe('lost its picture')
+      // An unavailable restored image still yields one removable chip.
+      await vi.waitFor(() => {
+        expect(input.state.getSnapshot().attachmentIds).toHaveLength(1)
+      })
     } finally {
       revert.mockRestore()
       await b.runtime.dispose()

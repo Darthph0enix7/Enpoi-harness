@@ -22,14 +22,19 @@ export function DefaultConversationViews({
   const conversation = useConversation(s => s)
   const inputState = useInput(s => s)
   const storedDraft = useStore(s => s.draft)
+  const storedAttachments = useStore(s => s.draftAttachments ?? [])
   const viewRequest = useStore(s => s.viewRequest ?? null)
 
   // The mount seed and a later server-side adoption (a draft synced from
-  // another device) both fill an empty composer; a non-empty editor is never
-  // overwritten, so in-progress typing always wins over an arriving draft.
+  // another device) both fill an empty composer — text and durable restored
+  // attachments — so a reverted message's media survives reload. A non-empty
+  // editor or rail is never overwritten, so in-progress work always wins.
   useEffect(() => {
-    if (inputState.draft === '' && storedDraft !== '') inputActions.setDraft(storedDraft)
-  }, [storedDraft, inputState.draft, inputActions])
+    if (inputState.draft === '' && inputState.attachmentIds.length === 0
+      && (storedDraft !== '' || storedAttachments.length > 0)) {
+      inputActions.restoreDraft(storedDraft, storedAttachments)
+    }
+  }, [storedDraft, storedAttachments, inputState.draft, inputState.attachmentIds.length, inputActions])
 
   useEffect(() => {
     const unmirror = bindDraftMirror(actions.setDraft)

@@ -53,24 +53,43 @@ export function ComposerAttachments({
             labels={attachmentRailLabels(t)}
             renderItem={(item) => {
               const attachment = item.attachment
-              if (attachment.kind === 'file') {
-                const upload = uploads[attachment.id]
+              if (attachment.kind === 'unavailable') {
+                const name = attachment.name === undefined || attachment.name === ''
+                  ? t('attachment.unavailable')
+                  : attachment.name
                 return (
                   <FileCard
-                    name={attachment.file.name || t('file.label')}
-                    bytes={attachment.file.size}
-                    state={upload === undefined || upload.status === 'uploading'
-                      ? 'uploading'
-                      : upload.status === 'ready' ? 'ready' : 'error'}
+                    name={name}
+                    bytes={attachment.attachment.bytes}
+                    state="unavailable"
+                    labels={fileCardLabels(t, name)}
+                    onRemove={() => { onRemoveAttachment(attachment.id) }}
+                  />
+                )
+              }
+              if (attachment.kind === 'file') {
+                const upload = uploads[attachment.id]
+                const name = attachment.file?.name || attachment.attachment?.name || ''
+                const state = attachment.file === undefined
+                  ? 'ready'
+                  : upload === undefined || upload.status === 'uploading'
+                    ? 'uploading'
+                    : upload.status === 'ready' ? 'ready' : 'error'
+                return (
+                  <FileCard
+                    name={name === '' ? t('file.label') : name}
+                    bytes={attachment.file?.size || attachment.attachment?.bytes || 0}
+                    state={state}
                     {...upload?.status === 'uploading' && upload.total !== undefined && upload.total > 0
                       ? { progress: upload.loaded / upload.total }
                       : {}}
-                    labels={fileCardLabels(t, attachment.file.name)}
+                    labels={fileCardLabels(t, name)}
                     onRemove={() => { onRemoveAttachment(attachment.id) }}
                     onRetry={() => { onRetryFile(attachment.id) }}
                   />
                 )
               }
+              const name = attachment.file?.name || attachment.attachment?.name || ''
               return (
                 <div className={css.imageItem}>
                   <button
@@ -79,12 +98,12 @@ export function ComposerAttachments({
                     title={t('image.openOriginal')}
                     onClick={() => { setPreview(attachment) }}
                   >
-                    <img src={attachment.previewUrl} alt={attachment.file.name || t('image.pending')} />
+                    <img src={attachment.previewUrl} alt={name === '' ? t('image.pending') : name} />
                   </button>
                   <button
                     type="button"
                     className={css.remove}
-                    aria-label={t('image.remove', { name: attachment.file.name })}
+                    aria-label={t('image.remove', { name })}
                     onClick={() => { onRemoveAttachment(attachment.id) }}
                   >
                     <IconCloseFillRegular size={12} />
@@ -98,7 +117,7 @@ export function ComposerAttachments({
       {preview !== null && (
         <ImageLightbox
           src={preview.previewUrl}
-          alt={preview.file.name || t('image.original')}
+          alt={preview.file?.name || preview.attachment?.name || t('image.original')}
           labels={lightboxLabels(t)}
           onClose={closePreview}
         />

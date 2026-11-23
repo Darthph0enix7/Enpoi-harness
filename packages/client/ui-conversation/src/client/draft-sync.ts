@@ -10,17 +10,24 @@
  * mirror, never the store, and logs once until a call succeeds.
  */
 import { randomUUID } from '@deepseek-ai/dsh-util-crypto'
+import type { AttachmentId, ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
+import type { RestoredDraftAttachment } from './contract/input.ts'
 
 /** The store instance face draft sync reads and writes. */
 export interface DraftSyncTarget {
-  getSnapshot(): { readonly draft: string }
-  readonly actions: { setDraft(text: string): void }
+  getSnapshot(): {
+    readonly draft: string
+    readonly draftAttachments?: readonly RestoredDraftAttachment[] | undefined
+  }
+  readonly actions: { setDraft(text: string, attachments?: readonly RestoredDraftAttachment[]): void }
   subscribe(listener: () => void): () => void
 }
 
 /** One device's draft record as the server carries it. */
 interface DraftRecord {
   readonly text: string
+  /** Durable restored attachments; absent for text-only drafts and older records. */
+  readonly attachments?: readonly RestoredDraftAttachment[]
   readonly updatedAt: number
   readonly clientId: string
 }
@@ -30,6 +37,32 @@ const DRAFT_SYNC_KEY = 'dsh.conversation.draft-sync.v1'
 
 /** How long a change waits before it reaches the server; a burst of keystrokes collapses into one push. */
 const PUSH_DELAY_MS = 600
+
+/**
+ * Server draft contract for restored attachments (`enpoiUiState` rejects a
+ * larger record wholesale, losing the text too). A push keeps the text and
+ * sends only the references that fit these bounds.
+ */
+const MAX_WIRE_ATTACHMENTS = 256
+const MAX_WIRE_ATTACHMENTS_JSON_CHARS = 256_000
+
+/** Optional binding callbacks. */
+export interface DraftSyncOptions {
+  /** Called at most once per binding when a push drops references beyond the server record cap. */
+  onAttachmentOverflow?: (() => void) | undefined
+}
+
+/** One wire record with its attachment list bounded to the server contract. */
+function boundedRecord(record: DraftRecord): { readonly record: DraftRecord; readonly dropped: number } {
+  const attachments = record.attachments ?? []
+  if (attachments.length === 0) return { record, dropped: 0 }
+  let kept = attachments.slice(0, MAX_WIRE_ATTACHMENTS)
+  while (kept.length > 0 && JSON.stringify(kept).length > MAX_WIRE_ATTACHMENTS_JSON_CHARS) {
+    kept = kept.slice(0, -1)
+  }
+  if (kept.length === attachments.length) return { record, dropped: 0 }
+  return { record: { ...record, attachments: kept }, dropped: attachments.length - kept.length }
+}
 
 /** This tab's identity, minted once on first use. */
 let tabClientId: string | undefined
@@ -43,6 +76,79 @@ function clientId(): string {
 /** Whether a wire value is a JSON object rather than an array or a primitive. */
 function isWireRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Whether a stored media-type string is one the image attachment vocabulary accepts. */
+function isImageMediaType(value: string): value is ImageMediaType {
+  return value === 'image/png' || value === 'image/jpeg' || value === 'image/webp' || value === 'image/gif'
+}
+
+/** Whether a value is a non-negative finite number. */
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+/**
+ * Validate one persisted restored attachment. The reference only drives the
+ * composer chip and the prompt citation; the Host canonicalizes it from the
+ * Session log at send, so the accepted shape is exactly what the chip renders.
+ * @param value - one stored attachment entry.
+ * @returns the typed reference, or undefined when the entry is malformed.
+ */
+function restoredAttachmentOf(value: unknown): RestoredDraftAttachment | undefined {
+  if (!isWireRecord(value) || !isWireRecord(value.attachment)) return undefined
+  const attachment = value.attachment
+  const attachmentId = attachment.attachmentId
+  if (typeof attachmentId !== 'string' || attachmentId === '') return undefined
+  if (value.kind === 'image') {
+    const { mediaType, bytes, width, height, name } = attachment
+    if (typeof mediaType !== 'string' || !isImageMediaType(mediaType)) return undefined
+    if (!isCount(bytes) || !isCount(width) || !isCount(height)) return undefined
+    if (name !== undefined && typeof name !== 'string') return undefined
+    const ref: ImageAttachmentRef = {
+      attachmentId: attachmentId as AttachmentId,
+      mediaType,
+      bytes,
+      width,
+      height,
+      ...(typeof name === 'string' && name !== '' ? { name } : {}),
+    }
+    return { kind: 'image', attachment: ref }
+  }
+  if (value.kind !== 'file') return undefined
+  const { name, bytes } = attachment
+  if (typeof name !== 'string' || !isCount(bytes)) return undefined
+  return {
+    kind: 'file',
+    attachment: { attachmentId: attachmentId as AttachmentId, name, bytes },
+  }
+}
+
+/** Validate one stored attachment list; absent means a text-only draft, malformed means untrusted. */
+function storedAttachmentsOf(value: Record<string, unknown>): readonly RestoredDraftAttachment[] | undefined {
+  if (value.attachments === undefined) return []
+  if (!Array.isArray(value.attachments)) return undefined
+  const attachments: RestoredDraftAttachment[] = []
+  for (const entry of value.attachments) {
+    const attachment = restoredAttachmentOf(entry)
+    if (attachment === undefined) return undefined
+    attachments.push(attachment)
+  }
+  return attachments
+}
+
+/** Whether two attachment lists cite the same durable references in the same order. */
+function sameAttachments(
+  left: readonly RestoredDraftAttachment[],
+  right: readonly RestoredDraftAttachment[],
+): boolean {
+  if (left.length !== right.length) return false
+  return left.every((reference, index) => {
+    const other = right[index]
+    return other !== undefined
+      && other.kind === reference.kind
+      && String(other.attachment.attachmentId) === String(reference.attachment.attachmentId)
+  })
 }
 
 /* jscpd:ignore-start -- the fork's enpoi namespaces share this envelope caller,
@@ -88,7 +194,10 @@ async function uiStateRpc<T>(method: string, args: Record<string, unknown>): Pro
 /* jscpd:ignore-end */
 
 /** The local revision record, which must agree with the store's persisted draft to be trusted. */
-function readRecord(sessionId: string, text: string): DraftRecord | undefined {
+function readRecord(
+  sessionId: string,
+  snapshot: { readonly draft: string; readonly draftAttachments?: readonly RestoredDraftAttachment[] | undefined },
+): DraftRecord | undefined {
   if (typeof localStorage === 'undefined') return undefined
   let raw: string | null
   try { raw = localStorage.getItem(`${DRAFT_SYNC_KEY}.${sessionId}`) }
@@ -98,12 +207,15 @@ function readRecord(sessionId: string, text: string): DraftRecord | undefined {
     const parsed: unknown = JSON.parse(raw)
     if (!isWireRecord(parsed)) return undefined
     const { text: storedText, updatedAt, clientId: storedClient } = parsed
+    const attachments = storedAttachmentsOf(parsed)
     // A record that disagrees with the store proves nothing: treat the local
     // draft as having no revision time, so the server's record wins.
-    if (typeof storedText !== 'string' || storedText !== text) return undefined
+    if (typeof storedText !== 'string' || storedText !== snapshot.draft) return undefined
+    if (attachments === undefined || !sameAttachments(attachments, snapshot.draftAttachments ?? [])) return undefined
     if (typeof updatedAt !== 'number' || !Number.isFinite(updatedAt) || updatedAt <= 0) return undefined
     return {
-      text,
+      text: snapshot.draft,
+      attachments,
       updatedAt: Math.floor(updatedAt),
       clientId: typeof storedClient === 'string' ? storedClient : clientId(),
     }
@@ -135,7 +247,14 @@ function remoteDraft(value: unknown): DraftRecord | undefined {
   const { text, updatedAt, clientId: storedClient } = value.draft
   if (typeof text !== 'string') return undefined
   if (typeof updatedAt !== 'number' || !Number.isFinite(updatedAt) || updatedAt <= 0) return undefined
-  return { text, updatedAt: Math.floor(updatedAt), clientId: typeof storedClient === 'string' ? storedClient : clientId() }
+  return {
+    text,
+    // A malformed attachment list never blocks adopting the text; the chip
+    // loss is visible and recoverable, a stuck draft is not.
+    attachments: storedAttachmentsOf(value.draft) ?? [],
+    updatedAt: Math.floor(updatedAt),
+    clientId: typeof storedClient === 'string' ? storedClient : clientId(),
+  }
 }
 
 /**
@@ -151,11 +270,17 @@ function remoteDraft(value: unknown): DraftRecord | undefined {
  * stop that cancels its pending push.
  * @param instance - the session's store instance.
  * @param sessionId - the session whose draft this instance holds.
+ * @param options - optional binding callbacks.
  * @returns a stop for the binding's pending push.
  */
-export function bindDraftSync(instance: DraftSyncTarget, sessionId: string): () => void {
+export function bindDraftSync(
+  instance: DraftSyncTarget,
+  sessionId: string,
+  options: DraftSyncOptions = {},
+): () => void {
   if (typeof localStorage === 'undefined' || typeof fetch !== 'function') return () => {}
   let stopped = false
+  let overflowNotified = false
   let adopting = false
   let readFailed = false
   let readComplete = false
@@ -163,14 +288,25 @@ export function bindDraftSync(instance: DraftSyncTarget, sessionId: string): () 
   let lastPushedUpdatedAt = -1
   let pushTimer: ReturnType<typeof setTimeout> | undefined
   let pending: DraftRecord | undefined
-  let local = readRecord(sessionId, instance.getSnapshot().draft)
-    ?? { text: instance.getSnapshot().draft, updatedAt: 0, clientId: clientId() }
+  const initial = instance.getSnapshot()
+  let local = readRecord(sessionId, initial)
+    ?? {
+      text: initial.draft,
+      attachments: initial.draftAttachments ?? [],
+      updatedAt: 0,
+      clientId: clientId(),
+    }
 
   const push = (): void => {
     const next = pending
     pending = undefined
     if (stopped || next === undefined || next.updatedAt <= lastPushedUpdatedAt) return
-    void uiStateRpc<unknown>('enpoiUiState.put', { sessionId, patch: { draft: next } })
+    const wire = boundedRecord(next)
+    if (wire.dropped > 0 && !overflowNotified) {
+      overflowNotified = true
+      options.onAttachmentOverflow?.()
+    }
+    void uiStateRpc<unknown>('enpoiUiState.put', { sessionId, patch: { draft: wire.record } })
       .then((result) => {
         if (stopped) return
         if (!result.ok) {
@@ -199,9 +335,10 @@ export function bindDraftSync(instance: DraftSyncTarget, sessionId: string): () 
 
   const unsubscribe = instance.subscribe(() => {
     if (stopped || adopting) return
-    const text = instance.getSnapshot().draft
-    if (text === local.text) return
-    local = { text, updatedAt: Date.now(), clientId: local.clientId }
+    const snapshot = instance.getSnapshot()
+    const attachments = snapshot.draftAttachments ?? []
+    if (snapshot.draft === local.text && sameAttachments(attachments, local.attachments ?? [])) return
+    local = { ...local, text: snapshot.draft, attachments, updatedAt: Date.now() }
     writeRecord(sessionId, local)
     mirror(local)
   })
@@ -221,10 +358,11 @@ export function bindDraftSync(instance: DraftSyncTarget, sessionId: string): () 
       return
     }
     const remote = remoteDraft(result.value)
-    if (remote === undefined && local.updatedAt === 0 && local.text !== '') {
+    if (remote === undefined && local.updatedAt === 0
+      && (local.text !== '' || (local.attachments?.length ?? 0) > 0)) {
       // A draft from before the mirror existed carries no revision time; give
       // it one so it can seed the server and order future merges.
-      local = { text: local.text, updatedAt: Date.now(), clientId: local.clientId }
+      local = { ...local, updatedAt: Date.now() }
       writeRecord(sessionId, local)
     }
     if (remote !== undefined && remote.updatedAt > local.updatedAt) {
@@ -232,7 +370,7 @@ export function bindDraftSync(instance: DraftSyncTarget, sessionId: string): () 
       local = remote
       writeRecord(sessionId, remote)
       lastPushedUpdatedAt = Math.max(lastPushedUpdatedAt, remote.updatedAt)
-      instance.actions.setDraft(remote.text)
+      instance.actions.setDraft(remote.text, remote.attachments ?? [])
       adopting = false
       return
     }

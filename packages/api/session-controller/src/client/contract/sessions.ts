@@ -169,9 +169,10 @@ export interface ISessions {
   /**
    * Revert the conversation from a user message: everything from `atSeq`
    * becomes reverted (hidden from the transcript and the model surface on the
-   * next commit). Returns the reverted query text for the input card.
+   * next commit). Returns the reverted query text and durable attachment
+   * references for the input card.
    * @param opts - session and the user-message seq anchoring the revert.
-   * @returns the host receipt: the reverted query text and count, plus the
+   * @returns the host receipt: the reverted query content and count, plus the
    *   no-op compatibility fields an older host may set.
    * @throws when the host rejects the anchor.
    */

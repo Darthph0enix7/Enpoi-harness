@@ -529,10 +529,11 @@ export class ClientSessions implements ISessions {
   }
 
   /**
-   * Revert the conversation from a user message. The reverted query text is
-   * returned for the input card; the transcript truncates at the boundary.
+   * Revert the conversation from a user message. The reverted query content
+   * (text and durable attachment references) is returned for the input card;
+   * the transcript truncates at the boundary.
    * @param opts - session and the user-message seq anchoring the revert.
-   * @returns the host receipt: the reverted query text and count, plus the
+   * @returns the host receipt: the reverted query content and count, plus the
    *   no-op compatibility fields an older host may set.
    * @throws {Error} when the host rejects the anchor.
    */

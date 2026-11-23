@@ -297,6 +297,9 @@ function installControllers(
         const selection = defaults.defaultModelSelection()
         return [{ id: selection.provider, name: selection.provider }]
       },
+      resolveModelInfo: (provider: string, model: string) => Promise.resolve({
+        provider, id: model, name: model, inputModalities: ['text', 'image'],
+      }),
     } as never)
   }
   if (ctx.get('attachments') === undefined) {
@@ -308,7 +311,9 @@ function installControllers(
         const admitted: AdmittedPromptContentPart[] = []
         for (const part of content) {
           if (part.type === 'image') throw new Error('test did not configure image persistence')
-          admitted.push(part)
+          if (part.type === 'image-ref') admitted.push({ type: 'image', attachment: part.attachment })
+          else if (part.type === 'file-ref') admitted.push({ type: 'file', attachment: part.attachment })
+          else admitted.push(part)
         }
         return admitted
       },

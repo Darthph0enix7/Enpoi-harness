@@ -17,7 +17,7 @@ import type { LexicalEditor } from 'lexical'
 import type {
   CommandClaim, ConsumeTokenRequest, DraftAttachmentId,
   InputActions, InputEffect, InputNotice, InputState, InputTriggerController, PickOutcome,
-  SessionInput, SubmitAttempt, SubmitAttachment, SubmitOutcome,
+  RestoredDraftAttachment, SessionInput, SubmitAttempt, SubmitAttachment, SubmitOutcome,
 } from '../contract/input.ts'
 import type {
   ArbitrateKey, ArbitrateOutcome, ComposerKeyboard, Occurrence, ReferenceInsert, TokenSpan,
@@ -52,6 +52,15 @@ export interface SessionInputDeps {
    * order (the empty-draft accelerated-Enter gesture); absent = unsupported.
    */
   steerQueue?: (() => void) | undefined
+  /**
+   * Create runtime draft descriptors for durable restored references, in
+   * order. Absent only in unit shells that never restore a draft.
+   */
+  restoreAttachments?(references: readonly RestoredDraftAttachment[]): Promise<readonly DraftAttachmentId[]>
+  /** Release browser-owned draft ids a replace or prune dropped. */
+  releaseAttachments?(ids: readonly DraftAttachmentId[]): void
+  /** Localized notice for a send attempted while restored attachments are still being created. */
+  restorePendingNotice(): string
   /** The plain-message sink (send choreography / materialize fork — the hub owns it). */
   defaultSink(
     text: string,
@@ -99,6 +108,8 @@ interface DetachedDraft {
   readonly draft: string
   readonly occurrences: readonly Occurrence[]
   readonly attachmentIds: readonly DraftAttachmentId[]
+  /** Draft-replacement epoch at snapshot; a later restoreDraft owns the rail. */
+  readonly replaceEpoch: number
 }
 
 /**
@@ -124,6 +135,7 @@ export class SessionInputShell implements SessionInput {
       return this.draftEditor.insertAsyncText(span, text)
     },
     setDraft: (text) => { this.setDraft(text) },
+    restoreDraft: (text, attachments) => { this.restoreDraft(text, attachments) },
     addAttachments: ids => this.addAttachments(ids),
     removeAttachment: (id) => { this.removeAttachment(id) },
     pruneAttachments: (ids) => { this.pruneAttachments(ids) },
@@ -141,8 +153,18 @@ export class SessionInputShell implements SessionInput {
   private lastMirroredDraft = ''
   private attachmentIds: readonly DraftAttachmentId[] = []
   private disposed = false
-  /** Draft persistence mirror (Conversation store write; receives the clipboard projection). */
-  private mirrorFn: ((text: string) => void) | undefined
+  /** Draft persistence mirror (Conversation store write; receives the clipboard projection plus durable refs). */
+  private mirrorFn: ((text: string, attachments: readonly RestoredDraftAttachment[]) => void) | undefined
+  /** Durable references behind restored attachment ids; the only refs that reach the persisted draft. */
+  private readonly durableRefs = new Map<DraftAttachmentId, RestoredDraftAttachment>()
+  /** Rail epoch: every send, commit, and draft replacement invalidates an in-flight restored batch. */
+  private railEpoch = 0
+  /** Draft-replacement epoch; a failed send must not merge attachments into a replaced draft. */
+  private draftReplaceEpoch = 0
+  /** Restores still creating attachment descriptors; submit refuses meanwhile. */
+  private pendingRestores = 0
+  /** Attachment signature of the last persisted mirror write. */
+  private lastMirroredAttachments = ''
   /** The mounted composer's file-picker opener (scoped pick-files event target). */
   private filePicker: Parameters<ComposerKeyboard['bindFilePicker']>[0] | undefined
   /** Default sends retained until admission settles or scope disposal releases their attachments. */
@@ -212,6 +234,51 @@ export class SessionInputShell implements SessionInput {
     this.draftEditor.setDraft(text)
   }
 
+  /**
+   * Replace the draft with a reverted message's text and durable attachments.
+   * Reverting is the explicit replace the gesture asks for: current text,
+   * browser picks, and previously restored chips leave the rail. Images whose
+   * bytes the Session can no longer serve still arrive as removable chips.
+   * Busy admission phases refuse the replacement (like
+   * {@link addAttachments}), and a send while descriptor creation is pending
+   * is refused rather than snapshotting an empty rail.
+   * @param text - the reverted query text.
+   * @param attachments - durable references in original message order.
+   */
+  restoreDraft(text: string, attachments: readonly RestoredDraftAttachment[]): void {
+    if (this.snapshot.phase === 'adjudicating' || this.snapshot.phase === 'submitting') return
+    this.setDraft(text)
+    this.draftReplaceEpoch += 1
+    this.railEpoch += 1
+    const epoch = this.railEpoch
+    const previous = this.attachmentIds
+    this.attachmentIds = []
+    this.durableRefs.clear()
+    if (previous.length > 0) this.deps.releaseAttachments?.(previous)
+    this.publish()
+    if (attachments.length === 0) return
+    const creating = this.deps.restoreAttachments?.(attachments)
+    if (creating === undefined) return
+    this.pendingRestores += 1
+    void creating.then((ids) => {
+      this.pendingRestores -= 1
+      if (this.disposed || epoch !== this.railEpoch) {
+        this.deps.releaseAttachments?.(ids)
+        return
+      }
+      this.attachmentIds = [...this.attachmentIds, ...ids]
+      ids.forEach((id, index) => {
+        const reference = attachments[index]
+        if (reference !== undefined) this.durableRefs.set(id, reference)
+      })
+      this.publish()
+    }, () => {
+      this.pendingRestores -= 1
+      // Creation failure leaves the text restored without media chips; the
+      // operator can still edit and send.
+    })
+  }
+
   /** Append ordered attachment ids unless an admission transaction is locked. */
   addAttachments(ids: readonly DraftAttachmentId[]): boolean {
     if (this.snapshot.phase === 'adjudicating' || this.snapshot.phase === 'submitting') return false
@@ -245,6 +312,7 @@ export class SessionInputShell implements SessionInput {
     const next = this.attachmentIds.filter(candidate => candidate !== id)
     if (next.length === this.attachmentIds.length) return false
     this.attachmentIds = next
+    this.durableRefs.delete(id)
     this.publish()
     return true
   }
@@ -258,6 +326,9 @@ export class SessionInputShell implements SessionInput {
     const next = this.attachmentIds.filter(id => keep.has(id))
     if (next.length === this.attachmentIds.length) return
     this.attachmentIds = next
+    for (const id of this.durableRefs.keys()) {
+      if (!keep.has(id)) this.durableRefs.delete(id)
+    }
     this.publish()
   }
 
@@ -270,6 +341,7 @@ export class SessionInputShell implements SessionInput {
   commitSend(attachmentIds: readonly DraftAttachmentId[]): void {
     const submitted = new Set(attachmentIds)
     this.attachmentIds = this.attachmentIds.filter(id => !submitted.has(id))
+    this.railEpoch += 1
     this.dispatchRun(({ type: 'send-committed' }))
   }
 
@@ -291,23 +363,32 @@ export class SessionInputShell implements SessionInput {
    * dismisses and the menu tracks frozen.
    */
   submit(mode: InputSubmitMode = 'queue'): void {
+    if (this.pendingRestores > 0) {
+      this.notify('error', this.deps.restorePendingNotice())
+      return
+    }
     if (this.snapshot.draft.trim() === '' && this.attachmentIds.length > 0) {
       if (this.snapshot.phase === 'plain') {
         const attachmentIds = [...this.attachmentIds]
+        const replaceEpoch = this.draftReplaceEpoch
         const controller = new AbortController()
         this.attachmentFlightSeq += 1
         const flight = this.attachmentFlightSeq
         this.attachmentFlights.set(flight, { controller, attachmentIds })
         this.commitSend(attachmentIds)
+        const failed = (message: string | undefined): void => {
+          if (this.disposed || !this.attachmentFlights.delete(flight)) return
+          if (replaceEpoch === this.draftReplaceEpoch) this.restoreAttachments(attachmentIds)
+          if (message !== undefined) this.notify('error', message)
+        }
         void this.deps.defaultSink('', attachmentIds, mode, controller.signal).then((outcome) => {
-          if (this.disposed || !this.attachmentFlights.delete(flight)) return
-          if (outcome.kind === 'success') return
-          this.restoreAttachments(attachmentIds)
-          if (outcome.text !== undefined) this.notify('error', outcome.text)
+          if (outcome.kind === 'success') {
+            this.attachmentFlights.delete(flight)
+            return
+          }
+          failed(outcome.text)
         }, (error: unknown) => {
-          if (this.disposed || !this.attachmentFlights.delete(flight)) return
-          this.restoreAttachments(attachmentIds)
-          this.notify('error', error instanceof Error ? error.message : String(error))
+          failed(error instanceof Error ? error.message : String(error))
         })
       }
       return
@@ -517,12 +598,12 @@ export class SessionInputShell implements SessionInput {
   /**
    * Bind the draft persistence mirror (Conversation store write). Adopt-on-bind: the
    * store draft may hold a persisted value from a previous mount; the caller
-   * seeds it via setDraft BEFORE binding, and afterwards every editor-adopted
-   * draft mirrors out.
+   * seeds it via restoreDraft BEFORE binding, and afterwards every
+   * editor-adopted draft mirrors out with its durable restored attachments.
    * @param write - store draft write.
    * @returns the unbind disposer.
    */
-  bindMirror(write: (text: string) => void): () => void {
+  bindMirror(write: (text: string, attachments: readonly RestoredDraftAttachment[]) => void): () => void {
     this.mirrorFn = write
     return () => {
       if (this.mirrorFn === write) this.mirrorFn = undefined
@@ -613,6 +694,7 @@ export class SessionInputShell implements SessionInput {
    * undo history so sent content cannot resurrect.
    */
   private commitDraft(retainSuffixOf: string | null): void {
+    this.railEpoch += 1
     this.draftEditor.clearCommittedDraft((clip) => {
       if (retainSuffixOf !== null && clip !== retainSuffixOf && clip.startsWith(retainSuffixOf)) {
         return retainSuffixOf.length
@@ -635,8 +717,9 @@ export class SessionInputShell implements SessionInput {
   ): void {
     const attachmentIds = [...this.attachmentIds]
     this.attachmentIds = []
+    this.railEpoch += 1
     const occurrences = this.projection.occurrences
-    const record = { draft, occurrences, attachmentIds }
+    const record = { draft, occurrences, attachmentIds, replaceEpoch: this.draftReplaceEpoch }
     this.detachedDrafts.set(attempt.seq, record)
     if (this.failedRestoreRev === this.rev) {
       this.failedDetached.clear()
@@ -699,15 +782,22 @@ export class SessionInputShell implements SessionInput {
     )
   }
 
-  /** Restore one failed detached send without overwriting text entered after a restoration. */
+  /**
+   * Restore one failed detached send without overwriting text entered after a
+   * restoration. A draft replacement (revert restore) after the send snapshot
+   * owns the rail: the failed snapshot then only surfaces its notice instead
+   * of merging stale attachments and text into the replacement.
+   */
   private settleDetachedFailure(attempt: SubmitAttempt, message?: string): void {
     const record = this.detachedDrafts.get(attempt.seq)
     if (record === undefined) return
     this.detachedDrafts.delete(attempt.seq)
-    this.restoreAttachments(record.attachmentIds)
-    this.failedDetached.set(attempt.seq, record)
-    if (this.projection.clipboardText === '' || this.failedRestoreRev === this.rev) {
-      this.restoreFailedDrafts()
+    if (record.replaceEpoch === this.draftReplaceEpoch) {
+      this.restoreAttachments(record.attachmentIds)
+      this.failedDetached.set(attempt.seq, record)
+      if (this.projection.clipboardText === '' || this.failedRestoreRev === this.rev) {
+        this.restoreFailedDrafts()
+      }
     }
     this.dispatchRun(({ type: 'sink-settled', attempt, ok: false, ...(message === undefined ? {} : { message }) }))
   }
@@ -831,9 +921,24 @@ export class SessionInputShell implements SessionInput {
   private publish(): void {
     const next = this.compose()
     this.state.set(next)
-    if (next.draft !== this.lastMirroredDraft) {
+    const attachments = this.durableDraftAttachments()
+    const signature = attachments
+      .map(reference => String(reference.attachment.attachmentId))
+      .join('\n')
+    if (next.draft !== this.lastMirroredDraft || signature !== this.lastMirroredAttachments) {
       this.lastMirroredDraft = next.draft
-      this.mirrorFn?.(next.draft)
+      this.lastMirroredAttachments = signature
+      this.mirrorFn?.(next.draft, attachments)
     }
+  }
+
+  /** Durable references still present in the draft, in attachment order. */
+  private durableDraftAttachments(): readonly RestoredDraftAttachment[] {
+    const references: RestoredDraftAttachment[] = []
+    for (const id of this.attachmentIds) {
+      const reference = this.durableRefs.get(id)
+      if (reference !== undefined) references.push(reference)
+    }
+    return references
   }
 }

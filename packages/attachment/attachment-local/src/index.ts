@@ -3,7 +3,7 @@
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { AttachmentStore } from '@deepseek-ai/dsh-attachment'
+import { AttachmentStore, DEFAULT_MAX_FILE_REFERENCES_PER_MESSAGE as SERVICE_MAX_FILE_REFERENCES_PER_MESSAGE } from '@deepseek-ai/dsh-attachment'
 import type {
   FileAttachmentRef,
   ImageAttachmentLimits,
@@ -36,6 +36,8 @@ export const DEFAULT_MAX_IMAGE_BYTES = 20 * 1024 * 1024
 export const DEFAULT_MAX_IMAGES_PER_MESSAGE = 20
 /** Default maximum aggregate image bytes in one prompt. */
 export const DEFAULT_MAX_MESSAGE_IMAGE_BYTES = 200 * 1024 * 1024
+/** Default maximum durable file references one prompt may cite; also the `AttachmentStore` fallback. */
+export const DEFAULT_MAX_FILE_REFERENCES_PER_MESSAGE = SERVICE_MAX_FILE_REFERENCES_PER_MESSAGE
 /** Default maximum intrinsic pixels for one submitted image. */
 export const DEFAULT_MAX_IMAGE_PIXELS = 64_000_000
 /** Default per-side pixel cap for one submitted image. */
@@ -65,6 +67,8 @@ export interface Config {
   maxImageBytes?: number
   /** Maximum image count accepted in one submitted message. Default: 20. */
   maxImagesPerMessage?: number
+  /** Maximum durable file references one prompt may cite. Default: 64. */
+  maxFileReferencesPerMessage?: number
   /** Maximum aggregate encoded image bytes accepted in one submitted message. Default: 200 MiB. */
   maxMessageImageBytes?: number
   /** Maximum intrinsic width multiplied by height accepted for one submitted image. Default: 64,000,000. */
@@ -149,6 +153,7 @@ export class LocalAttachmentStore extends AttachmentStore {
     dshHome: z.string(),
     maxImageBytes: z.number().step(1).min(1).default(DEFAULT_MAX_IMAGE_BYTES),
     maxImagesPerMessage: z.number().step(1).min(1).default(DEFAULT_MAX_IMAGES_PER_MESSAGE),
+    maxFileReferencesPerMessage: z.number().step(1).min(1).default(DEFAULT_MAX_FILE_REFERENCES_PER_MESSAGE),
     maxMessageImageBytes: z.number().step(1).min(1).default(DEFAULT_MAX_MESSAGE_IMAGE_BYTES),
     maxImagePixels: z.number().step(1).min(1).default(DEFAULT_MAX_IMAGE_PIXELS),
     maxImageDimension: z.number().step(1).min(1).default(DEFAULT_MAX_IMAGE_DIMENSION),
@@ -162,6 +167,7 @@ export class LocalAttachmentStore extends AttachmentStore {
   /** Absolute versioned storage root. */
   readonly root: string
   readonly imageLimits: ImageAttachmentLimits
+  override readonly maxFileReferencesPerMessage: number
   /** Resolved provider-independent normalization policy. */
   readonly normalizationPolicy: Readonly<NormalizationPolicy>
   /** Resolved instance-level compression limit. */
@@ -175,6 +181,7 @@ export class LocalAttachmentStore extends AttachmentStore {
     const dshHome = resolveDshHome(config.dshHome)
     this.root = join(dshHome, 'attachments', 'v1')
     this.cacheRoot = dshCachePath({ dshHome }, 'attachments')
+    this.maxFileReferencesPerMessage = config.maxFileReferencesPerMessage ?? DEFAULT_MAX_FILE_REFERENCES_PER_MESSAGE
     this.imageLimits = Object.freeze({
       maxImageBytes: config.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES,
       maxImagesPerMessage: config.maxImagesPerMessage ?? DEFAULT_MAX_IMAGES_PER_MESSAGE,

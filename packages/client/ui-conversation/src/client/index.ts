@@ -60,6 +60,7 @@ export type { ConversationKey } from './locales.ts'
 export type {
   ComposerAttachment, ComposerAttachmentsOwnerProps, ComposerAttachmentsProps,
   ComposerFileAttachment, ComposerImageAttachment, DraftFileUpload, DraftFileUploads,
+  UnavailableComposerAttachment,
   ComposerBarInjected, ComposerBarOwnerProps, ComposerBarProps, ComposerChainProps,
   ConversationHeaderActionOwnerProps, ConversationHeaderCornerOwnerProps, ConversationHeaderLineageOwnerProps,
   ConversationContentInputProps, ConversationContentProps,
@@ -74,8 +75,8 @@ export type {
 } from './contract/slots.ts'
 export type {
   BeginCommandRequest, CommandClaim, ConsumeTokenRequest, DraftAttachmentId, InputActions,
-  InputState, InsertReferenceRequest, InsertTextRequest, PickOutcome, SessionInput,
-  SessionInputResolver, SubmitAttachment, SubmitOutcome,
+  InputState, InsertReferenceRequest, InsertTextRequest, PickOutcome, RestoredDraftAttachment,
+  SessionInput, SessionInputResolver, SubmitAttachment, SubmitOutcome,
 } from './contract/input.ts'
 export type { ArbitrateKey, ArbitrateOutcome, ReferenceInsert, TokenSpan } from './contract/draft-editor.ts'
 export type { ComposerBlock, ComposerBlocks } from './contract/composer-blocks.ts'

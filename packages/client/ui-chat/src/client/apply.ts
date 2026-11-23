@@ -2,8 +2,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
-import type { SessionBinding } from '@deepseek-ai/dsh-api-session-controller/client'
-import type { GroupKey } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { SessionBinding, SessionRevertValue } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { GroupKey, RestoredDraftAttachment } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { createSnapshotStore, type ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { SidebarRightResourceParamsMap } from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
@@ -45,6 +45,19 @@ import { PerformanceUsageRow, type PerformanceUsageRowInjected } from './setting
 import { PerformanceUsagePolicy } from './performance-usage.ts'
 import { useTurnDataValue } from './chat/use-turn-data.ts'
 import { bindDisclosure } from './chat/use-disclosure.ts'
+
+/** Map the host's reverted content blocks to durable composer references. */
+function restoredDraftAttachments(
+  content: SessionRevertValue['revertedContent'] | undefined,
+): readonly RestoredDraftAttachment[] {
+  if (content === undefined) return []
+  const attachments: RestoredDraftAttachment[] = []
+  for (const part of content) {
+    if (part.type === 'image') attachments.push({ kind: 'image', attachment: part.attachment })
+    else if (part.type === 'file') attachments.push({ kind: 'file', attachment: part.attachment })
+  }
+  return attachments
+}
 
 const CHAT_NODE_INJECT: ChatNodeInjected = {
   hooks: {
@@ -267,12 +280,16 @@ export function apply(ctx: Context): void {
                 ...(receipt.notice === undefined ? {} : { notice: receipt.notice }),
               }
             }
-            // Populate the composer draft with the reverted query so the
-            // textarea updates live (the reverted text re-enters input).
+            // Restore the reverted query — text plus durable attachment
+            // references — so the composer updates live and the operator can
+            // edit, drop, or keep the media before re-sending.
             const scoped = ctx.sessions.scope(sessionId)
             if (scoped !== undefined) {
               const conversation = scoped.get('conversation')
-              conversation?.input.for(scoped).setDraft(receipt.revertedText)
+              conversation?.input.for(scoped).restoreDraft(
+                receipt.revertedText,
+                restoredDraftAttachments(receipt.revertedContent),
+              )
             }
             return { noop: false }
           },

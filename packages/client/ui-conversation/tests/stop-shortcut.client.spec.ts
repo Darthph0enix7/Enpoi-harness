@@ -31,6 +31,8 @@ async function bench() {
   const hub = new InputHub(runtime.ctx, makeTranslate(zh, {}))
   const fiber = runtime.ctx.plugin(ConversationController, {
     input: hub, blocks: new ComposerBlockRegistry(), maxConcurrentFileUploads: 2,
+    resolveImageUrl: () => Promise.resolve('blob:restored'),
+    unavailableAttachmentText: () => 'attachment unavailable',
   })
   await fiber.await()
   const conversation = new UiConversation(runtime.ctx, runtime.sessions)

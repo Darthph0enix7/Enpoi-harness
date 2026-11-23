@@ -94,8 +94,10 @@ export interface EncodedImageAttachment {
 /**
  * Browser-submitted prompt content accepted by Host prompt endpoints; the
  * accepting Host promotes image parts to durable references through
- * `ctx.attachments.admitPromptContent()` before any message is created, so a wire caller can
- * never cite an attachment it did not upload.
+ * `ctx.attachments.admitPromptContent()` before any message is created, so an
+ * upload part always becomes a fresh log entry. A durable `image-ref` or
+ * `file-ref` citation is authorized per Session by the Host against that
+ * Session's log; it never uploads or re-reads the cited bytes.
  */
 export type PromptContentPart =
   | { readonly type: 'text'; readonly text: string }
@@ -106,10 +108,18 @@ export type PromptContentPart =
     readonly name?: string
   }
 
-/** Host prompt content whose file receipts are resolved and whose image bytes await admission. */
+/**
+ * Host prompt content whose file receipts are resolved and whose image bytes
+ * await admission. The `*-ref` arms already cite durable attachments (a
+ * restored composer draft); the store passes them through without reading or
+ * rewriting their bytes, while charging every citation against the same
+ * per-message batch limits as uploaded content.
+ */
 export type AttachmentAdmissionPart =
   | PromptContentPart
   | { readonly type: 'file'; readonly attachment: FileAttachmentRef }
+  | { readonly type: 'image-ref'; readonly attachment: ImageAttachmentRef }
+  | { readonly type: 'file-ref'; readonly attachment: FileAttachmentRef }
 
 /** Host-admitted prompt content with every attachment represented by its durable reference. */
 export type AdmittedPromptContentPart =

@@ -891,8 +891,9 @@ workspaceDesktop(): { name: string; available: boolean; fileManager: 'finder' | 
 /**
  * Revert the conversation from a user message (revert-from-here).
  * @param request - session and the user-message seq anchoring the revert.
- * @returns the reverted query text and count for the input card; an unusable
- *   anchor is rejected with `revert-invalid`.
+ * @returns the reverted query content and count for the input card; content
+ *   preserves block order and cites durable attachments, never bytes. An
+ *   unusable anchor is rejected with `revert-invalid`.
  */
 @Remote('revert') revert(request: SessionRevertRequest): Promise<SessionRevertValue>
 

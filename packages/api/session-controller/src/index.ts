@@ -184,7 +184,7 @@ export interface SessionControllerInternals {
   readonly revealPath?: (path: string, signal: AbortSignal) => Promise<void>
   /** Native handoff availability probe. */
   readonly canOpenPath?: () => boolean
-  /** Override the per-Session wire-capture log root; defaults to `DSH_WIRE_LOG`'s directory or `~/.dsh/logs`. */
+  /** Override the per-Session wire-capture log root; defaults to `DSH_WIRE_LOG`'s directory, `$DSH_HOME/logs`, or `~/.dsh/logs`. */
   readonly wireLogRoot?: string
 }
 
@@ -545,8 +545,9 @@ export class SessionController extends TypertRemoteService {
   /**
    * Revert the conversation from a user message (revert-from-here).
    * @param request - session and the user-message seq anchoring the revert.
-   * @returns the reverted query text and count for the input card; an unusable
-   *   anchor is rejected with `revert-invalid`.
+   * @returns the reverted query content and count for the input card; content
+   *   preserves block order and cites durable attachments, never bytes. An
+   *   unusable anchor is rejected with `revert-invalid`.
    */
   @Remote('revert')
   revert(request: SessionRevertRequest): Promise<SessionRevertValue> {

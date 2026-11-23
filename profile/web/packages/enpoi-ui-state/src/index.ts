@@ -38,6 +38,10 @@ export const inject: string[] = []
 const MAX_SESSION_ID_CHARS = 200
 /** Longest accepted draft text (characters). */
 const MAX_DRAFT_TEXT_CHARS = 100_000
+/** Most durable attachments one draft record may carry (a reverted message can cite many files). */
+const MAX_DRAFT_ATTACHMENTS = 256
+/** Longest accepted serialized draft attachment list (JSON characters). */
+const MAX_DRAFT_ATTACHMENTS_JSON_CHARS = 256_000
 /** Longest accepted serialized surface (JSON characters). */
 const MAX_SURFACE_JSON_CHARS = 64_000
 /** Record keys become path segments in the per-record json backend. */
@@ -47,10 +51,24 @@ export const LAYOUT_KEY = 'layout'
 /** Widest accepted width member in px; a frame wider than this does not exist. */
 const MAX_WIDTH_PX = 20_000
 
-/** One client's unsent composer text, timestamped by that client. */
+/** One durable attachment a restored draft cites (image or file object reference). */
+export interface UiStateDraftAttachment {
+  /** Attachment kind, mirroring the composer's draft rail. */
+  readonly kind: 'image' | 'file'
+  /** Durable reference fields exactly as the client persists them; the Host never interprets them. */
+  readonly attachment: Readonly<Record<string, unknown>>
+}
+
+/** One client's unsent composer text and restored attachments, timestamped by that client. */
 export interface UiStateDraft {
   /** Unsent composer text. */
   text: string
+  /**
+   * Durable references restored into the draft (a reverted message's media).
+   * Absent for text-only drafts and records written before drafts carried
+   * attachments; browser-picked files never appear here.
+   */
+  attachments?: readonly UiStateDraftAttachment[]
   /** Client clock (milliseconds) of the last change; stored as given, never compared. */
   updatedAt: number
   /** Client instance that typed the text. */
@@ -97,6 +115,10 @@ export interface LayoutWidths {
 const uiStateRecordSchema = z.object({
   draft: z.object({
     text: z.string(),
+    attachments: z.array(z.object({
+      kind: z.enum(['image', 'file']),
+      attachment: z.object({ attachmentId: z.string() }).passthrough(),
+    }).passthrough()).max(MAX_DRAFT_ATTACHMENTS).optional(),
     updatedAt: z.number(),
     clientId: z.string(),
   }).optional(),
@@ -166,11 +188,11 @@ function requireSessionId(value: unknown): string {
  * @returns the validated draft, with exactly the stored fields.
  * @throws TypeError for a malformed draft; RangeError for oversized text.
  */
-function requireDraft(value: unknown): UiStateDraft {
+export function requireDraft(value: unknown): UiStateDraft {
   if (!isRecord(value)) {
     throw new TypeError('enpoiUiState: patch.draft must be an object')
   }
-  const { text, updatedAt, clientId } = value
+  const { text, updatedAt, clientId, attachments } = value
   if (typeof text !== 'string') {
     throw new TypeError('enpoiUiState: patch.draft.text must be a string')
   }
@@ -183,7 +205,49 @@ function requireDraft(value: unknown): UiStateDraft {
   if (typeof clientId !== 'string' || clientId === '') {
     throw new TypeError('enpoiUiState: patch.draft.clientId must be a non-empty string')
   }
-  return { text, updatedAt, clientId }
+  return { text, updatedAt, clientId, ...requireDraftAttachments(attachments) }
+}
+
+/**
+ * Validate the optional durable attachment list carried by one draft.
+ * @param value - raw `patch.draft.attachments` argument.
+ * @returns an empty object for an absent list, or the validated `attachments` member.
+ * @throws TypeError for a malformed entry; RangeError for excess count or size.
+ */
+function requireDraftAttachments(value: unknown): { attachments?: readonly UiStateDraftAttachment[] } {
+  if (value === undefined) return {}
+  if (!Array.isArray(value)) {
+    throw new TypeError('enpoiUiState: patch.draft.attachments must be an array')
+  }
+  if (value.length > MAX_DRAFT_ATTACHMENTS) {
+    throw new RangeError(`enpoiUiState: patch.draft.attachments must hold at most ${MAX_DRAFT_ATTACHMENTS} entries`)
+  }
+  const attachments: UiStateDraftAttachment[] = []
+  for (const entry of value) {
+    if (!isRecord(entry) || !isRecord(entry.attachment)) {
+      throw new TypeError('enpoiUiState: patch.draft.attachments entries must be objects with an attachment')
+    }
+    const kind = entry.kind
+    if (kind !== 'image' && kind !== 'file') {
+      throw new TypeError('enpoiUiState: patch.draft.attachments[].kind must be "image" or "file"')
+    }
+    const attachmentId = entry.attachment.attachmentId
+    if (typeof attachmentId !== 'string' || attachmentId === '') {
+      throw new TypeError('enpoiUiState: patch.draft.attachments[].attachment.attachmentId must be a non-empty string')
+    }
+    attachments.push({ kind, attachment: entry.attachment })
+  }
+  let serialized: string
+  try { serialized = JSON.stringify(attachments) }
+  catch (error) {
+    throw new TypeError(`enpoiUiState: patch.draft.attachments is not JSON-serializable: ${String(error)}`)
+  }
+  if (serialized.length > MAX_DRAFT_ATTACHMENTS_JSON_CHARS) {
+    throw new RangeError(
+      `enpoiUiState: patch.draft.attachments must serialize to at most ${MAX_DRAFT_ATTACHMENTS_JSON_CHARS} characters`,
+    )
+  }
+  return { attachments }
 }
 
 /**

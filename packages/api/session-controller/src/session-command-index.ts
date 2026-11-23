@@ -9,7 +9,7 @@
  * per operation.
  */
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { FileAttachmentRef, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { assistantStreamChunks } from '@deepseek-ai/dsh-llm'
 import {
   emptyIterationFoldState,
@@ -21,6 +21,7 @@ import {
 export class SessionCommandIndex {
   private readonly promptRequestIds = new Set<string>()
   private readonly attachments = new Map<string, ImageAttachmentRef>()
+  private readonly files = new Map<string, FileAttachmentRef>()
   private revertFromSeq: number | undefined
   private throughSeq = -1
   /** Durable revert-iteration pointer index, advanced by the same ingest. */
@@ -67,12 +68,29 @@ export class SessionCommandIndex {
     return this.attachments.get(attachmentId)
   }
 
+  /**
+   * Resolve one verbatim-file reference to its committed user message.
+   * Restored composer drafts may only re-cite files the Session itself
+   * logged, and a prompt's file blocks enter through `user/message` events
+   * alone.
+   * @param attachmentId - opaque file attachment identity.
+   * @returns the referenced file, or undefined when no user message cites it.
+   */
+  referencedFile(attachmentId: string): FileAttachmentRef | undefined {
+    return this.files.get(attachmentId)
+  }
+
   private apply(event: SessionEvent): void {
     foldIterationEvent(this.iterations, event)
     if (event.type === 'user/message') {
       const source = event.data.source
       if (source.kind === 'user' && 'rpcId' in source && typeof source.rpcId === 'string') {
         this.promptRequestIds.add(source.rpcId)
+      }
+      for (const block of event.data.content) {
+        if (block.type !== 'file') continue
+        const id = String(block.attachment.attachmentId)
+        if (!this.files.has(id)) this.files.set(id, block.attachment)
       }
     } else if (event.type === 'revert/state') {
       const data = event.data as { readonly fromSeq?: number | null }

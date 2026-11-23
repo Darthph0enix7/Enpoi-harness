@@ -159,7 +159,12 @@ export function apply(ctx: Context, config: Config = Config({})): void {
 
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-conversation: dictionaries')
   const t = ctx.locale.bind(NS)
-  const conversationStore = createConversationStore()
+  const conversationStore = createConversationStore({
+    onDraftAttachmentOverflow: (sessionId) => {
+      const binding = sessions.binding(sessionId)
+      if (binding !== undefined) inputHub.shellFor(binding).notify('info', t('attachment.draftLimitReached'))
+    },
+  })
   const submissionPolicy = new ComposerSubmissionPolicy(
     ctx.configForms.get<ConversationSettings>(CONVERSATION_SETTINGS_NAMESPACE),
   )
@@ -371,19 +376,32 @@ export function apply(ctx: Context, config: Config = Config({})): void {
           const draft = from.snapshot.draft
           const attachmentIds = from.snapshot.attachmentIds
           const next = inputHub.shell(nextId)
-          if (attachmentIds.length === 0 || next.addAttachments(attachmentIds)) {
-            if (sessions.binding(nextId) === undefined) {
-              throw new Error(`ui-conversation: session "${nextId}" resolved no binding`)
-            }
-            concreteConversation(ctx).rebindDraftFiles(nextId, attachmentIds)
-            if (draft !== '') {
-              next.setDraft(draft)
-              from.setDraft('')
-            }
-            if (attachmentIds.length > 0) {
-              for (const id of attachmentIds) from.removeAttachment(id)
-            }
+          const phase = next.snapshot.phase
+          if (phase === 'adjudicating' || phase === 'submitting') return
+          if (sessions.binding(nextId) === undefined) {
+            throw new Error(`ui-conversation: session "${nextId}" resolved no binding`)
           }
+          const conversation = concreteConversation(ctx)
+          const durable = conversation.durableDraftAttachments(attachmentIds)
+          const carried = durable.filter(entry => entry.sessionId === nextId)
+          const dropped = durable.filter(entry => entry.sessionId !== nextId)
+          const browserIds = attachmentIds.filter(id => !durable.some(entry => entry.id === id))
+          if (draft !== '' || carried.length > 0) {
+            // A reference is authorized by the Session whose log cites it.
+            // Only same-Session references can move; another Session's chips
+            // would fail host authorization on send. Browser picks then join
+            // the rebuilt rail.
+            next.restoreDraft(draft, carried.map(entry => entry.reference))
+          }
+          if (browserIds.length > 0) next.addAttachments(browserIds)
+          conversation.rebindDraftFiles(nextId, browserIds)
+          // Source descriptors belong to the source draft; the target owns
+          // rebuilt descriptors for carried references and nothing for
+          // dropped ones.
+          for (const entry of durable) conversation.releaseDraftAttachment(entry.id)
+          if (dropped.length > 0) next.notify('info', t('attachment.crossSessionDropped'))
+          if (draft !== '') from.setDraft('')
+          for (const id of attachmentIds) from.removeAttachment(id)
         }
       }),
     }),
@@ -589,6 +607,8 @@ export function apply(ctx: Context, config: Config = Config({})): void {
     input: inputHub,
     blocks: composerBlocks,
     maxConcurrentFileUploads,
+    resolveImageUrl: (sessionId, attachment) => uiConversation.imageUrl(sessionId, attachment),
+    unavailableAttachmentText: () => t('attachment.unavailableSend'),
   })
   ctx.plugin(todoDockEntry)
   ctx.plugin(queueDockEntry)

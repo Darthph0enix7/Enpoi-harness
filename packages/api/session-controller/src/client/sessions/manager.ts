@@ -710,7 +710,8 @@ export class SessionManager {
   /**
    * Revert the conversation from a user message: everything from `atSeq`
    * becomes reverted (hidden from the transcript and the model surface on the
-   * next commit). Returns the reverted query text for the input card.
+   * next commit). Returns the reverted query content (text and durable
+   * attachment references) for the input card.
    * @param opts - session and the user-message seq anchoring the revert.
    * @returns the host revert receipt, or the transport failure.
    */

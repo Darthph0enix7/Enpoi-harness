@@ -1,4 +1,5 @@
 /** Conversation view and session-local presentation state. */
+import type { RestoredDraftAttachment } from './input.ts'
 
 /**
  * One conversation view tab, projected from a 'conversation.view' slot
@@ -18,6 +19,12 @@ export interface ConversationViewRequest {
 export interface ConversationStoreState {
   /** Composer draft (persisted; survives session switches and reloads). */
   draft: string
+  /**
+   * Durable attachments restored into the draft (persisted with the draft so
+   * a reverted message's media survives reload and reaches another device).
+   * Browser-picked attachments stay local and are never persisted here.
+   */
+  draftAttachments?: readonly RestoredDraftAttachment[]
   /** Preferred `conversation.view` entry id; null resolves to Chat when registered. */
   view: string | null
   /** Focus request consumed and acknowledged by the addressed View. */

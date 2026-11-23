@@ -5,6 +5,7 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import SessionStore, { SESSION_FORMAT_VERSION, SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage, MessageId } from '@deepseek-ai/dsh-llm'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
 import { describe, expect, it, vi } from 'vitest'
 import SessionController from '../src/index.ts'
@@ -74,11 +75,121 @@ describe('SessionController revert RPC', () => {
 
     expect(result.accepted).toBe(true)
     expect(result.revertedText).toBe('first query')
+    expect(result.revertedContent).toEqual([{ type: 'text', text: 'first query' }])
     expect(result.revertedCount).toBe(1) // the second user query
     const revertEvent = session.snapshotEvents().find(e => e.type === 'revert/state')
     expect(revertEvent).toBeDefined()
     expect((revertEvent!.data as { fromSeq: number; cause: string }).fromSeq).toBe(firstUserSeq)
     expect((revertEvent!.data as { cause: string }).cause).toBe('revert')
+  })
+
+  it('returns the reverted query media as durable references in block order', async () => {
+    const { ctx, controller, sessionId } = await composed()
+    const session = ctx.sessions.get(sessionId)!
+    const image = {
+      attachmentId: AttachmentId('image-ref-1'),
+      mediaType: 'image/png' as const,
+      bytes: 3,
+      width: 1,
+      height: 1,
+      name: 'photo.png',
+    }
+    const file = { attachmentId: AttachmentId('file-ref-1'), name: 'report.pdf', bytes: 42 }
+    session.append('user/message', createUserMessage({
+      content: [
+        { type: 'text', text: 'inspect these' },
+        { type: 'tool-call', id: 'call-1' as never, name: 'example', arguments: '{}' },
+        { type: 'image', attachment: image },
+        { type: 'file', attachment: file },
+      ],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    const mediaSeq = session.snapshotEvents().findLast(e => e.type === 'user/message')!.seq
+
+    const result = await controller.revert({ sessionId, atSeq: mediaSeq })
+
+    expect(result.revertedText).toBe('inspect these')
+    expect(result.revertedContent).toEqual([
+      { type: 'text', text: 'inspect these' },
+      { type: 'image', attachment: image },
+      { type: 'file', attachment: file },
+    ])
+  })
+
+  it('admits durable image and file prompt references logged by the session', async () => {
+    const { ctx, controller, sessionId } = await composed()
+    const session = ctx.sessions.get(sessionId)!
+    const image = {
+      attachmentId: AttachmentId('image-restored'),
+      mediaType: 'image/png' as const,
+      bytes: 5,
+      width: 2,
+      height: 2,
+    }
+    const file = { attachmentId: AttachmentId('file-restored'), name: 'notes.txt', bytes: 9 }
+    session.append('user/message', createUserMessage({
+      content: [
+        { type: 'text', text: 'original' },
+        { type: 'image', attachment: image },
+        { type: 'file', attachment: file },
+      ],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    const followup = vi.fn()
+    Object.assign(ctx.agents.get(sessionId)!, { followup })
+    const signal = new AbortController().signal
+
+    await expect(controller.prompt({
+      requestId: 'restored-refs' as never,
+      sessionId,
+      mode: 'queue',
+      content: [
+        // Altered display metadata must be replaced by the log's copy.
+        { type: 'image-ref', attachment: { ...image, name: 'spoofed.png', bytes: 999 } },
+        { type: 'file-ref', attachment: { ...file, name: 'spoofed.txt', bytes: 999 } },
+        { type: 'text', text: 'resend' },
+      ],
+    }, signal)).resolves.toMatchObject({ accepted: true })
+
+    expect(followup).toHaveBeenCalledTimes(1)
+    const message = followup.mock.calls[0]![0] as { content: readonly unknown[] }
+    expect(message.content).toEqual([
+      { type: 'image', attachment: image },
+      { type: 'file', attachment: file },
+      { type: 'text', text: 'resend' },
+    ])
+  })
+
+  it('refuses a durable prompt reference the session log never cited', async () => {
+    const { controller, sessionId } = await composed()
+    const signal = new AbortController().signal
+
+    await expect(controller.prompt({
+      requestId: 'foreign-ref' as never,
+      sessionId,
+      mode: 'queue',
+      content: [{
+        type: 'image-ref',
+        attachment: {
+          attachmentId: AttachmentId('foreign-image'), mediaType: 'image/png', bytes: 1, width: 1, height: 1,
+        },
+      }],
+    }, signal)).rejects.toMatchObject({
+      code: 'session/attachment-invalid',
+      details: { reason: 'ATTACHMENT_NOT_REFERENCED' },
+    })
+    await expect(controller.prompt({
+      requestId: 'foreign-file' as never,
+      sessionId,
+      mode: 'queue',
+      content: [{
+        type: 'file-ref',
+        attachment: { attachmentId: AttachmentId('foreign-file'), name: 'x.txt', bytes: 1 },
+      }],
+    }, signal)).rejects.toMatchObject({
+      code: 'session/attachment-invalid',
+      details: { reason: 'ATTACHMENT_NOT_REFERENCED' },
+    })
   })
 
   it('preserves child settlement notices across the revert cancel and drops operator queue input', async () => {

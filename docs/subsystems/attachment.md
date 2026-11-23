@@ -56,7 +56,7 @@ interface ImageAttachmentLimits {
 }
 ```
 
-The local backend admits at most 20 images and 200 MiB of encoded source data per message. One source may use up to 20 MiB, 64,000,000 pixels, and 8192 pixels on either side. These source limits precede the independent normalization stage, which limits the long edge to 2048 pixels and encoded data to 4 MiB by default.
+The local backend admits at most 20 image occurrences and 200 MiB of encoded image data per message, counting uploaded images and durable image citations together, plus at most 64 durable file citations. One source may use up to 20 MiB, 64,000,000 pixels, and 8192 pixels on either side. These source limits precede the independent normalization stage, which limits the long edge to 2048 pixels and encoded data to 4 MiB by default.
 
 The reference records intrinsic dimensions and encoded length so clients can lay out history without decoding first, while every authoritative read still re-checks digest, media signature, dimensions, and metadata against the object.
 
@@ -66,8 +66,10 @@ The reference records intrinsic dimensions and encoded length so clients can lay
 /**
  * Browser-submitted prompt content accepted by Host prompt endpoints; the
  * accepting Host promotes image parts to durable references through
- * `ctx.attachments.admitPromptContent()` before any message is created, so a wire caller can
- * never cite an attachment it did not upload.
+ * `ctx.attachments.admitPromptContent()` before any message is created, so an
+ * upload part always becomes a fresh log entry. A durable `image-ref` or
+ * `file-ref` citation is authorized per Session by the Host against that
+ * Session's log; it never uploads or re-reads the cited bytes.
  */
 type PromptContentPart =
   | { readonly type: 'text'; readonly text: string }
@@ -80,10 +82,18 @@ type PromptContentPart =
 ```
 
 ```ts type-equiv
-/** Host prompt content whose file receipts are resolved and whose image bytes await admission. */
+/**
+ * Host prompt content whose file receipts are resolved and whose image bytes
+ * await admission. The `*-ref` arms already cite durable attachments (a
+ * restored composer draft); the store passes them through without reading or
+ * rewriting their bytes, while charging every citation against the same
+ * per-message batch limits as uploaded content.
+ */
 type AttachmentAdmissionPart =
   | PromptContentPart
   | { readonly type: 'file'; readonly attachment: FileAttachmentRef }
+  | { readonly type: 'image-ref'; readonly attachment: ImageAttachmentRef }
+  | { readonly type: 'file-ref'; readonly attachment: FileAttachmentRef }
 ```
 
 ```ts type-equiv
@@ -200,11 +210,16 @@ abstract validateImage(input: SaveImageAttachment): Promise<void>
 async saveImages(inputs: readonly SaveImageAttachment[]): Promise<readonly ImageAttachmentRef[]>
 
 /**
- * Admit one Host prompt and replace each uploaded image with its durable reference.
- * Text and durable file references pass through unchanged. A prompt without image parts performs no storage operation.
+ * Admit one Host prompt and replace each uploaded image with its durable
+ * reference. Text and durable image/file citations pass through unchanged.
+ * Uploads and citations are charged together against the per-message image
+ * count, aggregate image bytes, media types, and file-reference count; a
+ * durable object cited more than once is refused. A prompt without image
+ * parts performs no storage operation.
  * @param content - prompt parts in message order after file receipt resolution.
  * @returns admitted prompt parts in the same order as `content`.
- * @throws AttachmentError when the image batch is refused.
+ * @throws AttachmentError when the image batch, a citation, or the
+ *   file-reference count is refused.
  */
 async admitPromptContent( content: readonly AttachmentAdmissionPart[], ): Promise<AdmittedPromptContentPart[]>
 

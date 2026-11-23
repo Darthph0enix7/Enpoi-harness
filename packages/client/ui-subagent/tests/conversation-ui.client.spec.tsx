@@ -115,6 +115,7 @@ function props(
       captureInsertion: unused,
       insertText: unused,
       setDraft: unused,
+      restoreDraft: () => {},
       addAttachments: unused,
       removeAttachment: unused,
       pruneAttachments: unused,

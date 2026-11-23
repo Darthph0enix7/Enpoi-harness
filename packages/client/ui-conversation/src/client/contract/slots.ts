@@ -16,7 +16,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { WorkspaceId } from '@deepseek-ai/dsh-workspace/types'
 import type { ComposerBlock } from './composer-blocks.ts'
-import type { DraftAttachmentId, InputActions, InputNotice, InputState } from './input.ts'
+import type { DraftAttachmentId, InputActions, InputNotice, InputState, RestoredDraftAttachment } from './input.ts'
 import type { ComposerTabDirection } from './composer-tab.ts'
 import type { ComposerKeyboard, EditSelection } from './draft-editor.ts'
 import type { createConversationStore } from '../stores.ts'
@@ -24,26 +24,61 @@ import type { BusyEnterBehavior } from './composer-submission.ts'
 import type { ConversationSnapshot } from './snapshot.ts'
 import type { ViewTab } from './views.ts'
 
-/** Browser-owned draft attachment that has not crossed the durable Host boundary. */
-export type ComposerAttachment = ComposerImageAttachment | ComposerFileAttachment
+/**
+ * One draft attachment: browser-owned bytes picked in this composer, a
+ * durable reference restored from the Session log (a reverted message), or a
+ * restored reference the Session can no longer serve.
+ */
+export type ComposerAttachment =
+  | ComposerImageAttachment
+  | ComposerFileAttachment
+  | UnavailableComposerAttachment
 
-/** Browser-owned image, base64-encoded into the prompt at send time. */
+/**
+ * Composer image. A browser pick carries `file` (base64-encoded at send
+ * time); a restored draft carries the durable `attachment` reference and is
+ * sent by citing it, never by re-encoding bytes.
+ */
 export interface ComposerImageAttachment {
   kind: 'image'
   id: DraftAttachmentId
-  file: File
+  /** Browser-owned bytes; absent when the draft cites a durable restored image. */
+  file?: File
+  /** Durable reference behind a restored image; absent on a browser pick. */
+  attachment?: ImageAttachmentRef
+  /** Session whose log authorized `attachment`; present only on a restored reference. */
+  sessionId?: SessionId
   previewUrl: string
-  /** Intrinsic pixel width, filled asynchronously by the intake header probe. */
+  /** Intrinsic pixel width, filled asynchronously by the intake header probe or read from the durable reference. */
   width?: number
-  /** Intrinsic pixel height, filled asynchronously by the intake header probe. */
+  /** Intrinsic pixel height, filled asynchronously by the intake header probe or read from the durable reference. */
   height?: number
 }
 
-/** Browser-owned generic file whose bytes upload to the Host as soon as it is picked. */
+/**
+ * Composer generic file. A browser pick uploads its bytes on pick and sends
+ * its staged receipt; a restored draft carries the durable `attachment`
+ * reference and is sent by citing it.
+ */
 export interface ComposerFileAttachment {
   kind: 'file'
   id: DraftAttachmentId
-  file: File
+  /** Browser-owned bytes; absent when the draft cites a durable restored file. */
+  file?: File
+  /** Durable reference behind a restored file; absent on a browser pick. */
+  attachment?: FileAttachmentRef
+  /** Session whose log authorized `attachment`; present only on a restored reference. */
+  sessionId?: SessionId
+}
+
+/** A restored reference whose durable bytes the Session can no longer serve; removable, never sendable. */
+export interface UnavailableComposerAttachment {
+  kind: 'unavailable'
+  id: DraftAttachmentId
+  /** Durable reference the restored draft cited. */
+  attachment: ImageAttachmentRef | FileAttachmentRef
+  /** Display name from the durable reference, or the localized fallback the owner renders. */
+  name?: string
 }
 
 /** Upload lifecycle of one picked file draft (files upload on pick, not on send). */
@@ -370,8 +405,8 @@ export interface ConversationSessionInjected {
     readonly conversationViews: ObservableSnapshot<readonly ViewTab[]>
     readonly inspectCall: ObservableSnapshot<ConvViewOwnerProps['inspectCall']>
   }
-  /** Bind input draft persistence to the Session-owned store instance. */
-  bindDraftMirror: (write: (text: string) => void) => () => void
+  /** Bind input draft persistence (text plus durable restored attachments) to the Session-owned store instance. */
+  bindDraftMirror: (write: (text: string, attachments: readonly RestoredDraftAttachment[]) => void) => () => void
   /** Select and activate one View while addressing an opaque focus request to it. */
   openView: (view: string, focus: string) => void
 }

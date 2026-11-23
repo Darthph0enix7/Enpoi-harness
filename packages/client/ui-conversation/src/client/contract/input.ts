@@ -7,6 +7,7 @@
  * here is the submit plane (phase, claim, attempt) alone.
  */
 import type { Context } from '@deepseek-ai/cordis'
+import type { FileAttachmentRef, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { InboxState } from '@deepseek-ai/dsh-agent/types'
 import type { ObservableSnapshot, SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { Branded } from '@deepseek-ai/dsh-brand'
@@ -161,6 +162,15 @@ declare module '@deepseek-ai/cordis' {
 export type DraftAttachmentId = Branded<'DraftAttachmentId'>
 
 /**
+ * One durable attachment reference carried by a restored composer draft.
+ * Restored drafts cite the Session log instead of browser bytes, so they
+ * survive a reload and follow the Session to another device.
+ */
+export type RestoredDraftAttachment =
+  | { readonly kind: 'image'; readonly attachment: ImageAttachmentRef }
+  | { readonly kind: 'file'; readonly attachment: FileAttachmentRef }
+
+/**
  * The scoped-event application verbs: the hub's bail listeners call these,
  * and the boolean answer IS the event's bail value (true ⟺ the editor
  * applied the edit after phase and span guards).
@@ -176,6 +186,17 @@ export interface InputTarget {
 export interface SessionInput extends InputTarget {
   /** Replace the whole draft (persisted-draft seed and programmatic writes). */
   setDraft(text: string): void
+  /**
+   * Replace the whole draft with a reverted message's text and durable
+   * attachments. Reverting is an explicit replace: current draft text and
+   * browser-owned picks are discarded, and unavailable references surface as
+   * removable chips. Busy admission phases refuse the replacement; a send
+   * attempted while restored descriptors are still being created refuses with
+   * a localized notice instead of snapshotting an empty rail.
+   * @param text - the reverted query text.
+   * @param attachments - durable references in original message order.
+   */
+  restoreDraft(text: string, attachments: readonly RestoredDraftAttachment[]): void
   /** Append ordered browser-owned attachment ids; busy admission phases refuse. */
   addAttachments(ids: readonly DraftAttachmentId[]): boolean
   /** Remove one browser-owned attachment id; busy admission phases refuse. @returns whether the id was removed. */
@@ -231,6 +252,15 @@ export interface InputActions {
   insertText(text: string, span: TokenSpan): boolean
   /** Replace the whole draft (persisted-draft seed and programmatic writes). */
   setDraft(text: string): void
+  /**
+   * Replace the whole draft with a reverted message's text and durable
+   * attachments (revert-from-here and the Revert tray's restore action).
+   * Busy admission phases refuse; a send before restored descriptors exist
+   * refuses with a localized notice.
+   * @param text - the reverted query text.
+   * @param attachments - durable references in original message order.
+   */
+  restoreDraft(text: string, attachments: readonly RestoredDraftAttachment[]): void
   /** Append ordered browser-owned attachment ids; busy admission phases refuse. */
   addAttachments(ids: readonly DraftAttachmentId[]): boolean
   /** Remove one browser-owned attachment id; busy admission phases refuse. */

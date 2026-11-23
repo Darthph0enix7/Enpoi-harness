@@ -56,7 +56,7 @@ interface ImageAttachmentLimits {
 }
 ```
 
-本地后端每条消息最多准入 20 张图片，源图编码数据总量不超过 200 MiB。单张源图不得超过 20 MiB、64,000,000 像素和单边 8192 像素。这些源文件限制先于独立的规范化阶段执行；该阶段默认把长边限制为 2048 像素，把编码数据限制为 4 MiB。
+本地后端每条消息最多准入 20 次图片出现（上传图片与持久图片引用合并计数），图片编码数据总量不超过 200 MiB，并最多引用 64 个持久文件。单张源图不得超过 20 MiB、64,000,000 像素和单边 8192 像素。这些源文件限制先于独立的规范化阶段执行；该阶段默认把长边限制为 2048 像素，把编码数据限制为 4 MiB。
 
 引用记录固有尺寸和编码长度，使客户端无需先解码即可排布历史记录；每次权威读取仍会根据对象重新校验摘要、媒体签名、尺寸和元数据。
 
@@ -66,8 +66,10 @@ interface ImageAttachmentLimits {
 /**
  * Browser-submitted prompt content accepted by Host prompt endpoints; the
  * accepting Host promotes image parts to durable references through
- * `ctx.attachments.admitPromptContent()` before any message is created, so a wire caller can
- * never cite an attachment it did not upload.
+ * `ctx.attachments.admitPromptContent()` before any message is created, so an
+ * upload part always becomes a fresh log entry. A durable `image-ref` or
+ * `file-ref` citation is authorized per Session by the Host against that
+ * Session's log; it never uploads or re-reads the cited bytes.
  */
 type PromptContentPart =
   | { readonly type: 'text'; readonly text: string }
@@ -80,10 +82,18 @@ type PromptContentPart =
 ```
 
 ```ts type-equiv
-/** Host prompt content whose file receipts are resolved and whose image bytes await admission. */
+/**
+ * Host prompt content whose file receipts are resolved and whose image bytes
+ * await admission. The `*-ref` arms already cite durable attachments (a
+ * restored composer draft); the store passes them through without reading or
+ * rewriting their bytes, while charging every citation against the same
+ * per-message batch limits as uploaded content.
+ */
 type AttachmentAdmissionPart =
   | PromptContentPart
   | { readonly type: 'file'; readonly attachment: FileAttachmentRef }
+  | { readonly type: 'image-ref'; readonly attachment: ImageAttachmentRef }
+  | { readonly type: 'file-ref'; readonly attachment: FileAttachmentRef }
 ```
 
 ```ts type-equiv
@@ -200,11 +210,16 @@ abstract validateImage(input: SaveImageAttachment): Promise<void>
 async saveImages(inputs: readonly SaveImageAttachment[]): Promise<readonly ImageAttachmentRef[]>
 
 /**
- * Admit one Host prompt and replace each uploaded image with its durable reference.
- * Text and durable file references pass through unchanged. A prompt without image parts performs no storage operation.
+ * Admit one Host prompt and replace each uploaded image with its durable
+ * reference. Text and durable image/file citations pass through unchanged.
+ * Uploads and citations are charged together against the per-message image
+ * count, aggregate image bytes, media types, and file-reference count; a
+ * durable object cited more than once is refused. A prompt without image
+ * parts performs no storage operation.
  * @param content - prompt parts in message order after file receipt resolution.
  * @returns admitted prompt parts in the same order as `content`.
- * @throws AttachmentError when the image batch is refused.
+ * @throws AttachmentError when the image batch, a citation, or the
+ *   file-reference count is refused.
  */
 async admitPromptContent( content: readonly AttachmentAdmissionPart[], ): Promise<AdmittedPromptContentPart[]>
 

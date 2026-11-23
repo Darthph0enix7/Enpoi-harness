@@ -3,7 +3,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render } from '@testing-library/react'
 import type {
-  ComposerAttachment, ComposerAttachmentsOwnerProps, ComposerAttachmentsProps,
+  ComposerAttachmentsOwnerProps, ComposerAttachmentsProps,
+  ComposerFileAttachment, ComposerImageAttachment, UnavailableComposerAttachment,
 } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { ComposerAttachments } from '../src/client/ComposerAttachments.tsx'
 
@@ -57,19 +58,19 @@ const t = ((key: string, params?: Readonly<Record<string, unknown>>): string => 
   return messages[key] ?? key
 }) as ComposerAttachmentsProps['t']
 
-function attachment(id: string, name = `${id}.png`): ComposerAttachment {
+function attachment(id: string, name = `${id}.png`): ComposerImageAttachment {
   return {
     kind: 'image',
-    id: id as ComposerAttachment['id'],
+    id: id as ComposerImageAttachment['id'],
     file: new File([Uint8Array.of(1)], name, { type: 'image/png' }),
     previewUrl: `blob:${id}`,
   }
 }
 
-function fileDraft(id: string, name = `${id}.pdf`): ComposerAttachment {
+function fileDraft(id: string, name = `${id}.pdf`): ComposerFileAttachment {
   return {
     kind: 'file',
-    id: id as ComposerAttachment['id'],
+    id: id as ComposerFileAttachment['id'],
     file: new File([Uint8Array.of(1, 2, 3)], name, { type: 'application/pdf' }),
   }
 }
@@ -226,6 +227,58 @@ describe('ComposerAttachments', () => {
     expect(view.getByAltText('待发送图片')).toBeTruthy()
     fireEvent.click(view.getByTitle('查看原图'))
     expect(view.getByAltText('原图')).toBeTruthy()
+  })
+})
+
+describe('ComposerAttachments restored drafts', () => {
+  it('renders durable image and file chips and an unavailable restored chip', () => {
+    const onRemoveAttachment = vi.fn()
+    const restoredImage: ComposerImageAttachment = {
+      kind: 'image',
+      id: 'restored-image' as never,
+      attachment: {
+        attachmentId: 'image-1' as never, mediaType: 'image/png', bytes: 3, width: 1, height: 1, name: 'restored.png',
+      },
+      previewUrl: 'blob:restored-image',
+    }
+    const restoredFile: ComposerFileAttachment = {
+      kind: 'file',
+      id: 'restored-file' as never,
+      attachment: { attachmentId: 'file-1' as never, name: 'notes.txt', bytes: 4 },
+    }
+    const unnamedRestoredFile: ComposerFileAttachment = {
+      kind: 'file',
+      id: 'restored-unnamed' as never,
+      attachment: { attachmentId: 'file-2' as never, name: '', bytes: 0 },
+    }
+    const unavailable: UnavailableComposerAttachment = {
+      kind: 'unavailable',
+      id: 'missing' as never,
+      attachment: { attachmentId: 'gone' as never, name: 'gone.pdf', bytes: 1 },
+      name: 'gone.pdf',
+    }
+    const unavailableUnnamed: UnavailableComposerAttachment = {
+      kind: 'unavailable',
+      id: 'missing-unnamed' as never,
+      attachment: { attachmentId: 'gone-2' as never, name: '', bytes: 1 },
+    }
+    const view = render(<ComposerAttachments {...props({
+      attachments: [restoredImage, restoredFile, unnamedRestoredFile, unavailable, unavailableUnnamed],
+      onRemoveAttachment,
+    })} />)
+
+    // The restored image keeps the durable preview URL and display name.
+    expect(view.getByAltText('restored.png')).toBeTruthy()
+    expect(view.getByText('notes.txt')).toBeTruthy()
+    expect(view.getByText('文件')).toBeTruthy()
+    // Unavailable references read as a named chip, or the fallback label.
+    expect(view.getByText('gone.pdf')).toBeTruthy()
+    expect(view.getAllByText('attachment.unavailable').length).toBeGreaterThan(0)
+
+    fireEvent.click(view.getByRole('button', { name: '移除文件 notes.txt' }))
+    expect(onRemoveAttachment).toHaveBeenCalledWith(restoredFile.id)
+    fireEvent.click(view.getByRole('button', { name: '移除文件 gone.pdf' }))
+    expect(onRemoveAttachment).toHaveBeenCalledWith(unavailable.id)
   })
 })
 

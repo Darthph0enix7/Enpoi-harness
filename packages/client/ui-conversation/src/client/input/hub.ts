@@ -17,7 +17,7 @@ import type { InboxState } from '@deepseek-ai/dsh-agent/types'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type {
   DraftAttachmentId, DraftAttachmentSerializationResult, InputTriggerController,
-  SessionInputResolver, SessionInput, SubmitOutcome,
+  RestoredDraftAttachment, SessionInputResolver, SessionInput, SubmitOutcome,
 } from '../contract/input.ts'
 import type { ComposerKeyboard } from '../contract/draft-editor.ts'
 import type { InputSubmitMode } from '../contract/composer-submission.ts'
@@ -46,6 +46,17 @@ interface ConversationAttachmentFace {
   ): Promise<SubmitOutcome>
   serializeDraftAttachments(attachmentIds: readonly DraftAttachmentId[]): Promise<DraftAttachmentSerializationResult>
   releaseDraftAttachment(id: DraftAttachmentId): void
+  createRestoredDrafts(
+    sessionId: SessionId,
+    references: readonly RestoredDraftAttachment[],
+  ): Promise<readonly { readonly id: DraftAttachmentId }[]>
+  durableDraftAttachments(
+    ids: readonly DraftAttachmentId[],
+  ): readonly {
+    readonly id: DraftAttachmentId
+    readonly reference: RestoredDraftAttachment
+    readonly sessionId: SessionId | undefined
+  }[]
 }
 
 /** Session-addressed input facade registry (SessionInputResolver face + composer-layer extras). */
@@ -94,6 +105,14 @@ export class InputHub implements SessionInputResolver {
       popup: () => this.popup(actx),
       inbox: session.projections.faceOf('inbox') as ObservableSnapshot<InboxState | undefined>,
       defaultSink: (text, attachmentIds, mode, signal) => this.sink(session, text, attachmentIds, mode, signal),
+      restoreAttachments: async references => (await this.conversation()
+        .createRestoredDrafts(session.sessionId, references))
+        .map(descriptor => descriptor.id),
+      releaseAttachments: (ids) => {
+        const conversation = this.rootCtx.get('conversation') as ConversationAttachmentFace | undefined
+        for (const attachmentId of ids) conversation?.releaseDraftAttachment(attachmentId)
+      },
+      restorePendingNotice: () => this.t('attachment.restorePending'),
       steerQueue: () => { void this.steerQueue(session, shell) },
       commandAttachments: {
         serialize: async (ids) => {
