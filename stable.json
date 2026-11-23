@@ -1,8 +1,19 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-11-18T09:41:02.891Z",
+  "generatedAt": "2026-11-23T08:44:13.805Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.132",
+      "commit": "00ff2d6",
+      "releasedAt": "2026-11-23T08:21:44.000Z",
+      "notes": [
+        "chore(harness): reconcile Stop docs and refresh release catalogs and receipts",
+        "fix(chat): restore durable attachments with reverted and synchronized drafts",
+        "fix(llm): disable request archives by default and bound diagnostic storage",
+        "fix(models): keep picker groups collapsible and distinguish duplicate routes"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.131",
       "commit": "72d7f94",
@@ -383,19 +394,6 @@
       "notes": [
         "fix(update): merge template dsh.profile.bundles into the live profile",
         "feat(update-ui): manual Check for updates in the dialog and the settings row"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.85",
-      "commit": "45d263b",
-      "releasedAt": "2026-10-13T18:10:52.000Z",
-      "notes": [
-        "fix(update): the cancel endpoint was never declared on the remote class",
-        "feat(update): engine-marker observer, UI cancel, and bounded post-restart reload",
-        "feat(update): live-run marker, attach, cancel; TTY-less pnpm hardening",
-        "feat(update): version-free Update pill + General-settings update row (skips stay updatable)",
-        "fix(update): normalize legacy run.json records across the rung/launcher split",
-        "feat(update): engine capability probe + one-shot fallback for pre-two-phase installs"
       ]
     }
   ]
