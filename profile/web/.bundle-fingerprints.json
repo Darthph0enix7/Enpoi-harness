@@ -138,8 +138,8 @@
       "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
     },
     "enpoi-ui-state": {
-      "sourceInputs": "4ec765c0285aca563ffd8eb1d31c4383463d4d0f7e39d0c5657c2eeee1552926",
-      "outputSha": "a309eb300f9c59faeef1551635e6a791d8e92af55481ee615dbb5d14b2d8f3bb",
+      "sourceInputs": "2cd53ab1c52bd69605db38419d1303bdaee81b50008095bec10274047fecbd96",
+      "outputSha": "9da3e518dbf583eb90817302353cb8d9993c72c71deb85adec7bf4111d8a3c06",
       "buildFlags": "37b043a99797e32796baa18a567873665404716a601e00f71e4711e00c8abeac"
     },
     "enpoi-update-check": {

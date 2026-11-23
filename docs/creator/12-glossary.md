@@ -60,7 +60,7 @@ One line per term, harness-specific meaning first. `$DSH_HOME` is the user's har
 - **metered** — whether the host actually read the durable `tokenUsage` projection for a budgeted session; false means the recorded ceiling is reported but not enforced.
 - **answer-only / debug exposure** — the pairing's event exposure, chosen host-side: `answer-only` carries dialogue, turn boundaries, approvals, and settlement notices; `debug` also carries tool, step, subagent, goal, and compaction records.
 - **waitForTreeWork** — the subagent service call that resolves when no descendant of a root is running and no admission is pending; the goal driver awaits it before reserving a round.
-- **stop-all vs detach** — Stop (✕) is `detach`: the turn stops, live continuable children keep running and later wake the parent; "Stop all agents" is `stop-all`: it interrupts the descendant tree, revokes queued goal rounds and human prompts, keeps settlement/job/relay observations, and parks late settlement notices until the next human turn.
+- **stop-all vs detach** — Stop (✕) is `detach`: the turn stops, live continuable children keep running and later wake the parent; "Stop all agents" is `stop-all`: it interrupts the descendant tree, keeps the inbox (queued prompts stay parked; a queued goal round is withdrawn when the agent next idles), and parks late settlement notices until the next human turn.
 
 ## Providers and models
 

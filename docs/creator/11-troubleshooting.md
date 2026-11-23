@@ -202,7 +202,7 @@ Also part of a rebuild: `pnpm run -s verify-cordis-catalog` (generated docs) and
 
 ### Stop did not stop the continuation / the session woke after Stop
 - Symptom: after Stop, a queued goal round starts, or a child settlement wakes the session.
-- Cause: `detach` abandons only the active turn and leaves live continuable descendants running; `stop-all` also parks them. A queued goal round is removed by the Stop's inbox clear, and the goal driver removes one still queued at idle. A settlement already claimed by a turn, or one produced by a schedule/job, is outside inbox revocation (`packages/api/session-controller/src/types.ts:830-833`; `packages/core/agent-loop/src/inbox.ts:81-86,130-140`).
+- Cause: `detach` abandons only the active turn and leaves live continuable descendants running; `stop-all` also parks them. The composer Stop keeps the inbox, so a queued goal round is removed by the goal driver at the next idle (which also pauses the armed goal); revert and delete clear the inbox directly. Queued human and peer prompts stay parked after a Stop. A settlement already claimed by a turn, or one produced by a schedule/job, is outside inbox revocation (`packages/api/session-controller/src/types.ts:830-833`; `packages/core/agent-loop/src/inbox.ts:81-86,130-140`).
 - Fix: use Stop-all (the UI Stop) rather than detach; the turn's `turn/end.reason` should be `aborted` with cancel cause `user` and `intent: 'stop-all'`. Settlements that land in the stop window park in the next-turn inbox and are claimed by the next human turn; a schedule/job wake must be cancelled at its owner.
 
 ### A child report did not arrive after a restart

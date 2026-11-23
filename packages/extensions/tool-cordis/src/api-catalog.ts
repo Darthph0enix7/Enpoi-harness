@@ -421,6 +421,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [],
       },
       {
+        signature: 'readonly maxFileReferencesPerMessage: number = DEFAULT_MAX_FILE_REFERENCES_PER_MESSAGE',
+        description: 'Maximum durable file references (`file` or `file-ref` parts) one admitted prompt may cite. Deployment backends override this from validated configuration; the service bound applies when a provider names none.',
+        parameters: [],
+      },
+      {
         signature: 'abstract validateImage(input: SaveImageAttachment): Promise<void>',
         description: 'Validate one image without persisting it. Batch callers validate every member before saving any member.',
         parameters: [{ name: 'input', description: 'encoded bytes, declared media type, and optional display name.' }],
@@ -434,10 +439,10 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: 'async admitPromptContent( content: readonly AttachmentAdmissionPart[], ): Promise<AdmittedPromptContentPart[]>',
-        description: 'Admit one Host prompt and replace each uploaded image with its durable reference. Text and durable file references pass through unchanged. A prompt without image parts performs no storage operation.',
+        description: 'Admit one Host prompt and replace each uploaded image with its durable reference. Text and durable image/file citations pass through unchanged. Uploads and citations are charged together against the per-message image count, aggregate image bytes, media types, and file-reference count; a durable object cited more than once is refused. A prompt without image parts performs no storage operation.',
         parameters: [{ name: 'content', description: 'prompt parts in message order after file receipt resolution.' }],
         returns: 'admitted prompt parts in the same order as `content`.',
-        throws: ['AttachmentError when the image batch is refused.'],
+        throws: ['AttachmentError when the image batch, a citation, or the file-reference count is refused.'],
       },
       {
         signature: 'admitEncodedFile(input: EncodedFileAttachment): Promise<FileAttachmentRef>',
@@ -2172,7 +2177,7 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         signature: '@Remote(\'revert\') revert(request: SessionRevertRequest): Promise<SessionRevertValue>',
         description: 'Revert the conversation from a user message (revert-from-here).',
         parameters: [{ name: 'request', description: 'session and the user-message seq anchoring the revert.' }],
-        returns: 'the reverted query text and count for the input card; an unusable anchor is rejected with `revert-invalid`.',
+        returns: 'the reverted query content and count for the input card; content preserves block order and cites durable attachments, never bytes. An unusable anchor is rejected with `revert-invalid`.',
       },
       {
         signature: '@Remote(\'revertRestore\') revertRestore(request: SessionRevertRestoreRequest): Promise<SessionRevertRestoreValue>',
@@ -4964,7 +4969,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AttachmentAdmissionPart',
-    declaration: 'export type AttachmentAdmissionPart = PromptContentPart | {\n    readonly type: \'file\';\n    readonly attachment: FileAttachmentRef;\n};',
+    declaration: 'export type AttachmentAdmissionPart = PromptContentPart | {\n    readonly type: \'file\';\n    readonly attachment: FileAttachmentRef;\n} | {\n    readonly type: \'image-ref\';\n    readonly attachment: ImageAttachmentRef;\n} | {\n    readonly type: \'file-ref\';\n    readonly attachment: FileAttachmentRef;\n};',
   },
   {
     name: 'AttachmentError',
@@ -7683,6 +7688,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SessionResultRange {\n    from?: number;\n    to?: number;\n}',
   },
   {
+    name: 'SessionRevertContentPart',
+    declaration: 'export type SessionRevertContentPart = {\n    readonly type: \'text\';\n    readonly text: string;\n} | {\n    readonly type: \'image\';\n    readonly attachment: ImageAttachmentRef;\n} | {\n    readonly type: \'file\';\n    readonly attachment: FileAttachmentRef;\n};',
+  },
+  {
     name: 'SessionRevertFold',
     declaration: 'export interface SessionRevertFold {\n    readonly fromSeq: number | null;\n    readonly shadowRanges: readonly SessionRevertShadowRange[];\n    readonly conflicts: readonly RevertFileConflict[];\n    readonly outcomes: Record<string, RevertFileOutcome>;\n    readonly iterations: readonly SessionIterationEdge[];\n    readonly asOfSeq: number;\n}',
   },
@@ -7720,7 +7729,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionRevertValue',
-    declaration: 'export interface SessionRevertValue {\n    readonly accepted: true;\n    readonly revertedText: string;\n    readonly revertedCount: number;\n    readonly noop?: boolean;\n    readonly notice?: string;\n}',
+    declaration: 'export interface SessionRevertValue {\n    readonly accepted: true;\n    readonly revertedText: string;\n    readonly revertedContent?: readonly SessionRevertContentPart[];\n    readonly revertedCount: number;\n    readonly noop?: boolean;\n    readonly notice?: string;\n}',
   },
   {
     name: 'SessionSearchCursor',

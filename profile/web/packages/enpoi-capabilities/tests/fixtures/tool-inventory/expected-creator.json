@@ -4,7 +4,7 @@
   "captureSource": "apps/web/tests/keyless-tool-inventory.e2e.ts",
   "captureReceipt": {
     "version": "0.1.7-enpoi.2",
-    "head": "4aacaed75c2518bc6a8723e78db2747ff53a07dd",
+    "head": "72d7f94ad2f7186d1e0f4dfc7600391eaeb7112c",
     "profileFingerprints": {
       "dsh-enpoi-agent-switch": {
         "dir": "enpoi-agent-switch",
@@ -143,8 +143,8 @@
       },
       "dsh-enpoi-ui-state": {
         "dir": "enpoi-ui-state",
-        "sourceInputs": "4ec765c0285aca563ffd8eb1d31c4383463d4d0f7e39d0c5657c2eeee1552926",
-        "outputSha": "a309eb300f9c59faeef1551635e6a791d8e92af55481ee615dbb5d14b2d8f3bb"
+        "sourceInputs": "2cd53ab1c52bd69605db38419d1303bdaee81b50008095bec10274047fecbd96",
+        "outputSha": "9da3e518dbf583eb90817302353cb8d9993c72c71deb85adec7bf4111d8a3c06"
       },
       "dsh-enpoi-update-check": {
         "dir": "enpoi-update-check",
@@ -233,7 +233,7 @@
         "name": "@deepseek-ai/dsh-llm",
         "version": "0.1.7-enpoi.2",
         "packageJson": "a448adc8fcd0192f17fb84320e01d512bb9badc0ad39a8fef80ff5e8b7b8a396",
-        "entry": "3dd1784edbab5445def3807225d9230f56adc34eb2d653a40261e3eed8739e9e"
+        "entry": "d58dfc3240f6e34ffae9b466f2b54bb459eab0097b2a246887de2412aa20a1f0"
       },
       "@deepseek-ai/dsh-base": {
         "name": "@deepseek-ai/dsh-base",
@@ -248,16 +248,16 @@
         "entry": "83b1e4e90a82ef3c0b15eb9ff49c630cf061f33dbf6f98854fa884ee7665c8a5"
       }
     },
-    "combinedDigest": "65775058127d76f2c03b9606c1d77a723b0e749aa403ca108ff24acdb9d10a8e"
+    "combinedDigest": "607c5b026fa11cb706fea20a4e63aae5cc666e894ae278fbc91c04c994248faa"
   },
   "captureClientBuild": {
     "artifacts": {
       "fileCount": 378,
-      "sha256": "d1658d7b37bd49e5dd8dd4f7df9582fc6d7bab1398bc5ec6e63acaa2e1ee390d"
+      "sha256": "9321e329b12ce4960f4db9e4fe81167f9d1ab6c21cbdaa82a282e57abbfd8787"
     },
     "environment": {
       "DSH_CLIENT_BUILD_PROFILE": "official",
-      "DSH_CLIENT_COMMIT_HASH": "4aacaed",
+      "DSH_CLIENT_COMMIT_HASH": "72d7f94",
       "DSH_CLIENT_TITLE": "DeepSeek Harness",
       "DSH_CLIENT_VERSION": "0.1.7-enpoi.2"
     }

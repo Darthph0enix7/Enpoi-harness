@@ -142,7 +142,7 @@ peer 提示词在正常的用户回合边界追加，并保留可复用前缀；
 - **`peer.create` 没有幂等键。** 响应丢失后的重试会创建另一个会话并重绑别名，退役先前的绑定；被退役的会话仍可通过显式 `sessionId` 寻址。重试前先通过 `peer.list` 与绑定状态核对，并把未知的 create 结果视为不确定。
 - **`peer.selectModel` 的重放先查回执、后查空闲。** 同 id、同载荷的重试即使会话随后已开始运行，也会返回原始值并带 `replayed: true`；权威是回执，而不是当前闩锁。
 - **`peer.prompt` 只按 `requestId` 去重，不绑定载荷。** Session Controller 的实时收件箱与日志 `source.rpcId` 索引对同一 id 直接回答 `accepted: true`，不比较内容，因此复用 id 搭配变更载荷不会冲突；调用方必须每次尝试都铸造新的请求 id，并自行绑定内容哈希。
-- **人类 Stop 会清除排队的 peer 提示。** peer 提示以 source kind `user` 进入，因此 Stop 的收件箱清理会在它成为持久 `user/message` 之前丢弃排队的 peer 提示；清理记录带有 `outcome: canceled`，但不携带被移除消息的身份，所以唯一证据是缺失的持久 user/message。已经看到 `accepted: true` 的调用方必须检测其 `requestId` 从未进入日志，并重新驱动。
+- **取消会保留排队的 peer 提示。** `peer.cancel` 与人类 Stop 都以 `keepInbox: true` 中止正在运行的回合，因此在回合运行期间被接受的 peer 提示会保持排队，并在下一次发送或唤醒时运行。只有移除队列项、撤回或删除会话才会丢弃它，且这些记录带有 `outcome: canceled`，但不产生持久的 `user/message`。
 - **`allowModels` 为空时 `peer.models.models` 为空。** `models` 是固定路由投影；`allowModels` 缺失或为空时，即使 `chains` 有就绪成员，它也是空的，因此请读取 `chains[].members` 获取链可选集合。
 - **`allowModels` 也会收窄所选链的每个成员。** 选择链不是绕过：每个解析出的成员都必须像固定路由一样满足 `allowModels`、`requireZeroPrice`、`requireNoTraining`、`requireTools` 与 `allowReasoningEfforts`。
 - **`peer.follow` 的快照和 `state` 帧也会读取执行状态投影**（`host.ts` 的 `follow`），因此在挂载了该投影的主机上，这些帧会像 `peer.state` 一样报告 `source: 'host-latch'`；冷 Session 保持推导路径，因为 `session.executionState` 只寻址已附着的 Session。live-host e2e 仍只断言 `peer.state`（doc 72 §2.2）。
