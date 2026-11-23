@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, {
   createUserMessage,
@@ -12,6 +12,14 @@ import LlmRuntime, {
   type RouteHealthPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { createIsolatedTestEnvironment } from './test-env.ts'
+
+// Own every path a dispatch might touch, including ambient DSH_WIRE_* values.
+const testEnv = await createIsolatedTestEnvironment('dsh-llm-route-health-')
+afterAll(async () => {
+  await new Promise(resolve => setTimeout(resolve, 300))
+  await testEnv.restore()
+})
 
 /** A completed `stop` carrying one empty text block: answers nothing. */
 const EMPTY_SCRIPT: StreamChunk[] = [

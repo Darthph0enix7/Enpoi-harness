@@ -58,7 +58,7 @@ import { STREAM_CUT_CODE } from './assembler.ts'
 import { normalizeLlmFailure } from './adapter-failure.ts'
 import { normalizeApiKey } from './api-key.ts'
 import { RouteHealthLedger, resolveRouteHealthPolicy, type RouteHealthEntry } from './route-health.ts'
-import { writeSessionWireCapture } from './wire-sessions.ts'
+import { captureWireRequest } from './wire-sessions.ts'
 import {
   contentHasFile,
   contentHasImage,
@@ -1854,7 +1854,7 @@ export class LlmRuntime extends TypertRemoteService {
       // Enpoi Harness wire capture — the ONE chokepoint every dispatch passes
       // (both `ctx.llm.stream()` and the agent-loop's prepared-call path), after
       // every projection so the capture shows what the adapter actually receives.
-      void captureWireRequest(projectedOptions)
+      captureWireRequest(projectedOptions)
       const stream = dispatch(this.forAdapter(projectedOptions, adapter))
       iterator = stream[Symbol.asyncIterator]()
     } catch (error: unknown) {
@@ -2475,72 +2475,3 @@ interface PreparedDispatch {
 }
 
 export default LlmRuntime
-
-/**
- * Enpoi Harness: capture the exact wire request to a log file (seam-level —
- * every adapter dispatch flows through `LlmRuntime.stream()`).
- *
- * The fully-assembled request (system prompt, ordered messages, tool schemas,
- * config) is written to `~/.dsh/logs/wire-last.json` (override via
- * `DSH_WIRE_LOG`) so an operator can inspect byte-for-byte what the agent
- * actually sent — and prove system-prompt stability across model switches
- * (only `config` should change; `system`/`tools` must stay identical).
- * Main calls additionally refresh `~/.dsh/logs/wire-sessions/<sessionId>.json`
- * so a Host API can expose one Session's most recent request read-only; see
- * {@link writeSessionWireCapture}.
- * Fire-and-forget: a write failure must never affect the request.
- */
-// Serialized, not merely tracked: a chain dispatches several requests in
-// sequence and their captures must be written in that same sequence, so
-// `wire-last.json` holds the link that actually answered rather than whichever
-// write happened to finish last.
-let wireCapturePending: Promise<void> = Promise.resolve()
-
-/** Take a queue slot synchronously, then write one capture in that order. */
-async function captureWireRequest(options: GenerateOptions): Promise<void> {
-  // Read the destination at dispatch time and claim the slot before any await:
-  // resolving imports first would let a later dispatch enqueue ahead of this
-  // one, and would read an environment a later caller may already have changed.
-  const wireLogPath = process.env.DSH_WIRE_LOG
-  wireCapturePending = wireCapturePending.then(
-    () => writeWireCapture(options, wireLogPath),
-    () => writeWireCapture(options, wireLogPath),
-  )
-  await wireCapturePending
-}
-
-/** Write one dispatched request's capture; best-effort, never affects the request. */
-async function writeWireCapture(options: GenerateOptions, wireLogPath: string | undefined): Promise<void> {
-  try {
-    const { homedir } = await import('node:os')
-    const fs = await import('node:fs/promises')
-    const path = await import('node:path')
-    const root = wireLogPath === undefined ? homedir() + '/.dsh/logs' : path.dirname(wireLogPath)
-    const payload = {
-      time: Date.now(),
-      provider: options.provider,
-      model: options.model,
-      ...options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort },
-      ...options.maxTokens === undefined ? {} : { maxTokens: options.maxTokens },
-      ...options.sessionId === undefined ? {} : { sessionId: options.sessionId },
-      ...options.purpose === undefined ? {} : { purpose: options.purpose },
-      system: options.system ?? null,
-      messages: options.messages,
-      tools: options.tools ?? [],
-    }
-    await fs.mkdir(root, { recursive: true })
-    // Full audit trail: every call, timestamped. wire-last.json additionally
-    // holds only the MAIN agent call (no `purpose` — auxiliary calls like
-    // session-title/context-keeper are excluded), so it is always inspectable.
-    const serialized = JSON.stringify(payload)
-    await fs.writeFile(path.join(root, `wire-${Date.now()}.json`), serialized).then(undefined, () => undefined)
-    if (options.purpose === undefined) {
-      await fs.writeFile(wireLogPath ?? path.join(root, 'wire-last.json'), serialized).then(undefined, () => undefined)
-      // Per-Session view beside the global files: one bounded, atomically
-      // replaced capture holding the most recent MAIN request of that Session.
-      await writeSessionWireCapture(root, options)
-    }
-  } catch {
-    // Best-effort diagnostics never break a request.
-  }
-}

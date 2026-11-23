@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import LlmRuntime, {
@@ -32,6 +32,15 @@ import type {
 } from '@deepseek-ai/dsh-llm'
 
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
+import { createIsolatedTestEnvironment } from './test-env.ts'
+
+// Own every path a dispatch might touch, including ambient DSH_WIRE_* values.
+const testEnv = await createIsolatedTestEnvironment('dsh-llm-service-')
+afterAll(async () => {
+  await new Promise(resolve => setTimeout(resolve, 300))
+  await testEnv.restore()
+})
+
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     'test': { kind: 'test' } & ContextFormed

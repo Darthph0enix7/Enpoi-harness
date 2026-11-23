@@ -70,6 +70,16 @@ for await (const chunk of ctx.llm.stream({
 - **校验调用配置**——显式或配置的推理强度会在任何提供方 I/O 之前对照精确模型校验；请求省略输出上限时，会填入适配器配置的输出上限。
 - **不展开即读取内嵌 Assistant 流**——`assistantStreamFirstTokenTime`（首 token）、`assistantStreamHasVisibleContent`（任一可见内容）与 `assistantStreamHasVisibleText`（任一可见文本）通过可提前退出的扫描直接从紧凑记录得出结果；`lastAssistantStreamChunk` 反向扫描到某一类型的最后一个原始 chunk，`assistantStreamChunks` 与 `joinAssistantStreamText` 扫描整个流，`assembleAssistantStream` 向 `BlockAssembler` 每个 run 喂一段拼接 delta，blocks／usage／replayState 与逐成员展开相同。`runFirstTokenTime` 与 `runFirstVisibleTime` 对单个打包 run 做提前退出扫描，`isTokenDelta`、`isVisibleChunk` 与 `chunkHasVisibleText` 定义单个 chunk 的 token 与可见性规则。`expandAssistantStream` 仍是持久边界读取记录的校验路径；它不被记忆化，因为保留的展开在事件生命周期内约花费紧凑流的十倍内存。
 
+### 线上请求诊断
+
+本分支在 harness home 旁写入诊断文件；它们从不作为模型输入，也从不改变请求。默认情况下，`wire-last.json` 保存最近一次主请求（非辅助调用），`wire-sessions/<sessionId>.json` 保存每个 Session 最近一次主请求；两者都是有界、原子替换的摘要或正文文件。根目录为 `$DSH_HOME/logs`；未设置 `DSH_HOME` 时为 `~/.dsh/logs`。`DSH_WIRE_LOG` 保持原有路径语义：该精确文件接收最近请求，其所在目录承载 Session 存储。
+
+按调用保存历史归档默认关闭，`DSH_WIRE_LOG` 不会启用它。`DSH_WIRE_HISTORY=1`（或 `true`）显式启用后，每次捕获的调用（包括辅助调用）都会写出 `wire-<timestamp>-<pid>-<uuid>.json`。保留策略在每次启用历史后的捕获时执行，而非由定时器执行；空闲目录永不清理。限制项为 `DSH_WIRE_HISTORY_MAX_FILES`（默认 100）、`DSH_WIRE_HISTORY_MAX_BYTES`（总计 64 MiB，按包含 JSON 包装的精确 UTF-8 字节计）与 `DSH_WIRE_HISTORY_MAX_AGE_MS`（86,400,000）。单个捕获超过总预算时会被拒绝，而不是清空归档；过期文件等待下一次捕获。清理只删除名称匹配当前或已退役 `wire-<digits>.json` 形式的自有普通文件；无关 JSON、Session 存储与符号链接均不触碰。
+
+`wire-last.json` 受 `DSH_WIRE_LAST_MAX_BYTES`（默认 16 MiB）约束；超限请求只保存身份与带 `truncated: true` 的 `summary`（可通过 `ds wire --json` 查看），若连摘要也超过上限则跳过写入并保留原文件。Session 检查器受 `DSH_WIRE_SESSION_MAX_BYTES`（默认 16 MiB，超限仅存摘要）约束，并保留 `DSH_WIRE_SESSION_RETAIN` 个文件（默认 100）。Session 摘要必须满足同一字节上限；无法满足时跳过该次写入，原 Session 捕获保留其较早的 `capturedAt`——这是过期快照，绝不会被改标为当前请求。读取方会拒绝符号链接或超过当前上限的文件，而不是无界读取。
+
+写入为 fire-and-forget，并按进程串行。每个目标与上限设置都在接受派发时读取一次；排队写入使用该快照。最近请求与 Session 视图会合并为最新请求，因此模型链中实际作答的链路会替换更早失败的链路；历史写入保持派发顺序，但有界积压达到上限后会丢弃后续捕获并只向 stderr 警告一次，而不是保留每个请求。待处理请求上下文按条目数量约束（16 个历史、16 个 Session、1 个最近请求），并非按字节预算约束；在这些小上限内，内存占用随请求大小增长。并发进程共享该目录且不加锁：每个已落盘的历史捕获会先为刚写入的文件预留额度，再清理更旧文件，因此该次写入后数量、总字节与年龄上限成立；但进程之间可能短暂超额，崩溃或文件系统失败也可能留下多余文件，直到下一次成功的显式历史捕获执行清理。不声称瞬时跨进程硬上限。POSIX 上新建目录模式为 0700、新文件为 0600；Windows 忽略这些模式并使用继承的 ACL。无效取值会向 stderr 写一次警告并继续使用有限默认值；无效的 `DSH_WIRE_HISTORY` 取值保持历史关闭。
+
 ### 失败与恢复
 
 每个流都恰好以一个终止 `finish` 分片结束：失败为 `{ kind: 'error', failure }`，取消为 `{ kind: 'aborted', failure }`。失败携带稳定 code，如 `NO_ADAPTER`、`MISSING_CREDENTIAL`、`AUTH`、`RATE_LIMIT` 与 `CONTEXT_WINDOW_EXCEEDED`；消费方依据 code 路由，绝不解析消息文本。`QUOTA` 表示提供方中立的额度耗尽，`ACCOUNT_QUOTA` 专用于当前产品能够充值的第一方账号余额不足。每个失败还会点名其运行所在的 `provider` 与 `model` 路由，调用方无需重新推导路由即可归因并处理失败。点名未注册提供方的请求会以 `NO_ADAPTER` 失败，格式错误的凭据会以 `INVALID_CREDENTIAL` 失败，而不是表现为不透明的 fetch 错误。本服务从不自行重跑请求：重试是 `dsh-llm-retry` 在 agent 失败步骤扩展点上的职责。

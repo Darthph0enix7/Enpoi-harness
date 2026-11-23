@@ -4,10 +4,10 @@
  */
 
 import { createHash } from 'node:crypto'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import {
@@ -21,9 +21,30 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import { createSessionTestRemote, type TestSessionRemote } from './test-remote.ts'
 
 const SESSION_ID = 'session-snapshot-1' as SessionId
+const WIRE_PREFIX = 'DSH_WIRE_'
+const OWNED_KEYS = [
+  'HOME',
+  'USERPROFILE',
+  'DSH_HOME',
+  'DSH_MEMORY_DB',
+  'XDG_CONFIG_HOME',
+  'XDG_CACHE_HOME',
+  'XDG_DATA_HOME',
+  'XDG_STATE_HOME',
+  'TMPDIR',
+  'TEMP',
+  'TMP',
+] as const
 
 const temps: string[] = []
-let previousCap: string | undefined
+let savedEnv = new Map<string, string | undefined>()
+let testHome = ''
+
+function clearWireEnvironment(): void {
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith(WIRE_PREFIX)) Reflect.deleteProperty(process.env, key)
+  }
+}
 
 async function harness(): Promise<{ root: string; remote: TestSessionRemote; ctx: Context }> {
   const root = await mkdtemp(join(tmpdir(), 'dsh-request-snapshot-'))
@@ -39,7 +60,7 @@ async function harness(): Promise<{ root: string; remote: TestSessionRemote; ctx
   return { root, remote, ctx }
 }
 
-function options(sessionId: SessionId): GenerateOptions {
+function options(sessionId: SessionId, text = 'hello'): GenerateOptions {
   return {
     provider: 'mock',
     model: 'mock',
@@ -47,7 +68,7 @@ function options(sessionId: SessionId): GenerateOptions {
     messages: [
       createSystemMessage('SYSTEM RULES'),
       createUserMessage({
-        content: [{ type: 'text', text: 'hello' }],
+        content: [{ type: 'text', text }],
         source: { kind: 'user' },
       }),
     ],
@@ -55,11 +76,40 @@ function options(sessionId: SessionId): GenerateOptions {
   }
 }
 
+beforeEach(async () => {
+  testHome = await mkdtemp(join(tmpdir(), 'dsh-request-snapshot-home-'))
+  savedEnv = new Map()
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith(WIRE_PREFIX)) savedEnv.set(key, process.env[key])
+  }
+  for (const key of OWNED_KEYS) savedEnv.set(key, process.env[key])
+  clearWireEnvironment()
+  process.env.HOME = testHome
+  process.env.USERPROFILE = testHome
+  process.env.DSH_HOME = testHome
+  process.env.DSH_MEMORY_DB = join(testHome, 'memory.sqlite')
+  process.env.XDG_CONFIG_HOME = join(testHome, 'xdg', 'config')
+  process.env.XDG_CACHE_HOME = join(testHome, 'xdg', 'cache')
+  process.env.XDG_DATA_HOME = join(testHome, 'xdg', 'data')
+  process.env.XDG_STATE_HOME = join(testHome, 'xdg', 'state')
+  await mkdir(join(testHome, 'tmp'), { recursive: true })
+  process.env.TMPDIR = join(testHome, 'tmp')
+  process.env.TEMP = join(testHome, 'tmp')
+  process.env.TMP = join(testHome, 'tmp')
+})
+
 afterEach(async () => {
-  if (previousCap === undefined) delete process.env.DSH_WIRE_SESSION_MAX_BYTES
-  else process.env.DSH_WIRE_SESSION_MAX_BYTES = previousCap
-  previousCap = undefined
+  // Every capture write in this spec is awaited; let any I/O settle before
+  // ambient paths return, then clean the owned trees.
+  await new Promise(resolve => setTimeout(resolve, 100))
   await Promise.all(temps.splice(0).map(root => rm(root, { recursive: true, force: true })))
+  await rm(testHome, { recursive: true, force: true })
+  clearWireEnvironment()
+  for (const [key, value] of savedEnv) {
+    if (value === undefined) Reflect.deleteProperty(process.env, key)
+    else process.env[key] = value
+  }
+  savedEnv = new Map()
 })
 
 describe('session.requestSnapshot', () => {
@@ -152,10 +202,8 @@ describe('session.requestSnapshot', () => {
   it('reports a size-capped capture without bodies', async () => {
     const { root, remote, ctx } = await harness()
     try {
-      previousCap = process.env.DSH_WIRE_SESSION_MAX_BYTES
-      process.env.DSH_WIRE_SESSION_MAX_BYTES = '64'
-      await writeSessionWireCapture(root, options(SESSION_ID))
-      process.env.DSH_WIRE_SESSION_MAX_BYTES = previousCap
+      process.env.DSH_WIRE_SESSION_MAX_BYTES = '1024'
+      await writeSessionWireCapture(root, options(SESSION_ID, 'x'.repeat(4000)))
 
       const result = await remote.requestSnapshot(
         { sessionId: SESSION_ID, includeBodies: true },

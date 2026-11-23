@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, {
   BlockAssembler,
@@ -32,6 +32,14 @@ import LlmRuntime, {
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
+import { createIsolatedTestEnvironment } from './test-env.ts'
+
+// Own every path a dispatch might touch, including ambient DSH_WIRE_* values.
+const testEnv = await createIsolatedTestEnvironment('dsh-llm-model-chain-')
+afterAll(async () => {
+  await new Promise(resolve => setTimeout(resolve, 300))
+  await testEnv.restore()
+})
 
 const SCRIPT: StreamChunk[] = [
   { type: 'block-start', index: 0, blockType: 'text' },

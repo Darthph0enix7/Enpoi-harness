@@ -1,10 +1,9 @@
 /** Per-Session wire capture: bounded files, main-call selectivity, and the read path. */
 
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { mkdtemp, readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Branded } from '@deepseek-ai/dsh-brand'
 import LlmRuntime, {
@@ -15,6 +14,7 @@ import LlmRuntime, {
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { createIsolatedTestEnvironment, type IsolatedTestEnvironment } from './test-env.ts'
 
 const SESSION_ID = 'session-wire-1' as Branded<'SessionId'>
 
@@ -73,34 +73,33 @@ async function readJson(path: string): Promise<Record<string, unknown>> {
   throw new Error(`capture was not written: ${path}`)
 }
 
-/** Poll until `count` timestamped audit captures exist (they precede per-session writes in the queue). */
-async function awaitAuditCount(root: string, count: number): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    const names = await readdir(root).catch(() => [] as string[])
-    if (names.filter(name => /^wire-\d+\.json$/.test(name)).length >= count) return
-    await new Promise(resolve => setTimeout(resolve, 10))
-  }
-  throw new Error(`audit captures did not reach ${count}`)
+/** Poll until no owned historical archive appears; default capture writes none. */
+async function expectNoHistory(root: string): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, 150))
+  const names = await readdir(root).catch(() => [] as string[])
+  expect(names.filter(name => /^wire-(?:\d+)(?:-\d+-[0-9a-f-]+)?\.json$/i.test(name))).toEqual([])
 }
 
-const temps: string[] = []
-let previousWireLog: string | undefined
+let testEnv: IsolatedTestEnvironment
 
 async function useWireLog(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'dsh-wire-sessions-'))
-  temps.push(root)
-  previousWireLog = process.env.DSH_WIRE_LOG
+  testEnv.clearWireEnvironment()
+  const root = await mkdtemp(join(testEnv.tmp, 'run-'))
+  process.env.HOME = join(root, 'home')
+  process.env.USERPROFILE = join(root, 'home')
   process.env.DSH_WIRE_LOG = join(root, 'wire-last.json')
+  process.env.DSH_HOME = join(root, 'home')
   return root
 }
 
+beforeEach(async () => {
+  testEnv = await createIsolatedTestEnvironment('dsh-wire-sessions-')
+})
+
 afterEach(async () => {
-  if (previousWireLog === undefined) delete process.env.DSH_WIRE_LOG
-  else process.env.DSH_WIRE_LOG = previousWireLog
-  previousWireLog = undefined
-  delete process.env.DSH_WIRE_SESSION_MAX_BYTES
-  delete process.env.DSH_WIRE_SESSION_RETAIN
-  await Promise.all(temps.splice(0).map(root => rm(root, { recursive: true, force: true })))
+  // Drain before restoring ambient env so no queued write can read it.
+  await new Promise(resolve => setTimeout(resolve, 250))
+  await testEnv.restore()
   vi.restoreAllMocks()
 })
 
@@ -166,7 +165,9 @@ describe('per-Session wire capture', () => {
         source: { kind: 'user' },
       })],
     }))
-    await awaitAuditCount(root, 2)
+    // An auxiliary call has no last-request or inspector consumer; without
+    // DSH_WIRE_HISTORY it serializes nothing and writes no historical file.
+    await expectNoHistory(root)
 
     const record = await readJson(join(root, 'wire-sessions', `${SESSION_ID}.json`))
     expect(record.purpose).toBeUndefined()
@@ -187,16 +188,24 @@ describe('per-Session wire capture', () => {
 
   it('stores only the summary once the byte cap is exceeded', async () => {
     const root = await useWireLog()
-    process.env.DSH_WIRE_SESSION_MAX_BYTES = '256'
+    process.env.DSH_WIRE_SESSION_MAX_BYTES = '512'
     const ctx = await runtime()
-    await collect(ctx.llm.stream(request()))
+    await collect(ctx.llm.stream(request({
+      messages: [
+        createSystemMessage('SYSTEM RULES'),
+        createUserMessage({
+          content: [{ type: 'text', text: 'x'.repeat(2000) }],
+          source: { kind: 'user' },
+        }),
+      ],
+    })))
 
     const record = await readJson(join(root, 'wire-sessions', `${SESSION_ID}.json`))
     expect(record.truncated).toBe(true)
     expect(record.messages).toBeUndefined()
     expect(record.summary).toMatchObject({
       tools: ['read'],
-      messages: [{ role: 'system', chars: 'SYSTEM RULES'.length }, { role: 'user', chars: 'hello'.length }],
+      messages: [{ role: 'system', chars: 'SYSTEM RULES'.length }, { role: 'user', chars: 2000 }],
     })
 
     const capture = await readSessionWireCapture(SESSION_ID, { root })
