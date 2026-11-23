@@ -15,7 +15,7 @@ const SESSION = SessionId('session-1')
 interface Fake {
   directory: ModelDirectory
   selectModel: ReturnType<typeof vi.fn>
-  setProjected(next: unknown): void
+  setProjected: (next: unknown) => void
 }
 
 function fakeDirectory(selectModel: ReturnType<typeof vi.fn>): Fake {
@@ -47,7 +47,7 @@ function fakeDirectory(selectModel: ReturnType<typeof vi.fn>): Fake {
     SESSION,
     () => true,
     catalog,
-    projected as never,
+    projected,
   )
   return {
     directory,

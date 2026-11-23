@@ -13,7 +13,6 @@
 .compactRoot .modelTrigger {
   height: 22px;
   padding: 0 8px;
-  border-radius: 11px;
   font-size: 11px;
   max-width: 150px;
 }
@@ -21,7 +20,6 @@
 .compactRoot .effortTrigger {
   height: 22px;
   padding: 0 7px;
-  border-radius: 11px;
   font-size: 10px;
   gap: 3px;
 }
@@ -58,46 +56,78 @@
   max-width: min(280px, 35cqw);
   height: 28px;
   padding: 0 10px;
-  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.08));
-  border-radius: 14px;
+  box-sizing: border-box;
+  border: 0.5px solid var(--dsw-alias-border-l2-darkmode-thin);
+  border-radius: 999px;
+  corner-shape: round;
   outline: none;
-  background: var(--dsw-specific-input-major, rgba(255, 255, 255, 0.04));
-  backdrop-filter: blur(8px);
-  color: var(--dsw-alias-label-primary, #f1f5f9);
+  background: var(--dsw-specific-input-major);
+  color: var(--dsw-alias-label-primary);
   font-size: 12px;
   line-height: 20px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 120ms ease;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
   user-select: none;
 }
 
 .modelTrigger:hover:not(:disabled) {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.08));
-  border-color: var(--dsw-alias-border-l3, rgba(255, 255, 255, 0.18));
-  color: var(--dsw-alias-label-primary, #ffffff);
+  background: var(--dsw-alias-interactive-bg-hover);
+  border-color: var(--dsw-alias-border-l3);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* An ambiguous selection needs room for the provider suffix; extend the cap
+   only for that state so the ordinary trigger keeps its compact seat. */
+.modelTriggerAmbiguous {
+  max-width: min(280px, 50cqw);
 }
 
 .modelTriggerActive {
-  background: rgba(103, 220, 231, 0.12);
-  border-color: rgba(103, 220, 231, 0.35);
-  color: #67dce7;
+  background: var(--dsw-alias-state-business-tertiary);
+  border-color: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-alias-state-business-primary);
 }
 
-.modelTrigger:focus-visible {
-  box-shadow: 0 0 0 2px rgba(103, 220, 231, 0.3);
+.modelTrigger:focus-visible,
+.effortTrigger:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -1px;
 }
 
 .modelTrigger:disabled {
-  color: var(--dsw-alias-label-dimmed, #64748b);
+  color: var(--dsw-alias-label-dimmed);
   cursor: default;
 }
 
 .modelNameLabel {
+  flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Ambiguous selection: the provider rides beside the model name in the same
+   quiet secondary ink the rows use, and yields width to the model name. */
+.triggerProvider {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  font-weight: 450;
+}
+
+.triggerProvider::after {
+  content: '·';
+  margin-inline-start: 4px;
+  opacity: 0.7;
 }
 
 /* Conditional Reasoning Effort Button on the Input Bar */
@@ -108,31 +138,34 @@
   height: 28px;
   padding: 0 9px;
   max-width: 140px;
-  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(255, 255, 255, 0.08));
-  border-radius: 14px;
+  box-sizing: border-box;
+  border: 0.5px solid var(--dsw-alias-border-l2-darkmode-thin);
+  border-radius: 999px;
+  corner-shape: round;
   outline: none;
-  background: var(--dsw-specific-input-major, rgba(255, 255, 255, 0.04));
-  backdrop-filter: blur(8px);
-  color: var(--dsw-alias-label-secondary, #94a3b8);
+  background: var(--dsw-specific-input-major);
+  color: var(--dsw-alias-label-secondary);
   font-size: 11.5px;
   line-height: 20px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 120ms ease;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
   user-select: none;
-  box-sizing: border-box;
 }
 
 .effortTrigger:hover:not(:disabled) {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.08));
-  color: var(--dsw-alias-label-primary, #f8fafc);
-  border-color: var(--dsw-alias-border-l3, rgba(255, 255, 255, 0.18));
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-border-l3);
 }
 
 .effortTriggerActive {
-  background: rgba(103, 220, 231, 0.12);
-  border-color: rgba(103, 220, 231, 0.35);
-  color: #67dce7;
+  background: var(--dsw-alias-state-business-tertiary);
+  border-color: var(--dsw-alias-state-business-primary);
+  color: var(--dsw-alias-state-business-primary);
 }
 
 .triggerIcon {
@@ -165,42 +198,33 @@
   transform: rotate(180deg);
 }
 
-/* Main Model Picker Pop-Up Window (Matching Liquid Glass Input Card Material) */
+/* Main Model Picker Pop-Up Window: MenuSurface owns the glass material; this
+   card owns placement, geometry, and the scroll viewport. */
 .pickerPopover {
   /* Portaled to body: fixed viewport coordinates come from the component's
      measured placement (see ModelSelect.tsx); z matches the Menu primitive's
      portal layer. */
-  position: fixed;
   z-index: 1100;
   display: flex;
   flex-direction: column;
   width: min(380px, calc(100vw - 32px));
   max-width: calc(100vw - 32px);
   max-height: min(470px, calc(100vh - 110px));
-  overflow-x: hidden;
-  overflow-y: hidden;
+  overflow: hidden;
   box-sizing: border-box;
   padding: 0;
-  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(103, 220, 231, 0.15));
-  border-radius: 16px;
-  background: var(--dsw-specific-input-major, rgba(13, 22, 39, 0.5));
-  backdrop-filter: blur(8px) saturate(140%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.18),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
-    0 16px 40px rgba(0, 7, 18, 0.45);
-  background-image: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.07) 0%,
-    rgba(255, 255, 255, 0.015) 18%,
-    rgba(255, 255, 255, 0) 42%
-  );
-  color: var(--dsw-alias-label-primary, #f1f5f9);
+  border: 0;
+  border-radius: var(--dsw-radius-lg);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
+  box-shadow: var(--dsw-elevation-prominent);
+  /* Elevated surface: scrollbars follow the l2 rung, matching the Menu card. */
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+  color: var(--dsw-alias-label-primary);
 }
 
 /* Effort Selector Dropdown */
 .effortPopover {
-  position: absolute;
   right: 0;
   bottom: calc(100% + 8px);
   z-index: 60;
@@ -209,20 +233,10 @@
   width: 190px;
   padding: 4px;
   box-sizing: border-box;
-  border: 1px solid var(--dsw-alias-border-l2-darkmode-thin, rgba(103, 220, 231, 0.15));
-  border-radius: 14px;
-  background: var(--dsw-specific-input-major, rgba(13, 22, 39, 0.5));
-  backdrop-filter: blur(8px) saturate(140%);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.18),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
-    0 12px 32px rgba(0, 7, 18, 0.45);
-  background-image: linear-gradient(
-    180deg,
-    rgba(255, 255, 255, 0.07) 0%,
-    rgba(255, 255, 255, 0.015) 18%,
-    rgba(255, 255, 255, 0) 42%
-  );
+  border: 0;
+  border-radius: var(--dsw-radius-md);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l1);
+  box-shadow: var(--dsw-elevation-prominent);
 }
 
 .effortItem {
@@ -231,25 +245,36 @@
   justify-content: space-between;
   padding: 6px 10px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--dsw-radius-sm);
   background: transparent;
-  color: var(--dsw-alias-label-secondary, #94a3b8);
+  color: var(--dsw-alias-label-secondary);
   font-size: 12px;
   font-weight: 500;
-  text-align: left;
+  text-align: start;
   cursor: pointer;
-  transition: all 100ms ease;
+  transition: background 100ms ease, color 100ms ease;
 }
 
 .effortItem:hover {
-  background: var(--dsw-alias-interactive-bg-hover, rgba(255, 255, 255, 0.08));
-  color: var(--dsw-alias-label-primary, #f8fafc);
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.effortItem:focus-visible,
+.clearSearchBtn:focus-visible,
+.starBtn:focus-visible,
+.modelRowMain:focus-visible,
+.groupHeaderToggle:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  /* Inset ring: the popover clips its own rounded edge, so an outer ring would
+     lose its first pixels. */
+  outline-offset: -2px;
 }
 
 .effortItemSelected {
-  background: rgba(103, 220, 231, 0.12);
-  color: #67dce7;
-  font-weight: 600;
+  background: var(--dsw-alias-state-business-tertiary);
+  color: var(--dsw-alias-state-business-primary);
+  font-weight: 500;
 }
 
 /* Top Search Bar */
@@ -257,14 +282,14 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  flex: 0 0 auto;
   padding: 8px 12px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(0, 0, 0, 0.12);
+  border-bottom: 0.5px solid var(--dsw-alias-border-l1);
   box-sizing: border-box;
 }
 
 .searchIcon {
-  color: var(--dsw-alias-label-caption, #64748b);
+  color: var(--dsw-alias-label-caption);
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -276,36 +301,41 @@
   border: none;
   outline: none;
   background: transparent;
-  color: var(--dsw-alias-label-primary, #f8fafc);
-  font-size: 12.5px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 18px;
 }
 
 .searchInput::placeholder {
-  color: var(--dsw-alias-label-caption, #64748b);
+  color: var(--dsw-alias-label-caption);
 }
 
 .clearSearchBtn {
+  flex-shrink: 0;
   border: none;
   background: transparent;
-  color: #94a3b8;
-  font-size: 13px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 15px;
   cursor: pointer;
   padding: 0 4px;
+  border-radius: var(--dsw-radius-xs);
   line-height: 1;
 }
 
 .clearSearchBtn:hover {
-  color: #f8fafc;
+  color: var(--dsw-alias-label-primary);
 }
 
 /* Scrollable Container — themed glass scrollbar (matches old liquid-glass). */
 .pickerScrollable {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   max-height: 380px;
   box-sizing: border-box;
-  padding: 4px 4px 6px 4px;
+  padding: 4px;
+  overscroll-behavior: contain;
   /* Glass theme scrollbars: reserve gutter so rows don't shift, but keep themed thumb. */
   scrollbar-gutter: stable;
   /* Themed thin scrollbar — ui-theme rebind, no browser default grey. */
@@ -317,98 +347,59 @@
 /* Section / Group Header */
 .groupSection {
   margin-bottom: 4px;
+  min-width: 0;
 }
 
 .groupHeader {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  width: 100%;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* The toggle is the full header hit area. It never carries width:100% beside
+   horizontal padding, so its trailing chevron cannot cross the scrollport
+   edge (the previous content-box width plus padding overran it). */
+.groupHeaderToggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
   padding: 6px 8px;
+  box-sizing: border-box;
   border: none;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.02);
-  color: var(--dsw-alias-label-secondary, #94a3b8);
+  border-radius: var(--dsw-radius-sm);
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   cursor: pointer;
   user-select: none;
+  text-align: start;
 }
 
-.option:hover:not(:disabled),
-.option:focus-visible {
+.groupHeaderToggle:hover {
   background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-primary, #ffffff);
-}
-
-/* Selection marker is the trailing check, not a fill — matches the Menu
- * primitive's selected treatment. */
-.selected {
-  background: transparent;
-}
-
-.option:disabled {
-  color: var(--dsw-alias-label-dimmed);
-  cursor: default;
-}
-
-.optionCopy {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.modelName {
-  overflow: hidden;
-  color: inherit;
-  font-size: 14px;
-  line-height: 20px;
-  font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.check {
-  display: grid;
-  place-items: center;
-  flex: 0 0 18px;
   color: var(--dsw-alias-label-primary);
-}
-
-/* Two-level root cells (figma 496:26454 .Menu_cell): 40px row, 10px side
-   padding, 8px gap, 10px radius; 14/22 label in primary, value in the
-   #81858C tertiary tone, right chevron drilling into the sub-list. */
-.cell {
-
-  box-sizing: border-box;
-  transition: background 100ms ease;
-}
-
-.groupHeader:hover {
-  background: rgba(255, 255, 255, 0.06);
-  color: #f1f5f9;
-}
-
-.groupHeaderLeft {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  flex: 1;
 }
 
 .groupIcon {
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  color: var(--dsw-alias-label-secondary, #94a3b8);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.favoriteIcon {
+  color: var(--dsw-alias-state-warn-primary);
 }
 
 .dragHandle {
-  color: var(--dsw-alias-label-caption, #475569);
+  flex-shrink: 0;
+  color: var(--dsw-alias-label-caption);
   cursor: grab;
   padding: 2px;
   line-height: 1;
@@ -420,7 +411,7 @@
 
 .dragHandle:hover {
   opacity: 1;
-  color: var(--dsw-alias-label-primary, #94a3b8);
+  color: var(--dsw-alias-label-secondary);
 }
 
 .groupTitleText {
@@ -429,26 +420,23 @@
   white-space: nowrap;
 }
 
-.groupHeaderRight {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-}
-
 .groupBadge {
+  flex-shrink: 0;
   font-size: 10px;
   padding: 1px 5px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--dsw-alias-label-secondary, #94a3b8);
+  border-radius: 999px;
+  corner-shape: round;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-secondary);
   font-weight: 500;
 }
 
 .groupChevron {
   display: flex;
   align-items: center;
-  color: var(--dsw-alias-label-caption, #64748b);
+  flex-shrink: 0;
+  margin-inline-start: auto;
+  color: var(--dsw-alias-label-caption);
   transition: transform 120ms ease;
 }
 
@@ -458,45 +446,67 @@
 
 /* Offset Nested Model List (Visually distinct from Group Header) */
 .groupBody {
-  margin-left: 6px;
-  padding-left: 8px;
-  border-left: 1px solid rgba(255, 255, 255, 0.05);
+  margin-inline-start: 6px;
+  padding-inline-start: 8px;
+  border-inline-start: 0.5px solid var(--dsw-alias-border-l1);
   margin-top: 2px;
   margin-bottom: 4px;
+  min-width: 0;
 }
 
 /* Model Row Item - content-visibility for large lists (800+ models) */
 .modelRow {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  min-width: 0;
   width: 100%;
-  padding: 5px 8px 5px 8px;
   margin: 1px 0;
+  padding: 0;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--dsw-radius-sm);
   background: transparent;
-  color: var(--dsw-alias-label-primary, #e2e8f0);
-  font-size: 12.5px;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 18px;
   font-weight: 450;
-  text-align: left;
-  cursor: pointer;
+  text-align: start;
   box-sizing: border-box;
-  transition: all 100ms ease;
+  transition: background 100ms ease, color 100ms ease;
   content-visibility: auto;
   /* auto preserves intrinsic width so the right edge never clips to 0. */
   contain-intrinsic-size: auto 34px;
 }
 
 .modelRow:hover {
-  background: rgba(255, 255, 255, 0.06);
-  color: #ffffff;
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* The selectable area is its own button: the star stays a sibling, so the
+   row's accessible name stays clean and no button nests inside another. */
+.modelRowMain {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 8px;
+  border: none;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
 }
 
 .modelRowSelected {
-  background: rgba(103, 220, 231, 0.12) !important;
-  color: #67dce7 !important;
-  font-weight: 600;
+  background: var(--dsw-alias-state-business-tertiary);
+  color: var(--dsw-alias-state-business-primary);
+}
+
+.modelRowSelected:hover {
+  background: var(--dsw-alias-state-business-tertiary);
 }
 
 .modelRowLeft {
@@ -504,7 +514,7 @@
   align-items: center;
   gap: 6px;
   min-width: 0;
-  flex: 1;
+  flex: 1 1 auto;
 }
 
 .modelNameText {
@@ -516,20 +526,35 @@
 .modelRowRight {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 7px;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-width: 0;
 }
 
-/* Context Size Tag (High-contrast slate on dark glass) */
+/* Provider tag shown only for a name/id collision across providers. It yields
+   ellipsis before the fixed-size capacity tag and check mark. */
+.providerTag {
+  min-width: 0;
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  font-weight: 450;
+}
+
+/* Context Size Tag */
 .contextTag {
   font-size: 11px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-weight: 500;
-  color: #94a3b8;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-alias-interactive-bg-hover);
+  border: 0.5px solid var(--dsw-alias-border-l1);
   padding: 1.5px 5px;
-  border-radius: 4px;
+  border-radius: var(--dsw-radius-xs);
   letter-spacing: -0.02em;
   flex-shrink: 0;
   line-height: 1;
@@ -539,11 +564,11 @@
 .ruleTag {
   font-size: 10.5px;
   font-weight: 500;
-  color: #94a3b8;
-  background: rgba(148, 163, 184, 0.1);
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-interactive-bg-hover);
+  border: 0.5px solid var(--dsw-alias-border-l1);
   padding: 1.5px 5px;
-  border-radius: 4px;
+  border-radius: var(--dsw-radius-xs);
   letter-spacing: -0.01em;
   flex-shrink: 0;
   line-height: 1;
@@ -557,63 +582,64 @@
 .modelRowHidden {
   opacity: 0.45;
   cursor: default;
+  padding: 6px 8px;
 }
 
 /* A retired (disabled) or member-less group: visible, never selectable. */
 .modelRowDisabled {
   opacity: 0.45;
   cursor: default;
+  padding: 6px 8px;
 }
 
-.modelRowDisabled:hover {
+.modelRowDisabled:hover,
+.modelRowHidden:hover {
   background: transparent;
-  color: var(--dsw-alias-label-primary, #e2e8f0);
+  color: var(--dsw-alias-label-primary);
 }
 
 /* Selector-backed group: its members resolve from the live catalogue. */
 .dynamicTag {
   font-size: 10px;
   font-weight: 500;
-  color: #94a3b8;
-  background: rgba(148, 163, 184, 0.1);
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  color: var(--dsw-alias-label-secondary);
+  background: var(--dsw-alias-interactive-bg-hover);
+  border: 0.5px solid var(--dsw-alias-border-l1);
   padding: 1px 4px;
-  border-radius: 4px;
+  border-radius: var(--dsw-radius-xs);
   letter-spacing: 0.01em;
   flex-shrink: 0;
   line-height: 1.2;
 }
 
-.modelRowHidden:hover {
-  background: transparent;
-  color: var(--dsw-alias-label-primary, #e2e8f0);
-}
-
 /* Star Favorite Button (Monochrome Vector Star) */
 .starBtn {
+  flex-shrink: 0;
   border: none;
   background: transparent;
   padding: 2px;
   cursor: pointer;
-  color: var(--dsw-alias-label-caption, #64748b);
+  color: var(--dsw-alias-label-caption);
   display: flex;
   align-items: center;
+  justify-content: center;
   line-height: 1;
-  transition: all 120ms ease;
-  border-radius: 4px;
+  transition: color 120ms ease, transform 120ms ease;
+  border-radius: var(--dsw-radius-xs);
 }
 
 .starBtn:hover {
-  color: var(--dsw-alias-label-primary, #f8fafc);
+  color: var(--dsw-alias-label-primary);
   transform: scale(1.15);
 }
 
 .starBtnActive {
-  color: #fbbf24 !important;
+  color: var(--dsw-alias-state-warn-primary);
 }
 
 .checkIcon {
-  color: #67dce7;
+  flex-shrink: 0;
+  color: var(--dsw-alias-state-business-primary);
   display: flex;
   align-items: center;
 }
@@ -621,12 +647,12 @@
 .emptyState {
   padding: 20px 12px;
   text-align: center;
-  color: var(--dsw-alias-label-caption, #64748b);
+  color: var(--dsw-alias-label-caption);
   font-size: 12px;
 }
 
 .dragOver {
-  border-top: 2px solid #67dce7;
+  border-top: 2px solid var(--dsw-alias-state-business-primary);
 }
 
 /* Model-group rows keep the section glyph beside the label, in the same
@@ -636,11 +662,11 @@
   flex-shrink: 0;
   display: flex;
   align-items: center;
-  color: var(--dsw-alias-label-secondary, #94a3b8);
+  color: var(--dsw-alias-label-secondary);
 }
 
 .chainRowIcon {
-  margin-right: 2px;
+  margin-inline-end: 2px;
 }
 
 /* ── Phone sheet presentation ──
@@ -661,26 +687,56 @@
   max-height: none;
 }
 
+/* Coarse pointers: every actionable row and header reaches the 44px touch
+   floor, including the desktop popover on a touch tablet. */
 @media (pointer: coarse) {
-  .sheetContent .modelRow,
-  .sheetContent .groupHeader,
-  .sheetContent .effortItem {
+  .modelRow,
+  .modelRowMain,
+  .groupHeaderToggle,
+  .effortItem {
     min-height: 44px;
   }
 
-  .sheetContent .starBtn {
+  .starBtn {
     width: 44px;
     height: 44px;
   }
-}
 
-/* Coarse pointers: the model and effort triggers in the composer rider reach
-   the 44px touch floor. */
-@media (pointer: coarse) {
   .modelTrigger,
   .effortTrigger {
     min-height: 44px;
     padding-top: 0;
     padding-bottom: 0;
+  }
+
+  .searchHeader {
+    min-height: 44px;
+  }
+
+  .clearSearchBtn {
+    width: 44px;
+    height: 44px;
+  }
+
+  /* HTML5 drag ordering has no touch gesture; the handles would only be noise. */
+  .dragHandle {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modelTrigger,
+  .effortTrigger,
+  .chevronIcon,
+  .groupChevron,
+  .modelRow,
+  .effortItem,
+  .starBtn,
+  .dragHandle {
+    transition: none;
+  }
+
+  .starBtn:hover {
+    transform: none;
   }
 }

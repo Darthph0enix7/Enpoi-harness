@@ -219,8 +219,8 @@ describe('ModelSelect reasoning effort', () => {
       t={t}
     />)
 
-    // OpenChamber shows raw model id when not in catalog (title/modelLabel is model id alone)
-    const trigger = screen.getByRole('button', { name: 'removed-model' })
+    // A stale selection keeps its provider/model identity when the catalogue no longer names it
+    const trigger = screen.getByRole('button', { name: 'DeepSeek/removed-model' })
     expect(trigger.textContent).toContain('removed-model')
     fireEvent.click(trigger)
     // no reasoning pill when model not found
@@ -230,7 +230,7 @@ describe('ModelSelect reasoning effort', () => {
     expect(screen.getByText('DeepSeek-V4-Flash')).toBeTruthy()
     expect(screen.queryByText('Fast catalog description')).toBeNull()
     // only the trigger contains removed-model, the list does not duplicate it
-    expect(screen.getAllByText('removed-model').length).toBe(1)
+    expect(screen.getAllByText('DeepSeek/removed-model').length).toBe(1)
   })
 
   it('shows loading until the catalog and Session projection are both ready', async () => {
@@ -314,7 +314,7 @@ describe('ModelSelect reasoning effort', () => {
       />)
       const trigger = screen.getByRole('button', { name: 'DeepSeek-V4-Flash' })
       fireEvent.click(trigger)
-      const menu = screen.getByRole('menu')
+      const menu = screen.getByRole('dialog')
       // Outside the composer subtree — column overflow clips cannot crop it.
       expect(container.contains(menu)).toBe(false)
       expect(menu.parentElement).toBe(document.body)
@@ -326,9 +326,9 @@ describe('ModelSelect reasoning effort', () => {
       fireEvent.mouseDown(menu)
       fireEvent.mouseDown(trigger)
       fireEvent.blur(trigger, { relatedTarget: menu })
-      expect(screen.getByRole('menu')).toBeTruthy()
+      expect(screen.getByRole('dialog')).toBeTruthy()
       fireEvent.mouseDown(document.body)
-      expect(screen.queryByRole('menu')).toBeNull()
+      expect(screen.queryByRole('dialog')).toBeNull()
     } finally {
       Object.defineProperty(HTMLElement.prototype, 'offsetWidth', offsetWidth)
       Object.defineProperty(HTMLElement.prototype, 'offsetHeight', offsetHeight)
@@ -372,7 +372,7 @@ describe('ModelSelect reasoning effort', () => {
         t={t}
       />)
       fireEvent.click(screen.getByRole('button', { name: 'DeepSeek-V4-Flash' }))
-      const menu = screen.getByRole('menu')
+      const menu = screen.getByRole('dialog')
       // 400x300 card hung off the trigger's top-right corner, bottom-clamped to the 12px margin.
       expect(menu.style.left).toBe('600px')
       expect(menu.style.top).toBe('488px')
@@ -394,7 +394,7 @@ describe('ModelSelect reasoning effort', () => {
       expect(Number.parseFloat(menu.style.top) + 700).toBeLessThanOrEqual(800 - 12)
 
       fireEvent.mouseDown(document.body)
-      expect(screen.queryByRole('menu')).toBeNull()
+      expect(screen.queryByRole('dialog')).toBeNull()
       expect(made[0]?.disconnected).toBe(true)
     } finally {
       width.mockRestore()
@@ -416,7 +416,7 @@ describe('ModelSelect reasoning effort', () => {
       t={t}
     />)
     fireEvent.click(screen.getByRole('button', { name: 'DeepSeek-V4-Flash' }))
-    expect(screen.getByRole('menu')).toBeTruthy()
+    expect(screen.getByRole('dialog')).toBeTruthy()
   })
 
   it('renders no Agent-bound control for an addressed subagent session', () => {

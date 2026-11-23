@@ -18,7 +18,7 @@ const RESOLVED_NEXT = {
 /** Parse the wire envelope of one stubbed RPC request. */
 function requestOf(input: unknown, init?: RequestInit): { method?: string; payload?: { args?: Record<string, unknown> } } {
   void input
-  return JSON.parse(String(init?.body)) as { method?: string; payload?: { args?: Record<string, unknown> } }
+  return JSON.parse(typeof init?.body === 'string' ? init.body : '') as { method?: string; payload?: { args?: Record<string, unknown> } }
 }
 
 afterEach(() => {

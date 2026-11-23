@@ -144,6 +144,30 @@ describe('ModelSelect groups section', () => {
     })
   })
 
+  it('keeps the Groups section collapsible while a search is active', async () => {
+    await seed(CHAINS)
+    render(<ModelSelect
+      locked={false}
+      available
+      directory={createSnapshotStore<ModelDirectoryState>(state())}
+      load={vi.fn()}
+      select={vi.fn().mockResolvedValue({ ok: true as const, value: undefined })}
+      t={t}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: 'DeepSeek-V4-Flash' }))
+    fireEvent.change(screen.getByPlaceholderText(t('search.placeholder')), { target: { value: 'stable' } })
+    const header = screen.getByRole('button', { name: t('group.groups') })
+    expect(header.getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByText('Stable')).toBeTruthy()
+
+    fireEvent.click(header)
+    expect(header.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByText('Stable')).toBeNull()
+
+    fireEvent.click(screen.getByRole('button', { name: t('search.clear') }))
+    expect(header.getAttribute('aria-expanded')).toBe('true')
+  })
+
   it('reads the artifact channel, never the raw chains document', async () => {
     await seed(CHAINS)
     const [url, init] = fetchMock.mock.calls.at(-1) as [string, RequestInit]
@@ -227,7 +251,7 @@ describe('ModelSelect groups section', () => {
     // The row renders the RESOLVED member count and the dynamic marker even
     // though the group declares no explicit link.
     const row = await screen.findByText('Free tools')
-    expect(row.parentElement?.textContent).toContain(t('group.dynamic'))
+    expect(row.closest('button')?.textContent).toContain(t('group.dynamic'))
     expect(screen.getByText('2 个模型')).toBeTruthy()
     fireEvent.click(row)
 
