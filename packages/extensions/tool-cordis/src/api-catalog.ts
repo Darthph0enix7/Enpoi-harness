@@ -471,6 +471,18 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         throws: ['the signal reason when aborted, or a storage error when verification fails.'],
       },
       {
+        signature: 'async imageExists(ref: ImageAttachmentRef, signal?: AbortSignal): Promise<boolean>',
+        description: 'Check via metadata only (no full byte read) whether a stored normalized image object exists in this store. Backends without host-file paths return `true` unless they override this check.',
+        parameters: [{ name: 'ref', description: 'durable normalized attachment reference.' }, { name: 'signal', description: 'optional cancellation signal.' }],
+        returns: 'whether the stored object exists.',
+      },
+      {
+        signature: 'async fileExists(ref: FileAttachmentRef, signal?: AbortSignal): Promise<boolean>',
+        description: 'Check via metadata only (no full byte read) whether a stored verbatim file object exists in this store. Backends without host-file paths return `true` unless they override this check.',
+        parameters: [{ name: 'ref', description: 'durable file attachment reference.' }, { name: 'signal', description: 'optional cancellation signal.' }],
+        returns: 'whether the stored object exists.',
+      },
+      {
         signature: 'imageHostPath(ref: ImageAttachmentRef): string | undefined',
         description: 'Locate the provider-owned normalized object in the harness host filesystem.',
         parameters: [{ name: 'ref', description: 'durable normalized attachment reference.' }],
@@ -1653,6 +1665,32 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'peerJobBindings',
+    summary: 'Cordis service interface registered under `peerJobBindings`.',
+    description: 'Cordis service interface registered under `peerJobBindings`.',
+    methods: [
+      {
+        signature: 'revoke(sessionId: SessionId): Promise<boolean>',
+        description: 'Deny subsequent guard reads immediately and persist before acknowledging.',
+        parameters: [{ name: 'sessionId', description: 'bound session identifier to revoke.' }],
+        returns: 'true when a binding existed and was revoked, false when absent.',
+      },
+    ],
+  },
+  {
+    key: 'peerProfileIdentity',
+    summary: 'Optional service seam implemented by the profile layer and read through `ctx.get(\'peerProfileIdentity\')` to attest effective worker session identity.',
+    description: 'Optional service seam implemented by the profile layer and read through `ctx.get(\'peerProfileIdentity\')` to attest effective worker session identity.',
+    methods: [
+      {
+        signature: 'describe(sessionId: SessionId): PeerProfileIdentity | undefined',
+        description: 'Describe the effective profile identity for a session.',
+        parameters: [{ name: 'sessionId', description: 'created or bound session identifier.' }],
+        returns: 'profile identity facts, or `undefined` when unavailable.',
+      },
+    ],
+  },
+  {
     key: 'peerRouting',
     summary: 'Structural seam the peer host consumes through `ctx.get(\'peerRouting\')`.',
     description: 'Structural seam the peer host consumes through `ctx.get(\'peerRouting\')`. The profile owns the catalogue, selector rules, chain registry, and route health; the peer package owns transport, pairing, and exposure. A host without this service serves neither `model-discovery` nor `model-switch`, and refuses any routing request on a pairing that carries a `routing` policy.',
@@ -1677,6 +1715,11 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     description: 'Host service backing the generated `ctx.remote.peer` namespace.',
     methods: [
       {
+        signature: 'readonly instanceId: string = randomUUID()',
+        description: 'Fresh host boot identity generated per `PeerService` instance.',
+        parameters: [],
+      },
+      {
         signature: 'readonly pairings: PeerPairingsStore',
         description: 'Pairing table and created-session bindings.',
         parameters: [],
@@ -1692,11 +1735,16 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [],
       },
       {
+        signature: 'readonly inputReceipts: PeerInputReceiptStore',
+        description: 'Restart-safe write-ahead receipts for `peer.create` and `peer.prompt`.',
+        parameters: [],
+      },
+      {
         signature: '@Remote(\'handshake\') handshake(request: PeerHandshakeRequest): PeerHandshakeValue',
         description: 'Negotiate protocol, capability, and pairing identity.',
         parameters: [{ name: 'request', description: 'caller protocol, harness version, schema digest, and device name.' }],
-        returns: 'the host identity, capabilities, and visible pairings.',
-        throws: ['{@link RemoteError} `gateway/bad-request` when the request is absent or not an object, `peer/version-skew` on protocol divergence.'],
+        returns: 'the host identity, boot `instanceId`, capabilities, and authorized pairings for `request.device`.',
+        throws: ['{@link RemoteError} `peer/forbidden` (`reason: \'unauthorized\'`) when credentials fail or `device` does not match the authenticated pairing, `gateway/bad-request` when the request is absent or not an object, `peer/version-skew` on protocol divergence.'],
       },
       {
         signature: '@Remote(\'state\') async state(request: PeerStateRequest): Promise<PeerStateValue>',
@@ -1705,32 +1753,44 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'latch, descendants, pending asks, model selection, and cursor.',
       },
       {
+        signature: '@Remote(\'asks\') asks(request: PeerAsksRequest): PeerAsksValue',
+        description: 'Read retained pending and settled asks for an authenticated binding.',
+        parameters: [{ name: 'request', description: 'alias and optional current or retired Session id.' }],
+        returns: 'retained ask records and the current host identity.',
+      },
+      {
+        signature: '@Remote(\'waitQuiescent\') async waitQuiescent(request: PeerWaitQuiescentRequest, signal: AbortSignal): Promise<PeerWaitQuiescentValue>',
+        description: 'Poll one binding for an observed quiet state; never certify descendant teardown.',
+        parameters: [{ name: 'request', description: 'alias and bounded polling timeout in milliseconds.' }, { name: 'signal', description: 'carrier cancellation.' }],
+        returns: 'last observed state and whether the deadline elapsed.',
+      },
+      {
         signature: '@Remote(\'list\') list(request?: PeerListRequest): PeerListValue',
-        description: 'List the pairings this host exposes with a cheap live summary. Discovery is read-only and reports each pairing at its own exposure; a supplied target resolves through the same pairing gate as every other call, so an unpaired session is refused rather than listed.',
+        description: 'List the pairings this caller is authorized to see with a cheap live summary. Discovery is read-only and reports each pairing at its own exposure; a supplied target authenticates and resolves through the same pairing gate as every other call.',
         parameters: [{ name: 'request', description: 'optional target narrowing the answer to one pairing.' }],
-        returns: 'the host device and one row per selected pairing.',
-        throws: ['{@link RemoteError} `peer/not-paired` when a supplied target does not resolve.'],
+        returns: 'the host device and one row per authorized pairing.',
+        throws: ['{@link RemoteError} `peer/forbidden` (`reason: \'unauthorized\'`) on invalid credentials; `peer/not-paired` when an authenticated unbound alias is targeted.'],
       },
       {
         signature: '@Remote(\'create\') async create(request: PeerCreateRequest): Promise<PeerCreateValue>',
-        description: 'Create or explicitly adopt a Session and bind it to a pairing alias.\n\nA pairing with a `routing` policy is authoritative: every create (new or adopt) must name a route, the policy is evaluated before any session or selection exists, and the applied selection is the verdict\'s `selection` (a chain-only request is resolved there). Without a policy the legacy behavior is unchanged and `allowModelChange` gates adopt-time routing.',
-        parameters: [{ name: 'request', description: 'pairing alias, participant, optional explicit session, routing, and token ceiling.' }],
-        returns: 'the resolved target and whether a new Session was created.',
-        throws: ['{@link RemoteError} `peer/not-paired`; `peer/forbidden` for a policy refusal, a missing routing service, a ceiling on a host without the usage seam (reason `budget-unmetered`), or an adopt without `allowModelChange`; `peer/not-found` for a deeper create failure.'],
+        description: 'Create or explicitly adopt a Session and bind it to a pairing alias.\n\nPairing `create.*` values (`workspaceId`, `cwd`, `agentPreset`, `allowAgentPresets`) act as upper-bound limits: callers may narrow `cwd` within the pinned directory or select a preset within the allowed set, and any attempt to widen is refused with `peer/forbidden`. Adoption is restricted to sessions already bound to or created by this alias (`reason: \'session-adoption\'`).\n\nWhen `requestId` is supplied, the host derives a deterministic session id from `(alias, requestId)` when `sessionId` is omitted, writes a write-ahead payload-bound receipt before creating/adopting, replays identical retries with `replayed: true`, and rejects changed payloads under the same id with `peer/conflict` (`reason: \'request-id-reuse\'`). If the write-ahead receipt cannot be persisted, creation is refused with `peer/unavailable` before any session or binding side effect.\n\nA pairing with a `routing` policy is authoritative: every create (new or adopt) must name a route, the policy is evaluated before any session or selection exists, and the applied selection is the verdict\'s `selection` (a chain-only request is resolved there). Without a policy the legacy behavior is unchanged and `allowModelChange` gates adopt-time routing.',
+        parameters: [{ name: 'request', description: 'pairing alias, participant, optional requestId/session, routing, and token ceiling.' }],
+        returns: 'the resolved target, whether a new Session was created, and receipt metadata when `requestId` was supplied.',
+        throws: ['{@link RemoteError} `peer/not-paired`; `peer/forbidden` for auth, scope limits (`workspace-not-allowed`, `cwd-not-allowed`, `preset-not-allowed`, `session-adoption`), policy refusal, a missing routing service, a ceiling on a host without the usage seam (reason `budget-unmetered`), or an adopt without `allowModelChange`; `peer/conflict` (`reason: \'request-id-reuse\'`); `peer/unavailable` when receipt persistence fails; `peer/not-found` for a deeper create failure.'],
       },
       {
         signature: '@Remote(\'models\') async models(request: PeerModelsRequest): Promise<PeerModelsValue>',
         description: 'Policy-filtered model and chain discovery for one alias.',
         parameters: [{ name: 'request', description: 'alias, participant, optional filter, cursor, and page limit.' }],
         returns: 'selectable chains/models with the policy echoed for the caller.',
-        throws: ['{@link RemoteError} `peer/not-paired` for an unknown alias, `peer/forbidden` when the pairing configures no policy or the host mounts no routing service, `gateway/bad-request` for an invalid page cursor, and `peer/forbidden` reason `routing-unavailable` when the service throws.'],
+        throws: ['{@link RemoteError} `peer/forbidden` (`reason: \'unauthorized\'`) on invalid credentials, `peer/forbidden` when the pairing configures no policy or the host mounts no routing service, `gateway/bad-request` for an invalid page cursor, and `peer/forbidden` reason `routing-unavailable` when the service throws.'],
       },
       {
         signature: '@Remote(\'selectModel\') async selectModel(request: PeerSelectModelRequest): Promise<PeerSelectModelValue>',
-        description: 'Switch one idle Session\'s routing for its next turn. The policy decides the exact selection; the caller\'s request is only an input. A replay of the same `requestId` with the same payload returns the original value without appending another selection.',
+        description: 'Switch one idle Session\'s routing for its next turn. The policy decides the exact selection; the caller\'s request is only an input.\n\nDurability and retry guarantees:\n\n- A replay of the same `requestId` with the same payload while the receipt is retained returns the original value (`replayed: true`) before the idle check and without re-applying over any newer selection.\n- If `receipts.put()` fails after applying, the host logs a warning and returns `receiptPersisted: false` (and in-memory replays also carry `receiptPersisted: false`) so callers know cross-restart idempotency is not guaranteed.\n- On a post-restart retry without a persisted receipt, the host compares the Session\'s live selection to the resolved verdict selection before calling `sessionController.selectModel` and skips re-applying when they already match (no duplicate `model/selection` event).',
         parameters: [{ name: 'request', description: 'target, participant, request id, and requested route.' }],
-        returns: 'the applied selection, the previous one when known, and replay status.',
-        throws: ['{@link RemoteError} `peer/forbidden` for a policy refusal or a disallowed switch, `peer/conflict` for a busy Session or a reused request id, `peer/not-paired` for an unresolved target.'],
+        returns: 'the applied selection, the previous one when known, replay status, and `receiptPersisted: false` when durable receipt storage failed.',
+        throws: ['{@link RemoteError} `peer/forbidden` for auth, a policy refusal, or a disallowed switch, `peer/conflict` for a busy Session or a reused request id, `peer/not-paired` for an unresolved target.'],
       },
       {
         signature: 'ceilingOf(sessionId: SessionId): number | undefined',
@@ -1740,22 +1800,55 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
       },
       {
         signature: '@Remote(\'prompt\') async prompt(request: PeerPromptRequest, signal: AbortSignal): Promise<PeerPromptValue>',
-        description: 'Admit one queued peer turn into a paired Session.',
+        description: 'Admit one queued peer turn into a paired Session with write-ahead payload-bound receipt persistence.',
         parameters: [{ name: 'request', description: 'target, participant, dedupe id, text content, and hop telemetry.' }, { name: 'signal', description: 'carrier cancellation before prompt admission begins.' }],
-        returns: 'acceptance and the incremented hop count.',
-        throws: ['{@link RemoteError} `peer/hop-limit` only when the pairing configures a ceiling; `peer/forbidden` with reason `budget` once the Session\'s token ceiling is reached.'],
+        returns: 'acceptance, incremented hop count, receipt metadata, and disposition.',
+        throws: ['{@link RemoteError} `peer/hop-limit` only when the pairing configures a ceiling; `peer/forbidden` with reason `budget` once the Session\'s token ceiling is reached; `peer/conflict` (`reason: \'request-id-reuse\'`) when `requestId` is reused with different content; `peer/unavailable` when the write-ahead receipt cannot be persisted.'],
+      },
+      {
+        signature: '@Remote(\'receipt\') async receipt(request: PeerReceiptRequest): Promise<PeerReceiptValue>',
+        description: 'Look up a durable `peer.create` or `peer.prompt` receipt and derive its current host-side disposition directly from the Session store / log.',
+        parameters: [{ name: 'request', description: 'pairing alias, caller request id, and optional kind disambiguator.' }],
+        returns: 'receipt metadata, `replayedAcrossRestart`, and derived disposition.',
+        throws: ['{@link RemoteError} `peer/forbidden` (`reason: \'unauthorized\'`) on invalid credentials or unknown alias, `gateway/bad-request` on malformed input or ambiguous match without `kind`, `peer/unavailable` when the receipt store failed to open.'],
+      },
+      {
+        signature: '@Remote(\'jobUpdate\') async jobUpdate(request: PeerJobUpdateRequest): Promise<PeerJobUpdateValue>',
+        description: 'Update a bound worker job\'s fence, expiration timestamp, or revocation state. Fence bumps are strictly monotonic and exposed only through this authenticated method, with payload-bound idempotency receipts persisted alongside the binding.',
+        parameters: [{ name: 'request', description: 'pairing alias, request id, job id, and mutation fields.' }],
+        returns: 'the updated binding and receipt metadata.',
+        throws: ['{@link RemoteError} `peer/forbidden` on auth failure or non-worker pairing, `gateway/bad-request` on malformed input, `peer/not-found` when the job binding is absent, `peer/conflict` on fence regression, expired non-extended job, already-revoked job, or changed payload under the same `requestId`, `peer/unavailable` when binding persistence is unavailable.'],
+      },
+      {
+        signature: '@Remote(\'ready\') ready(request: PeerReadyRequest): PeerReadyValue',
+        description: 'Probe authenticated host and pairing readiness before dispatching work.',
+        parameters: [{ name: 'request', description: 'pairing alias to check.' }],
+        returns: 'readiness boolean, missing capability list, advertised capabilities, optional attested profile summary when bound, boot `instanceId`, and harness `version`.',
+        throws: ['{@link RemoteError} `peer/forbidden` (`reason: \'unauthorized\'`) on invalid credentials or unknown alias, `gateway/bad-request` on malformed input.'],
+      },
+      {
+        signature: '@Remote(\'exportList\') exportList(request: PeerExportListRequest): PeerExportListValue',
+        description: 'List regular files inside the bound worker session\'s fixed export root. Requires a live (non-expired, non-revoked) job binding.',
+        parameters: [{ name: 'request', description: 'pairing alias owning the worker session.' }],
+        returns: 'bounded list of regular files with relative paths and truncation flag.',
+      },
+      {
+        signature: '@Remote(\'exportFetch\') exportFetch(request: PeerExportFetchRequest): PeerExportFetchValue',
+        description: 'Fetch one bounded regular file from the bound worker session\'s fixed export root, refusing traversal, symlinks, non-regular files, oversize reads, and size changes between stat and read. Requires a live job binding; the hub must still independently re-verify returned bytes and SHA-256.',
+        parameters: [{ name: 'request', description: 'pairing alias, relative file path, and optional caller byte cap.' }],
+        returns: 'relative path, exact byte length, SHA-256 over the returned bytes, and base64 content.',
       },
       {
         signature: '@Remote(\'cancel\') cancel(request: PeerCancelRequest): PeerCancelValue',
-        description: 'Cancel the active turn of a paired Session, attributed to the peer.',
-        parameters: [{ name: 'request', description: 'target and participant.' }],
-        returns: 'acceptance and whether a turn was active.',
+        description: 'Stop a paired Session and optionally discard the pairing\'s pending prompts.',
+        parameters: [{ name: 'request', description: 'target, participant, and optional queue removal intent.' }],
+        returns: 'acceptance, whether a turn was active, the immediate stop observation, and the number removed.',
       },
       {
         signature: '@Remote(\'answer\') answer(request: PeerAnswerRequest): PeerAnswerValue',
         description: 'Settle a pending ask for a paired Session. An answer may resume a turn the host paused on that ask; the ceiling watcher stops it after the next response when the Session is already over budget.',
-        parameters: [{ name: 'request', description: 'target, participant, ask id, and answer payload.' }],
-        returns: 'acceptance after the ask settled.',
+        parameters: [{ name: 'request', description: 'target, participant, ask id, retry id, and answer payload.' }],
+        returns: 'the persisted decision receipt, replayed without another delivery on a matching retry.',
       },
       {
         signature: '@Remote(\'page\') async page(request: PeerPageRequest, signal: AbortSignal): Promise<PeerPageValue>',
@@ -1764,10 +1857,10 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'one contiguous backwards window of visible records.',
       },
       {
-        signature: '@Remote({ mode: \'stream\' }) async *follow(request: PeerFollowRequest, signal: AbortSignal): AsyncIterable<PeerFollowFrame>',
+        signature: '@Remote({ mode: \'stream\' }) follow(request: PeerFollowRequest, signal: AbortSignal): RemoteStream<PeerFollowFrame, PeerFollowAck>',
         description: 'Open a filtered stream: opening snapshot, then durable events and latch transitions.',
         parameters: [{ name: 'request', description: 'target, window budget, and debug-only assistant stream opt-in.' }, { name: 'signal', description: 'carrier cancellation owned by the Remote stream.' }],
-        returns: 'peer follow frames; `event`/`state` frames carry the durable scan cursor.',
+        returns: 'acknowledgement-paced peer frames; a gap item is followed by a `peer/gap` failure.',
       },
     ],
   },
@@ -4612,6 +4705,22 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'info', description: 'the provider and published child identity.' }],
   },
   {
+    name: 'subagent/stop-all',
+    mode: 'emit',
+    signature: '\'subagent/stop-all\'(parent: Agent, window: symbol): void',
+    summary: 'A user Stop-all has opened the parent settlement park window.',
+    description: 'A user Stop-all has opened the parent settlement park window. The active stop policy may now interrupt live continuable descendants.',
+    parameters: [{ name: 'parent', description: 'exact live Agent authorizing the cascade.' }, { name: 'window', description: 'process-local identity of this stop window, shared by repeat presses.' }],
+  },
+  {
+    name: 'subagent/stop-idle-tree',
+    mode: 'emit',
+    signature: '\'subagent/stop-idle-tree\'(parent: Agent): void',
+    summary: 'Request Stop-all for an idle parent with no turn end to publish.',
+    description: 'Request Stop-all for an idle parent with no turn end to publish.',
+    parameters: [{ name: 'parent', description: 'exact live ordinary Agent addressed by the host.' }],
+  },
+  {
     name: 'system-prompt/assemble',
     mode: 'waterfall',
     signature: '\'system-prompt/assemble\'(this: Scoped<SystemPrompt>, assembly: PromptAssembly, context: AssembleContext, next: () => Promise<PromptAssembly>): Promise<PromptAssembly>',
@@ -4904,6 +5013,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ArchiveSessionOptions {\n    readonly stopActivity?: boolean;\n}',
   },
   {
+    name: 'AskStoreOptions',
+    declaration: 'export interface AskStoreOptions {\n    readonly path: string;\n    readonly maxCount: number;\n    readonly maxBytes: number;\n    readonly maxRecordBytes: number;\n    readonly maxRequestIdLength: number;\n    readonly instanceId: string;\n}',
+  },
+  {
     name: 'AskUserQuestionAnswer',
     declaration: 'export interface AskUserQuestionAnswer {\n    answers: AskUserQuestionAnswerItem[];\n}',
   },
@@ -4973,11 +5086,15 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'AttachmentError',
-    declaration: 'export class AttachmentError extends Error {\n    readonly code: AttachmentErrorCode;\n    constructor(message: string, code: AttachmentErrorCode, options?: ErrorOptions);\n}',
+    declaration: 'export class AttachmentError extends Error {\n    readonly code: AttachmentErrorCode;\n    readonly attachmentId?: string;\n    readonly attachmentName?: string;\n    constructor(message: string, code: AttachmentErrorCode, options?: AttachmentErrorOptions);\n}',
   },
   {
     name: 'AttachmentErrorCode',
     declaration: 'export type AttachmentErrorCode = typeof ATTACHMENT_ERROR_CODES[number];',
+  },
+  {
+    name: 'AttachmentErrorOptions',
+    declaration: 'export interface AttachmentErrorOptions extends ErrorOptions {\n    readonly attachmentId?: string;\n    readonly attachmentName?: string;\n}',
   },
   {
     name: 'AttachmentId',
@@ -5606,6 +5723,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'FileUploadValue',
     declaration: 'export interface FileUploadValue {\n    readonly receiptId: FileUploadReceiptId;\n    readonly file: FileAttachmentRef;\n}',
+  },
+  {
+    name: 'FinalizePeerInputReceipt',
+    declaration: 'export interface FinalizePeerInputReceipt {\n    readonly kind: PeerInputReceiptKind;\n    readonly alias: PeerAlias;\n    readonly requestId: PeerRequestId;\n    readonly payloadHash: string;\n    readonly instanceId: string;\n    readonly sessionId: SessionId;\n    readonly finalizedAt: number;\n    readonly created?: boolean;\n    readonly profile?: PeerProfileSummary;\n    readonly queued?: boolean;\n    readonly hopCount?: number;\n}',
   },
   {
     name: 'FinishReason',
@@ -6349,11 +6470,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PeerAnswerRequest',
-    declaration: 'export interface PeerAnswerRequest {\n    readonly target: PeerTarget;\n    readonly participant: PeerParticipant;\n    readonly askId: PeerAskId;\n    readonly answer: PeerAnswer;\n}',
+    declaration: 'export interface PeerAnswerRequest {\n    readonly target: PeerTarget;\n    readonly participant: PeerParticipant;\n    readonly askId: PeerAskId;\n    readonly requestId: PeerRequestId;\n    readonly answer: PeerAnswer;\n}',
   },
   {
     name: 'PeerAnswerValue',
-    declaration: 'export interface PeerAnswerValue {\n    readonly accepted: true;\n    readonly settled: true;\n}',
+    declaration: 'export interface PeerAnswerValue {\n    readonly accepted: true;\n    readonly settled: true;\n    readonly replayed: boolean;\n    readonly payloadHash: string;\n    readonly instanceId: string;\n}',
   },
   {
     name: 'PeerApprovalOutcome',
@@ -6364,8 +6485,20 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type PeerAskId = Branded<\'PeerAskId\'>;',
   },
   {
+    name: 'PeerAskRecord',
+    declaration: 'export type PeerAskRecord = PeerPendingAsk & {\n    readonly alias: PeerAlias;\n    readonly sessionId: SessionId;\n    readonly instanceId: string;\n    readonly createdAt: number;\n    readonly state: \'pending\' | \'answered\' | \'expired\' | \'cancelled\';\n    readonly settledAt?: number;\n    readonly settlementReason?: \'host-restarted\' | \'local-answer\' | \'local-cancelled\';\n    readonly answeredBy?: {\n        readonly requestId: PeerRequestId;\n        readonly payloadHash: string;\n    };\n};',
+  },
+  {
     name: 'PeerAskRegistry',
-    declaration: 'export class PeerAskRegistry {\n    constructor(private readonly ctx: Context, private readonly pairings: PeerPairingsStore);\n    install(): void;\n    onChange(listener: (sessionId: SessionId) => void): () => void;\n    pendingFor(sessionId: SessionId): readonly PeerPendingAsk[];\n    answer(resolved: ResolvedPeerPairing, askId: PeerAskId, answer: PeerAnswer): PeerAnswerValue;\n}',
+    declaration: 'export class PeerAskRegistry {\n    constructor(private readonly ctx: Context, private readonly pairings: PeerPairingsStore, options: AskStoreOptions);\n    install(): void;\n    onChange(listener: (sessionId: SessionId) => void): () => void;\n    pendingFor(sessionId: SessionId, resolved?: ResolvedPeerPairing): readonly PeerPendingAsk[];\n    isAvailable(): boolean;\n    list(resolved: ResolvedPeerPairing): readonly PeerAskRecord[];\n    answer(resolved: ResolvedPeerPairing, askId: PeerAskId, answer: PeerAnswer, requestId: PeerRequestId, participant?: PeerParticipant): PeerAnswerValue;\n}',
+  },
+  {
+    name: 'PeerAsksRequest',
+    declaration: 'export interface PeerAsksRequest {\n    readonly alias: PeerAlias;\n    readonly sessionId?: SessionId;\n}',
+  },
+  {
+    name: 'PeerAsksValue',
+    declaration: 'export interface PeerAsksValue {\n    readonly instanceId: string;\n    readonly asks: readonly PeerAskRecord[];\n}',
   },
   {
     name: 'PeerBinding',
@@ -6373,15 +6506,15 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PeerCancelRequest',
-    declaration: 'export interface PeerCancelRequest {\n    readonly target: PeerTarget;\n    readonly participant: PeerParticipant;\n}',
+    declaration: 'export interface PeerCancelRequest {\n    readonly target: PeerTarget;\n    readonly participant: PeerParticipant;\n    readonly dropQueued?: boolean;\n}',
   },
   {
     name: 'PeerCancelValue',
-    declaration: 'export interface PeerCancelValue {\n    readonly accepted: true;\n    readonly cancelled: boolean;\n}',
+    declaration: 'export interface PeerCancelValue {\n    readonly accepted: true;\n    readonly cancelled: boolean;\n    readonly stopIntent: PeerStopIntent;\n    readonly droppedQueued: number;\n}',
   },
   {
     name: 'PeerCapability',
-    declaration: 'export type PeerCapability = \'state-latch\' | \'derived-latch\' | \'assistant-stream\' | \'answer-routing\' | \'runaway-ceiling\' | \'session-create\' | \'model-discovery\' | \'model-routing-at-create\' | \'model-switch\' | \'model-attribution\' | \'token-ceiling\';',
+    declaration: 'export type PeerCapability = \'state-latch\' | \'derived-latch\' | \'assistant-stream\' | \'answer-routing\' | \'runaway-ceiling\' | \'session-create\' | \'model-discovery\' | \'model-routing-at-create\' | \'model-switch\' | \'model-attribution\' | \'token-ceiling\' | \'create-receipts\' | \'prompt-receipts\' | \'input-disposition\' | \'fresh-only-create\' | \'job-binding\' | \'profile-identity\' | \'ready\' | \'export-root\' | \'shape-digest\' | \'durable-asks\' | \'ask-idempotent-answer\' | \'stop-intent\' | \'cancel-drop-queued\' | \'wait-quiescent\' | \'bounded-follow\' | \'follow-gap-frames\';',
   },
   {
     name: 'PeerChainInfo',
@@ -6389,15 +6522,23 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PeerCreateDefaults',
-    declaration: 'export interface PeerCreateDefaults {\n    readonly workspaceId?: string;\n    readonly cwd?: string;\n    readonly agentPreset?: string;\n}',
+    declaration: 'export interface PeerCreateDefaults {\n    readonly workspaceId?: string;\n    readonly cwd?: string;\n    readonly agentPreset?: string;\n    readonly allowAgentPresets?: readonly string[];\n    readonly freshOnly?: boolean;\n}',
+  },
+  {
+    name: 'PeerCreateDisposition',
+    declaration: 'export type PeerCreateDisposition = \'created\' | \'adopted\' | \'unknown\';',
+  },
+  {
+    name: 'PeerCreateJobRequest',
+    declaration: 'export interface PeerCreateJobRequest {\n    readonly jobId: string;\n    readonly fence: number;\n    readonly expiresAt: number;\n    readonly capabilities: readonly string[];\n    readonly limits: PeerJobLimits;\n    readonly mcpEndpointId?: string;\n    readonly credentialRef?: string;\n    readonly allowedToolNames?: readonly string[];\n}',
   },
   {
     name: 'PeerCreateRequest',
-    declaration: 'export interface PeerCreateRequest {\n    readonly alias: PeerAlias;\n    readonly participant: PeerParticipant;\n    readonly sessionId?: SessionId;\n    readonly workspaceId?: string;\n    readonly cwd?: string;\n    readonly agentPreset?: string;\n    readonly provider?: string;\n    readonly model?: string;\n    readonly chain?: string;\n    readonly reasoningEffort?: string;\n    readonly maxTotalTokens?: number;\n}',
+    declaration: 'export interface PeerCreateRequest {\n    readonly alias: PeerAlias;\n    readonly participant: PeerParticipant;\n    readonly requestId?: PeerRequestId;\n    readonly sessionId?: SessionId;\n    readonly workspaceId?: string;\n    readonly cwd?: string;\n    readonly agentPreset?: string;\n    readonly provider?: string;\n    readonly model?: string;\n    readonly chain?: string;\n    readonly reasoningEffort?: string;\n    readonly maxTotalTokens?: number;\n    readonly job?: PeerCreateJobRequest;\n}',
   },
   {
     name: 'PeerCreateValue',
-    declaration: 'export interface PeerCreateValue {\n    readonly target: PeerTargetResolved;\n    readonly created: boolean;\n}',
+    declaration: 'export interface PeerCreateValue {\n    readonly target: PeerTargetResolved;\n    readonly created: boolean;\n    readonly replayed?: boolean;\n    readonly payloadHash?: string;\n    readonly instanceId?: string;\n    readonly profile?: PeerProfileSummary;\n}',
   },
   {
     name: 'PeerDeviceName',
@@ -6409,11 +6550,35 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PeerExecutionState',
-    declaration: 'export interface PeerExecutionState {\n    readonly latch: PeerLatch;\n    readonly since: number;\n    readonly source: \'host-latch\' | \'derived\';\n    readonly activeDescendants: number;\n    readonly descendantsExact: boolean;\n    readonly pendingAsks: readonly PeerPendingAsk[];\n    readonly lastTurnEnd?: PeerTurnTerminal;\n    readonly lastParticipantAction?: PeerParticipantAction;\n    readonly model?: PeerModelSelection;\n    readonly usage?: PeerTokenUsage;\n    readonly budget?: {\n        readonly maxTotalTokens: number;\n        readonly usedTokens: number;\n        readonly exceeded: boolean;\n        readonly metered: boolean;\n    };\n    readonly recentModelHops?: readonly PeerModelHopData[];\n}',
+    declaration: 'export interface PeerExecutionState {\n    readonly latch: PeerLatch;\n    readonly since: number;\n    readonly source: \'host-latch\' | \'derived\';\n    readonly activeDescendants: number;\n    readonly descendantsExact: boolean;\n    readonly pendingAsks: readonly PeerPendingAsk[];\n    readonly stopIntent?: PeerStopIntent;\n    readonly lastTurnEnd?: PeerTurnTerminal;\n    readonly lastParticipantAction?: PeerParticipantAction;\n    readonly model?: PeerModelSelection;\n    readonly usage?: PeerTokenUsage;\n    readonly budget?: {\n        readonly maxTotalTokens: number;\n        readonly usedTokens: number;\n        readonly exceeded: boolean;\n        readonly metered: boolean;\n    };\n    readonly recentModelHops?: readonly PeerModelHopData[];\n}',
+  },
+  {
+    name: 'PeerExportFetchRequest',
+    declaration: 'export interface PeerExportFetchRequest {\n    readonly alias: PeerAlias;\n    readonly path: string;\n    readonly maxBytes?: number;\n}',
+  },
+  {
+    name: 'PeerExportFetchValue',
+    declaration: 'export interface PeerExportFetchValue {\n    readonly path: string;\n    readonly bytes: number;\n    readonly sha256: string;\n    readonly contentBase64: string;\n}',
+  },
+  {
+    name: 'PeerExportFileEntry',
+    declaration: 'export interface PeerExportFileEntry {\n    readonly path: string;\n    readonly bytes: number;\n    readonly mtimeMs: number;\n}',
+  },
+  {
+    name: 'PeerExportListRequest',
+    declaration: 'export interface PeerExportListRequest {\n    readonly alias: PeerAlias;\n}',
+  },
+  {
+    name: 'PeerExportListValue',
+    declaration: 'export interface PeerExportListValue {\n    readonly files: readonly PeerExportFileEntry[];\n    readonly truncated: boolean;\n}',
   },
   {
     name: 'PeerExposure',
     declaration: 'export type PeerExposure = \'answer-only\' | \'debug\';',
+  },
+  {
+    name: 'PeerFollowAck',
+    declaration: 'export interface PeerFollowAck {\n    readonly type: \'ack\';\n    readonly frame: number;\n}',
   },
   {
     name: 'PeerFollowAssistantStreamFrame',
@@ -6429,7 +6594,11 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PeerFollowFrame',
-    declaration: 'export type PeerFollowFrame = PeerFollowSnapshotFrame | PeerFollowEventFrame | PeerFollowStateFrame | PeerFollowAssistantStreamFrame | PeerFollowEndFrame;',
+    declaration: 'export type PeerFollowFrame = PeerFollowSnapshotFrame | PeerFollowEventFrame | PeerFollowStateFrame | PeerFollowAssistantStreamFrame | PeerFollowGapFrame | PeerFollowEndFrame;',
+  },
+  {
+    name: 'PeerFollowGapFrame',
+    declaration: 'export interface PeerFollowGapFrame {\n    readonly type: \'gap\';\n    readonly fromSeq: SessionSeq | null;\n    readonly toSeq: SessionSeq | null;\n    readonly reason: \'queue-overflow\' | \'sequence-discontinuity\' | \'upstream-closed\' | \'open-timeout\' | \'idle-timeout\' | \'lifetime-limit\';\n    readonly resync: \'refollow-and-page\';\n}',
   },
   {
     name: 'PeerFollowRequest',
@@ -6449,11 +6618,47 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PeerHandshakeValue',
-    declaration: 'export interface PeerHandshakeValue {\n    readonly protocolVersion: PeerProtocolVersion;\n    readonly harnessVersion: string;\n    readonly schemaDigest: string;\n    readonly hostDevice: PeerDeviceName;\n    readonly capabilities: readonly PeerCapability[];\n    readonly pairings: readonly PeerPairingSummary[];\n}',
+    declaration: 'export interface PeerHandshakeValue {\n    readonly protocolVersion: PeerProtocolVersion;\n    readonly harnessVersion: string;\n    readonly schemaDigest: string;\n    readonly methodsDigest?: string;\n    readonly hostDevice: PeerDeviceName;\n    readonly instanceId: string;\n    readonly capabilities: readonly PeerCapability[];\n    readonly pairings: readonly PeerPairingSummary[];\n}',
   },
   {
     name: 'PeerId',
     declaration: 'export type PeerId = Branded<\'PeerId\'>;',
+  },
+  {
+    name: 'PeerInputDisposition',
+    declaration: 'export type PeerInputDisposition = PeerPromptDisposition | PeerCreateDisposition;',
+  },
+  {
+    name: 'PeerInputReceipt',
+    declaration: 'export interface PeerInputReceipt {\n    readonly key: string;\n    readonly kind: PeerInputReceiptKind;\n    readonly alias: PeerAlias;\n    readonly requestId: PeerRequestId;\n    readonly payloadHash: string;\n    readonly instanceId: string;\n    readonly sessionId: SessionId;\n    readonly phase: PeerInputReceiptPhase;\n    readonly acceptedAt: number;\n    readonly finalizedAt?: number;\n    readonly created?: boolean;\n    readonly profile?: PeerProfileSummary;\n    readonly queued?: boolean;\n    readonly hopCount?: number;\n}',
+  },
+  {
+    name: 'PeerInputReceiptKind',
+    declaration: 'export type PeerInputReceiptKind = \'create\' | \'prompt\';',
+  },
+  {
+    name: 'PeerInputReceiptPhase',
+    declaration: 'export type PeerInputReceiptPhase = \'prepared\' | \'finalized\';',
+  },
+  {
+    name: 'PeerInputReceiptStore',
+    declaration: 'export class PeerInputReceiptStore {\n    constructor(readonly path: string = DEFAULT_INPUT_RECEIPTS_PATH, private readonly maxCount: number = 1024, private readonly maxBytes: number = 1048576);\n    tryOpen(): {\n        readonly ok: true;\n    } | {\n        readonly ok: false;\n        readonly error: unknown;\n    };\n    isAvailable(): boolean;\n    get(kind: PeerInputReceiptKind, alias: string, requestId: string): PeerInputReceipt | undefined;\n    find(alias: string, requestId: string, kind?: PeerInputReceiptKind): {\n        readonly receipt?: PeerInputReceipt;\n        readonly ambiguous: boolean;\n    };\n    async prepare(input: PreparePeerInputReceipt): Promise<PeerInputReceipt>;\n    async finalize(input: FinalizePeerInputReceipt): Promise<PeerInputReceipt>;\n    async abortPrepared(kind: PeerInputReceiptKind, alias: string, requestId: string): Promise<void>;\n}',
+  },
+  {
+    name: 'PeerJobBinding',
+    declaration: 'export interface PeerJobBinding {\n    readonly sessionId: SessionId;\n    readonly jobId: string;\n    readonly fence: number;\n    readonly expiresAt: number;\n    readonly capabilities: readonly string[];\n    readonly limits: PeerJobLimits;\n    readonly mcpEndpointId?: string;\n    readonly credentialRef?: string;\n    readonly allowedToolNames?: readonly string[];\n    readonly alias: PeerAlias;\n    readonly instanceId: string;\n    readonly createdAt: number;\n    readonly revoked?: boolean;\n    readonly revokedAt?: number;\n}',
+  },
+  {
+    name: 'PeerJobLimits',
+    declaration: 'export interface PeerJobLimits {\n    readonly maxSteps?: number;\n    readonly maxToolCalls?: number;\n    readonly maxWallMs?: number;\n    readonly maxTotalTokens?: number;\n}',
+  },
+  {
+    name: 'PeerJobUpdateRequest',
+    declaration: 'export interface PeerJobUpdateRequest {\n    readonly alias: PeerAlias;\n    readonly requestId: PeerRequestId;\n    readonly jobId: string;\n    readonly fence?: number;\n    readonly expiresAt?: number;\n    readonly revoked?: boolean;\n}',
+  },
+  {
+    name: 'PeerJobUpdateValue',
+    declaration: 'export interface PeerJobUpdateValue {\n    readonly accepted: true;\n    readonly binding: PeerJobBinding;\n    readonly replayed: boolean;\n    readonly payloadHash: string;\n    readonly instanceId: string;\n}',
   },
   {
     name: 'PeerKnown',
@@ -6513,15 +6718,15 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PeerPairing',
-    declaration: 'export interface PeerPairing {\n    readonly alias: PeerAlias;\n    readonly peer: PeerDeviceName;\n    readonly exposure: PeerExposure;\n    readonly sessionId?: SessionId;\n    readonly create?: PeerCreateDefaults;\n    readonly remoteSessionId?: SessionId;\n    readonly endpoint?: string;\n    readonly token?: string;\n    readonly runawayCeiling?: number;\n    readonly allowModelChange?: boolean;\n    readonly routing?: PeerRoutingPolicy;\n}',
+    declaration: 'export interface PeerPairing {\n    readonly alias: PeerAlias;\n    readonly peer: PeerDeviceName;\n    readonly exposure: PeerExposure;\n    readonly sessionId?: SessionId;\n    readonly create?: PeerCreateDefaults;\n    readonly worker?: PeerWorkerPolicy;\n    readonly remoteSessionId?: SessionId;\n    readonly endpoint?: string;\n    readonly tokenHash?: string;\n    readonly outboundToken?: string;\n    readonly insecure?: boolean;\n    readonly runawayCeiling?: number;\n    readonly allowModelChange?: boolean;\n    readonly routing?: PeerRoutingPolicy;\n}',
   },
   {
     name: 'PeerPairingsStore',
-    declaration: 'export class PeerPairingsStore {\n    readonly pairingsPath: string;\n    readonly bindingsPath: string;\n    constructor(pairingsPath: string = dshHomePath(\'pairings.yaml\'), bindingsPath: string = dshHomePath(\'peer-state.json\'), private readonly options: PeerPairingsStoreOptions = {});\n    load(): LoadedPeerPairings;\n    current(): LoadedPeerPairings;\n    reload(): LoadedPeerPairings;\n    device(): PeerDeviceName;\n    list(): readonly PeerPairing[];\n    resolve(target: PeerTarget): ResolvedPeerPairing | undefined;\n    exposed(sessionId: SessionId): ResolvedPeerPairing | undefined;\n    async bind(alias: PeerAlias, device: PeerDeviceName, sessionId: SessionId, options: {\n        readonly maxTotalTokens?: number;\n    } = {}): Promise<void>;\n    ceilingOf(sessionId: SessionId): number | undefined;\n    describe(resolved: ResolvedPeerPairing): PeerTargetResolved;\n}',
+    declaration: 'export class PeerPairingsStore {\n    readonly pairingsPath: string;\n    readonly bindingsPath: string;\n    constructor(pairingsPath: string = dshHomePath(\'pairings.yaml\'), bindingsPath: string = dshHomePath(\'peer-state.json\'), private readonly options: PeerPairingsStoreOptions = {});\n    load(): LoadedPeerPairings;\n    current(): LoadedPeerPairings;\n    reload(): LoadedPeerPairings;\n    device(): PeerDeviceName;\n    list(): readonly PeerPairing[];\n    resolve(target: PeerTarget): ResolvedPeerPairing | undefined;\n    exposed(sessionId: SessionId): ResolvedPeerPairing | undefined;\n    isSessionBoundToAlias(alias: PeerAlias, sessionId: SessionId): boolean;\n    isSessionBoundToOtherAlias(alias: PeerAlias, sessionId: SessionId): boolean;\n    async bind(alias: PeerAlias, device: PeerDeviceName, sessionId: SessionId, options: {\n        readonly maxTotalTokens?: number;\n    } = {}): Promise<void>;\n    ceilingOf(sessionId: SessionId): number | undefined;\n    describe(resolved: ResolvedPeerPairing): PeerTargetResolved;\n}',
   },
   {
     name: 'PeerPairingsStoreOptions',
-    declaration: 'export interface PeerPairingsStoreOptions {\n    readonly onConfigError?: (message: string) => void;\n}',
+    declaration: 'export interface PeerPairingsStoreOptions {\n    readonly onConfigError?: (message: string) => void;\n    readonly onWarning?: (message: string) => void;\n}',
   },
   {
     name: 'PeerPairingSummary',
@@ -6540,8 +6745,20 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type PeerPendingAsk = {\n    readonly kind: \'approval\';\n    readonly askId: PeerAskId;\n    readonly toolName: string;\n    readonly callId?: string;\n    readonly reason?: string;\n    readonly since: number;\n} | {\n    readonly kind: \'question\';\n    readonly askId: PeerAskId;\n    readonly questions: readonly AskUserQuestionItem[];\n    readonly since: number;\n};',
   },
   {
+    name: 'PeerProfileIdentity',
+    declaration: 'export interface PeerProfileIdentity {\n    readonly hash: string;\n    readonly presetId: string;\n    readonly toolNames: readonly string[];\n    readonly configDigest: string;\n}',
+  },
+  {
+    name: 'PeerProfileSummary',
+    declaration: 'export interface PeerProfileSummary {\n    readonly hash: string;\n    readonly presetId: string;\n}',
+  },
+  {
     name: 'PeerPromptContentPart',
     declaration: 'export type PeerPromptContentPart = PeerPromptTextPart;',
+  },
+  {
+    name: 'PeerPromptDisposition',
+    declaration: 'export type PeerPromptDisposition = \'queued\' | \'claimed\' | \'cancelled_before_dispatch\' | \'terminal\' | \'unknown\';',
   },
   {
     name: 'PeerPromptRequest',
@@ -6553,19 +6770,35 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PeerPromptValue',
-    declaration: 'export interface PeerPromptValue {\n    readonly accepted: true;\n    readonly queued: boolean;\n    readonly hopCount: number;\n}',
+    declaration: 'export interface PeerPromptValue {\n    readonly accepted: true;\n    readonly queued: boolean;\n    readonly hopCount: number;\n    readonly replayed?: boolean;\n    readonly payloadHash?: string;\n    readonly instanceId?: string;\n    readonly disposition?: PeerPromptDisposition;\n    readonly terminalState?: PeerTerminalOutcome;\n    readonly terminal?: PeerTurnTerminal;\n}',
   },
   {
     name: 'PeerProtocolVersion',
     declaration: 'export type PeerProtocolVersion = 1;',
   },
   {
+    name: 'PeerReadyRequest',
+    declaration: 'export interface PeerReadyRequest {\n    readonly alias: PeerAlias;\n}',
+  },
+  {
+    name: 'PeerReadyValue',
+    declaration: 'export interface PeerReadyValue {\n    readonly ready: boolean;\n    readonly missing: readonly string[];\n    readonly capabilities: readonly PeerCapability[];\n    readonly profile?: PeerProfileSummary;\n    readonly instanceId: string;\n    readonly version: string;\n}',
+  },
+  {
     name: 'PeerReceipt',
     declaration: 'export interface PeerReceipt {\n    readonly key: string;\n    readonly hash: string;\n    readonly value: PeerSelectModelValue;\n    readonly at: number;\n}',
   },
   {
+    name: 'PeerReceiptRequest',
+    declaration: 'export interface PeerReceiptRequest {\n    readonly alias: PeerAlias;\n    readonly requestId: PeerRequestId;\n    readonly kind?: PeerInputReceiptKind;\n}',
+  },
+  {
     name: 'PeerReceiptStore',
-    declaration: 'export class PeerReceiptStore {\n    constructor(readonly path: string = DEFAULT_RECEIPTS_PATH, private readonly limit: number = 512);\n    get(key: string): PeerReceipt | undefined;\n    async put(key: string, hash: string, value: PeerSelectModelValue): Promise<void>;\n}',
+    declaration: 'export class PeerReceiptStore {\n    constructor(readonly path: string = DEFAULT_RECEIPTS_PATH, private readonly limit: number = 512);\n    get(key: string): PeerReceipt | undefined;\n    isPersisted(key: string): boolean;\n    async put(key: string, hash: string, value: PeerSelectModelValue): Promise<void>;\n}',
+  },
+  {
+    name: 'PeerReceiptValue',
+    declaration: 'export interface PeerReceiptValue {\n    readonly found: boolean;\n    readonly kind?: PeerInputReceiptKind;\n    readonly sessionId?: SessionId;\n    readonly payloadHash?: string;\n    readonly instanceId?: string;\n    readonly phase?: PeerInputReceiptPhase;\n    readonly replayedAcrossRestart: boolean;\n    readonly disposition: PeerInputDisposition;\n    readonly terminalState?: PeerTerminalOutcome;\n    readonly terminal?: PeerTurnTerminal;\n    readonly acceptedAt?: number;\n    readonly finalizedAt?: number;\n}',
   },
   {
     name: 'PeerRequestId',
@@ -6589,7 +6822,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'PeerSelectModelValue',
-    declaration: 'export interface PeerSelectModelValue {\n    readonly accepted: true;\n    readonly selected: PeerModelSelection;\n    readonly previous?: PeerModelSelection;\n    readonly replayed: boolean;\n}',
+    declaration: 'export interface PeerSelectModelValue {\n    readonly accepted: true;\n    readonly selected: PeerModelSelection;\n    readonly previous?: PeerModelSelection;\n    readonly replayed: boolean;\n    readonly receiptPersisted?: boolean;\n}',
   },
   {
     name: 'PeerStateRequest',
@@ -6600,12 +6833,20 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface PeerStateValue {\n    readonly target: PeerTargetResolved;\n    readonly state: PeerExecutionState;\n    readonly cursor: SessionSeq;\n}',
   },
   {
+    name: 'PeerStopIntent',
+    declaration: 'export interface PeerStopIntent {\n    readonly requestedAt?: number;\n    readonly keepInbox: true;\n    readonly turnState: PeerLatch | \'unknown\';\n    readonly activeDescendants: number;\n    readonly descendantsExact: boolean;\n    readonly inFlightTools?: number;\n    readonly quiescence: \'confirmed\' | \'observed\' | \'unknown\';\n}',
+  },
+  {
     name: 'PeerTarget',
     declaration: 'export type PeerTarget = {\n    readonly kind: \'alias\';\n    readonly alias: PeerAlias;\n} | {\n    readonly kind: \'session\';\n    readonly sessionId: SessionId;\n};',
   },
   {
     name: 'PeerTargetResolved',
     declaration: 'export interface PeerTargetResolved {\n    readonly device: PeerDeviceName;\n    readonly sessionId: SessionId;\n    readonly exposure: PeerExposure;\n    readonly alias?: PeerAlias;\n}',
+  },
+  {
+    name: 'PeerTerminalOutcome',
+    declaration: 'export type PeerTerminalOutcome = \'completed\' | \'aborted\' | \'failed\' | \'budget\' | \'blocked\' | \'max-tokens\' | \'interrupted\';',
   },
   {
     name: 'PeerTokenUsage',
@@ -6622,6 +6863,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'PeerTurnTerminal',
     declaration: 'export interface PeerTurnTerminal {\n    readonly turn: number;\n    readonly reason: \'completed\' | \'aborted\' | \'blocked\' | \'error\' | \'max-tokens\' | \'interrupted\';\n    readonly at: number;\n    readonly error?: PeerTurnError;\n    readonly ran?: PeerTurnModelReport;\n    readonly stop?: \'budget\';\n}',
+  },
+  {
+    name: 'PeerWaitQuiescentRequest',
+    declaration: 'export interface PeerWaitQuiescentRequest {\n    readonly alias: PeerAlias;\n    readonly timeoutMs: number;\n}',
+  },
+  {
+    name: 'PeerWaitQuiescentValue',
+    declaration: 'export interface PeerWaitQuiescentValue {\n    readonly observation: \'observed\';\n    readonly timedOut: boolean;\n    readonly last?: PeerStateValue;\n}',
+  },
+  {
+    name: 'PeerWorkerPolicy',
+    declaration: 'export interface PeerWorkerPolicy {\n    readonly allowedCapabilities?: readonly string[];\n    readonly maxLimits?: PeerJobLimits;\n    readonly allowedMcpEndpoints?: readonly string[];\n    readonly allowedToolNames?: readonly string[];\n}',
   },
   {
     name: 'PermissionCatalog',
@@ -6710,6 +6963,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'PreparedReferencedMessage',
     declaration: 'export interface PreparedReferencedMessage {\n    content: ContentBlock[];\n    additionalContext?: UserMessage;\n}',
+  },
+  {
+    name: 'PreparePeerInputReceipt',
+    declaration: 'export interface PreparePeerInputReceipt {\n    readonly kind: PeerInputReceiptKind;\n    readonly alias: PeerAlias;\n    readonly requestId: PeerRequestId;\n    readonly payloadHash: string;\n    readonly instanceId: string;\n    readonly sessionId: SessionId;\n    readonly acceptedAt: number;\n    readonly queued?: boolean;\n    readonly hopCount?: number;\n}',
   },
   {
     name: 'PrepareSessionOptions',
@@ -6898,6 +7155,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'RemoteEventHostInfo',
     declaration: 'export interface RemoteEventHostInfo {\n    readonly home: string;\n}',
+  },
+  {
+    name: 'RemoteStream',
+    declaration: 'export type RemoteStream<Out, In = never> = AsyncIterable<Out> & {\n    readonly [STREAM_UPLINK]?: In;\n};',
   },
   {
     name: 'RenderedDocumentBytes',
@@ -7153,7 +7414,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'Session',
-    declaration: 'export class Session {\n    get surface(): SessionSurface;\n    readonly header: SessionHeader;\n    readonly inheritedEventCount: SessionLogOffset;\n    get id(): SessionId;\n    readonly firstLiveSeq: SessionLogOffset;\n    readonly firstLifecycleSeq: SessionLogOffset;\n    static create(id: SessionId, seed?: readonly SessionEvent[], header?: SessionHeader, inheritedEventCount?: SessionLogOffset, projections?: readonly SessionMessageProjection[]): Session;\n    static fromRestore(id: SessionId, seed: readonly SessionEvent[], header: SessionHeader, inheritedEventCount: SessionLogOffset, eventState: SessionSeedEventState, projections?: readonly SessionMessageProjection[]): Session;\n    eventAt(seq: SessionSeq): SessionEvent | undefined;\n    snapshotEvents(fromSeq: SessionLogOffset = SessionLogOffset(0), toSeqExclusive: SessionLogOffset = this.seq): readonly SessionEvent[];\n    ownEvents(): readonly SessionEvent[];\n    isOwnSeq(seq: SessionSeq): boolean;\n    get seq(): SessionLogOffset;\n    append<T extends SessionEventType>(type: T, data: SessionEventMap[T], ...opts: T extends SurfaceEventType ? [\n        opts: SurfaceIntent<T>\n    ] : [\n        opts?: {\n            ignorable?: true;\n        }\n    ]): SessionEvent<T>;\n    requestHeader(): EpochHeader | undefined;\n    requestContext(): RequestContext | undefined;\n    toolHistory(): ToolHistory;\n    deriveMessages(): Message[];\n    closeUnansweredToolCalls(turn: number, step: number): number;\n    deriveEventMessage(event: SessionEvent) /* …truncated — full shape in source */',
+    declaration: 'export class Session {\n    get surface(): SessionSurface;\n    readonly header: SessionHeader;\n    readonly inheritedEventCount: SessionLogOffset;\n    get id(): SessionId;\n    readonly firstLiveSeq: SessionLogOffset;\n    readonly firstLifecycleSeq: SessionLogOffset;\n    static create(id: SessionId, seed?: readonly SessionEvent[], header?: SessionHeader, inheritedEventCount?: SessionLogOffset, projections?: readonly SessionMessageProjection[]): Session;\n    static fromRestore(id: SessionId, seed: readonly SessionEvent[], header: SessionHeader, inheritedEventCount: SessionLogOffset, eventState: SessionSeedEventState, projections?: readonly SessionMessageProjection[]): Session;\n    eventAt(seq: SessionSeq): SessionEvent | undefined;\n    snapshotEvents(fromSeq: SessionLogOffset = SessionLogOffset(0), toSeqExclusive: SessionLogOffset = this.seq): readonly SessionEvent[];\n    ownEvents(): readonly SessionEvent[];\n    isOwnSeq(seq: SessionSeq): boolean;\n    get seq(): SessionLogOffset;\n    append<T extends SessionEventType>(type: T, data: SessionEventMap[T], ...opts: T extends SurfaceEventType ? [\n        opts: SurfaceIntent<T>\n    ] : [\n        opts?: {\n            ignorable?: true;\n        }\n    ]): SessionEvent<T>;\n    requestHeader(): EpochHeader | undefined;\n    requestContext(): RequestContext | undefined;\n    toolHistory(): ToolHistory;\n    referencedImage(attachmentId: string): ImageBlock[\'attachment\'] | undefined;\n    referencedFile(attachmentId: string): FileBlock[\'attachme /* …truncated — full shape in source */',
   },
   {
     name: 'SessionAccess',
@@ -8216,6 +8477,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SubagentProvider {\n    readonly name: string;\n    readonly capabilities: SubagentCapabilities;\n    readonly inheritsParentContext: boolean;\n    readonly agentRouteDefaults?: Readonly<{\n        provider: string;\n        model: string;\n    }>;\n    start(request: ResolvedSubagentStartRequest): Promise<SubagentRun>;\n    prepareContinuable?(request: ContinuableCreateRequest): Promise<ContinuableCreateSpec>;\n}',
   },
   {
+    name: 'SubagentReportMode',
+    declaration: 'export type SubagentReportMode = \'bounded\' | \'full-inline\';',
+  },
+  {
     name: 'SubagentResult',
     declaration: 'export interface SubagentResult {\n    readonly output: readonly ContentBlock[];\n    readonly structured?: unknown;\n    readonly diagnostic?: string;\n    readonly stopReason: SubagentStopReason;\n}',
   },
@@ -8245,7 +8510,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SubagentStartRequest',
-    declaration: 'export interface SubagentStartRequest {\n    readonly label?: string;\n    readonly prompt: ContentBlock[];\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n    readonly agentOptions?: AgentOptions;\n    readonly outputSchema?: ObjectJsonSchema;\n    readonly maxDepth?: number;\n    readonly toolFilter?: ToolRestriction;\n    readonly persona?: string;\n    readonly quiet?: boolean;\n}',
+    declaration: 'export interface SubagentStartRequest {\n    readonly label?: string;\n    readonly prompt: ContentBlock[];\n    readonly parent: Agent;\n    readonly signal: AbortSignal;\n    readonly agentOptions?: AgentOptions;\n    readonly outputSchema?: ObjectJsonSchema;\n    readonly maxDepth?: number;\n    readonly toolFilter?: ToolRestriction;\n    readonly persona?: string;\n    readonly quiet?: boolean;\n    readonly reportMode?: SubagentReportMode;\n}',
   },
   {
     name: 'SubagentStopReason',

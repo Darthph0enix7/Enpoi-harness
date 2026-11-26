@@ -2557,7 +2557,8 @@ export interface LspLocalServerConfig {
 ## `@deepseek-ai/dsh-mcp-client`
 
 - `inject`: `tools`
-- `source`: [`packages/mcp/mcp-client/src/index.ts:104`](../packages/mcp/mcp-client/src/index.ts)
+- `refs`: [`JsonValue`](../packages/util/values/src/index.ts)
+- `source`: [`packages/mcp/mcp-client/src/index.ts:130`](../packages/mcp/mcp-client/src/index.ts)
 
 ```ts config-catalog
 /** Configuration for one stdio or Streamable HTTP MCP server. */
@@ -2589,6 +2590,10 @@ export interface StdioConfig {
   maxInstructionBytes?: number
   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
   reconnect?: ReconnectConfig
+  /** Optional allowlist of raw MCP tool names; unknown names fail loud at load/refresh. */
+  allowedTools?: string[]
+  /** Whether to publish attributed server `instructions` into the system prompt (default `true`). */
+  includeInstructions?: boolean
 }
 
 /** Config for connecting to an MCP server over Streamable HTTP (SSE). */
@@ -2613,6 +2618,24 @@ export interface StreamableHttpConfig {
   maxInstructionBytes?: number
   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
   reconnect?: ReconnectConfig
+  /** Optional allowlist of raw MCP tool names; unknown names fail loud at load/refresh. */
+  allowedTools?: string[]
+  /** Whether to publish attributed server `instructions` into the system prompt (default `true`). */
+  includeInstructions?: boolean
+  /** Release-owned tool roster; required with `lazyConnect`. */
+  staticTools?: StaticMcpTool[]
+  /** Publish static tools without network access; negotiate only for an authorized session. */
+  lazyConnect?: boolean
+  /** Maximum cached lazy session connections (default 16). */
+  lazySessionCacheMax?: number
+  /** Idle period after which a lazy connection closes, in milliseconds (default 300000). */
+  lazySessionIdleTtlMs?: number
+  /** Refuse HTTP requests without a session and dynamic headers; implied by `lazyConnect`. */
+  requireDynamicHeaders?: boolean
+  /** Case-insensitive list of header names treated as credentials for redaction. */
+  secretHeaderNames?: string[]
+  /** Minimum length of a credential header and its recognized authorization payload (default 8). */
+  secretHeaderMinLength?: number
 }
 
 /** Automatic reconnect policy for one MCP server connection. */
@@ -2625,6 +2648,22 @@ export interface ReconnectConfig {
   maxDelayMs?: number
   /** Consecutive failed attempts per outage before giving up for good (default 10). */
   maxAttempts?: number
+}
+
+/** One release-owned tool definition; annotations are not used for authorization or prompting. */
+export interface StaticMcpTool {
+  /** Raw MCP tool name. */
+  name: string
+  /** Model-facing description supplied by the profile. */
+  description: string
+  /** JSON Schema for the tool's object arguments. */
+  inputSchema: {
+    /** JSON Schema root type; MCP tool arguments are always an object. */
+    type: 'object'
+    [key: string]: JsonValue
+  }
+  /** Optional MCP annotations. */
+  annotations?: Record<string, JsonValue>
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-mcp-client -->
@@ -3635,7 +3674,7 @@ export type JournalMode = 'wal' | 'delete' | 'truncate' | 'persist'
 ## `@deepseek-ai/dsh-subagent`
 
 - `refs`: `Volatile` (`@deepseek-ai/cordis`)
-- `source`: [`packages/subagent/subagent/src/index.ts:198`](../packages/subagent/subagent/src/index.ts)
+- `source`: [`packages/subagent/subagent/src/index.ts:217`](../packages/subagent/subagent/src/index.ts)
 
 ```ts config-catalog
 /** Host configuration for continuable subagent capacity and settlement notices. */
@@ -3646,13 +3685,24 @@ export interface Config {
   maxDepth: Volatile<number>
   /**
    * Maximum UTF-16 code units of a settled child's closing report copied into
-   * its parent's notice; defaults to 12000. The complete report always stays in
-   * the child's own durable session, and a shortened notice states the exact
-   * omission and how to read it there.
+   * its parent's notice; defaults to 12000. Oversized reports spill to
+   * `ctx.spillStore` when mounted; a shortened notice states what was omitted
+   * and how to find the original in the child session or the saved text copy.
    */
   settlementReportMaxChars: Volatile<number>
   /** Maximum image blocks of a settled child's closing report copied into its parent's notice; defaults to 4. */
   settlementReportMaxImages: Volatile<number>
+  /**
+   * Hard UTF-16 character ceiling used when `reportMode` is `'full-inline'` or
+   * when both spill storage and final session flush fail; defaults to 200000.
+   */
+  settlementReportHardMaxChars: Volatile<number>
+  /** Maximum UTF-16 characters of the Markdown heading outline emitted in a spilled notice; defaults to 1500. */
+  settlementReportOutlineMaxChars: Volatile<number>
+  /** Maximum UTF-16 characters per physical line in a spilled closing-report file before wrapping; defaults to 1800. */
+  settlementSpillMaxLineChars: Volatile<number>
+  /** Maximum milliseconds to wait for `ctx.spillStore.saveText()` before falling back to inline truncation; defaults to 5000. */
+  settlementSpillTimeoutMs: Volatile<number>
 }
 ```
 <!-- END GENERATED config-catalog:@deepseek-ai/dsh-subagent -->

@@ -3464,7 +3464,7 @@ SHA-256: `6f22a9d02b9a1f1157f3b0e7bdccd7e7b12b085c4efdb709dfc74a465cd4e590`
 
 SHA-256: `4a9bef9f27a942520cc2279ca7dd3082556e4bff543f66b5c0333e1bbed1cd86`
 
-来源：[`packages/subagent/subagent/src/continuation-messages.ts:22`](../packages/subagent/subagent/src/continuation-messages.ts)
+来源：[`packages/subagent/subagent/src/continuation-messages.ts:24`](../packages/subagent/subagent/src/continuation-messages.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
@@ -5178,7 +5178,7 @@ SHA-256: `c5e7f0ca35538a55348e92afc252cc15dd0e043e6cbd411892e1a31f9872e969`
 
 SHA-256: `4e97c3d85c0fc817ee58873c38c25a2474abaaa0af4839311b50b68db3b8cf1a`
 
-来源：[`packages/subagent/subagent/src/continuation-messages.ts:37`](../packages/subagent/subagent/src/continuation-messages.ts)
+来源：[`packages/subagent/subagent/src/continuation-messages.ts:39`](../packages/subagent/subagent/src/continuation-messages.ts)
 
 | 属性 | 存在性 | 类型 |
 |---|---|---|
