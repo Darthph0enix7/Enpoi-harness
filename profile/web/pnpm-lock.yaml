@@ -205,6 +205,17 @@ importers:
 
   packages/enpoi-heavy-providers: {}
 
+  packages/enpoi-jarvis-worker:
+    dependencies:
+      dsh-enpoi-job-guard:
+        specifier: workspace:*
+        version: link:../enpoi-job-guard
+      dsh-enpoi-worker-credentials:
+        specifier: workspace:*
+        version: link:../enpoi-worker-credentials
+
+  packages/enpoi-job-guard: {}
+
   packages/enpoi-living-brief:
     dependencies:
       dsh-enpoi-contracts:
@@ -288,6 +299,8 @@ importers:
       dsh-enpoi-contracts:
         specifier: workspace:*
         version: link:../enpoi-contracts
+
+  packages/enpoi-worker-credentials: {}
 
 packages:
 
