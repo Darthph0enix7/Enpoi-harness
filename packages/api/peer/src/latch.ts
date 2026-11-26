@@ -157,6 +157,8 @@ export class PeerLatchFold {
   private latch: PeerLatch = 'idle'
   private latchSince = 0
   private lastEventTime = 0
+  private readonly openTools = new Set<string>()
+  private toolsExact = true
 
   /**
    * Fold one durable event into the cached state.
@@ -165,6 +167,23 @@ export class PeerLatchFold {
   apply(event: PeerFoldEvent): void {
     this.lastEventTime = event.time
     switch (event.type) {
+      case 'tool/call':
+      case 'tool/result': {
+        const id = event.type === 'tool/call' ? stringField(event.data, 'callId')
+          : stringField(recordField(event.data, 'message'), 'toolCallId')
+        const turn = numberField(event.data, 'turn')
+        const step = numberField(event.data, 'step')
+        if (id === undefined || turn === undefined || step === undefined) {
+          this.toolsExact = false
+          break
+        }
+        const key = JSON.stringify([turn, step, id])
+        if (event.type === 'tool/call') {
+          if (this.openTools.has(key)) this.toolsExact = false
+          this.openTools.add(key)
+        } else if (!this.openTools.delete(key)) this.toolsExact = false
+        break
+      }
       case 'turn/start': {
         const turn = numberField(event.data, 'turn')
         this.turnHops = 0
@@ -292,6 +311,14 @@ export class PeerLatchFold {
   /** Record a host-local peer action; supplemental to the durable participant attribution written into the session log. */
   recordPeerAction(action: PeerExecutionState['lastParticipantAction']): void {
     if (action !== undefined) this.lastPeerAction = action
+  }
+
+  /**
+   * Count tool calls with no result yet.
+   * @returns unmatched tool calls, or undefined if pairings cannot be counted from the log.
+   */
+  inFlightTools(): number | undefined {
+    return this.toolsExact ? this.openTools.size : undefined
   }
 
   /** The number of current-turn catalog children without an observed settlement. */

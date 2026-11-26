@@ -11,14 +11,14 @@
 
 | 工具 | 作用 |
 |---|---|
-| `peer_status {alias}` | 握手（对端身份、能力、协议）+ `peer.state`：暴露级别、目标会话、闩锁状态、子代理数、待决询问、当前模型。 |
+| `peer_status {alias}` | 握手（对端身份、本次启动的 `instanceId`、摘要、能力、协议）+ `peer.state`：暴露级别、目标会话、闩锁状态、子代理数、待决询问、当前模型与停止意图。观察到静默不代表清理已经完成。 |
 | `peer_sessions {alias?}` | 跨所有调用方配对发现：alias、对端、endpoint、绑定的远端会话 id（本地 `remoteSessionId` 固定或主机上报的会话）、暴露级别、闩锁摘要与最近活动；不可达主机即为该行的错误。只读。 |
 | `peer_models {alias, limit?, cursor?, zeroPrice?, tools?}` | 对端允许本调用方选择的模型与链（已按策略过滤），附带每条路由的能力事实（工具、视觉、上下文窗口、零价、受限、训练、推理强度）与每个链成员的实时状态（`ready`、带 `cooldownUntil` 的 `cooldown`、`deprecated`）；策略通过 `selectable` 回显。只读。不声明模型发现能力的主机会返回 `peer/capability-missing`，并提示 "host does not advertise model-discovery; upgrade the host"。 |
 | `peer_switch_model {alias, provider?, model?, chain?, reasoningEffort?, requestId?}` | 把空闲的远端会话在下个回合切换到另一条路由（`provider`+`model`，或仅链 id 以取其首个就绪成员；也可在链内指定具体路由）。此处命名的 `chain` 或路由只替换本次调用中配对固定的 create 路由。返回已应用的路由、先前路由，以及同一 `requestId` 重试时的 `replayed`。对端执行自己的允许列表；拒绝会带 `peer/forbidden` 与策略原因（`model-not-allowed`、`chain-not-allowed`、`price-unproven` 等），忙碌会话返回带闩锁的 `peer/conflict`。不声明模型切换能力的主机会返回 `peer/capability-missing`，并提示 "host does not advertise model-switch; upgrade the host"。 |
-| `peer_ask {alias, message?, waitMs?, resume?, provider?, model?, chain?, reasoningEffort?, maxTotalTokens?}` | 必要时采纳/创建会话，以带归属的 peer 回合发送提示，带重连与 `peer.page` 修复地跟踪，直到会话真正静默（无活动子代理或询问且静默窗口结束）后返回**最终**回合；否则返回结构化 pending/失败结果。路由选项仅在本调用**创建**会话时生效（此处命名的路由会替换配对固定的 `create` 路由），`maxTotalTokens` 记录该会话的 token 上限；对已绑定的会话这些选项会被拒绝并指向 `peer_switch_model`，而不是被静默丢弃。被跟踪回合进入 `waiting_approval` 时**提前**返回 `status: 'waiting_approval'` 与待决询问（`askId`、`kind`、`toolName`、`reason` 及提问选项）；`resume: <requestId>` 可续跟同一回合直到终态，不会重发消息。主机在跟踪中途停止应答时，在 `probeIntervalMs` 之后返回 `status: 'host_unreachable'`（绝不取消远端回合）。 |
-| `peer_asks {alias}` | 远端待决询问（审批与提问两种）。 |
-| `peer_answer {alias, askId, outcome \| answers[]}` | 解决审批询问（`allowed-once` \| `rejected`）或提问询问（`answers: [{id, selected[], custom?}]`）。先到先得。非法选择在本地被拒绝并给出原因，绝不调用主机。传输失败时重读 `peer.state`：询问已消失则报告 `confirmation: 'lost'`，而不是诱使盲目重试的失败。 |
-| `peer_cancel {alias}` | 取消远端当前回合，归属为本调用方。传输失败时重读闩锁：无活动回合时报 `confirmation: 'lost'`。 |
+| `peer_ask {alias, message?, waitMs?, resume?, requestId?, provider?, model?, chain?, reasoningEffort?, maxTotalTokens?}` | 必要时采纳/创建会话，以带归属的 peer 回合发送提示，带重连与 `peer.page` 修复地跟踪，直到会话真正静默（无活动子代理或询问且静默窗口结束）后返回**最终**回合；否则返回结构化 pending/失败结果。路由选项仅在本调用**创建**会话时生效（此处命名的路由会替换配对固定的 `create` 路由），`maxTotalTokens` 记录该会话的 token 上限；对已绑定的会话这些选项会被拒绝并指向 `peer_switch_model`，而不是被静默丢弃。被跟踪回合进入 `waiting_approval` 时**提前**返回 `status: 'waiting_approval'` 与待决询问（`askId`、`kind`、`toolName`、`reason` 及提问选项）；`resume: <requestId>` 可续跟同一回合直到终态，不会重发消息。主机在跟踪中途停止应答时，在 `probeIntervalMs` 之后返回 `status: 'host_unreachable'`（绝不取消远端回合）。 |
+| `peer_asks {alias}` | 主机声明 `durable-asks` 时读取其询问日志，包括 `answered`、`expired` 和 `cancelled` 状态；旧主机只提供即时的待决列表，调用方会发出警告。 |
+| `peer_answer {alias, askId, requestId?, outcome \| answers[]}` | 提交一次审批决定（`allowed-once` \| `rejected`）或提问决定（`answers: [{id, selected[], custom?}]`）。以原 ID 重试相同决定可确认先前已处理的应答（`replayed: true`），不会再次投递决定。 |
+| `peer_cancel {alias}` | 以调用方身份请求停止。`stopIntent` 区分停止请求与执行观测，`keepInbox: true` 保留排队任务。未收到答复时，即使回合不再运行，也不能断定停止请求已生效。 |
 
 ## 配对文件
 
@@ -33,7 +33,10 @@ pairings:
     exposure: debug               # host-role; required by the host parser
     endpoint: https://laptop.pike-acrux.ts.net:8443
     remoteSessionId: sess-xyz     # optional; omit to address the alias (create/adopt)
-    token: null                   # reserved; sent as Authorization: Bearer, not verified by the host yet
+    outboundToken: null           # optional; plaintext bearer secret sent when dialing endpoint
+    tokenHash: null               # host-role inbound credential hash (ignored by caller)
+    inboundToken: null            # host-role plaintext inbound credential (ignored by caller)
+    insecure: false               # host-role auth opt-out (ignored by caller)
     create:
       cwd: /home/user/projects/thing
       agentPreset: standard
@@ -68,8 +71,9 @@ patch。插件配置的 `pairingsPath`（CLI 的 `--pairings`）可指向其他�
 处理。本地服务不可用时
 （无 `approval` 服务、无 agent、无打开的回合）或询问为提问类型时，询问写入
 持久通知文件（`<配对目录>/peer-bridge/asks.jsonl`），仍可通过
-`peer_answer` / `ds peer answer` 应答。`peer/conflict` 表示其他参与者已先行
-应答——本插件如实报告，绝不盲目重试。不会自动应答任何询问。
+`peer_answer` / `ds peer answer` 应答。不会自动应答任何询问。
+
+桥接插件发送决定前，会在通知文件旁的 `answer-requests` 目录记录为该询问生成的应答 ID，不保存决定内容。除非显式传入 `requestId`，`peer_answer` 和本地卡片转发会为同一询问和调用方使用同一 ID。未收到答复时，不能断定由谁应答，也不能排除询问已经过期。若要确认是否为重放，请使用原 ID 和相同决定。不要重试已过期的询问，也不要重试主机因工作节点重启而拒绝的询问。
 
 被跟踪回合进入 `waiting_approval` 时不会把调用方拖到 `waitMs`：`peer_ask`
 提前返回 `ok: false`、`pending: true`、`status: 'waiting_approval'`、会话 id、
@@ -84,6 +88,10 @@ request id 以及结构化的待决询问 `pendingAsks[]`（另含摘要 `asks[]
 
 ## 跟踪可靠性
 
+`peer_ask` 为提示分配一个 `requestId`，并据此派生单独的 `createRequestId`。若未收到应答，它查询 `peer.receipt` 并报告主机所知的状态，不会重发请求。提示状态可以是 `queued`、`claimed`、`cancelled_before_dispatch`、`terminal` 或 `unknown`；回执缺失或无法读取时，只能报告 `unknown`，不能断定主机从未接收。若要重试，请传回原 `requestId`，并保持消息及创建选项不变；若只想继续跟踪已接收的提示而不重发，请使用 `resume`。不要把凭据放入请求 ID。主机的回执保留量有限，不要假定旧 ID 仍可安全重放。
+
+握手摘要不一致或主机未声明 `peer_ask` 所需的可选能力时，调用方会发出警告。工作节点的就绪检查、任务更新、导出读取以及等待静默观测仅由 CLI 提供，不会为 peer 工具组增加工具或权限。
+
 `peer_ask` 与 `ds peer ask`/`follow` 在首个 `turn/end` 之后，只要仍有子代理、
 待决询问或后续回合活动，就会继续跟踪；只有在静默窗口（`settleMs`，默认 2000
 毫秒；CLI 的 `--settle-ms`）结束并重读一次 `peer.state` 确认后，才认定会话
@@ -94,10 +102,8 @@ request id 以及结构化的待决询问 `pendingAsks[]`（另含摘要 `asks[]
 回合会把结果冻结在我们自己的回合上（`superseded: true`），且 terminal 只携带其
 自身回合提交的回答文本。`admitted` 报告宿主已接受提示（`peer.prompt` 返回接受，
 或持久的 `user/message`），因此已记录的提示绝不会被报告为未采纳。
-`peer/not-paired`、`peer/not-found`、`peer/forbidden`、
-`peer/version-skew` 错误帧会立即终止跟踪并上报该错误，而不是按退避节奏无限
-重连；`peer.page` 无法证明连续的持久化空洞会带 `[from, to)` 范围经警告回调
-上报，重放则跨过该空洞继续。
+
+主机声明 `bounded-follow` 时，调用方按顺序确认每个已消费的非终止帧。遇到 `gap` 帧或 `peer/gap`，调用方重新打开跟踪并用 `peer.page` 修复历史，不会把缺口当作完成。连续三次修复重试仍未收到新的持久事件时，调用方停止重试。若主机返回 `follow-capacity`，请退避后再重新打开跟踪。
 
 主机在回合中途消失（笔记本休眠、链路中断）时，跟踪套接字仍然静默打开，单凭
 静默无法区分"主机已离开"与"模型正在生成"。在无帧达到
@@ -109,16 +115,11 @@ request id 以及结构化的待决询问 `pendingAsks[]`（另含摘要 `asks[]
 
 ## 已知限制与后续工作
 
-- 提问类询问会展示但暂不可从本桥应答（尚未暴露结构化的
-  `AskUserQuestionAnswer` 词表）。
 - `hopCount` 固定发送 0：本桥不跟踪自主交换链（doc 69 §9.3 视其为遥测）。
+- 调用方在拨号 `endpoint` 时将 `outboundToken` 作为 `Authorization: Bearer` 发送，且绝不在工具输出或错误中记录或回显它；主机角色字段（`tokenHash`、`inboundToken`、`insecure`、`create.allowAgentPresets`）会被接受并忽略，而有歧义的旧键 `token` 会被拒绝并提示使用 `outboundToken`。若配对设置了 `insecure: true`，须保持对端链路仅限 tailnet/LAN。
 - 主机侧 `peer.create` 绑定与主机配对是两件事；本包只读取调用方条目。
 - 调用方握手报告已安装的 harness 版本：解析 profile 旁的
   `@deepseek-ai/dsh-api-peer` 清单，或 `$DSH_HOME` 下安装器的
   `harness/install-state.json`；`DSH_PEER_HARNESS_VERSION` 可覆盖，两者都不存在时
   会明确报错（fail closed），不会发送伪造身份。
-- 因 `@deepseek-ai/dsh-api-peer` 不是 profile 依赖，这里保留一份本地
-  peer 客户端副本（`src/peer-client.ts`）；帧协议需与
-  `packages/api/peer/src/client.ts` 保持同步。本地副本额外在调用方终态错误帧上
-  终止、对已接受的修复空洞发出警告，并在 `src/index.ts` 中先结算再返回；
-  harness 客户端目前仍对除版本偏差外的错误一律重试。
+- 由于 `@deepseek-ai/dsh-api-peer` 不是 profile 依赖，这里保留 peer 客户端副本（`src/peer-client.ts`），须与 `packages/api/peer/src/client.ts` 保持同步。本地应答 ID 文件不会自动清理；主机独立限制日志保留量，因此本地仍有 ID 并不保证可重放。

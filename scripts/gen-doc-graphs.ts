@@ -842,6 +842,20 @@ const SERVICE_ROLES: ServiceRole[] = [
     mode: 'seam',
     note: 'The peer host reads this structural seam through `ctx.get(\'peerRouting\')`; the deployed profile plugin owns the catalogue, selector rules, chain registry, and route health, while the peer package keeps transport, pairing, and exposure. Without a mounted implementation every routing request fails closed.',
   },
+  {
+    key: 'peerJobBindings',
+    pkg: 'peer',
+    title: 'Peer job binding store',
+    mode: 'seam',
+    note: 'The peer host stores one job binding per worker session (job id, integer fence, expiry, limits, tool allow-list, credential reference); the job guard and credential provider read it by session. Without a binding, a worker session has no authority.',
+  },
+  {
+    key: 'peerProfileIdentity',
+    pkg: 'peer',
+    title: 'Peer profile identity seam',
+    mode: 'seam',
+    note: 'The peer host asks this structural seam to describe the effective tool and profile view of a worker session; the deployed worker profile provides it. Worker `create` fails and tears the session down when it is missing.',
+  },
 ]
 
 function generatedHeader(title: string): string[] {

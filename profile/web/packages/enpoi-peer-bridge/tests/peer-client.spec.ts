@@ -3,6 +3,46 @@ import { PeerBridgeError, PeerClient, type PeerFollowFrame, type PeerWebSocket }
 import { FakeSocket, rpcResponse, SNAPSHOT } from './helpers.ts'
 
 describe('PeerClient envelope', () => {
+  it('compares both digests without refusing the host and preserves its instance identity', async () => {
+    const warnings: string[] = []
+    const client = new PeerClient({
+      endpoint: 'https://host', device: 'caller', schemaDigest: 'local-shape', harnessVersion: '1.0.0',
+      onCompatibilityWarning: (message) => { warnings.push(message) },
+      fetch: async (_input, init) => {
+        expect(init?.body).toEqual(expect.stringContaining('local-shape'))
+        return rpcResponse({ instanceId: 'boot-1', capabilities: ['shape-digest'], schemaDigest: 'remote-shape', methodsDigest: 'remote-methods' })
+      },
+    })
+    expect(await client.handshake()).toMatchObject({ instanceId: 'boot-1' })
+    expect(warnings).toEqual([expect.stringContaining('schemaDigest'), expect.stringContaining('methodsDigest')])
+  })
+
+  it('sends receipt, ready, job update, and export calls with their exact request fields', async () => {
+    const sent: unknown[] = []
+    const client = new PeerClient({
+      endpoint: 'https://host', device: 'caller',
+      fetch: async (_input, init) => {
+        if (typeof init?.body !== 'string') throw new Error('missing request body')
+        const body = JSON.parse(init.body) as { method: string; payload: { args: { request: Record<string, unknown> } } }
+        sent.push([body.method, body.payload.args.request])
+        return rpcResponse({})
+      },
+    })
+    const target = { alias: 'scratch' }
+    await client.receipt({ ...target, requestId: 'req-1', kind: 'create' })
+    await client.ready(target)
+    await client.jobUpdate({ ...target, requestId: 'req-2', jobId: 'job-1', fence: 2 })
+    await client.exportList(target)
+    await client.exportFetch({ ...target, path: 'note', maxBytes: 64 })
+    expect(sent).toEqual([
+      ['peer/receipt', { alias: 'scratch', requestId: 'req-1', kind: 'create' }],
+      ['peer/ready', target],
+      ['peer/jobUpdate', { alias: 'scratch', requestId: 'req-2', jobId: 'job-1', fence: 2 }],
+      ['peer/exportList', target],
+      ['peer/exportFetch', { alias: 'scratch', path: 'note', maxBytes: 64 }],
+    ])
+  })
+
   it('wraps unary calls in the SRC request envelope and decodes values', async () => {
     const bodies: Array<{ url: string; body: Record<string, unknown> }> = []
     const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -95,6 +135,63 @@ describe('PeerClient envelope', () => {
 })
 
 describe('PeerClient follow', () => {
+  it('bounds explicit gap retries when snapshots repeat without forward progress', async () => {
+    let generations = 0
+    const client = new PeerClient({ endpoint: 'https://host', device: 'caller', backoff: { initialMs: 1, maxMs: 1, factor: 1 },
+      webSocket: () => new FakeSocket((socket, id) => {
+        generations += 1
+        socket.frame(id, { ...SNAPSHOT, cursor: 1 })
+        socket.frame(id, { type: 'gap', fromSeq: 2, toSeq: 2, reason: 'idle-timeout', resync: 'refollow-and-page' })
+      }),
+    })
+    await expect((async () => {
+      for await (const frame of client.follow({ target: { kind: 'alias', alias: 'scratch' } }, AbortSignal.timeout(1000))) expect(frame.type).not.toBe('end')
+    })()).rejects.toMatchObject({ code: 'peer/gap' })
+    expect(generations).toBe(4)
+  })
+  it('acks each consumed item in order, skips the gap, then repairs on a new generation', async () => {
+    const acks: unknown[] = []
+    const calls: string[] = []
+    let generation = 0
+    const client = new PeerClient({
+      endpoint: 'https://host', device: 'caller', backoff: { initialMs: 1, maxMs: 1, factor: 1 },
+      fetch: async () => { calls.push('page'); return rpcResponse({ records: [{ seq: 2, time: 0, type: 'user/message', data: {} }], hasMore: false }) },
+      webSocket: () => {
+        const current = ++generation
+        return new FakeSocket((socket, id) => {
+          calls.push(`open-${current}`)
+          socket.frame(id, { ...SNAPSHOT, cursor: current === 1 ? 1 : 3 })
+        }, (socket, id, ack) => {
+          acks.push(ack)
+          if (current === 1 && acks.length === 1) socket.frame(id, { type: 'state', state: SNAPSHOT.state, cursor: 1 })
+          else if (current === 1) {
+            socket.emit('message', { data: JSON.stringify({ type: 'item', streamId: id, value: { type: 'gap', fromSeq: 2, toSeq: 2, reason: 'queue-overflow', resync: 'refollow-and-page' } }) })
+            socket.emit('message', { data: JSON.stringify({ type: 'error', streamId: id, error: { code: 'peer/gap' } }) })
+          } else socket.frame(id, { type: 'end', reason: 'target-detached' })
+        })
+      },
+    })
+    const frames: string[] = []
+    for await (const frame of client.follow({ target: { kind: 'alias', alias: 'scratch' } }, AbortSignal.timeout(150))) {
+      frames.push(frame.type)
+      if (frame.type === 'end') break
+    }
+    expect(frames).toEqual(['snapshot', 'state', 'gap', 'event', 'snapshot', 'end'])
+    expect(acks).toEqual([{ type: 'ack', frame: 1 }, { type: 'ack', frame: 2 }, { type: 'ack', frame: 1 }])
+    expect(calls).toEqual(['open-1', 'open-2', 'page'])
+  })
+
+  it('surfaces follow-capacity instead of reopening immediately', async () => {
+    let opens = 0
+    const client = new PeerClient({ endpoint: 'https://host', device: 'caller', maxReconnects: 0,
+      webSocket: () => new FakeSocket((socket, id) => {
+        opens += 1
+        socket.emit('message', { data: JSON.stringify({ type: 'error', streamId: id, error: { code: 'peer/unavailable', details: { reason: 'follow-capacity' } } }) })
+      }),
+    })
+    await expect(client.follow({ target: { kind: 'alias', alias: 'scratch' } }, AbortSignal.timeout(150)).next()).rejects.toMatchObject({ message: expect.stringContaining('back off') })
+    expect(opens).toBe(1)
+  })
   it('streams frames and surfaces stream error frames', async () => {
     const sockets: FakeSocket[] = []
     const client = new PeerClient({

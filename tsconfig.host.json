@@ -180,6 +180,11 @@
     "packages/*/*/tests/**/*.ts",
     "scripts/**/*.ts",
     "scripts/tool-inventory/keyless-inventory-runner.mts",
+    "scripts/tool-inventory/worker-capture.mts",
+    "profile/web/packages/enpoi-cascade/src/**/*.ts",
+    "profile/web/packages/enpoi-job-guard/src/**/*.ts",
+    "profile/web/packages/enpoi-jarvis-worker/src/**/*.ts",
+    "profile/web/packages/enpoi-worker-credentials/src/**/*.ts",
     "vitest.shared.ts",
     "website/**/*.ts",
     "website/.vitepress/**/*.ts"

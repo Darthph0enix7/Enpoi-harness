@@ -18,15 +18,19 @@
  * default.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
   ASK_RETRY_TTL_MS, CALLER_HARNESS_VERSION_ENV, DEFAULT_SETTLE_QUIET_MS, LocalPeerClient, askStatePath, beginAsk,
-  commandAnswer, commandAsk, commandCancel, commandModels, commandSwitch, createRoutingFlags, finishAsk, followToSettled,
-  isPeerSessionSettled, parseArgs, parseModelRoute, resolveCallerHarnessVersion,
+  commandAnswer, commandAsk, commandAsks, commandCancel, commandHashToken, commandModels, commandStatus, commandSwitch,
+  commandWaitQuiescent,
+  commandReceipt, commandReady, commandExportList, commandExportFetch, commandJobUpdate,
+  createRoutingFlags, finishAsk, followToSettled, hashPairingToken, headersOf, isPeerSessionSettled,
+  loadPairings, parseArgs, parseModelRoute, parsePairingDocument, renderOutput, resolveCallerHarnessVersion,
 // @ts-expect-error The CLI is a plain runtime script with no declaration artifact.
 } from './dsh-peer.mjs'
 
@@ -165,6 +169,15 @@ describe('isPeerSessionSettled', () => {
 })
 
 describe('followToSettled', () => {
+  it('does not turn a previously seen terminal into completion while gap repair is pending', async () => {
+    const value = await followToSettled(options([
+      { frame: turnStartFrame(6, 11) }, { frame: userFrame('peer-cli-spec', 12) }, { frame: turnEndFrame(6, 13) },
+      { frame: stateFrame({ latch: 'idle', activeDescendants: 0 }, 14) },
+      { frame: { type: 'gap', fromSeq: 15, toSeq: null, reason: 'upstream-closed', resync: 'refollow-and-page' } },
+    ], { wait: 0.12, settleMs: 5 }))
+    expect(value).toMatchObject({ settled: false, pending: true, ok: false })
+    expect(value.note).toContain('history repair did not finish')
+  })
   it('follows past the dispatch turn/end to the settled summary (scenario 2)', async () => {
     const result = await followToSettled(options(fanOutTimeline()))
     expect(result.answer).toBe('FINAL SUMMARY: both children settled')
@@ -413,6 +426,13 @@ describe('beginAsk / finishAsk', () => {
     const afterFinish = beginAsk({ statePath: path, alias: 'co-dev', target: 'sess-a', message: 'same', baselineTurn: 9, now: 1_000 + ASK_RETRY_TTL_MS + 2 })
     expect(afterFinish.reused).toBe(false)
   })
+
+  it('keeps the automatic retry entry when the operator also supplies the generated ID', () => {
+    const options = { statePath: askStatePath(pairingFile()), alias: 'co-dev', target: 'sess-a', message: 'same', baselineTurn: 3, now: 1_000 }
+    const first = beginAsk(options)
+    expect(beginAsk({ ...options, explicitId: first.requestId })).toMatchObject({ requestId: first.requestId, reused: true })
+    expect(beginAsk(options)).toMatchObject({ requestId: first.requestId, reused: true })
+  })
 })
 
 function askHarness(): {
@@ -440,7 +460,7 @@ function askHarness(): {
       if (!state.admitted.includes(request.requestId)) state.admitted.push(request.requestId)
       if (state.failNextPrompt) {
         state.failNextPrompt = false
-        throw new Error('socket hang up after admission')
+        throw transportFailure('socket hang up after admission')
       }
       return { accepted: true, queued: true, hopCount: 1 }
     },
@@ -469,7 +489,7 @@ describe('commandAsk requestId persistence', () => {
     const harness = askHarness()
     let clientOptions: Record<string, unknown> | undefined
     const deps = { clientFactory: (options: Record<string, unknown>) => { clientOptions = options; return harness.client } }
-    await expect(commandAsk(flags, positional, deps)).rejects.toThrowError('socket hang up after admission')
+    await expect(commandAsk(flags, positional, deps)).resolves.toMatchObject({ ok: false, disposition: 'unknown' })
     expect(harness.state.admitted).toHaveLength(1)
     // `ask` follows until --wait expires: unbounded reconnects, like `follow`.
     expect(clientOptions?.maxReconnects).toBeUndefined()
@@ -494,7 +514,7 @@ describe('commandAsk requestId persistence', () => {
     const harness = askHarness()
     const deps = { clientFactory: () => harness.client }
     const first = beginAsk({ statePath: askStatePath(pairingsPath), alias: 'other', message: 'hello', baselineTurn: 0, now: 1 })
-    await expect(commandAsk(flags, positional, deps)).rejects.toThrowError('socket hang up after admission')
+    await expect(commandAsk(flags, positional, deps)).resolves.toMatchObject({ ok: false, disposition: 'unknown' })
     expect(harness.state.admitted[0]).not.toBe(first.requestId)
   })
 
@@ -545,7 +565,53 @@ function transportFailure(message = 'socket closed'): Error {
 }
 
 describe('commandAnswer confirmation', () => {
-  it('reports settled-remotely when the answer transport fails but the ask is gone', async () => {
+  it('persists the answer ID across invocations and reports replay instead of another settlement', async () => {
+    const pairingsPath = pairingFile()
+    const { flags, positional } = commandArgs(['answer', 'co-dev', 'ask-1', 'once'], pairingsPath)
+    const ids: string[] = []
+    const deps = { clientFactory: () => ({
+      answer: async ({ requestId }: { requestId: string }) => {
+        ids.push(requestId)
+        return { accepted: true, settled: true, replayed: ids.length > 1, payloadHash: 'hash', instanceId: 'boot-1' }
+      },
+    }) }
+    const first = await commandAnswer(flags, positional, deps)
+    expect(first).toMatchObject({ requestId: expect.any(String), settled: true, replayed: false })
+    expect(await commandAnswer(flags, positional, deps)).toMatchObject({ requestId: ids[0], settled: true, replayed: true })
+    expect(ids[1]).toBe(ids[0])
+    expect(readFileSync(join(pairingsPath, '..', 'peer-bridge', 'answer-requests', ids[0]!.replace('peer-cli-answer-', '')), 'utf8').trim()).toBe(ids[0])
+  })
+
+  it('replays a durable question answer after it leaves the pending list', async () => {
+    const { flags, positional } = commandArgs(['answer', 'co-dev', 'q1', '--select', 'yes', '--request-id', 'previous'], pairingFile())
+    const deps = { clientFactory: () => ({
+      handshake: async () => ({ capabilities: ['durable-asks', 'ask-idempotent-answer'] }),
+      asks: async () => ({ asks: [{ kind: 'question', askId: 'q1', sessionId: 'sess-1', state: 'answered', questions: [{ id: 'choice', options: [{ label: 'yes' }] }] }] }),
+      answer: async (request: unknown) => {
+        expect(request).toMatchObject({
+          target: { kind: 'session', sessionId: 'sess-1' }, requestId: 'previous',
+          answer: { kind: 'question', answer: { answers: [{ id: 'choice', selected: ['yes'] }] } },
+        })
+        return { accepted: true, settled: true, replayed: true }
+      },
+    }) }
+    expect(await commandAnswer(flags, positional, deps)).toMatchObject({ settled: true, replayed: true, requestId: 'previous' })
+  })
+
+  it.each(['request-id-reuse', 'ask-already-settled', 'stale-generation', 'ask-expired', 'ask-not-found', 'ask-store-unavailable', 'ask-write-failed'])('redacts refusal details for %s', async (reason) => {
+    const { flags, positional } = commandArgs(['answer', 'co-dev', 'ask-1', 'once', '--request-id', 'retry-answer'], pairingFile())
+    const deps = { clientFactory: () => ({
+      answer: async ({ requestId }: { requestId: string }) => {
+        expect(requestId).toBe('retry-answer')
+        throw Object.assign(new Error('private detail'), { code: 'peer/conflict', details: { reason } })
+      },
+    }) }
+    const result = await commandAnswer(flags, positional, deps)
+    expect(result).toMatchObject({ ok: false, settled: false, requestId: 'retry-answer', error: { message: expect.any(String) } })
+    expect(JSON.stringify(result)).not.toContain('private detail')
+    if (reason === 'stale-generation' || reason === 'ask-expired') expect(result.note).toContain('no longer answerable')
+  })
+  it('reports lost confirmation when the answer transport fails and the ask is gone', async () => {
     const pairingsPath = pairingFile()
     const { flags, positional } = commandArgs(['answer', 'co-dev', 'ask-1', 'once'], pairingsPath)
     let pending = [{ askId: 'ask-1', kind: 'approval', toolName: 'bash', since: 1 }]
@@ -562,7 +628,7 @@ describe('commandAnswer confirmation', () => {
       },
     }
     const result = await commandAnswer(flags, positional, { clientFactory: () => client }) as Record<string, unknown>
-    expect(result).toMatchObject({ ok: true, settled: false, confirmation: 'lost' })
+    expect(result).toMatchObject({ ok: false, settled: false, confirmation: 'lost' })
     expect(String(result.note)).toContain('no longer pending')
   })
 
@@ -577,7 +643,9 @@ describe('commandAnswer confirmation', () => {
       }),
       answer: async () => { throw transportFailure() },
     }
-    await expect(commandAnswer(flags, positional, { clientFactory: () => client })).rejects.toThrowError('socket closed')
+    await expect(commandAnswer(flags, positional, { clientFactory: () => client })).resolves.toMatchObject({
+      ok: false, settled: false, confirmation: 'lost', requestId: expect.any(String), error: { code: 'peer/target-unreachable' },
+    })
   })
 
   it('reports lost confirmation for a cancel when the remote shows no active turn', async () => {
@@ -595,6 +663,24 @@ describe('commandAnswer confirmation', () => {
     expect(result).toMatchObject({ ok: true, cancelled: false, confirmation: 'lost' })
     expect(String(result.note)).toContain('no active turn')
   })
+
+  it('requests queued prompt removal explicitly and reports the confirmed count', async () => {
+    const { flags, positional } = commandArgs(['cancel', 'co-dev', '--drop-queued'], pairingFile())
+    const cancel = vi.fn().mockResolvedValue({ accepted: true, cancelled: false, droppedQueued: 2 })
+    const client = { cancel, handshake: async () => ({ capabilities: ['stop-intent', 'cancel-drop-queued'] }) }
+    await expect(commandCancel(flags, positional, { clientFactory: () => client }))
+      .resolves.toMatchObject({ ok: true, cancelled: false, droppedQueued: 2 })
+    expect(cancel).toHaveBeenCalledOnce()
+    expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ dropQueued: true }))
+  })
+
+  it('does not submit an explicit queue drop to a host that cannot drop queued prompts', async () => {
+    const { flags, positional } = commandArgs(['cancel', 'co-dev', '--drop-queued'], pairingFile())
+    const client = { cancel: vi.fn(), handshake: async () => ({ capabilities: ['stop-intent'] }) }
+    await expect(commandCancel(flags, positional, { clientFactory: () => client }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'peer/capability-missing' } })
+    expect(client.cancel).not.toHaveBeenCalled()
+  })
 })
 
 // ── LocalPeerClient stream and repair behavior ───────────────────────────────
@@ -602,7 +688,8 @@ describe('commandAnswer confirmation', () => {
 class ScriptedSocket {
   private readonly listeners = new Map<string, Set<(event: unknown) => void>>()
 
-  constructor(private readonly onSend: (socket: ScriptedSocket, streamId: string) => void) {}
+  constructor(private readonly onSend: (socket: ScriptedSocket, streamId: string) => void,
+    private readonly onUplink?: (socket: ScriptedSocket, streamId: string, value: unknown) => void) {}
 
   addEventListener(type: string, listener: (event: unknown) => void): void {
     const set = this.listeners.get(type) ?? new Set()
@@ -616,8 +703,9 @@ class ScriptedSocket {
   }
 
   send(data: string): void {
-    const parsed = JSON.parse(data) as { type: string; streamId: string }
+    const parsed = JSON.parse(data) as { type: string; streamId: string; value?: unknown }
     if (parsed.type === 'open') this.onSend(this, parsed.streamId)
+    if (parsed.type === 'item') this.onUplink?.(this, parsed.streamId, parsed.value)
   }
 
   close(): void {
@@ -637,6 +725,65 @@ function okResponse(value: unknown): Response {
 }
 
 describe('LocalPeerClient reliability', () => {
+  it('bounds explicit gap retries even when every generation offers the same opening snapshot', async () => {
+    let generations = 0
+    const packets = (socket: ScriptedSocket, id: string, value: unknown): void => {
+      socket.emit('message', { data: JSON.stringify({ type: 'item', streamId: id, value }) })
+    }
+    const client = new LocalPeerClient({ endpoint: 'https://host', device: 'caller', backoff: { initialMs: 1, maxMs: 1, factor: 1 },
+      webSocket: () => new ScriptedSocket((socket, id) => {
+        generations += 1
+        packets(socket, id, { type: 'snapshot', cursor: 1, records: [] })
+        packets(socket, id, { type: 'gap', fromSeq: 2, toSeq: 2, reason: 'idle-timeout', resync: 'refollow-and-page' })
+      }),
+    })
+    await expect((async () => {
+      for await (const frame of client.follow({ target: { kind: 'alias', alias: 'scratch' } }, AbortSignal.timeout(1000))) expect(frame.type).not.toBe('end')
+    })()).rejects.toMatchObject({ code: 'peer/gap' })
+    expect(generations).toBe(4)
+  })
+  it('acks consumed items and reopens plus pages an explicit gap without acking it', async () => {
+    const calls: string[] = []
+    const acks: unknown[] = []
+    let generation = 0
+    const client = new LocalPeerClient({ endpoint: 'https://host', device: 'caller', backoff: { initialMs: 1, maxMs: 1, factor: 1 },
+      fetch: async () => { calls.push('page'); return okResponse({ records: [{ seq: 2, time: 0, type: 'user/message', data: {} }], hasMore: false }) },
+      webSocket: () => {
+        const current = ++generation
+        const emit = (socket: ScriptedSocket, id: string, value: unknown): void => {
+          socket.emit('message', { data: JSON.stringify({ type: 'item', streamId: id, value }) })
+        }
+        return new ScriptedSocket((socket, id) => {
+          calls.push(`open-${current}`)
+          emit(socket, id, { type: 'snapshot', cursor: current === 1 ? 1 : 3, records: [] })
+        }, (socket, id, ack) => {
+          acks.push(ack)
+          if (current === 1 && acks.length === 1) emit(socket, id, { type: 'state', cursor: 1 })
+          else if (current === 1) {
+            emit(socket, id, { type: 'gap', fromSeq: 2, toSeq: 2, reason: 'queue-overflow', resync: 'refollow-and-page' })
+            socket.emit('message', { data: JSON.stringify({ type: 'error', streamId: id, error: { code: 'peer/gap' } }) })
+          } else emit(socket, id, { type: 'end', reason: 'target-detached' })
+        })
+      },
+    })
+    const frames: string[] = []
+    for await (const frame of client.follow({ target: { kind: 'alias', alias: 'scratch' } }, AbortSignal.timeout(150))) {
+      frames.push(frame.type)
+      if (frame.type === 'end') break
+    }
+    expect(frames).toEqual(['snapshot', 'state', 'gap', 'event', 'snapshot', 'end'])
+    expect(acks).toEqual([{ type: 'ack', frame: 1 }, { type: 'ack', frame: 2 }, { type: 'ack', frame: 1 }])
+    expect(calls).toEqual(['open-1', 'open-2', 'page'])
+  })
+
+  it('surfaces follow capacity as backoff', async () => {
+    const client = new LocalPeerClient({ endpoint: 'https://host', device: 'caller', maxReconnects: 0,
+      webSocket: () => new ScriptedSocket((socket, id) => {
+        socket.emit('message', { data: JSON.stringify({ type: 'error', streamId: id, error: { code: 'peer/unavailable', details: { reason: 'follow-capacity' } } }) })
+      }),
+    })
+    await expect(client.follow({ target: { kind: 'alias', alias: 'scratch' } }, AbortSignal.timeout(150)).next()).rejects.toMatchObject({ message: expect.stringContaining('back off') })
+  })
   it('breaks a follow on caller-terminal peer error frames', async () => {
     for (const code of ['peer/not-paired', 'peer/not-found', 'peer/forbidden']) {
       let generations = 0
@@ -957,7 +1104,7 @@ describe('commandAsk create routing', () => {
     const calls: Array<{ method: string; request: Record<string, unknown> }> = []
     let bound = false
     const client: Record<string, unknown> = {
-      handshake: async () => ({ protocolVersion: 1, harnessVersion: '0.1.6-alpha.2', schemaDigest: '', hostDevice: 'serverlocal', capabilities: [], pairings: [] }),
+      handshake: async () => ({ protocolVersion: 1, harnessVersion: '0.1.6-alpha.2', schemaDigest: '', hostDevice: 'serverlocal', capabilities: ['input-disposition', 'create-receipts', 'prompt-receipts', 'model-routing-at-create', 'session-create', 'token-ceiling'], pairings: [] }),
       state: async () => {
         if (!bound) {
           const error = Object.assign(new Error('no session bound'), { code: 'peer/not-paired', endpoint: 'https://peer.test:8443' })
@@ -969,7 +1116,7 @@ describe('commandAsk create routing', () => {
           cursor: 0,
         }
       },
-      create: async (request: Record<string, unknown>) => { calls.push({ method: 'create', request }); bound = true; return { created: true } },
+      create: async (request: Record<string, unknown>) => { calls.push({ method: 'create', request }); bound = true; return { created: true, target: { sessionId: 'sess-1' } } },
       prompt: async (request: Record<string, unknown>) => { calls.push({ method: 'prompt', request }); return { accepted: true, queued: true, hopCount: 1 } },
       follow: async function* (): AsyncGenerator<unknown> {
         yield {
@@ -1004,9 +1151,36 @@ describe('commandAsk create routing', () => {
       chain: 'free',
       reasoningEffort: 'high',
       maxTotalTokens: 5000,
+      requestId: expect.any(String),
     })
     // --chain replaced the pairing route instead of merging with it.
     expect(harness.calls.find(call => call.method === 'create')!.request).not.toHaveProperty('provider')
+  })
+
+  it('checks a lost create reply, then reuses both request IDs on the routed retry', async () => {
+    const harness = createHarness()
+    const create = harness.client.create as (request: Record<string, unknown>) => Promise<object>
+    let replyLost = false
+    harness.client.create = async (request: Record<string, unknown>) => {
+      const result = await create(request)
+      if (!replyLost) { replyLost = true; throw transportFailure('private transport detail') }
+      return result
+    }
+    harness.client.receipt = async (request: Record<string, unknown>) => {
+      harness.calls.push({ method: 'receipt', request })
+      return { found: true, kind: 'create', disposition: 'created', sessionId: 'sess-1' }
+    }
+    const { flags, positional } = commandArgs(['ask', 'co-dev', 'hello', '--chain', 'free', '--request-id', 'logical-1'], routedPairingFile())
+    const deps = { clientFactory: () => harness.client }
+    const first = await commandAsk(flags, positional, deps)
+    expect(first).toMatchObject({ ok: false, disposition: 'created', requestId: 'logical-1', createRequestId: expect.any(String) })
+    expect(harness.calls.map(call => call.method)).toEqual(['create', 'receipt'])
+    await commandAsk(flags, positional, deps)
+    const creates = harness.calls.filter(call => call.method === 'create')
+    expect(creates).toHaveLength(2)
+    expect(creates[1]?.request).toEqual(creates[0]?.request)
+    expect(harness.calls.map(call => call.method)).toEqual(['create', 'receipt', 'receipt', 'create', 'prompt'])
+    expect(harness.calls.at(-1)?.request.requestId).toBe('logical-1')
   })
 
   it('forwards the pairing create route when no route flag overrides it', async () => {
@@ -1026,5 +1200,214 @@ describe('commandAsk create routing', () => {
     await commandAsk(commandArgs(['ask', 'co-dev', 'hello'], path).flags, positional, { clientFactory: () => harness.client })
     await expect(commandAsk(flags, positional, { clientFactory: () => harness.client }))
       .rejects.toThrowError('use `switch` to change its model')
+  })
+})
+
+describe('peer receipt and worker commands', () => {
+  it('lists expired durable asks instead of reading only the live latch', async () => {
+    const { flags, positional } = commandArgs(['asks', 'co-dev', '--session', 'sess-1'], pairingFile())
+    const result = await commandAsks(flags, positional, { clientFactory: () => ({
+      handshake: async () => ({ capabilities: ['durable-asks'] }),
+      asks: async (request: unknown) => {
+        expect(request).toEqual({ alias: 'co-dev', sessionId: 'sess-1' })
+        return { instanceId: 'boot-1', asks: [{ kind: 'approval', askId: 'ask-old', state: 'expired', settlementReason: 'host-restarted' }] }
+      },
+    }) })
+    expect(result).toMatchObject({ instanceId: 'boot-1', asks: [{ state: 'expired', settlementReason: 'host-restarted' }] })
+  })
+
+  it('waits for an observation and does not turn a timeout into proof of stopping', async () => {
+    const { flags, positional } = commandArgs(['wait-quiescent', 'co-dev', '--timeout-ms', '100'], pairingFile())
+    const result = await commandWaitQuiescent(flags, positional, { clientFactory: () => ({
+      handshake: async () => ({ capabilities: ['wait-quiescent'], instanceId: 'boot-1' }),
+      waitQuiescent: async (request: unknown) => {
+        expect(request).toEqual({ alias: 'co-dev', timeoutMs: 100 })
+        return { observation: 'observed', timedOut: true }
+      },
+    }) })
+    expect(result).toMatchObject({ ok: false, observation: 'observed', timedOut: true, note: expect.stringContaining('not proof') })
+  })
+  const bytes = Buffer.from('verified export')
+  const sha256 = createHash('sha256').update(bytes).digest('hex')
+  const exportValue = { path: 'artifact.txt', bytes: bytes.length, sha256, contentBase64: bytes.toString('base64') }
+
+  it('warns on both digest differences and missing optional capability without failing a status probe', async () => {
+    const args = commandArgs(['receipt', 'co-dev', 'logical-1'], pairingFile())
+    const warnings: string[] = []
+    const result = await commandReceipt(args.flags, args.positional, {
+      clientFactory: () => ({
+        handshake: async () => ({ capabilities: ['shape-digest'], schemaDigest: 'different-fields', methodsDigest: 'different-methods', instanceId: 'boot-2' }),
+        receipt: async () => ({ found: false, disposition: 'unknown' }),
+      }),
+      warn: (message: string) => { warnings.push(message) },
+    })
+    expect(result).toMatchObject({ ok: true, disposition: 'unknown' })
+    expect(warnings.map(message => message.split(' ').filter(part => /Digest|input-disposition/u.test(part)).join(' ')))
+      .toEqual(['schemaDigest', 'methodsDigest', 'input-disposition;'])
+  })
+
+  it('passes the receipt kind and renders disposition without remote error prose', async () => {
+    const args = commandArgs(['receipt', 'co-dev', 'logical-1', '--kind', 'prompt'], pairingFile())
+    const client = {
+      handshake: async () => ({ capabilities: [], instanceId: 'boot-2' }),
+      receipt: async (request: unknown) => {
+        expect(request).toEqual({ alias: 'co-dev', requestId: 'logical-1', kind: 'prompt' })
+        return { found: true, disposition: 'terminal', terminalState: 'failed', terminal: { turn: 4, error: { message: 'private detail' } }, replayedAcrossRestart: true }
+      },
+    }
+    const result = await commandReceipt(args.flags, args.positional, { clientFactory: () => client, warn: () => {} })
+    expect(result).toMatchObject({ disposition: 'terminal', terminalState: 'failed', replayedAcrossRestart: true })
+    expect(JSON.stringify(result)).not.toContain('private detail')
+  })
+
+  it('reports readiness and refuses to mutate a worker job without job-binding', async () => {
+    const path = pairingFile()
+    const deps = { clientFactory: () => ({
+      handshake: async () => ({ capabilities: ['ready'], instanceId: 'boot-2' }),
+      ready: async () => ({ ready: false, missing: ['job-binding'], instanceId: 'boot-2' }),
+      jobUpdate: () => { throw new Error('must not dispatch') },
+    }) }
+    const ready = commandArgs(['ready', 'co-dev'], path)
+    expect(await commandReady(ready.flags, ready.positional, deps)).toMatchObject({ ready: false, missing: ['job-binding'], instanceId: 'boot-2' })
+    const update = commandArgs(['job-update', 'co-dev', 'job-1', '--revoke'], path)
+    expect(await commandJobUpdate(update.flags, update.positional, deps)).toMatchObject({ ok: false, error: { code: 'peer/capability-missing', message: expect.stringContaining('job-binding') } })
+  })
+
+  it('passes job update flags and does not print credential references', async () => {
+    const args = commandArgs(['job-update', 'co-dev', 'job-1', '--fence', '4', '--expires-at', '1700000000000', '--request-id', 'update-1'], pairingFile())
+    const result = await commandJobUpdate(args.flags, args.positional, { clientFactory: () => ({
+      handshake: async () => ({ capabilities: ['job-binding'] }),
+      jobUpdate: async (request: unknown) => {
+        expect(request).toEqual({ alias: 'co-dev', requestId: 'update-1', jobId: 'job-1', fence: 4, expiresAt: 1700000000000 })
+        return { binding: { fence: 4, credentialRef: 'private reference' }, accepted: true, replayed: false }
+      },
+    }) })
+    expect(result).toMatchObject({ ok: true, requestId: 'update-1', binding: { fence: 4 } })
+    expect(JSON.stringify(result)).not.toContain('private reference')
+  })
+
+  it('lists bounded metadata, verifies export bytes, refuses overwrites and never renders base64', async () => {
+    const path = pairingFile()
+    const output = join(tmpDir('dsh-peer-export-'), 'out.txt')
+    const deps = { clientFactory: () => ({
+      handshake: async () => ({ capabilities: ['export-root'] }),
+      exportList: async () => ({ files: [{ path: 'artifact.txt', bytes: bytes.length, mtimeMs: 1 }], truncated: false }),
+      exportFetch: async (request: unknown) => {
+        expect(request).toEqual({ alias: 'co-dev', path: 'artifact.txt', maxBytes: 64 })
+        return exportValue
+      },
+    }) }
+    const listed = commandArgs(['export-list', 'co-dev'], path)
+    expect(await commandExportList(listed.flags, listed.positional, deps)).toMatchObject({ ok: true, files: [{ path: 'artifact.txt' }] })
+    const fetched = commandArgs(['export-fetch', 'co-dev', 'artifact.txt', '--out', output, '--max-bytes', '64', '--json'], path)
+    const value = await commandExportFetch(fetched.flags, fetched.positional, deps)
+    expect(readFileSync(output)).toEqual(bytes)
+    const lines: string[] = []
+    renderOutput('export-fetch', value, fetched.flags, (line: string) => { lines.push(line) })
+    expect(lines.join('\n')).not.toContain(exportValue.contentBase64)
+    await expect(commandExportFetch(fetched.flags, fetched.positional, deps)).rejects.toThrow(/already exists/u)
+    expect(readFileSync(output)).toEqual(bytes)
+  })
+
+  it.each([{ sha256: '0'.repeat(64) }, { bytes: 65 }, { contentBase64: '!' }, { path: 'wrong.txt' }])('refuses invalid export metadata or bytes before writing (%o)', async (patch) => {
+    const output = join(tmpDir('dsh-peer-export-invalid-'), 'out.txt')
+    const args = commandArgs(['export-fetch', 'co-dev', 'artifact.txt', '--out', output, '--max-bytes', '64'], pairingFile())
+    await expect(commandExportFetch(args.flags, args.positional, { clientFactory: () => ({
+      handshake: async () => ({ capabilities: ['export-root'] }),
+      exportFetch: async () => ({ ...exportValue, ...patch }),
+    }) })).rejects.toThrow(/export.*(verification|size)/u)
+    expect(existsSync(output)).toBe(false)
+  })
+})
+
+describe('pairing outboundToken, parser parity, token redaction, and hash-token', () => {
+  it('accepts shared host credential keys, uses outboundToken in headersOf, and rejects legacy token', () => {
+    const secret = 'cli-outbound-secret-123'
+    const doc = parsePairingDocument([
+      'version: 1',
+      'device: caller',
+      'pairings:',
+      '  - alias: co-dev',
+      '    peer: serverlocal',
+      '    exposure: debug',
+      '    endpoint: https://peer.test:8443',
+      '    tokenHash: sha256$0000000000000000000000000000000000000000000000000000000000000000',
+      `    outboundToken: ${secret}`,
+      '    create:',
+      '      agentPreset: standard',
+      '      allowAgentPresets: [standard, sysadmin]',
+      '  - alias: host-only',
+      '    peer: desktop',
+      '    exposure: answer-only',
+      '    insecure: true',
+      '    sessionId: sess-1',
+      '  - alias: inbound-only',
+      '    peer: laptop',
+      '    exposure: debug',
+      '    inboundToken: inbound-secret',
+      '    sessionId: sess-2',
+      '',
+    ].join('\n'), 'test.yaml')
+    expect(doc.pairings).toHaveLength(3)
+    const headers = headersOf({ header: [] }, doc.pairings[0])
+    expect(headers.authorization).toBe(`Bearer ${secret}`)
+    expect(headersOf({ header: [] }, doc.pairings[1]).authorization).toBeUndefined()
+
+    expect(() => parsePairingDocument(
+      `version: 1\ndevice: caller\npairings:\n  - alias: x\n    peer: p\n    endpoint: https://x\n    token: ${secret}\n`,
+      'test.yaml',
+    )).toThrow(/ambiguous key "token".*outboundToken/u)
+  })
+
+  it('never leaks outboundToken or inbound secrets in status or handshake rendering', async () => {
+    const secret = 'never-print-outbound-secret'
+    const dir = tmpDir('dsh-peer-redact-')
+    const path = join(dir, 'pairings.yaml')
+    writeFileSync(path, [
+      'version: 1',
+      'device: caller',
+      'pairings:',
+      '  - alias: co-dev',
+      '    peer: serverlocal',
+      '    exposure: debug',
+      '    endpoint: https://peer.test:8443',
+      `    outboundToken: ${secret}`,
+      '    inboundToken: inbound-secret-xyz',
+      '',
+    ].join('\n'))
+    const doc = loadPairings(path)
+    expect(doc.pairings[0].outboundToken).toBe(secret)
+    const lines: string[] = []
+    renderOutput('handshake', {
+      ok: true,
+      client: 'test',
+      host: {
+        hostDevice: 'serverlocal',
+        harnessVersion: '0.1.7',
+        protocolVersion: 1,
+        capabilities: ['state-latch'],
+        pairings: [{ alias: 'co-dev', peer: 'caller', exposure: 'debug', tokenRequired: true, outboundToken: secret }],
+      },
+    }, { json: false }, (line: string) => lines.push(line))
+    expect(lines.join('\n')).not.toContain(secret)
+    expect(lines.join('\n')).not.toContain('inbound-secret-xyz')
+
+    const statusSummary = await commandStatus({ pairings: path, header: [], json: true }, ['status'])
+    expect(JSON.stringify(statusSummary)).not.toContain(secret)
+    expect(JSON.stringify(statusSummary)).not.toContain('inbound-secret-xyz')
+  })
+
+  it('hashes tokens via hashPairingToken and commandHashToken compatibly with verifyPairingToken', async () => {
+    const { verifyPairingToken } = await import('../packages/api/peer/src/pairings.ts')
+    const argResult = await commandHashToken({}, ['hash-token', 'my-secret-token'])
+    expect(argResult.ok).toBe(true)
+    expect(argResult.hash).toMatch(/^scrypt\$/u)
+    expect(verifyPairingToken('my-secret-token', argResult.hash)).toBe(true)
+    expect(verifyPairingToken('wrong-token', argResult.hash)).toBe(false)
+
+    const stdinResult = await commandHashToken({}, ['hash-token'], { readStdin: async () => 'stdin-secret\n' })
+    expect(verifyPairingToken('stdin-secret', stdinResult.hash)).toBe(true)
+    expect(verifyPairingToken('stdin-secret', hashPairingToken('stdin-secret'))).toBe(true)
+    await expect(commandHashToken({}, ['hash-token'], { readStdin: async () => '\n' })).rejects.toThrow(/non-empty/u)
   })
 })

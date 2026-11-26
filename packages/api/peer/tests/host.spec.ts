@@ -1,6 +1,7 @@
 import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
 import { brandNumber } from '@deepseek-ai/dsh-brand'
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -13,17 +14,19 @@ import SessionQueryEngine, { type SessionObservationOptions } from '@deepseek-ai
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { LlmAdapter, ToolCallId, type GenerateOptions, type LlmModelInfo, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { scopeTarget } from '@deepseek-ai/dsh-scope'
+import { defineContentToolFixture } from '@deepseek-ai/dsh-tools'
 import { RemoteError } from '@deepseek-ai/dsh-typert-protocol'
 import ApprovalService, { type ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval/types'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { PeerService, PEER_CAPABILITIES, PEER_CAPABILITY_LEDGER, PLANNED_PEER_CAPABILITIES } from '../src/host.ts'
+import { PeerService, PEER_CAPABILITIES, PEER_CAPABILITY_LEDGER, PLANNED_PEER_CAPABILITIES, withPeerAuth, type Config } from '../src/host.ts'
 import { HARNESS_VERSION } from '../src/version.ts'
 import { MODEL_HOP_RECORD_TYPE } from '../src/exposure.ts'
 import { PEER_BUDGET_STOP_REASON } from '../src/latch.ts'
 import { PeerConfigError, PeerPairingsStore } from '../src/pairings.ts'
 import { PeerReceiptStore, receiptKey } from '../src/receipts.ts'
 import type {
+  PeerAnswerRequest,
   PeerCapability,
   PeerEventRecord,
   PeerFollowFrame,
@@ -252,6 +255,7 @@ interface Harness {
 }
 
 async function setup(options: {
+  readonly peerConfig?: Config
   readonly watchdogMs?: number
   readonly exposures?: readonly string[]
   readonly extraAliases?: readonly string[]
@@ -276,6 +280,7 @@ async function setup(options: {
       `  - alias: ${exposure}`,
       '    peer: laptop',
       '    exposure: ' + exposure,
+      '    insecure: true',
       '    create:',
       `      cwd: ${cwd}`,
     ]),
@@ -283,6 +288,7 @@ async function setup(options: {
       `  - alias: ${alias}`,
       '    peer: laptop',
       '    exposure: debug',
+      '    insecure: true',
       '    create:',
       `      cwd: ${cwd}`,
       ...options.routingBlocks?.[alias]
@@ -341,12 +347,16 @@ async function setup(options: {
     ...(options.modelsLimit === undefined ? {} : { modelsLimit: options.modelsLimit }),
     ...(options.modelsLimitMax === undefined ? {} : { modelsLimitMax: options.modelsLimitMax }),
     ...(options.harnessVersion === undefined ? {} : { harnessVersion: options.harnessVersion }),
+    ...options.peerConfig,
   }
   let peer: PeerService
   let peerFiber: { dispose: () => Promise<void> } | undefined
   if (options.peerAsFiber === true) {
     const mounted = { current: undefined as PeerService | undefined }
-    const fiber = ctx.plugin((inner) => { mounted.current = new PeerService(inner, peerConfig) })
+    const fiber = ctx.plugin({
+      inject: PeerService.inject,
+      apply: (inner: Context) => { mounted.current = new PeerService(inner, peerConfig) },
+    })
     await fiber
     peer = mounted.current!
     peerFiber = fiber
@@ -361,12 +371,9 @@ async function setup(options: {
     cwd,
   })
   if ((options.exposures ?? ['debug']).includes('answer-only')) {
-    // Bind the second exposure to the same session through explicit adoption.
-    await peer.create({
-      alias: 'answer-only' as never,
-      participant: { kind: 'peer', name: 'laptop' },
-      sessionId: created.target.sessionId,
-    })
+    // Bind the second exposure to the same session in the host binding table
+    // so both aliases observe one Session without cross-alias peer.create adoption.
+    await peer.pairings.bind('answer-only' as never, 'laptop', created.target.sessionId)
   }
   return {
     ctx,
@@ -819,6 +826,7 @@ describe('peer host service', () => {
       'model-switch',
     ]
     const usageCapabilities: readonly PeerCapability[] = ['token-ceiling']
+    const profileCapabilities: readonly PeerCapability[] = ['profile-identity']
     const { peer } = await setup()
     const handshake = (target: PeerService): readonly PeerCapability[] => target.handshake({
       protocolVersion: 1,
@@ -831,22 +839,34 @@ describe('peer host service', () => {
     // handshake.capabilities ⊆ the contractual union (the ledger keys are
     // exactly the union: its Record type fails the build on drift).
     for (const capability of advertised) expect(ledger).toContain(capability)
-    // Without a mounted routing service the routing trio is not served, so it
-    // must not be advertised; the rest of the build's capabilities are, and
-    // this host mounts the token meter.
+    // Without a mounted routing service or profile identity service, those
+    // conditional capabilities are withheld; the rest of the build's
+    // capabilities are advertised, and this host mounts the token meter.
     expect(new Set(advertised)).toEqual(new Set(
-      PEER_CAPABILITIES.filter(capability => !routingCapabilities.includes(capability)),
+      PEER_CAPABILITIES.filter(capability =>
+        !routingCapabilities.includes(capability) && !profileCapabilities.includes(capability)),
     ))
     for (const capability of routingCapabilities) expect(advertised).not.toContain(capability)
+    expect(advertised).not.toContain('profile-identity')
     // The same build advertises the routing trio once the seam is mounted.
     const routed = await setup({ routingService: new FakeRoutingService() })
+    expect(new Set(handshake(routed.peer))).toEqual(new Set(
+      PEER_CAPABILITIES.filter(capability => !profileCapabilities.includes(capability)),
+    ))
+    // Mounting peerProfileIdentity advertises 'profile-identity' too.
+    routed.ctx.provide('peerProfileIdentity', {
+      describe: () => ({ hash: 'h', presetId: 'p', toolNames: ['read'], configDigest: 'c' }),
+    })
     expect(new Set(handshake(routed.peer))).toEqual(new Set(PEER_CAPABILITIES))
-    // Without the usage seam both the routing trio and token-ceiling are
-    // withheld: nothing may promise a guard this host cannot read.
+    // Without the usage seam both the routing trio and token-ceiling (and
+    // unmounted profile-identity) are withheld: nothing may promise a guard this
+    // host cannot read.
     const unmetered = await setup({ meter: false })
     const unmeteredCaps = handshake(unmetered.peer)
     expect(new Set(unmeteredCaps)).toEqual(new Set(PEER_CAPABILITIES.filter(capability =>
-      !routingCapabilities.includes(capability) && !usageCapabilities.includes(capability))))
+      !routingCapabilities.includes(capability)
+      && !usageCapabilities.includes(capability)
+      && !profileCapabilities.includes(capability))))
     // Every contractual capability is either served or explicitly planned,
     // exactly once across the two lists.
     const served = ledger.filter(capability => PEER_CAPABILITY_LEDGER[capability] === 'served')
@@ -976,6 +996,13 @@ describe('peer host service', () => {
     try {
       peer.list({ target: { kind: 'session', sessionId: 'ghost' as never } })
       expect.unreachable('an unpaired list target must be refused')
+    } catch (error) {
+      expect((error as RemoteError).code).toBe('peer/forbidden')
+      expect((error as RemoteError).details).toEqual({ reason: 'unauthorized' })
+    }
+    try {
+      peer.list({ target: { kind: 'alias', alias: 'spare' as never } })
+      expect.unreachable('an unbound alias list target must report not-paired')
     } catch (error) {
       expect((error as RemoteError).code).toBe('peer/not-paired')
     }
@@ -1165,9 +1192,10 @@ describe('peer host service', () => {
       target,
       participant: { kind: 'peer', name: 'laptop' },
       askId,
+      requestId: 'decision' as never,
       answer: { kind: 'approval', outcome: 'allowed-once' },
     })
-    expect(answered).toEqual({ accepted: true, settled: true })
+    expect(answered).toMatchObject({ accepted: true, settled: true, replayed: false })
     await expect(decision).resolves.toBe('allowed-once')
     // Settle broadcast: the local forwarded ask's lifetime signal aborts as
     // soon as the peer wins, so every other client dismisses its card and a
@@ -1177,6 +1205,7 @@ describe('peer host service', () => {
       target,
       participant: { kind: 'peer', name: 'laptop' },
       askId,
+      requestId: 'late-decision' as never,
       answer: { kind: 'approval', outcome: 'allowed-once' },
     })).toThrow(RemoteError)
     hold.release()
@@ -1184,6 +1213,88 @@ describe('peer host service', () => {
     const finished = await peer.state({ target })
     expect(finished.state.lastTurnEnd).toMatchObject({ turn: 1, reason: 'completed' })
     expect(finished.state.lastParticipantAction).toMatchObject({ action: 'answer' })
+  })
+
+  it('expires a persisted pending question on restart without allowing a stale answer', async () => {
+    const { peer, ctx, sessionId, target, root, peerFiber } = await setup({ peerAsFiber: true })
+    const participant = { kind: 'peer', name: 'laptop' } as const
+    mintQuestionAsk(ctx, ctx.agents.get(sessionId)!)
+    await waitFor(async () => peer.registry.pendingFor(sessionId).length === 1)
+    const answeredAskId = peer.registry.pendingFor(sessionId)[0]!.askId
+    const savedAnswer: PeerAnswerRequest = { target, askId: answeredAskId, requestId: 'win' as never, participant,
+      answer: { kind: 'question', answer: { answers: [{ id: 'colour', selected: ['blue'] }] } },
+    }
+    const won = peer.answer(savedAnswer)
+    mintQuestionAsk(ctx, ctx.agents.get(sessionId)!)
+    await waitFor(async () => peer.registry.pendingFor(sessionId).length === 1)
+    const askId = peer.registry.pendingFor(sessionId)[0]!.askId
+    await peerFiber!.dispose()
+    const replacement = new PeerService(ctx, { pairingsPath: join(root, 'pairings.yaml'), bindingsPath: join(root, 'peer-state.json') })
+    expect(replacement.asks({ alias: 'debug' as never, sessionId }).asks.find(ask => ask.askId === askId)).toMatchObject({
+      askId, state: 'expired', settlementReason: 'host-restarted', instanceId: peer.instanceId,
+      questions: [{ id: 'colour', question: 'Which colour?', options: [{ label: 'red' }, { label: 'blue' }] }],
+    })
+    expect(replacement.answer(savedAnswer)).toEqual({ ...won, replayed: true })
+    expect(() => replacement.answer({ target, askId, requestId: 'stale' as never,
+      participant: { kind: 'peer', name: 'laptop' }, answer: { kind: 'question', answer: { answers: [] } },
+    })).toThrow(expect.objectContaining({ code: 'peer/conflict', details: { askId, reason: 'stale-generation' } }))
+  })
+
+  it('replays the winning answer, refuses competing payloads, and does not deliver after a write failure', async () => {
+    const { peer, ctx, sessionId, target, root } = await setup()
+    mintQuestionAsk(ctx, ctx.agents.get(sessionId)!)
+    await waitFor(async () => peer.registry.pendingFor(sessionId).length === 1)
+    const askId = peer.registry.pendingFor(sessionId)[0]!.askId
+    const answer = (requestId: string, selected = 'blue') => peer.answer({ target, askId, requestId: requestId as never,
+      participant: { kind: 'peer', name: 'laptop' }, answer: { kind: 'question', answer: { answers: [{ id: 'colour', selected: [selected] }] } },
+    })
+    const path = join(root, 'peer-asks.json')
+    const record = readFileSync(path, 'utf8')
+    rmSync(path)
+    mkdirSync(path)
+    try {
+      expect(() => answer('first')).toThrow(expect.objectContaining({ code: 'peer/unavailable', details: { reason: 'ask-write-failed' } }))
+      expect(peer.registry.pendingFor(sessionId)).toHaveLength(1)
+    } finally {
+      rmSync(path, { recursive: true })
+      writeFileSync(path, record, { mode: 0o600 })
+    }
+    const results = await Promise.allSettled(['first', 'second', 'first'].map(async (id) => {
+      await Promise.resolve()
+      return answer(id)
+    }))
+    expect(results).toMatchObject([
+      { status: 'fulfilled', value: { replayed: false } },
+      { status: 'rejected', reason: { code: 'peer/conflict', details: { reason: 'ask-already-settled' } } },
+      { status: 'fulfilled', value: { replayed: true } },
+    ])
+    expect(() => answer('first', 'red')).toThrow(expect.objectContaining({ code: 'peer/conflict', details: { askId, reason: 'request-id-reuse' } }))
+    expect(peer.registry.pendingFor(sessionId)).toHaveLength(0)
+    expect(statSync(path).mode & 0o777).toBe(0o600)
+  })
+
+  it('bounds a slow follow and sends a gap instead of a completion', async () => {
+    const { ctx, peer, sessionId, target } = await setup({
+      peerConfig: { followQueueMaxItems: 1, followIdleMs: 200, followMaxPerAlias: 1 },
+    })
+    const controller = new AbortController()
+    const iterator = peer.follow({ target }, controller.signal)[Symbol.asyncIterator]()
+    try {
+      expect((await iterator.next()).value).toMatchObject({ type: 'snapshot' })
+      const other = peer.follow({ target }, controller.signal)[Symbol.asyncIterator]()
+      await expect(other.next()).rejects.toMatchObject({ code: 'peer/unavailable', details: { reason: 'follow-capacity' } })
+      mintQuestionAsk(ctx, ctx.agents.get(sessionId)!)
+      await waitFor(async () => peer.registry.pendingFor(sessionId).length === 1)
+      await peer.prompt({ target, participant: { kind: 'peer', name: 'laptop' }, requestId: 'flood' as never,
+        content: [{ type: 'text', text: 'overflow the queue' }],
+      }, controller.signal)
+      await new Promise(resolve => setTimeout(resolve, 230))
+      expect((await iterator.next()).value).toMatchObject({ type: 'gap', reason: 'queue-overflow', resync: 'refollow-and-page' })
+      await expect(iterator.next()).rejects.toMatchObject({ code: 'peer/gap' })
+    } finally {
+      controller.abort()
+      await iterator.return?.()
+    }
   })
 
   it('cancels a running peer turn and reports idle cancels', async () => {
@@ -1197,12 +1308,18 @@ describe('peer host service', () => {
     }, NEVER_ABORTED)
     await hold.started
     await waitFor(async () => (await peer.state({ target })).state.latch !== 'idle')
-    expect(peer.cancel({ target, participant: { kind: 'peer', name: 'laptop' } }))
-      .toMatchObject({ accepted: true, cancelled: true })
+    await expect(peer.waitQuiescent({ alias: 'debug' as never, timeoutMs: 25 }, NEVER_ABORTED)).resolves.toMatchObject({
+      observation: 'observed', timedOut: true, last: { state: { stopIntent: { turnState: 'running', quiescence: 'unknown' } } },
+    })
+    const stopped = peer.cancel({ target, participant: { kind: 'peer', name: 'laptop' } })
+    expect(stopped).toMatchObject({ accepted: true, cancelled: true, stopIntent: { keepInbox: true, quiescence: 'unknown' } })
+    expect(typeof stopped.stopIntent.requestedAt).toBe('number')
     await waitFor(async () => (await peer.state({ target })).state.latch === 'idle')
     const terminal = await peer.state({ target })
     expect(terminal.state.lastTurnEnd?.reason).toBe('aborted')
     expect(terminal.state.lastParticipantAction).toMatchObject({ action: 'cancel' })
+    expect(terminal.state.stopIntent).toMatchObject({ requestedAt: stopped.stopIntent.requestedAt, keepInbox: true, turnState: 'idle', inFlightTools: 0 })
+    await expect(peer.waitQuiescent({ alias: 'debug' as never, timeoutMs: 500 }, NEVER_ABORTED)).resolves.toMatchObject({ observation: 'observed', timedOut: false })
     hold.release()
     expect(peer.cancel({ target, participant: { kind: 'peer', name: 'laptop' } }))
       .toMatchObject({ accepted: true, cancelled: false })
@@ -1219,6 +1336,36 @@ describe('peer host service', () => {
     } finally {
       hostLatch.mockRestore()
     }
+  })
+
+  it('reports an open tool separately from Stop and an aborted input', async () => {
+    const { peer, ctx, adapter, target } = await setup()
+    const started = Promise.withResolvers<undefined>()
+    const release = Promise.withResolvers<undefined>()
+    ctx.tools.register(defineContentToolFixture({
+      name: 'peer_probe', description: 'Park until the test releases the tool', parameters: {},
+      async execute() {
+        started.resolve(undefined)
+        await release.promise
+        return [{ type: 'text', text: 'released' }]
+      },
+    }))
+    adapter.callToolOnce()
+    const requestId = 'stop-in-tool' as never
+    const participant = { kind: 'peer', name: 'laptop' } as const
+    try {
+      await peer.prompt({ target, participant, requestId, content: [{ type: 'text', text: 'start tool' }] }, NEVER_ABORTED)
+      await started.promise
+      expect((await peer.state({ target })).state.stopIntent).toMatchObject({ inFlightTools: 1, quiescence: 'unknown' })
+      expect(peer.cancel({ target, participant }).stopIntent.quiescence).toBe('unknown')
+    } finally {
+      release.resolve(undefined)
+    }
+    await waitFor(async () => (await peer.state({ target })).state.latch === 'idle')
+    expect((await peer.state({ target })).state.stopIntent).toMatchObject({ inFlightTools: 0, quiescence: 'observed' })
+    await expect(peer.receipt({ alias: 'debug' as never, kind: 'prompt', requestId })).resolves.toMatchObject({
+      disposition: 'terminal', terminalState: 'aborted',
+    })
   })
 
   it('pushes an ask minted mid-tool-call to a follower that started before it', async () => {
@@ -1250,7 +1397,8 @@ describe('peer host service', () => {
       expect(Date.now() - mintedAt).toBeLessThan(1_000)
       expect(reader.frames.slice(baseline, pushed.index + 1).some(frame => frame.type === 'event')).toBe(false)
       if (pushed.frame.type === 'state') {
-        expect(pushed.frame.state.pendingAsks[0]).toMatchObject({ kind: 'question', since: expect.any(Number) })
+        expect(pushed.frame.state.pendingAsks[0]).toMatchObject({ kind: 'question' })
+        expect(typeof pushed.frame.state.pendingAsks[0]?.since).toBe('number')
         // A pushed frame carries the last scanned durable position, so repair
         // from any frame cut stays contiguous.
         const priorCursors = reader.frames.slice(0, pushed.index).flatMap(frame =>
@@ -1292,8 +1440,9 @@ describe('peer host service', () => {
         target,
         participant: { kind: 'peer', name: 'laptop' },
         askId,
+        requestId: 'decision' as never,
         answer: { kind: 'question', answer: { answers: [{ id: 'colour', selected: ['blue'] }] } },
-      })).toEqual({ accepted: true, settled: true })
+      })).toMatchObject({ accepted: true, settled: true, replayed: false })
       const settled = await reader.waitFor(
         frame => frame.type === 'state' && frame.state.pendingAsks.length === 0,
         { from: pushed.index + 1 },
@@ -1310,7 +1459,7 @@ describe('peer host service', () => {
     }
   })
 
-  it('emits no frame when a mint and settle land before the next read', async () => {
+  it('preserves queued mint and settlement transitions when a follower pauses', async () => {
     const { peer, ctx, sessionId, target } = await setup()
     const agent = ctx.agents.get(sessionId) as Agent
     const controller = new AbortController()
@@ -1318,8 +1467,7 @@ describe('peer host service', () => {
     try {
       const snapshot = await iterator.next()
       expect(snapshot.value).toMatchObject({ type: 'snapshot' })
-      // The generator is parked at the snapshot yield, so both notifications
-      // coalesce into one wake that finds the snapshot's ask set unchanged.
+      // The delivery iterator pauses while the bounded producer tracks changes.
       mintQuestionAsk(ctx, agent)
       await waitFor(async () => peer.registry.pendingFor(sessionId).length === 1)
       const askId = peer.registry.pendingFor(sessionId)[0]!.askId
@@ -1327,14 +1475,12 @@ describe('peer host service', () => {
         target,
         participant: { kind: 'peer', name: 'laptop' },
         askId,
+        requestId: 'decision' as never,
         answer: { kind: 'question', answer: { answers: [{ id: 'colour', selected: ['blue'] }] } },
-      })).toEqual({ accepted: true, settled: true })
+      })).toMatchObject({ accepted: true, settled: true, replayed: false })
       expect(peer.registry.pendingFor(sessionId)).toHaveLength(0)
-      const next = await Promise.race([
-        iterator.next(),
-        new Promise<'quiet'>(resolve => setTimeout(() => resolve('quiet'), 200)),
-      ])
-      expect(next).toBe('quiet')
+      expect((await iterator.next()).value).toMatchObject({ type: 'state', state: { pendingAsks: [{ askId }] } })
+      expect((await iterator.next()).value).toMatchObject({ type: 'state', state: { pendingAsks: [] } })
     } finally {
       controller.abort()
       await iterator.return?.()
@@ -1376,14 +1522,11 @@ describe('peer host service', () => {
   })
 
   it('rejects unpaired targets and a hop ceiling when configured', async () => {
-    const { peer } = await setup()
+    const { peer } = await setup({ extraAliases: ['unbound'] })
     await expect(peer.state({ target: { kind: 'session', sessionId: 'nope' as never } }))
-      .rejects.toThrow(RemoteError)
-    try {
-      await peer.state({ target: { kind: 'session', sessionId: 'nope' as never } })
-    } catch (error) {
-      expect((error as RemoteError).code).toBe('peer/not-paired')
-    }
+      .rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
+    await expect(peer.state({ target: { kind: 'alias', alias: 'unbound' as never } }))
+      .rejects.toMatchObject({ code: 'peer/not-paired' })
     // No ceiling is configured by default: a high hop count is admitted.
     const { peer: peer2, target: target2 } = await setup()
     const value = await peer2.prompt({
@@ -1601,20 +1744,26 @@ describe('peer host service', () => {
 
   it('adopts under a routing pairing and ignores legacy allowModelChange', async () => {
     const routing = new FakeRoutingService()
-    const { peer, sessionId } = await setup({
+    const { peer } = await setup({
       extraAliases: ['routed'],
       routingAliases: ['routed'],
       routingService: routing,
     })
+    const initial = await peer.create({
+      alias: 'routed' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      provider: 'scripted',
+      model: 'routed',
+    })
     const adopted = await peer.create({
       alias: 'routed' as never,
       participant: { kind: 'peer', name: 'laptop' },
-      sessionId,
+      sessionId: initial.target.sessionId,
       provider: 'scripted',
       model: 'switched',
     })
     expect(adopted.created).toBe(false)
-    expect(adopted.target.sessionId).toBe(sessionId)
+    expect(adopted.target.sessionId).toBe(initial.target.sessionId)
     const state = await peer.state({ target: { kind: 'alias', alias: 'routed' as never } })
     expect(state.state.model).toMatchObject({ provider: 'scripted', model: 'switched' })
   })
@@ -1763,7 +1912,7 @@ describe('peer host service', () => {
     const { peer } = await setup()
     const participant = { kind: 'peer', name: 'laptop' } as const
     await expect(peer.models({ alias: 'ghost' as never, participant }))
-      .rejects.toMatchObject({ code: 'peer/not-paired' })
+      .rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
     await expect(peer.models({ alias: 'debug' as never, participant }))
       .rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'routing-not-configured' } })
   })
@@ -1951,7 +2100,7 @@ describe('peer host service', () => {
     })
     const participant = { kind: 'peer', name: 'laptop' } as const
     await expect(peer.create({ alias: 'ghost' as never, participant }))
-      .rejects.toMatchObject({ code: 'peer/not-paired' })
+      .rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
     // A pinned route must name provider and model together.
     await expect(peer.create({
       alias: 'routed' as never,
@@ -2061,16 +2210,21 @@ describe('peer host service', () => {
     })
     expect(value.accepted).toBe(true)
     expect(value.selected).toMatchObject({ provider: 'scripted', model: 'switched' })
+    expect(value.receiptPersisted).toBe(false)
   })
 
   it('keeps legacy pairing behavior when no routing policy is present', async () => {
-    const { peer, sessionId } = await setup({ extraAliases: ['legacy'] })
+    const { peer } = await setup({ extraAliases: ['legacy'] })
     const participant = { kind: 'peer', name: 'laptop' } as const
+    const legacyCreated = await peer.create({
+      alias: 'legacy' as never,
+      participant,
+    })
     // Adopt-time routing still needs allowModelChange on a legacy pairing.
     await expect(peer.create({
       alias: 'legacy' as never,
       participant,
-      sessionId,
+      sessionId: legacyCreated.target.sessionId,
       provider: 'scripted',
       model: 'routed',
     })).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'model-change' } })
@@ -2081,7 +2235,7 @@ describe('peer host service', () => {
       chain: 'free',
     })).rejects.toMatchObject({ code: 'gateway/bad-request' })
     await expect(peer.selectModel({
-      target: { kind: 'session', sessionId },
+      target: { kind: 'session', sessionId: legacyCreated.target.sessionId },
       participant,
       requestId: 'sw-legacy' as never,
       provider: 'scripted',
@@ -2498,5 +2652,1409 @@ describe('peer host service', () => {
     expect(ctx.agents.get(SessionId('prune-agent'))).toBeUndefined()
     expect(ctx.sessions.dispose(sessionId)).toBe(true)
     expect(ctx.sessions.get(sessionId)).toBeUndefined()
+  })
+})
+
+describe('peer hardening P-01 / P-03 / P-05', () => {
+  async function authHarness(
+    buildPairings: (root: string) => string,
+    options: { routingService?: PeerRoutingService; peerAsFiber?: boolean } = {},
+  ) {
+    const root = mkdtempSync(join(tmpdir(), 'peer-hardening-'))
+    roots.push(root)
+    const pairingsPath = join(root, 'pairings.yaml')
+    const bindingsPath = join(root, 'peer-state.json')
+    writeFileSync(pairingsPath, buildPairings(root))
+    const ctx = new Context()
+    contexts.push(ctx)
+    await mountAgentLoopTestDependencies(ctx)
+    ctx.provide('agentDefaultModel', {
+      currentSelection: () => ({ provider: 'scripted', model: 'mock' }),
+      saveSelection: async () => {},
+    } as never)
+    ctx.provide('attachments', {
+      imageLimits: IMAGE_LIMITS,
+      admitPromptContent: async (content: readonly AttachmentAdmissionPart[]): Promise<AdmittedPromptContentPart[]> =>
+        content.flatMap(part => part.type === 'text' ? [{ type: 'text' as const, text: part.text }] : []),
+    } as never)
+    ctx.provide('fileUploads', {
+      registerAgentResolver: () => () => {},
+      resolve: () => undefined,
+      bindPrompt: () => ({ commit: () => {}, [Symbol.dispose]: () => {} }),
+      retirePrompt: () => {},
+    } as never)
+    ctx.provide('typert', {
+      lookups: { configure: () => () => {} },
+      contexts: { configureHost: () => () => {} },
+    } as never)
+    new TestSessionQuery(ctx)
+    new SessionController(ctx, { listPageSize: 50 }, { wireLogRoot: join(root, 'wire') })
+    await ctx.plugin(ApprovalService)
+    await mountAgentLoopTestHarness(ctx)
+    await ctx.plugin(TokenMeter)
+    if (options.routingService !== undefined) ctx.provide('peerRouting', options.routingService)
+    const peerConfig = {
+      pairingsPath,
+      bindingsPath,
+      receiptsPath: join(root, 'peer-receipts.json'),
+      watchdogMs: 60_000,
+    }
+    const mountPeer = async () => {
+      let mounted: PeerService | undefined
+      const fiber = ctx.plugin({
+        inject: PeerService.inject,
+        apply: (inner) => { mounted = new PeerService(inner, peerConfig) },
+      })
+      await fiber
+      return { peer: mounted!, fiber }
+    }
+    let peer: PeerService
+    let fiber: { dispose: () => Promise<void> } | undefined
+    if (options.peerAsFiber === true) {
+      const result = await mountPeer()
+      peer = result.peer
+      fiber = result.fiber
+    } else {
+      peer = new PeerService(ctx, peerConfig)
+    }
+    const adapter = new ScriptedAdapter()
+    ctx.llm.registerAdapter(['scripted'], adapter)
+    return { ctx, peer, fiber, mountPeer, root, pairingsPath, bindingsPath, adapter }
+  }
+
+  it('P-01: enforces bearer authentication before any peer method runs with uniform errors and device binding', async () => {
+    const tokenAlpha = 'alpha-secret-token'
+    const outboundAlpha = 'alpha-outbound-secret'
+    const tokenBetaHash = `sha256$${createHash('sha256').update('beta-secret-token', 'utf8').digest('hex')}`
+    const { ctx, peer } = await authHarness(dir => [
+      'version: 1',
+      'device: serverlocal',
+      'pairings:',
+      '  - alias: alpha',
+      '    peer: laptop',
+      '    exposure: debug',
+      `    inboundToken: ${tokenAlpha}`,
+      `    outboundToken: ${outboundAlpha}`,
+      '    endpoint: http://100.0.0.5:3080',
+      '    create:',
+      `      cwd: ${join(dir, 'alpha-work')}`,
+      '  - alias: beta',
+      '    peer: desktop',
+      '    exposure: answer-only',
+      `    tokenHash: ${tokenBetaHash}`,
+      '    create:',
+      `      cwd: ${join(dir, 'beta-work')}`,
+      '  - alias: legacy-unauthed',
+      '    peer: tablet',
+      '    exposure: debug',
+      '    endpoint: http://100.0.0.6:3080',
+      '    outboundToken: legacy-outbound-secret',
+      '    create:',
+      `      cwd: ${join(dir, 'legacy-work')}`,
+    ].join('\n'))
+
+    const createSpy = vi.spyOn(ctx.sessionController, 'create')
+    const promptSpy = vi.spyOn(ctx.sessionController, 'prompt')
+
+    // Unauthenticated calls fail uniformly before any method logic across every endpoint.
+    const unauthHandshake = (() => {
+      try {
+        peer.handshake({ protocolVersion: 99, harnessVersion: 'x', schemaDigest: 'y', device: 'laptop' })
+        return undefined
+      } catch (error) {
+        return error as RemoteError
+      }
+    })()
+    expect(unauthHandshake).toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
+
+    const missingAliasErr = await peer.state({ target: { kind: 'alias', alias: 'nonexistent' as never } }).catch((e: unknown) => e)
+    const existingAliasNoTokenErr = await peer.state({ target: { kind: 'alias', alias: 'alpha' as never } }).catch((e: unknown) => e)
+    expect(missingAliasErr).toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
+    expect(existingAliasNoTokenErr).toMatchObject({
+      code: (missingAliasErr as RemoteError).code,
+      message: (missingAliasErr as RemoteError).message,
+      details: (missingAliasErr as RemoteError).details,
+    })
+
+    expect(() => peer.list({})).toThrow(RemoteError)
+    await expect(peer.models({ alias: 'alpha' as never, participant: { kind: 'peer', name: 'laptop' } }))
+      .rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
+    await expect(peer.selectModel({
+      target: { kind: 'alias', alias: 'alpha' as never },
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'sw-u' as never,
+      provider: 'scripted',
+      model: 'mock',
+    })).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
+    expect(() => peer.cancel({ target: { kind: 'alias', alias: 'alpha' as never }, participant: { kind: 'peer', name: 'laptop' } }))
+      .toThrow(RemoteError)
+    expect(() => peer.answer({
+      target: { kind: 'alias', alias: 'alpha' as never },
+      participant: { kind: 'peer', name: 'laptop' },
+      askId: 'ask-u' as never,
+      requestId: 'req-unauth' as never,
+      answer: { kind: 'approval', outcome: 'rejected' },
+    })).toThrow(RemoteError)
+    await expect(peer.page({ target: { kind: 'alias', alias: 'alpha' as never }, throughSeq: 0 as never }, NEVER_ABORTED))
+      .rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
+    expect(() => peer.follow({ target: { kind: 'alias', alias: 'alpha' as never } }, NEVER_ABORTED))
+      .toThrow(RemoteError)
+
+    await expect(peer.create({
+      alias: 'alpha' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+    })).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
+    expect(createSpy).not.toHaveBeenCalled()
+
+    await expect(peer.prompt({
+      target: { kind: 'alias', alias: 'alpha' as never },
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'r-unauth' as never,
+      content: [{ type: 'text', text: 'hi' }],
+    }, NEVER_ABORTED)).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
+    expect(promptSpy).not.toHaveBeenCalled()
+
+    const { withPeerAuth } = await import('../src/host.ts')
+
+    // Wrong device on handshake with alpha token is refused.
+    expect(() => withPeerAuth(`Bearer ${tokenAlpha}`, () =>
+      peer.handshake({ protocolVersion: 1, harnessVersion: 'x', schemaDigest: 'y', device: 'desktop' }))).toThrow(RemoteError)
+
+    // Handshake with matching device returns only alpha (not beta), and never leaks outboundToken/tokenHash.
+    const hs = withPeerAuth(`Bearer ${tokenAlpha}`, () =>
+      peer.handshake({ protocolVersion: 1, harnessVersion: 'x', schemaDigest: 'y', device: 'laptop' }))
+    expect(hs.pairings.map(p => p.alias)).toEqual(['alpha'])
+    expect(hs.pairings[0]?.tokenRequired).toBe(true)
+    expect(JSON.stringify(hs)).not.toContain(outboundAlpha)
+    expect(JSON.stringify(hs)).not.toContain(tokenBetaHash)
+
+    // Unauthenticated-legacy pairing loads cleanly for outbound use (`outboundToken` readable),
+    // but refuses every inbound request uniformly (`reason: 'unauthorized'`).
+    const loadedLegacy = peer.pairings.load().pairings.find(p => p.alias === 'legacy-unauthed')
+    expect(loadedLegacy?.outboundToken).toBe('legacy-outbound-secret')
+    expect(() => peer.handshake({ protocolVersion: 1, harnessVersion: 'x', schemaDigest: 'y', device: 'tablet' }))
+      .toThrow(RemoteError)
+    await expect(peer.create({
+      alias: 'legacy-unauthed' as never,
+      participant: { kind: 'peer', name: 'tablet' },
+    })).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
+    await expect(withPeerAuth(`Bearer ${tokenAlpha}`, () => peer.create({
+      alias: 'legacy-unauthed' as never,
+      participant: { kind: 'peer', name: 'tablet' },
+    }))).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
+
+    // Wrong token for alpha returns uniform unauthorized error even when token matches beta.
+    await expect(withPeerAuth('Bearer beta-secret-token', () => peer.create({
+      alias: 'alpha' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+    }))).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
+
+    // Mismatched participant.device is refused; omitted participant.device gets bound to pairing.peer ('laptop').
+    await expect(withPeerAuth(`Bearer ${tokenAlpha}`, () => peer.create({
+      alias: 'alpha' as never,
+      participant: { kind: 'peer', name: 'evil', device: 'desktop' },
+    }))).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
+
+    const created = await withPeerAuth(`Bearer ${tokenAlpha}`, () => peer.create({
+      alias: 'alpha' as never,
+      participant: { kind: 'peer', name: 'laptop-agent' },
+    }))
+    const state = await withPeerAuth(`Bearer ${tokenAlpha}`, () =>
+      peer.state({ target: { kind: 'session', sessionId: created.target.sessionId } }))
+    expect(state.state.lastParticipantAction?.actor).toEqual({
+      kind: 'peer',
+      name: 'laptop-agent',
+      device: 'laptop',
+    })
+
+    // HTTP connection/request waterfall extracts Authorization: Bearer header for /api/peer/* routes.
+    let waterfallList: unknown
+    // `connection/request` is declared by the client connection package, which this host program does not load.
+    await Promise.resolve(Reflect.apply(ctx.waterfall, ctx, [
+      'connection/request',
+      { url: '/api/peer/list', headers: { authorization: `Bearer ${tokenAlpha}` } },
+      {},
+      () => {
+        waterfallList = peer.list({})
+        return Promise.resolve()
+      },
+    ]))
+    expect((waterfallList as { pairings: Array<{ alias: string }> }).pairings.map(p => p.alias)).toEqual(['alpha'])
+  })
+
+  it('P-03: surfaces receipt write failure and keeps post-restart retries safe against overwriting newer selections', async () => {
+    const routing = new FakeRoutingService()
+    const { ctx, peer, fiber, mountPeer } = await authHarness(dir => [
+      'version: 1',
+      'device: serverlocal',
+      'pairings:',
+      '  - alias: routed',
+      '    peer: laptop',
+      '    exposure: debug',
+      '    insecure: true',
+      '    create:',
+      `      cwd: ${join(dir, 'work')}`,
+      '    routing:',
+      '      allowChains: [free]',
+      '      allowModels: ["scripted/*"]',
+      '      allowSwitch: idle-only',
+    ].join('\n'), { routingService: routing, peerAsFiber: true })
+
+    const created = await peer.create({
+      alias: 'routed' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      provider: 'scripted',
+      model: 'routed',
+    })
+    const target: PeerTarget = { kind: 'session', sessionId: created.target.sessionId }
+
+    // 1. Receipt write failure must surface on the returned value, and a retry
+    // compares the live selection so it does not re-apply sessionController.selectModel.
+    const putSpy = vi.spyOn(peer.receipts, 'put').mockRejectedValueOnce(new Error('disk full'))
+    const failedWriteResult = await peer.selectModel({
+      target,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'sw-disk-full' as never,
+      provider: 'scripted',
+      model: 'switched',
+    })
+    putSpy.mockRestore()
+    expect(failedWriteResult).toMatchObject({
+      accepted: true,
+      selected: { provider: 'scripted', model: 'switched' },
+      replayed: false,
+      receiptPersisted: false,
+    })
+
+    const selectSpy = vi.spyOn(ctx.sessionController, 'selectModel')
+    // When an unpersisted receipt is present in memory, replay also marks receiptPersisted: false.
+    await peer.receipts.put(receiptKey(created.target.sessionId, 'sw-mem-only'), 'unused', failedWriteResult)
+    const isPersistedSpy = vi.spyOn(peer.receipts, 'isPersisted').mockReturnValueOnce(false)
+    const retryUnpersisted = await peer.selectModel({
+      target,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'sw-disk-full' as never,
+      provider: 'scripted',
+      model: 'switched',
+    })
+    isPersistedSpy.mockRestore()
+    expect(retryUnpersisted).toMatchObject({
+      accepted: true,
+      selected: { provider: 'scripted', model: 'switched' },
+    })
+    expect(selectSpy).not.toHaveBeenCalled()
+
+    // 2. Restart without persisted receipt: retrying same requestId when live selection already matches
+    // must NOT append another model/selection event.
+    await fiber!.dispose()
+    const restartedMount = await mountPeer()
+    const restarted = restartedMount.peer
+    const beforeCount = await selectionEvents(ctx, created.target.sessionId)
+    const retryAfterRestart = await restarted.selectModel({
+      target,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'sw-disk-full' as never,
+      provider: 'scripted',
+      model: 'switched',
+    })
+    expect(retryAfterRestart.accepted).toBe(true)
+    expect(retryAfterRestart.receiptPersisted).toBeUndefined()
+    expect(selectSpy).not.toHaveBeenCalled()
+    expect(await selectionEvents(ctx, created.target.sessionId)).toBe(beforeCount)
+    selectSpy.mockRestore()
+
+    // 3. When a persisted receipt exists and a newer selection was applied afterwards,
+    // retrying the old requestId after restart replays the original receipt and NEVER overwrites the newer selection.
+    await restarted.selectModel({
+      target,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'sw-newer' as never,
+      provider: 'scripted',
+      model: 'routed',
+    })
+    await restartedMount.fiber.dispose()
+    const restartedAgain = (await mountPeer()).peer
+    const replayOld = await restartedAgain.selectModel({
+      target,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'sw-disk-full' as never,
+      provider: 'scripted',
+      model: 'switched',
+    })
+    expect(replayOld.replayed).toBe(true)
+    expect((await restartedAgain.state({ target })).state.model).toMatchObject({
+      provider: 'scripted',
+      model: 'routed',
+    })
+  })
+
+  it('P-05: restricts session adoption to the same alias and enforces create.* limits', async () => {
+    const { ctx, peer, root } = await authHarness(dir => [
+      'version: 1',
+      'device: serverlocal',
+      'pairings:',
+      '  - alias: one',
+      '    peer: laptop',
+      '    exposure: debug',
+      '    insecure: true',
+      '    create:',
+      `      cwd: ${join(dir, 'one-dir')}`,
+      '  - alias: preset-alias',
+      '    peer: laptop',
+      '    exposure: debug',
+      '    insecure: true',
+      '    create:',
+      '      agentPreset: orchestrator',
+      '      allowAgentPresets: [orchestrator, sysadmin]',
+      '  - alias: ws-alias',
+      '    peer: laptop',
+      '    exposure: debug',
+      '    insecure: true',
+      '    create:',
+      '      workspaceId: ws-one',
+      '  - alias: two',
+      '    peer: laptop',
+      '    exposure: debug',
+      '    insecure: true',
+      '    create:',
+      `      cwd: ${join(dir, 'two-dir')}`,
+    ].join('\n'))
+
+    const oneDir = join(root, 'one-dir')
+    const subDir = join(oneDir, 'sub')
+    const outsideDir = join(root, 'outside')
+    mkdirSync(subDir, { recursive: true })
+    mkdirSync(outsideDir, { recursive: true })
+    const escapeLink = join(oneDir, 'escape-link')
+    symlinkSync(outsideDir, escapeLink)
+
+    // Unpaired local session cannot be adopted by peer.create.
+    const localOnly = await ctx.sessionController.create({ cwd: oneDir })
+    await expect(peer.create({
+      alias: 'one' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      sessionId: localOnly.sessionId,
+    })).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'session-adoption' } })
+
+    // Non-existent explicit sessionId cannot be forged/adopted under peer.create.
+    await expect(peer.create({
+      alias: 'one' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      sessionId: SessionId('nonexistent-forged-session'),
+    })).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'session-adoption' } })
+
+    // Session created by alias 'two' cannot be adopted by alias 'one'.
+    const createdByTwo = await peer.create({
+      alias: 'two' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+    })
+    await expect(peer.create({
+      alias: 'one' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      sessionId: createdByTwo.target.sessionId,
+    })).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'session-adoption' } })
+
+    // Narrowing cwd to a subdirectory succeeds.
+    const createdByOne = await peer.create({
+      alias: 'one' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      cwd: subDir,
+    })
+    expect(createdByOne.created).toBe(true)
+
+    // Adopting a session bound to the SAME alias succeeds.
+    const adoptedSame = await peer.create({
+      alias: 'one' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      sessionId: createdByOne.target.sessionId,
+    })
+    expect(adoptedSame.created).toBe(false)
+
+    // Widening workspaceId, cwd (outside / sibling prefix / traversal / symlink escape), or preset is refused.
+    await expect(peer.create({
+      alias: 'ws-alias' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      workspaceId: 'ws-other',
+    })).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'workspace-not-allowed' } })
+
+    for (const badCwd of [outsideDir, `${oneDir}-evil`, join(oneDir, '..', 'outside'), escapeLink]) {
+      await expect(peer.create({
+        alias: 'one' as never,
+        participant: { kind: 'peer', name: 'laptop' },
+        cwd: badCwd,
+      })).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'cwd-not-allowed' } })
+    }
+
+    const createSpy = vi.spyOn(ctx.sessionController, 'create')
+    await expect(peer.create({
+      alias: 'preset-alias' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      agentPreset: 'creator',
+    })).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'preset-not-allowed' } })
+    expect(createSpy).not.toHaveBeenCalled()
+
+    createSpy.mockResolvedValueOnce({ sessionId: SessionId('sess-preset-allowed') })
+    const presetAllowed = await peer.create({
+      alias: 'preset-alias' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      agentPreset: 'sysadmin',
+    })
+    expect(presetAllowed.target.sessionId).toBe('sess-preset-allowed')
+    expect(createSpy).toHaveBeenCalledWith(expect.objectContaining({ agentPreset: 'sysadmin' }))
+    createSpy.mockRestore()
+
+    // Limits also apply on adopt.
+    await expect(peer.create({
+      alias: 'one' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      sessionId: createdByOne.target.sessionId,
+      cwd: outsideDir,
+    })).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'cwd-not-allowed' } })
+  })
+
+  it('HW-A5: provides idempotent create/prompt receipts, conflict detection, restart replay, and host-side disposition lookup', async () => {
+    const token = 'hw-a5-secret-token'
+    const { ctx, peer, fiber, mountPeer, root } = await authHarness(dir => [
+      'version: 1',
+      'device: serverlocal',
+      'pairings:',
+      '  - alias: work',
+      '    peer: laptop',
+      '    exposure: answer-only',
+      `    inboundToken: ${token}`,
+      '    create:',
+      `      cwd: ${join(dir, 'work')}`,
+      '  - alias: other',
+      '    peer: laptop',
+      '    exposure: debug',
+      `    inboundToken: ${token}`,
+      '    create:',
+      `      cwd: ${join(dir, 'other')}`,
+    ].join('\n'), { peerAsFiber: true })
+
+    // 1. Handshake reports instanceId and receipt capabilities.
+    const hs1 = withPeerAuth(`Bearer ${token}`, () => peer.handshake({
+      protocolVersion: 1,
+      harnessVersion: 'test',
+      schemaDigest: 'digest',
+      device: 'laptop',
+    }))
+    expect(typeof hs1.instanceId).toBe('string')
+    expect(hs1.instanceId.length).toBeGreaterThan(0)
+    expect(hs1.capabilities).toEqual(expect.arrayContaining([
+      'create-receipts',
+      'prompt-receipts',
+      'input-disposition',
+    ]))
+
+    // 2. Unauthorized lookup fails uniformly with peer/forbidden unauthorized.
+    const unauthKnown = await peer.receipt({ alias: 'work' as never, requestId: 'r1' as never }).catch((e: unknown) => e)
+    const unauthMissing = await peer.receipt({ alias: 'missing' as never, requestId: 'r1' as never }).catch((e: unknown) => e)
+    expect(unauthKnown).toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
+    expect(unauthMissing).toMatchObject({
+      code: (unauthKnown as RemoteError).code,
+      message: (unauthKnown as RemoteError).message,
+      details: (unauthKnown as RemoteError).details,
+    })
+
+    // 3. peer.create with requestId creates deterministic session id; lost-reply retry returns identical receipt with no second session.
+    const createSpy = vi.spyOn(ctx.sessionController, 'create')
+    const created1 = await withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'work' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'create-1' as never,
+    }))
+    expect(created1.created).toBe(true)
+    expect(created1.replayed).toBe(false)
+    expect(created1.target.sessionId).toMatch(/^peer-[0-9a-f]{32}$/u)
+    expect(created1.instanceId).toBe(hs1.instanceId)
+    expect(createSpy).toHaveBeenCalledTimes(1)
+
+    const createdRetry = await withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'work' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'create-1' as never,
+    }))
+    expect(createdRetry).toEqual({
+      ...created1,
+      replayed: true,
+    })
+    expect(createSpy).toHaveBeenCalledTimes(1)
+    createSpy.mockRestore()
+
+    // 4. Changed payload under same create requestId is peer/conflict request-id-reuse.
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'work' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'create-1' as never,
+      cwd: join(root, 'work', 'sub'),
+    }))).rejects.toMatchObject({ code: 'peer/conflict', details: { reason: 'request-id-reuse' } })
+
+    // Deterministic sessionId belongs strictly to this alias; another alias cannot adopt it.
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'other' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      sessionId: created1.target.sessionId,
+    }))).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'session-adoption' } })
+
+    // 5. peer.prompt write-ahead receipt, lost-reply retry, changed payload conflict, and answer-only disposition lookup.
+    const promptSpy = vi.spyOn(ctx.sessionController, 'prompt')
+    const prompt1 = await withPeerAuth(`Bearer ${token}`, () => peer.prompt({
+      target: { kind: 'alias', alias: 'work' as never },
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'prompt-1' as never,
+      content: [{ type: 'text', text: 'hello world' }],
+    }, NEVER_ABORTED))
+    expect(prompt1).toMatchObject({
+      accepted: true,
+      queued: true,
+      hopCount: 1,
+      replayed: false,
+      instanceId: hs1.instanceId,
+    })
+    expect(promptSpy).toHaveBeenCalledTimes(1)
+
+    const promptRetry = await withPeerAuth(`Bearer ${token}`, () => peer.prompt({
+      target: { kind: 'alias', alias: 'work' as never },
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'prompt-1' as never,
+      content: [{ type: 'text', text: 'hello world' }],
+    }, NEVER_ABORTED))
+    expect(promptRetry).toMatchObject({
+      accepted: true,
+      queued: true,
+      hopCount: 1,
+      replayed: true,
+      payloadHash: prompt1.payloadHash,
+      instanceId: hs1.instanceId,
+    })
+    expect(promptSpy).toHaveBeenCalledTimes(1)
+    promptSpy.mockRestore()
+
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.prompt({
+      target: { kind: 'alias', alias: 'work' as never },
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'prompt-1' as never,
+      content: [{ type: 'text', text: 'changed payload' }],
+    }, NEVER_ABORTED))).rejects.toMatchObject({ code: 'peer/conflict', details: { reason: 'request-id-reuse' } })
+
+    await waitFor(async () => (
+      await withPeerAuth(`Bearer ${token}`, () => peer.receipt({ alias: 'work' as never, requestId: 'prompt-1' as never }))
+    ).disposition === 'terminal', 5_000)
+
+    const lookupSameBoot = await withPeerAuth(`Bearer ${token}`, () =>
+      peer.receipt({ alias: 'work' as never, requestId: 'prompt-1' as never }))
+    expect(lookupSameBoot).toMatchObject({
+      found: true,
+      kind: 'prompt',
+      sessionId: created1.target.sessionId,
+      payloadHash: prompt1.payloadHash,
+      instanceId: hs1.instanceId,
+      replayedAcrossRestart: false,
+      disposition: 'terminal',
+      terminalState: 'completed',
+    })
+
+    // 6. Restart simulation: new PeerService instance over same file replays and marks replayedAcrossRestart: true.
+    await fiber!.dispose()
+    const restartedMount = await mountPeer()
+    const restarted = restartedMount.peer
+    const hs2 = withPeerAuth(`Bearer ${token}`, () => restarted.handshake({
+      protocolVersion: 1,
+      harnessVersion: 'test',
+      schemaDigest: 'digest',
+      device: 'laptop',
+    }))
+    expect(hs2.instanceId).not.toBe(hs1.instanceId)
+
+    const lookupAfterRestart = await withPeerAuth(`Bearer ${token}`, () =>
+      restarted.receipt({ alias: 'work' as never, requestId: 'prompt-1' as never }))
+    expect(lookupAfterRestart).toMatchObject({
+      found: true,
+      kind: 'prompt',
+      instanceId: hs1.instanceId,
+      replayedAcrossRestart: true,
+      disposition: 'terminal',
+      terminalState: 'completed',
+    })
+
+    const createAfterRestart = await withPeerAuth(`Bearer ${token}`, () => restarted.create({
+      alias: 'work' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'create-1' as never,
+    }))
+    expect(createAfterRestart).toEqual({
+      ...created1,
+      replayed: true,
+    })
+
+    const promptAfterRestart = await withPeerAuth(`Bearer ${token}`, () => restarted.prompt({
+      target: { kind: 'alias', alias: 'work' as never },
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'prompt-1' as never,
+      content: [{ type: 'text', text: 'hello world' }],
+    }, NEVER_ABORTED))
+    expect(promptAfterRestart).toMatchObject({
+      accepted: true,
+      queued: true,
+      replayed: true,
+      instanceId: hs1.instanceId,
+      disposition: 'terminal',
+      terminalState: 'completed',
+    })
+
+    // 7. Receipt write failure refuses BEFORE side effect (no session / no prompt queued).
+    const prepareSpy = vi.spyOn(restarted.inputReceipts, 'prepare').mockRejectedValueOnce(new Error('disk full'))
+    const createBeforeFailSpy = vi.spyOn(ctx.sessionController, 'create')
+    await expect(withPeerAuth(`Bearer ${token}`, () => restarted.create({
+      alias: 'work' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'create-write-fail' as never,
+    }))).rejects.toMatchObject({ code: 'peer/unavailable', details: { reason: 'receipt-write-failed' } })
+    expect(createBeforeFailSpy).not.toHaveBeenCalled()
+    createBeforeFailSpy.mockRestore()
+
+    prepareSpy.mockRejectedValueOnce(new Error('disk full'))
+    const promptBeforeFailSpy = vi.spyOn(ctx.sessionController, 'prompt')
+    await expect(withPeerAuth(`Bearer ${token}`, () => restarted.prompt({
+      target: { kind: 'alias', alias: 'work' as never },
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'prompt-write-fail' as never,
+      content: [{ type: 'text', text: 'never queued' }],
+    }, NEVER_ABORTED))).rejects.toMatchObject({ code: 'peer/unavailable', details: { reason: 'receipt-write-failed' } })
+    expect(promptBeforeFailSpy).not.toHaveBeenCalled()
+    promptBeforeFailSpy.mockRestore()
+    prepareSpy.mockRestore()
+  })
+
+  it('HW-A5: withholds receipt capabilities and refuses calls when input receipt store fails to open', async () => {
+    const { ctx, root, fiber } = await authHarness(dir => [
+      'version: 1',
+      'device: serverlocal',
+      'pairings:',
+      '  - alias: work',
+      '    peer: laptop',
+      '    exposure: debug',
+      '    insecure: true',
+      '    create:',
+      `      cwd: ${join(dir, 'work')}`,
+    ].join('\n'), { peerAsFiber: true })
+    await fiber!.dispose()
+    const broken = new PeerService(ctx, {
+      pairingsPath: join(root, 'pairings.yaml'),
+      bindingsPath: join(root, 'peer-state.json'),
+      receiptsPath: join(root, 'peer-receipts.json'),
+      inputReceiptsPath: root, // EISDIR
+    })
+    const hs = broken.handshake({
+      protocolVersion: 1,
+      harnessVersion: 'test',
+      schemaDigest: 'digest',
+      device: 'laptop',
+    })
+    expect(hs.capabilities).not.toContain('create-receipts')
+    expect(hs.capabilities).not.toContain('prompt-receipts')
+    expect(hs.capabilities).not.toContain('input-disposition')
+    await expect(broken.create({
+      alias: 'work' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'c1' as never,
+    })).rejects.toMatchObject({ code: 'peer/unavailable', details: { reason: 'receipt-store-unavailable' } })
+    await expect(broken.receipt({
+      alias: 'work' as never,
+      requestId: 'c1' as never,
+    })).rejects.toMatchObject({ code: 'peer/unavailable', details: { reason: 'receipt-store-unavailable' } })
+  })
+
+  it('HW-A5: derives live queued/claimed/cancelled_before_dispatch/aborted/budget/unknown dispositions and reconciles prepared crashes', async () => {
+    const token = 'hw-a5-live-disp-token'
+    const { ctx, peer, fiber, mountPeer, root, adapter } = await authHarness(dir => [
+      'version: 1',
+      'device: serverlocal',
+      'pairings:',
+      '  - alias: disp',
+      '    peer: laptop',
+      '    exposure: answer-only',
+      `    inboundToken: ${token}`,
+      '    create:',
+      `      cwd: ${join(dir, 'work')}`,
+    ].join('\n'), { peerAsFiber: true })
+
+    // Missing receipt returns found: false, disposition: unknown.
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.receipt({
+      alias: 'disp' as never,
+      requestId: 'never-seen' as never,
+    }))).resolves.toEqual({
+      found: false,
+      replayedAcrossRestart: false,
+      disposition: 'unknown',
+    })
+
+    // Create with requestId, plus prompt with the SAME requestId to test ambiguous lookup vs kind filter.
+    const created = await withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'disp' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'shared-id' as never,
+    }))
+
+    // Hold turn 1 so prompt-A is claimed mid-turn, prompt-B is queued, prompt-C is removed via updateQueue.
+    const hold1 = adapter.holdCall(1)
+    await withPeerAuth(`Bearer ${token}`, () => peer.prompt({
+      target: { kind: 'alias', alias: 'disp' as never },
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'shared-id' as never,
+      content: [{ type: 'text', text: 'first prompt' }],
+    }, NEVER_ABORTED))
+    await hold1.started
+
+    await withPeerAuth(`Bearer ${token}`, () => peer.prompt({
+      target: { kind: 'alias', alias: 'disp' as never },
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'queued-keep' as never,
+      content: [{ type: 'text', text: 'stays queued across cancel' }],
+    }, NEVER_ABORTED))
+    await withPeerAuth(`Bearer ${token}`, () => peer.prompt({
+      target: { kind: 'alias', alias: 'disp' as never },
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'cancelled-q' as never,
+      content: [{ type: 'text', text: 'will be removed before dispatch' }],
+    }, NEVER_ABORTED))
+
+    // While turn 1 is held: shared-id is claimed, queued-keep is queued.
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.receipt({
+      alias: 'disp' as never,
+      requestId: 'shared-id' as never,
+      kind: 'prompt',
+    }))).resolves.toMatchObject({ found: true, kind: 'prompt', disposition: 'claimed' })
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.receipt({
+      alias: 'disp' as never,
+      requestId: 'shared-id' as never,
+      kind: 'create',
+    }))).resolves.toMatchObject({ found: true, kind: 'create', disposition: 'created' })
+    // Omitting kind when both create and prompt share requestId rejects loudly.
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.receipt({
+      alias: 'disp' as never,
+      requestId: 'shared-id' as never,
+    }))).rejects.toMatchObject({ code: 'gateway/bad-request' })
+
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.receipt({
+      alias: 'disp' as never,
+      requestId: 'queued-keep' as never,
+    }))).resolves.toMatchObject({ found: true, disposition: 'queued' })
+
+    // Remove cancelled-q via sessionController.updateQueue({ action: { kind: 'remove' } }) -> cancelled_before_dispatch.
+    const liveAgent = ctx.agents.get(created.target.sessionId)!
+    const removeTarget = liveAgent.inbox.nextTurn.find(m =>
+      m.content[0]?.type === 'text' && m.content[0].text === 'will be removed before dispatch')!
+    await ctx.sessionController.updateQueue({
+      sessionId: created.target.sessionId,
+      itemId: removeTarget.id,
+      action: { kind: 'remove' },
+    })
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.receipt({
+      alias: 'disp' as never,
+      requestId: 'cancelled-q' as never,
+    }))).resolves.toMatchObject({ found: true, disposition: 'cancelled_before_dispatch' })
+
+    // peer.cancel aborts turn 1 with keepInbox: true, leaving queued-keep parked as 'queued' until woken.
+    withPeerAuth(`Bearer ${token}`, () => peer.cancel({
+      target: { kind: 'alias', alias: 'disp' as never },
+      participant: { kind: 'peer', name: 'laptop' },
+    }))
+    hold1.release()
+    await waitFor(async () => (
+      await withPeerAuth(`Bearer ${token}`, () => peer.state({ target: { kind: 'alias', alias: 'disp' as never } }))
+    ).state.latch === 'idle', 5_000)
+
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.receipt({
+      alias: 'disp' as never,
+      requestId: 'shared-id' as never,
+      kind: 'prompt',
+    }))).resolves.toMatchObject({
+      found: true,
+      disposition: 'terminal',
+      terminalState: 'aborted',
+    })
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.receipt({
+      alias: 'disp' as never,
+      requestId: 'queued-keep' as never,
+    }))).resolves.toMatchObject({ found: true, disposition: 'queued' })
+
+    // Waking queued-keep runs turn 2 to completion.
+    const wakeTarget = liveAgent.inbox.nextTurn.find(m =>
+      m.content[0]?.type === 'text' && m.content[0].text === 'stays queued across cancel')!
+    await ctx.sessionController.updateQueue({
+      sessionId: created.target.sessionId,
+      itemId: wakeTarget.id,
+      action: { kind: 'wake' },
+    })
+    await waitFor(async () => (
+      await withPeerAuth(`Bearer ${token}`, () => peer.receipt({
+        alias: 'disp' as never,
+        requestId: 'queued-keep' as never,
+      }))
+    ).disposition === 'terminal', 5_000)
+
+    // Simulate a crash leaving a 'prepared' prompt receipt with no log evidence -> 'unknown' until reconciled.
+    await peer.inputReceipts.prepare({
+      kind: 'prompt',
+      alias: 'disp' as never,
+      requestId: 'crashed-before-log' as never,
+      payloadHash: 'unused-hash',
+      instanceId: 'dead-boot',
+      sessionId: created.target.sessionId,
+      acceptedAt: 123,
+    })
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.receipt({
+      alias: 'disp' as never,
+      requestId: 'crashed-before-log' as never,
+    }))).resolves.toMatchObject({
+      found: true,
+      phase: 'prepared',
+      replayedAcrossRestart: true,
+      disposition: 'unknown',
+    })
+
+    // Simulate a crash leaving a 'prepared' create receipt after session existed -> lookup reconciles 'created', retry replays.
+    const crashCreateId = 'crashed-create-after-session'
+    await peer.inputReceipts.prepare({
+      kind: 'create',
+      alias: 'disp' as never,
+      requestId: crashCreateId as never,
+      payloadHash: (await import('../src/receipts.ts')).createPayloadHash('disp', {
+        alias: 'disp' as never,
+        participant: { kind: 'peer', name: 'laptop' },
+      }),
+      instanceId: 'dead-boot',
+      sessionId: created.target.sessionId,
+      acceptedAt: 124,
+    })
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.receipt({
+      alias: 'disp' as never,
+      requestId: crashCreateId as never,
+    }))).resolves.toMatchObject({
+      found: true,
+      kind: 'create',
+      phase: 'prepared',
+      replayedAcrossRestart: true,
+      disposition: 'created',
+    })
+
+    // Deterministic sessionId cannot adopt an unbound local session created outside this alias.
+    const collidingId = (await import('../src/receipts.ts')).deterministicCreateSessionId('disp', 'collide-local')
+    await ctx.sessionController.create({ sessionId: collidingId, cwd: join(root, 'work') })
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'disp' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'collide-local' as never,
+    }))).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'session-adoption' } })
+
+    // Request id exceeding requestIdMaxLength is rejected as gateway/bad-request.
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'disp' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'x'.repeat(257) as never,
+    }))).rejects.toMatchObject({ code: 'gateway/bad-request' })
+
+    // Restart still reads receipts cleanly.
+    await fiber!.dispose()
+    const restarted = (await mountPeer()).peer
+    const afterRestart = await withPeerAuth(`Bearer ${token}`, () => restarted.receipt({
+      alias: 'disp' as never,
+      requestId: 'queued-keep' as never,
+    }))
+    expect(afterRestart).toMatchObject({
+      found: true,
+      replayedAcrossRestart: true,
+      disposition: 'terminal',
+      terminalState: 'completed',
+    })
+
+    // Retrying crashed-create-after-session reconciles the prepared create receipt into finalized replay.
+    const reconciledCreate = await withPeerAuth(`Bearer ${token}`, () => restarted.create({
+      alias: 'disp' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: crashCreateId as never,
+    }))
+    expect(reconciledCreate).toMatchObject({
+      created: true,
+      replayed: true,
+      instanceId: 'dead-boot',
+      target: { sessionId: created.target.sessionId },
+    })
+
+    // Idempotent adoption via peer.create with both requestId and sessionId.
+    const adoptKeyed = await withPeerAuth(`Bearer ${token}`, () => restarted.create({
+      alias: 'disp' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'adopt-1' as never,
+      sessionId: created.target.sessionId,
+    }))
+    expect(adoptKeyed).toMatchObject({ created: false, replayed: false })
+    const adoptKeyedReplay = await withPeerAuth(`Bearer ${token}`, () => restarted.create({
+      alias: 'disp' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'adopt-1' as never,
+      sessionId: created.target.sessionId,
+    }))
+    expect(adoptKeyedReplay).toMatchObject({ created: false, replayed: true })
+
+    // Crashed prepared prompt receipt whose log already contains the rpcId reconciles on retry.
+    const queuedKeepHash = (await import('../src/receipts.ts')).promptPayloadHash(
+      created.target.sessionId,
+      [{ type: 'text', text: 'stays queued across cancel' }],
+    )
+    await restarted.inputReceipts.prepare({
+      kind: 'prompt',
+      alias: 'disp' as never,
+      requestId: 'queued-keep' as never,
+      payloadHash: queuedKeepHash,
+      instanceId: 'dead-boot',
+      sessionId: created.target.sessionId,
+      acceptedAt: 125,
+    })
+    const reconciledPrompt = await withPeerAuth(`Bearer ${token}`, () => restarted.prompt({
+      target: { kind: 'alias', alias: 'disp' as never },
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'queued-keep' as never,
+      content: [{ type: 'text', text: 'stays queued across cancel' }],
+    }, NEVER_ABORTED))
+    expect(reconciledPrompt).toMatchObject({
+      replayed: true,
+      instanceId: 'dead-boot',
+      disposition: 'terminal',
+      terminalState: 'completed',
+    })
+
+    // Invalid receipt requests fail with gateway/bad-request.
+    await expect(withPeerAuth(`Bearer ${token}`, () =>
+      restarted.receipt(undefined as never))).rejects.toMatchObject({ code: 'gateway/bad-request' })
+    await expect(withPeerAuth(`Bearer ${token}`, () => restarted.receipt({
+      alias: 'disp' as never,
+      requestId: 'x' as never,
+      kind: 'invalid' as never,
+    }))).rejects.toMatchObject({ code: 'gateway/bad-request' })
+  })
+
+  it('drops only the cancelling alias’s pending prompts and counts only successful removals', async () => {
+    const sessionId = SessionId('shared-queue')
+    const { ctx, peer, adapter, root } = await authHarness(() => [
+      'version: 1', 'device: serverlocal', 'pairings:',
+      ...['alpha', 'beta'].flatMap(alias => [
+        `  - alias: ${alias}`, '    peer: laptop', '    exposure: debug',
+        `    sessionId: ${sessionId}`, '    insecure: true',
+      ]),
+    ].join('\n'))
+    await ctx.sessionController.create({ sessionId, cwd: root })
+    const agent = ctx.agents.get(sessionId)!
+    const participant = { kind: 'peer', name: 'laptop' } as const
+    const alpha = { kind: 'alias', alias: 'alpha' as never } as const
+    const beta = { kind: 'alias', alias: 'beta' as never } as const
+    const send = (target: typeof alpha, id: string, text: string) => peer.prompt({
+      target, participant, requestId: id as never, content: [{ type: 'text', text }],
+    }, NEVER_ABORTED)
+    const receipt = (target: typeof alpha, id: string) => peer.receipt({ alias: target.alias, requestId: id as never })
+    const hold = adapter.holdNext()
+    try {
+      await send(alpha, 'active', 'active')
+      await hold.started
+      await send(alpha, 'shared-id', 'alpha queued')
+      await send(beta, 'shared-id', 'beta queued')
+      await send(alpha, 'race', 'claimed during removal')
+      await ctx.sessionController.prompt({
+        sessionId, requestId: 'human' as never, mode: 'queue', content: [{ type: 'text', text: 'human queued' }],
+      }, NEVER_ABORTED)
+      expect(peer.cancel({ target: alpha, participant })).toMatchObject({ accepted: true, droppedQueued: 0 })
+      hold.release()
+      await agent.whenIdle()
+      await expect(receipt(alpha, 'shared-id')).resolves.toMatchObject({ disposition: 'queued' })
+      await expect(receipt(alpha, 'active')).resolves.toMatchObject({ disposition: 'terminal', terminalState: 'aborted' })
+
+      const raced = agent.inbox.nextTurn.find(message => message.content[0]?.type === 'text'
+        && message.content[0].text === 'claimed during removal')!
+      const remove = agent.inbox.remove.bind(agent.inbox)
+      const spy = vi.spyOn(agent.inbox, 'remove').mockImplementation((id) => {
+        if (id === raced.id) {
+          // Record the driver's claim splice (no canceled outcome) immediately before removal.
+          const start = agent.inbox.nextTurn.findIndex(message => message.id === id)
+          expect(start).toBeGreaterThanOrEqual(0)
+          agent.session.append('agent/inbox/spliced', { target: 'next-turn', start, removedCount: 1, inserted: [] })
+        }
+        return remove(id)
+      })
+      try {
+        expect(peer.cancel({ target: alpha, participant, dropQueued: true }))
+          .toMatchObject({ accepted: true, droppedQueued: 1 })
+        expect(spy).toHaveBeenCalledWith(raced.id)
+      } finally {
+        spy.mockRestore()
+      }
+      await expect(receipt(alpha, 'shared-id')).resolves.toMatchObject({ disposition: 'cancelled_before_dispatch' })
+      await expect(receipt(alpha, 'race')).resolves.toMatchObject({ disposition: 'claimed' })
+      await expect(receipt(beta, 'shared-id')).resolves.toMatchObject({ disposition: 'queued' })
+      expect(agent.inbox.nextTurn.map(message => message.content)).toEqual([
+        [{ type: 'text', text: 'beta queued' }], [{ type: 'text', text: 'human queued' }],
+      ])
+    } finally {
+      hold.release()
+    }
+  })
+
+  it('HW-A2/A7/A9/A10: enforces freshOnly, job bindings, peerJobBindings service, jobUpdate, profileIdentity, ready, and export root', async () => {
+    const token = 'hw-worker-secret-token'
+    const { ctx, peer, fiber, mountPeer, root, adapter } = await authHarness(dir => [
+      'version: 1',
+      'device: serverlocal',
+      'pairings:',
+      '  - alias: plain',
+      '    peer: laptop',
+      '    exposure: debug',
+      `    inboundToken: ${token}`,
+      '    create:',
+      `      cwd: ${join(dir, 'plain')}`,
+      '  - alias: worker',
+      '    peer: laptop',
+      '    exposure: answer-only',
+      `    inboundToken: ${token}`,
+      '    create:',
+      '      freshOnly: true',
+      `      cwd: ${join(dir, 'worker')}`,
+      '    worker:',
+      '      allowedCapabilities: [read, search]',
+      '      maxLimits:',
+      '        maxSteps: 10',
+      '        maxToolCalls: 25',
+      '        maxWallMs: 60000',
+      '        maxTotalTokens: 40000',
+      '      allowedMcpEndpoints: [jarvis-hub]',
+      '      allowedToolNames: [read, grep, mcp__jarvis__knowledge_search]',
+    ].join('\n'), { peerAsFiber: true })
+
+    // 1. Before peerProfileIdentity is mounted: peer.ready reports missing profile-identity and ready: false.
+    const notReady = withPeerAuth(`Bearer ${token}`, () => peer.ready({ alias: 'worker' as never }))
+    expect(notReady.ready).toBe(false)
+    expect(notReady.missing).toContain('profile-identity')
+    expect(notReady.capabilities).not.toContain('profile-identity')
+    expect(notReady.capabilities).toEqual(expect.arrayContaining([
+      'fresh-only-create',
+      'job-binding',
+      'ready',
+      'export-root',
+      'shape-digest',
+    ]))
+    expect(notReady.version).toBe(HARNESS_VERSION)
+
+    // Handshake carries both shape-based schemaDigest and legacy methodsDigest.
+    const hsBefore = withPeerAuth(`Bearer ${token}`, () => peer.handshake({
+      protocolVersion: 1,
+      harnessVersion: 'test',
+      schemaDigest: 'caller',
+      device: 'laptop',
+    }))
+    expect(hsBefore.methodsDigest).toMatch(/^[0-9a-f]{64}$/u)
+    expect(hsBefore.schemaDigest).not.toBe(hsBefore.methodsDigest)
+
+    // Unauthenticated or unknown alias on ready/jobUpdate/exportList/exportFetch fails uniformly.
+    const unauthReadyKnown = await (async () => {
+      try {
+        return peer.ready({ alias: 'worker' as never })
+      } catch (error) {
+        return error as RemoteError
+      }
+    })()
+    const unauthReadyMissing = await (async () => {
+      try {
+        return peer.ready({ alias: 'nope' as never })
+      } catch (error) {
+        return error as RemoteError
+      }
+    })()
+    expect(unauthReadyKnown).toMatchObject({ code: 'peer/forbidden', details: { reason: 'unauthorized' } })
+    expect(unauthReadyMissing).toMatchObject({
+      code: (unauthReadyKnown as RemoteError).code,
+      message: (unauthReadyKnown as RemoteError).message,
+      details: (unauthReadyKnown as RemoteError).details,
+    })
+
+    // 2. Worker create fails closed when peerProfileIdentity is absent, leaving no session.
+    const createControllerSpy = vi.spyOn(ctx.sessionController, 'create')
+    const baseJob = {
+      jobId: 'job-1',
+      fence: 1,
+      expiresAt: Date.now() + 60_000,
+      capabilities: ['read'],
+      limits: { maxSteps: 5, maxToolCalls: 10 },
+      mcpEndpointId: 'jarvis-hub',
+      credentialRef: 'vault:jarvis-ro',
+      allowedToolNames: ['read'],
+    }
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'worker' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-no-profile' as never,
+      job: baseJob,
+    }))).rejects.toMatchObject({ code: 'peer/unavailable', details: { reason: 'profile-identity-unavailable' } })
+    expect(createControllerSpy).not.toHaveBeenCalled()
+    createControllerSpy.mockRestore()
+
+    // 3. When peerProfileIdentity returns undefined, create fails closed AND disposes/deletes the created session.
+    let profileReturnsUndefined = true
+    ctx.provide('peerProfileIdentity', {
+      describe: sessionId => profileReturnsUndefined || ctx.get('peerJobBindings')?.get(sessionId) === undefined
+        ? undefined
+        : {
+          hash: 'profile-sha-1',
+          presetId: 'worker-ro',
+          toolNames: ['read', 'grep'],
+          configDigest: 'cfg-sha-1',
+        },
+    })
+    const expectedDeadId = (await import('../src/receipts.ts')).deterministicCreateSessionId('worker', 'req-undef-profile')
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'worker' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-undef-profile' as never,
+      job: { ...baseJob, jobId: 'failed-profile-job' },
+    }))).rejects.toMatchObject({ code: 'peer/unavailable', details: { reason: 'profile-identity-unavailable' } })
+    expect(ctx.sessions.get(expectedDeadId) === undefined).toBe(true)
+    await expect(ctx.sessionQuery.observeSession(expectedDeadId)).rejects.toThrow()
+    expect(ctx.get('peerJobBindings')?.get(expectedDeadId)?.revoked).toBe(true)
+
+    // 4. Mount working profile identity: ready becomes true.
+    profileReturnsUndefined = false
+    const readyNow = withPeerAuth(`Bearer ${token}`, () => peer.ready({ alias: 'worker' as never }))
+    expect(readyNow.ready).toBe(true)
+    expect(readyNow.missing).toEqual([])
+    expect(readyNow.capabilities).toContain('profile-identity')
+
+    // 5. freshOnly refuses missing requestId and caller-supplied sessionId.
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'worker' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      job: baseJob,
+    }))).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'request-id-required' } })
+
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'worker' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-sess' as never,
+      sessionId: SessionId('caller-supplied'),
+      job: baseJob,
+    }))).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'fresh-only-create' } })
+
+    // Non-worker pairing rejects job.
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'plain' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-plain-job' as never,
+      job: baseJob,
+    }))).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'worker-policy-required' } })
+
+    // Out-of-policy job fields are refused (never clamped).
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'worker' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-over-cap' as never,
+      job: { ...baseJob, capabilities: ['bash'] },
+    }))).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'job-capability-not-allowed', denied: 'bash' } })
+
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'worker' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-over-steps' as never,
+      job: { ...baseJob, limits: { maxSteps: 11 } },
+    }))).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'job-limit-exceeded', denied: 'maxSteps' } })
+
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'worker' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-bad-cred' as never,
+      job: { ...baseJob, credentialRef: 'sk-live-secret-value' },
+    }))).rejects.toMatchObject({ code: 'gateway/bad-request' })
+
+    // 6. Successful worker create returns profile, persists binding & 0700 export dir, and enforces idempotency + job hash conflict.
+    const workerCreated = await withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'worker' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-worker-1' as never,
+      job: baseJob,
+    }))
+    expect(workerCreated.created).toBe(true)
+    expect(workerCreated.profile).toEqual({ hash: 'profile-sha-1', presetId: 'worker-ro' })
+    const workerSessionId = workerCreated.target.sessionId
+    const workerTarget = { kind: 'alias', alias: 'worker' as never } as const
+    const participant = { kind: 'peer', name: 'laptop' } as const
+    const workerHold = adapter.holdNext()
+    const workerPrompt = (requestId: string) => withPeerAuth(`Bearer ${token}`, () => peer.prompt({
+      target: workerTarget, participant, requestId: requestId as never, content: [{ type: 'text', text: requestId }],
+    }, NEVER_ABORTED))
+    try {
+      await workerPrompt('worker-active')
+      await workerHold.started
+      await workerPrompt('worker-queued')
+      expect(withPeerAuth(`Bearer ${token}`, () => peer.cancel({ target: workerTarget, participant })))
+        .toMatchObject({ accepted: true, droppedQueued: 1 })
+      await expect(withPeerAuth(`Bearer ${token}`, () => peer.receipt({ alias: workerTarget.alias, requestId: 'worker-queued' as never })))
+        .resolves.toMatchObject({ disposition: 'cancelled_before_dispatch' })
+    } finally {
+      workerHold.release()
+    }
+    await ctx.agents.get(workerSessionId)!.whenIdle()
+    const exportDir = join(root, 'peer-exports', workerSessionId)
+    expect(statSync(exportDir).mode & 0o777).toBe(0o700)
+
+    const reader = ctx.get('peerJobBindings')!
+    expect(reader).toBeDefined()
+    expect(reader.get(workerSessionId)).toMatchObject({
+      sessionId: workerSessionId,
+      jobId: 'job-1',
+      fence: 1,
+      capabilities: ['read'],
+      limits: { maxSteps: 5, maxToolCalls: 10, maxWallMs: 60_000, maxTotalTokens: 40_000 },
+      mcpEndpointId: 'jarvis-hub',
+      credentialRef: 'vault:jarvis-ro',
+      allowedToolNames: ['read'],
+      alias: 'worker',
+    })
+
+    // Exact replay returns same profile + replayed: true.
+    const workerReplay = await withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'worker' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-worker-1' as never,
+      job: baseJob,
+    }))
+    expect(workerReplay).toEqual({ ...workerCreated, replayed: true })
+
+    // Changed job under same requestId conflicts.
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.create({
+      alias: 'worker' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-worker-1' as never,
+      job: { ...baseJob, capabilities: ['ungranted'] },
+    }))).rejects.toMatchObject({ code: 'peer/conflict', details: { reason: 'request-id-reuse' } })
+
+    // Ready on bound alias includes profile summary.
+    expect(withPeerAuth(`Bearer ${token}`, () => peer.ready({ alias: 'worker' as never })).profile)
+      .toEqual({ hash: 'profile-sha-1', presetId: 'worker-ro' })
+
+    // 7. Export list and fetch work while job is live.
+    const reportBytes = Buffer.from('summary: three lines\n', 'utf8')
+    writeFileSync(join(exportDir, 'summary.txt'), reportBytes)
+    const listed = withPeerAuth(`Bearer ${token}`, () => peer.exportList({ alias: 'worker' as never }))
+    expect(listed.truncated).toBe(false)
+    expect(listed.files.map(f => f.path)).toEqual(['summary.txt'])
+    const fetched = withPeerAuth(`Bearer ${token}`, () => peer.exportFetch({
+      alias: 'worker' as never,
+      path: 'summary.txt',
+    }))
+    expect(fetched).toEqual({
+      path: 'summary.txt',
+      bytes: reportBytes.byteLength,
+      sha256: createHash('sha256').update(reportBytes).digest('hex'),
+      contentBase64: reportBytes.toString('base64'),
+    })
+
+    // 8. jobUpdate bumps fence, extends expiry, replays idempotently, rejects regressions and payload changes.
+    const extendedExp = Date.now() + 120_000
+    const updated1 = await withPeerAuth(`Bearer ${token}`, () => peer.jobUpdate({
+      alias: 'worker' as never,
+      requestId: 'upd-1' as never,
+      jobId: 'job-1',
+      fence: 2,
+      expiresAt: extendedExp,
+    }))
+    expect(updated1.replayed).toBe(false)
+    expect(updated1.binding.fence).toBe(2)
+    expect(updated1.binding.expiresAt).toBe(extendedExp)
+    expect(reader.get(workerSessionId)?.fence).toBe(2)
+
+    const updated1Replay = await withPeerAuth(`Bearer ${token}`, () => peer.jobUpdate({
+      alias: 'worker' as never,
+      requestId: 'upd-1' as never,
+      jobId: 'job-1',
+      fence: 2,
+      expiresAt: extendedExp,
+    }))
+    expect(updated1Replay.replayed).toBe(true)
+
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.jobUpdate({
+      alias: 'worker' as never,
+      requestId: 'upd-1' as never,
+      jobId: 'job-1',
+      fence: 3,
+    }))).rejects.toMatchObject({ code: 'peer/conflict', details: { reason: 'request-id-reuse' } })
+
+    await expect(withPeerAuth(`Bearer ${token}`, () => peer.jobUpdate({
+      alias: 'worker' as never,
+      requestId: 'upd-regress' as never,
+      jobId: 'job-1',
+      fence: 2,
+    }))).rejects.toMatchObject({ code: 'peer/conflict', details: { reason: 'fence-regression' } })
+
+    // 9. Restart reloads job binding and update receipt, and freshOnly blocks reuse if receipt is evicted.
+    await fiber!.dispose()
+    expect(ctx.get('peerJobBindings')).toBeUndefined()
+    const restarted = (await mountPeer()).peer
+    expect(ctx.get('peerJobBindings')?.get(workerSessionId)?.fence).toBe(2)
+    expect(await withPeerAuth(`Bearer ${token}`, () => restarted.jobUpdate({
+      alias: 'worker' as never,
+      requestId: 'upd-1' as never,
+      jobId: 'job-1',
+      fence: 2,
+      expiresAt: extendedExp,
+    }))).toEqual({ ...updated1, replayed: true })
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(extendedExp)
+    try {
+      expect(() => withPeerAuth(`Bearer ${token}`, () => restarted.exportFetch({
+        alias: 'worker' as never,
+        path: 'summary.txt',
+      }))).toThrow(expect.objectContaining({ code: 'peer/forbidden', details: { reason: 'job-expired' } }))
+    } finally {
+      clock.mockRestore()
+    }
+
+    // Revoking via jobUpdate immediately affects peerJobBindings.get and blocks exportList/exportFetch.
+    const revoked = await withPeerAuth(`Bearer ${token}`, () => restarted.jobUpdate({
+      alias: 'worker' as never,
+      requestId: 'upd-revoke' as never,
+      jobId: 'job-1',
+      revoked: true,
+    }))
+    expect(revoked.binding.revoked).toBe(true)
+    expect(ctx.get('peerJobBindings')?.get(workerSessionId)?.revoked).toBe(true)
+
+    expect(() => withPeerAuth(`Bearer ${token}`, () => restarted.exportList({ alias: 'worker' as never })))
+      .toThrow(expect.objectContaining({ code: 'peer/forbidden', details: { reason: 'job-revoked' } }))
+    expect(() => withPeerAuth(`Bearer ${token}`, () => restarted.exportFetch({
+      alias: 'worker' as never,
+      path: 'summary.txt',
+    }))).toThrow(expect.objectContaining({ code: 'peer/forbidden', details: { reason: 'job-revoked' } }))
+
+    // Cannot bump fence on a revoked job.
+    await expect(withPeerAuth(`Bearer ${token}`, () => restarted.jobUpdate({
+      alias: 'worker' as never,
+      requestId: 'upd-after-revoke' as never,
+      jobId: 'job-1',
+      fence: 3,
+    }))).rejects.toMatchObject({ code: 'peer/conflict', details: { reason: 'job-revoked' } })
+
+    // Simulate receipt eviction for req-worker-1: freshOnly must refuse reusing existing session!
+    await restarted.inputReceipts.prepare({
+      kind: 'create',
+      alias: 'worker' as never,
+      requestId: 'req-worker-1' as never,
+      payloadHash: 'other',
+      instanceId: 'dead',
+      sessionId: workerSessionId,
+      acceptedAt: 1,
+    })
+    await restarted.inputReceipts.abortPrepared('create', 'worker', 'req-worker-1')
+    await expect(withPeerAuth(`Bearer ${token}`, () => restarted.create({
+      alias: 'worker' as never,
+      participant: { kind: 'peer', name: 'laptop' },
+      requestId: 'req-worker-1' as never,
+      job: { ...baseJob, jobId: 'job-fresh-only-evict' },
+    }))).rejects.toMatchObject({ code: 'peer/forbidden', details: { reason: 'fresh-only-create' } })
   })
 })

@@ -13,14 +13,23 @@ import { brandNumber } from '@deepseek-ai/dsh-brand'
 import type { SessionSeq } from '@deepseek-ai/dsh-session/types'
 import { RemoteError, remoteErrorOf, type RemoteErrorCode } from '@deepseek-ai/dsh-typert-protocol'
 import { HARNESS_VERSION } from './version.ts'
+import { PEER_SCHEMA_DIGEST, WIRE_PROTOCOL_VERSION } from './wire-schema.ts'
+import { followCursor, followDefaults, followGapError } from './follow.ts'
 import type {
   PeerCreateRequest,
   PeerCreateValue,
   PeerDeviceName,
+  PeerExportFetchRequest,
+  PeerExportFetchValue,
+  PeerExportListRequest,
+  PeerExportListValue,
   PeerFollowFrame,
+  PeerFollowGapFrame,
   PeerFollowRequest,
   PeerHandshakeRequest,
   PeerHandshakeValue,
+  PeerJobUpdateRequest,
+  PeerJobUpdateValue,
   PeerListRequest,
   PeerListValue,
   PeerModelsRequest,
@@ -29,8 +38,14 @@ import type {
   PeerPageValue,
   PeerPromptRequest,
   PeerPromptValue,
+  PeerReadyRequest,
+  PeerReadyValue,
+  PeerReceiptRequest,
+  PeerReceiptValue,
   PeerAnswerRequest,
   PeerAnswerValue,
+  PeerAsksRequest,
+  PeerAsksValue,
   PeerCancelRequest,
   PeerCancelValue,
   PeerSelectModelRequest,
@@ -38,6 +53,8 @@ import type {
   PeerStateRequest,
   PeerStateValue,
   PeerTarget,
+  PeerWaitQuiescentRequest,
+  PeerWaitQuiescentValue,
 } from './types.ts'
 
 /** Minimal WebSocket surface `follow` needs; injectable for tests and custom carriers. */
@@ -61,6 +78,10 @@ export interface PeerClientOptions {
   readonly endpoint: string
   /** Caller device name reported in the handshake. */
   readonly device: PeerDeviceName
+  /** Optional outbound pairing bearer token sent as `Authorization: Bearer <outboundToken>`. */
+  readonly outboundToken?: string
+  /** Alias for `outboundToken` kept for callers passing `token`. */
+  readonly token?: string
   /** Extra HTTP headers (loopback launch-token cookie, or a pairing bearer token). */
   readonly headers?: Readonly<Record<string, string>>
   /** Harness version reported in the handshake; defaults to the running package manifest version. */
@@ -69,25 +90,31 @@ export interface PeerClientOptions {
   readonly schemaDigest?: string
   /** `fetch` replacement for tests. */
   readonly fetch?: typeof fetch
-  /** WebSocket factory; defaults to `globalThis.WebSocket`. */
-  readonly webSocket?: (url: string) => PeerWebSocket
+  /** WebSocket factory; defaults to `globalThis.WebSocket`. Receives outbound headers as an optional second argument. */
+  readonly webSocket?: (url: string, headers?: Readonly<Record<string, string>>) => PeerWebSocket
   /** Reconnect pacing; defaults to 250 ms doubling to 4 s. */
   readonly backoff?: PeerBackoff
   /** Maximum consecutive reconnect attempts before `peer/target-unreachable`; omitted retries forever. */
   readonly maxReconnects?: number
   /** Payload cap raised to the server; defaults to the host's own window. */
   readonly pageSize?: number
+  /** Local socket and opening-frame deadline; default 10 s. */
+  readonly followOpenMs?: number
+  /** Local silence/consumption deadline; default 30 s. */
+  readonly followIdleMs?: number
+  /** Local socket lifetime; default 15 minutes. */
+  readonly followLifetimeMs?: number
+  /** Local queued wire envelope item cap; default 16,384. */
+  readonly followQueueMaxItems?: number
+  /** Local queued wire envelope byte cap; default 8 MiB. */
+  readonly followQueueMaxBytes?: number
 }
 
 const DEFAULT_BACKOFF: PeerBackoff = { initialMs: 250, maxMs: 4_000, factor: 2 }
 const REPAIR_PAGE_LIMIT = 20
 
 /** One peer follow generation's terminal shape. */
-interface WireFrame {
-  readonly streamId: string
-  readonly type: 'item' | 'error' | 'end'
-  readonly value?: unknown
-}
+type WireFrame = { readonly type: 'item' | 'error' | 'end'; readonly value: unknown; readonly bytes: number }
 
 /**
  * Client bridge one device uses to drive, observe, and answer a peer's Session.
@@ -97,7 +124,7 @@ export class PeerClient {
   private readonly endpoint: string
   private readonly headers: Readonly<Record<string, string>>
   private readonly fetchImpl: typeof fetch
-  private readonly webSocketFactory: (url: string) => PeerWebSocket
+  private readonly webSocketFactory: (url: string, headers?: Readonly<Record<string, string>>) => PeerWebSocket
   private readonly backoff: PeerBackoff
   private readonly maxReconnects: number | undefined
   private readonly pageSize: number
@@ -107,7 +134,12 @@ export class PeerClient {
    */
   constructor(private readonly options: PeerClientOptions) {
     this.endpoint = options.endpoint.replace(/\/+$/, '')
-    this.headers = options.headers ?? {}
+    const baseHeaders = options.headers ?? {}
+    const hasAuthorization = baseHeaders.authorization !== undefined || baseHeaders.Authorization !== undefined
+    const bearer = options.outboundToken ?? options.token
+    this.headers = bearer !== undefined && bearer.length > 0 && !hasAuthorization
+      ? { ...baseHeaders, authorization: `Bearer ${bearer}` }
+      : baseHeaders
     this.fetchImpl = options.fetch ?? globalThis.fetch
     this.webSocketFactory = options.webSocket ?? defaultWebSocket
     this.backoff = options.backoff ?? DEFAULT_BACKOFF
@@ -118,9 +150,9 @@ export class PeerClient {
   /** Negotiate against the target; a protocol mismatch surfaces `peer/version-skew`. */
   async handshake(): Promise<PeerHandshakeValue> {
     const request: PeerHandshakeRequest = {
-      protocolVersion: 1,
+      protocolVersion: WIRE_PROTOCOL_VERSION,
       harnessVersion: this.options.harnessVersion ?? HARNESS_VERSION,
-      schemaDigest: this.options.schemaDigest ?? '',
+      schemaDigest: this.options.schemaDigest ?? PEER_SCHEMA_DIGEST,
       device: this.options.device,
     }
     return this.rpc('handshake', request)
@@ -129,6 +161,24 @@ export class PeerClient {
   /** Read the latch for one target. */
   state(target: PeerTarget): Promise<PeerStateValue> {
     return this.rpc('state', { target } satisfies PeerStateRequest)
+  }
+
+  /**
+   * List retained ask records for one alias.
+   * @param request - authenticated alias and optional Session id.
+   * @returns retained ask records.
+   */
+  asks(request: PeerAsksRequest): Promise<PeerAsksValue> {
+    return this.rpc('asks', request)
+  }
+
+  /**
+   * Poll one session until it looks quiescent or the budget ends.
+   * @param request - authenticated alias and polling budget.
+   * @returns an observation, not termination proof.
+   */
+  waitQuiescent(request: PeerWaitQuiescentRequest): Promise<PeerWaitQuiescentValue> {
+    return this.rpc('waitQuiescent', request)
   }
 
   /** List the pairings the host exposes, optionally narrowed to one resolved target. */
@@ -155,7 +205,56 @@ export class PeerClient {
     return this.rpc('prompt', request)
   }
 
-  /** Cancel the target's active turn. */
+  /**
+   * Look up a persisted create or prompt receipt and its host-derived disposition.
+   * @param request - pairing alias, caller request id, and optional kind filter.
+   * @returns receipt metadata, restart indicator, and derived disposition.
+   */
+  receipt(request: PeerReceiptRequest): Promise<PeerReceiptValue> {
+    return this.rpc('receipt', request)
+  }
+
+  /**
+   * Update a bound worker job's fence, expiration timestamp, or revocation state.
+   * @param request - pairing alias, request id, job id, and requested updates.
+   * @returns updated binding record and payload-bound receipt metadata.
+   */
+  jobUpdate(request: PeerJobUpdateRequest): Promise<PeerJobUpdateValue> {
+    return this.rpc('jobUpdate', request)
+  }
+
+  /**
+   * Probe authenticated host and pairing readiness before dispatching work.
+   * @param request - pairing alias to check.
+   * @returns readiness status, missing capability list, capabilities, optional profile, and runtime identity.
+   */
+  ready(request: PeerReadyRequest): Promise<PeerReadyValue> {
+    return this.rpc('ready', request)
+  }
+
+  /**
+   * List regular files inside the bound worker session's export root.
+   * @param request - pairing alias owning the worker session.
+   * @returns bounded relative regular file list and truncation indicator.
+   */
+  exportList(request: PeerExportListRequest): Promise<PeerExportListValue> {
+    return this.rpc('exportList', request)
+  }
+
+  /**
+   * Fetch one bounded regular file from the bound worker session's export root.
+   * @param request - pairing alias, relative path, and optional byte cap.
+   * @returns relative path, byte length, SHA-256 over returned bytes, and base64 payload.
+   */
+  exportFetch(request: PeerExportFetchRequest): Promise<PeerExportFetchValue> {
+    return this.rpc('exportFetch', request)
+  }
+
+  /**
+   * Request a stop and optionally discard the pairing's pending prompts.
+   * @param request - target, participant, and optional queue removal intent.
+   * @returns stop acknowledgement and the number of queued prompts actually removed.
+   */
   cancel(request: PeerCancelRequest): Promise<PeerCancelValue> {
     return this.rpc('cancel', request)
   }
@@ -186,18 +285,54 @@ export class PeerClient {
    * @returns frames exactly as the host sends them.
    */
   async *followOnce(request: PeerFollowRequest, signal: AbortSignal): AsyncGenerator<PeerFollowFrame> {
-    const socket = this.webSocketFactory(this.muxUrl())
+    if (signal.aborted) return
+    const socket = this.webSocketFactory(this.muxUrl(), this.headers)
     const streamId = `peer-${randomToken()}`
     const queue: WireFrame[] = []
     let wake: (() => void) | undefined
     let closed = false
+    let socketOpen = false
+    const isClosed = (): boolean => closed
+    const didOpenSocket = (): boolean => socketOpen
+    let opened = false
+    let frameNumber = 0
+    let bytes = 0
+    let cursor: SessionSeq | undefined
+    let gap: PeerFollowGapFrame | undefined
+    let idle: ReturnType<typeof setTimeout> | undefined
     const notify = (): void => {
       wake?.()
       wake = undefined
     }
+    const close = (): void => {
+      if (closed) return
+      closed = true
+      notify()
+      socket.close()
+    }
+    const lose = (reason: PeerFollowGapFrame['reason']): void => {
+      if (closed) return
+      gap = { type: 'gap', fromSeq: cursor === undefined ? null : brandNumber<SessionSeq>(cursor + 1), toSeq: null,
+        reason, resync: 'refollow-and-page' }
+      queue.length = 0
+      close()
+    }
+    const armIdle = (): void => {
+      clearTimeout(idle)
+      idle = setTimeout(() => { lose('idle-timeout') }, this.options.followIdleMs ?? followDefaults.followIdleMs)
+    }
+    const open = setTimeout(() => { lose('open-timeout') }, this.options.followOpenMs ?? followDefaults.followOpenMs)
+    const lifetime = setTimeout(() => { lose('lifetime-limit') }, this.options.followLifetimeMs ?? followDefaults.followLifetimeMs)
     const onMessage = (event: unknown): void => {
+      if (closed) return
       const text = messageText(event)
       if (text === undefined) return
+      const size = new TextEncoder().encode(text).byteLength
+      if (size + bytes > (this.options.followQueueMaxBytes ?? followDefaults.followQueueMaxBytes)
+        || queue.length >= (this.options.followQueueMaxItems ?? followDefaults.followQueueMaxItems)) {
+        lose('queue-overflow')
+        return
+      }
       let parsed: unknown
       try {
         parsed = JSON.parse(text)
@@ -206,64 +341,92 @@ export class PeerClient {
       }
       if (typeof parsed !== 'object' || parsed === null) return
       const frame = parsed as Record<string, unknown>
-      if (frame.streamId !== streamId || typeof frame.type !== 'string') return
-      queue.push(frame as unknown as WireFrame)
+      if (frame.streamId !== streamId || (frame.type !== 'item' && frame.type !== 'error' && frame.type !== 'end')) return
+      queue.push({ type: frame.type, value: frame.type === 'error' ? frame.error ?? frame.value : frame.value, bytes: size })
+      bytes += size
       notify()
     }
     const onClose = (): void => {
       closed = true
       notify()
     }
-    // Read through a call: an open socket can close between a check and a read,
-    // which flow analysis of the captured flag cannot express.
-    const isClosed = (): boolean => closed
-    const onAbort = (): void => {
-      closed = true
-      notify()
-      socket.close()
+    const onOpen = (): void => {
+      if (closed) return
+      socketOpen = true
+      try {
+        socket.send(JSON.stringify({ type: 'open', streamId, endpoint: 'peer/follow', payload: { args: { request } } }))
+      } catch (error) {
+        void error
+        close()
+      }
     }
+    const onError = (): void => { close() }
     socket.addEventListener('message', onMessage)
     socket.addEventListener('close', onClose)
-    signal.addEventListener('abort', onAbort, { once: true })
+    socket.addEventListener('open', onOpen)
+    socket.addEventListener('error', onError)
+    signal.addEventListener('abort', close, { once: true })
     try {
-      await new Promise<void>((resolve, reject) => {
-        const onOpen = (): void => {
-          socket.removeEventListener('open', onOpen)
-          socket.send(JSON.stringify({
-            type: 'open',
-            streamId,
-            endpoint: 'peer/follow',
-            payload: { args: { request } },
-          }))
-          resolve()
+      while (!signal.aborted) {
+        const lost = gap
+        if (lost !== undefined) {
+          yield lost
+          throw followGapError(lost)
         }
-        const onOpenError = (): void => {
-          socket.removeEventListener('error', onOpenError)
-          reject(unreachable(this.endpoint))
-        }
-        socket.addEventListener('open', onOpen)
-        socket.addEventListener('error', onOpenError)
-      })
-      while (true) {
         const frame = queue.shift()
         if (frame === undefined) {
-          if (isClosed()) return
+          if (isClosed()) {
+            if (!didOpenSocket()) throw unreachable(this.endpoint)
+            const lost: PeerFollowGapFrame = { type: 'gap', reason: 'upstream-closed', resync: 'refollow-and-page',
+              fromSeq: cursor === undefined ? null : brandNumber<SessionSeq>(cursor + 1), toSeq: null }
+            yield lost
+            throw followGapError(lost)
+          }
           await new Promise<void>((resolve) => { wake = resolve })
           continue
         }
+        bytes -= frame.bytes
         if (frame.type === 'item') {
-          yield frame.value as PeerFollowFrame
+          if (typeof frame.value !== 'object' || frame.value === null || !('type' in frame.value)) throw unreachable(this.endpoint)
+          const value = frame.value as PeerFollowFrame
+          if (value.type === 'gap') {
+            yield value
+            throw followGapError(value)
+          }
+          if (value.type === 'end') {
+            yield value
+            return
+          }
+          if (!opened) {
+            opened = true
+            clearTimeout(open)
+            armIdle()
+          }
+          cursor = followCursor(value) ?? cursor
+          yield value
+          if (!isClosed() && !isAborted(signal)) {
+            socket.send(JSON.stringify({ type: 'item', streamId, value: { type: 'ack', frame: ++frameNumber } }))
+            armIdle()
+          }
           continue
         }
         if (frame.type === 'error') {
           throw decodeFailure(frame.value, this.endpoint)
         }
-        return
+        const missing: PeerFollowGapFrame = { type: 'gap', fromSeq: cursor === undefined ? null : brandNumber<SessionSeq>(cursor + 1),
+          toSeq: null, reason: 'upstream-closed', resync: 'refollow-and-page' }
+        yield missing
+        throw followGapError(missing)
       }
     } finally {
-      signal.removeEventListener('abort', onAbort)
+      clearTimeout(open)
+      clearTimeout(idle)
+      clearTimeout(lifetime)
+      signal.removeEventListener('abort', close)
       socket.removeEventListener('message', onMessage)
       socket.removeEventListener('close', onClose)
+      socket.removeEventListener('open', onOpen)
+      socket.removeEventListener('error', onError)
       socket.close()
       if (queue.length > 0) queue.length = 0
     }
@@ -280,27 +443,33 @@ export class PeerClient {
     let attempt = 0
     while (!signal.aborted) {
       let progressed = false
+      let reportedGap = false
       try {
         for await (const frame of this.followOnce(request, signal)) {
-          progressed = true
           if (frame.type === 'snapshot') {
-            if (lastCursor !== undefined && frame.records.length > 0) {
-              const oldest = frame.records[0]?.seq
-              if (oldest !== undefined && oldest > lastCursor + 1) {
-                yield* this.repairForward(request.target, lastCursor, oldest, signal)
-              }
+            const oldest = frame.records[0]?.seq ?? frame.cursor + 1
+            if (lastCursor !== undefined && oldest > lastCursor + 1) {
+              yield* this.repairForward(request.target, lastCursor, oldest, signal)
             }
-            lastCursor = frame.cursor
+            lastCursor = Math.max(lastCursor ?? -1, frame.cursor)
           } else if (frame.type === 'event') {
             lastCursor = Math.max(lastCursor ?? -1, frame.record.seq)
           } else if (frame.type === 'state') {
             lastCursor = Math.max(lastCursor ?? -1, frame.cursor)
+          } else if (frame.type === 'gap') {
+            reportedGap = true
           }
+          progressed ||= frame.type === 'snapshot' || frame.type === 'event' || frame.type === 'state'
           yield frame
         }
       } catch (error) {
         if (isAborted(signal)) return
-        if (remoteErrorOf(error)?.code === 'peer/version-skew') throw error
+        const failure = remoteErrorOf(error)
+        if (failure?.code === 'peer/version-skew') throw error
+        if (!reportedGap && error instanceof RemoteError && error.code === 'peer/gap') {
+          const gap = (error.details as { readonly gap?: PeerFollowGapFrame }).gap
+          if (gap !== undefined) yield gap
+        }
       }
       if (isAborted(signal)) return
       attempt = progressed ? 1 : attempt + 1
@@ -326,20 +495,35 @@ export class PeerClient {
     signal: AbortSignal,
   ): AsyncGenerator<PeerFollowFrame> {
     const collected: PeerFollowFrame[] = []
+    let bytes = 0
     let throughSeq = brandNumber<SessionSeq>(toExclusive - 1)
+    let complete = throughSeq <= fromExclusive
+    const incomplete = (): RemoteError<'peer/gap'> => followGapError({
+      type: 'gap', reason: 'sequence-discontinuity', resync: 'refollow-and-page',
+      fromSeq: brandNumber<SessionSeq>(fromExclusive + 1), toSeq: brandNumber<SessionSeq>(toExclusive - 1),
+    })
     for (let page = 0; page < REPAIR_PAGE_LIMIT; page += 1) {
-      if (signal.aborted || throughSeq <= fromExclusive) break
+      if (signal.aborted || complete) break
       const value = await this.page({ target, throughSeq, maxMessages: this.pageSize })
-      if (value.records.length === 0) break
       for (const record of value.records) {
         if (record.seq > fromExclusive && record.seq < toExclusive) {
-          collected.push({ type: 'event', record, cursor: record.seq })
+          const frame: PeerFollowFrame = { type: 'event', record, cursor: record.seq }
+          bytes += new TextEncoder().encode(JSON.stringify(frame)).byteLength
+          if (collected.length >= (this.options.followQueueMaxItems ?? followDefaults.followQueueMaxItems)
+            || bytes > (this.options.followQueueMaxBytes ?? followDefaults.followQueueMaxBytes)) throw incomplete()
+          collected.push(frame)
         }
       }
       const oldest = value.records[0]?.seq
-      if (oldest === undefined || oldest <= fromExclusive || !value.hasMore) break
+      if (!value.hasMore || (oldest !== undefined && oldest <= fromExclusive + 1)) {
+        complete = true
+        break
+      }
+      if (oldest === undefined || oldest > throughSeq) throw incomplete()
       throughSeq = brandNumber<SessionSeq>(oldest - 1)
     }
+    if (signal.aborted) return
+    if (!complete) throw incomplete()
     collected.sort((left, right) => {
       const a = left.type === 'event' ? left.record.seq : 0
       const b = right.type === 'event' ? right.record.seq : 0

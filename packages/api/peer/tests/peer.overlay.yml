@@ -9,3 +9,4 @@
     pairingsPath: !!js process.env.DSH_PEER_TEST_PAIRINGS
     bindingsPath: !!js process.env.DSH_PEER_TEST_BINDINGS
     watchdogMs: 60000
+    followIdleMs: 750

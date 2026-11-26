@@ -12,14 +12,14 @@ executes anything remotely.
 
 | Tool | What it does |
 |---|---|
-| `peer_status {alias}` | Handshake (host identity, capabilities, protocol) + `peer.state`: exposure, target session, latch, descendants, pending asks, current model. |
+| `peer_status {alias}` | Handshake (host identity, boot `instanceId`, digests, capabilities, protocol) + `peer.state`: exposure, target session, latch, descendants, pending asks, current model, and stop intent. Observed quiescence is not proof of teardown. |
 | `peer_sessions {alias?}` | Discovery across every caller-role pairing: alias, peer, endpoint, the bound remote session id (local `remoteSessionId` pin or the host-reported session), exposure, latch summary, and last activity; an unreachable host is that row's error. Read-only. |
 | `peer_models {alias, limit?, cursor?, zeroPrice?, tools?}` | The policy-filtered models and chains the peer lets this caller select, with each route's capability facts (tools, vision, context window, zero price, gating, training, reasoning efforts) and each chain member's live state (`ready`, `cooldown` with `cooldownUntil`, `deprecated`); the policy is echoed as `selectable`. Read-only. A host that does not advertise model discovery answers `peer/capability-missing` with "host does not advertise model-discovery; upgrade the host". |
 | `peer_switch_model {alias, provider?, model?, chain?, reasoningEffort?, requestId?}` | Moves an idle remote session to another route for its next turn (`provider`+`model`, or a chain id alone for its first ready member; naming a route inside a chain is allowed). A `chain` or route named here replaces the pairing's pinned create route for this call only. Reports the applied route, the previous one, and `replayed` for a same-`requestId` retry. The peer enforces its own allow list; a refusal carries `peer/forbidden` and the policy reason (`model-not-allowed`, `chain-not-allowed`, `price-unproven`, …), and a busy session answers `peer/conflict` with the latch. A host that does not advertise model switching answers `peer/capability-missing` with "host does not advertise model-switch; upgrade the host". |
-| `peer_ask {alias, message?, waitMs?, resume?, provider?, model?, chain?, reasoningEffort?, maxTotalTokens?}` | Adopts/creates the session when needed, prompts it as an attributed peer turn, follows through reconnects and `peer.page` repair, and returns the FINAL turn once the session is settled (no live descendant or ask, quiet window elapsed); otherwise the structured pending/failure result. The route options apply only when this call creates the session (a route named here replaces the pairing's pinned `create` route) and `maxTotalTokens` records the session's token ceiling; on an already-bound session they are refused with a pointer to `peer_switch_model` instead of being dropped. A followed turn that enters `waiting_approval` returns EARLY with `status: 'waiting_approval'` and the pending ask(s) (`askId`, `kind`, `toolName`, `reason`, question options); `resume: <requestId>` continues that same turn to completion without re-sending the message. A host that stops answering mid-follow returns `status: 'host_unreachable'` after `probeIntervalMs` (never cancelling the remote turn). |
-| `peer_asks {alias}` | Pending remote asks (approval and question kinds); question rows carry the question ids and option labels. |
-| `peer_answer {alias, askId, outcome \| answers[]}` | Settles an approval ask (`allowed-once` \| `rejected`) or a question ask (`answers: [{id, selected[], custom?}]`). First answer wins. A malformed selection is rejected locally with the reason; the host is never called. A transport failure re-reads `peer.state` and reports `confirmation: 'lost'` when the ask is already gone, instead of a failure that invites a blind retry. |
-| `peer_cancel {alias}` | Cancels the remote active turn, attributed to this caller. A transport failure re-reads the latch: no active turn surfaces as `confirmation: 'lost'`, not as a failed cancel. |
+| `peer_ask {alias, message?, waitMs?, resume?, requestId?, provider?, model?, chain?, reasoningEffort?, maxTotalTokens?}` | Adopts/creates the session when needed, prompts it as an attributed peer turn, follows through reconnects and `peer.page` repair, and returns the FINAL turn once the session is settled (no live descendant or ask, quiet window elapsed); otherwise the structured pending/failure result. The route options apply only when this call creates the session (a route named here replaces the pairing's pinned `create` route) and `maxTotalTokens` records the session's token ceiling; on an already-bound session they are refused with a pointer to `peer_switch_model` instead of being dropped. A followed turn that enters `waiting_approval` returns EARLY with `status: 'waiting_approval'` and the pending ask(s) (`askId`, `kind`, `toolName`, `reason`, question options); `resume: <requestId>` continues that same turn to completion without re-sending the message. A host that stops answering mid-follow returns `status: 'host_unreachable'` after `probeIntervalMs` (never cancelling the remote turn). |
+| `peer_asks {alias}` | Reads the host ask journal when the host advertises `durable-asks`, including `answered`, `expired`, and `cancelled` asks. On older hosts, warns and reads the live pending list instead. |
+| `peer_answer {alias, askId, requestId?, outcome \| answers[]}` | Submits one approval (`allowed-once` \| `rejected`) or question decision (`answers: [{id, selected[], custom?}]`). Reusing the ID with the same decision can confirm a prior settlement (`replayed: true`) without delivering it again. |
+| `peer_cancel {alias}` | Requests Stop with peer attribution. `stopIntent` separates the request from execution observations; `keepInbox: true` preserves queued work. A lost reply and an inactive turn do not prove the request took effect. |
 
 ## Pairing document
 
@@ -34,7 +34,10 @@ pairings:
     exposure: debug               # host-role; required by the host parser
     endpoint: https://laptop.pike-acrux.ts.net:8443
     remoteSessionId: sess-xyz     # optional; omit to address the alias (create/adopt)
-    token: null                   # reserved; sent as Authorization: Bearer, not verified by the host yet
+    outboundToken: null           # optional; plaintext bearer secret sent when dialing endpoint
+    tokenHash: null               # host-role inbound credential hash (ignored by caller)
+    inboundToken: null            # host-role plaintext inbound credential (ignored by caller)
+    insecure: false               # host-role auth opt-out (ignored by caller)
     create:
       cwd: /home/user/projects/thing
       agentPreset: standard
@@ -89,9 +92,9 @@ cannot be used (no `approval`/`userQuestions` service, no agent, no open turn)
 the ask — approval or question, with its options — is written to a durable
 notice file (`<pairing dir>/peer-bridge/asks.jsonl`) and stays answerable
 through `peer_answer` / `ds peer answer` (questions with `--select <label>`, or
-`--select <questionId>=<label>` for multi-question asks). A `peer/conflict`
-answer means another participant settled it first — the bridge reports that
-and never retries blind. Nothing is auto-answered.
+`--select <questionId>=<label>` for multi-question asks). Nothing is auto-answered.
+
+For each ask, the bridge records a generated answer ID in `answer-requests` beside its notices file before sending, without storing decision contents. `peer_answer` and local-card relays use the same ID for that ask and caller unless an explicit `requestId` is supplied. A lost reply does not establish who answered or whether the ask expired. To check for a replay, use the same ID and decision. Do not retry an expired ask or one from a worker generation the host rejected.
 
 A followed turn that enters `waiting_approval` does not hold the caller until
 `waitMs`: `peer_ask` returns EARLY with `ok: false`, `pending: true`,
@@ -120,6 +123,10 @@ keeps the derived fold.
 
 ## Follow reliability
 
+`peer_ask` assigns one prompt `requestId` and derives a separate `createRequestId`. On a lost reply it checks `peer.receipt` and reports the host's disposition without resending. For a prompt this can be `queued`, `claimed`, `cancelled_before_dispatch`, `terminal`, or `unknown`; a missing or unreadable receipt means `unknown`, not “never admitted.” To retry the operation, supply the returned `requestId` with the same message and create options; use `resume` instead to follow an admitted prompt without resending. Keep credentials out of request IDs. Hosts with bounded receipts can forget earlier requests; do not assume an old ID is safe to replay.
+
+Handshake digest differences and missing optional ask capabilities are warnings. Worker readiness, job updates, export reads, and waiting for a quiescence observation are CLI-only; they do not add tools or permissions to the peer group.
+
 `peer_ask` and `ds peer ask`/`follow` keep following past the first `turn/end`
 while a child, an ask, or a follow-up turn is live, and accept the session as
 settled only after a quiet window (`settleMs`, default 2000 ms; `--settle-ms`
@@ -133,11 +140,9 @@ terminal, a later turn opened by a different operator's prompt freezes the
 result on our own turn (`superseded: true`), and a terminal carries only the
 answer text committed for that same turn. `admitted` reports the host's prompt
 acceptance (the accepted `peer.prompt` response or the durable `user/message`),
-so a recorded prompt is never reported as unadmitted. An error frame for
-`peer/not-paired`, `peer/not-found`, `peer/forbidden`, or `peer/version-skew`
-stops the follow with that code instead of reconnecting at backoff cadence; a
-durable hole `peer.page` cannot prove contiguous is reported through the
-warning sink with its `[from, to)` range and the replay continues past it.
+so a recorded prompt is never reported as unadmitted.
+
+With `bounded-follow`, the caller acknowledges each consumed nonterminal frame in order. A `gap` frame or `peer/gap` reopens the follow and repairs history with `peer.page`; it never reports completion. The caller stops after three consecutive gap retries without new durable events. If the host returns `follow-capacity`, back off before opening another follow.
 
 A host that dies mid-turn (a sleeping laptop, a cut link) leaves the follow
 socket open and silent, so silence alone can never distinguish "the host is
@@ -154,8 +159,7 @@ wakes. `waitMs` remains the outer bound for reachable-but-silent turns.
 - `hopCount` is sent as 0: this bridge does not track autonomous-exchange
   chains, so `runawayCeiling` cannot fire for traffic this caller generates
   (doc 69 §9.3 / doc 70 §12 reserve the counter, it is not implemented).
-- The pairing `token` is sent as `Authorization: Bearer` but never verified by
-  the host yet; the peer path must stay tailnet/LAN-only.
+- The caller sends `outboundToken` as `Authorization: Bearer` when dialing `endpoint` and never logs or echoes it in tool output or errors; host-role fields (`tokenHash`, `inboundToken`, `insecure`, `create.allowAgentPresets`) are accepted and ignored, while the ambiguous legacy `token` key is rejected with a configuration error naming `outboundToken`. Keep the peer path tailnet/LAN-only when a pairing sets `insecure: true`.
 - The host-side `peer.create` binding and the host pairing are separate
   concerns; this package only reads caller-role entries.
 - The caller handshake reports the installed harness version, resolved from
@@ -163,9 +167,4 @@ wakes. `waitMs` remains the outer bound for reachable-but-silent turns.
   installer's `harness/install-state.json` under `$DSH_HOME`;
   `DSH_PEER_HARNESS_VERSION` overrides it, and a build with neither source
   fails closed with a clear error instead of sending a made-up identity.
-- Uses a local copy of the harness peer client (`src/peer-client.ts`) because
-  `@deepseek-ai/dsh-api-peer` is not a profile dependency; keep the frame
-  contract in step with `packages/api/peer/src/client.ts`. The local copy
-  additionally breaks on caller-terminal error frames, warns on accepted
-  repair holes, and (in `src/index.ts`) settles a followed turn before
-  returning; the harness client still retries every non-skew error.
+- Uses a local copy of the harness peer client (`src/peer-client.ts`) because `@deepseek-ai/dsh-api-peer` is not a profile dependency; keep it in step with `packages/api/peer/src/client.ts`. Local answer ID files are not pruned automatically; the host independently bounds its journal, so a retained local ID does not guarantee replay.

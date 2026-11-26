@@ -1,6 +1,8 @@
-# systemd units — serverlocal only (not shipped templates)
+# systemd units
 
-These units are the **serverlocal operator's hand-written dev units**. They are
+`dsh-worker@.service` is a separate opt-in worker template. See the [Jarvis worker profile](../../../docs/creator/16-jarvis-worker-profile.md#confinement-and-evidence) for isolation, required drop-ins, and verification. The installer never starts it.
+
+The other units are the **serverlocal operator's hand-written dev units**. They are
 kept in the profile so `ds sync`/`ds pull` can keep the serverlocal machine's
 service definitions under version control. They are **not** a generic installer
 input and must not be installed on another machine as-is: every file hardcodes

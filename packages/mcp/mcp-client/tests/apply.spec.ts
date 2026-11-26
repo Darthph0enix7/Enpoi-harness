@@ -433,7 +433,7 @@ describe('apply (plugin lifecycle)', () => {
       transport: 'streamable-http',
       serverName: 'web',
       url: 'http://localhost:3000/mcp',
-      headers: { Authorization: 'Bearer x' },
+      headers: { Authorization: 'Bearer http-test-token' },
       toolCallTimeoutMs: 30_000,
       failOnStartupError: false,
     }

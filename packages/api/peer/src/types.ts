@@ -193,6 +193,54 @@ export type PeerPendingAsk =
     readonly since: number
   }
 
+/** Retained peer ask. `answeredBy` records a committed decision, not a resumed turn. */
+export type PeerAskRecord = PeerPendingAsk & {
+  readonly alias: PeerAlias
+  readonly sessionId: SessionId
+  readonly instanceId: string
+  readonly createdAt: number
+  readonly state: 'pending' | 'answered' | 'expired' | 'cancelled'
+  readonly settledAt?: number
+  readonly settlementReason?: 'host-restarted' | 'local-answer' | 'local-cancelled'
+  readonly answeredBy?: { readonly requestId: PeerRequestId; readonly payloadHash: string }
+}
+
+/** `peer.asks` selects the alias's current session or one of its retained bindings. */
+export interface PeerAsksRequest {
+  readonly alias: PeerAlias
+  readonly sessionId?: SessionId
+}
+
+/** Bounded ask journal view, oldest first. */
+export interface PeerAsksValue {
+  readonly instanceId: string
+  readonly asks: readonly PeerAskRecord[]
+}
+
+/** Independent stop request, execution observations, and confidence. */
+export interface PeerStopIntent {
+  readonly requestedAt?: number
+  readonly keepInbox: true
+  readonly turnState: PeerLatch | 'unknown'
+  readonly activeDescendants: number
+  readonly descendantsExact: boolean
+  readonly inFlightTools?: number
+  readonly quiescence: 'confirmed' | 'observed' | 'unknown'
+}
+
+/** `peer.waitQuiescent` observes a pinned alias until idle or the deadline. */
+export interface PeerWaitQuiescentRequest {
+  readonly alias: PeerAlias
+  readonly timeoutMs: number
+}
+
+/** Bounded poll result; it does not certify termination. */
+export interface PeerWaitQuiescentValue {
+  readonly observation: 'observed'
+  readonly timedOut: boolean
+  readonly last?: PeerStateValue
+}
+
 /**
  * Aggregate execution state a peer observes instead of crawling child streams.
  * `source` says whether a host-owned latch produced it or whether it was
@@ -206,6 +254,8 @@ export interface PeerExecutionState {
   readonly activeDescendants: number
   readonly descendantsExact: boolean
   readonly pendingAsks: readonly PeerPendingAsk[]
+  /** Stop observations are supplied by the host, not a standalone latch fold. */
+  readonly stopIntent?: PeerStopIntent
   readonly lastTurnEnd?: PeerTurnTerminal
   readonly lastParticipantAction?: PeerParticipantAction
   /**
@@ -281,6 +331,32 @@ export type PeerCapability =
    * that needs a ceiling.
    */
   | 'token-ceiling'
+  /** `peer.create` accepts optional `requestId` for deterministic session creation and payload-bound idempotency. */
+  | 'create-receipts'
+  /** `peer.prompt` persists payload-bound write-ahead receipts and rejects changed-payload reuse. */
+  | 'prompt-receipts'
+  /** `peer.receipt` queries durable create/prompt receipts and host-derived prompt dispositions. */
+  | 'input-disposition'
+  /** Pairing `create.freshOnly` rejects caller-supplied session ids and non-receipt reuse. */
+  | 'fresh-only-create'
+  /** `peer.create` and `peer.jobUpdate` persist and enforce bounded non-secret job bindings. */
+  | 'job-binding'
+  /** Worker `peer.create` and `peer.ready` attest the effective profile identity when mounted. */
+  | 'profile-identity'
+  /** `peer.ready` reports authenticated readiness, missing capabilities, and runtime identity. */
+  | 'ready'
+  /** `peer.exportList` and `peer.exportFetch` serve bounded, symlink-safe reads from the session export root. */
+  | 'export-root'
+  /** `peer.handshake` computes `schemaDigest` from method names plus request and response wire fields. */
+  | 'shape-digest'
+  | 'durable-asks'
+  | 'ask-idempotent-answer'
+  | 'stop-intent'
+  /** `peer.cancel` can discard pending prompts admitted by the authenticated pairing. */
+  | 'cancel-drop-queued'
+  | 'wait-quiescent'
+  | 'bounded-follow'
+  | 'follow-gap-frames'
 
 /** One pairing as the serving host reports it; never carries a token. */
 export interface PeerPairingSummary {
@@ -305,8 +381,13 @@ export interface PeerHandshakeRequest {
 export interface PeerHandshakeValue {
   readonly protocolVersion: PeerProtocolVersion
   readonly harnessVersion: string
+  /** Canonical SHA-256 over protocol version, method names, and request/response wire fields. */
   readonly schemaDigest: string
+  /** Legacy compatibility digest over protocol version and method names only. */
+  readonly methodsDigest?: string
   readonly hostDevice: PeerDeviceName
+  /** Fresh host boot identity generated per service instance; receipts store it so restarts are visible. */
+  readonly instanceId: string
   readonly capabilities: readonly PeerCapability[]
   readonly pairings: readonly PeerPairingSummary[]
 }
@@ -357,10 +438,99 @@ export interface PeerListValue {
   readonly pairings: readonly PeerListEntry[]
 }
 
+/** Upper-bound execution limits attached to a worker job or pairing policy. */
+export interface PeerJobLimits {
+  readonly maxSteps?: number
+  readonly maxToolCalls?: number
+  readonly maxWallMs?: number
+  readonly maxTotalTokens?: number
+}
+
+/** Job scope and fencing descriptor submitted on `peer.create` for a worker pairing. */
+export interface PeerCreateJobRequest {
+  readonly jobId: string
+  readonly fence: number
+  readonly expiresAt: number
+  readonly capabilities: readonly string[]
+  readonly limits: PeerJobLimits
+  readonly mcpEndpointId?: string
+  /** Reference handle name only; never a secret token or URL with credentials. */
+  readonly credentialRef?: string
+  readonly allowedToolNames?: readonly string[]
+}
+
+/** Attested profile summary returned on `peer.create` and `peer.ready` for worker sessions. */
+export interface PeerProfileSummary {
+  readonly hash: string
+  readonly presetId: string
+}
+
+/** Full profile identity reported by the optional `peerProfileIdentity` service. */
+export interface PeerProfileIdentity {
+  readonly hash: string
+  readonly presetId: string
+  readonly toolNames: readonly string[]
+  readonly configDigest: string
+}
+
+/**
+ * Optional service seam implemented by the profile layer and read through
+ * `ctx.get('peerProfileIdentity')` to attest effective worker session identity.
+ */
+export interface PeerProfileIdentityService {
+  /**
+   * Describe the effective profile identity for a session.
+   * @param sessionId - created or bound session identifier.
+   * @returns profile identity facts, or `undefined` when unavailable.
+   */
+  describe(sessionId: SessionId): PeerProfileIdentity | undefined
+}
+
+/** Persisted non-secret job binding keyed by session id. */
+export interface PeerJobBinding {
+  readonly sessionId: SessionId
+  readonly jobId: string
+  readonly fence: number
+  readonly expiresAt: number
+  readonly capabilities: readonly string[]
+  readonly limits: PeerJobLimits
+  readonly mcpEndpointId?: string
+  readonly credentialRef?: string
+  readonly allowedToolNames?: readonly string[]
+  readonly alias: PeerAlias
+  readonly instanceId: string
+  readonly createdAt: number
+  readonly revoked?: boolean
+  readonly revokedAt?: number
+}
+
+/** Read-only job binding lookup seam consumed by execution guards via `ctx.get('peerJobBindings')`. */
+export interface PeerJobBindingReader {
+  /**
+   * Read the persisted job binding for a session. Expired and revoked records
+   * remain visible so callers observe `expiresAt` and `revoked` and fail closed.
+   * @param sessionId - target session identifier.
+   * @returns the binding record, or `undefined` when the session has no job binding.
+   */
+  get(sessionId: SessionId): PeerJobBinding | undefined
+}
+
+/** Cordis service interface registered under `peerJobBindings`. */
+export interface PeerJobBindingsService extends PeerJobBindingReader {
+  /**
+   * Deny subsequent guard reads immediately and persist before acknowledging.
+   * @param sessionId - bound session identifier to revoke.
+   * @returns true when a binding existed and was revoked, false when absent.
+   */
+  revoke(sessionId: SessionId): Promise<boolean>
+}
+
 /** `peer.create` request: bind a fresh or explicitly adopted session to a pairing alias. */
 export interface PeerCreateRequest {
   readonly alias: PeerAlias
   readonly participant: PeerParticipant
+  /** Optional caller-minted idempotency identity; yields a deterministic session id and payload-bound replay. */
+  readonly requestId?: PeerRequestId
   readonly sessionId?: SessionId
   readonly workspaceId?: string
   readonly cwd?: string
@@ -376,12 +546,22 @@ export interface PeerCreateRequest {
    * There is deliberately no cost ceiling: the harness has no billing data.
    */
   readonly maxTotalTokens?: number
+  /** Optional job binding for pairings declaring a `worker` policy. */
+  readonly job?: PeerCreateJobRequest
 }
 
 /** `peer.create` value: `created` is false when an existing session was adopted. */
 export interface PeerCreateValue {
   readonly target: PeerTargetResolved
   readonly created: boolean
+  /** Present when `requestId` was supplied: true on idempotent replay, false on initial admission. */
+  readonly replayed?: boolean
+  /** Canonical SHA-256 of the semantically relevant create request fields when `requestId` was supplied. */
+  readonly payloadHash?: string
+  /** Host boot identity that wrote the receipt when `requestId` was supplied. */
+  readonly instanceId?: string
+  /** Attested profile identity when `peerProfileIdentity` is mounted and the pairing has a `worker` policy. */
+  readonly profile?: PeerProfileSummary
 }
 
 /**
@@ -402,18 +582,143 @@ export interface PeerPromptValue {
   readonly accepted: true
   readonly queued: boolean
   readonly hopCount: number
+  /** True when `requestId` + payload matched a retained receipt instead of queueing a second turn. */
+  readonly replayed?: boolean
+  /** Canonical SHA-256 of the target session id and prompt content. */
+  readonly payloadHash?: string
+  /** Host boot identity that accepted the request. */
+  readonly instanceId?: string
+  /** Host-derived prompt disposition at admission or replay. */
+  readonly disposition?: PeerPromptDisposition
+  /** Terminal outcome when `disposition` is `'terminal'`. */
+  readonly terminalState?: PeerTerminalOutcome
+  /** Turn terminal record when `disposition` is `'terminal'`. */
+  readonly terminal?: PeerTurnTerminal
+}
+
+/** Receipt kind tracked by the write-ahead input receipt store. */
+export type PeerInputReceiptKind = 'create' | 'prompt'
+
+/** Write-ahead lifecycle phase persisted in `peer-input-receipts.json`. */
+export type PeerInputReceiptPhase = 'prepared' | 'finalized'
+
+/** Terminal state derived for a turn that consumed a peer prompt. */
+export type PeerTerminalOutcome = 'completed' | 'aborted' | 'failed' | 'budget' | 'blocked' | 'max-tokens' | 'interrupted'
+
+/** Host-derived disposition of an accepted peer prompt from the raw session log. */
+export type PeerPromptDisposition = 'queued' | 'claimed' | 'cancelled_before_dispatch' | 'terminal' | 'unknown'
+
+/** Host-derived disposition of an accepted peer create from the session store. */
+export type PeerCreateDisposition = 'created' | 'adopted' | 'unknown'
+
+/** Disposition reported by `peer.receipt`. */
+export type PeerInputDisposition = PeerPromptDisposition | PeerCreateDisposition
+
+/** `peer.receipt` request: look up one create or prompt receipt and its current host-side disposition. */
+export interface PeerReceiptRequest {
+  readonly alias: PeerAlias
+  readonly requestId: PeerRequestId
+  readonly kind?: PeerInputReceiptKind
+}
+
+/** `peer.receipt` value: persisted receipt identity, restart visibility, and derived disposition. */
+export interface PeerReceiptValue {
+  readonly found: boolean
+  readonly kind?: PeerInputReceiptKind
+  readonly sessionId?: SessionId
+  readonly payloadHash?: string
+  readonly instanceId?: string
+  readonly phase?: PeerInputReceiptPhase
+  readonly replayedAcrossRestart: boolean
+  readonly disposition: PeerInputDisposition
+  readonly terminalState?: PeerTerminalOutcome
+  readonly terminal?: PeerTurnTerminal
+  readonly acceptedAt?: number
+  readonly finalizedAt?: number
+}
+
+/** `peer.jobUpdate` request: authenticated fence bump, TTL extension, or revocation for a bound job. */
+export interface PeerJobUpdateRequest {
+  readonly alias: PeerAlias
+  readonly requestId: PeerRequestId
+  readonly jobId: string
+  readonly fence?: number
+  readonly expiresAt?: number
+  readonly revoked?: boolean
+}
+
+/** `peer.jobUpdate` value: updated binding record and payload-bound receipt metadata. */
+export interface PeerJobUpdateValue {
+  readonly accepted: true
+  readonly binding: PeerJobBinding
+  readonly replayed: boolean
+  readonly payloadHash: string
+  readonly instanceId: string
+}
+
+/** `peer.ready` request: authenticated readiness probe for one pairing alias. */
+export interface PeerReadyRequest {
+  readonly alias: PeerAlias
+}
+
+/** `peer.ready` value: readiness status, missing capabilities, runtime identity, and optional profile. */
+export interface PeerReadyValue {
+  readonly ready: boolean
+  readonly missing: readonly string[]
+  readonly capabilities: readonly PeerCapability[]
+  readonly profile?: PeerProfileSummary
+  readonly instanceId: string
+  readonly version: string
+}
+
+/** `peer.exportList` request: list regular files under the bound worker session export root. */
+export interface PeerExportListRequest {
+  readonly alias: PeerAlias
+}
+
+/** One regular file entry inside a session export directory. */
+export interface PeerExportFileEntry {
+  readonly path: string
+  readonly bytes: number
+  readonly mtimeMs: number
+}
+
+/** `peer.exportList` value: bounded relative file inventory. */
+export interface PeerExportListValue {
+  readonly files: readonly PeerExportFileEntry[]
+  readonly truncated: boolean
+}
+
+/** `peer.exportFetch` request: read one bounded regular file from the bound worker session export root. */
+export interface PeerExportFetchRequest {
+  readonly alias: PeerAlias
+  readonly path: string
+  readonly maxBytes?: number
+}
+
+/** `peer.exportFetch` value: exact returned bytes, base64 encoding, and SHA-256 over the returned bytes. */
+export interface PeerExportFetchValue {
+  readonly path: string
+  readonly bytes: number
+  readonly sha256: string
+  readonly contentBase64: string
 }
 
 /** `peer.cancel` request: cancel the target's active turn, attributed to the peer. */
 export interface PeerCancelRequest {
   readonly target: PeerTarget
   readonly participant: PeerParticipant
+  /** Discard this alias's pending peer prompts. Defaults to true for worker pairings, false otherwise. */
+  readonly dropQueued?: boolean
 }
 
 /** `peer.cancel` value: `cancelled` is false when no turn was active. */
 export interface PeerCancelValue {
   readonly accepted: true
   readonly cancelled: boolean
+  readonly stopIntent: PeerStopIntent
+  /** Pending prompts actually removed. Never counts work already claimed by the driver. */
+  readonly droppedQueued: number
 }
 
 /** Outcomes a peer may grant. A peer never grants `allowed-always` (doc 69 §2). */
@@ -429,13 +734,17 @@ export interface PeerAnswerRequest {
   readonly target: PeerTarget
   readonly participant: PeerParticipant
   readonly askId: PeerAskId
+  readonly requestId: PeerRequestId
   readonly answer: PeerAnswer
 }
 
-/** `peer.answer` value: the answer settled the ask. */
+/** `peer.answer` value: the decision was committed. A replay does not deliver it again. */
 export interface PeerAnswerValue {
   readonly accepted: true
   readonly settled: true
+  readonly replayed: boolean
+  readonly payloadHash: string
+  readonly instanceId: string
 }
 
 /** `peer.page` request: backwards history repair from a follow opening cut (doc 69 §12.3). */
@@ -507,21 +816,49 @@ export interface PeerFollowEndFrame {
   readonly reason: 'closed' | 'target-detached'
 }
 
+/** Loss or forced resynchronization; null positions mean there is no known durable bound. */
+export interface PeerFollowGapFrame {
+  readonly type: 'gap'
+  readonly fromSeq: SessionSeq | null
+  readonly toSeq: SessionSeq | null
+  readonly reason: 'queue-overflow' | 'sequence-discontinuity' | 'upstream-closed' | 'open-timeout' | 'idle-timeout' | 'lifetime-limit'
+  readonly resync: 'refollow-and-page'
+}
+
+/** Gateway uplink acknowledging one consumed nonterminal follow frame, in order, starting at 1. */
+export interface PeerFollowAck {
+  readonly type: 'ack'
+  readonly frame: number
+}
+
 /** Every frame a `peer.follow` stream carries. */
 export type PeerFollowFrame =
   | PeerFollowSnapshotFrame
   | PeerFollowEventFrame
   | PeerFollowStateFrame
   | PeerFollowAssistantStreamFrame
+  | PeerFollowGapFrame
   | PeerFollowEndFrame
 
 // ── Pairing file schema ──────────────────────────────────────────────────────
 
-/** Defaults stamped on a session a peer creates through an alias (doc 69 §10.2). */
+/** Defaults and scope limits stamped on a session a peer creates or adopts through an alias (doc 69 §10.2). */
 export interface PeerCreateDefaults {
   readonly workspaceId?: string
   readonly cwd?: string
   readonly agentPreset?: string
+  /** Allowed presets when a caller names `agentPreset`; must include `agentPreset` when both are set. */
+  readonly allowAgentPresets?: readonly string[]
+  /** When true, `peer.create` requires `requestId`, rejects caller-supplied `sessionId`, and forbids session reuse. */
+  readonly freshOnly?: boolean
+}
+
+/** Pairing-level upper bounds applied to `job` requests on `peer.create`. */
+export interface PeerWorkerPolicy {
+  readonly allowedCapabilities?: readonly string[]
+  readonly maxLimits?: PeerJobLimits
+  readonly allowedMcpEndpoints?: readonly string[]
+  readonly allowedToolNames?: readonly string[]
 }
 
 /**
@@ -539,14 +876,23 @@ export interface PeerPairing {
   readonly exposure: PeerExposure
   /** This host's session bound to the pairing; absent with `create` for a peer-created session. */
   readonly sessionId?: SessionId
-  /** Present when a peer may create (or adopt) a session under this alias. */
+  /** Present when a peer may create (or adopt) a session under this alias; its fields act as limits. */
   readonly create?: PeerCreateDefaults
+  /** Optional worker policy bounding `job` scope, limits, MCP endpoints, and allowed tools. */
+  readonly worker?: PeerWorkerPolicy
   /** The session on `peer` this host calls; caller-role bookkeeping only. */
   readonly remoteSessionId?: SessionId
   /** Base URL of `peer`'s peer surface; caller-role addressing. */
   readonly endpoint?: string
-  /** Reserved for doc 69 §8 correction 1; never verified on the host yet (the peer path reads no request headers). */
-  readonly token?: string
+  /**
+   * Hashed inbound bearer credential (`scrypt$...` or `sha256$...`);
+   * plaintext `inboundToken` in YAML is hashed at load and never retained.
+   */
+  readonly tokenHash?: string
+  /** Plaintext bearer credential this host sends when dialing `endpoint` as a caller; never logged or echoed in RPC replies. */
+  readonly outboundToken?: string
+  /** Explicit opt-out allowing unauthenticated inbound calls to this pairing when no credential is configured. */
+  readonly insecure?: boolean
   /** Optional emergency stop (doc 69 §9.3); absent means unbounded agent-to-agent exchange. */
   readonly runawayCeiling?: number
   /** Allows an adopting `peer.create` to change routing (doc 69 §10.1); default off. Legacy: ignored when `routing` is present. */
@@ -670,6 +1016,8 @@ export interface PeerSelectModelValue {
   readonly selected: PeerModelSelection
   readonly previous?: PeerModelSelection
   readonly replayed: boolean
+  /** False when the switch applied to the Session but its idempotency receipt failed to persist to disk; omitted when durable. */
+  readonly receiptPersisted?: boolean
 }
 
 /** Verdict of evaluating one selection against a pairing's routing policy. */
@@ -744,6 +1092,7 @@ export type PeerErrorCode =
   | 'peer/gap'
   | 'peer/hop-limit'
   | 'peer/version-skew'
+  | 'peer/unavailable'
   | 'peer/target-unreachable'
 
 /** One structured peer failure: a stable code plus a human-readable message. */
@@ -767,11 +1116,13 @@ declare module '@deepseek-ai/dsh-typert-protocol' {
      */
     'peer/conflict': { readonly askId?: string; readonly reason?: string; readonly latch?: string }
     /** A follow generation cannot prove durable contiguity; repair with `peer.page`. */
-    'peer/gap': { readonly expectedSeq?: number; readonly observedSeq?: number }
+    'peer/gap': { readonly expectedSeq?: number; readonly observedSeq?: number; readonly gap?: PeerFollowGapFrame }
     /** The pairing's configured emergency hop ceiling refused the prompt. */
     'peer/hop-limit': { readonly hopCount?: number; readonly ceiling?: number }
     /** Handshake protocol or schema divergence. */
     'peer/version-skew': { readonly expected?: number; readonly received?: number; readonly schemaDigest?: string }
+    /** Required receipt durability is unavailable or failed to write before the side effect. */
+    'peer/unavailable': { readonly reason?: string }
     /** Caller-side outcome: the target host could not be reached; the caller owns backoff. */
     'peer/target-unreachable': { readonly endpoint?: string }
   }

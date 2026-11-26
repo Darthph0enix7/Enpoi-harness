@@ -3,26 +3,32 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write packages/api/peer/README.md
 /:
-  en: 7d959fe70aca8f2d
-  zh: 978b4d8598b01e68
+  en: 71943a015611a49c
+  zh: 3f426edd4fcceea5
 /deepseek-ai-dsh-api-peer:
   en: 08063506f457abe7
   zh: 58bf87c854711e5b
 /deepseek-ai-dsh-api-peer/summary:
-  en: e9b9c7fe382db15a
-  zh: 87ab00d5fb047678
+  en: 2c6e3b27b247b579
+  zh: 1ce66d485c6f7865
 /deepseek-ai-dsh-api-peer/table-of-contents:
   en: 58cc0cb146c0ed2d
   zh: 184ea8c4997e46b4
 /deepseek-ai-dsh-api-peer/use-this-package:
-  en: cab563dff21bad20
-  zh: 6c478fdc204a87c8
+  en: ce9a3391bbc144f0
+  zh: dd619be97b1fa021
 /deepseek-ai-dsh-api-peer/pairing-file:
-  en: e7d34e76a9758077
-  zh: 6cd02e4654a2bc2e
+  en: 78ec568f528c8d32
+  zh: 3035d5d4281deca0
 /deepseek-ai-dsh-api-peer/host-surface:
-  en: 16025f455d5aa405
-  zh: 8d049fb5313d539d
+  en: 262409b867f7df66
+  zh: 886f8feac695a3b5
+/deepseek-ai-dsh-api-peer/host-surface/worker-sessions:
+  en: 95b179dee5f8e1e6
+  zh: 8a2ee61acbbdf704
+/deepseek-ai-dsh-api-peer/host-surface/refusal-reason-table:
+  en: afe63ff6f1cd525d
+  zh: ca9af08af9a31e38
 /deepseek-ai-dsh-api-peer/host-surface/model-attribution-and-usage:
   en: 8c562a2f3ba33f10
   zh: 116e9e84710c35e0
@@ -33,8 +39,8 @@
   en: 82d20746550c8ea0
   zh: 16c3b893741d4c1c
 /deepseek-ai-dsh-api-peer/caller-bridge:
-  en: db18d36314b11535
-  zh: cd8e25c5f3cd1b52
+  en: 3adb522bc9dac278
+  zh: c8ba6e9329c84c44
 /deepseek-ai-dsh-api-peer/model-experience:
   en: 215e7ba838619b7b
   zh: a311da3843709f90
@@ -51,8 +57,8 @@
   en: 55057a42ccc5595f
   zh: 6300de65135c5fb9
 /deepseek-ai-dsh-api-peer/known-limitations-and-deferred-work:
-  en: cb1e367a0164a771
-  zh: 19fdf4d0f5c90b12
+  en: 5cdb38a1427188fd
+  zh: 598a0d75dcb99ede
 /deepseek-ai-dsh-api-peer/known-limitations-and-deferred-work/dev-note:
-  en: 09bedbd4834c008c
-  zh: 7888eca671c3dddd
+  en: a573f5c691461b54
+  zh: d317a6257588c93a

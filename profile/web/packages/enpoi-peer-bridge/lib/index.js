@@ -1,7 +1,8 @@
 // src/index.ts
 import Schema from "@deepseek-ai/schemastery";
-import { randomUUID } from "node:crypto";
-import { dirname as dirname3 } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync as mkdirSync2, writeFileSync } from "node:fs";
+import { dirname as dirname3, join as join3 } from "node:path";
 
 // src/asks.ts
 import { appendFileSync, mkdirSync } from "node:fs";
@@ -167,9 +168,13 @@ var PeerBridgeError = class extends Error {
     this.endpoint = endpoint;
   }
 };
+var SCHEMA_DIGEST = "599b07e200d7a174273a735675729383f40e6edfa3fdfc9afb2842dd8e106d86";
+var METHODS_DIGEST = "43cd7b31db35f5a557e10ec65debe4b3308e11597cf17a1656a0145fe2a4e87e";
 var DEFAULT_BACKOFF = { initialMs: 250, maxMs: 4e3, factor: 2 };
 var REPAIR_PAGE_LIMIT = 20;
+var GAP_RECONNECT_LIMIT = 3;
 var CALLER_TERMINAL_CODES = /* @__PURE__ */ new Set([
+  "gateway/bad-request",
   "peer/version-skew",
   "peer/not-paired",
   "peer/not-found",
@@ -196,14 +201,25 @@ var PeerClient = class {
   backoff;
   maxReconnects;
   pageSize;
+  boundedFollow;
   /** Negotiate against the target; a protocol mismatch surfaces `peer/version-skew`. */
   async handshake() {
-    return this.rpc("handshake", {
+    const schemaDigest = this.options.schemaDigest ?? SCHEMA_DIGEST;
+    const value = await this.rpc("handshake", {
       protocolVersion: 1,
       harnessVersion: this.options.harnessVersion ?? resolveCallerHarnessVersion(),
-      schemaDigest: this.options.schemaDigest ?? "",
+      schemaDigest,
       device: this.options.device
     });
+    this.boundedFollow = value.capabilities.includes("bounded-follow");
+    if (value.capabilities.includes("shape-digest") && value.schemaDigest !== schemaDigest) {
+      this.options.onCompatibilityWarning?.("peer handshake schemaDigest differs from this caller");
+    }
+    const methodsDigest = value.methodsDigest ?? (value.capabilities.includes("shape-digest") ? void 0 : value.schemaDigest);
+    if (methodsDigest && methodsDigest !== METHODS_DIGEST) {
+      this.options.onCompatibilityWarning?.("peer handshake methodsDigest differs from this caller");
+    }
+    return value;
   }
   /** Read the latch for one target. */
   state(target) {
@@ -229,9 +245,37 @@ var PeerClient = class {
   prompt(request) {
     return this.rpc("prompt", request);
   }
+  /** Read one input receipt; a missing entry does not prove non-admission. */
+  receipt(request, signal) {
+    return this.rpc("receipt", request, signal);
+  }
+  /** Rotate a fence, extend the expiry, or revoke a bound job. */
+  jobUpdate(request) {
+    return this.rpc("jobUpdate", request);
+  }
+  /** Read authenticated readiness for one alias. */
+  ready(request) {
+    return this.rpc("ready", request);
+  }
+  /** List metadata for a worker's export files. */
+  exportList(request) {
+    return this.rpc("exportList", request);
+  }
+  /** Fetch one bounded export; the caller verifies the returned digest and size. */
+  exportFetch(request) {
+    return this.rpc("exportFetch", request);
+  }
   /** Cancel the target's active turn. */
   cancel(request) {
     return this.rpc("cancel", request);
+  }
+  /** Read retained asks for the selected alias binding. */
+  asks(request) {
+    return this.rpc("asks", request);
+  }
+  /** Wait for an observation, not proof of quiescence. */
+  waitQuiescent(request) {
+    return this.rpc("waitQuiescent", request);
   }
   /** Settle a pending ask. */
   answer(request) {
@@ -246,8 +290,8 @@ var PeerClient = class {
     return this.rpc("selectModel", request);
   }
   /** Read one backwards history window for repair. */
-  page(request) {
-    return this.rpc("page", request);
+  page(request, signal) {
+    return this.rpc("page", request, signal);
   }
   /**
    * Cheap reachability probe: one bounded `peer.state` read.
@@ -278,11 +322,16 @@ var PeerClient = class {
    * @returns frames exactly as the host sends them.
    */
   async *followOnce(request, signal) {
+    if (signal.aborted) return;
     const socket = this.webSocketFactory(this.muxUrl());
     const streamId = `peer-${randomToken()}`;
     const queue = [];
     let wake;
     let closed = false;
+    let opened = false;
+    const openedSocket = () => opened;
+    let frameNumber = 0;
+    let cursor;
     const notify = () => {
       wake?.();
       wake = void 0;
@@ -298,8 +347,8 @@ var PeerClient = class {
       }
       if (typeof parsed !== "object" || parsed === null) return;
       const frame = parsed;
-      if (frame.streamId !== streamId || typeof frame.type !== "string") return;
-      queue.push(frame);
+      if (frame.streamId !== streamId || frame.type !== "item" && frame.type !== "error" && frame.type !== "end") return;
+      queue.push({ streamId, type: frame.type, value: frame.type === "error" ? frame.error ?? frame.value : frame.value });
       notify();
     };
     const onClose = () => {
@@ -312,50 +361,70 @@ var PeerClient = class {
       notify();
       socket.close();
     };
+    const openTimer = setTimeout(onAbort, 1e4).unref();
+    const onOpen = () => {
+      clearTimeout(openTimer);
+      if (isClosed()) return;
+      try {
+        socket.send(JSON.stringify({ type: "open", streamId, endpoint: "peer/follow", payload: { args: { request } } }));
+        opened = true;
+      } catch {
+        onAbort();
+      }
+    };
     socket.addEventListener("message", onMessage);
     socket.addEventListener("close", onClose);
+    socket.addEventListener("open", onOpen);
+    socket.addEventListener("error", onAbort);
     signal.addEventListener("abort", onAbort, { once: true });
     try {
-      await new Promise((resolve, reject) => {
-        const onOpen = () => {
-          socket.removeEventListener("open", onOpen);
-          socket.send(JSON.stringify({
-            type: "open",
-            streamId,
-            endpoint: "peer/follow",
-            payload: { args: { request } }
-          }));
-          resolve();
-        };
-        const onOpenError = () => {
-          socket.removeEventListener("error", onOpenError);
-          reject(unreachable(this.endpoint));
-        };
-        socket.addEventListener("open", onOpen);
-        socket.addEventListener("error", onOpenError);
-      });
-      while (true) {
+      while (!signal.aborted) {
         const frame = queue.shift();
         if (frame === void 0) {
-          if (isClosed()) return;
+          if (isClosed()) {
+            if (this.boundedFollow === true && openedSocket()) yield gapAfter(cursor, "upstream-closed");
+            if (!openedSocket()) throw unreachable(this.endpoint);
+            return;
+          }
           await new Promise((resolve) => {
             wake = resolve;
           });
           continue;
         }
         if (frame.type === "item") {
-          yield frame.value;
+          if (typeof frame.value !== "object" || frame.value === null || !("type" in frame.value)) throw unreachable(this.endpoint);
+          const value = frame.value;
+          if (value.type === "gap" || value.type === "end") {
+            yield value;
+            return;
+          }
+          if ("cursor" in value) cursor = value.cursor;
+          try {
+            yield value;
+          } finally {
+            if (this.boundedFollow !== false && !isClosed() && !signal.aborted) {
+              try {
+                socket.send(JSON.stringify({ type: "item", streamId, value: { type: "ack", frame: ++frameNumber } }));
+              } catch {
+                onAbort();
+              }
+            }
+          }
           continue;
         }
         if (frame.type === "error") {
           throw decodeFailure(frame.value, this.endpoint);
         }
+        if (this.boundedFollow === true) yield gapAfter(cursor, "upstream-closed");
         return;
       }
     } finally {
+      clearTimeout(openTimer);
       signal.removeEventListener("abort", onAbort);
       socket.removeEventListener("message", onMessage);
       socket.removeEventListener("close", onClose);
+      socket.removeEventListener("open", onOpen);
+      socket.removeEventListener("error", onAbort);
       socket.close();
       if (queue.length > 0) queue.length = 0;
     }
@@ -368,33 +437,74 @@ var PeerClient = class {
    */
   async *follow(request, signal) {
     let lastCursor;
+    let boundSession;
     let attempt = 0;
+    let gapAttempts = 0;
+    let recovering = false;
+    let recoveryThrough = -1;
     while (!signal.aborted) {
       let progressed = false;
+      let lost;
       try {
         for await (const frame of this.followOnce(request, signal)) {
+          if (frame.type === "gap") {
+            lost = frame;
+            break;
+          }
           progressed = true;
           if (frame.type === "snapshot") {
-            if (lastCursor !== void 0 && frame.records.length > 0) {
-              const oldest = frame.records[0]?.seq;
-              if (oldest !== void 0 && oldest > lastCursor + 1) {
-                yield* this.repairForward(request.target, lastCursor, oldest, signal);
+            if (boundSession !== void 0 && frame.target.sessionId !== boundSession) {
+              yield { type: "end", reason: "target-detached" };
+              return;
+            }
+            boundSession = frame.target.sessionId;
+            if (recovering && frame.cursor < recoveryThrough) {
+              throw new PeerBridgeError("peer/gap", "The follow snapshot is older than the required repair cut.", this.endpoint);
+            }
+            if (lastCursor !== void 0) {
+              const oldest = frame.records[0]?.seq ?? frame.cursor + 1;
+              if (oldest > lastCursor + 1) {
+                const target = { kind: "session", sessionId: frame.target.sessionId };
+                yield* this.repairForward(target, lastCursor, oldest, signal, recovering);
               }
             }
-            lastCursor = frame.cursor;
+            lastCursor = Math.max(lastCursor ?? -1, frame.cursor);
+            recovering = false;
+            recoveryThrough = -1;
           } else if (frame.type === "event") {
-            lastCursor = Math.max(lastCursor ?? -1, frame.record.seq);
+            if (frame.cursor > (lastCursor ?? -1)) gapAttempts = 0;
+            lastCursor = Math.max(lastCursor ?? -1, frame.cursor);
           } else if (frame.type === "state") {
             lastCursor = Math.max(lastCursor ?? -1, frame.cursor);
           }
           yield frame;
+          if (frame.type === "end") return;
         }
       } catch (error) {
         if (signal.aborted) return;
-        if (error instanceof PeerBridgeError && CALLER_TERMINAL_CODES.has(error.code)) throw error;
+        if (error instanceof PeerBridgeError) {
+          if (CALLER_TERMINAL_CODES.has(error.code)) throw error;
+          if (error.code === "peer/unavailable" && error.details.reason === "follow-capacity") {
+            throw new PeerBridgeError(error.code, "Peer follow is at capacity; back off before reopening.", this.endpoint, { reason: "follow-capacity" });
+          }
+          if (error.code === "peer/gap") lost = gapFromError(error.details.gap, lastCursor);
+        }
       }
       if (signal.aborted) return;
-      attempt = progressed ? 1 : attempt + 1;
+      if (lost !== void 0 || recovering) {
+        recovering = true;
+        gapAttempts += 1;
+        if (lost !== void 0) {
+          recoveryThrough = Math.max(recoveryThrough, lost.toSeq ?? -1, lastCursor ?? -1);
+          if (lost.fromSeq !== null) lastCursor = Math.min(lastCursor ?? lost.fromSeq - 1, lost.fromSeq - 1);
+          else if (lastCursor === void 0 && lost.toSeq !== null) lastCursor = -1;
+          yield lost;
+        }
+        if (gapAttempts > Math.min(this.maxReconnects ?? GAP_RECONNECT_LIMIT, GAP_RECONNECT_LIMIT)) {
+          throw new PeerBridgeError("peer/gap", "Peer follow could not repair history within the retry limit; retry following the same request.", this.endpoint);
+        }
+      }
+      attempt = recovering ? gapAttempts : progressed ? 1 : attempt + 1;
       if (this.maxReconnects !== void 0 && attempt > this.maxReconnects) {
         throw unreachable(this.endpoint);
       }
@@ -408,18 +518,21 @@ var PeerClient = class {
    * @param fromExclusive - last durable seq the caller already folded.
    * @param toExclusive - first durable seq the caller is about to receive.
    * @param signal - caller cancellation.
+   * @param strict - refuse incomplete repair after an explicit gap.
    * @returns the missing records in ascending seq order.
    */
-  async *repairForward(target, fromExclusive, toExclusive, signal) {
+  async *repairForward(target, fromExclusive, toExclusive, signal, strict = false) {
     const collected = [];
     let throughSeq = toExclusive - 1;
     let hole;
     let pages = 0;
+    let complete = throughSeq <= fromExclusive;
     while (pages < REPAIR_PAGE_LIMIT) {
       if (signal.aborted || throughSeq <= fromExclusive) break;
-      const value = await this.page({ target, throughSeq, maxMessages: this.pageSize });
+      const value = await this.page({ target, throughSeq, maxMessages: this.pageSize }, signal);
       pages += 1;
       if (value.records.length === 0) {
+        complete = !value.hasMore;
         hole = { from: fromExclusive + 1, to: throughSeq + 1 };
         break;
       }
@@ -428,12 +541,15 @@ var PeerClient = class {
       }
       const oldest = value.records[0]?.seq;
       if (oldest === void 0 || oldest <= fromExclusive + 1 || !value.hasMore) {
+        complete = true;
         if (oldest !== void 0 && oldest > fromExclusive + 1) hole = { from: fromExclusive + 1, to: oldest };
         break;
       }
       throughSeq = oldest - 1;
     }
-    if (hole === void 0 && !signal.aborted && throughSeq > fromExclusive) {
+    if (strict && !complete && !signal.aborted) throw new PeerBridgeError("peer/gap", "Peer history repair exceeded its page limit.", this.endpoint);
+    if (strict) hole = void 0;
+    if (!strict && hole === void 0 && !signal.aborted && throughSeq > fromExclusive) {
       hole = { from: fromExclusive + 1, to: throughSeq + 1 };
     }
     if (hole !== void 0) this.options.onWarning?.(hole);
@@ -462,10 +578,15 @@ var PeerClient = class {
     if (!response.ok) {
       throw new PeerBridgeError("peer/target-unreachable", `peer ${method} failed over HTTP ${String(response.status)}`, this.endpoint, { endpoint: this.endpoint });
     }
-    const body = await response.json();
-    const result = body.result;
-    if (result === void 0) {
-      throw new PeerBridgeError("gateway/internal", `peer ${method} returned no result envelope`, this.endpoint, {});
+    let body;
+    try {
+      body = await response.json();
+    } catch (error) {
+      throw unreachable(this.endpoint, error);
+    }
+    const result = body?.result;
+    if (result?.ok !== true && result?.ok !== false) {
+      throw new PeerBridgeError("gateway/internal", `peer ${method} returned no result envelope`, this.endpoint, { reason: "missing-result-envelope" });
     }
     if (result.ok) return result.value;
     throw decodeFailure(result.error, this.endpoint);
@@ -478,6 +599,16 @@ var PeerClient = class {
     return url.toString();
   }
 };
+function gapAfter(cursor, reason = "sequence-discontinuity") {
+  return { type: "gap", fromSeq: cursor === void 0 ? null : cursor + 1, toSeq: null, reason, resync: "refollow-and-page" };
+}
+function gapFromError(wire, cursor) {
+  const gap = gapAfter(cursor);
+  if (typeof wire !== "object" || wire === null || !("type" in wire) || wire.type !== "gap") return gap;
+  const fromSeq = "fromSeq" in wire && typeof wire.fromSeq === "number" && Number.isSafeInteger(wire.fromSeq) ? wire.fromSeq : gap.fromSeq;
+  const toSeq = "toSeq" in wire && typeof wire.toSeq === "number" && Number.isSafeInteger(wire.toSeq) ? wire.toSeq : null;
+  return { ...gap, fromSeq, toSeq };
+}
 function unreachable(endpoint, cause) {
   const error = new PeerBridgeError("peer/target-unreachable", `peer target ${endpoint} is unreachable`, endpoint, { endpoint });
   if (cause !== void 0) error.cause = cause;
@@ -660,6 +791,12 @@ function loadCallerPairing(path, alias) {
 }
 var ALIAS_PATTERN = /^[A-Za-z0-9._-]+$/;
 function parseEntry(entry, subject) {
+  if (Object.hasOwn(entry, "token")) {
+    throw new PairingDocumentError(
+      `${subject}: ambiguous key "token" is not allowed; use "tokenHash" or "inboundToken" for inbound auth, or "outboundToken" for outbound calls`,
+      1
+    );
+  }
   const alias = requireNonEmptyString(entry.alias, `${subject}: alias`);
   if (!ALIAS_PATTERN.test(alias)) {
     throw new PairingDocumentError(`${subject}: alias must match [A-Za-z0-9._-]+ (received ${JSON.stringify(alias)})`, 1);
@@ -688,14 +825,17 @@ function parseEntry(entry, subject) {
   if (exposure !== void 0 && exposure !== "answer-only" && exposure !== "debug") {
     throw new PairingDocumentError(`${subject}: exposure must be answer-only or debug (received ${JSON.stringify(exposure)})`, 1);
   }
+  const outboundToken = optionalString("outboundToken");
+  const remoteSessionId = optionalString("remoteSessionId");
+  const sessionId = optionalString("sessionId");
   return {
     alias,
     peer,
     ...endpoint === void 0 ? {} : { endpoint },
     ...exposure === void 0 ? {} : { exposure },
-    ...optionalString("token") === void 0 ? {} : { token: optionalString("token") },
-    ...optionalString("remoteSessionId") === void 0 ? {} : { remoteSessionId: optionalString("remoteSessionId") },
-    ...optionalString("sessionId") === void 0 ? {} : { sessionId: optionalString("sessionId") },
+    ...outboundToken === void 0 ? {} : { outboundToken },
+    ...remoteSessionId === void 0 ? {} : { remoteSessionId },
+    ...sessionId === void 0 ? {} : { sessionId },
     ...create === void 0 ? {} : { create },
     ...createRouting === void 0 ? {} : { createRouting },
     ...runawayCeiling === void 0 ? {} : { runawayCeiling }
@@ -936,6 +1076,9 @@ function registerTools(ctx, config, deps = {}) {
     ...deps,
     onWarning: deps.onWarning ?? ((hole) => {
       ctx.logger?.warn?.(`enpoi-peer-bridge: peer follow history hole [${String(hole.from)}, ${String(hole.to)}) \u2014 records in that range are missing locally`);
+    }),
+    onCompatibilityWarning: deps.onCompatibilityWarning ?? ((message) => {
+      ctx.logger?.warn?.(`enpoi-peer-bridge: ${message}`);
     })
   };
   ctx.tools.register({
@@ -970,6 +1113,9 @@ function registerTools(ctx, config, deps = {}) {
               device: { type: "string" },
               harnessVersion: { type: "string" },
               protocolVersion: { type: "number" },
+              instanceId: { type: "string" },
+              schemaDigest: { type: "string" },
+              methodsDigest: { type: "string" },
               capabilities: { type: "array", items: { type: "string" } }
             },
             required: ["device", "harnessVersion", "protocolVersion", "capabilities"]
@@ -981,6 +1127,7 @@ function registerTools(ctx, config, deps = {}) {
           latchSource: { type: "string" },
           activeDescendants: { type: "number" },
           descendantsExact: { type: "boolean" },
+          stopIntent: stopIntentSchema(),
           model: { type: "string" },
           lastTurnEnd: { type: "string" },
           pendingAsks: { type: "array", items: { type: "string" } },
@@ -999,6 +1146,7 @@ function registerTools(ctx, config, deps = {}) {
       const client = makeClient(pairing, config, document.device, effectiveDeps);
       try {
         const handshake = await client.handshake();
+        warnAskCapabilities(handshake, effectiveDeps, ["stop-intent"]);
         let bound = pairing.remoteSessionId !== void 0;
         let stateValue;
         try {
@@ -1018,6 +1166,9 @@ function registerTools(ctx, config, deps = {}) {
             device: handshake.hostDevice,
             harnessVersion: handshake.harnessVersion,
             protocolVersion: handshake.protocolVersion,
+            instanceId: handshake.instanceId,
+            schemaDigest: handshake.schemaDigest,
+            methodsDigest: handshake.methodsDigest,
             capabilities: [...handshake.capabilities]
           },
           exposure: stateValue?.target.exposure ?? pairing.exposure ?? "unknown",
@@ -1027,6 +1178,7 @@ function registerTools(ctx, config, deps = {}) {
           latchSource: state?.source ?? "unknown",
           activeDescendants: state?.activeDescendants ?? 0,
           descendantsExact: state?.descendantsExact ?? false,
+          stopIntent: state?.stopIntent,
           model: state?.model === void 0 ? "" : `${state.model.provider}/${state.model.model}${state.model.chain === void 0 ? "" : ` (${state.model.chain})`}`,
           lastTurnEnd: state?.lastTurnEnd === void 0 ? "" : `turn ${String(state.lastTurnEnd.turn)} ${state.lastTurnEnd.reason}`,
           pendingAsks: (state?.pendingAsks ?? []).map(askSummary),
@@ -1406,6 +1558,7 @@ function registerTools(ctx, config, deps = {}) {
             "following that same remote turn to its terminal state without sending the message again."
           ].join(" ")
         },
+        requestId: { type: "string", description: "Retry key from a lost reply. Retry with the same message and create options; use resume to follow without resending." },
         provider: { type: "string", description: "When this call creates the session: provider of the route it starts on (with model)." },
         model: { type: "string", description: "When this call creates the session: model it starts on (with provider)." },
         chain: { type: "string", description: "When this call creates the session: chain id it starts on (its first ready member runs)." },
@@ -1425,6 +1578,11 @@ function registerTools(ctx, config, deps = {}) {
           sessionId: { type: "string" },
           created: { type: "boolean" },
           requestId: { type: "string" },
+          createRequestId: { type: "string" },
+          disposition: { type: "string" },
+          terminalState: { type: "string" },
+          instanceId: { type: "string" },
+          replayed: { type: "boolean" },
           admitted: { type: "boolean" },
           resumed: { type: "boolean" },
           status: { type: "string" },
@@ -1464,6 +1622,9 @@ function registerTools(ctx, config, deps = {}) {
         return { ok: false, error: { code: "gateway/bad-request", message: "resume must be the requestId string from a prior peer_ask result" } };
       }
       const resume = typeof resumeRaw === "string" ? resumeRaw : void 0;
+      const requestId = nonEmptyTextOf("requestId", request.requestId);
+      if (requestId !== void 0 && !requestId.ok) return badRequest(requestId.message);
+      if (resume !== void 0 && requestId !== void 0) return badRequest("peer_ask takes either resume or requestId, not both");
       if (resume !== void 0 && message.trim() !== "") {
         return { ok: false, error: { code: "gateway/bad-request", message: "resume continues a followed turn; drop message (the first peer_ask already sent it)" } };
       }
@@ -1486,6 +1647,8 @@ function registerTools(ctx, config, deps = {}) {
         alias,
         message,
         ...resume === void 0 ? {} : { resume },
+        ...requestId === void 0 ? {} : { requestId: requestId.value },
+        ...exec.agent?.session === void 0 ? {} : { toolCallKey: JSON.stringify([exec.agent.session.id, exec.callId]) },
         createRouting: createRouting.value,
         allowCreate: true,
         deps: effectiveDeps
@@ -1494,7 +1657,7 @@ function registerTools(ctx, config, deps = {}) {
   });
   ctx.tools.register({
     name: "peer_asks",
-    description: "List the pending asks (approvals and questions) on a paired peer session so the local operator can decide them with peer_answer.",
+    description: "List retained asks on a paired peer session, including expired asks. Only pending approvals and questions can take a new decision with peer_answer.",
     parameters: {
       type: "object",
       properties: {
@@ -1511,6 +1674,7 @@ function registerTools(ctx, config, deps = {}) {
           alias: { type: "string" },
           sessionId: { type: "string" },
           latch: { type: "string" },
+          instanceId: { type: "string" },
           asks: {
             type: "array",
             items: askItemSchema()
@@ -1525,16 +1689,28 @@ function registerTools(ctx, config, deps = {}) {
     async execute(args) {
       const request = narrow(args);
       const alias = requireAlias(request.alias);
-      const { pairing } = resolveEntry(pairingsPath, alias);
-      const client = makeClient(pairing, config, void 0, effectiveDeps);
+      const { pairing, document } = resolveEntry(pairingsPath, alias);
+      const client = makeClient(pairing, config, document.device, effectiveDeps);
       try {
+        const handshake = await client.handshake();
+        if (handshake.capabilities.includes("durable-asks")) {
+          const value2 = await client.asks({ alias, sessionId: pairing.remoteSessionId });
+          return {
+            ok: true,
+            alias,
+            instanceId: value2.instanceId,
+            sessionId: pairing.remoteSessionId ?? value2.asks[0]?.sessionId,
+            asks: value2.asks.map((ask) => ({ ...askPayload(ask), state: ask.state, settlementReason: ask.settlementReason, answeredBy: ask.answeredBy }))
+          };
+        }
+        warnAskCapabilities(handshake, effectiveDeps, ["durable-asks"]);
         const value = await client.state(targetOf(pairing));
         return {
           ok: true,
           alias,
           sessionId: value.target.sessionId,
           latch: value.state.latch,
-          asks: value.state.pendingAsks.map(askPayload)
+          asks: value.state.pendingAsks.map((ask) => ({ ...askPayload(ask), state: "pending" }))
         };
       } catch (error) {
         return failureFrom(error, pairing.endpoint);
@@ -1546,8 +1722,8 @@ function registerTools(ctx, config, deps = {}) {
     description: [
       "Answer one pending ask on a paired peer session. Approvals take outcome allowed-once or rejected;",
       "questions take answers[] naming each question id and the selected option labels (see peer_asks for",
-      "the ids and options). First answer wins \u2014 a peer/conflict means another participant already settled",
-      "it and the answer must not be retried blindly. A malformed selection is rejected here with the",
+      "the ids and options). Reuse requestId and the same decision after a lost reply; an expired ask",
+      "cannot take a new decision. A malformed selection is rejected here with the",
       "reason and never reaches the host."
     ].join(" "),
     parameters: {
@@ -1555,6 +1731,7 @@ function registerTools(ctx, config, deps = {}) {
       properties: {
         alias: { type: "string", description: "Pairing alias of the peer session." },
         askId: { type: "string", description: "Remote ask id from peer_asks or a peer_ask result." },
+        requestId: { type: "string", description: "Retry ID from an earlier answer; reuse only with the same decision." },
         outcome: { type: "string", enum: ["allowed-once", "rejected"], description: "Approval outcome (allowed-always is not grantable from a peer)." },
         answers: {
           type: "array",
@@ -1581,6 +1758,10 @@ function registerTools(ctx, config, deps = {}) {
           ok: { type: "boolean" },
           alias: { type: "string" },
           askId: { type: "string" },
+          requestId: { type: "string" },
+          replayed: { type: "boolean" },
+          payloadHash: { type: "string" },
+          instanceId: { type: "string" },
           settled: { type: "boolean" },
           confirmation: { type: "string" },
           note: { type: "string" },
@@ -1595,6 +1776,8 @@ function registerTools(ctx, config, deps = {}) {
       const alias = requireAlias(request.alias);
       const askId = typeof request.askId === "string" && request.askId !== "" ? request.askId : void 0;
       if (askId === void 0) return { ok: false, error: { code: "gateway/bad-request", message: "peer_answer needs an askId" } };
+      const retry = nonEmptyTextOf("requestId", request.requestId);
+      if (retry !== void 0 && !retry.ok) return badRequest(retry.message);
       const outcome = request.outcome;
       const rawAnswers = Array.isArray(request.answers) ? request.answers : void 0;
       if (outcome !== void 0 && rawAnswers !== void 0) {
@@ -1608,7 +1791,17 @@ function registerTools(ctx, config, deps = {}) {
       }
       const { pairing, document } = resolveEntry(pairingsPath, alias);
       const client = makeClient(pairing, config, document.device, effectiveDeps);
+      const participant = participantOf(config, document);
+      let target = targetOf(pairing);
       let answer;
+      let durableAsks = false;
+      try {
+        const handshake = await client.handshake();
+        warnAskCapabilities(handshake, effectiveDeps, ["ask-idempotent-answer"]);
+        durableAsks = handshake.capabilities.includes("durable-asks");
+      } catch (error) {
+        return failureFrom(error, pairing.endpoint);
+      }
       if (outcome !== void 0) {
         answer = { kind: "approval", outcome };
       } else {
@@ -1616,8 +1809,15 @@ function registerTools(ctx, config, deps = {}) {
         if (!parsed.ok) return badRequest(parsed.message);
         let pending;
         try {
-          const value = await client.state(targetOf(pairing));
-          pending = value.state.pendingAsks.find((candidate) => candidate.askId === askId);
+          if (durableAsks) {
+            const value = await client.asks({ alias, sessionId: pairing.remoteSessionId });
+            const retained = value.asks.find((candidate) => candidate.askId === askId);
+            pending = retained;
+            if (retained !== void 0) target = { kind: "session", sessionId: retained.sessionId };
+          } else {
+            const value = await client.state(target);
+            pending = value.state.pendingAsks.find((candidate) => candidate.askId === askId);
+          }
         } catch (error) {
           return failureFrom(error, pairing.endpoint);
         }
@@ -1631,44 +1831,50 @@ function registerTools(ctx, config, deps = {}) {
         if (!normalized.ok) return badRequest(normalized.message);
         answer = { kind: "question", answer: normalized.answer };
       }
-      const target = targetOf(pairing);
+      let requestId;
       try {
-        await client.answer({
+        requestId = retry?.value ?? recordAnswerId(dirname3(noticesPath), pairing, participant, askId);
+      } catch {
+        return { ok: false, settled: false, error: { code: "peer/unavailable", message: "Could not record the local answer retry ID; no answer was sent." } };
+      }
+      try {
+        const value = await client.answer({
           target,
-          participant: participantOf(config, document),
+          participant,
           askId,
+          requestId,
           answer
         });
         return {
-          ok: true,
+          ok: value.accepted === true && value.settled === true,
           alias,
           askId,
-          settled: true,
+          requestId,
+          settled: value.settled === true,
+          replayed: value.replayed,
+          payloadHash: value.payloadHash,
+          instanceId: value.instanceId,
           confirmation: "confirmed",
-          note: answer.kind === "question" ? "question settled; the first answer won" : "ask settled; the first answer won"
+          note: value.replayed === true ? "The host replayed the recorded answer; no new decision was delivered." : answer.kind === "question" ? "question settled; the first answer won" : "ask settled; the first answer won"
         };
       } catch (error) {
         const conflict = error instanceof PeerBridgeError && error.code === "peer/conflict";
-        if (!conflict && error instanceof PeerBridgeError && error.code === "peer/target-unreachable") {
+        if (error instanceof PeerBridgeError && (error.code === "peer/target-unreachable" || error.details.reason === "missing-result-envelope")) {
           const reread = await client.state(target).catch(() => void 0);
-          if (reread !== void 0 && !reread.state.pendingAsks.some((candidate) => candidate.askId === askId)) {
-            return {
-              ok: true,
-              alias,
-              askId,
-              settled: false,
-              confirmation: "lost",
-              note: "the answer transport failed with no confirmation, but the remote ask is no longer pending \u2014 it was settled remotely (by this answer or another participant); re-run peer_asks before resending"
-            };
-          }
+          const gone = reread !== void 0 && !reread.state.pendingAsks.some((candidate) => candidate.askId === askId);
+          const message = gone ? "The answer reply was lost and the ask is no longer pending. This does not establish who answered or whether it expired; reuse the same request ID and decision to check for replay." : "The answer reply was lost; reuse the same request ID and decision to check for replay.";
+          return { ok: false, alias, askId, requestId, settled: false, confirmation: "lost", note: message, error: { code: "peer/target-unreachable", message } };
         }
+        const refusal = answerRefusal(error);
+        const failure = failureFrom(error, pairing.endpoint);
         return {
           ok: false,
           alias,
           askId,
+          requestId,
           settled: false,
-          note: conflict ? "another participant already answered this ask (peer/conflict) \u2014 report it; do not retry blind" : errorText(error),
-          error: failureFrom(error, pairing.endpoint).error
+          note: refusal ?? (conflict ? "another participant already answered this ask (peer/conflict) \u2014 report it; do not retry blind" : failure.error.message),
+          error: refusal === void 0 ? failure.error : { ...failure.error, message: refusal }
         };
       }
     }
@@ -1691,6 +1897,7 @@ function registerTools(ctx, config, deps = {}) {
           ok: { type: "boolean" },
           alias: { type: "string" },
           cancelled: { type: "boolean" },
+          stopIntent: stopIntentSchema(),
           confirmation: { type: "string" },
           note: { type: "string" },
           error: failureSchema()
@@ -1701,7 +1908,8 @@ function registerTools(ctx, config, deps = {}) {
         const record = narrow(value);
         return [{
           type: "text",
-          text: record.ok === true ? `${record.cancelled === true ? "Cancelled" : "Nothing to cancel on"} ${String(record.alias)} \u2014 ${String(record.note ?? "")}` : `peer_cancel failed: ${String(narrow(record.error).message ?? "")}`
+          text: record.ok === true ? `${record.cancelled === true ? "Stop requested on" : "No active turn reported on"} ${String(record.alias)} \u2014 ${String(record.note ?? "")}${record.stopIntent === void 0 ? "" : `
+${stopIntentText(record.stopIntent)}`}` : `peer_cancel failed: ${String(narrow(record.error).message ?? "")}`
         }];
       }
     },
@@ -1712,12 +1920,14 @@ function registerTools(ctx, config, deps = {}) {
       const client = makeClient(pairing, config, document.device, effectiveDeps);
       try {
         const value = await client.cancel({ target: targetOf(pairing), participant: participantOf(config, document) });
+        if (value.stopIntent === void 0) effectiveDeps.onCompatibilityWarning?.("peer cancel did not report stop-intent");
         return {
           ok: true,
           alias,
           cancelled: value.cancelled,
+          stopIntent: value.stopIntent,
           confirmation: "confirmed",
-          note: value.cancelled ? "remote turn cancelled" : "remote session had no active turn"
+          note: value.cancelled ? "remote Stop was requested; this does not prove teardown" : "remote session had no active turn"
         };
       } catch (error) {
         if (error instanceof PeerBridgeError && error.code === "peer/target-unreachable") {
@@ -1728,6 +1938,7 @@ function registerTools(ctx, config, deps = {}) {
               alias,
               cancelled: false,
               confirmation: "lost",
+              stopIntent: reread.state.stopIntent,
               note: "the cancel confirmation was lost (transport failure); the remote reports no active turn \u2014 it may have completed or been cancelled"
             };
           }
@@ -1737,19 +1948,73 @@ function registerTools(ctx, config, deps = {}) {
     }
   });
 }
+function warnAskCapabilities(host, deps, capabilities) {
+  for (const capability of capabilities) {
+    if (!host.capabilities.includes(capability)) deps.onCompatibilityWarning?.(`peer host does not advertise ${capability}`);
+  }
+}
+function lostInputReply(client, kind, alias, requestId, createRequestId, error) {
+  if (!(error instanceof PeerBridgeError)) return void 0;
+  const reason = error.details.reason;
+  if (error.code !== "peer/target-unreachable" && reason !== "missing-result-envelope" && !(error.code === "peer/unavailable" && reason === "receipt-finalize-failed")) return void 0;
+  return (async () => {
+    const receipt = await client.receipt({ alias, requestId: kind === "create" ? createRequestId : requestId, kind }, AbortSignal.timeout(HOST_PROBE_TIMEOUT_MS)).catch(() => void 0);
+    const dispositions = kind === "create" ? ["created", "adopted"] : ["queued", "claimed", "cancelled_before_dispatch", "terminal"];
+    const disposition = receipt?.found === true && dispositions.includes(receipt.disposition) ? receipt.disposition : "unknown";
+    return {
+      ok: false,
+      alias,
+      requestId,
+      ...kind === "create" ? { createRequestId } : {},
+      disposition,
+      sessionId: receipt?.sessionId,
+      instanceId: receipt?.instanceId,
+      terminalState: receipt?.terminalState,
+      error: { code: error.code, message: `Peer ${kind} reply could not be confirmed; receipt disposition: ${disposition}.` }
+    };
+  })();
+}
 async function runAsk(ctx, options) {
   const { pairing, document } = resolveEntry(options.pairingsPath, options.alias);
   const client = makeClient(pairing, options.config, document.device, options.deps);
   const participant = participantOf(options.config, document);
   const resumed = options.resume !== void 0 && options.resume !== "";
+  const requestId = options.resume ?? options.requestId ?? (options.toolCallKey === void 0 ? `peer-bridge-${randomUUID()}` : `peer-bridge-${createHash("sha256").update(options.toolCallKey).digest("hex")}`);
+  const createRequestId = `peer-bridge-create-${createHash("sha256").update(requestId).digest("hex")}`;
   let created = false;
+  let createAttempted = false;
+  let handshake;
   try {
-    await client.handshake();
+    handshake = await client.handshake();
+    warnAskCapabilities(handshake, options.deps, ["bounded-follow", "ask-idempotent-answer"]);
   } catch (error) {
     return failureFrom(error, pairing.endpoint);
   }
-  const requestedTarget = targetOf(pairing);
+  let requestedTarget = targetOf(pairing);
   let baseline;
+  const createOrReplay = async () => {
+    createAttempted = true;
+    const defaults = pairing.create ?? {};
+    const routeOverride = options.createRouting.provider !== void 0 || options.createRouting.chain !== void 0;
+    const routing = { ...routeOverride ? {} : pairing.createRouting ?? {}, ...options.createRouting };
+    warnAskCapabilities(handshake, options.deps, [
+      "session-create",
+      "create-receipts",
+      ...routing.provider !== void 0 || routing.chain !== void 0 ? ["model-routing-at-create"] : [],
+      ...routing.maxTotalTokens === void 0 ? [] : ["token-ceiling"]
+    ]);
+    const value = await client.create({
+      alias: pairing.alias,
+      participant,
+      requestId: createRequestId,
+      ...typeof defaults.cwd === "string" ? { cwd: defaults.cwd } : {},
+      ...typeof defaults.agentPreset === "string" ? { agentPreset: defaults.agentPreset } : {},
+      ...routing
+    });
+    created = value.created;
+    requestedTarget = { kind: "session", sessionId: value.target.sessionId };
+    return client.state(requestedTarget);
+  };
   try {
     baseline = await client.state(requestedTarget);
   } catch (error) {
@@ -1758,32 +2023,43 @@ async function runAsk(ctx, options) {
       return failureFrom(error, pairing.endpoint);
     }
     try {
-      const defaults = pairing.create ?? {};
-      const routeOverride = options.createRouting.provider !== void 0 || options.createRouting.chain !== void 0;
-      await client.create({
-        alias: pairing.alias,
-        participant,
-        ...typeof defaults.cwd === "string" ? { cwd: defaults.cwd } : {},
-        ...typeof defaults.agentPreset === "string" ? { agentPreset: defaults.agentPreset } : {},
-        // The host pins this route on the created Session only; the parser
-        // already guarantees provider+model travel together.
-        ...routeOverride ? {} : pairing.createRouting ?? {},
-        ...options.createRouting
-      });
-      created = true;
-      baseline = await client.state(requestedTarget);
+      baseline = await createOrReplay();
     } catch (createError) {
-      return failureFrom(createError, pairing.endpoint);
+      return lostInputReply(client, "create", pairing.alias, requestId, createRequestId, createError) ?? { ...failureFrom(createError, pairing.endpoint), requestId, createRequestId };
     }
   }
-  if (!created && Object.keys(options.createRouting).length > 0) {
+  if (!resumed && !createAttempted && requestedTarget.kind === "alias" && handshake.capabilities.includes("input-disposition") && (options.requestId !== void 0 || Object.keys(options.createRouting).length > 0)) {
+    try {
+      const prior = await client.receipt({ alias: pairing.alias, requestId: createRequestId, kind: "create" }, AbortSignal.timeout(HOST_PROBE_TIMEOUT_MS));
+      if (prior.found) baseline = await createOrReplay();
+    } catch (error) {
+      return (createAttempted ? lostInputReply(client, "create", pairing.alias, requestId, createRequestId, error) : void 0) ?? { ...failureFrom(error, pairing.endpoint), requestId, createRequestId };
+    }
+  }
+  if (!createAttempted && Object.keys(options.createRouting).length > 0) {
     return badRequest(resumed ? "peer_ask resume cannot change the model; call peer_switch_model first if the turn needs another route" : "peer_ask model options apply only when this call creates the session; this session already exists \u2014 use peer_switch_model to change its model");
   }
-  const baselineTurn = baseline.state.lastTurnEnd?.turn ?? 0;
-  const requestId = options.resume ?? `peer-bridge-${randomUUID()}`;
+  let prompt;
   if (!resumed) {
+    warnAskCapabilities(handshake, options.deps, ["prompt-receipts", "input-disposition"]);
     try {
-      await client.prompt({
+      if (requestedTarget.kind === "alias") {
+        let sessionId = baseline.target.sessionId;
+        if (options.requestId !== void 0 && handshake.capabilities.includes("input-disposition")) {
+          const prior = await client.receipt({ alias: pairing.alias, requestId, kind: "prompt" }, AbortSignal.timeout(HOST_PROBE_TIMEOUT_MS));
+          if (prior.found && prior.sessionId !== void 0 && prior.sessionId !== sessionId) {
+            requestedTarget = { kind: "session", sessionId: prior.sessionId };
+            baseline = await client.state(requestedTarget);
+            sessionId = baseline.target.sessionId;
+          }
+        }
+        requestedTarget = { kind: "session", sessionId };
+      }
+    } catch (error) {
+      return { ...failureFrom(error, pairing.endpoint), requestId };
+    }
+    try {
+      prompt = await client.prompt({
         target: requestedTarget,
         participant,
         requestId,
@@ -1791,8 +2067,19 @@ async function runAsk(ctx, options) {
         hopCount: 0
       });
     } catch (error) {
-      return failureFrom(error, pairing.endpoint);
+      return lostInputReply(client, "prompt", pairing.alias, requestId, createRequestId, error) ?? { ...failureFrom(error, pairing.endpoint), requestId };
     }
+  }
+  const input = {
+    ...createAttempted ? { createRequestId } : {},
+    ...prompt?.disposition === void 0 ? {} : { disposition: prompt.disposition },
+    ...prompt?.terminalState === void 0 ? {} : { terminalState: prompt.terminalState },
+    ...prompt?.replayed === void 0 ? {} : { replayed: prompt.replayed },
+    instanceId: prompt?.instanceId ?? handshake.instanceId
+  };
+  const baselineTurn = options.requestId !== void 0 || prompt?.replayed === true ? 0 : baseline.state.lastTurnEnd?.turn ?? 0;
+  if (prompt?.disposition === "cancelled_before_dispatch") {
+    return { ...input, ok: false, alias: pairing.alias, sessionId: baseline.target.sessionId, requestId, created, admitted: true };
   }
   const controller = new AbortController();
   let timedOut = false;
@@ -1839,6 +2126,7 @@ async function runAsk(ctx, options) {
   let admissionSeen = false;
   let abandoned = false;
   let quietExpired = false;
+  let repairing = false;
   let quietTimer;
   const clearQuiet = () => {
     if (quietTimer !== void 0) {
@@ -1853,7 +2141,7 @@ async function runAsk(ctx, options) {
       controller.abort();
     }, options.settleMs);
   };
-  const settledNow = () => isPeerSessionSettled({
+  const settledNow = () => !repairing && isPeerSessionSettled({
     terminal,
     latch,
     activeDescendants,
@@ -1944,7 +2232,13 @@ async function runAsk(ctx, options) {
   try {
     for await (const frame of client.follow({ target: requestedTarget }, controller.signal)) {
       lastFrameAt = Date.now();
+      if (frame.type === "gap") {
+        repairing = true;
+        clearQuiet();
+        continue;
+      }
       if (frame.type === "snapshot") {
+        repairing = false;
         cursor = frame.cursor;
         latch = frame.state.latch;
         activeDescendants = frame.state.activeDescendants;
@@ -1968,6 +2262,7 @@ async function runAsk(ctx, options) {
         detached = true;
         break;
       }
+      if (repairing) continue;
       if (latch === "waiting_approval" && pendingNow.length > 0) {
         approvalPause = true;
         break;
@@ -1979,7 +2274,7 @@ async function runAsk(ctx, options) {
       }
     }
   } catch (error) {
-    if (!timedOut && !controller.signal.aborted) return failureFrom(error, pairing.endpoint);
+    if (!timedOut && !controller.signal.aborted) return { ...failureFrom(error, pairing.endpoint), ...input, requestId, admitted, alias: pairing.alias, sessionId: baseline.target.sessionId };
   } finally {
     clearTimeout(timer);
     clearQuiet();
@@ -2000,6 +2295,7 @@ async function runAsk(ctx, options) {
   }
   if (hostSilent) {
     return {
+      ...input,
       ok: false,
       pending: true,
       status: "host_unreachable",
@@ -2024,6 +2320,7 @@ async function runAsk(ctx, options) {
   }
   if (detached) {
     return {
+      ...input,
       ok: false,
       pending: true,
       alias: pairing.alias,
@@ -2041,6 +2338,7 @@ async function runAsk(ctx, options) {
   if (approvalPause) {
     const ids = pendingNow.map((ask) => ask.askId);
     return {
+      ...input,
       ok: false,
       pending: true,
       status: "waiting_approval",
@@ -2065,6 +2363,7 @@ async function runAsk(ctx, options) {
   const answer = answerParts.join("\n").trim();
   if (terminal === void 0) {
     return {
+      ...input,
       ok: false,
       pending: true,
       alias: pairing.alias,
@@ -2080,8 +2379,9 @@ async function runAsk(ctx, options) {
       note: `no terminal within ${String(options.waitMs)}ms \u2014 the remote turn is still live (follow it again with peer_ask resume: ${JSON.stringify(requestId)}, or ds peer follow)`
     };
   }
-  if (abandoned) {
+  if (abandoned && !repairing) {
     return {
+      ...input,
       ok: terminal.reason === "completed",
       settled: true,
       superseded: true,
@@ -2109,6 +2409,7 @@ async function runAsk(ctx, options) {
   }
   if (!settledNow()) {
     return {
+      ...input,
       ok: false,
       pending: true,
       settled: false,
@@ -2132,11 +2433,12 @@ async function runAsk(ctx, options) {
       asks: askLines(asks),
       latch,
       cursor,
-      note: `remote turn ${String(terminal.turn)} ended: ${terminal.reason} but the session was not settled when following stopped (${unsettledSummary(latch, activeDescendants, pendingAskCount)}) \u2014 follow again to collect the remainder`
+      note: repairing ? "Peer follow lost continuity; history repair did not finish. Follow again to collect the remainder." : `remote turn ${String(terminal.turn)} ended: ${terminal.reason} but the session was not settled when following stopped (${unsettledSummary(latch, activeDescendants, pendingAskCount)}) \u2014 follow again to collect the remainder`
     };
   }
   if (terminal.reason !== "completed") {
     return {
+      ...input,
       ok: false,
       settled: true,
       alias: pairing.alias,
@@ -2162,6 +2464,7 @@ async function runAsk(ctx, options) {
     };
   }
   return {
+    ...input,
     ok: true,
     settled: true,
     alias: pairing.alias,
@@ -2241,18 +2544,11 @@ async function surfacePending(ctx, client, noticesPath, pairing, participant, ta
       continue;
     }
     try {
-      await client.answer({
-        target,
-        participant,
-        askId: ask.askId,
-        answer: { kind: "approval", outcome: mapped.outcome }
-      });
-      record.relay = "settled";
-      record.note = mapped.note;
+      await relayAnswer(client, noticesPath, pairing, target, participant, ask.askId, { kind: "approval", outcome: mapped.outcome }, record, mapped.note);
     } catch (error) {
       const code = error instanceof PeerBridgeError ? error.code : "unknown";
       record.relay = code === "peer/conflict" ? "conflict" : code === "peer/not-found" ? "not-found" : "failed";
-      record.note = code === "peer/conflict" ? "another participant answered first (peer/conflict) \u2014 not retried" : `relay failed: ${errorText(error)}`;
+      record.note = answerRefusal(error) ?? (code === "peer/conflict" ? "another participant answered first (peer/conflict) \u2014 not retried" : `relay failed [${code}]${record.answerRequestId === void 0 ? "" : "; reuse the answer request ID with the same decision"}`);
     }
   }
 }
@@ -2297,13 +2593,57 @@ async function surfaceQuestion(ctx, client, noticesPath, pairing, participant, t
     return;
   }
   try {
-    await client.answer({ target, participant, askId: ask.askId, answer: { kind: "question", answer } });
-    record.relay = "settled";
-    record.note = "local question answered \u2192 relayed";
+    await relayAnswer(client, noticesPath, pairing, target, participant, ask.askId, { kind: "question", answer }, record, "local question answered \u2192 relayed");
   } catch (error) {
     const code = error instanceof PeerBridgeError ? error.code : "unknown";
     record.relay = code === "peer/conflict" ? "conflict" : code === "peer/not-found" ? "not-found" : "failed";
-    record.note = code === "peer/conflict" ? "another participant answered first (peer/conflict) \u2014 not retried" : `relay failed: ${errorText(error)}`;
+    record.note = answerRefusal(error) ?? (code === "peer/conflict" ? "another participant answered first (peer/conflict) \u2014 not retried" : `relay failed [${code}]${record.answerRequestId === void 0 ? "" : "; reuse the answer request ID with the same decision"}`);
+  }
+}
+async function relayAnswer(client, noticesPath, pairing, target, participant, askId, answer, record, note) {
+  const requestId = recordAnswerId(dirname3(noticesPath), pairing, participant, askId);
+  record.answerRequestId = requestId;
+  const result = await client.answer({ target, participant, askId, requestId, answer });
+  if (result.accepted !== true || result.settled !== true) {
+    record.relay = "failed";
+    record.note = "The host did not confirm answer settlement.";
+    return;
+  }
+  record.relay = "settled";
+  record.note = result.replayed === true ? "the host replayed the recorded answer; no new decision was delivered" : note;
+}
+function recordAnswerId(directory, pairing, participant, askId) {
+  const fingerprint = createHash("sha256").update(JSON.stringify([pairing.endpoint, pairing.alias, participant.device, participant.name, askId])).digest("hex");
+  const requestId = `peer-bridge-answer-${fingerprint}`;
+  const store = join3(directory, "answer-requests");
+  mkdirSync2(store, { recursive: true, mode: 448 });
+  try {
+    writeFileSync(join3(store, fingerprint), `${requestId}
+`, { flag: "wx", mode: 384 });
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
+  }
+  return requestId;
+}
+function answerRefusal(error) {
+  if (!(error instanceof PeerBridgeError)) return void 0;
+  switch (error.details.reason) {
+    case "request-id-reuse":
+      return "This answer request ID belongs to a different decision. Do not retry with changed answers.";
+    case "ask-already-settled":
+      return "The ask was already settled; this answer did not settle it.";
+    case "stale-generation":
+      return "The worker restarted; this ask is no longer answerable. Do not retry.";
+    case "ask-expired":
+      return "The ask expired (including after a worker restart) and is no longer answerable. Do not retry.";
+    case "ask-not-found":
+      return "The host no longer has this ask for the selected session. Read peer_asks before taking another action.";
+    case "ask-store-unavailable":
+      return "The host ask journal is unavailable; no answer was confirmed.";
+    case "ask-write-failed":
+      return "The host could not persist the answer; reuse the same request ID and decision if retrying.";
+    default:
+      return void 0;
   }
 }
 function recordAskNotice(path, alias, sessionId, ask, note) {
@@ -2331,7 +2671,7 @@ function participantOf(config, document) {
   return { kind: "peer", name: config.participantName ?? device, device };
 }
 function makeClient(pairing, config, device, deps = {}) {
-  const headers = pairing.token === void 0 ? {} : { authorization: `Bearer ${pairing.token}` };
+  const headers = pairing.outboundToken === void 0 ? {} : { authorization: `Bearer ${pairing.outboundToken}` };
   return new PeerClient({
     endpoint: pairing.endpoint,
     device: config.device ?? device ?? pairing.peer,
@@ -2339,7 +2679,8 @@ function makeClient(pairing, config, device, deps = {}) {
     ...config.maxReconnects === void 0 ? {} : { maxReconnects: config.maxReconnects },
     ...deps.fetch === void 0 ? {} : { fetch: deps.fetch },
     ...deps.webSocket === void 0 ? {} : { webSocket: deps.webSocket },
-    ...deps.onWarning === void 0 ? {} : { onWarning: deps.onWarning }
+    ...deps.onWarning === void 0 ? {} : { onWarning: deps.onWarning },
+    ...deps.onCompatibilityWarning === void 0 ? {} : { onCompatibilityWarning: deps.onCompatibilityWarning }
   });
 }
 function narrow(args) {
@@ -2463,13 +2804,15 @@ function requireAlias(value) {
 }
 function failureFrom(error, endpoint) {
   if (error instanceof PeerBridgeError) {
+    const reason = error.details.reason;
+    const safeMessage = error.code === "peer/conflict" && reason === "request-id-reuse" ? "This request ID already belongs to a different payload. Reuse the original payload, or use a new ID for new work." : error.code === "peer/unavailable" && typeof reason === "string" && reason.startsWith("receipt-") ? reason === "receipt-write-failed" ? "The host could not persist the input receipt." : "The host receipt store could not confirm this request." : error.message;
     return {
       ok: false,
       error: {
         code: error.code,
-        message: error.code === "peer/target-unreachable" ? `REMOTE TARGET UNREACHABLE: ${error.endpoint}` : error.message,
+        message: error.code === "peer/target-unreachable" ? `REMOTE TARGET UNREACHABLE: ${error.endpoint}` : safeMessage,
         endpoint: error.endpoint,
-        ...error.code === "peer/target-unreachable" ? { hint: "the peer device is offline or the endpoint is wrong; the caller owns backoff and no turn was queued remotely" } : {}
+        ...error.code === "peer/target-unreachable" ? { hint: "the peer device did not answer; the caller owns backoff" } : {}
       }
     };
   }
@@ -2541,7 +2884,10 @@ function askItemSchema() {
           required: ["id", "question", "options"]
         }
       },
-      since: { type: "number" }
+      since: { type: "number" },
+      state: { type: "string" },
+      settlementReason: { type: "string" },
+      answeredBy: { type: "object", additionalProperties: false, properties: { requestId: { type: "string" }, payloadHash: { type: "string" } } }
     },
     required: ["askId", "kind", "since"]
   };
@@ -2567,6 +2913,7 @@ function askLines(asks) {
     if (record.decision !== void 0) parts.push(`decision=${record.decision}`);
     if (record.selected !== void 0 && record.selected.length > 0) parts.push(`selected=${record.selected.join(",")}`);
     if (record.relay !== void 0) parts.push(`relay=${record.relay}`);
+    if (record.answerRequestId !== void 0) parts.push(`answer requestId=${record.answerRequestId}`);
     if (record.note !== void 0 && record.note !== "") parts.push(record.note);
     return parts.join(" \u2014 ");
   });
@@ -2580,11 +2927,29 @@ function renderStatus(value) {
   const host = narrow(record.host);
   const pendingAsks = Array.isArray(record.pendingAsks) ? record.pendingAsks : [];
   return [
-    `peer ${String(record.alias)} \u2192 ${String(host.device ?? "")} @ ${String(record.endpoint)}`,
+    `peer ${String(record.alias)} \u2192 ${String(host.device ?? "")} @ ${String(record.endpoint)}${host.instanceId === void 0 ? "" : ` (instance ${String(host.instanceId)})`}`,
     `session ${String(record.sessionId)} (${String(record.exposure)}) bound=${String(record.bound)}`,
     `latch ${String(record.latch)} (${String(record.latchSource)}), descendants ${String(record.activeDescendants)}, model ${String(record.model)}`,
+    ...record.stopIntent === void 0 ? [] : [stopIntentText(record.stopIntent)],
     pendingAsks.length === 0 ? "no pending asks" : `pending: ${pendingAsks.join("; ")}`
   ].join("\n");
+}
+function stopIntentSchema() {
+  const keys = {
+    requestedAt: "number",
+    keepInbox: "boolean",
+    turnState: "string",
+    activeDescendants: "number",
+    descendantsExact: "boolean",
+    inFlightTools: "number",
+    quiescence: "string"
+  };
+  return { type: "object", additionalProperties: false, properties: Object.fromEntries(Object.entries(keys).map(([key, type]) => [key, { type }])) };
+}
+function stopIntentText(value) {
+  const stop = narrow(value);
+  const tools = stop.inFlightTools === void 0 ? "" : `, in-flight tools ${String(stop.inFlightTools)}`;
+  return `Stop ${stop.requestedAt === void 0 ? "not recorded" : "requested"}; inbox kept; turn ${String(stop.turnState)}, descendants ${String(stop.activeDescendants)} (exact=${String(stop.descendantsExact)})${tools}; quiescence ${stop.quiescence === "observed" ? "observed, not proof of teardown" : "unknown"}.`;
 }
 function renderSessions(value) {
   const record = narrow(value);
@@ -2676,6 +3041,13 @@ function renderSwitch(value) {
 }
 function renderAsk(value) {
   const record = narrow(value);
+  if (record.disposition !== void 0 && (record.error !== void 0 || record.disposition === "cancelled_before_dispatch")) {
+    const outcome = record.terminalState === void 0 ? "" : ` (${String(record.terminalState)})`;
+    const create = record.createRequestId === void 0 ? "" : `; create requestId ${String(record.createRequestId)}`;
+    const error = narrow(record.error);
+    const detail = typeof error.message === "string" ? ` ${error.message}` : "";
+    return `Remote input disposition: ${String(record.disposition)}${outcome} \u2014 requestId ${String(record.requestId)}${create}.${detail} No automatic resend.`;
+  }
   if (record.error !== void 0 && record.ok !== true && record.pending !== true) {
     const error = narrow(record.error);
     if (error.code === "peer/target-unreachable") {
@@ -2724,10 +3096,11 @@ function renderAsks(value) {
   const record = narrow(value);
   if (record.ok !== true) return `peer_asks failed: ${String(narrow(record.error).message ?? "")}`;
   const asks = Array.isArray(record.asks) ? record.asks : [];
-  if (asks.length === 0) return `no pending asks on ${String(record.alias)} (latch ${String(record.latch)})`;
+  if (asks.length === 0) return record.instanceId === void 0 ? `no pending asks on ${String(record.alias)} (latch ${String(record.latch)})` : `no retained asks on ${String(record.alias)}`;
   return [
-    `${String(asks.length)} pending ask(s) on ${String(record.alias)}:`,
+    `${String(asks.length)} ${record.instanceId === void 0 ? "pending" : "retained"} ask(s) on ${String(record.alias)}:`,
     ...asks.map((ask) => {
+      if (ask.state !== void 0 && ask.state !== "pending") return `\u2022 ${String(ask.askId)} ${String(ask.kind)}: ${String(ask.state)}${ask.settlementReason === "host-restarted" ? " (worker restarted)" : ""} \u2014 not answerable`;
       if (String(ask.kind) === "question") {
         const questions = Array.isArray(ask.questions) ? ask.questions : [];
         const rendered = questions.map((question) => renderQuestion({
@@ -2744,10 +3117,11 @@ function renderAsks(value) {
 }
 function renderAnswer(value) {
   const record = narrow(value);
-  if (record.ok === true) return `answered ${String(record.askId)} on ${String(record.alias)} \u2014 ${String(record.note ?? "settled")}`;
+  const retry = typeof record.requestId === "string" ? ` (requestId ${record.requestId})` : "";
+  if (record.ok === true) return `${record.settled === true ? "Answer settled" : "Answer not confirmed"} for ${String(record.askId)} on ${String(record.alias)} \u2014 ${String(record.note ?? "")}${retry}`;
   const error = narrow(record.error);
   const detail = typeof record.note === "string" && record.note !== "" ? record.note : String(error.message ?? "");
-  return `peer_answer failed [${String(error.code ?? "unknown")}] ${String(record.askId ?? "")}: ${detail}`;
+  return `peer_answer failed [${String(error.code ?? "unknown")}] ${String(record.askId ?? "")}: ${detail}${retry}`;
 }
 export {
   Config,

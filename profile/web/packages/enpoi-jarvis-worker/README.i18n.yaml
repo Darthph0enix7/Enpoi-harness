@@ -1,0 +1,13 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write profile/web/packages/enpoi-jarvis-worker/README.md
+/jarvis-worker-bundle:
+  en: 9d529e338609ea71
+  zh: 42c75c75185d9bf9
+/jarvis-worker-bundle/model-experience:
+  en: af5692599103afec
+  zh: 57ea849b2c6f6c3f
+/jarvis-worker-bundle/known-limitations-and-deferred-work:
+  en: d215a6715cb39ad1
+  zh: 842c853ba6b5238c

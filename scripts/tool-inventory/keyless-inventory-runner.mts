@@ -16,6 +16,7 @@ import {
   copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync,
   statSync, symlinkSync, writeFileSync,
 } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import http from 'node:http'
 import https from 'node:https'
@@ -83,13 +84,14 @@ function assertOwnedEnvironment(): { root: string; home: string } {
     USERPROFILE: process.env.USERPROFILE,
     DSH_HOME: process.env.DSH_HOME,
     DSH_MEMORY_DB: process.env.DSH_MEMORY_DB,
-    DSH_WIRE_LOG: process.env.DSH_WIRE_LOG,
   })) {
     if (typeof value !== 'string' || !pathWithin(resolve(value), realRoot)) fail(`${name} is not under the owned temp root`)
   }
   if (process.env.USERPROFILE !== home || process.env.DSH_HOME !== home) fail('USERPROFILE/DSH_HOME must equal HOME')
   if (process.env.DSH_MEMORY_DB !== join(home, 'memory.db')) fail('DSH_MEMORY_DB must be the owned temp memory.db')
-  if (process.env.DSH_WIRE_LOG !== join(realRoot, 'wire', 'wire-last.json')) fail('DSH_WIRE_LOG must be the owned wire file')
+  if (process.env.DSH_WIRE_LOG !== undefined && process.env.DSH_WIRE_LOG !== join(realRoot, 'wire', 'wire-last.json')) {
+    fail('DSH_WIRE_LOG must be the owned wire file')
+  }
   // Whitelisted child env: these names must never survive from the parent.
   for (const name of ['GOOGLE_APPLICATION_CREDENTIALS', 'KUBECONFIG', 'DOCKER_CONFIG', 'SSH_AUTH_SOCK',
     'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN', 'HF_TOKEN']) {
@@ -491,6 +493,25 @@ async function main(): Promise<void> {
   const readiness = await captureReadiness()
   if (!readiness.ready) fail(`build readiness recheck failed: ${readiness.blockers.join('; ')}`)
 
+  if (process.env.DSH_KEYLESS_INVENTORY_WORKER === '1') {
+    const { captureWorker } = await import('./worker-capture.mts')
+    const capture = await captureWorker(true)
+    const failures = capture.rows.filter(row => [0, 1, 2, 4, 14].includes(row.step) && row.status !== 'pass')
+    if (failures.length > 0) fail(`worker capture did not pass: ${JSON.stringify(failures)}`)
+    const paths = [
+      'profile/web/packages/enpoi-jarvis-worker/cordis.patch.yml',
+      'profile/web/packages/enpoi-jarvis-worker/knowledge-tools.json',
+      'profile/web/packages/enpoi-jarvis-worker/restrict.mjs',
+      'profile/web/packages/enpoi-jarvis-worker/lib/index.js',
+      'profile/web/packages/enpoi-worker-credentials/lib/index.js',
+      'profile/web/packages/enpoi-job-guard/lib/index.js',
+      'packages/api/peer/lib/index.js', 'packages/mcp/mcp-client/lib/index.js',
+    ]
+    const receipt = Object.fromEntries(paths.map(path => [path, createHash('sha256').update(readFileSync(join(REPO_ROOT, path))).digest('hex')]))
+    writeFileSync(join(root, 'worker-result.json'), JSON.stringify({ ...capture, receipt }, null, 2))
+    return
+  }
+  if (process.env.DSH_WIRE_LOG === undefined) fail('human inventory requires the owned wire file')
   const guard = installNetworkGuard(root)
   let scaffold: Awaited<ReturnType<typeof import('../../apps/web/tests/scaffold.ts').launchWebScaffold>> | undefined
   // Partial composition is never accepted: any auto-disabled profile row

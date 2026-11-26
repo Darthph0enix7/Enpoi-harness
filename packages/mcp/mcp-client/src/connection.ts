@@ -17,10 +17,13 @@
 
 import { Client, type Transport } from '@modelcontextprotocol/client'
 import type { Context } from '@deepseek-ai/cordis'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { assertNever, type JsonValue } from '@deepseek-ai/dsh-util-values'
 import type { ServerContext } from './server-context.ts'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
-import { createTransport } from './transport.ts'
+import { runWithMcpSession, type McpHeaderProvider } from './header-context.ts'
+import { formatBoundedError, sanitizeError, SecretRedactor } from './redact.ts'
+import { createTransport, resolveHeaderPolicy, staticHttpRedactor, type HeaderPolicy } from './transport.ts'
 import { syncTools } from './tools.ts'
 import type { ToolBridgeOptions, ToolDisposers } from './tools.ts'
 import type { Config } from './index.ts'
@@ -115,22 +118,43 @@ export interface ConnectionHandle extends ServerContext {
   dispose(): Promise<void>
 }
 
+function connectionRedactor(config: Config): { redactor: SecretRedactor; headerPolicy?: HeaderPolicy } {
+  if (config.transport === 'streamable-http') {
+    const headerPolicy = resolveHeaderPolicy(config)
+    return { redactor: staticHttpRedactor(config, headerPolicy), headerPolicy }
+  }
+  const redactor = new SecretRedactor()
+  for (const [k, v] of Object.entries(config.env)) redactor.addEnv(k, v)
+  return { redactor }
+}
+
+function scopeSessionIdOf(ctx: Context): string | undefined {
+  const scope = scopeOf(ctx)
+  if (scope !== undefined && 'id' in scope) {
+    const id = scope.id
+    if (typeof id === 'string' && id.length > 0) return id
+  }
+  return undefined
+}
+
 /**
- * Start the supervised connection for one MCP server and keep it alive per
- * the reconnect policy.
- *
- * @param ctx - Cordis context providing the `tools` registry and logger.
- * @param config - Resolved plugin config selecting the transport and server identity.
+ * Start eager discovery and recover the connection per the reconnect policy.
+ * @param ctx - Cordis context providing the tools registry and logger.
+ * @param config - Resolved transport and server identity.
  * @param policy - Resolved reconnect policy from {@link resolveReconnectPolicy}.
- * @returns Handle with a `ready` promise for startup-await and a `dispose` for teardown.
+ * @returns Startup readiness and teardown controls for the supervised connection.
  */
 export function startConnection(ctx: Context, config: Config, policy: ResolvedReconnectPolicy): ConnectionHandle {
   const label = `mcp-client(${config.serverName})`
   const incompleteDisposalMessage = `${label}: transport closure could not be confirmed during disposal — server shutdown may be incomplete`
+  const { redactor, headerPolicy } = connectionRedactor(config)
+  const scopeSessionId = scopeSessionIdOf(ctx)
   const opts: ToolBridgeOptions = {
     registrationFailure: 'contain',
     serverName: config.serverName,
     toolCallTimeoutMs: config.toolCallTimeoutMs,
+    ...(config.allowedTools === undefined ? {} : { allowedTools: config.allowedTools }),
+    redactor,
   }
   // The initial sync uses 'throw' when failOnStartupError is configured, so
   // a registration conflict propagates to the startup-await path. Re-syncs
@@ -169,7 +193,7 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
   function enqueueSync(generation: Client, syncOpts: ToolBridgeOptions = opts): Promise<void> {
     const run = syncChain.then(async () => {
       if (!isCurrent(generation)) return
-      disposers = await syncTools(generation, ctx, syncOpts, disposers)
+      disposers = await runWithMcpSession(scopeSessionId, () => syncTools(generation, ctx, syncOpts, disposers))
     })
     // The chain tail must survive a failed sync; the enqueuing caller owns reporting.
     syncChain = run.catch(() => {})
@@ -299,13 +323,22 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
       try {
         await enqueueSync(generation)
       } catch (error) {
-        if (!disposed) ctx.logger.error(`${label}: tool re-sync failed: ${String(error)}`)
+        if (!disposed) ctx.logger.error(`${label}: tool re-sync failed: ${formatBoundedError(error, redactor, 'tool re-sync failed')}`)
       }
     }
     let instructions: string
     try {
-      transport = createTransport(config)
-      await generation.connect(transport)
+      const getHeaderProvider = (): McpHeaderProvider | undefined => ctx.get('mcpHeaderProvider')
+      transport = getHeaderProvider() === undefined && config.transport === 'stdio'
+        ? createTransport(config)
+        : createTransport(config, {
+          getHeaderProvider,
+          ...(headerPolicy === undefined ? {} : { headerPolicy }),
+          ...(scopeSessionId === undefined ? {} : { scopeSessionId }),
+          redactor,
+        })
+      const activeTransport = transport
+      await runWithMcpSession(scopeSessionId, () => generation.connect(activeTransport))
       if (hasClosed()) {
         attemptSettled = true
         generationDown(generation)
@@ -315,17 +348,22 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         if (!await closeGeneration()) ctx.logger.error(incompleteDisposalMessage)
         return
       }
-      const serverText = generation.getInstructions()?.trimEnd() ?? ''
-      instructions = serverText ? `### MCP server: ${config.serverName}\n\n${serverText}` : ''
-      if (Buffer.byteLength(instructions) > maxInstructionBytes) {
-        throw new Error(`${label}: server instructions exceed maxInstructionBytes (${maxInstructionBytes})`)
+      if (config.includeInstructions === false) {
+        instructions = ''
+      } else {
+        const serverText = redactor.redact(generation.getInstructions()?.trimEnd() ?? '')
+        instructions = serverText ? `### MCP server: ${config.serverName}\n\n${serverText}` : ''
+        if (Buffer.byteLength(instructions) > maxInstructionBytes) {
+          throw new Error(`${label}: server instructions exceed maxInstructionBytes (${maxInstructionBytes})`)
+        }
       }
       await enqueueSync(generation, startup ? startupOpts : opts)
     } catch (error) {
-      if (firstAttemptError === undefined) firstAttemptError = error
+      const safeError = sanitizeError(error, redactor, `${label}: connection attempt failed`)
+      if (firstAttemptError === undefined) firstAttemptError = safeError
       // Disposal clears current ownership before it closes the generation, so
       // only a live supervisor reports an attempt failure.
-      if (isCurrent(generation)) ctx.logger.warn(`${label}: connection attempt failed: ${String(error)}`)
+      if (isCurrent(generation)) ctx.logger.warn(`${label}: connection attempt failed: ${formatBoundedError(safeError, redactor, 'connection attempt failed')}`)
       const quiesced = await closeGeneration()
       attemptSettled = true
       settleFailedGeneration(generation, quiesced)
@@ -368,20 +406,28 @@ export function startConnection(ctx: Context, config: Config, policy: ResolvedRe
         const generation = client
         if (!generation || connectedAt === undefined) throw new Error(`${label}: server is disconnected`)
         const options = { signal: exec.signal, timeout: config.toolCallTimeoutMs }
-        switch (request.method) {
-          case 'resources/list':
-            return await generation.listResources(
-              request.cursor === undefined ? undefined : { cursor: request.cursor }, options,
-            ) as JsonValue
-          case 'resources/templates/list':
-            return await generation.listResourceTemplates(
-              request.cursor === undefined ? undefined : { cursor: request.cursor }, options,
-            ) as JsonValue
-          case 'resources/read':
-            return await generation.readResource({ uri: request.uri }, options) as JsonValue
-          /* v8 ignore next 2 -- resource requests are the closed, typed tool operation union */
-          default:
-            return assertNever(request)
+        const callRedactor = new SecretRedactor(redactor)
+        const requestResource = async (): Promise<JsonValue> => {
+          switch (request.method) {
+            case 'resources/list':
+              return await generation.listResources(
+                request.cursor === undefined ? undefined : { cursor: request.cursor }, options,
+              ) as JsonValue
+            case 'resources/templates/list':
+              return await generation.listResourceTemplates(
+                request.cursor === undefined ? undefined : { cursor: request.cursor }, options,
+              ) as JsonValue
+            case 'resources/read':
+              return await generation.readResource({ uri: request.uri }, options) as JsonValue
+            /* v8 ignore next 2 -- resource requests are the closed, typed tool operation union */
+            default:
+              return assertNever(request)
+          }
+        }
+        try {
+          return callRedactor.redactJson(await runWithMcpSession(exec.agent?.session.id, requestResource, callRedactor))
+        } catch (error) {
+          throw sanitizeError(error, callRedactor, 'MCP resource request failed')
         }
       },
     },

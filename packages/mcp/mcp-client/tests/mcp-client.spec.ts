@@ -345,7 +345,7 @@ describe('syncTools', () => {
         signal: testToolSignal,
         callId: ToolCallId('missing'), name: 'mcp__srv__supported', arguments: {},
       })
-      expect(missing.error?.message).toContain('structured content')
+      expect(missing.error?.message).toBe('MCP tool request failed.')
 
       const fallback = await ctx.tools.execute({
         signal: testToolSignal,
@@ -880,7 +880,7 @@ describe('tool execution', () => {
     const result = await ctx.tools.execute({ signal: testToolSignal, callId: ToolCallId('c1'), name: 'mcp__srv__fail', arguments: {} })
 
     expect(result.isError).toBe(true)
-    expect(result.content[0]).toEqual({ type: 'text', text: 'Error: something went wrong' })
+    expect(result.content[0]).toEqual({ type: 'text', text: 'Error: MCP server reported a tool error.' })
     expect('value' in result).toBe(false)
   })
 
@@ -1058,7 +1058,7 @@ describe('tool execution', () => {
     expect(result.isError).toBe(true)
     expect(result.content[0]).toEqual({
       type: 'text',
-      text: 'Error: [image unavailable: image/png; this result was not admitted to durable model context; raw image data remains available to programmatic callers]',
+      text: 'Error: MCP server reported a tool error.',
     })
   })
 

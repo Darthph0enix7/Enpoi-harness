@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "hash": "9bd27c3b6ebb7422f24f3e58481a6b935aa4974671293514488dd210ad6810d8",
+  "tools": [
+    {
+      "name": "knowledge_search",
+      "description": "Search the operator's visible source-backed knowledge. Read-only; returns bounded source hits.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 10 }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "knowledge_facts",
+      "description": "List the operator's visible confirmed or tentative facts matching a query. Read-only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 10 }
+        },
+        "required": ["query"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

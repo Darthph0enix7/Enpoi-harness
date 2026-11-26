@@ -11,6 +11,7 @@
  * @module @deepseek-ai/dsh-api-peer/pairings
  */
 
+import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import { readFileSync, statSync } from 'node:fs'
 import { hostname } from 'node:os'
 import { writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
@@ -26,11 +27,13 @@ import type {
   PeerCreateDefaults,
   PeerDeviceName,
   PeerExposure,
+  PeerJobLimits,
   PeerPairing,
   PeerPairingsFile,
   PeerRoutingPolicy,
   PeerTarget,
   PeerTargetResolved,
+  PeerWorkerPolicy,
   RetiredPeerBinding,
 } from './types.ts'
 import { isRoutingPattern } from './routing-policy.ts'
@@ -51,6 +54,104 @@ const PRIVATE_MODE = 0o600
 const MAX_RELOAD_WARNINGS = 16
 /** Longest rejection line a warning carries; parser detail stops at the first newline. */
 const MAX_REJECTION_LINE = 300
+const SCRYPT_N = 16_384
+const SCRYPT_R = 8
+const SCRYPT_P = 1
+const SCRYPT_KEY_BYTES = 32
+const SCRYPT_SALT_BYTES = 16
+const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/i
+const DUMMY_SCRYPT_SALT = Buffer.from('dsh-peer-dummy-salt-0000', 'utf8')
+const PROCESS_VERIFIED_CACHE_KEY = randomBytes(32)
+const VERIFIED_CACHE_LIMIT = 256
+const verifiedTokenCache = new Map<string, true>()
+
+/**
+ * Hash a plaintext pairing bearer token with scrypt and a random 16-byte salt.
+ * @param token - plaintext bearer secret; never retained or logged.
+ * @returns encoded credential hash in `scrypt$<salt>$<hash>` form.
+ * @throws {@link PeerConfigError} when `token` is empty.
+ */
+export function hashPairingToken(token: string): string {
+  if (typeof token !== 'string' || token.length === 0) {
+    throw new PeerConfigError('pairing token must be a non-empty string')
+  }
+  const salt = randomBytes(SCRYPT_SALT_BYTES)
+  const derived = scryptSync(token, salt, SCRYPT_KEY_BYTES, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P })
+  return `scrypt$${salt.toString('base64url')}$${derived.toString('base64url')}`
+}
+
+/**
+ * Verify a presented bearer token against a stored `scrypt$...` or
+ * `sha256$...` credential hash using constant-time comparison.
+ * @param token - candidate bearer token from the request.
+ * @param tokenHash - stored credential hash from the pairing entry.
+ * @returns true only when `token` matches `tokenHash`.
+ */
+export function verifyPairingToken(token: string, tokenHash: string): boolean {
+  if (typeof token !== 'string' || token.length === 0) return false
+  if (tokenHash.startsWith('sha256$')) {
+    const hex = tokenHash.slice('sha256$'.length)
+    if (!SHA256_HEX_PATTERN.test(hex)) return false
+    const expected = Buffer.from(hex, 'hex')
+    const actual = createHash('sha256').update(token, 'utf8').digest()
+    return actual.byteLength === expected.byteLength && timingSafeEqual(actual, expected)
+  }
+  const parsed = parseScryptHash(tokenHash)
+  if (parsed === undefined) return false
+  const cacheKey = `${tokenHash}\u0000${createHmac('sha256', PROCESS_VERIFIED_CACHE_KEY).update(token, 'utf8').digest('hex')}`
+  if (verifiedTokenCache.has(cacheKey)) return true
+  const actual = scryptSync(token, parsed.salt, SCRYPT_KEY_BYTES, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P })
+  if (actual.byteLength !== parsed.hash.byteLength || !timingSafeEqual(actual, parsed.hash)) return false
+  verifiedTokenCache.set(cacheKey, true)
+  if (verifiedTokenCache.size > VERIFIED_CACHE_LIMIT) {
+    const oldest = verifiedTokenCache.keys().next().value
+    if (oldest !== undefined) verifiedTokenCache.delete(oldest)
+  }
+  return true
+}
+
+/**
+ * Perform dummy scrypt work so missing-alias probes do not leak alias existence
+ * through response timing.
+ * @param token - candidate bearer token from the request.
+ */
+export function dummyVerifyToken(token: string): void {
+  const actual = scryptSync(token, DUMMY_SCRYPT_SALT, SCRYPT_KEY_BYTES, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P })
+  timingSafeEqual(actual, actual)
+}
+
+/**
+ * Extract the bearer secret from an HTTP `Authorization` header value.
+ * @param header - raw `Authorization` header string.
+ * @returns the non-empty bearer token, or `undefined` when absent or malformed.
+ */
+export function parseBearerAuthorization(header: string | undefined): string | undefined {
+  if (typeof header !== 'string') return undefined
+  const match = /^Bearer[ \t]+([^\s]+)[ \t]*$/i.exec(header)
+  return match?.[1]
+}
+
+function parseScryptHash(value: string): { readonly salt: Buffer; readonly hash: Buffer } | undefined {
+  const parts = value.split('$')
+  if (parts.length !== 3 || parts[0] !== 'scrypt') return undefined
+  const saltPart = parts[1]
+  const hashPart = parts[2]
+  if (saltPart === undefined || hashPart === undefined
+    || !BASE64URL_PATTERN.test(saltPart) || !BASE64URL_PATTERN.test(hashPart)) {
+    return undefined
+  }
+  const salt = Buffer.from(saltPart, 'base64url')
+  const hash = Buffer.from(hashPart, 'base64url')
+  if (salt.toString('base64url') !== saltPart || hash.toString('base64url') !== hashPart) return undefined
+  if (salt.byteLength < SCRYPT_SALT_BYTES || hash.byteLength !== SCRYPT_KEY_BYTES) return undefined
+  return { salt, hash }
+}
+
+function isValidTokenHash(value: string): boolean {
+  if (value.startsWith('sha256$')) return SHA256_HEX_PATTERN.test(value.slice('sha256$'.length))
+  return parseScryptHash(value) !== undefined
+}
 
 /** A pairing document that cannot be trusted to describe this host's exposure. */
 export class PeerConfigError extends Error {
@@ -79,6 +180,11 @@ export interface PeerPairingsStoreOptions {
    * the log.
    */
   readonly onConfigError?: (message: string) => void
+  /**
+   * Sink for one-time security warnings at load, such as a pairing declaring
+   * `insecure: true`.
+   */
+  readonly onWarning?: (message: string) => void
 }
 
 /** Loaded pairing document plus its created-session bindings. */
@@ -104,6 +210,9 @@ export class PeerPairingsStore {
   private pairingStamp: { mtimeMs: number; size: number } | undefined
   private writeChain: Promise<void> = Promise.resolve()
   private readonly rejected = new Set<string>()
+  private readonly warnedInsecure = new Set<string>()
+  private readonly warnedUnauthedLegacy = new Set<string>()
+  private warnedWorldReadable = false
 
   /**
    * @param pairingsPath - pairing document path; defaults to `~/.dsh/pairings.yaml`.
@@ -193,7 +302,37 @@ export class PeerPairingsStore {
     }
     this.snapshot = snapshot
     this.pairingStamp = this.stampOf(this.pairingsPath)
+    this.reportSecurityWarnings(snapshot.pairings)
     return snapshot
+  }
+
+  private reportSecurityWarnings(pairings: readonly PeerPairing[]): void {
+    for (const pairing of pairings) {
+      if (pairing.insecure === true && !this.warnedInsecure.has(pairing.alias)) {
+        this.warnedInsecure.add(pairing.alias)
+        this.options.onWarning?.(
+          `peer-api: pairing ${JSON.stringify(pairing.alias)} sets insecure: true; bearer token authentication is disabled`,
+        )
+      } else if (pairing.tokenHash === undefined && pairing.insecure !== true && !this.warnedUnauthedLegacy.has(pairing.alias)) {
+        this.warnedUnauthedLegacy.add(pairing.alias)
+        this.options.onWarning?.(
+          `peer-api: pairing ${JSON.stringify(pairing.alias)} has no inbound credential (add tokenHash or inboundToken, or set insecure: true); inbound calls to this alias are refused`,
+        )
+      }
+    }
+    if (!this.warnedWorldReadable && pairings.some(pairing => pairing.outboundToken !== undefined)) {
+      try {
+        const mode = statSync(this.pairingsPath).mode
+        if ((mode & 0o077) !== 0) {
+          this.warnedWorldReadable = true
+          this.options.onWarning?.(
+            `peer-api: pairings file ${this.pairingsPath} is group/world-readable (mode 0o${(mode & 0o777).toString(8)}); restrict permissions to 0600 to protect outboundToken`,
+          )
+        }
+      } catch {
+        // Ignore stat failures here; load just read the file.
+      }
+    }
   }
 
   /** The active device name (host name when no pairing document is present). */
@@ -256,6 +395,41 @@ export class PeerPairingsStore {
   /** The pairing exposing one session, when the session is paired at all. */
   exposed(sessionId: SessionId): ResolvedPeerPairing | undefined {
     return this.resolve({ kind: 'session', sessionId })
+  }
+
+  /**
+   * Whether `sessionId` is pinned to or persisted (active or retired) under `alias`.
+   * @param alias - pairing alias being addressed.
+   * @param sessionId - candidate session id.
+   * @returns true only when `alias` owns or previously created `sessionId`.
+   */
+  isSessionBoundToAlias(alias: PeerAlias, sessionId: SessionId): boolean {
+    const loaded = this.load()
+    const pairing = loaded.pairings.find(candidate => candidate.alias === alias)
+    if (pairing?.sessionId === sessionId) return true
+    const binding = loaded.bindings[alias]
+    if (binding === undefined) return false
+    if (binding.sessionId === sessionId) return true
+    return binding.retired?.some(entry => entry.sessionId === sessionId) === true
+  }
+
+  /**
+   * Whether `sessionId` is pinned to or bound under an alias other than `alias`.
+   * @param alias - pairing alias attempting to bind `sessionId`.
+   * @param sessionId - candidate session id.
+   * @returns true when another alias already owns or retired `sessionId`.
+   */
+  isSessionBoundToOtherAlias(alias: PeerAlias, sessionId: SessionId): boolean {
+    const loaded = this.load()
+    if (loaded.pairings.some(candidate => candidate.alias !== alias && candidate.sessionId === sessionId)) {
+      return true
+    }
+    for (const [ownerAlias, binding] of Object.entries(loaded.bindings)) {
+      if (ownerAlias === alias) continue
+      if (binding.sessionId === sessionId) return true
+      if (binding.retired?.some(entry => entry.sessionId === sessionId) === true) return true
+    }
+    return false
   }
 
   /**
@@ -436,14 +610,24 @@ const PAIRING_KEYS: ReadonlySet<string> = new Set([
   'sessionId',
   'remoteSessionId',
   'endpoint',
-  'token',
+  'inboundToken',
+  'tokenHash',
+  'outboundToken',
+  'insecure',
   'runawayCeiling',
   'allowModelChange',
   'create',
   'routing',
+  'worker',
 ])
 
-const CREATE_KEYS: ReadonlySet<string> = new Set(['workspaceId', 'cwd', 'agentPreset'])
+const CREATE_KEYS: ReadonlySet<string> = new Set([
+  'workspaceId',
+  'cwd',
+  'agentPreset',
+  'allowAgentPresets',
+  'freshOnly',
+])
 
 /**
  * Reject keys outside the closed set. A pairing is access policy: a mistyped
@@ -456,6 +640,11 @@ const CREATE_KEYS: ReadonlySet<string> = new Set(['workspaceId', 'cwd', 'agentPr
  */
 function rejectUnknownKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>, subject: string): void {
   for (const key of Object.keys(value)) {
+    if (key === 'token' && allowed === PAIRING_KEYS) {
+      throw new PeerConfigError(
+        `${subject}: ambiguous key "token" is not allowed; use "tokenHash" or "inboundToken" for inbound auth, or "outboundToken" for outbound calls`,
+      )
+    }
     if (!allowed.has(key)) throw new PeerConfigError(`${subject}: unknown key ${JSON.stringify(key)}`)
   }
 }
@@ -475,7 +664,20 @@ function parsePairing(value: unknown, subject: string): PeerPairing {
   const sessionId = optionalString(value, 'sessionId', subject)
   const remoteSessionId = optionalString(value, 'remoteSessionId', subject)
   const endpoint = optionalString(value, 'endpoint', subject)
-  const token = optionalString(value, 'token', subject)
+  const inboundToken = optionalString(value, 'inboundToken', subject)
+  const explicitTokenHash = optionalString(value, 'tokenHash', subject)
+  const outboundToken = optionalString(value, 'outboundToken', subject)
+  const insecure = optionalBoolean(value, 'insecure', subject)
+  if (inboundToken !== undefined && explicitTokenHash !== undefined) {
+    throw new PeerConfigError(`${subject}: declare either inboundToken or tokenHash, not both`)
+  }
+  if (explicitTokenHash !== undefined && !isValidTokenHash(explicitTokenHash)) {
+    throw new PeerConfigError(`${subject}: tokenHash must be scrypt$<salt>$<hash> or sha256$<hex>`)
+  }
+  if (insecure === true && (inboundToken !== undefined || explicitTokenHash !== undefined)) {
+    throw new PeerConfigError(`${subject}: insecure: true cannot be combined with inboundToken or tokenHash`)
+  }
+  const tokenHash = explicitTokenHash ?? (inboundToken === undefined ? undefined : hashPairingToken(inboundToken))
   const runawayCeiling = optionalPositiveInteger(value, 'runawayCeiling', subject)
   const allowModelChange = optionalBoolean(value, 'allowModelChange', subject)
   let create: PeerCreateDefaults | undefined
@@ -486,10 +688,22 @@ function parsePairing(value: unknown, subject: string): PeerPairing {
     const workspaceId = optionalString(value.create, 'workspaceId', createSubject)
     const cwd = optionalString(value.create, 'cwd', createSubject)
     const agentPreset = optionalString(value.create, 'agentPreset', createSubject)
+    const allowAgentPresets = optionalStringList(value.create, 'allowAgentPresets', createSubject)
+    const freshOnly = value.create.freshOnly
+    if (freshOnly !== undefined && typeof freshOnly !== 'boolean') {
+      throw new PeerConfigError(`${createSubject}: freshOnly must be a boolean`)
+    }
+    if (agentPreset !== undefined && allowAgentPresets !== undefined && !allowAgentPresets.includes(agentPreset)) {
+      throw new PeerConfigError(
+        `${createSubject}: agentPreset ${JSON.stringify(agentPreset)} must be included in allowAgentPresets`,
+      )
+    }
     create = {
       ...(workspaceId === undefined ? {} : { workspaceId }),
       ...(cwd === undefined ? {} : { cwd }),
       ...(agentPreset === undefined ? {} : { agentPreset }),
+      ...(allowAgentPresets === undefined ? {} : { allowAgentPresets }),
+      ...(freshOnly === undefined ? {} : { freshOnly }),
     }
   }
   if (sessionId === undefined && create === undefined) {
@@ -498,15 +712,24 @@ function parsePairing(value: unknown, subject: string): PeerPairing {
   const routing = value.routing === undefined
     ? undefined
     : parseRoutingPolicy(value.routing, `${subject}.routing`)
+  const worker = value.worker === undefined
+    ? undefined
+    : parseWorkerPolicy(value.worker, `${subject}.worker`)
+  if (worker !== undefined && (create === undefined || sessionId !== undefined || create.freshOnly === false)) {
+    throw new PeerConfigError(`${subject}: worker requires fresh create and cannot pin a sessionId`)
+  }
   return {
     alias: brandString<PeerAlias>(alias),
     peer,
     exposure: exposure as PeerExposure,
     ...(sessionId === undefined ? {} : { sessionId: sessionIdOf(sessionId) }),
     ...(create === undefined ? {} : { create }),
+    ...(worker === undefined ? {} : { worker }),
     ...(remoteSessionId === undefined ? {} : { remoteSessionId: sessionIdOf(remoteSessionId) }),
     ...(endpoint === undefined ? {} : { endpoint }),
-    ...(token === undefined ? {} : { token }),
+    ...(tokenHash === undefined ? {} : { tokenHash }),
+    ...(outboundToken === undefined ? {} : { outboundToken }),
+    ...(insecure === true ? { insecure: true } : {}),
     ...(runawayCeiling === undefined ? {} : { runawayCeiling }),
     ...(allowModelChange === undefined ? {} : { allowModelChange }),
     ...(routing === undefined ? {} : { routing }),
@@ -556,6 +779,58 @@ function parseRoutingPolicy(value: unknown, subject: string): PeerRoutingPolicy 
     ...(allowReasoningEfforts === undefined ? {} : { allowReasoningEfforts }),
     ...(allowSwitch === undefined ? {} : { allowSwitch }),
     ...(maxTotalTokens === undefined ? {} : { maxTotalTokens }),
+  }
+}
+
+const WORKER_KEYS: ReadonlySet<string> = new Set([
+  'allowedCapabilities',
+  'maxLimits',
+  'allowedMcpEndpoints',
+  'allowedToolNames',
+])
+
+const WORKER_LIMIT_KEYS: ReadonlySet<string> = new Set([
+  'maxSteps',
+  'maxToolCalls',
+  'maxWallMs',
+  'maxTotalTokens',
+])
+
+/**
+ * Strictly validate one pairing's `worker` policy. Unknown keys and wrong
+ * types fail host load rather than silently widening job grants.
+ */
+function parseWorkerPolicy(value: unknown, subject: string): PeerWorkerPolicy {
+  if (!isRecord(value)) throw new PeerConfigError(`${subject} must be a mapping`)
+  rejectUnknownKeys(value, WORKER_KEYS, subject)
+  if (Object.values(value).some(field => field === null)) throw new PeerConfigError(`${subject}: null fields are not allowed`)
+  const allowedCapabilities = optionalStringList(value, 'allowedCapabilities', subject)
+  const allowedMcpEndpoints = optionalStringList(value, 'allowedMcpEndpoints', subject)
+  const allowedToolNames = optionalStringList(value, 'allowedToolNames', subject)
+  let maxLimits: PeerJobLimits | undefined
+  if (value.maxLimits !== undefined) {
+    const limitsSubject = `${subject}.maxLimits`
+    if (!isRecord(value.maxLimits)) throw new PeerConfigError(`${limitsSubject} must be a mapping`)
+    rejectUnknownKeys(value.maxLimits, WORKER_LIMIT_KEYS, limitsSubject)
+    if (Object.values(value.maxLimits).some(field => field === null)) {
+      throw new PeerConfigError(`${limitsSubject}: null limits are not allowed`)
+    }
+    const maxSteps = optionalPositiveInteger(value.maxLimits, 'maxSteps', limitsSubject)
+    const maxToolCalls = optionalPositiveInteger(value.maxLimits, 'maxToolCalls', limitsSubject)
+    const maxWallMs = optionalPositiveInteger(value.maxLimits, 'maxWallMs', limitsSubject)
+    const maxTotalTokens = optionalPositiveInteger(value.maxLimits, 'maxTotalTokens', limitsSubject)
+    maxLimits = {
+      ...(maxSteps === undefined ? {} : { maxSteps }),
+      ...(maxToolCalls === undefined ? {} : { maxToolCalls }),
+      ...(maxWallMs === undefined ? {} : { maxWallMs }),
+      ...(maxTotalTokens === undefined ? {} : { maxTotalTokens }),
+    }
+  }
+  return {
+    ...(allowedCapabilities === undefined ? {} : { allowedCapabilities }),
+    ...(maxLimits === undefined ? {} : { maxLimits }),
+    ...(allowedMcpEndpoints === undefined ? {} : { allowedMcpEndpoints }),
+    ...(allowedToolNames === undefined ? {} : { allowedToolNames }),
   }
 }
 

@@ -48,8 +48,8 @@ export interface CallerPairing {
   readonly endpoint?: string
   /** Host-role exposure (unused by the caller, kept for shared documents). */
   readonly exposure?: string
-  /** Bearer token sent when present (doc 69 §8 correction 1 hook). */
-  readonly token?: string
+  /** Plaintext bearer credential sent when dialing `endpoint`; never logged or echoed. */
+  readonly outboundToken?: string
   /** Session on `peer` this bridge addresses; absent falls back to the alias. */
   readonly remoteSessionId?: string
   /** Peer-created session defaults, host-role (unused by the caller). */
@@ -190,6 +190,12 @@ export function loadCallerPairing(path: string, alias: string): { readonly docum
 const ALIAS_PATTERN = /^[A-Za-z0-9._-]+$/
 
 function parseEntry(entry: Record<string, unknown>, subject: string): CallerPairing {
+  if (Object.hasOwn(entry, 'token')) {
+    throw new PairingDocumentError(
+      `${subject}: ambiguous key "token" is not allowed; use "tokenHash" or "inboundToken" for inbound auth, or "outboundToken" for outbound calls`,
+      1,
+    )
+  }
   const alias = requireNonEmptyString(entry.alias, `${subject}: alias`)
   if (!ALIAS_PATTERN.test(alias)) {
     throw new PairingDocumentError(`${subject}: alias must match [A-Za-z0-9._-]+ (received ${JSON.stringify(alias)})`, 1)
@@ -222,14 +228,17 @@ function parseEntry(entry: Record<string, unknown>, subject: string): CallerPair
   if (exposure !== undefined && exposure !== 'answer-only' && exposure !== 'debug') {
     throw new PairingDocumentError(`${subject}: exposure must be answer-only or debug (received ${JSON.stringify(exposure)})`, 1)
   }
+  const outboundToken = optionalString('outboundToken')
+  const remoteSessionId = optionalString('remoteSessionId')
+  const sessionId = optionalString('sessionId')
   return {
     alias,
     peer,
     ...(endpoint === undefined ? {} : { endpoint }),
     ...(exposure === undefined ? {} : { exposure }),
-    ...(optionalString('token') === undefined ? {} : { token: optionalString('token') as string }),
-    ...(optionalString('remoteSessionId') === undefined ? {} : { remoteSessionId: optionalString('remoteSessionId') as string }),
-    ...(optionalString('sessionId') === undefined ? {} : { sessionId: optionalString('sessionId') as string }),
+    ...(outboundToken === undefined ? {} : { outboundToken }),
+    ...(remoteSessionId === undefined ? {} : { remoteSessionId }),
+    ...(sessionId === undefined ? {} : { sessionId }),
     ...(create === undefined ? {} : { create }),
     ...(createRouting === undefined ? {} : { createRouting }),
     ...(runawayCeiling === undefined ? {} : { runawayCeiling }),

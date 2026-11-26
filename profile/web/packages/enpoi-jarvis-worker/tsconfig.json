@@ -1,0 +1,12 @@
+{
+  "extends": "../../../../tsconfig.base.json",
+  "compilerOptions": { "composite": false, "incremental": false, "noEmit": true, "rewriteRelativeImportExtensions": false, "allowImportingTsExtensions": true },
+  "include": ["src/**/*"],
+  "references": [
+    { "path": "../../../../vendor/cordis" },
+    { "path": "../../../../vendor/cosmokit" },
+    { "path": "../../../../vendor/include" },
+    { "path": "../../../../vendor/loader" },
+    { "path": "../../../../vendor/schemastery" }
+  ]
+}

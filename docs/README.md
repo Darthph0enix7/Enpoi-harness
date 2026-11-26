@@ -17,7 +17,7 @@ This repository is the Enpoi fork of `deepseek-ai/deepseek-harness`. The `docs/`
 
 | Path | Origin | State | Notes |
 |---|---|---|---|
-| `docs/creator/**` | ours (fork) | current — live | Creator agent knowledge base; fork truth lives here, not in upstream pages |
+| `docs/creator/**` | ours (fork) | current — live | Creator agent knowledge base and fork reference; retained in prebuilt releases when other docs are pruned |
 | `docs/README.md`, `docs/archive/**` | ours (fork) | current | this map; frozen pages with banners |
 | `docs/subsystems/**` | upstream (+ fork pages `peer.md`, `settings.md`) | current | page prose is hand-maintained; the `cordis-surface` regions are generated — never edit between the markers |
 | `docs/persistence-changes/**` | upstream + fork records (`2026-09-23-file-revert-events`, `2026-09-23-subagent-descriptor-quiet`, `2026-11-07-session-format-v5`) | current | historical acknowledgements; `.schema.json` snapshots are tool-generated; two retired unaccepted records are frozen under [`archive/retired-persistence/`](archive/retired-persistence/README.md) |

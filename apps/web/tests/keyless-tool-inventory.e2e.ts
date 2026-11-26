@@ -72,7 +72,7 @@ interface RunnerResult {
   }
 }
 
-function childEnvironment(root: string, nonce: string, head: string): NodeJS.ProcessEnv {
+function childEnvironment(root: string, nonce: string, head: string, worker = false): NodeJS.ProcessEnv {
   const home = join(root, 'home')
   // Strict whitelist: never inherit HOME, credentials, proxy, Kubernetes,
   // Docker, SSH-agent or other ambient paths. DSH_* is set explicitly below.
@@ -105,6 +105,10 @@ function childEnvironment(root: string, nonce: string, head: string): NodeJS.Pro
     TEMP: join(root, 'tmp'),
     TMP: join(root, 'tmp'),
   })
+  if (worker) {
+    delete env.DSH_WIRE_LOG
+    env.DSH_KEYLESS_INVENTORY_WORKER = '1'
+  }
   return env
 }
 
@@ -221,3 +225,39 @@ it('captures the shipped presets keylessly, or reports BLOCKED until the central
     rmSync(root, { recursive: true, force: true })
   }
 }, 300_000)
+
+it('captures the isolated Jarvis worker roster and direct execution refusals', async () => {
+  const readiness = await captureReadiness()
+  if (!readiness.ready) expect.fail(`CAPTURE_BLOCKED:\n${readiness.blockers.map(blocker => `  - ${blocker}`).join('\n')}`)
+  const root = mkdtempSync(join(tmpdir(), 'dsh-keyless-worker-inventory-'))
+  try {
+    for (const dir of ['home', 'tmp']) mkdirSync(join(root, dir), { mode: 0o700 })
+    const nonce = randomUUID()
+    writeFileSync(join(root, 'intent.json'), JSON.stringify({ capture: true, nonce }), { mode: 0o600 })
+    const run = spawnSync(VITEST_BIN, ['run', '--config', CAPTURE_CONFIG], {
+      cwd: REPO_ROOT, env: childEnvironment(root, nonce, '', true), encoding: 'utf8', timeout: 120_000,
+    })
+    if (run.status !== 0) expect.fail(`worker inventory failed: ${run.stdout ?? ''}\n${run.stderr ?? ''}`)
+    const capture = JSON.parse(readFileSync(join(root, 'worker-result.json'), 'utf8')) as {
+      tools: string[]
+      profileHash: string
+      receipt: Record<string, string>
+    }
+    const fixture = readFixture('jarvis-worker')
+    expect(fixture.preset).toBe('jarvis-worker')
+    expect(capture.tools).toEqual(fixture.tools)
+    expect(capture.profileHash).toMatch(/^[0-9a-f]{64}$/u)
+    if (WRITE) {
+      writeFileSync(join(FIXTURE_DIR, 'expected-jarvis-worker.json'), `${JSON.stringify({ ...fixture, stale: false,
+        captureMethod: CAPTURE_METHOD, captureSource: CAPTURE_SOURCE, captureScope: 'separate release-owned Jarvis worker host; fake adapter, loopback hub, direct executor refusal checks',
+        captureReceipt: capture.receipt,
+      }, null, 2)}\n`)
+    } else {
+      expect(fixture.stale, 'worker fixture must be recaptured by the central build').not.toBe(true)
+      expect(fixture.captureMethod).toBe(CAPTURE_METHOD)
+      expect(fixture.captureReceipt).toEqual(capture.receipt)
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}, 130_000)

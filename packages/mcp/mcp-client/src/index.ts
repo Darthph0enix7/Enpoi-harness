@@ -19,6 +19,8 @@ import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import { DEFAULT_MAX_INSTRUCTION_BYTES, RECONNECT_DEFAULTS, resolveReconnectPolicy, startConnection } from './connection.ts'
 import type { ReconnectConfig } from './connection.ts'
+import { LAZY_SESSION_CACHE_DEFAULTS, mountLazyTools, resolveLazyTools, type StaticMcpTool } from './lazy-connection.ts'
+import { DEFAULT_SECRET_HEADER_MIN_LENGTH, DEFAULT_SECRET_HEADER_NAMES } from './redact.ts'
 import { registerServerContext } from './server-context.ts'
 // Side-effect type import: declaration-merges `ctx.tools` onto Context.
 import type {} from '@deepseek-ai/dsh-tools'
@@ -26,6 +28,8 @@ import type {} from '@deepseek-ai/dsh-tools'
 export { createMcpToolDefinition } from './tools.ts'
 export type { McpResult, McpToolDefinitionOptions } from './tools.ts'
 export type { ReconnectConfig, ResolvedReconnectPolicy } from './connection.ts'
+export type { McpHeaderProvider } from './header-context.ts'
+export type { StaticMcpTool } from './lazy-connection.ts'
 
 /** Cordis plugin name used by loader diagnostics. */
 export const name = 'mcp-client'
@@ -74,6 +78,10 @@ export interface StdioConfig {
   maxInstructionBytes?: number
   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
   reconnect?: ReconnectConfig
+  /** Optional allowlist of raw MCP tool names; unknown names fail loud at load/refresh. */
+  allowedTools?: string[]
+  /** Whether to publish attributed server `instructions` into the system prompt (default `true`). */
+  includeInstructions?: boolean
 }
 
 /** Config for connecting to an MCP server over Streamable HTTP (SSE). */
@@ -98,6 +106,24 @@ export interface StreamableHttpConfig {
   maxInstructionBytes?: number
   /** Automatic reconnect policy after a lost connection; omission uses the defaults. */
   reconnect?: ReconnectConfig
+  /** Optional allowlist of raw MCP tool names; unknown names fail loud at load/refresh. */
+  allowedTools?: string[]
+  /** Whether to publish attributed server `instructions` into the system prompt (default `true`). */
+  includeInstructions?: boolean
+  /** Release-owned tool roster; required with `lazyConnect`. */
+  staticTools?: StaticMcpTool[]
+  /** Publish static tools without network access; negotiate only for an authorized session. */
+  lazyConnect?: boolean
+  /** Maximum cached lazy session connections (default 16). */
+  lazySessionCacheMax?: number
+  /** Idle period after which a lazy connection closes, in milliseconds (default 300000). */
+  lazySessionIdleTtlMs?: number
+  /** Refuse HTTP requests without a session and dynamic headers; implied by `lazyConnect`. */
+  requireDynamicHeaders?: boolean
+  /** Case-insensitive list of header names treated as credentials for redaction. */
+  secretHeaderNames?: string[]
+  /** Minimum length of a credential header and its recognized authorization payload (default 8). */
+  secretHeaderMinLength?: number
 }
 
 /** Configuration for one stdio or Streamable HTTP MCP server. */
@@ -128,6 +154,8 @@ export const Config = z.union([
     failOnStartupError: z.boolean().default(false),
     maxInstructionBytes: z.number().step(1).min(1).default(DEFAULT_MAX_INSTRUCTION_BYTES),
     reconnect: Reconnect,
+    allowedTools: z.array(z.string().min(1)),
+    includeInstructions: z.boolean().default(true),
   }),
   z.object({
     transport: z.const('streamable-http'),
@@ -138,24 +166,61 @@ export const Config = z.union([
     failOnStartupError: z.boolean().default(false),
     maxInstructionBytes: z.number().step(1).min(1).default(DEFAULT_MAX_INSTRUCTION_BYTES),
     reconnect: Reconnect,
+    allowedTools: z.array(z.string().min(1)),
+    includeInstructions: z.boolean().default(true),
+    staticTools: z.array(z.object({
+      name: z.string().min(1).required(),
+      description: z.string().required(),
+      inputSchema: z.object({ type: z.const('object') }).required(),
+      annotations: z.any(),
+    })).min(1).extra('default', undefined),
+    lazyConnect: z.boolean().default(false),
+    lazySessionCacheMax: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(LAZY_SESSION_CACHE_DEFAULTS.max),
+    lazySessionIdleTtlMs: z.number().step(1).min(1).max(MAX_TIMER_DELAY_MS).default(LAZY_SESSION_CACHE_DEFAULTS.idleTtlMs),
+    requireDynamicHeaders: z.boolean().default(false),
+    secretHeaderNames: z.array(z.string().min(1)).default([...DEFAULT_SECRET_HEADER_NAMES]),
+    secretHeaderMinLength: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(DEFAULT_SECRET_HEADER_MIN_LENGTH),
   }),
 ]) as z<ConfigInput, Config>
+
+/** Validate `allowedTools` even when `apply()` is called programmatically without Schemastery. */
+function validateAllowedTools(allowedTools: readonly string[] | undefined, label: string): void {
+  if (allowedTools === undefined) return
+  if (!Array.isArray(allowedTools)) {
+    throw new Error(`${label}: allowedTools must be an array of non-empty tool names`)
+  }
+  const seen = new Set<string>()
+  for (const toolName of allowedTools) {
+    if (typeof toolName !== 'string' || toolName.length === 0) {
+      throw new Error(`${label}: allowedTools entries must be non-empty strings`)
+    }
+    if (seen.has(toolName)) {
+      throw new Error(`${label}: allowedTools contains duplicate entry "${toolName}"`)
+    }
+    seen.add(toolName)
+  }
+}
 
 // ---- Plugin apply ----
 
 /**
- * Connect one MCP server and publish its initial tool generation before activation.
+ * Publish the configured static roster or connect and discover tools before activation.
  * This entry remains explicitly `async`: Cordis treats a prototype-bearing
  * ordinary function as a constructor, whose returned Promise is not startup work.
  * @param ctx - plugin context carrying the tool registry.
  * @param config - resolved transport and server namespace configuration.
- * @returns startup readiness after connection and initial tool discovery settle.
+ * @returns startup readiness after static registration or initial discovery settles.
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
-  // Fail loud at load: reconnect misconfiguration (including programmatic
+  // Fail loud at load: reconnect or allowlist misconfiguration (including programmatic
   // construction that bypassed Schemastery) rejects THIS instance before any
   // effect registers.
   const reconnect = resolveReconnectPolicy(config.reconnect, `mcp-client(${config.serverName}): reconnect`)
+  validateAllowedTools(config.allowedTools, `mcp-client(${config.serverName})`)
+  if (config.includeInstructions !== undefined && typeof config.includeInstructions !== 'boolean') {
+    throw new Error(`mcp-client(${config.serverName}): includeInstructions must be a boolean`)
+  }
+  const lazy = resolveLazyTools(config)
 
   // Reserve the namespace next: a duplicate `serverName` fails THIS instance
   // at load with an actionable error and leaves the earlier instance intact.
@@ -175,11 +240,18 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     return () => void names.delete(config.serverName)
   }, 'mcp-client.serverName')
 
+  if (lazy !== undefined) {
+    mountLazyTools(ctx, lazy)
+    return
+  }
+
   // The supervisor owns the client/transport generations, the reconnect
   // loop, and the live tool registrations; disposal stops reconnection,
   // quiesces in-flight work, and unregisters the current generation.
   const connection = startConnection(ctx, config, reconnect)
-  registerServerContext(ctx, config.serverName, connection)
+  registerServerContext(ctx, config.serverName, connection, {
+    includeInstructions: config.includeInstructions !== false,
+  })
   let stopping: Promise<void> | undefined
   const dispose = (): Promise<void> => stopping ??= connection.dispose()
   // Cordis announces unload before awaiting an unfinished apply(). Closing

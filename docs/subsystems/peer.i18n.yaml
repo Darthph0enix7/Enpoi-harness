@@ -3,38 +3,41 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/subsystems/peer.md
 /peer-interconnect:
-  en: f79745ba16df567c
-  zh: ddc6f46d71326584
+  en: 81dedc3c7637051b
+  zh: 1ab252b7f9504f40
 /peer-interconnect/host-service-and-configuration:
-  en: 6040e96df1d79f11
-  zh: 17213e948982d854
+  en: 9a657de545ff8287
+  zh: 432ef1694e9aee0f
 /peer-interconnect/pairing-model:
-  en: 0e2ecf9dd49c4e1e
-  zh: 58f8d4d95cb6eb9c
+  en: 88c8498c42cb672c
+  zh: eb0a1d377450812e
 /peer-interconnect/exposure-filter:
   en: 163e99df86927f9e
   zh: 9115fc4e4f494e67
 /peer-interconnect/handshake:
-  en: 9d2c2ec747e7f842
-  zh: 2896dcb51512d99c
+  en: 686c356003d7bf8c
+  zh: 30b2cf43e6a122aa
 /peer-interconnect/discovery:
-  en: 6ef5e7aa5d229fb4
-  zh: 45c74227df7122c7
+  en: fb649189dbdb30e7
+  zh: ccd8afb5584d6d18
 /peer-interconnect/sessions-create-prompt-cancel:
-  en: 7048e824474626f8
-  zh: ff0a5e918a6b89e2
+  en: 3845b86ce7d80aa1
+  zh: 5d6743985d23b967
+/peer-interconnect/worker-control:
+  en: a9bb987204f4f933
+  zh: 988046c03368760a
 /peer-interconnect/execution-state:
-  en: f02875b3202c8efe
-  zh: 236b3ca800b7f890
+  en: 80eb3f24c0f78a7b
+  zh: aeb2b4255be48490
 /peer-interconnect/asks-answer-and-the-race:
-  en: e821c0785ea1b941
-  zh: 34117249dd415a90
+  en: 63bc96e574569a28
+  zh: b5620effa146308e
 /peer-interconnect/history-page-and-follow:
-  en: 1b78bff465c8a80b
-  zh: 871cab7969fa25fa
+  en: 4e49a6f0cdbeb05b
+  zh: 0de3182a8271b79a
 /peer-interconnect/orphan-watchdog:
   en: adfad8b8f13c73e2
   zh: bc0f8104060b0f8e
 /peer-interconnect/limits-and-known-gaps:
-  en: 63a7295b3c54d71a
-  zh: 9ffe68e3ba3da15e
+  en: e7887139f8cb5b27
+  zh: 0e41b7085e538232

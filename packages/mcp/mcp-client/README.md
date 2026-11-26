@@ -58,6 +58,15 @@ Add one entry per server; nothing else is required. After the harness starts, th
 | `serverName` | required | Namespace for the server's tool names; `[A-Za-z0-9_-]{1,32}`, unique inside one registration scope |
 | `command` / `args` / `env` / `cwd` | — | stdio: executable, arguments, extra env merged over scrubbed ambient env, working directory |
 | `url` / `headers` | — | streamable-http: endpoint URL and extra request headers |
+| `allowedTools` | omitted (all) | Exact raw names admitted from `tools/list`; `[]` registers none. An unknown name rejects synchronization with a diagnostic. |
+| `includeInstructions` | `true` | Set `false` to omit server instructions. Always off in lazy mode. |
+| `lazyConnect` | `false` | Streamable HTTP only: register static tools at load and connect on an authorized call. Incompatible with `failOnStartupError: true`. |
+| `staticTools` | omitted | Non-empty release-owned manifest required in lazy mode. Its names must exactly match `allowedTools` (order does not matter). |
+| `lazySessionCacheMax` | `16` | Maximum cached lazy connections; evict the least recently used on overflow. |
+| `lazySessionIdleTtlMs` | `300,000` | Close a lazy connection after this many idle milliseconds. |
+| `requireDynamicHeaders` | `false` | Streamable HTTP only: refuse requests without a session and at least one nonblank dynamic header. Always on in lazy mode. |
+| `secretHeaderNames` | `authorization`, `proxy-authorization`, `x-api-key`, `cookie` | Case-insensitive credential header names. A custom list replaces these defaults. |
+| `secretHeaderMinLength` | `8` | Reject shorter credentials before sending; recognized authorization schemes also check the payload length. |
 | `toolCallTimeoutMs` | `60,000` | Timeout per `tools/call` or resource request |
 | `maxInstructionBytes` | `32,768` | Maximum UTF-8 bytes of server instructions including attribution; an oversized value rejects the connection |
 | `failOnStartupError` | `false` | Reject plugin activation when the initial connection or tool synchronization fails |
@@ -82,13 +91,35 @@ The model sees each tool under a stable server-qualified name: `mcp__<serverName
 
 ### Calling tools and reading results
 
-When the model calls an MCP tool, the call runs against the remote server with a per-call timeout (default 60 seconds) and can be cancelled like any other tool call. The result comes back as ordinary text in block order; resource links appear as text with their name and URI. If the server reports an error, the call fails visibly — the model does not see a fake success.
+When the model calls an MCP tool, the call runs against the remote server with a per-call timeout (default 60 seconds) and can be cancelled like any other tool call. The result comes back as ordinary text in block order; resource links appear as text with their name and URI. MCP and transport errors produce a fixed failure message instead of forwarding the server's text.
+
+### Worker credentials and trust
+
+The host service `mcpHeaderProvider.headersFor(sessionId, serverId)` resolves HTTP headers. `serverId` is the configured `serverName`. Tool calls pass the executing agent's session; eager discovery uses the owning agent scope or passes `undefined` from the host. With `requireDynamicHeaders`, missing sessions, absent or throwing providers, and empty headers fail locally; host-global eager discovery therefore cannot use this setting. Keep job credentials out of Config: authorize the session and destination in the provider before reading the job's credential. Requests with dynamic headers reject redirects.
+
+Use `lazyConnect: true` when the job binding does not exist at startup. The release-owned `staticTools` manifest is the trust root; remote metadata is untrusted. This entry publishes no resource provider or remote instructions. Each call rechecks credentials, uses a connection confined to the executing session, and fetches the roster before calling. A SHA-256 comparison of `{name, inputSchema}` sorts object keys recursively and preserves array order. A missing, duplicate, or changed entry refuses the call; remote descriptions, annotations, and extra tools cannot affect what the model sees. Connections close on credential refusal or change, session or agent disposal, eviction, idle expiry, or unload. The next authorized call reconnects on demand; background reconnect settings do not apply. Lazy connections use MCP `initialize` (`2025-11-25` or a compatible legacy protocol), not modern `server/discover` negotiation.
+
+```yaml
+lazyConnect: true
+allowedTools: [knowledge_search]
+staticTools:
+  - name: knowledge_search
+    description: Search the team's approved knowledge base.
+    inputSchema:
+      type: object
+      properties:
+        query: { type: string }
+      required: [query]
+    annotations: { readOnlyHint: true }
+```
+
+Use a trusted HTTPS endpoint (loopback for tests) and an executor-level policy. The bridge masks credential header values and recognized authorization payloads by literal match; routing headers such as job ID and fence are not redacted. A compromised hub can still return harmful data, split or encode secrets to defeat literal matching, or act on credentials already sent. Do not log request headers in proxies, SDK instrumentation, or the credential provider.
 
 Images are supported when the current model accepts image input and the harness attachment feature is enabled; they then appear in the conversation like other images. Otherwise — and for audio or embedded resources — the model sees a clear diagnostic message instead of nothing.
 
 ### Startup, updates, and reconnection
 
-The server's tools appear before the harness starts its first turn. When the server changes its tool list, the model's tool set updates automatically; if the update fails, the previous tool set keeps working.
+In eager mode, the server's tools appear before the harness starts its first turn. When the server changes its tool list, the model's tool set updates automatically; if the update fails, the previous tool set keeps working.
 
 When a server connection drops — for example a local server process crashes — the plugin reconnects automatically with delays that double from 500 ms up to 30 s and then refreshes the tool set; reconnect progress is visible in the logs. During an outage the last known tools stay listed but calls to them fail until the server recovers. After ten consecutive failed attempts the server's tools are removed and reconnection stops until you reload the configuration or restart the harness; a server that stays connected for a while resets that counter. Set `reconnect.enabled: false` to disable automatic reconnection — tools then stay listed but fail until you reload. Editing the configuration entry reloads the server connection in place, and unchanged names stay unchanged.
 
@@ -116,6 +147,7 @@ This section explains the design decisions behind the bridge and points at the c
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin entry: `Config` schema, `serverName` reservation, activation await |
 | [`src/connection.ts`](src/connection.ts) | Connection supervisor: client generations, reconnect policy, attempt budget, disposal |
+| [`src/lazy-connection.ts`](src/lazy-connection.ts) | Static registration, roster matching, and per-session connection lifetime |
 | [`src/server-context.ts`](src/server-context.ts) | Resource-provider registration and literal server instructions |
 | [`src/tools.ts`](src/tools.ts) | Tool bridge: discovery, naming, registration swap, execution, image projection |
 | [`src/transport.ts`](src/transport.ts) | Transport factory: stdio spawn with scrubbed env, Streamable HTTP |
@@ -161,7 +193,7 @@ Read these pages when the package-level contract is not enough. They move from t
 
 #### What the model sees
 
-After discovery succeeds, SDK-admitted MCP tools appear as native tools named `mcp__<serverName>__<rawName>` (or their deterministic normalized form), with the server description and input schema. A re-sync replaces the generation; disposal or an exhausted reconnect budget removes it. A server without the tools capability connects with an empty tool set.
+SDK-admitted MCP tools appear as native tools named `mcp__<serverName>__<rawName>` (or their deterministic normalized form). Eager tools use the server description and input schema; lazy tools use only the manifest. A re-sync replaces the eager generation; disposal or an exhausted eager reconnect budget removes its tools. A server without the tools capability connects with an empty eager tool set.
 
 #### Token effect
 
@@ -169,7 +201,7 @@ The tool descriptions and input schemas enter every request while the tools are 
 
 #### KV Cache effect
 
-The tool-definition prefix stays stable while the discovered set and schemas are unchanged. A re-sync that adds, removes, renames, or changes a tool replaces definitions and may invalidate reuse from the first changed schema token onward; a reconnect that recovers an unchanged list reproduces identical definitions and stays prefix-stable.
+The tool-definition prefix stays stable while the tool definitions are unchanged. Lazy connections never change those definitions. An eager re-sync that adds, removes, renames, or changes a tool may invalidate reuse from the first changed schema token onward.
 
 ### Tool-call history and results
 
@@ -189,7 +221,7 @@ Append-only; newly visible content follows the reusable request prefix and does 
 
 #### What the model sees
 
-One server-labeled section contains the nonblank instructions returned by each successful connection. Absent or blank instructions add no prompt text. Braces remain literal. A replacement connection publishes its instructions only after discovery succeeds; disposal or exhausted recovery removes the section.
+An eager connection with instructions enabled publishes one server-labeled section containing its nonblank instructions. Absent or blank instructions add no prompt text. Braces remain literal. A replacement connection publishes its instructions only after discovery succeeds; disposal or exhausted recovery removes the section. Lazy connections never publish server instructions.
 
 #### Token effect
 
@@ -207,10 +239,10 @@ Unchanged instructions retain identical prompt text. Updated or removed instruct
 These limits describe what you cannot do with this plugin and when it needs operational attention. They are current package constraints, not a comparison with other MCP clients or a task backlog.
 
 - **Resources are read on demand** — shipped profiles provide the [shared resource service](../mcp-resources/README.md); resource subscriptions and MCP prompt templates are unsupported.
-- **Startup and discovery timeouts are inherited from the MCP SDK** — the plugin exposes no separate connection or discovery timeout. Negotiation and discovery use the SDK's 60-second request default; discovery also uses its page limit. Plugin unload closes the transport to interrupt pending startup requests before awaiting teardown.
+- **Negotiation and discovery have no separate timeout setting** — eager discovery uses the SDK's 60-second request default; lazy negotiation and discovery use `toolCallTimeoutMs` per operation. Discovery also uses the SDK's page limit. Plugin unload closes pending transports before awaiting teardown.
 - **Reconnect handles failed negotiation and transport close** — a failed initial probe or crashed stdio child uses the configured reconnect budget. Once HTTP is connected, request failures use the SDK transport's recovery rather than respawning the connection.
 - **Image is the only durable rich-result bridge** — PNG, JPEG, WebP, and GIF enter Native context after exact capability proof. Audio and embedded-resource payloads remain execution-local with explicit diagnostics, while resource links preserve only their name and URI as text.
-- **Invalid protocol results or output schemas fail through the SDK** — the bridge does not accept legacy `toolResult` substitutes or bypass advertised schema validation.
+- **Invalid protocol results fail through the SDK** — the bridge does not accept legacy `toolResult` substitutes. Eager mode also validates advertised output schemas; lazy mode ignores them.
 - **Task-required MCP tools are rejected at call time** — a tool that requires the task-based execution extension throws instead of bridging; the extension is not implemented.
 
 <a id="dev-note"></a>

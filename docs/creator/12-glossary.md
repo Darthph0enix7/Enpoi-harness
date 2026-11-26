@@ -40,7 +40,7 @@ One line per term, harness-specific meaning first. `$DSH_HOME` is the user's har
 - **referee / chair / arbiter** — fixed council roles: scoring, chairing, and neutral rulings; never seats.
 - **Oracle** — tool-only senior reviewer (`oracle_review`), scorecard + verdict contract; cannot be spawned as a worker.
 - **reviewer seat / `review_run`** — read-only test runner for reviewer roles; fixed runner enum, workspace read-only, scratch-only writes.
-- **settlement notice** — the runtime-owned `subagent-settled` parent message reporting a background child's outcome plus its closing report (body bounded by `settlementReportMaxChars`/`settlementReportMaxImages`, with the full report left in the child's session); one per settled child, distinct from model-authored relay messages.
+- **settlement notice** — the runtime-owned `subagent-settled` parent message reporting a background child's outcome and closing report. A shortened report names the child session and, when its text was saved separately, the spill file; distinct from model-authored relay messages.
 - **goal round** — one automatic same-session continuation turn the goal driver queues for an idle, armed goal; `maxGoalRounds` caps it and `blocked` requires a minimum number started.
 - **turn / step** — one user-initiated model run / one model call inside it.
 - **session / session log** — durable JSONL event log under `$DSH_HOME/sessions/`; current format version 4 (v4).
@@ -52,6 +52,11 @@ One line per term, harness-specific meaning first. `$DSH_HOME` is the user's har
 - **memory** — durable project facts store (`enpoi-memory`, SQLite + FTS/backfill) with save/search/confirm/rescind tools.
 - **peer** — cross-device interconnect (`enpoi-peer-bridge`) exposing eight on-demand tools over another harness instance's `peer` namespace: status, sessions, models, switch-model, ask, asks, answer, cancel.
 - **peer pairing / alias** — one entry in `$DSH_HOME/pairings.yaml`: the alias names the remote member (same string on both devices, unique per host), `exposure` and `create` are its serving defaults, and `endpoint` is its peer URL.
+- **job binding** — a peer-owned record of the session's job id, fence, expiry, grants, and limits; the worker guard and MCP credential provider consult it at execution.
+- **Jarvis worker profile** — a release-owned, peer-only host for one job attempt with exactly two hub knowledge tools; its selector, sessions, and secrets stay in a private `$DSH_HOME` ([16](16-jarvis-worker-profile.md)).
+- **worker tool manifest** — the pinned release list of model-facing names, descriptions, and input schemas; its schema hash detects incompatible hub discovery before dispatch.
+- **credential reference** — a non-secret name in the job binding; the Jarvis worker credential provider resolves it against the private worker secret directory, not session text.
+- **profile identity** — the job guard's SHA-256 of the live Session preset, tool schemas, guard configuration, and approved binding fields; not an attestation of OS confinement.
 - **routing policy** — a pairing's optional `routing` block (`allowChains`, `allowModels`, `requireZeroPrice`, `requireNoTraining`, `requireTools`, `allowReasoningEfforts`, `allowSwitch`, `maxTotalTokens`); absent keeps legacy create routing, present makes every create/adopt name a policy-approved route before any session exists.
 - **peerRouting service** — the profile service (`enpoi-peer-routing`, `ctx.peerRouting`) that owns the catalogue, chain registry, selector rules, and route health behind `peer.models` and `peer.selectModel`; its absence withholds the routing trio from the handshake.
 - **strict pairings parse** — closed key sets at pairing, `create`, and `routing` level plus type and pattern checks; a rejected reload keeps the previous valid snapshot and logs one bounded warning per distinct diagnostic.

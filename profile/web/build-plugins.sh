@@ -187,6 +187,11 @@ build_declarations() {
 cd "$PACKAGES_DIR" || exit 1
 
 fail=0
+# Only the version-owned release tree gets the worker resolver links. Never
+# project the human profile's node_modules (which may point at another release).
+if [ -f "$SCRIPT_DIR/../../scripts/worker-release-links.mjs" ] && [ "$PROFILE_ROOT" = "$SCRIPT_DIR" ]; then
+  "$NODE_BIN" "$SCRIPT_DIR/../../scripts/worker-release-links.mjs" || exit 1
+fi
 for dir in enpoi-*/; do
   [ -d "$dir" ] || continue
   pkg="${dir%/}"

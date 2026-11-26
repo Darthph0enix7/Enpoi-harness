@@ -24,12 +24,14 @@ const DOCUMENT = [
   '    sessionId: sess-abc',
   '    remoteSessionId: sess-xyz',
   '    endpoint: "https://laptop.pike-acrux.ts.net:8443"',
-  '    token: null',
+  '    tokenHash: sha256$0000000000000000000000000000000000000000000000000000000000000000',
+  '    outboundToken: outbound-secret-co-dev',
   '    runawayCeiling: null',
   '    allowModelChange: false',
   '    create:',
   '      cwd: /home/user/projects/thing',
   '      agentPreset: standard',
+  '      allowAgentPresets: [standard, sysadmin]',
   '      provider: antigravity',
   '      model: gemini-3.8-flash-tiered',
   '      chain: loopback',
@@ -38,15 +40,22 @@ const DOCUMENT = [
   '    peer: macbook',
   '    exposure: answer-only',
   '    endpoint: https://macbook.tail:8443',
+  '    inboundToken: inbound-secret-caller-only',
+  '    create:',
+  '      agentPreset: standard',
+  '      allowAgentPresets:',
+  '        - standard',
+  '        - orchestrator',
   '  - alias: host-only',
   '    peer: desktop',
   '    exposure: debug',
+  '    insecure: true',
   '    sessionId: sess-host',
   '',
 ].join('\n')
 
 describe('pairing document parser', () => {
-  it('parses entries, nested create defaults, comments, and quoted URLs', () => {
+  it('parses entries, outboundToken, nested create defaults, comments, and ignores host credential fields', () => {
     const parsed = parsePairingDocument(DOCUMENT, 'test.yaml')
     expect(parsed.device).toBe('serverlocal')
     expect(parsed.pairings).toHaveLength(3)
@@ -54,7 +63,10 @@ describe('pairing document parser', () => {
     expect(coDev.alias).toBe('co-dev')
     expect(coDev.endpoint).toBe('https://laptop.pike-acrux.ts.net:8443')
     expect(coDev.remoteSessionId).toBe('sess-xyz')
-    expect(coDev.token).toBeUndefined()
+    expect(coDev.outboundToken).toBe('outbound-secret-co-dev')
+    expect('tokenHash' in coDev).toBe(false)
+    expect('inboundToken' in coDev).toBe(false)
+    expect('insecure' in coDev).toBe(false)
     expect(coDev.runawayCeiling).toBeUndefined()
     expect(coDev.create).toMatchObject({ cwd: '/home/user/projects/thing', agentPreset: 'standard' })
     expect(coDev.createRouting).toEqual({
@@ -63,6 +75,36 @@ describe('pairing document parser', () => {
       chain: 'loopback',
       reasoningEffort: 'high',
     })
+    const callerOnly = parsed.pairings[1]!
+    expect(callerOnly.outboundToken).toBeUndefined()
+    expect('inboundToken' in callerOnly).toBe(false)
+    expect(callerOnly.create?.allowAgentPresets).toEqual(['standard', 'orchestrator'])
+    const hostOnly = parsed.pairings[2]!
+    expect('insecure' in hostOnly).toBe(false)
+  })
+
+  it('rejects the legacy token key naming outboundToken and never echoes its secret', () => {
+    const secret = 'legacy-secret-must-not-leak'
+    for (const raw of [
+      `version: 1\ndevice: x\npairings:\n  - alias: pc\n    peer: serverlocal\n    endpoint: https://x\n    token: ${secret}\n`,
+      'version: 1\ndevice: x\npairings:\n  - alias: pc\n    peer: serverlocal\n    endpoint: https://x\n    token: null\n',
+    ]) {
+      let caught: unknown
+      try {
+        parsePairingDocument(raw, 't')
+      } catch (error) {
+        caught = error
+      }
+      expect(caught).toBeInstanceOf(PairingDocumentError)
+      expect((caught as Error).message).toContain('outboundToken')
+      expect((caught as Error).message).toContain('ambiguous key "token"')
+      expect((caught as Error).message).not.toContain(secret)
+    }
+  })
+
+  it('rejects malformed outboundToken without echoing its value', () => {
+    const raw = 'version: 1\ndevice: x\npairings:\n  - alias: pc\n    peer: serverlocal\n    endpoint: https://x\n    outboundToken: ""\n'
+    expect(() => parsePairingDocument(raw, 't')).toThrowError(/outboundToken must be a non-empty string/u)
   })
 
   it('rejects a create routing half-pair as a malformed pairing', () => {

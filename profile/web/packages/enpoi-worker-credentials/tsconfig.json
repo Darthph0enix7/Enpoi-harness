@@ -1,0 +1,14 @@
+{
+  "extends": "../../../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    "noEmit": true
+  },
+  "include": ["src/**/*", "tests/**/*"],
+  "references": [
+    { "path": "../../../../packages/util/home-paths" },
+    { "path": "../../../../vendor/cordis" },
+    { "path": "../../../../vendor/schemastery" }
+  ]
+}

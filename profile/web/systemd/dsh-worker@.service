@@ -1,0 +1,36 @@
+[Unit]
+Description=Jarvis knowledge worker attempt %i
+
+[Service]
+Type=exec
+StateDirectory=dsh-worker-%i
+StateDirectoryMode=0700
+WorkingDirectory=%S/dsh-worker-%i
+UMask=0077
+EnvironmentFile=/etc/dsh-worker/%i.env
+UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT NODE_OPTIONS NODE_PATH
+ExecStartPre=/usr/bin/env -i HOME=%S/dsh-worker-%i DSH_HOME=%S/dsh-worker-%i PATH=/usr/bin:/bin /opt/dsh-worker/node /opt/dsh-worker/release/scripts/worker-profile.mjs
+ExecStart=/usr/bin/env -i HOME=%S/dsh-worker-%i DSH_HOME=%S/dsh-worker-%i PATH=/usr/bin:/bin LANG=C.UTF-8 DSH_TELEMETRY_DISABLED=1 DSH_WORKER_PEER_PORT=${DSH_WORKER_PEER_PORT} DSH_WORKER_MCP_URL=${DSH_WORKER_MCP_URL} DSH_WORKER_MODEL=${DSH_WORKER_MODEL} DSH_WORKER_MODEL_URL=${DSH_WORKER_MODEL_URL} /opt/dsh-worker/node /opt/dsh-worker/release/apps/cli/lib/bin.js --profile jarvis-worker
+NoNewPrivileges=yes
+PrivateUsers=yes
+ProtectHome=tmpfs
+BindPaths=%S/dsh-worker-%i
+BindReadOnlyPaths=/opt/dsh-worker/release /opt/dsh-worker/node
+ProtectSystem=strict
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+InaccessiblePaths=-/usr/bin/bash -/usr/bin/dash
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+MemoryMax=768M
+CPUQuota=100%
+TasksMax=64
+RuntimeMaxSec=180
+TimeoutStopSec=10
+KillMode=control-group
+Restart=no
+IPAddressDeny=any

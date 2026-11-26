@@ -1,0 +1,4 @@
+# dsh-enpoi-job-guard — fail-closed worker job guard (admission, budgets, audit, identity).
+- insert:
+    - id: enpoi-job-guard
+      name: 'dsh-enpoi-job-guard'

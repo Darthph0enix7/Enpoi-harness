@@ -5,7 +5,8 @@ export class FakeSocket implements PeerWebSocket {
   private readonly listeners = new Map<string, Set<(event: unknown) => void>>()
   readonly sent: string[] = []
 
-  constructor(private readonly onOpenEnvelope: (socket: FakeSocket, streamId: string) => void) {}
+  constructor(private readonly onOpenEnvelope: (socket: FakeSocket, streamId: string) => void,
+    private readonly onUplink?: (socket: FakeSocket, streamId: string, value: unknown) => void) {}
 
   addEventListener(type: 'open' | 'message' | 'error' | 'close', listener: (event: unknown) => void): void {
     const set = this.listeners.get(type) ?? new Set()
@@ -20,8 +21,9 @@ export class FakeSocket implements PeerWebSocket {
 
   send(data: string): void {
     this.sent.push(data)
-    const parsed = JSON.parse(data) as { type: string; streamId: string }
+    const parsed = JSON.parse(data) as { type: string; streamId: string; value?: unknown }
     if (parsed.type === 'open') this.onOpenEnvelope(this, parsed.streamId)
+    if (parsed.type === 'item') this.onUplink?.(this, parsed.streamId, parsed.value)
   }
 
   close(): void {

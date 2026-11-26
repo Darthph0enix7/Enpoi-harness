@@ -19,16 +19,29 @@ export interface ServerContext {
   instructions(): string
 }
 
+/** Options controlling server context contributions. */
+export interface ServerContextOptions {
+  /** Whether to publish server `instructions` to the system prompt (default `true`). */
+  includeInstructions?: boolean
+}
+
 /**
  * Contribute server context to the services enabled by this composition.
  * @param ctx - server plugin's registration scope and effect owner.
  * @param server - configured server identity.
  * @param connection - live resource operations and successful instruction snapshot.
+ * @param options - optional section inclusion flags.
  */
-export function registerServerContext(ctx: Context, server: string, connection: ServerContext): void {
+export function registerServerContext(
+  ctx: Context,
+  server: string,
+  connection: ServerContext,
+  options?: ServerContextOptions,
+): void {
   ctx.inject(['mcpResources'], (inner) => {
     inner.mcpResources.register(server, connection.resources)
   })
+  if (options?.includeInstructions === false) return
   ctx.inject(['systemPrompt'], (inner) => {
     inner.systemPrompt.section({
       name: `mcp:${server}`,

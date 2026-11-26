@@ -39,8 +39,9 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-user-questions'
-import { randomUUID } from 'node:crypto'
-import { dirname } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import type { AskNotice, AskRecord, LocalAskDecision, QuestionSelection } from './asks.js'
 import {
   appendAskNotice,
@@ -52,6 +53,7 @@ import {
   renderQuestion,
 } from './asks.js'
 import type { PeerEventRecord, PeerParticipant, PeerPendingAsk, PeerQuestionAnswer, PeerQuestionItem, PeerRepairHole, PeerWebSocket } from './peer-client.js'
+import type { PeerHandshakeValue, PeerInputReceiptKind, PeerPromptValue, PeerStopIntent } from './peer-client.js'
 import { PeerBridgeError, PeerClient } from './peer-client.js'
 import { DEFAULT_SETTLE_QUIET_MS, isPeerSessionSettled, recordAssistantText, recordRpcId, recordSourceKind, recordTerminal, recordTurn } from './follow.js'
 import type { DialablePairing, PairingDocument } from './pairings.js'
@@ -131,6 +133,8 @@ export interface BridgeDeps {
   readonly webSocket?: (url: string) => PeerWebSocket
   /** Receives a durable-repair hole; defaults to a context warning. */
   readonly onWarning?: (hole: PeerRepairHole) => void
+  /** Receives compatibility warnings without stopping ordinary peer calls. */
+  readonly onCompatibilityWarning?: (message: string) => void
 }
 
 const DEFAULT_WAIT_MS = 300_000
@@ -155,6 +159,7 @@ interface ToolFailure {
 
 interface AskBridgeRecord extends AskRecord {
   readonly summary: string
+  answerRequestId?: string
   /** Aborts only this ask's locally surfaced card when the remote ask settles elsewhere. */
   readonly card: AbortController
   /** Set when the remote state first showed the ask gone while its card was open. */
@@ -193,6 +198,9 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
     onWarning: deps.onWarning ?? ((hole: PeerRepairHole): void => {
       ctx.logger?.warn?.(`enpoi-peer-bridge: peer follow history hole [${String(hole.from)}, ${String(hole.to)}) — records in that range are missing locally`)
     }),
+    onCompatibilityWarning: deps.onCompatibilityWarning ?? ((message: string): void => {
+      ctx.logger?.warn?.(`enpoi-peer-bridge: ${message}`)
+    }),
   }
 
   ctx.tools.register({
@@ -227,6 +235,9 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
               device: { type: 'string' },
               harnessVersion: { type: 'string' },
               protocolVersion: { type: 'number' },
+              instanceId: { type: 'string' },
+              schemaDigest: { type: 'string' },
+              methodsDigest: { type: 'string' },
               capabilities: { type: 'array', items: { type: 'string' } },
             },
             required: ['device', 'harnessVersion', 'protocolVersion', 'capabilities'],
@@ -238,6 +249,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           latchSource: { type: 'string' },
           activeDescendants: { type: 'number' },
           descendantsExact: { type: 'boolean' },
+          stopIntent: stopIntentSchema(),
           model: { type: 'string' },
           lastTurnEnd: { type: 'string' },
           pendingAsks: { type: 'array', items: { type: 'string' } },
@@ -256,6 +268,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       const client = makeClient(pairing, config, document.device, effectiveDeps)
       try {
         const handshake = await client.handshake()
+        warnAskCapabilities(handshake, effectiveDeps, ['stop-intent'])
         let bound = pairing.remoteSessionId !== undefined
         let stateValue: Awaited<ReturnType<PeerClient['state']>> | undefined
         try {
@@ -275,6 +288,9 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
             device: handshake.hostDevice,
             harnessVersion: handshake.harnessVersion,
             protocolVersion: handshake.protocolVersion,
+            instanceId: handshake.instanceId,
+            schemaDigest: handshake.schemaDigest,
+            methodsDigest: handshake.methodsDigest,
             capabilities: [...handshake.capabilities],
           },
           exposure: stateValue?.target.exposure ?? pairing.exposure ?? 'unknown',
@@ -284,6 +300,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           latchSource: state?.source ?? 'unknown',
           activeDescendants: state?.activeDescendants ?? 0,
           descendantsExact: state?.descendantsExact ?? false,
+          stopIntent: state?.stopIntent,
           model: state?.model === undefined ? '' : `${state.model.provider}/${state.model.model}${state.model.chain === undefined ? '' : ` (${state.model.chain})`}`,
           lastTurnEnd: state?.lastTurnEnd === undefined ? '' : `turn ${String(state.lastTurnEnd.turn)} ${state.lastTurnEnd.reason}`,
           pendingAsks: (state?.pendingAsks ?? []).map(askSummary),
@@ -673,6 +690,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
             'following that same remote turn to its terminal state without sending the message again.',
           ].join(' '),
         },
+        requestId: { type: 'string', description: 'Retry key from a lost reply. Retry with the same message and create options; use resume to follow without resending.' },
         provider: { type: 'string', description: 'When this call creates the session: provider of the route it starts on (with model).' },
         model: { type: 'string', description: 'When this call creates the session: model it starts on (with provider).' },
         chain: { type: 'string', description: 'When this call creates the session: chain id it starts on (its first ready member runs).' },
@@ -692,6 +710,11 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           sessionId: { type: 'string' },
           created: { type: 'boolean' },
           requestId: { type: 'string' },
+          createRequestId: { type: 'string' },
+          disposition: { type: 'string' },
+          terminalState: { type: 'string' },
+          instanceId: { type: 'string' },
+          replayed: { type: 'boolean' },
           admitted: { type: 'boolean' },
           resumed: { type: 'boolean' },
           status: { type: 'string' },
@@ -731,6 +754,9 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
         return { ok: false, error: { code: 'gateway/bad-request', message: 'resume must be the requestId string from a prior peer_ask result' } }
       }
       const resume = typeof resumeRaw === 'string' ? resumeRaw : undefined
+      const requestId = nonEmptyTextOf('requestId', request.requestId)
+      if (requestId !== undefined && !requestId.ok) return badRequest(requestId.message)
+      if (resume !== undefined && requestId !== undefined) return badRequest('peer_ask takes either resume or requestId, not both')
       if (resume !== undefined && message.trim() !== '') {
         return { ok: false, error: { code: 'gateway/bad-request', message: 'resume continues a followed turn; drop message (the first peer_ask already sent it)' } }
       }
@@ -755,6 +781,8 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
         alias,
         message,
         ...(resume === undefined ? {} : { resume }),
+        ...(requestId === undefined ? {} : { requestId: requestId.value }),
+        ...(exec.agent?.session === undefined ? {} : { toolCallKey: JSON.stringify([exec.agent.session.id, exec.callId]) }),
         createRouting: createRouting.value,
         allowCreate: true,
         deps: effectiveDeps,
@@ -764,7 +792,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
 
   ctx.tools.register({
     name: 'peer_asks',
-    description: 'List the pending asks (approvals and questions) on a paired peer session so the local operator can decide them with peer_answer.',
+    description: 'List retained asks on a paired peer session, including expired asks. Only pending approvals and questions can take a new decision with peer_answer.',
     parameters: {
       type: 'object',
       properties: {
@@ -781,6 +809,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           alias: { type: 'string' },
           sessionId: { type: 'string' },
           latch: { type: 'string' },
+          instanceId: { type: 'string' },
           asks: {
             type: 'array',
             items: askItemSchema(),
@@ -795,16 +824,23 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
     async execute(args) {
       const request = narrow(args)
       const alias = requireAlias(request.alias)
-      const { pairing } = resolveEntry(pairingsPath, alias)
-      const client = makeClient(pairing, config, undefined, effectiveDeps)
+      const { pairing, document } = resolveEntry(pairingsPath, alias)
+      const client = makeClient(pairing, config, document.device, effectiveDeps)
       try {
+        const handshake = await client.handshake()
+        if (handshake.capabilities.includes('durable-asks')) {
+          const value = await client.asks({ alias, sessionId: pairing.remoteSessionId })
+          return { ok: true, alias, instanceId: value.instanceId, sessionId: pairing.remoteSessionId ?? value.asks[0]?.sessionId,
+            asks: value.asks.map(ask => ({ ...askPayload(ask), state: ask.state, settlementReason: ask.settlementReason, answeredBy: ask.answeredBy })) }
+        }
+        warnAskCapabilities(handshake, effectiveDeps, ['durable-asks'])
         const value = await client.state(targetOf(pairing))
         return {
           ok: true,
           alias,
           sessionId: value.target.sessionId,
           latch: value.state.latch,
-          asks: value.state.pendingAsks.map(askPayload),
+          asks: value.state.pendingAsks.map(ask => ({ ...askPayload(ask), state: 'pending' })),
         }
       } catch (error) {
         return failureFrom(error, pairing.endpoint)
@@ -817,8 +853,8 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
     description: [
       'Answer one pending ask on a paired peer session. Approvals take outcome allowed-once or rejected;',
       'questions take answers[] naming each question id and the selected option labels (see peer_asks for',
-      'the ids and options). First answer wins — a peer/conflict means another participant already settled',
-      'it and the answer must not be retried blindly. A malformed selection is rejected here with the',
+      'the ids and options). Reuse requestId and the same decision after a lost reply; an expired ask',
+      'cannot take a new decision. A malformed selection is rejected here with the',
       'reason and never reaches the host.',
     ].join(' '),
     parameters: {
@@ -826,6 +862,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       properties: {
         alias: { type: 'string', description: 'Pairing alias of the peer session.' },
         askId: { type: 'string', description: 'Remote ask id from peer_asks or a peer_ask result.' },
+        requestId: { type: 'string', description: 'Retry ID from an earlier answer; reuse only with the same decision.' },
         outcome: { type: 'string', enum: ['allowed-once', 'rejected'], description: 'Approval outcome (allowed-always is not grantable from a peer).' },
         answers: {
           type: 'array',
@@ -852,6 +889,10 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           ok: { type: 'boolean' },
           alias: { type: 'string' },
           askId: { type: 'string' },
+          requestId: { type: 'string' },
+          replayed: { type: 'boolean' },
+          payloadHash: { type: 'string' },
+          instanceId: { type: 'string' },
           settled: { type: 'boolean' },
           confirmation: { type: 'string' },
           note: { type: 'string' },
@@ -866,6 +907,8 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       const alias = requireAlias(request.alias)
       const askId = typeof request.askId === 'string' && request.askId !== '' ? request.askId : undefined
       if (askId === undefined) return { ok: false, error: { code: 'gateway/bad-request', message: 'peer_answer needs an askId' } }
+      const retry = nonEmptyTextOf('requestId', request.requestId)
+      if (retry !== undefined && !retry.ok) return badRequest(retry.message)
       const outcome = request.outcome
       const rawAnswers = Array.isArray(request.answers) ? request.answers : undefined
       if (outcome !== undefined && rawAnswers !== undefined) {
@@ -879,7 +922,17 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       }
       const { pairing, document } = resolveEntry(pairingsPath, alias)
       const client = makeClient(pairing, config, document.device, effectiveDeps)
-      let answer: { readonly kind: 'approval'; readonly outcome: 'allowed-once' | 'rejected' } | { readonly kind: 'question'; readonly answer: PeerQuestionAnswer }
+      const participant = participantOf(config, document)
+      let target = targetOf(pairing)
+      let answer: Parameters<PeerClient['answer']>[0]['answer']
+      let durableAsks = false
+      try {
+        const handshake = await client.handshake()
+        warnAskCapabilities(handshake, effectiveDeps, ['ask-idempotent-answer'])
+        durableAsks = handshake.capabilities.includes('durable-asks')
+      } catch (error) {
+        return failureFrom(error, pairing.endpoint)
+      }
       if (outcome !== undefined) {
         answer = { kind: 'approval', outcome }
       } else {
@@ -887,8 +940,15 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
         if (!parsed.ok) return badRequest(parsed.message)
         let pending: PeerPendingAsk | undefined
         try {
-          const value = await client.state(targetOf(pairing))
-          pending = value.state.pendingAsks.find(candidate => candidate.askId === askId)
+          if (durableAsks) {
+            const value = await client.asks({ alias, sessionId: pairing.remoteSessionId })
+            const retained = value.asks.find(candidate => candidate.askId === askId)
+            pending = retained
+            if (retained !== undefined) target = { kind: 'session', sessionId: retained.sessionId }
+          } else {
+            const value = await client.state(target)
+            pending = value.state.pendingAsks.find(candidate => candidate.askId === askId)
+          }
         } catch (error) {
           return failureFrom(error, pairing.endpoint)
         }
@@ -902,50 +962,56 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
         if (!normalized.ok) return badRequest(normalized.message)
         answer = { kind: 'question', answer: normalized.answer }
       }
-      const target = targetOf(pairing)
+      let requestId: string
       try {
-        await client.answer({
+        requestId = retry?.value ?? recordAnswerId(dirname(noticesPath), pairing, participant, askId)
+      } catch {
+        return { ok: false, settled: false, error: { code: 'peer/unavailable', message: 'Could not record the local answer retry ID; no answer was sent.' } }
+      }
+      try {
+        const value = await client.answer({
           target,
-          participant: participantOf(config, document),
+          participant,
           askId,
+          requestId,
           answer,
         })
         return {
-          ok: true,
+          ok: value.accepted === true && value.settled === true,
           alias,
           askId,
-          settled: true,
+          requestId,
+          settled: value.settled === true,
+          replayed: value.replayed,
+          payloadHash: value.payloadHash,
+          instanceId: value.instanceId,
           confirmation: 'confirmed',
-          note: answer.kind === 'question'
+          note: value.replayed === true ? 'The host replayed the recorded answer; no new decision was delivered.' : answer.kind === 'question'
             ? 'question settled; the first answer won'
             : 'ask settled; the first answer won',
         }
       } catch (error) {
         const conflict = error instanceof PeerBridgeError && error.code === 'peer/conflict'
-        if (!conflict && error instanceof PeerBridgeError && error.code === 'peer/target-unreachable') {
-          // The answer may have settled before the confirmation was lost; a
-          // fresh read distinguishes "applied" from "never reached".
+        if (error instanceof PeerBridgeError && (error.code === 'peer/target-unreachable' || error.details.reason === 'missing-result-envelope')) {
           const reread = await client.state(target).catch(() => undefined)
-          if (reread !== undefined && !reread.state.pendingAsks.some(candidate => candidate.askId === askId)) {
-            return {
-              ok: true,
-              alias,
-              askId,
-              settled: false,
-              confirmation: 'lost',
-              note: 'the answer transport failed with no confirmation, but the remote ask is no longer pending — it was settled remotely (by this answer or another participant); re-run peer_asks before resending',
-            }
-          }
+          const gone = reread !== undefined && !reread.state.pendingAsks.some(candidate => candidate.askId === askId)
+          const message = gone
+            ? 'The answer reply was lost and the ask is no longer pending. This does not establish who answered or whether it expired; reuse the same request ID and decision to check for replay.'
+            : 'The answer reply was lost; reuse the same request ID and decision to check for replay.'
+          return { ok: false, alias, askId, requestId, settled: false, confirmation: 'lost', note: message, error: { code: 'peer/target-unreachable', message } }
         }
+        const refusal = answerRefusal(error)
+        const failure = failureFrom(error, pairing.endpoint)
         return {
           ok: false,
           alias,
           askId,
+          requestId,
           settled: false,
-          note: conflict
+          note: refusal ?? (conflict
             ? 'another participant already answered this ask (peer/conflict) — report it; do not retry blind'
-            : errorText(error),
-          error: failureFrom(error, pairing.endpoint).error,
+            : failure.error.message),
+          error: refusal === undefined ? failure.error : { ...failure.error, message: refusal },
         }
       }
     },
@@ -969,6 +1035,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
           ok: { type: 'boolean' },
           alias: { type: 'string' },
           cancelled: { type: 'boolean' },
+          stopIntent: stopIntentSchema(),
           confirmation: { type: 'string' },
           note: { type: 'string' },
           error: failureSchema(),
@@ -980,7 +1047,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
         return [{
           type: 'text',
           text: record.ok === true
-            ? `${record.cancelled === true ? 'Cancelled' : 'Nothing to cancel on'} ${String(record.alias)} — ${String(record.note ?? '')}`
+            ? `${record.cancelled === true ? 'Stop requested on' : 'No active turn reported on'} ${String(record.alias)} — ${String(record.note ?? '')}${record.stopIntent === undefined ? '' : `\n${stopIntentText(record.stopIntent)}`}`
             : `peer_cancel failed: ${String(narrow(record.error).message ?? '')}`,
         }]
       },
@@ -992,12 +1059,14 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
       const client = makeClient(pairing, config, document.device, effectiveDeps)
       try {
         const value = await client.cancel({ target: targetOf(pairing), participant: participantOf(config, document) })
+        if (value.stopIntent === undefined) effectiveDeps.onCompatibilityWarning?.('peer cancel did not report stop-intent')
         return {
           ok: true,
           alias,
           cancelled: value.cancelled,
+          stopIntent: value.stopIntent,
           confirmation: 'confirmed',
-          note: value.cancelled ? 'remote turn cancelled' : 'remote session had no active turn',
+          note: value.cancelled ? 'remote Stop was requested; this does not prove teardown' : 'remote session had no active turn',
         }
       } catch (error) {
         if (error instanceof PeerBridgeError && error.code === 'peer/target-unreachable') {
@@ -1010,6 +1079,7 @@ export function registerTools(ctx: Context, config: ResolvedConfig, deps: Bridge
               alias,
               cancelled: false,
               confirmation: 'lost',
+              stopIntent: reread.state.stopIntent,
               note: 'the cancel confirmation was lost (transport failure); the remote reports no active turn — it may have completed or been cancelled',
             }
           }
@@ -1035,6 +1105,8 @@ interface AskRunOptions {
   readonly message: string
   /** RequestId of a prior result to resume; no prompt is sent when set. */
   readonly resume?: string
+  readonly requestId?: string
+  readonly toolCallKey?: string
   /** Create-time routing and ceiling; only ever applied when this call creates the session. */
   readonly createRouting: {
     readonly provider?: string
@@ -1047,6 +1119,29 @@ interface AskRunOptions {
   readonly deps: BridgeDeps
 }
 
+function warnAskCapabilities(host: PeerHandshakeValue, deps: BridgeDeps, capabilities: readonly string[]): void {
+  for (const capability of capabilities) {
+    if (!host.capabilities.includes(capability)) deps.onCompatibilityWarning?.(`peer host does not advertise ${capability}`)
+  }
+}
+
+function lostInputReply(client: PeerClient, kind: PeerInputReceiptKind, alias: string, requestId: string, createRequestId: string, error: unknown): Promise<unknown> | undefined {
+  if (!(error instanceof PeerBridgeError)) return undefined
+  const reason = error.details.reason
+  if (error.code !== 'peer/target-unreachable' && reason !== 'missing-result-envelope'
+    && !(error.code === 'peer/unavailable' && reason === 'receipt-finalize-failed')) return undefined
+  return (async () => {
+    const receipt = await client.receipt({ alias, requestId: kind === 'create' ? createRequestId : requestId, kind }, AbortSignal.timeout(HOST_PROBE_TIMEOUT_MS)).catch(() => undefined)
+    const dispositions = kind === 'create' ? ['created', 'adopted'] : ['queued', 'claimed', 'cancelled_before_dispatch', 'terminal']
+    const disposition = receipt?.found === true && dispositions.includes(receipt.disposition) ? receipt.disposition : 'unknown'
+    return {
+      ok: false, alias, requestId, ...(kind === 'create' ? { createRequestId } : {}), disposition,
+      sessionId: receipt?.sessionId, instanceId: receipt?.instanceId, terminalState: receipt?.terminalState,
+      error: { code: error.code, message: `Peer ${kind} reply could not be confirmed; receipt disposition: ${disposition}.` },
+    }
+  })()
+}
+
 async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   const { pairing, document } = resolveEntry(options.pairingsPath, options.alias)
   const client = makeClient(pairing, options.config, document.device, options.deps)
@@ -1056,14 +1151,42 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   // resumed follow may replay the admission and even the turn's terminal in
   // its opening snapshot).
   const resumed = options.resume !== undefined && options.resume !== ''
+  const requestId = options.resume ?? options.requestId ?? (options.toolCallKey === undefined
+    ? `peer-bridge-${randomUUID()}`
+    : `peer-bridge-${createHash('sha256').update(options.toolCallKey).digest('hex')}`)
+  const createRequestId = `peer-bridge-create-${createHash('sha256').update(requestId).digest('hex')}`
   let created = false
+  let createAttempted = false
+  let handshake: PeerHandshakeValue
   try {
-    await client.handshake()
+    handshake = await client.handshake()
+    warnAskCapabilities(handshake, options.deps, ['bounded-follow', 'ask-idempotent-answer'])
   } catch (error) {
     return failureFrom(error, pairing.endpoint)
   }
-  const requestedTarget = targetOf(pairing)
+  let requestedTarget = targetOf(pairing)
   let baseline: Awaited<ReturnType<PeerClient['state']>>
+  const createOrReplay = async () => {
+    createAttempted = true
+    const defaults = pairing.create ?? {}
+    const routeOverride = options.createRouting.provider !== undefined || options.createRouting.chain !== undefined
+    const routing = { ...(routeOverride ? {} : pairing.createRouting ?? {}), ...options.createRouting }
+    warnAskCapabilities(handshake, options.deps, [
+      'session-create', 'create-receipts',
+      ...(routing.provider !== undefined || routing.chain !== undefined ? ['model-routing-at-create'] : []),
+      ...(routing.maxTotalTokens === undefined ? [] : ['token-ceiling']),
+    ])
+    const value = await client.create({
+      alias: pairing.alias, participant, requestId: createRequestId,
+      ...(typeof defaults.cwd === 'string' ? { cwd: defaults.cwd } : {}),
+      ...(typeof defaults.agentPreset === 'string' ? { agentPreset: defaults.agentPreset } : {}),
+      ...routing,
+    })
+    created = value.created
+    // Use the session this receipt names, not a potentially rebound alias.
+    requestedTarget = { kind: 'session', sessionId: value.target.sessionId }
+    return client.state(requestedTarget)
+  }
   try {
     baseline = await client.state(requestedTarget)
   } catch (error) {
@@ -1072,36 +1195,48 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       return failureFrom(error, pairing.endpoint)
     }
     try {
-      const defaults = pairing.create ?? {}
-      // A route named on this call replaces the pairing's pinned route; the
-      // ceiling and effort ride whichever route applies.
-      const routeOverride = options.createRouting.provider !== undefined || options.createRouting.chain !== undefined
-      await client.create({
-        alias: pairing.alias,
-        participant,
-        ...(typeof defaults.cwd === 'string' ? { cwd: defaults.cwd } : {}),
-        ...(typeof defaults.agentPreset === 'string' ? { agentPreset: defaults.agentPreset } : {}),
-        // The host pins this route on the created Session only; the parser
-        // already guarantees provider+model travel together.
-        ...(routeOverride ? {} : pairing.createRouting ?? {}),
-        ...options.createRouting,
-      })
-      created = true
-      baseline = await client.state(requestedTarget)
+      baseline = await createOrReplay()
     } catch (createError) {
-      return failureFrom(createError, pairing.endpoint)
+      return lostInputReply(client, 'create', pairing.alias, requestId, createRequestId, createError)
+        ?? { ...failureFrom(createError, pairing.endpoint), requestId, createRequestId }
     }
   }
-  if (!created && Object.keys(options.createRouting).length > 0) {
+  if (!resumed && !createAttempted && requestedTarget.kind === 'alias' && handshake.capabilities.includes('input-disposition')
+    && (options.requestId !== undefined || Object.keys(options.createRouting).length > 0)) {
+    try {
+      const prior = await client.receipt({ alias: pairing.alias, requestId: createRequestId, kind: 'create' }, AbortSignal.timeout(HOST_PROBE_TIMEOUT_MS))
+      if (prior.found) baseline = await createOrReplay()
+    } catch (error) {
+      return (createAttempted ? lostInputReply(client, 'create', pairing.alias, requestId, createRequestId, error) : undefined)
+        ?? { ...failureFrom(error, pairing.endpoint), requestId, createRequestId }
+    }
+  }
+  if (!createAttempted && Object.keys(options.createRouting).length > 0) {
     return badRequest(resumed
       ? 'peer_ask resume cannot change the model; call peer_switch_model first if the turn needs another route'
       : 'peer_ask model options apply only when this call creates the session; this session already exists — use peer_switch_model to change its model')
   }
-  const baselineTurn = baseline.state.lastTurnEnd?.turn ?? 0
-  const requestId = options.resume ?? `peer-bridge-${randomUUID()}`
+  let prompt: PeerPromptValue | undefined
   if (!resumed) {
+    warnAskCapabilities(handshake, options.deps, ['prompt-receipts', 'input-disposition'])
     try {
-      await client.prompt({
+      if (requestedTarget.kind === 'alias') {
+        let sessionId = baseline.target.sessionId
+        if (options.requestId !== undefined && handshake.capabilities.includes('input-disposition')) {
+          const prior = await client.receipt({ alias: pairing.alias, requestId, kind: 'prompt' }, AbortSignal.timeout(HOST_PROBE_TIMEOUT_MS))
+          if (prior.found && prior.sessionId !== undefined && prior.sessionId !== sessionId) {
+            requestedTarget = { kind: 'session', sessionId: prior.sessionId }
+            baseline = await client.state(requestedTarget)
+            sessionId = baseline.target.sessionId
+          }
+        }
+        requestedTarget = { kind: 'session', sessionId }
+      }
+    } catch (error) {
+      return { ...failureFrom(error, pairing.endpoint), requestId }
+    }
+    try {
+      prompt = await client.prompt({
         target: requestedTarget,
         participant,
         requestId,
@@ -1109,8 +1244,20 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
         hopCount: 0,
       })
     } catch (error) {
-      return failureFrom(error, pairing.endpoint)
+      return lostInputReply(client, 'prompt', pairing.alias, requestId, createRequestId, error)
+        ?? { ...failureFrom(error, pairing.endpoint), requestId }
     }
+  }
+  const input = {
+    ...(createAttempted ? { createRequestId } : {}),
+    ...(prompt?.disposition === undefined ? {} : { disposition: prompt.disposition }),
+    ...(prompt?.terminalState === undefined ? {} : { terminalState: prompt.terminalState }),
+    ...(prompt?.replayed === undefined ? {} : { replayed: prompt.replayed }),
+    instanceId: prompt?.instanceId ?? handshake.instanceId,
+  }
+  const baselineTurn = options.requestId !== undefined || prompt?.replayed === true ? 0 : (baseline.state.lastTurnEnd?.turn ?? 0)
+  if (prompt?.disposition === 'cancelled_before_dispatch') {
+    return { ...input, ok: false, alias: pairing.alias, sessionId: baseline.target.sessionId, requestId, created, admitted: true }
   }
 
   const controller = new AbortController()
@@ -1179,6 +1326,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   let admissionSeen = false
   let abandoned = false
   let quietExpired = false
+  let repairing = false
   let quietTimer: ReturnType<typeof setTimeout> | undefined
   const clearQuiet = (): void => {
     if (quietTimer !== undefined) { clearTimeout(quietTimer); quietTimer = undefined }
@@ -1190,7 +1338,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       controller.abort()
     }, options.settleMs)
   }
-  const settledNow = (): boolean => isPeerSessionSettled({
+  const settledNow = (): boolean => !repairing && isPeerSessionSettled({
     terminal, latch, activeDescendants, descendantsExact, pendingAskCount,
   })
 
@@ -1289,7 +1437,13 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   try {
     for await (const frame of client.follow({ target: requestedTarget }, controller.signal)) {
       lastFrameAt = Date.now()
+      if (frame.type === 'gap') {
+        repairing = true
+        clearQuiet()
+        continue
+      }
       if (frame.type === 'snapshot') {
+        repairing = false
         cursor = frame.cursor
         latch = frame.state.latch
         activeDescendants = frame.state.activeDescendants
@@ -1313,6 +1467,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
         detached = true
         break
       }
+      if (repairing) continue
       // A followed turn blocked on an ask: return the pending asks now instead
       // of holding the caller until waitMs. The caller (or its operator)
       // decides with peer_asks/peer_answer and resumes with the requestId.
@@ -1332,7 +1487,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       }
     }
   } catch (error) {
-    if (!timedOut && !controller.signal.aborted) return failureFrom(error, pairing.endpoint)
+    if (!timedOut && !controller.signal.aborted) return { ...failureFrom(error, pairing.endpoint), ...input, requestId, admitted, alias: pairing.alias, sessionId: baseline.target.sessionId }
   } finally {
     clearTimeout(timer)
     clearQuiet()
@@ -1361,6 +1516,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
 
   if (hostSilent) {
     return {
+      ...input,
       ok: false,
       pending: true,
       status: 'host_unreachable',
@@ -1386,6 +1542,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
 
   if (detached) {
     return {
+      ...input,
       ok: false,
       pending: true,
       alias: pairing.alias,
@@ -1404,6 +1561,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   if (approvalPause) {
     const ids = pendingNow.map(ask => ask.askId)
     return {
+      ...input,
       ok: false,
       pending: true,
       status: 'waiting_approval',
@@ -1429,6 +1587,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   const answer = answerParts.join('\n').trim()
   if (terminal === undefined) {
     return {
+      ...input,
       ok: false,
       pending: true,
       alias: pairing.alias,
@@ -1444,8 +1603,9 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       note: `no terminal within ${String(options.waitMs)}ms — the remote turn is still live (follow it again with peer_ask resume: ${JSON.stringify(requestId)}, or ds peer follow)`,
     }
   }
-  if (abandoned) {
+  if (abandoned && !repairing) {
     return {
+      ...input,
       ok: terminal.reason === 'completed',
       settled: true,
       superseded: true,
@@ -1473,6 +1633,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
   }
   if (!settledNow()) {
     return {
+      ...input,
       ok: false,
       pending: true,
       settled: false,
@@ -1496,11 +1657,13 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
       asks: askLines(asks),
       latch,
       cursor,
-      note: `remote turn ${String(terminal.turn)} ended: ${terminal.reason} but the session was not settled when following stopped (${unsettledSummary(latch, activeDescendants, pendingAskCount)}) — follow again to collect the remainder`,
+      note: repairing ? 'Peer follow lost continuity; history repair did not finish. Follow again to collect the remainder.'
+        : `remote turn ${String(terminal.turn)} ended: ${terminal.reason} but the session was not settled when following stopped (${unsettledSummary(latch, activeDescendants, pendingAskCount)}) — follow again to collect the remainder`,
     }
   }
   if (terminal.reason !== 'completed') {
     return {
+      ...input,
       ok: false,
       settled: true,
       alias: pairing.alias,
@@ -1526,6 +1689,7 @@ async function runAsk(ctx: Context, options: AskRunOptions): Promise<unknown> {
     }
   }
   return {
+    ...input,
     ok: true,
     settled: true,
     alias: pairing.alias,
@@ -1629,20 +1793,13 @@ async function surfacePending(
       continue
     }
     try {
-      await client.answer({
-        target,
-        participant,
-        askId: ask.askId,
-        answer: { kind: 'approval', outcome: mapped.outcome },
-      })
-      record.relay = 'settled'
-      record.note = mapped.note
+      await relayAnswer(client, noticesPath, pairing, target, participant, ask.askId, { kind: 'approval', outcome: mapped.outcome }, record, mapped.note)
     } catch (error) {
       const code = error instanceof PeerBridgeError ? error.code : 'unknown'
       record.relay = code === 'peer/conflict' ? 'conflict' : code === 'peer/not-found' ? 'not-found' : 'failed'
-      record.note = code === 'peer/conflict'
+      record.note = answerRefusal(error) ?? (code === 'peer/conflict'
         ? 'another participant answered first (peer/conflict) — not retried'
-        : `relay failed: ${errorText(error)}`
+        : `relay failed [${code}]${record.answerRequestId === undefined ? '' : '; reuse the answer request ID with the same decision'}`)
     }
   }
 }
@@ -1706,15 +1863,54 @@ async function surfaceQuestion(
     return
   }
   try {
-    await client.answer({ target, participant, askId: ask.askId, answer: { kind: 'question', answer } })
-    record.relay = 'settled'
-    record.note = 'local question answered → relayed'
+    await relayAnswer(client, noticesPath, pairing, target, participant, ask.askId, { kind: 'question', answer }, record, 'local question answered → relayed')
   } catch (error) {
     const code = error instanceof PeerBridgeError ? error.code : 'unknown'
     record.relay = code === 'peer/conflict' ? 'conflict' : code === 'peer/not-found' ? 'not-found' : 'failed'
-    record.note = code === 'peer/conflict'
+    record.note = answerRefusal(error) ?? (code === 'peer/conflict'
       ? 'another participant answered first (peer/conflict) — not retried'
-      : `relay failed: ${errorText(error)}`
+      : `relay failed [${code}]${record.answerRequestId === undefined ? '' : '; reuse the answer request ID with the same decision'}`)
+  }
+}
+
+async function relayAnswer(client: PeerClient, noticesPath: string, pairing: DialablePairing, target: ReturnType<typeof targetOf>, participant: PeerParticipant,
+  askId: string, answer: Parameters<PeerClient['answer']>[0]['answer'], record: AskBridgeRecord, note: string): Promise<void> {
+  const requestId = recordAnswerId(dirname(noticesPath), pairing, participant, askId)
+  record.answerRequestId = requestId
+  const result = await client.answer({ target, participant, askId, requestId, answer })
+  if (result.accepted !== true || result.settled !== true) {
+    record.relay = 'failed'
+    record.note = 'The host did not confirm answer settlement.'
+    return
+  }
+  record.relay = 'settled'
+  record.note = result.replayed === true ? 'the host replayed the recorded answer; no new decision was delivered' : note
+}
+
+function recordAnswerId(directory: string, pairing: DialablePairing, participant: PeerParticipant, askId: string): string {
+  const fingerprint = createHash('sha256').update(JSON.stringify([pairing.endpoint, pairing.alias, participant.device, participant.name, askId])).digest('hex')
+  const requestId = `peer-bridge-answer-${fingerprint}`
+  const store = join(directory, 'answer-requests')
+  mkdirSync(store, { recursive: true, mode: 0o700 })
+  try {
+    writeFileSync(join(store, fingerprint), `${requestId}\n`, { flag: 'wx', mode: 0o600 })
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) throw error
+  }
+  return requestId
+}
+
+function answerRefusal(error: unknown): string | undefined {
+  if (!(error instanceof PeerBridgeError)) return undefined
+  switch (error.details.reason) {
+    case 'request-id-reuse': return 'This answer request ID belongs to a different decision. Do not retry with changed answers.'
+    case 'ask-already-settled': return 'The ask was already settled; this answer did not settle it.'
+    case 'stale-generation': return 'The worker restarted; this ask is no longer answerable. Do not retry.'
+    case 'ask-expired': return 'The ask expired (including after a worker restart) and is no longer answerable. Do not retry.'
+    case 'ask-not-found': return 'The host no longer has this ask for the selected session. Read peer_asks before taking another action.'
+    case 'ask-store-unavailable': return 'The host ask journal is unavailable; no answer was confirmed.'
+    case 'ask-write-failed': return 'The host could not persist the answer; reuse the same request ID and decision if retrying.'
+    default: return undefined
   }
 }
 
@@ -1751,7 +1947,9 @@ function participantOf(config: ResolvedConfig, document: PairingDocument): PeerP
 }
 
 function makeClient(pairing: DialablePairing, config: ResolvedConfig, device?: string, deps: BridgeDeps = {}): PeerClient {
-  const headers: Record<string, string> = pairing.token === undefined ? {} : { authorization: `Bearer ${pairing.token}` }
+  const headers: Record<string, string> = pairing.outboundToken === undefined
+    ? {}
+    : { authorization: `Bearer ${pairing.outboundToken}` }
   return new PeerClient({
     endpoint: pairing.endpoint,
     device: config.device ?? device ?? pairing.peer,
@@ -1760,6 +1958,7 @@ function makeClient(pairing: DialablePairing, config: ResolvedConfig, device?: s
     ...(deps.fetch === undefined ? {} : { fetch: deps.fetch }),
     ...(deps.webSocket === undefined ? {} : { webSocket: deps.webSocket }),
     ...(deps.onWarning === undefined ? {} : { onWarning: deps.onWarning }),
+    ...(deps.onCompatibilityWarning === undefined ? {} : { onCompatibilityWarning: deps.onCompatibilityWarning }),
   })
 }
 
@@ -1940,16 +2139,22 @@ function requireAlias(value: unknown): string {
 
 function failureFrom(error: unknown, endpoint: string): ToolFailure {
   if (error instanceof PeerBridgeError) {
+    const reason = error.details.reason
+    const safeMessage = error.code === 'peer/conflict' && reason === 'request-id-reuse'
+      ? 'This request ID already belongs to a different payload. Reuse the original payload, or use a new ID for new work.'
+      : error.code === 'peer/unavailable' && typeof reason === 'string' && reason.startsWith('receipt-')
+        ? reason === 'receipt-write-failed' ? 'The host could not persist the input receipt.' : 'The host receipt store could not confirm this request.'
+        : error.message
     return {
       ok: false,
       error: {
         code: error.code,
         message: error.code === 'peer/target-unreachable'
           ? `REMOTE TARGET UNREACHABLE: ${error.endpoint}`
-          : error.message,
+          : safeMessage,
         endpoint: error.endpoint,
         ...(error.code === 'peer/target-unreachable'
-          ? { hint: 'the peer device is offline or the endpoint is wrong; the caller owns backoff and no turn was queued remotely' }
+          ? { hint: 'the peer device did not answer; the caller owns backoff' }
           : {}),
       },
     }
@@ -2029,6 +2234,9 @@ function askItemSchema(): Record<string, unknown> {
         },
       },
       since: { type: 'number' },
+      state: { type: 'string' },
+      settlementReason: { type: 'string' },
+      answeredBy: { type: 'object', additionalProperties: false, properties: { requestId: { type: 'string' }, payloadHash: { type: 'string' } } },
     },
     required: ['askId', 'kind', 'since'],
   }
@@ -2059,6 +2267,7 @@ function askLines(asks: Map<string, AskBridgeRecord>): string[] {
     if (record.decision !== undefined) parts.push(`decision=${record.decision}`)
     if (record.selected !== undefined && record.selected.length > 0) parts.push(`selected=${record.selected.join(',')}`)
     if (record.relay !== undefined) parts.push(`relay=${record.relay}`)
+    if (record.answerRequestId !== undefined) parts.push(`answer requestId=${record.answerRequestId}`)
     if (record.note !== undefined && record.note !== '') parts.push(record.note)
     return parts.join(' — ')
   })
@@ -2075,11 +2284,26 @@ function renderStatus(value: unknown): string {
   const host = narrow(record.host)
   const pendingAsks = Array.isArray(record.pendingAsks) ? record.pendingAsks as unknown[] : []
   return [
-    `peer ${String(record.alias)} → ${String(host.device ?? '')} @ ${String(record.endpoint)}`,
+    `peer ${String(record.alias)} → ${String(host.device ?? '')} @ ${String(record.endpoint)}${host.instanceId === undefined ? '' : ` (instance ${String(host.instanceId)})`}`,
     `session ${String(record.sessionId)} (${String(record.exposure)}) bound=${String(record.bound)}`,
     `latch ${String(record.latch)} (${String(record.latchSource)}), descendants ${String(record.activeDescendants)}, model ${String(record.model)}`,
+    ...(record.stopIntent === undefined ? [] : [stopIntentText(record.stopIntent)]),
     pendingAsks.length === 0 ? 'no pending asks' : `pending: ${pendingAsks.join('; ')}`,
   ].join('\n')
+}
+
+function stopIntentSchema(): Record<string, unknown> {
+  const keys: Readonly<Record<keyof PeerStopIntent, 'number' | 'boolean' | 'string'>> = {
+    requestedAt: 'number', keepInbox: 'boolean', turnState: 'string', activeDescendants: 'number', descendantsExact: 'boolean',
+    inFlightTools: 'number', quiescence: 'string',
+  }
+  return { type: 'object', additionalProperties: false, properties: Object.fromEntries(Object.entries(keys).map(([key, type]) => [key, { type }])) }
+}
+
+function stopIntentText(value: unknown): string {
+  const stop = narrow(value)
+  const tools = stop.inFlightTools === undefined ? '' : `, in-flight tools ${String(stop.inFlightTools)}`
+  return `Stop ${stop.requestedAt === undefined ? 'not recorded' : 'requested'}; inbox kept; turn ${String(stop.turnState)}, descendants ${String(stop.activeDescendants)} (exact=${String(stop.descendantsExact)})${tools}; quiescence ${stop.quiescence === 'observed' ? 'observed, not proof of teardown' : 'unknown'}.`
 }
 
 function renderSessions(value: unknown): string {
@@ -2185,6 +2409,13 @@ function renderSwitch(value: unknown): string {
 
 function renderAsk(value: unknown): string {
   const record = narrow(value)
+  if (record.disposition !== undefined && (record.error !== undefined || record.disposition === 'cancelled_before_dispatch')) {
+    const outcome = record.terminalState === undefined ? '' : ` (${String(record.terminalState)})`
+    const create = record.createRequestId === undefined ? '' : `; create requestId ${String(record.createRequestId)}`
+    const error = narrow(record.error)
+    const detail = typeof error.message === 'string' ? ` ${error.message}` : ''
+    return `Remote input disposition: ${String(record.disposition)}${outcome} — requestId ${String(record.requestId)}${create}.${detail} No automatic resend.`
+  }
   // Only a structured failure carries `error`; settled non-completed results
   // (terminal cancelled/aborted/error) and superseded turns carry `terminal`
   // instead and must render their reason below, never as an empty failure.
@@ -2243,10 +2474,11 @@ function renderAsks(value: unknown): string {
   const record = narrow(value)
   if (record.ok !== true) return `peer_asks failed: ${String(narrow(record.error).message ?? '')}`
   const asks = Array.isArray(record.asks) ? record.asks as Record<string, unknown>[] : []
-  if (asks.length === 0) return `no pending asks on ${String(record.alias)} (latch ${String(record.latch)})`
+  if (asks.length === 0) return record.instanceId === undefined ? `no pending asks on ${String(record.alias)} (latch ${String(record.latch)})` : `no retained asks on ${String(record.alias)}`
   return [
-    `${String(asks.length)} pending ask(s) on ${String(record.alias)}:`,
+    `${String(asks.length)} ${record.instanceId === undefined ? 'pending' : 'retained'} ask(s) on ${String(record.alias)}:`,
     ...asks.map(ask => {
+      if (ask.state !== undefined && ask.state !== 'pending') return `• ${String(ask.askId)} ${String(ask.kind)}: ${String(ask.state)}${ask.settlementReason === 'host-restarted' ? ' (worker restarted)' : ''} — not answerable`
       if (String(ask.kind) === 'question') {
         const questions = Array.isArray(ask.questions) ? ask.questions as Record<string, unknown>[] : []
         const rendered = questions.map(question => renderQuestion({
@@ -2264,8 +2496,9 @@ function renderAsks(value: unknown): string {
 
 function renderAnswer(value: unknown): string {
   const record = narrow(value)
-  if (record.ok === true) return `answered ${String(record.askId)} on ${String(record.alias)} — ${String(record.note ?? 'settled')}`
+  const retry = typeof record.requestId === 'string' ? ` (requestId ${record.requestId})` : ''
+  if (record.ok === true) return `${record.settled === true ? 'Answer settled' : 'Answer not confirmed'} for ${String(record.askId)} on ${String(record.alias)} — ${String(record.note ?? '')}${retry}`
   const error = narrow(record.error)
   const detail = typeof record.note === 'string' && record.note !== '' ? record.note : String(error.message ?? '')
-  return `peer_answer failed [${String(error.code ?? 'unknown')}] ${String(record.askId ?? '')}: ${detail}`
+  return `peer_answer failed [${String(error.code ?? 'unknown')}] ${String(record.askId ?? '')}: ${detail}${retry}`
 }

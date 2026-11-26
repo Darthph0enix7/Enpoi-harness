@@ -22,7 +22,9 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition, ToolExecution, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { assertSupportedJsonSchema } from '@deepseek-ai/dsh-tools'
 import type { JsonSchemaNode } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-util-values'
+import { isJsonValue, type JsonValue } from '@deepseek-ai/dsh-util-values'
+import { runWithMcpSession } from './header-context.ts'
+import { formatBoundedError, SecretRedactor } from './redact.ts'
 
 /** Resolved options relevant to tool bridging. */
 export interface ToolBridgeOptions {
@@ -30,6 +32,10 @@ export interface ToolBridgeOptions {
   registrationFailure: 'contain' | 'throw'
   serverName: string
   toolCallTimeoutMs: number
+  /** Optional allowlist of raw MCP tool names; unknown names fail loud. */
+  allowedTools?: readonly string[]
+  /** Optional redactor for secret-bearing results and logs. */
+  redactor?: SecretRedactor
 }
 
 /** State for one sync generation: the current set of disposers keyed by public name. */
@@ -118,11 +124,20 @@ export async function syncTools(
 ): Promise<ToolDisposers> {
   // Phase 1: fetch and build the next generation without touching the registry.
   const definitions = new Map<string, ToolDefinition>()
+  const allowSet = opts.allowedTools === undefined ? undefined : new Set(opts.allowedTools)
+  const seenAllowed = new Set<string>()
   const response = client.getServerCapabilities()?.tools === undefined
     ? { tools: [] }
     : await client.listTools(undefined, { cacheMode: 'refresh' })
   for (const tool of response.tools) {
+    if (allowSet !== undefined) {
+      if (!allowSet.has(tool.name)) continue
+      seenAllowed.add(tool.name)
+    }
     const publicName = publicToolName(opts.serverName, tool.name)
+    if (opts.redactor?.hasSecret(JSON.stringify([tool.name, publicName, tool.inputSchema, tool.outputSchema])) === true) {
+      throw new Error('MCP tool metadata contains a configured header value')
+    }
     if (definitions.has(publicName)) {
       throw new Error(
         `mcp-client(${opts.serverName}): server listed tool "${tool.name}" more than once — invalid tool list`,
@@ -131,15 +146,24 @@ export async function syncTools(
     definitions.set(publicName, createMcpToolDefinition(ctx, {
       name: publicName,
       rawName: tool.name,
-      description: tool.description ?? '',
+      description: opts.redactor?.redact(tool.description ?? '') ?? tool.description ?? '',
       inputSchema: tool.inputSchema,
       outputSchema: tool.outputSchema,
       taskRequired: tool.execution?.taskSupport === 'required',
+      ...(opts.redactor === undefined ? {} : { redactor: opts.redactor }),
       call: (args, execution) => client.callTool(
         { name: tool.name, arguments: args },
         { signal: execution.signal, timeout: opts.toolCallTimeoutMs, toolDefinition: tool },
       ),
     }))
+  }
+  if (opts.allowedTools !== undefined) {
+    const missing = opts.allowedTools.filter(name => !seenAllowed.has(name))
+    if (missing.length > 0) {
+      throw new Error(
+        `mcp-client(${opts.serverName}): allowedTools names unknown tool(s) not listed by server: ${missing.join(', ')}`,
+      )
+    }
   }
 
   // Phase 2: swap generations.
@@ -154,7 +178,8 @@ export async function syncTools(
     // registration occupies this server's namespace. Roll back so the model
     // sees either the full generation or none of it — never a partial set.
     for (const dispose of disposers.values()) dispose()
-    ctx.logger.error(`mcp-client(${opts.serverName}): tool registration failed, no tools registered: ${String(error)}`)
+    const errText = formatBoundedError(error, opts.redactor, 'tool registration failed')
+    ctx.logger.error(`mcp-client(${opts.serverName}): tool registration failed, no tools registered: ${errText}`)
     if (opts.registrationFailure === 'throw') throw error
     return new Map()
   }
@@ -206,6 +231,8 @@ export interface McpToolDefinitionOptions {
   outputSchema?: unknown
   /** Whether the upstream tool requires the unsupported task execution extension. */
   taskRequired?: boolean
+  /** Optional secret redactor applied to returned text and error messages. */
+  redactor?: SecretRedactor
   /**
    * Obtain one raw MCP result from the provider.
    * @param args - model arguments admitted by the ToolRuntime.
@@ -284,24 +311,33 @@ function createExecutor(
     // string/number/null). Fallback to {} lets the MCP server produce a
     // specific "missing required param" error the model can learn from.
     const argsObj = (typeof args === 'object' && args !== null ? args : {}) as Record<string, unknown>
-    const parsed = specTypeSchemas.CallToolResult['~standard'].validate(await options.call(argsObj, exec))
+    let rawResponse: unknown
+    const redactor = options.redactor === undefined ? undefined : new SecretRedactor(options.redactor)
+    try {
+      rawResponse = await runWithMcpSession(exec.agent?.session.id, () => options.call(argsObj, exec), redactor)
+    } catch {
+      throw new Error('MCP tool request failed.')
+    }
+    const parsed = specTypeSchemas.CallToolResult['~standard'].validate(rawResponse)
     if (parsed.issues !== undefined) {
-      throw new Error(`Tool "${rawName}" returned an invalid MCP result: ${parsed.issues.map(issue => issue.message).join('; ')}`)
+      throw new Error('MCP server returned an invalid tool result.')
     }
     const result = parsed.value
+    if (result.isError === true) throw new Error('MCP server reported a tool error.')
 
-    const content = result.content as unknown as JsonValue[]
-    const text = extractText(content, rawName)
+    const rawContent: unknown = result.content
+    if (!isJsonArray(rawContent)) throw new Error('MCP server returned an invalid tool result.')
+    const content = redactor === undefined ? rawContent : rawContent.map(block => redactor.redactJson(block))
 
-    // MCP isError → throw so ToolRuntime produces an isError result for the model.
-    if (result.isError === true) {
-      throw new Error(text)
-    }
-
+    const structured = result.structuredContent === undefined
+      ? undefined
+      : redactor === undefined
+        ? result.structuredContent as JsonValue
+        : redactor.redactJson(result.structuredContent as JsonValue)
     const value: McpResult = {
       content,
-      ...result.structuredContent !== undefined
-        ? { structuredContent: result.structuredContent as JsonValue }
+      ...structured !== undefined
+        ? { structuredContent: structured }
         : {},
     }
     if (containsImage(content)) {
@@ -311,6 +347,10 @@ function createExecutor(
     }
     return value
   }
+}
+
+function isJsonArray(value: unknown): value is JsonValue[] {
+  return Array.isArray(value) && isJsonValue(value)
 }
 
 /** Whether an untrusted MCP content array contains a declared image block. */

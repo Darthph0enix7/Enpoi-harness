@@ -39,7 +39,8 @@ pairings:
       agentPreset: sysadmin
     remoteSessionId: sess-xyz
     endpoint: https://laptop.pike-acrux.ts.net:8443
-    token: null
+    inboundToken: test-secret-token
+    outboundToken: test-outbound-token
     runawayCeiling: null
     allowModelChange: false
 `, '/tmp/pairings.yaml')
@@ -50,7 +51,9 @@ pairings:
     expect(pairing.sessionId).toBe('sess-abc')
     expect(pairing.create).toEqual({ cwd: '/home/adam/work', agentPreset: 'sysadmin' })
     expect(pairing.remoteSessionId).toBe('sess-xyz')
-    expect(pairing.token).toBeUndefined()
+    expect('inboundToken' in pairing).toBe(false)
+    expect(pairing.tokenHash).toMatch(/^scrypt\$/u)
+    expect(pairing.outboundToken).toBe('test-outbound-token')
     expect(pairing.runawayCeiling).toBeUndefined()
     expect(pairing.allowModelChange).toBe(false)
   })
@@ -87,11 +90,13 @@ pairings:
   - alias: bound
     peer: laptop
     exposure: answer-only
+    insecure: true
     create:
       cwd: ${root}
   - alias: fixed
     peer: desktop
     exposure: debug
+    insecure: true
     sessionId: sess-fixed
 `)
     const store = new PeerPairingsStore(pairingsPath, bindingsPath)
@@ -117,11 +122,13 @@ pairings:
   - alias: pinned
     peer: laptop
     exposure: debug
+    insecure: true
     sessionId: sess-local
     remoteSessionId: sess-pin
   - alias: created
     peer: desktop
     exposure: debug
+    insecure: true
     remoteSessionId: sess-bound-pin
     create:
       cwd: ${root}
@@ -148,6 +155,7 @@ pairings:
   - alias: bound
     peer: laptop
     exposure: debug
+    insecure: true
     create:
       cwd: ${root}
 `)
@@ -208,6 +216,7 @@ pairings:
   - alias: routed
     peer: laptop
     exposure: answer-only
+    insecure: true
     create:
       cwd: ${root}
     routing:
@@ -233,7 +242,7 @@ pairings:
       maxTotalTokens: 5000,
     })
     // An absent policy stays absent: no silent default.
-    write(pairingsPath, 'version: 1\ndevice: serverlocal\npairings:\n  - alias: plain\n    peer: laptop\n    exposure: debug\n    sessionId: s')
+    write(pairingsPath, 'version: 1\ndevice: serverlocal\npairings:\n  - alias: plain\n    peer: laptop\n    exposure: debug\n    insecure: true\n    sessionId: s')
     expect(new PeerPairingsStore(pairingsPath, join(root, 'peer-state.json')).load().pairings[0]?.routing)
       .toBeUndefined()
   })
@@ -260,6 +269,7 @@ pairings:
   - alias: routed
     peer: laptop
     exposure: debug
+    insecure: true
     create:
       cwd: ${root}
     ${block.replace(/\n/gu, '\n    ')}
@@ -281,6 +291,7 @@ pairings:
   - alias: typo
     peer: laptop
     exposure: debug
+    insecure: true
     sessionId: sess-typo
     ${block.replace(/\n/gu, '\n    ')}
 `)
@@ -425,5 +436,214 @@ describe('pairing store reload diagnostics', () => {
     silent.load()
     write(pairingsPath, 'version: 2\ndevice: a\npairings: []')
     expect(silent.load().device).toBe('a')
+  })
+})
+
+describe('pairing credentials and create limits (P-01 / P-05)', () => {
+  it('loads unauthenticated-legacy entries without credentials and warns once per alias', () => {
+    const root = tempRoot()
+    const pairingsPath = join(root, 'pairings.yaml')
+    writeFileSync(pairingsPath, `
+version: 1
+device: serverlocal
+pairings:
+  - alias: pc
+    peer: pc
+    exposure: debug
+    endpoint: http://100.98.71.68:3080
+    create:
+      agentPreset: orchestrator
+  - alias: macbook
+    peer: macbook
+    exposure: answer-only
+    endpoint: http://100.97.227.64:3080
+    outboundToken: outbound-only-secret
+    create:
+      agentPreset: orchestrator
+`, { mode: 0o600 })
+    const warnings: string[] = []
+    const store = new PeerPairingsStore(pairingsPath, join(root, 'peer-state.json'), {
+      onWarning: (message) => { warnings.push(message) },
+    })
+    const loaded = store.load()
+    expect(loaded.pairings).toHaveLength(2)
+    expect(loaded.pairings.find(p => p.alias === 'pc')).toMatchObject({
+      alias: 'pc',
+      peer: 'pc',
+      endpoint: 'http://100.98.71.68:3080',
+    })
+    expect(loaded.pairings.find(p => p.alias === 'macbook')?.outboundToken).toBe('outbound-only-secret')
+    expect(warnings).toHaveLength(2)
+    expect(warnings.some(w => w.includes('pc') && w.includes('tokenHash') && w.includes('inboundToken'))).toBe(true)
+    expect(warnings.some(w => w.includes('macbook') && w.includes('tokenHash') && w.includes('inboundToken'))).toBe(true)
+    // Second load hits cache and does not re-warn; warnings never echo outboundToken.
+    store.load()
+    expect(warnings).toHaveLength(2)
+    expect(warnings.join('\n')).not.toContain('outbound-only-secret')
+  })
+
+  it('rejects contradictory, ambiguous, or malformed credential fields without leaking plaintext tokens', () => {
+    const secret = 'super-secret-pairing-token-12345'
+    expect(() => parsePairingsDocument(`
+version: 1
+device: serverlocal
+pairings:
+  - alias: both
+    peer: laptop
+    exposure: debug
+    sessionId: sess-1
+    inboundToken: ${secret}
+    tokenHash: sha256$0000000000000000000000000000000000000000000000000000000000000000
+`, '/tmp/pairings.yaml')).toThrow(PeerConfigError)
+
+    expect(() => parsePairingsDocument(`
+version: 1
+device: serverlocal
+pairings:
+  - alias: insecure-with-token
+    peer: laptop
+    exposure: debug
+    sessionId: sess-1
+    insecure: true
+    inboundToken: ${secret}
+`, '/tmp/pairings.yaml')).toThrow(PeerConfigError)
+
+    expect(() => parsePairingsDocument(`
+version: 1
+device: serverlocal
+pairings:
+  - alias: ambiguous-token
+    peer: laptop
+    exposure: debug
+    sessionId: sess-1
+    token: ${secret}
+`, '/tmp/pairings.yaml')).toThrow(PeerConfigError)
+
+    try {
+      parsePairingsDocument(`
+version: 1
+device: serverlocal
+pairings:
+  - alias: bad-hash
+    peer: laptop
+    exposure: debug
+    sessionId: sess-1
+    tokenHash: not-a-valid-hash
+`, '/tmp/pairings.yaml')
+      expect.unreachable('malformed tokenHash must throw')
+    } catch (error) {
+      expect(error).toBeInstanceOf(PeerConfigError)
+      expect((error as Error).message).not.toContain('not-a-valid-hash')
+    }
+  })
+
+  it('hashes inboundToken at load, keeps outboundToken, warns on insecure and world-readable mode', () => {
+    const root = tempRoot()
+    const pairingsPath = join(root, 'pairings.yaml')
+    const inboundSecret = 'my-inbound-secret-token'
+    const outboundSecret = 'my-outbound-secret-token'
+    writeFileSync(pairingsPath, `
+version: 1
+device: serverlocal
+pairings:
+  - alias: hashed
+    peer: laptop
+    exposure: debug
+    sessionId: sess-1
+    inboundToken: ${inboundSecret}
+    outboundToken: ${outboundSecret}
+  - alias: opt-out
+    peer: desktop
+    exposure: answer-only
+    sessionId: sess-2
+    insecure: true
+`, { mode: 0o644 })
+    const warnings: string[] = []
+    const store = new PeerPairingsStore(pairingsPath, join(root, 'peer-state.json'), {
+      onWarning: (message) => { warnings.push(message) },
+    })
+    const loaded = store.load()
+    const hashed = loaded.pairings.find(p => p.alias === 'hashed')
+    expect(hashed).toBeDefined()
+    expect('inboundToken' in (hashed ?? {})).toBe(false)
+    expect('token' in (hashed ?? {})).toBe(false)
+    expect(typeof hashed?.tokenHash).toBe('string')
+    expect(String(hashed?.tokenHash)).toMatch(/^scrypt\$/u)
+    expect(hashed?.outboundToken).toBe(outboundSecret)
+    expect(JSON.stringify(loaded)).not.toContain(inboundSecret)
+    // Warns once for `insecure: true` and once for group/world-readable file mode with outboundToken.
+    expect(warnings).toHaveLength(2)
+    expect(warnings.some(w => w.includes('opt-out') && w.includes('insecure'))).toBe(true)
+    expect(warnings.some(w => w.includes('0600') && !w.includes(outboundSecret))).toBe(true)
+    // Second load hits cache and does not re-warn.
+    store.load()
+    expect(warnings).toHaveLength(2)
+  })
+
+  it('rejects create.agentPreset outside create.allowAgentPresets', () => {
+    expect(() => parsePairingsDocument(`
+version: 1
+device: serverlocal
+pairings:
+  - alias: limited
+    peer: laptop
+    exposure: debug
+    insecure: true
+    create:
+      agentPreset: creator
+      allowAgentPresets: [orchestrator, sysadmin]
+`, '/tmp/pairings.yaml')).toThrow(PeerConfigError)
+  })
+
+  it('parses create.freshOnly and worker policy strictly and rejects unknown keys or invalid bounds', () => {
+    const doc = parsePairingsDocument(`
+version: 1
+device: serverlocal
+pairings:
+  - alias: worker
+    peer: hub
+    exposure: answer-only
+    insecure: true
+    create:
+      freshOnly: true
+      agentPreset: worker-ro
+    worker:
+      allowedCapabilities: [read, search]
+      maxLimits:
+        maxSteps: 10
+        maxToolCalls: 25
+        maxWallMs: 60000
+        maxTotalTokens: 40000
+      allowedMcpEndpoints: [jarvis-hub]
+      allowedToolNames: [read, grep]
+`, '/tmp/pairings.yaml')
+    expect(doc.pairings[0]?.create?.freshOnly).toBe(true)
+    expect(doc.pairings[0]?.worker).toEqual({
+      allowedCapabilities: ['read', 'search'],
+      maxLimits: { maxSteps: 10, maxToolCalls: 25, maxWallMs: 60_000, maxTotalTokens: 40_000 },
+      allowedMcpEndpoints: ['jarvis-hub'],
+      allowedToolNames: ['read', 'grep'],
+    })
+
+    for (const bad of [
+      'create:\n      freshOnly: "yes"',
+      'create:\n      fresh_only: true',
+      'worker: 42',
+      'worker:\n      unknownKey: []',
+      'worker:\n      maxLimits:\n        maxSteps: 0',
+      'worker:\n      maxLimits:\n        unknownLimit: 10',
+      'worker:\n      allowedCapabilities: [""]',
+    ]) {
+      expect(() => parsePairingsDocument(`
+version: 1
+device: serverlocal
+pairings:
+  - alias: worker
+    peer: hub
+    exposure: answer-only
+    insecure: true
+    ${bad.includes('create:') ? bad : `create:\n      freshOnly: true\n    ${bad}`}
+`, '/tmp/pairings.yaml')).toThrow(PeerConfigError)
+    }
   })
 })

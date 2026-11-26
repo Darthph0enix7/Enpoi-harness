@@ -1,0 +1,6 @@
+{
+  "name": "dsh-profile-jarvis-worker",
+  "private": true,
+  "dependencies": { "dsh-enpoi-jarvis-worker": "file:./node_modules/dsh-enpoi-jarvis-worker" },
+  "dsh": { "profile": { "bundles": ["dsh-enpoi-jarvis-worker"] } }
+}

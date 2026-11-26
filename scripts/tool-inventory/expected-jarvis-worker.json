@@ -1,0 +1,46 @@
+{
+  "preset": "jarvis-worker",
+  "stale": false,
+  "tools": [
+    "mcp__jarvis__knowledge_facts",
+    "mcp__jarvis__knowledge_search"
+  ],
+  "directRefusals": [
+    "bash",
+    "read",
+    "edit",
+    "write",
+    "glob",
+    "grep",
+    "run_code",
+    "subagent",
+    "list_agents",
+    "memory_search",
+    "memory_save",
+    "memory_confirm",
+    "memory_rescind",
+    "compressor_retrieve",
+    "web_fetch",
+    "web_search",
+    "skill",
+    "goal_set",
+    "goal_status",
+    "peer_ask",
+    "peer_sessions",
+    "peer_models",
+    "peer_switch_model"
+  ],
+  "captureMethod": "keyless-profile-composition",
+  "captureSource": "apps/web/tests/keyless-tool-inventory.e2e.ts",
+  "captureScope": "separate release-owned Jarvis worker host; fake adapter, loopback hub, direct executor refusal checks",
+  "captureReceipt": {
+    "profile/web/packages/enpoi-jarvis-worker/cordis.patch.yml": "aacf029ae398e923a8747922cb7b64fe2759070fe94058866bb74dcd8e9c48ad",
+    "profile/web/packages/enpoi-jarvis-worker/knowledge-tools.json": "52c06aba6ebc556e94c22e30af71a2728c9f60d760cd2bc02728076107838958",
+    "profile/web/packages/enpoi-jarvis-worker/restrict.mjs": "b20fe422666e607d40a541f38faa6541af359ecc1ae177b3637c7b9efedc5f7c",
+    "profile/web/packages/enpoi-jarvis-worker/lib/index.js": "3f3f3e18338fa67816f50d596dc4a1e44b4467b180fcbf6511da38290f7c4ac2",
+    "profile/web/packages/enpoi-worker-credentials/lib/index.js": "3b4719045772d8159d4bc3d197ca2215cf6f1ceb640c15c3d565d351e4968d49",
+    "profile/web/packages/enpoi-job-guard/lib/index.js": "3bbc63f81ea69f7ec41c8dc5706b298d875b12ef06d5b514cc7be6e3b84e9593",
+    "packages/api/peer/lib/index.js": "52996bd2750c45d36a3d84f74cfe9b6db6f9c3da39064c0c0a3c62c16b1cffff",
+    "packages/mcp/mcp-client/lib/index.js": "2eae9b4b249bf8eb0e8a2d6e0fb5b3d74530418162f1004fef86abf80961bcc5"
+  }
+}

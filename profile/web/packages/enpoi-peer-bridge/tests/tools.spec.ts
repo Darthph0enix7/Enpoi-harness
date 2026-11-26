@@ -40,6 +40,9 @@ const ROUTED_PAIRING_DOC = [
 
 interface HostOptions {
   readonly answerError?: string
+  readonly answerReason?: string
+  readonly retainedAsks?: readonly Record<string, unknown>[]
+  readonly stopIntent?: Record<string, unknown>
   readonly ask?: PeerPendingAsk | null
   readonly withApproval?: boolean
   readonly networkFail?: boolean
@@ -105,6 +108,9 @@ interface HostOptions {
   readonly capabilities?: readonly string[]
   /** Fail `peer.create` with this peer error instead of binding. */
   readonly createFailure?: { readonly code: string; readonly message: string }
+  readonly lostInput?: 'create' | 'prompt'
+  readonly inputReceipt?: Record<string, unknown>
+  readonly promptFailure?: { readonly code: string; readonly message: string; readonly details: { readonly reason: string } }
   /** Report this latch from a `peer/selectModel` call (a busy session). */
   readonly switchBusy?: boolean
 }
@@ -122,9 +128,10 @@ function createHarness(options: HostOptions = {}) {
   const noticesPath = join(dir, 'peer-bridge', 'asks.jsonl')
   writeFileSync(pairingsPath, options.pairingDoc ?? PAIRING_DOC)
 
-  const calls: Array<{ method: string; args: Record<string, unknown> }> = []
+  const calls: Array<{ method: string; args: Record<string, unknown>; headers: Record<string, string> }> = []
   const captured = { requestId: undefined as string | undefined }
   let boundNow = options.unbound !== true
+  let inputLost = false
   // The scripted remote: state reads report the asks currently pending, and a
   // successful answer removes its ask, so a later confirming read agrees with
   // the state frames the socket already emitted.
@@ -140,7 +147,8 @@ function createHarness(options: HostOptions = {}) {
     const method = String(input).split('/api/peer/')[1]!
     const body = JSON.parse(String(init?.body)) as { rpcId: string; payload: { args: { request: Record<string, unknown> } } }
     const args = body.payload.args.request
-    calls.push({ method, args })
+    const headers = (init?.headers ?? {}) as Record<string, string>
+    calls.push({ method, args, headers })
     const ok = (value: unknown): Response => rpcResponse(value)
     const fail = (code: string, message: string): Response => rpcResponse({ code, message }, false)
     switch (method) {
@@ -149,6 +157,7 @@ function createHarness(options: HostOptions = {}) {
           protocolVersion: 1,
           harnessVersion: '0.1.6-alpha.2',
           schemaDigest: '',
+          instanceId: 'boot-1',
           hostDevice: 'serverlocal',
           capabilities: options.capabilities ?? ['state-latch'],
           pairings: [],
@@ -194,12 +203,14 @@ function createHarness(options: HostOptions = {}) {
             pendingAsks: pendingAsksNow,
             model: { provider: 'antigravity', model: 'gemini-3.8-flash-tiered' },
             lastTurnEnd: { turn: 0, reason: 'completed', at: 0 },
+            stopIntent: options.stopIntent,
           },
           cursor: 0,
         })
       case 'create':
         if (options.createFailure !== undefined) return fail(options.createFailure.code, options.createFailure.message)
         boundNow = true
+        if (options.lostInput === 'create' && !inputLost) { inputLost = true; throw new Error('private transport detail') }
         return ok({
           target: { device: 'serverlocal', sessionId: 'sess-1', exposure: 'debug', alias: 'scratch' },
           created: true,
@@ -220,16 +231,23 @@ function createHarness(options: HostOptions = {}) {
         })
       case 'prompt':
         captured.requestId = typeof args.requestId === 'string' ? args.requestId : undefined
+        if (options.promptFailure !== undefined) return rpcResponse(options.promptFailure, false)
+        if (options.lostInput === 'prompt' && !inputLost) { inputLost = true; return new Response('{') }
         return ok({ accepted: true, queued: true, hopCount: 1 })
+      case 'receipt':
+        return ok(options.inputReceipt ?? { found: false, replayedAcrossRestart: false, disposition: 'unknown' })
+      case 'asks':
+        return ok({ instanceId: 'boot-1', asks: options.retainedAsks ?? [] })
       case 'answer':
+        if (typeof args.requestId !== 'string') return fail('gateway/bad-request', 'answer requires a requestId')
         if (options.answerTransportFail === true) throw new Error('econnrefused')
         if (options.answerTransportLost === true) {
           pendingAsksNow = pendingAsksNow.filter(ask => ask.askId !== args.askId)
           throw new Error('econnrefused')
         }
-        if (options.answerError !== undefined) return fail(options.answerError, 'already settled')
+        if (options.answerError !== undefined) return rpcResponse({ code: options.answerError, message: options.answerReason === undefined ? 'already settled' : 'private detail', details: { reason: options.answerReason } }, false)
         pendingAsksNow = pendingAsksNow.filter(ask => ask.askId !== args.askId)
-        return ok({ accepted: true, settled: true })
+        return ok({ accepted: true, settled: true, replayed: calls.filter(call => call.method === 'answer' && call.args.requestId === args.requestId).length > 1, payloadHash: 'answer-hash', instanceId: 'boot-1' })
       case 'cancel':
         if (options.cancelTransportFail === true) throw new Error('econnrefused')
         return ok({ accepted: true, cancelled: true })
@@ -522,6 +540,46 @@ const QUESTION_ASK: PeerPendingAsk = {
 }
 
 describe('enpoi-peer-bridge tools', () => {
+  it('sends one stable answer ID and reports a same-ID replay', async () => {
+    const { tools, exec, calls, noticesPath } = createHarness()
+    const tool = tools.get('peer_answer')!
+    const args = { alias: 'scratch', askId: 'ask-1', outcome: 'rejected' }
+    const first = await tool.execute(args, exec)
+    expect(first).toMatchObject({ ok: true, settled: true, requestId: expect.any(String), replayed: false })
+    expect(await tool.execute(args, exec)).toMatchObject({ settled: true, requestId: first.requestId, replayed: true })
+    expect(calls.filter(call => call.method === 'answer').map(call => call.args.requestId)).toEqual([first.requestId, first.requestId])
+    expect(readFileSync(join(noticesPath, '..', 'answer-requests', String(first.requestId).replace('peer-bridge-answer-', '')), 'utf8').trim()).toBe(first.requestId)
+  })
+
+  it('replays a retained, already answered question even though it is not pending', async () => {
+    const { tools, exec, calls } = createHarness({ capabilities: ['durable-asks', 'ask-idempotent-answer'], retainedAsks: [{ ...QUESTION_ASK, sessionId: 'sess-1', state: 'answered' }] })
+    const args = { alias: 'scratch', askId: 'ask-q1', requestId: 'accepted-answer', answers: [{ id: 'colour', selected: ['red'] }] }
+    const tool = tools.get('peer_answer')!
+    await tool.execute(args, exec)
+    expect(await tool.execute(args, exec)).toMatchObject({ settled: true, replayed: true, requestId: 'accepted-answer' })
+    expect(calls.filter(call => call.method === 'answer').at(-1)?.args).toMatchObject({ target: { kind: 'session', sessionId: 'sess-1' }, requestId: 'accepted-answer' })
+  })
+
+  it.each(['request-id-reuse', 'ask-already-settled', 'stale-generation', 'ask-expired', 'ask-not-found', 'ask-store-unavailable', 'ask-write-failed'])('renders a non-secret refusal for %s', async (reason) => {
+    const { tools, exec, calls } = createHarness({ answerError: 'peer/conflict', answerReason: reason })
+    const result = await tools.get('peer_answer')!.execute({ alias: 'scratch', askId: 'ask-1', outcome: 'rejected' }, exec)
+    expect(result).toMatchObject({ ok: false, settled: false, error: { message: expect.any(String) } })
+    expect(JSON.stringify(result)).not.toContain('private detail')
+    if (reason === 'stale-generation' || reason === 'ask-expired') expect(result.note).toContain('no longer answerable')
+    expect(calls.filter(call => call.method === 'answer')).toHaveLength(1)
+  })
+
+  it('lists expired durable asks and labels stop observation as not proof', async () => {
+    const stopIntent = { keepInbox: true, turnState: 'idle', activeDescendants: 0, descendantsExact: true, quiescence: 'observed' }
+    const { tools, exec, calls } = createHarness({ capabilities: ['durable-asks', 'stop-intent'], retainedAsks: [{ ...APPROVAL_ASK, state: 'expired', settlementReason: 'host-restarted', sessionId: 'sess-1' }], stopIntent })
+    const listed = await tools.get('peer_asks')!.execute({ alias: 'scratch' }, exec)
+    expect(listed).toMatchObject({ instanceId: 'boot-1', asks: [{ state: 'expired', settlementReason: 'host-restarted' }] })
+    expect(calls.some(call => call.method === 'asks')).toBe(true)
+    expect(tools.get('peer_asks')!.output.render({}, listed)[0]?.text).toContain('expired')
+    const status = await tools.get('peer_status')!.execute({ alias: 'scratch' }, exec)
+    expect(status.stopIntent).toEqual(stopIntent)
+    expect(tools.get('peer_status')!.output.render({}, status)[0]?.text).toContain('not proof')
+  })
   it('registers the eight bridge tools with model-facing descriptions and renders', () => {
     const harness = createHarness()
     expect([...harness.tools.keys()]).toEqual([
@@ -546,6 +604,53 @@ describe('enpoi-peer-bridge tools', () => {
       model: 'antigravity/gemini-3.8-flash-tiered',
     })
     expect((result.host as Record<string, unknown>).device).toBe('serverlocal')
+    expect(result.host).toMatchObject({ instanceId: 'boot-1' })
+  })
+
+  it.each(['queued', 'claimed', 'cancelled_before_dispatch', 'terminal', 'unknown'])('reports a lost prompt reply with receipt disposition %s', async disposition => {
+    const { tools, exec, calls } = createHarness({ lostInput: 'prompt', inputReceipt: { found: true, kind: 'prompt', disposition, sessionId: 'sess-1' } })
+    const tool = tools.get('peer_ask')!
+    const result = await tool.execute({ alias: 'scratch', message: 'same' }, exec)
+    expect(result).toMatchObject({ ok: false, disposition, requestId: expect.any(String) })
+    expect(calls.filter(call => call.method === 'receipt')).toEqual([
+      expect.objectContaining({ args: { alias: 'scratch', kind: 'prompt', requestId: result.requestId } }),
+    ])
+    expect(calls.filter(call => call.method === 'prompt')).toHaveLength(1)
+    await tool.execute({ alias: 'scratch', message: 'same', requestId: result.requestId }, exec)
+    expect(calls.filter(call => call.method === 'prompt').map(call => call.args.requestId)).toEqual([result.requestId, result.requestId])
+  })
+
+  it('uses separate stable IDs and checks the create receipt without prompting after a lost reply', async () => {
+    const { tools, exec, calls } = createHarness({ unbound: true, lostInput: 'create', inputReceipt: { found: true, kind: 'create', disposition: 'created', sessionId: 'sess-1' } })
+    const result = await tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'same' }, exec)
+    expect(result).toMatchObject({ ok: false, disposition: 'created', requestId: expect.any(String), createRequestId: expect.any(String) })
+    expect(result.createRequestId).not.toBe(result.requestId)
+    expect(calls.map(call => call.method)).toEqual(['handshake', 'state', 'create', 'receipt'])
+    expect(calls[2]!.args.requestId).toBe(result.createRequestId)
+    expect(calls[3]!.args).toEqual({ alias: 'scratch', kind: 'create', requestId: result.createRequestId })
+  })
+
+  it('derives the same prompt ID when the same local tool call is delivered again', async () => {
+    const { tools, exec, calls } = createHarness()
+    const tool = tools.get('peer_ask')!
+    const args = { alias: 'scratch', message: 'same' }
+    await tool.execute(args, { ...exec, callId: 'call-1', agent: { session: { id: 'local-session' } } })
+    await tool.execute(args, { ...exec, callId: 'call-1', agent: { session: { id: 'local-session' } } })
+    await tool.execute(args, { ...exec, callId: 'call-1', agent: { session: { id: 'other-session' } } })
+    const ids = calls.filter(call => call.method === 'prompt').map(call => call.args.requestId)
+    expect(ids[0]).toBe(ids[1])
+    expect(ids[2]).not.toBe(ids[0])
+  })
+
+  it.each([
+    ['peer/conflict', 'request-id-reuse', /different payload/u],
+    ['peer/unavailable', 'receipt-write-failed', /could not persist/u],
+    ['peer/unavailable', 'receipt-store-unavailable', /receipt store/u],
+  ])('sanitizes %s (%s)', async (code, reason, message) => {
+    const { tools, exec } = createHarness({ promptFailure: { code, message: 'private remote detail', details: { reason } } })
+    const result = await tools.get('peer_ask')!.execute({ alias: 'scratch', message: 'same' }, exec)
+    expect(result.error).toMatchObject({ code, message: expect.stringMatching(message) })
+    expect(JSON.stringify(result)).not.toContain('private remote detail')
   })
 
   it('peer_status surfaces peer/target-unreachable naming the endpoint', async () => {
@@ -1056,10 +1161,10 @@ describe('enpoi-peer-bridge tools', () => {
     expect(String(result.note)).toContain('live descendant')
   })
 
-  it('reports an answer whose confirmation was lost as settled remotely', async () => {
+  it('does not confirm a lost answer reply just because the ask disappeared', async () => {
     const harness = createHarness({ ask: APPROVAL_ASK, answerTransportLost: true })
     const result = await harness.tools.get('peer_answer')!.execute({ alias: 'scratch', askId: 'ask-1', outcome: 'allowed-once' }, harness.exec)
-    expect(result).toMatchObject({ ok: true, settled: false, confirmation: 'lost' })
+    expect(result).toMatchObject({ ok: false, settled: false, confirmation: 'lost' })
     expect(String(result.note)).toContain('no longer pending')
   })
 
@@ -1290,6 +1395,45 @@ describe('enpoi-peer-bridge tools', () => {
       ok: false,
       error: { code: 'peer/forbidden', message: 'routing policy refused the requested model (model-not-allowed)' },
     })
+  })
+
+  it('sends outboundToken as Authorization bearer and never leaks it in tool output or errors', async () => {
+    const secret = 'outbound-bearer-secret-999'
+    const doc = [
+      'version: 1',
+      'device: serverlocal',
+      'pairings:',
+      '  - alias: scratch',
+      '    peer: serverlocal',
+      '    exposure: debug',
+      '    endpoint: https://serverlocal.pike-acrux.ts.net:8443',
+      '    tokenHash: sha256$0000000000000000000000000000000000000000000000000000000000000000',
+      `    outboundToken: ${secret}`,
+      '    create:',
+      '      cwd: /tmp/scratch-work',
+      '      allowAgentPresets: [standard]',
+      '',
+    ].join('\n')
+    const harness = createHarness({ pairingDoc: doc })
+    const status = await harness.tools.get('peer_status')!.execute({ alias: 'scratch' }, harness.exec)
+    expect(status.ok).toBe(true)
+    expect(harness.calls[0]!.headers.authorization).toBe(`Bearer ${secret}`)
+    const statusRendered = harness.tools.get('peer_status')!.output.render({}, status)[0]!.text
+    expect(JSON.stringify(status)).not.toContain(secret)
+    expect(statusRendered).not.toContain(secret)
+
+    const sessions = await harness.tools.get('peer_sessions')!.execute({ alias: 'scratch' }, harness.exec)
+    expect(sessions.ok).toBe(true)
+    expect(harness.calls.at(-1)!.headers.authorization).toBe(`Bearer ${secret}`)
+    const sessionsRendered = harness.tools.get('peer_sessions')!.output.render({}, sessions)[0]!.text
+    expect(JSON.stringify(sessions)).not.toContain(secret)
+    expect(sessionsRendered).not.toContain(secret)
+
+    const failing = createHarness({ pairingDoc: doc, networkFail: true })
+    const failedStatus = await failing.tools.get('peer_status')!.execute({ alias: 'scratch' }, failing.exec)
+    expect(failedStatus.ok).toBe(false)
+    expect(JSON.stringify(failedStatus)).not.toContain(secret)
+    expect(failing.tools.get('peer_status')!.output.render({}, failedStatus)[0]!.text).not.toContain(secret)
   })
 
 })

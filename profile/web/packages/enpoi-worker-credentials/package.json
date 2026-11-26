@@ -1,0 +1,13 @@
+{
+  "name": "dsh-enpoi-worker-credentials",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Resolve a bound Jarvis worker's MCP bearer from private local files",
+  "type": "module",
+  "main": "lib/index.js",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-home-paths": "workspace:*",
+    "@deepseek-ai/schemastery": "workspace:~"
+  }
+}

@@ -22,6 +22,7 @@ This directory is the Creator's knowledge base: everything needed to diagnose, c
 | `13-upstream-merge-runbook-and-fork-deltas.md` | Authoritative merge runbook, core fork modifications vs upstream (session core, PTC, MCP lifecycle, web search, permissions, orchestration/memory hardening, peer model control), conflict resolution rules, the ten-line post-merge peer probe, and verification probes. | Merging a new upstream release (e.g. 0.2.0+) without breaking Enpoi features. |
 | `14-update-maintenance.md` | Update-system maintenance: on-disk footprint, retention and disk hygiene, reading a dry-run and a report, pins/tombstones how-to, interrupted updates, rollback steps, the update failure table. | Updating a device, changing what an update preserves, or diagnosing an update that misbehaved. |
 | [15-jarvis-worker-integration-discovery.md](15-jarvis-worker-integration-discovery.md) | Jarvis worker integration discovery: supported control interfaces, lifecycle and authority limits, evidence, and a staged integration proposal. | Integrating an external assistant without commandeering human sessions or mistaking worker completion for verified success. |
+| [16-jarvis-worker-profile.md](16-jarvis-worker-profile.md) | Isolated worker profile, exact knowledge-tool manifest, release seeding, pairing, systemd confinement, evidence, and drill. | Preparing or verifying a disposable Jarvis worker deployment. |
 
 ## The rules (non-negotiable)
 

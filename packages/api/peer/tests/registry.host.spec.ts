@@ -49,6 +49,7 @@ function harness(sessionIds: readonly string[]): {
       `  - alias: alias-${id}`,
       '    peer: laptop',
       '    exposure: answer-only',
+      '    insecure: true',
       `    sessionId: ${id}`,
     ]),
   ].join('\n'))
@@ -72,7 +73,9 @@ function harness(sessionIds: readonly string[]): {
     },
   } as never)
   const store = new PeerPairingsStore(pairingsPath, join(root, 'peer-state.json'))
-  const registry = new PeerAskRegistry(ctx, store)
+  const registry = new PeerAskRegistry(ctx, store, {
+    path: join(root, 'peer-asks.json'), instanceId: 'test', maxCount: 16, maxBytes: 8192, maxRecordBytes: 4096, maxRequestIdLength: 256,
+  })
   registry.install()
   return { ctx, registry, store, agents }
 }
@@ -98,8 +101,8 @@ describe('ask registry race', () => {
     expect(asks).toHaveLength(1)
     const askId = asks[0]!.askId
     const resolved = store.exposed('root' as SessionId)!
-    expect(registry.answer(resolved, askId, { kind: 'approval', outcome: 'allowed-once' }))
-      .toEqual({ accepted: true, settled: true })
+    expect(registry.answer(resolved, askId, { kind: 'approval', outcome: 'allowed-once' }, 'once' as never))
+      .toMatchObject({ accepted: true, settled: true, replayed: false })
     await expect(pending).resolves.toBe('allowed-once')
     expect(registry.pendingFor('root' as SessionId)).toHaveLength(0)
   })
@@ -110,11 +113,12 @@ describe('ask registry race', () => {
     const childAgent = fakeAgent('child', 'root')
     agents.set(rootAgent.id, rootAgent)
     agents.set(childAgent.id, childAgent)
+    const gate = Promise.withResolvers<ApprovalOutcome>()
     const pending = ctx.waterfall(
       scopeTarget(childAgent, childAgent),
       'approval/request',
       approvalRequest(childAgent),
-      () => Promise.resolve<ApprovalOutcome>('unavailable'),
+      () => gate.promise,
     )
     await Promise.resolve()
     await Promise.resolve()
@@ -122,7 +126,8 @@ describe('ask registry race', () => {
     expect(registry.pendingFor('child' as SessionId)).toHaveLength(0)
     const ask = registry.pendingFor('root' as SessionId)[0]!
     expect(ask).toMatchObject({ kind: 'approval', toolName: 'bash' })
-    void pending
+    gate.resolve('unavailable')
+    await expect(pending).resolves.toBe('unavailable')
   })
 
   it('loses to a settled local answer with peer/conflict and rejects unknown asks', async () => {
@@ -142,14 +147,14 @@ describe('ask registry race', () => {
     const resolved = store.exposed('root' as SessionId)!
     gate.resolve('rejected')
     await expect(pending).resolves.toBe('rejected')
-    expect(() => registry.answer(resolved, askId, { kind: 'approval', outcome: 'allowed-once' }))
+    expect(() => registry.answer(resolved, askId, { kind: 'approval', outcome: 'allowed-once' }, 'once' as never))
       .toThrow(RemoteError)
     try {
-      registry.answer(resolved, askId, { kind: 'approval', outcome: 'allowed-once' })
+      registry.answer(resolved, askId, { kind: 'approval', outcome: 'allowed-once' }, 'once' as never)
     } catch (error) {
       expect((error as RemoteError).code).toBe('peer/conflict')
     }
-    expect(() => registry.answer(resolved, 'missing' as never, { kind: 'approval', outcome: 'rejected' }))
+    expect(() => registry.answer(resolved, 'missing' as never, { kind: 'approval', outcome: 'rejected' }, 'reject' as never))
       .toThrow(/no pending ask/u)
   })
 
@@ -157,17 +162,20 @@ describe('ask registry race', () => {
     const { ctx, registry, agents } = harness(['root'])
     const agent = fakeAgent('root')
     agents.set(agent.id, agent)
+    const gate = Promise.withResolvers<ApprovalOutcome>()
     const pending = ctx.waterfall(
       scopeTarget(agent, agent),
       'approval/request',
       approvalRequest(agent),
-      () => Promise.reject(new Error('forwarded ask was cancelled')),
+      () => gate.promise,
     )
     await Promise.resolve()
     await Promise.resolve()
     expect(registry.pendingFor('root' as SessionId)).toHaveLength(1)
 
-    await expect(pending).rejects.toThrow('forwarded ask was cancelled')
+    const rejected = expect(pending).rejects.toThrow('forwarded ask was cancelled')
+    gate.reject(new Error('forwarded ask was cancelled'))
+    await rejected
 
     // The settled rejection must not leave an answerable entry behind.
     expect(registry.pendingFor('root' as SessionId)).toHaveLength(0)
@@ -202,10 +210,10 @@ describe('ask registry race', () => {
     await Promise.resolve()
     const askId = registry.pendingFor('root' as SessionId)[0]!.askId
     const resolved = store.exposed('root' as SessionId)!
-    expect(() => registry.answer(resolved, askId, { kind: 'question', answer: { answers: 'nope' } as never }))
+    expect(() => registry.answer(resolved, askId, { kind: 'question', answer: { answers: 'nope' } as never }, 'question' as never))
       .toThrow(RemoteError)
     expect(registry.pendingFor('root' as SessionId)).toHaveLength(1)
-    registry.answer(resolved, askId, { kind: 'question', answer: { answers: [{ id: 'q1', selected: ['yes'] }] } })
+    registry.answer(resolved, askId, { kind: 'question', answer: { answers: [{ id: 'q1', selected: ['yes'] }] } }, 'question' as never)
     await expect(pending).resolves.toEqual({ answers: [{ id: 'q1', selected: ['yes'] }] })
   })
 })

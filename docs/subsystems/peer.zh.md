@@ -2,7 +2,7 @@
 
 [English](peer.md) | 中文
 
-[`@deepseek-ai/dsh-api-peer`](../../packages/api/peer) 的设备到设备对等 seam。一台宿主在 `peer` 命名空间下暴露一组窄接口——`handshake`、`state`、`create`、`prompt`、`cancel`、`answer`、`page`、`follow`——它们在一个闭合的分发表之后映射到 `session.*` 操作；另一台设备据此驱动并观察已配对的会话。配对是寻址边界：每个调用首先通过宿主的配对表解析其 `PeerTarget`，因此只有表中列名的会话可被听见，而暴露过滤、参与者校验、跳数上限与孤儿看门狗都在宿主侧施加，绝不交给调用方。
+[`@deepseek-ai/dsh-api-peer`](../../packages/api/peer) 的设备到设备对等 seam。一台宿主在 `peer` 命名空间下暴露一组窄接口——`handshake`、`list`、`state`、`create`、`prompt`、`receipt`、`cancel`、`answer`、`page`、`follow`、`models`、`selectModel`——它们在一个闭合的分发表之后映射到 `session.*` 操作；另一台设备据此驱动并观察已配对的会话。配对是寻址边界：每个调用首先通过宿主的配对表解析其 `PeerTarget`，因此只有表中列名的会话可被听见，而暴露过滤、参与者校验、跳数上限与孤儿看门狗都在宿主侧施加，绝不交给调用方。
 
 源码：[`packages/api/peer/src/host.ts`](../../packages/api/peer/src/host.ts)
 
@@ -23,10 +23,18 @@ interface Config {
   readonly harnessVersion?: string
   /** Schema digest reported by `peer.handshake`. */
   readonly schemaDigest?: string
+  /** Write-ahead input receipt path; defaults to `~/.dsh/peer-input-receipts.json` (or beside `bindingsPath`). */
+  readonly inputReceiptsPath?: string
+  /** Maximum retained create/prompt receipts; oldest evicted first. */
+  readonly inputReceiptLimit?: number
+  /** Maximum serialized UTF-8 byte size of the write-ahead receipt document. */
+  readonly inputReceiptMaxBytes?: number
+  /** Maximum code-unit length for caller-supplied `requestId` values. */
+  readonly requestIdMaxLength?: number
 }
 ```
 
-运行时常量为 `PEER_PROTOCOL_VERSION = 1`、`DEFAULT_WATCHDOG_MS = 15 * 60 * 1000` 与 `DEFAULT_HARNESS_VERSION`——后者是运行中包清单的版本，即插件兼容性通过 `getDshRuntimeVersion()` 读取的运行时版本，`dsh --version` 在其外层补充托管安装的发布标识；`PEER_SCHEMA_DIGEST` 是协议版本加固定方法列表的 SHA-256 摘要。握手宣告本构建已服务的能力：`state-latch`、`derived-latch`、`assistant-stream`、`answer-routing`、`runaway-ceiling`、`session-create` 与 `model-attribution` 无条件宣告；挂载 `peerRouting` 服务时追加 `model-discovery`、`model-routing-at-create` 与 `model-switch`；token meter 发布持久化 `tokenUsage` 投影时追加 `token-ceiling`。缺少这些接缝时，主机会收回相应能力并拒绝对应请求。`assistant-stream` 帧仅在 `debug` 暴露且调用方主动选择时由 `peer.follow` 承载。
+`PEER_PROTOCOL_VERSION` 为 `1`，`DEFAULT_WATCHDOG_MS` 为 15 分钟，`DEFAULT_HARNESS_VERSION` 取自运行中的包清单。握手宣告可用能力；调用方不得假定未宣告的能力可用。只有在 `debug` 暴露且调用方主动选择时，`peer.follow` 才会发送 `assistant-stream` 帧。
 
 ## 配对模型
 
@@ -73,14 +81,18 @@ interface PeerPairing {
   readonly exposure: PeerExposure
   /** This host's session bound to the pairing; absent with `create` for a peer-created session. */
   readonly sessionId?: SessionId
-  /** Present when a peer may create (or adopt) a session under this alias. */
+  /** Present when a peer may create (or adopt) a session under this alias; fields act as limits. */
   readonly create?: PeerCreateDefaults
   /** The session on `peer` this host calls; caller-role bookkeeping only. */
   readonly remoteSessionId?: SessionId
   /** Base URL of `peer`'s peer surface; caller-role addressing. */
   readonly endpoint?: string
-  /** Reserved; never verified on the host (the peer path reads no request headers). */
-  readonly token?: string
+  /** Hashed inbound bearer credential (`scrypt$...` or `sha256$...`); plaintext `inboundToken` in YAML is hashed at load and never retained. */
+  readonly tokenHash?: string
+  /** Plaintext bearer credential this host sends when dialing `endpoint` as a caller; never logged or echoed in RPC replies. */
+  readonly outboundToken?: string
+  /** Explicit opt-out allowing unauthenticated inbound calls when no credential is configured. */
+  readonly insecure?: boolean
   /** Optional emergency stop; absent means unbounded agent-to-agent exchange. */
   readonly runawayCeiling?: number
   /** Allows an adopting `peer.create` to change routing; default off. */
@@ -100,7 +112,7 @@ interface PeerPairingsFile {
 - `exposure` 必填；没有隐式默认值，因此没有配对会隐式处于 `debug`。
 - `sessionId` 与 `create` 至少存在其一，否则该条目不可达并在加载时被拒绝。
 - `watchdogMs` 与 `runawayCeiling` 存在时必须是正的安全整数。
-- `token` 会被解析，但在握手中只以 `tokenRequired` 报告；它从不被回显，也从不在此包中强制执行。
+- 入站与出站凭据为独立的可选字段：`tokenHash`（`scrypt$<salt>$<hash>` 或 `sha256$<hex>`）或 `inboundToken`（加载时以 scrypt 哈希，绝不保留或写入日志）约束本别名对入站调用的鉴权；`outboundToken` 是本宿主作为调用方拨号 `endpoint` 时发送的明文 bearer（绝不写入日志，也不在 `handshake`/`list`/`state` 中回显，且当 `pairings.yaml` 对组/全局可读时会在加载时警告一次）。`inboundToken` 与 `tokenHash` 并存、`insecure: true` 与入站凭据并存，或使用歧义旧键 `token` 都会抛出 `PeerConfigError`。既无入站凭据又无 `insecure: true` 的条目作为未鉴权兼容条目加载：宿主对每个此类别名警告一次并指明 `tokenHash`/`inboundToken`/`insecure: true`，统一拒绝所有入站调用为 `peer/forbidden`（`reason: 'unauthorized'`），并保持 `endpoint`/`outboundToken` 出站调用正常可用。每个对等方法在运行前都会对解析出的配对以常量时间校验 `Authorization: Bearer`，将 `pairing.peer` 绑定为已认证设备，并在鉴权失败或未知目标上统一返回 `peer/forbidden`（`reason: 'unauthorized'`）。
 - 绑定以别名为键，携带 `{sessionId, device, createdAt}`，外加可选的 `retired` 列表（该别名此前绑定过的会话）；格式错误的绑定文档会抛出 `PeerConfigError`。同一别名下再次 `peer.create` 会替换当前绑定并把旧绑定移入 `retired`，因此该别名解析到最新会话，而每个被替换的会话仍可通过同一配对以显式 `sessionId` target 寻址。
 
 ## 暴露过滤器
@@ -133,16 +145,17 @@ interface PeerHandshakeValue {
   readonly harnessVersion: string
   readonly schemaDigest: string
   readonly hostDevice: PeerDeviceName
+  readonly instanceId: string
   readonly capabilities: readonly PeerCapability[]
   readonly pairings: readonly PeerPairingSummary[]
 }
 ```
 
-`protocolVersion` 是硬性兼容门：任何非 `1` 的值都会在任何其他握手工作之前抛出 `peer/version-skew`，并附带期望值与收到的值。`harnessVersion` 与 `schemaDigest` 是宿主返回给调用方自行比较的提示值，因此在协议版本一致时摘要不同也会被接受。`device` 必须是非空字符串（否则为 `gateway/bad-request`）。回复中的每个配对是一个 `PeerPairingSummary`，包含别名、peer、exposure、`tokenRequired`，以及——当该别名当前可解析到会话时——解析后的 target。
+`protocolVersion` 是鉴权之后的硬性兼容门：未鉴权请求以 `peer/forbidden`（`reason: 'unauthorized'`）失败，已鉴权请求中任何非 `1` 的值都会在任何其他握手工作之前抛出 `peer/version-skew`，并附带期望值与收到的值。`harnessVersion` 与 `schemaDigest` 是宿主返回给调用方自行比较的提示值，因此在协议版本一致时摘要不同也会被接受。`instanceId` 是每个 `PeerService` 实例启动时新生成的 UUID，并写入预写回执以使宿主重启可见。`device` 必须是非空字符串（否则为 `gateway/bad-request`），且必须匹配某个已授权配对的 `peer`（否则为 `peer/forbidden` `unauthorized`）。回复中的每个配对是对应 `request.device` 的已授权 `PeerPairingSummary`，包含别名、peer、exposure、`tokenRequired`，以及——当该别名当前可解析到会话时——解析后的 target。
 
 ## 发现
 
-`list` 是只读的发现调用。不带 target 时，它报告宿主暴露的每个配对；带 `target` 时，它先通过与其它调用相同的配对门解析该 target（无法解析时为 `peer/not-paired`），并且只返回该配对。每一行携带别名、peer 与 exposure、该别名当前是否可解析到会话、绑定会话 id——即调用方的 `remoteSessionId`，来自配对自身的钉住或 `peer.create` 绑定——以及当 `sessionController.executionState` 能廉价回答绑定会话时，宿主 latch、最后活动时间与一行摘要（`latch · asks · last turn`）。仅声明为配对调用方角色 `remoteSessionId` 的钉住同样能解析显式的 `peer.state`/`peer.list` 会话 target，因此由另一台设备一侧撰写的共享文档保持可寻址，而不会因此授予任意会话 id。
+`list` 是只读的发现调用。不带 target 时，它报告调用方获准查看的每个配对；带 `target` 时，它先通过与其它调用相同的配对门鉴权并解析该 target（鉴权失败或未知会话为 `peer/forbidden` `unauthorized`，已鉴权但未绑定的别名为 `peer/not-paired`），并且只返回该配对。每一行携带别名、peer 与 exposure、该别名当前是否可解析到会话、绑定会话 id——即调用方的 `remoteSessionId`，来自配对自身的钉住或 `peer.create` 绑定——以及当 `sessionController.executionState` 能廉价回答绑定会话时，宿主 latch、最后活动时间与一行摘要（`latch · asks · last turn`）。仅声明为配对调用方角色 `remoteSessionId` 的钉住同样能解析显式的 `peer.state`/`peer.list` 会话 target，因此由另一台设备一侧撰写的共享文档保持可寻址，而不会因此授予任意会话 id。
 
 ```ts
 /** `peer.list` request: an absent target lists every pairing; a target narrows the answer. */
@@ -170,13 +183,14 @@ interface PeerListValue {
 
 ## 会话：create、prompt、cancel
 
-`create` 要求被寻址的配对条目带有 `create` 块（否则为 `peer/not-paired`）。当显式给出已存在的 `sessionId` 时，该会话被领养且 `created` 为 false；除非配对设置 `allowModelChange: true`，否则在领养时携带路由字段会被以 `peer/forbidden` 拒绝。否则会话通过 `sessionController.create` 创建，请求中的 `workspaceId`、`cwd` 与 `agentPreset` 回退到配对的 `create` 默认值，别名到会话的绑定随后被持久化。在通过绑定解析的别名下创建会替换该绑定；旧绑定移入 `retired`，因此之后每次别名调用都到达最新会话，而被替换的会话仍可通过显式 `sessionId` target 寻址。由配对自身 `sessionId` 钉住的别名始终解析到该钉住的会话，`create` 写入的绑定只能通过显式 `sessionId` 访问；需要新会话又不想移动别名当前目标的调用方应改用另一个别名。
+`create` 要求被寻址的配对条目带有 `create` 块（否则为 `peer/not-paired`）。配对的 `create.*` 字段在新建与领养时均作为上限约束：`workspaceId` 必须等于 `create.workspaceId`（`workspace-not-allowed`），`cwd` 必须规范解析并位于或等于 `create.cwd`（`cwd-not-allowed`），`agentPreset` 必须等于 `create.agentPreset` 或属于 `create.allowAgentPresets`（`preset-not-allowed`）。当显式给出已存在的 `sessionId` 时，只有已绑定到该别名或由其创建的会话才允许被领养（否则为 `session-adoption`），且 `created` 为 false；除非配对设置 `allowModelChange: true`，否则在领养时携带路由字段会被以 `peer/forbidden` 拒绝。提供可选 `requestId` 时，若省略 `sessionId`，`create` 会从 `(alias, requestId)` 推导确定性的 `peer-<hex>` 会话 id，在创建或领养前先向 `peer-input-receipts.json` 写入 `'prepared'` 预写回执（持久化失败则在副作用前以 `peer/unavailable` 拒绝），匹配的重试以 `replayed: true` 重放，同一 id 搭配变更载荷以 `peer/conflict`（`reason: 'request-id-reuse'`）拒绝；确定性 id 不能领养绑定在其他别名下的会话或未绑定的本地会话（`session-adoption`）。未提供 `requestId` 时仍通过 `sessionController.create` 非幂等地创建会话，因此 Jarvis 等调用方必须发送 `requestId`。在通过绑定解析的别名下创建会替换该绑定；旧绑定移入 `retired`，因此之后每次别名调用都到达最新会话，而被替换的会话仍可通过显式 `sessionId` target 寻址。由配对自身 `sessionId` 钉住的别名始终解析到该钉住的会话，`create` 写入的绑定只能通过显式 `sessionId` 访问；需要新会话又不想移动别名当前目标的调用方应改用另一个别名。
 
 ```ts
 /** `peer.create` request: bind a fresh or explicitly adopted session to a pairing alias. */
 interface PeerCreateRequest {
   readonly alias: PeerAlias
   readonly participant: PeerParticipant
+  readonly requestId?: PeerRequestId
   readonly sessionId?: SessionId
   readonly workspaceId?: string
   readonly cwd?: string
@@ -191,6 +205,9 @@ interface PeerCreateRequest {
 interface PeerCreateValue {
   readonly target: PeerTargetResolved
   readonly created: boolean
+  readonly replayed?: boolean
+  readonly payloadHash?: string
+  readonly instanceId?: string
 }
 ```
 
@@ -215,24 +232,43 @@ interface PeerPromptValue {
   readonly accepted: true
   readonly queued: boolean
   readonly hopCount: number
+  readonly replayed?: boolean
+  readonly payloadHash?: string
+  readonly instanceId?: string
+  readonly disposition?: string
 }
 
 /** `peer.cancel` request: cancel the target's active turn, attributed to the peer. */
 interface PeerCancelRequest {
   readonly target: PeerTarget
   readonly participant: PeerParticipant
+  /** Discard this alias's pending peer prompts. Defaults to true for worker pairings, false otherwise. */
+  readonly dropQueued?: boolean
 }
 
 /** `peer.cancel` value: `cancelled` is false when no turn was active. */
 interface PeerCancelValue {
   readonly accepted: true
   readonly cancelled: boolean
+  readonly stopIntent: PeerStopIntent
+  /** Pending prompts actually removed. Never counts work already claimed by the driver. */
+  readonly droppedQueued: number
 }
 ```
 
-`prompt` 恰好接纳一个排队轮次。其内容必须是非空文本部件列表，每个部件都含非空白文本（否则为 `gateway/bad-request`）；调用方铸造的 `requestId` 是去重身份，`participant` 会成为目标日志 `user/message` 中的持久归属信息，也即 latch 的 `lastParticipantAction` 所报告的内容。当解析出的配对配置了 `runawayCeiling` 且 `hopCount >= ceiling` 时，prompt 会被以 `peer/hop-limit` 拒绝；否则回复返回 `hopCount + 1`。prompt 准入会安排孤儿看门狗。
+`prompt` 恰好接纳一个排队轮次。其内容必须是非空文本部件列表，每个部件都含非空白文本（否则为 `gateway/bad-request`）；调用方铸造的 `requestId` 受 `requestIdMaxLength` 约束，并与 `(sessionId, content)` 的 SHA-256 绑定写入 `peer-input-receipts.json` 的预写回执（绝不存储提示词文本），持久化失败会在进入收件箱前以 `peer/unavailable` 拒绝，相同重试以 `replayed: true` 重放，变更载荷以 `peer/conflict`（`reason: 'request-id-reuse'`）拒绝。`participant` 会成为目标日志 `user/message` 中的持久归属信息，也即 latch 的 `lastParticipantAction` 所报告的内容。当解析出的配对配置了 `runawayCeiling` 且 `hopCount >= ceiling` 时，prompt 会被以 `peer/hop-limit` 拒绝；否则回复返回 `hopCount + 1`。prompt 准入会安排孤儿看门狗。
 
-`cancel` 将取消归属到调用方，仅当该会话的 agent 在调用时为 `running` 才报告 `cancelled: true`，并清除该会话的看门狗。
+`receipt` 统一鉴权（`peer/forbidden` `unauthorized`），在 `peer-input-receipts.json` 中查询 `(alias, requestId, kind?)`（当省略 `kind` 且 `'create'` 与 `'prompt'` 同时命中 `requestId` 时抛出 `gateway/bad-request`）。它返回 `replayedAcrossRestart`（`entry.instanceId !== host.instanceId`），并在宿主端直接从原始会话事件（`agent/inbox/spliced`、`turn/start`、`user/message`、`turn/end`）推导提示词处置（`queued`、`claimed`、`cancelled_before_dispatch`、带 `terminalState` `completed | aborted | failed | budget | blocked | max-tokens | interrupted` 的 `terminal`，或 `unknown`），不经过暴露过滤，因此在 `answer-only` 与 `debug` 下都可用。
+
+`cancel` 将停止归属到调用方，仅在 Agent 处于 `running` 状态时报告 `cancelled: true`，并清除该会话的看门狗。停止使用 `keepInbox: true`；若 `dropQueued: true`（`worker` 配对的默认值），主机随后只移除该别名接纳且仍在队列中的提示词。人工输入、其他别名的提示词以及结算或作业通知仍保留在队列中。`droppedQueued` 仅统计实际移除的提示词，不包括驱动已经认领的提示词。每次移除都记录一条带 `outcome: 'canceled'` 的 `agent/inbox/spliced` 事件，因此 `peer.receipt` 会报告 `cancelled_before_dispatch`；仅收到停止回执不能确认这一处置结果或会话已完全停稳。
+
+## Worker 控制
+
+`create.freshOnly` 禁止显式提供 `sessionId`，并要求 `requestId`。`worker` 策略启用仅新建模式，且要求通过 bearer 鉴权、别名未固定到会话，并提供作业描述。只有在 worker 配置档服务描述了已绑定的作业后，创建响应才会提供 `{hash, presetId}`。如果没有描述，主机会在别名暴露 worker 之前拒绝创建。
+
+`ctx.peerJobBindings.get(sessionId)` 返回独立的快照；已过期的绑定保留原始 `expiresAt`，已撤销的绑定报告 `revoked: true`。执行防护必须在每次准入时检查两者。`revoke(sessionId)` 会持久化不可逆的撤销。只有通过鉴权的 `peer.jobUpdate` 才接受增加围栏值或更改过期时间，并同时持久化变更与回执。`ctx.get('peerProfileIdentity')` 是可选服务；`describe(sessionId)` 返回 `{hash, presetId, toolNames, configDigest}` 或 `undefined`。
+
+`peer.ready` 报告依赖是否就绪，并在可用时提供已绑定 worker 的配置档。`peer.exportList` 与 `peer.exportFetch` 只读取当前别名对应的有效作业导出目录。参数、限制与中枢验收要求见[包契约](../../packages/api/peer/README.zh.md#host-surface)。`schemaDigest` 对方法和字段描述计算哈希；`methodsDigest` 仅对方法名计算哈希。
 
 ## 执行状态
 
@@ -264,19 +300,24 @@ interface PeerExecutionState {
   readonly activeDescendants: number
   readonly descendantsExact: boolean
   readonly pendingAsks: readonly PeerPendingAsk[]
+  readonly stopIntent?: PeerStopIntent
   readonly lastTurnEnd?: PeerTurnTerminal
   readonly lastParticipantAction?: PeerParticipantAction
   readonly model?: PeerModelSelection
 }
 ```
 
-宿主 latch 能回答时优先。`state` 先调用 `sessionController.executionState({ sessionId })`，仅当返回值在结构上带有合法 latch 且子代理数量为非负安全整数时才接受；否则它读取 `executionState` 或 `peerExecutionState` 投影，两者皆无时从持久事件流派生（`source: 'derived'`）。`follow` 只读取投影形式。派生统计的是在打开的轮次开始后生成、且尚未由 `subagent-settled` 用户消息结算的 `subagent/catalog` 子代理，因此安静的子代理会让 `descendantsExact` 保持 false，调用方应重新读取 `peer.state`，而不是宣告空闲。模型选择来自最后一条持久 `model/selection`，否则来自目标的 `modelSelection` 投影（`pending` 优先于 `lastUsed`），再否则来自宿主的 `agentDefaultModel.currentSelection()`。`lastParticipantAction` 优先取 `create`、`prompt`、`cancel` 与 `answer` 记录的宿主本地动作，然后是宿主 latch 值，最后是折叠出的人类动作。
+宿主闩锁可用时优先。`state` 和 `follow` 在可用时读取 `sessionController.executionState({ sessionId })`。宿主闩锁不可用时，`state` 先读取 `executionState` 或 `peerExecutionState` 投影，再从持久事件折叠推导（`source: 'derived'`）。折叠统计在当前回合生成、还没有 `subagent-settled` 消息的 `subagent/catalog` 子代理；此统计可能漏掉静默的子代理。模型选择优先来自最后一条持久 `model/selection`，其次是 `modelSelection` 投影（`pending` 优先于 `lastUsed`），最后来自 `agentDefaultModel.currentSelection()`。`lastParticipantAction` 优先取宿主本地的 peer 归属，其次是宿主闩锁，最后是折叠出的人类动作。
+
+`stopIntent` 包含本宿主实例最近一次接受的 peer 停止请求的 `requestedAt`、`keepInbox: true`、观察到的 `turnState`、`activeDescendants`、`descendantsExact`，以及会话日志能够匹配 `tool/call` 与 `tool/result` 时的 `inFlightTools`。取消的即时回执不扫描日志，故报告 `quiescence: 'unknown'`。只有宿主闩锁为空闲、后代的精确数量为零、且没有待处理 peer 提问或未配对的工具调用时，状态才报告 `observed`，否则报告 `unknown`。宿主绝不报告 `confirmed`：闩锁和日志无法排除暂存的结算通知或独立运行的副作用。
+
+`peer.waitQuiescent({alias, timeoutMs})` 在配置上限内轮询同一绑定，等待同样的观察结果，并返回 `{observation: 'observed', timedOut, last?}`。`last` 是最后一次完整读取的状态；没有完整读取时省略。观察结果不能证明某条输入已应用、工具副作用已撤销或排队工作不会在以后被唤醒。查询每条输入的处置请用 `peer.receipt`。
 
 ## 提问：answer 与竞态
 
 ask 注册表以 `prepend: true` 观察 `approval/request` 与 `user-questions/request`，因此在任何本地转发停驻该 waterfall 之前就铸造好 `PeerAskId`。只有根会话被某个配对暴露的 ask 才会发布；子代理提出的 ask 通过遍历 `parentSession` 链（上限 32 层）绑定到 peer 所跟随的根会话，而无法归属到 agent 或无法解析根会话的 ask 保持本地。
 
-本地链通过 `next()` 立即启动，注册表让它与 peer 的回答竞速：先结算者决定结果，败者值被丢弃。已结算的 ask 以 256 条为界的墓碑记录退役，因此迟到的回答会得到 `peer/conflict` 而非 `peer/not-found`。由于待处理 ask 的成员关系没有持久事件，注册表在铸造与结算时推送合并后的变更唤醒，而 `follow` 世代把 latch 键变化转化为至多一个 `state` 帧。
+本地链通过 `next()` 立即启动，最先结算的一方获胜。`peer.asks({alias, sessionId?})` 对别名的当前或保留会话返回 `{instanceId, asks}`，提问详情与 `state.pendingAsks` 相同。每条记录还包含 `alias`、`sessionId`、创建时的 `instanceId`、`createdAt`、`state`（`pending`、`answered`、`expired` 或 `cancelled`），以及可选的 `settledAt`、`settlementReason` 和 `answeredBy: {requestId, payloadHash}`。新宿主世代将旧的待处理记录标为 `expired`，并标记 `settlementReason: 'host-restarted'`；等待回答的回调不会保留。只有当前可回答的提问才出现在 `state.pendingAsks` 中。跟随流可直接观察提问变化，不必等待持久会话事件。
 
 ```ts
 /** One ask a peer may answer, correlated by the host-minted `askId`. */
@@ -306,17 +347,21 @@ interface PeerAnswerRequest {
   readonly target: PeerTarget
   readonly participant: PeerParticipant
   readonly askId: PeerAskId
+  readonly requestId: PeerRequestId
   readonly answer: PeerAnswer
 }
 
-/** `peer.answer` value: the answer settled the ask. */
+/** `peer.answer` value: the decision was committed. A replay does not deliver it again. */
 interface PeerAnswerValue {
   readonly accepted: true
   readonly settled: true
+  readonly replayed: boolean
+  readonly payloadHash: string
+  readonly instanceId: string
 }
 ```
 
-`answer` 先校验再认领，因此格式错误的回答会让 ask 保持待处理，而合法的回答会认领它。peer 的审批结果只限 `allowed-once` 与 `rejected`（其他值为 `peer/forbidden`），结构化提问回答则从 `{answers: [{id, selected, custom?}]}` 归一化（格式错误时为 `peer/not-found`）。未知 ask id 为 `peer/not-found`，属于其他会话的 ask 为 `peer/forbidden`，回答种类与 ask 种类不匹配为 `peer/not-found`。
+`answer` 先校验再认领。peer 审批结果仅限 `allowed-once` 与 `rejected`；提问回答使用 `{answers: [{id, selected, custom?}]}`。写入失败会返回 `peer/unavailable`（`ask-write-failed`），且不交付回答。相同 `requestId` 和规范化载荷会回放已持久化的决定，不会再次交付，即使宿主已重启。同一 id 搭配不同载荷会返回 `peer/conflict`（`request-id-reuse`）；不同 id 对当前已结算的提问返回 `ask-already-settled`，对旧宿主的提问返回 `stale-generation`，对没有活动回调的当前提问返回 `ask-expired`。未知或已淘汰的 id 返回 `peer/not-found`（`ask-not-found`）；禁止操作其他绑定的提问。
 
 ## 历史：page 与 follow
 
@@ -353,10 +398,13 @@ type PeerFollowFrame =
   | PeerFollowEventFrame
   | PeerFollowStateFrame
   | PeerFollowAssistantStreamFrame
+  | PeerFollowGapFrame
   | PeerFollowEndFrame
 ```
 
-`follow` 以一个 `snapshot` 帧开场，携带解析后的 target、线上头（`id`、`version`、`createdAt`，可选 `cwd` 与 `agentPreset`）、执行状态、持久游标、有界近期窗口（默认 50 条消息）与 `hasMore`。随后它为可见持久记录发出 `event` 帧，在每次 latch 键变化时发出 `state` 帧，选择性发出 `assistant-stream` 帧，并以终帧 `end` 结束。`event` 与 `state` 帧携带 `cursor`，即宿主已扫描到的持久位置：在 `answer-only` 下过滤器会丢弃记录，因此 `record.seq` 可以跳跃而 `cursor` 继续前进，`peer.page` 正是依据 `cursor` 修复。持久连续性本身在可见事件之间被强制执行——出现缺口会抛出 `peer/gap`。观察到已消失的会话会以 `{type: 'end', reason: 'target-detached'}` 结束流；宿主侧正常结束为 `'closed'`。`assistantStream: true` 要求 `debug` 暴露。
+`follow` 以 `snapshot` 开场，其中包含目标、头信息、执行状态、游标及近期历史窗口（默认 50 条消息）。随后发送 `event`、`state` 和可选的 `assistant-stream` 帧；`assistantStream: true` 要求 `debug` 暴露。`cursor` 是宿主已扫描的持久位置；暴露规则可省略记录而不破坏连续性。目标解除附着时可能收到 `end`；它描述的是流，不代表输入已完成。
+
+在 `/api/remote.mux` 上，每消费一个非终止帧后，发送 `{type: 'item', streamId, value: {type: 'ack', frame}}`。`frame` 在每个世代从 1 开始递增。进程内迭代器通过请求下一条来确认上一条。达到并发或打开速率上限时，主机返回 `peer/unavailable`（`reason: 'follow-capacity'`）；调用方应退避。发生丢失或超时时，主机发送 `{type: 'gap', fromSeq, toSeq, reason, resync: 'refollow-and-page'}` 后以 `peer/gap` 失败，而不是正常 `end`。序号范围包括端点，未知的端点为 `null`。从最后一个可靠游标用 `peer.page` 修复持久历史并重新打开跟随流；瞬时助手增量无法恢复。载体无法交付缺口帧时，也应以同样的方式处理断流。
 
 ## 孤儿看门狗
 
@@ -364,14 +412,15 @@ type PeerFollowFrame =
 
 ## 限制与已知缺口
 
-- 待处理 ask 只存在于注册表的内存表中：宿主重启会丢失它们，只有宿主进程存活期间铸造的 ask 才能被回答。提问类 ask 是最严格的情形——宿主在 `peer.answer` 接受结构化 `{answers: [...]}` 回复，但随附的调用方界面只回答审批，因此远程提问会停驻该轮次，直到浏览器作答或看门狗中止（doc 72 G1）。
+- 提问日志记录的是决定，而不是决定是否已交付给回合。保留策略和传输限制见 [peer 包参考](../../packages/api/peer/README.zh.md#host-surface)。
 - peer 已结算的 ask 不会被主动取消给本地应答者：竞速会启动浏览器链，只丢弃其迟到的值，因此浏览器仍可能显示一张结果已定的卡片。本地链以拒绝结算时，该拒绝会结算竞速并退役该 ask。
 - `hopCount` 与 `runawayCeiling` 对随附调用方实际上处于保留状态：只有配对配置了上限才会强制执行，且比较的是调用方提供的原始 `hopCount`，而随附调用方发送 `0`。
-- `token` 是保留字段，并未强制执行：宿主解析它且只报告 `tokenRequired`；此包不读取任何请求头，因此任何可达的调用方都能寻址已配对的别名。
+- HTTP `/api/peer/*` 请求通过 `connection/request` 传递 `Authorization: Bearer`，WebSocket `/api/remote.mux` 流通过 `RemoteStreamMuxServer` 仅透传升级请求的 `Authorization` 头（不透传其他请求头），使 `PeerService.follow` 校验相同的 bearer 凭据。
 - follow 的 latch 键省略了模型选择，因此仅模型变化不会发出 `state` 帧（且 `model/selection` 在 `answer-only` 暴露下被过滤）；`peer.state` 仍是权威。
 - 当 ask 从未由注册表铸造时（例如无法归属的提问），宿主 latch 可能报告 `latch: 'waiting_approval'` 而 `pendingAsks` 为空；该状态不会合并这两个来源。
 - 看门狗取消不带归属，且栈更深处抛出的 `create` 失败（例如 `agent-preset/not-found`）会按其原始错误码透传，而不是转为 peer 域错误。
-- `create` 由配对的 `create` 块把守，但参与者身份只做结构校验——不会与配对的 `peer` 设备比对。
+- 已鉴权调用会将 `pairing.peer` 绑定为握手与 `participant.device` 上的调用方设备；提供且不同于 `pairing.peer` 的 `participant.device` 会以 `peer/forbidden`（`unauthorized`）失败。`participant.name` 仍在该已认证 peer 内由调用方提供。
+- 预写输入回执（`peer-input-receipts.json`）受 `inputReceiptLimit` 与 `inputReceiptMaxBytes` 约束（LRU 淘汰）；被淘汰的回执在 `peer.receipt` 中会回退到会话存在性检查或 `'unknown'`。崩溃留下的 `'prepared'` 回执在根据会话存储或日志核对之前报告 `'unknown'`。
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -380,6 +429,44 @@ type PeerFollowFrame =
 ## Cordis API
 
 Generated from source by `scripts/gen-cordis-catalog.ts` (verified fresh by `pnpm run verify-cordis-catalog` in doc-sync; regenerate with `pnpm run gen-cordis-catalog`) — the language sides differ only in locale-specific paired document paths. Signature blocks use a `ts cordis-catalog` fence and keep the original source JSDoc; dispatch modes are defined in the [primer](../cordis-primer.zh.md#dispatch-modes), and the framework-inherited `ctx` API lives in [cordis-api/inherited.md](../cordis-api/inherited.md).
+
+<a id="ctxpeerjobbindings--peerjobbindingsservice"></a>
+
+### `ctx.peerJobBindings` — `PeerJobBindingsService`
+
+Cordis service interface registered under `peerJobBindings`.
+
+```ts cordis-catalog
+/**
+ * Deny subsequent guard reads immediately and persist before acknowledging.
+ * @param sessionId - bound session identifier to revoke.
+ * @returns true when a binding existed and was revoked, false when absent.
+ */
+revoke(sessionId: SessionId): Promise<boolean>
+```
+
+Types: [SessionId](core.zh.md)
+
+Source: [`packages/api/peer/src/types.ts`](../../packages/api/peer/src/types.ts)
+
+<a id="ctxpeerprofileidentity--peerprofileidentityservice"></a>
+
+### `ctx.peerProfileIdentity` — `PeerProfileIdentityService`
+
+Optional service seam implemented by the profile layer and read through `ctx.get('peerProfileIdentity')` to attest effective worker session identity.
+
+```ts cordis-catalog
+/**
+ * Describe the effective profile identity for a session.
+ * @param sessionId - created or bound session identifier.
+ * @returns profile identity facts, or `undefined` when unavailable.
+ */
+describe(sessionId: SessionId): PeerProfileIdentity | undefined
+```
+
+Types: [SessionId](core.zh.md)
+
+Source: [`packages/api/peer/src/types.ts`](../../packages/api/peer/src/types.ts)
 
 <a id="ctxpeerrouting--peerroutingservice"></a>
 
@@ -419,9 +506,11 @@ Host service backing the generated `ctx.remote.peer` namespace.
 /**
  * Negotiate protocol, capability, and pairing identity.
  * @param request - caller protocol, harness version, schema digest, and device name.
- * @returns the host identity, capabilities, and visible pairings.
- * @throws {@link RemoteError} `gateway/bad-request` when the request is
- * absent or not an object, `peer/version-skew` on protocol divergence.
+ * @returns the host identity, boot `instanceId`, capabilities, and authorized pairings for `request.device`.
+ * @throws {@link RemoteError} `peer/forbidden` (`reason: 'unauthorized'`) when
+ * credentials fail or `device` does not match the authenticated pairing,
+ * `gateway/bad-request` when the request is absent or not an object,
+ * `peer/version-skew` on protocol divergence.
  */
 @Remote('handshake') handshake(request: PeerHandshakeRequest): PeerHandshakeValue
 
@@ -435,30 +524,65 @@ Host service backing the generated `ctx.remote.peer` namespace.
 @Remote('state') async state(request: PeerStateRequest): Promise<PeerStateValue>
 
 /**
- * List the pairings this host exposes with a cheap live summary. Discovery
- * is read-only and reports each pairing at its own exposure; a supplied
- * target resolves through the same pairing gate as every other call, so an
- * unpaired session is refused rather than listed.
+ * Read retained pending and settled asks for an authenticated binding.
+ * @param request - alias and optional current or retired Session id.
+ * @returns retained ask records and the current host identity.
+ */
+@Remote('asks') asks(request: PeerAsksRequest): PeerAsksValue
+
+/**
+ * Poll one binding for an observed quiet state; never certify descendant teardown.
+ * @param request - alias and bounded polling timeout in milliseconds.
+ * @param signal - carrier cancellation.
+ * @returns last observed state and whether the deadline elapsed.
+ */
+@Remote('waitQuiescent') async waitQuiescent(request: PeerWaitQuiescentRequest, signal: AbortSignal): Promise<PeerWaitQuiescentValue>
+
+/**
+ * List the pairings this caller is authorized to see with a cheap live
+ * summary. Discovery is read-only and reports each pairing at its own
+ * exposure; a supplied target authenticates and resolves through the same
+ * pairing gate as every other call.
  * @param request - optional target narrowing the answer to one pairing.
- * @returns the host device and one row per selected pairing.
- * @throws {@link RemoteError} `peer/not-paired` when a supplied target does not resolve.
+ * @returns the host device and one row per authorized pairing.
+ * @throws {@link RemoteError} `peer/forbidden` (`reason: 'unauthorized'`) on
+ * invalid credentials; `peer/not-paired` when an authenticated unbound alias
+ * is targeted.
  */
 @Remote('list') list(request?: PeerListRequest): PeerListValue
 
 /**
  * Create or explicitly adopt a Session and bind it to a pairing alias.
  *
+ * Pairing `create.*` values (`workspaceId`, `cwd`, `agentPreset`,
+ * `allowAgentPresets`) act as upper-bound limits: callers may narrow `cwd`
+ * within the pinned directory or select a preset within the allowed set, and
+ * any attempt to widen is refused with `peer/forbidden`. Adoption is
+ * restricted to sessions already bound to or created by this alias (`reason:
+ * 'session-adoption'`).
+ *
+ * When `requestId` is supplied, the host derives a deterministic session id
+ * from `(alias, requestId)` when `sessionId` is omitted, writes a write-ahead
+ * payload-bound receipt before creating/adopting, replays identical retries
+ * with `replayed: true`, and rejects changed payloads under the same id with
+ * `peer/conflict` (`reason: 'request-id-reuse'`). If the write-ahead receipt
+ * cannot be persisted, creation is refused with `peer/unavailable` before any
+ * session or binding side effect.
+ *
  * A pairing with a `routing` policy is authoritative: every create (new or
  * adopt) must name a route, the policy is evaluated before any session or
  * selection exists, and the applied selection is the verdict's `selection`
  * (a chain-only request is resolved there). Without a policy the legacy
  * behavior is unchanged and `allowModelChange` gates adopt-time routing.
- * @param request - pairing alias, participant, optional explicit session, routing, and token ceiling.
- * @returns the resolved target and whether a new Session was created.
- * @throws {@link RemoteError} `peer/not-paired`; `peer/forbidden` for a policy
- * refusal, a missing routing service, a ceiling on a host without the usage
- * seam (reason `budget-unmetered`), or an adopt without `allowModelChange`;
- * `peer/not-found` for a deeper create failure.
+ * @param request - pairing alias, participant, optional requestId/session, routing, and token ceiling.
+ * @returns the resolved target, whether a new Session was created, and receipt metadata when `requestId` was supplied.
+ * @throws {@link RemoteError} `peer/not-paired`; `peer/forbidden` for auth,
+ * scope limits (`workspace-not-allowed`, `cwd-not-allowed`,
+ * `preset-not-allowed`, `session-adoption`), policy refusal, a missing
+ * routing service, a ceiling on a host without the usage seam (reason
+ * `budget-unmetered`), or an adopt without `allowModelChange`;
+ * `peer/conflict` (`reason: 'request-id-reuse'`); `peer/unavailable` when
+ * receipt persistence fails; `peer/not-found` for a deeper create failure.
  */
 @Remote('create') async create(request: PeerCreateRequest): Promise<PeerCreateValue>
 
@@ -466,22 +590,35 @@ Host service backing the generated `ctx.remote.peer` namespace.
  * Policy-filtered model and chain discovery for one alias.
  * @param request - alias, participant, optional filter, cursor, and page limit.
  * @returns selectable chains/models with the policy echoed for the caller.
- * @throws {@link RemoteError} `peer/not-paired` for an unknown alias,
- * `peer/forbidden` when the pairing configures no policy or the host mounts
- * no routing service, `gateway/bad-request` for an invalid page cursor, and
- * `peer/forbidden` reason `routing-unavailable` when the service throws.
+ * @throws {@link RemoteError} `peer/forbidden` (`reason: 'unauthorized'`) on
+ * invalid credentials, `peer/forbidden` when the pairing configures no policy
+ * or the host mounts no routing service, `gateway/bad-request` for an invalid
+ * page cursor, and `peer/forbidden` reason `routing-unavailable` when the
+ * service throws.
  */
 @Remote('models') async models(request: PeerModelsRequest): Promise<PeerModelsValue>
 
 /**
  * Switch one idle Session's routing for its next turn. The policy decides the
- * exact selection; the caller's request is only an input. A replay of the
- * same `requestId` with the same payload returns the original value without
- * appending another selection.
+ * exact selection; the caller's request is only an input.
+ *
+ * Durability and retry guarantees:
+ * - A replay of the same `requestId` with the same payload while the receipt is
+ *   retained returns the original value (`replayed: true`) before the idle
+ *   check and without re-applying over any newer selection.
+ * - If `receipts.put()` fails after applying, the host logs a warning and
+ *   returns `receiptPersisted: false` (and in-memory replays also carry
+ *   `receiptPersisted: false`) so callers know cross-restart idempotency is
+ *   not guaranteed.
+ * - On a post-restart retry without a persisted receipt, the host compares the
+ *   Session's live selection to the resolved verdict selection before calling
+ *   `sessionController.selectModel` and skips re-applying when they already
+ *   match (no duplicate `model/selection` event).
  * @param request - target, participant, request id, and requested route.
- * @returns the applied selection, the previous one when known, and replay status.
- * @throws {@link RemoteError} `peer/forbidden` for a policy refusal or a
- * disallowed switch, `peer/conflict` for a busy Session or a reused request
+ * @returns the applied selection, the previous one when known, replay status,
+ * and `receiptPersisted: false` when durable receipt storage failed.
+ * @throws {@link RemoteError} `peer/forbidden` for auth, a policy refusal, or
+ * a disallowed switch, `peer/conflict` for a busy Session or a reused request
  * id, `peer/not-paired` for an unresolved target.
  */
 @Remote('selectModel') async selectModel(request: PeerSelectModelRequest): Promise<PeerSelectModelValue>
@@ -500,20 +637,77 @@ Host service backing the generated `ctx.remote.peer` namespace.
 ceilingOf(sessionId: SessionId): number | undefined
 
 /**
- * Admit one queued peer turn into a paired Session.
+ * Admit one queued peer turn into a paired Session with write-ahead payload-bound
+ * receipt persistence.
  * @param request - target, participant, dedupe id, text content, and hop telemetry.
  * @param signal - carrier cancellation before prompt admission begins.
- * @returns acceptance and the incremented hop count.
+ * @returns acceptance, incremented hop count, receipt metadata, and disposition.
  * @throws {@link RemoteError} `peer/hop-limit` only when the pairing
  * configures a ceiling; `peer/forbidden` with reason `budget` once the
- * Session's token ceiling is reached.
+ * Session's token ceiling is reached; `peer/conflict` (`reason: 'request-id-reuse'`)
+ * when `requestId` is reused with different content; `peer/unavailable` when
+ * the write-ahead receipt cannot be persisted.
  */
 @Remote('prompt') async prompt(request: PeerPromptRequest, signal: AbortSignal): Promise<PeerPromptValue>
 
 /**
- * Cancel the active turn of a paired Session, attributed to the peer.
- * @param request - target and participant.
- * @returns acceptance and whether a turn was active.
+ * Look up a durable `peer.create` or `peer.prompt` receipt and derive its
+ * current host-side disposition directly from the Session store / log.
+ * @param request - pairing alias, caller request id, and optional kind disambiguator.
+ * @returns receipt metadata, `replayedAcrossRestart`, and derived disposition.
+ * @throws {@link RemoteError} `peer/forbidden` (`reason: 'unauthorized'`) on
+ * invalid credentials or unknown alias, `gateway/bad-request` on malformed input
+ * or ambiguous match without `kind`, `peer/unavailable` when the receipt store failed to open.
+ */
+@Remote('receipt') async receipt(request: PeerReceiptRequest): Promise<PeerReceiptValue>
+
+/**
+ * Update a bound worker job's fence, expiration timestamp, or revocation
+ * state. Fence bumps are strictly monotonic and exposed only through this
+ * authenticated method, with payload-bound idempotency receipts persisted
+ * alongside the binding.
+ * @param request - pairing alias, request id, job id, and mutation fields.
+ * @returns the updated binding and receipt metadata.
+ * @throws {@link RemoteError} `peer/forbidden` on auth failure or non-worker
+ * pairing, `gateway/bad-request` on malformed input, `peer/not-found` when
+ * the job binding is absent, `peer/conflict` on fence regression, expired
+ * non-extended job, already-revoked job, or changed payload under the same
+ * `requestId`, `peer/unavailable` when binding persistence is unavailable.
+ */
+@Remote('jobUpdate') async jobUpdate(request: PeerJobUpdateRequest): Promise<PeerJobUpdateValue>
+
+/**
+ * Probe authenticated host and pairing readiness before dispatching work.
+ * @param request - pairing alias to check.
+ * @returns readiness boolean, missing capability list, advertised capabilities,
+ * optional attested profile summary when bound, boot `instanceId`, and harness `version`.
+ * @throws {@link RemoteError} `peer/forbidden` (`reason: 'unauthorized'`) on
+ * invalid credentials or unknown alias, `gateway/bad-request` on malformed input.
+ */
+@Remote('ready') ready(request: PeerReadyRequest): PeerReadyValue
+
+/**
+ * List regular files inside the bound worker session's fixed export root.
+ * Requires a live (non-expired, non-revoked) job binding.
+ * @param request - pairing alias owning the worker session.
+ * @returns bounded list of regular files with relative paths and truncation flag.
+ */
+@Remote('exportList') exportList(request: PeerExportListRequest): PeerExportListValue
+
+/**
+ * Fetch one bounded regular file from the bound worker session's fixed export
+ * root, refusing traversal, symlinks, non-regular files, oversize reads, and
+ * size changes between stat and read. Requires a live job binding; the hub
+ * must still independently re-verify returned bytes and SHA-256.
+ * @param request - pairing alias, relative file path, and optional caller byte cap.
+ * @returns relative path, exact byte length, SHA-256 over the returned bytes, and base64 content.
+ */
+@Remote('exportFetch') exportFetch(request: PeerExportFetchRequest): PeerExportFetchValue
+
+/**
+ * Stop a paired Session and optionally discard the pairing's pending prompts.
+ * @param request - target, participant, and optional queue removal intent.
+ * @returns acceptance, whether a turn was active, the immediate stop observation, and the number removed.
  */
 @Remote('cancel') cancel(request: PeerCancelRequest): PeerCancelValue
 
@@ -521,8 +715,8 @@ ceilingOf(sessionId: SessionId): number | undefined
  * Settle a pending ask for a paired Session. An answer may resume a turn
  * the host paused on that ask; the ceiling watcher stops it after the next
  * response when the Session is already over budget.
- * @param request - target, participant, ask id, and answer payload.
- * @returns acceptance after the ask settled.
+ * @param request - target, participant, ask id, retry id, and answer payload.
+ * @returns the persisted decision receipt, replayed without another delivery on a matching retry.
  */
 @Remote('answer') answer(request: PeerAnswerRequest): PeerAnswerValue
 
@@ -538,9 +732,9 @@ ceilingOf(sessionId: SessionId): number | undefined
  * Open a filtered stream: opening snapshot, then durable events and latch transitions.
  * @param request - target, window budget, and debug-only assistant stream opt-in.
  * @param signal - carrier cancellation owned by the Remote stream.
- * @returns peer follow frames; `event`/`state` frames carry the durable scan cursor.
+ * @returns acknowledgement-paced peer frames; a gap item is followed by a `peer/gap` failure.
  */
-@Remote({ mode: 'stream' }) async *follow(request: PeerFollowRequest, signal: AbortSignal): AsyncIterable<PeerFollowFrame>
+@Remote({ mode: 'stream' }) follow(request: PeerFollowRequest, signal: AbortSignal): RemoteStream<PeerFollowFrame, PeerFollowAck>
 ```
 
 Types: [SessionId](core.zh.md)

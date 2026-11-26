@@ -1,0 +1,16 @@
+{
+  "extends": "../../../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    "noEmit": true
+  },
+  "include": ["src/**/*", "tests/**/*"],
+  "references": [
+    { "path": "../../../../vendor/cordis" },
+    { "path": "../../../../vendor/cosmokit" },
+    { "path": "../../../../vendor/include" },
+    { "path": "../../../../vendor/loader" },
+    { "path": "../../../../vendor/schemastery" }
+  ]
+}
