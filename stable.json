@@ -1,8 +1,21 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "generatedAt": "2026-11-23T08:44:13.805Z",
+  "generatedAt": "2026-11-26T22:37:17.900Z",
   "releases": [
+    {
+      "version": "0.1.7-enpoi.2.134",
+      "commit": "0a8c3c1",
+      "releasedAt": "2026-11-26T22:15:02.000Z",
+      "notes": [
+        "fix(worker): type the ws carrier without the ws package and import peer types from the package root",
+        "fix(worker): declare the worker package's workspace dependencies as peers and record the profile lockfile importers",
+        "chore(harness): regenerate catalogs, bundle fingerprints, tool inventory and docs for the worker and orchestration release",
+        "feat(peer): worker runtime — fenced job bindings, durable receipts and asks, bounded follow, export root, hardened MCP, job guard and a dedicated Jarvis worker profile",
+        "fix(orchestration): idle Stop-all, council cleanup, spill for oversized reports, authority and draft integrity",
+        "fix(update): atomic staged apply, rollback of prepared profile changes, managed link repair, docs shipped for the Creator"
+      ]
+    },
     {
       "version": "0.1.7-enpoi.2.132",
       "commit": "00ff2d6",
@@ -385,15 +398,6 @@
       "releasedAt": "2026-10-14T06:46:07.000Z",
       "notes": [
         "docs(plan): record the live verification evidence for the update system"
-      ]
-    },
-    {
-      "version": "0.1.7-enpoi.2.86",
-      "commit": "545082a",
-      "releasedAt": "2026-10-13T20:17:51.000Z",
-      "notes": [
-        "fix(update): merge template dsh.profile.bundles into the live profile",
-        "feat(update-ui): manual Check for updates in the dialog and the settings row"
       ]
     }
   ]
