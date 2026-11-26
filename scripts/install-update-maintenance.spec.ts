@@ -227,6 +227,37 @@ stamp_install_complete "$PREFIX/harness/0.1.7-enpoi.2.60" "0.1.7-enpoi.2.60" "aa
   })
 })
 
+describe.skipIf(win32)('repair settings detection', () => {
+  it.each([
+    ['profiles/web/settings.yaml', 0], ['settings.yaml', 0], ['settings.yaml.imported', 1],
+  ] as const)('checks %s without seeding', (settings, status) => {
+    const root = scratch()
+    const prefix = join(root, 'prefix')
+    const home = join(root, 'home')
+    const bin = join(prefix, 'bin')
+    const tree = join(prefix, 'harness/1')
+    write(tree, 'package.json', '{"version":"1"}\n')
+    write(tree, '.dsh-install-complete', '{"version":"1"}\n')
+    write(tree, 'apps/cli/lib/bin.js', 'console.log("1")\n')
+    symlinkSync('1', join(prefix, 'harness/current'))
+    write(prefix, 'harness/install-state.json', `${JSON.stringify({ version: '1', harnessDir: '1', dshHome: home, binDir: bin })}\n`)
+    write(bin, 'dsh', `#!/bin/sh\n# prefix ${prefix}\necho "dsh 1"\n`, 0o755)
+    write(bin, 'dsh-peer', '#!/bin/sh\nexit 0\n', 0o755)
+    write(home, 'profiles/web/cordis.patch.yml', '[]\n')
+    const settingsFile = write(home, settings, 'legacy: {}\n')
+    const result = runLib(String.raw`
+PREFIX="$PREFIX_DIR"; DSH_HOME="$HOME_DIR"; NODE="$NODE_BIN"; PATH="$PREFIX/bin:$PATH"; CHECK_ONLY=1
+detect_service_unit() { :; }
+seed_home() { die 'unexpected seed'; }
+do_repair
+`, { PREFIX_DIR: prefix, HOME_DIR: home, NODE_BIN: process.execPath })
+    expect(result.status, result.stdout + result.stderr).toBe(status)
+    if (status === 1) expect(result.stdout + result.stderr).toContain('settings.yaml is missing')
+    expect(readFileSync(settingsFile, 'utf8')).toBe('legacy: {}\n')
+    if (settings !== 'settings.yaml') expect(existsSync(join(home, 'settings.yaml'))).toBe(false)
+  })
+})
+
 describe.skipIf(win32)('pnpm store and pin', () => {
   it('resolves the pin from the profile first, then the harness', () => {
     const root = scratch()

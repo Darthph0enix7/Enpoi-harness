@@ -252,6 +252,7 @@ jobs:
           test -f "$ROOT/apps/cli/lib/bin.js"
           test -f "$ROOT/apps/web/dist/index.html"
           test -f "$ROOT/.dsh-build/client-build-environment.json"
+          test -f "$ROOT/docs/creator/00-index.md"
 
           SCRATCH="$RUNNER_TEMP/dsh-smoke"
           rm -rf "$SCRATCH"

@@ -19,7 +19,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 
@@ -181,6 +181,104 @@ printf 'LOG=%s\n' "$(grep -c 'restored 1 foreign symlink' "$LOG" || true)"
     expect(partial.stdout).toContain(`KEPT=${f.outside}/foreign-b`)
     expect(partial.stdout).toContain('LOG=1')
     expect(existsSync(join(f.profile, 'node_modules/@scope/outside'))).toBe(true)
+  })
+})
+
+function managedLinksFixture() {
+  const f = fixture()
+  const prefix = join(f.root, 'prefix')
+  const active = join(prefix, 'harness/active')
+  const current = join(prefix, 'harness/current')
+  const old = join(prefix, 'harness/retired')
+  const source = join(f.root, 'source checkout')
+  const scope = join(f.profile, 'node_modules/@deepseek-ai')
+  const pkg = (root: string, path: string, name: string) => {
+    const dir = join(root, path)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'package.json'), `${JSON.stringify({ name })}\n`)
+    return dir
+  }
+  for (const root of [active, source]) {
+    mkdirSync(root, { recursive: true })
+    writeFileSync(join(root, 'package.json'), '{"name":"@deepseek-ai/dsh-root","version":"active","workspaces":["packages/*/*"]}\n')
+  }
+  for (const tree of [active, old]) {
+    mkdirSync(tree, { recursive: true })
+    writeFileSync(join(tree, '.dsh-install-complete'), '{}\n')
+  }
+  symlinkSync('active', current)
+  mkdirSync(scope, { recursive: true })
+  const targets = {
+    source: pkg(source, 'packages/demo/from-source', '@deepseek-ai/from-source'),
+    old: pkg(old, 'packages/demo/from-old', '@deepseek-ai/from-old'),
+    missing: pkg(old, 'packages/demo/old-location', '@deepseek-ai/moved'),
+    pruned: join(prefix, 'harness/1.0.0/packages/demo/from-pruned'),
+    external: pkg(f.outside, 'packages/demo/operator-override', '@deepseek-ai/operator-override'),
+    unlisted: pkg(source, 'packages/demo/not-managed', '@deepseek-ai/not-managed'),
+  }
+  pkg(active, 'packages/demo/from-source', '@deepseek-ai/from-source')
+  pkg(active, 'packages/demo/from-old', '@deepseek-ai/from-old')
+  pkg(active, 'packages/demo/new-location', '@deepseek-ai/moved')
+  pkg(active, 'packages/demo/from-pruned', '@deepseek-ai/from-pruned')
+  pkg(active, 'packages/demo/operator-override', '@deepseek-ai/operator-override')
+  for (const [name, key] of [
+    ['from-source', 'source'], ['from-old', 'old'], ['moved', 'missing'],
+    ['from-pruned', 'pruned'], ['operator-override', 'external'], ['not-managed', 'unlisted'],
+  ] as const) symlinkSync(key === 'pruned' ? relative(scope, targets[key]) : targets[key], join(scope, name))
+  return { f, prefix, current, scope, targets }
+}
+
+describe.skipIf(win32)('managed profile links', () => {
+  it('restores pruned and surviving managed links through current without changing other targets', () => {
+    const { f, current, scope, targets } = managedLinksFixture()
+    const result = runLib(String.raw`
+PREFIX="$PREFIX_DIR"; PROFILE_DIR="$HOME_DIR/profiles/web"; NODE="$NODE_BIN"; LOG_FILE="$LOG"
+profile_foreign_links_snapshot "$HOME_DIR/snapshot"
+rm "$PROFILE_DIR/node_modules/@deepseek-ai/from-source" "$PROFILE_DIR/node_modules/@deepseek-ai/operator-override"
+profile_foreign_links_restore "$HOME_DIR/snapshot"
+`, baseEnv(f))
+    expect(result.status, result.stderr).toBe(0)
+    const snapshot = readFileSync(join(f.home, 'snapshot'), 'utf8')
+    expect(snapshot).toContain(`@deepseek-ai/from-source\t${current}/packages/demo/from-source`)
+    expect(readlinkSync(join(scope, 'from-source'))).toBe(join(current, 'packages/demo/from-source'))
+    expect(readlinkSync(join(scope, 'from-old'))).toBe(join(current, 'packages/demo/from-old'))
+    expect(readlinkSync(join(scope, 'from-pruned'))).toBe(join(current, 'packages/demo/from-pruned'))
+    expect(readlinkSync(join(scope, 'moved'))).toBe(targets.missing)
+    expect(readlinkSync(join(scope, 'operator-override'))).toBe(targets.external)
+    expect(readlinkSync(join(scope, 'not-managed'))).toBe(targets.unlisted)
+  })
+
+  it('reports wrong-root, missing names and absent targets read-only, then repairs only resolvable managed links', () => {
+    const { f, prefix, current, scope, targets } = managedLinksFixture()
+    rmSync(join(scope, 'from-old'))
+    writeFileSync(join(f.profile, '.dsh-foreign-links'), `@deepseek-ai/from-old\t${targets.old}\n`)
+    const body = String.raw`
+PREFIX="$PREFIX_DIR"; BIN_DIR="$PREFIX/bin"; DSH_HOME="$HOME_DIR"; PROFILE=web; NODE="$NODE_BIN"; CHECK_ONLY="$CHECK"
+detect_service_unit() { :; }
+find_backfill() { :; }
+seed_home() { die 'unexpected seed'; }
+do_repair
+`
+    writeFileSync(join(f.profile, 'settings.yaml'), '{}\n')
+    writeFileSync(join(f.profile, 'cordis.patch.yml'), '[]\n')
+    writeFileSync(join(prefix, 'harness/install-state.json'), '{"version":"active","harnessDir":"active"}\n')
+    const check = runLib(body, baseEnv(f, { CHECK: '1' }))
+    const output = check.stdout + check.stderr
+    expect(check.status).toBe(1)
+    expect(output).toContain('managed dependency link @deepseek-ai/from-source points outside')
+    expect(output).toContain('managed dependency link @deepseek-ai/from-old is missing')
+    expect(output).toContain(`current target is absent: ${current}/packages/demo/old-location`)
+    expect(output).not.toContain('@deepseek-ai/operator-override')
+    expect(readlinkSync(join(scope, 'from-source'))).toBe(targets.source)
+    expect(existsSync(join(scope, 'from-old'))).toBe(false)
+
+    const repair = runLib(body, baseEnv(f, { CHECK: '0' }))
+    expect(repair.stdout).toContain('relinked @deepseek-ai/from-source')
+    expect(readlinkSync(join(scope, 'from-source'))).toBe(join(current, 'packages/demo/from-source'))
+    expect(readlinkSync(join(scope, 'from-old'))).toBe(join(current, 'packages/demo/from-old'))
+    expect(readlinkSync(join(scope, 'from-pruned'))).toBe(join(current, 'packages/demo/from-pruned'))
+    expect(readlinkSync(join(scope, 'moved'))).toBe(targets.missing)
+    expect(readlinkSync(join(scope, 'operator-override'))).toBe(targets.external)
   })
 })
 

@@ -195,6 +195,7 @@ GUARD_MODE=0
 GUARD_BASELINE=""
 GUARD_TIMEOUT=""
 GUARD_EXPECT_RESTART=0
+GUARD_BACKFILL_TREE=""
 GUARD_HOME=""
 # The launchd label that submitted this one-shot verifier (macOS only; empty
 # for the systemd/setsid path). The verifier removes its own job at exit so a
@@ -845,7 +846,8 @@ Options:
                       target replaces the record)
   --apply             with --update: switch to the tree recorded by
                       $PREFIX/harness/.staged-apply.json, restart the service,
-                      self-check, health-proof, prune, and delete the record.
+                      backfill when the new Web runtime answers, self-check,
+                      health-check, prune, and consume the applied record.
                       Refuses (exit 1) when nothing is staged; the record
                       survives a failure so the UI can retry
   --cancel            with --update: stop a live update run — SIGTERM the
@@ -879,6 +881,7 @@ Options:
   --quiet, -q         suppress progress/detail lines (warnings, errors, and the
                       final summary still print)
   --no-open           do not try to open the Web UI URL after install
+  --seed-worker HOME  seed a private attempt home from this local release only
   --json              print a single JSON status object on stdout
   -h, --help          this help
 
@@ -935,6 +938,12 @@ need_value() { [ "$#" -ge 2 ] || die "option $1 needs a value"; }
 while [ "$#" -gt 0 ]; do
   arg="$1"
   case "$arg" in
+    --seed-worker)
+      [ "$#" -eq 2 ] || die "usage: bash RELEASE/scripts/install.sh --seed-worker ABSOLUTE_ATTEMPT_HOME"
+      [ -n "$SELF" ] && [ -f "$(dirname "$SELF")/worker-profile.mjs" ] || die "--seed-worker requires a local release script"
+      command -v node >/dev/null 2>&1 || die "--seed-worker requires the release-compatible Node on PATH"
+      exec node "$(dirname "$SELF")/worker-profile.mjs" "$2"
+      ;;
     --prefix) need_value "$@"; PREFIX="$2"; shift 2;;
     --prefix=*) PREFIX="${arg#*=}"; shift;;
     --bin-dir) need_value "$@"; BIN_DIR="$2"; BIN_DIR_EXPLICIT=1; shift 2;;
@@ -994,6 +1003,8 @@ while [ "$#" -gt 0 ]; do
     --guard-timeout) need_value "$@"; GUARD_TIMEOUT="$2"; shift 2;;
     --guard-timeout=*) GUARD_TIMEOUT="${arg#*=}"; shift;;
     --guard-expect-restart) GUARD_EXPECT_RESTART=1; shift;;
+    --guard-backfill-tree) need_value "$@"; GUARD_BACKFILL_TREE="$2"; shift 2;;
+    --guard-web-port) need_value "$@"; export DSH_WEB_PORT="$2"; shift 2;;
     --guard-home) need_value "$@"; GUARD_HOME="$2"; shift 2;;
     --guard-home=*) GUARD_HOME="${arg#*=}"; shift;;
     --guard-label) need_value "$@"; GUARD_LAUNCHD_LABEL="$2"; shift 2;;
@@ -1784,6 +1795,7 @@ stage_remote() { # url
 sha256_of() { # file
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+  elif [ -n "${NODE:-}" ] && [ -x "$NODE" ]; then "$NODE" -e 'const c=require("node:crypto"),f=require("node:fs");process.stdout.write(c.createHash("sha256").update(f.readFileSync(process.argv[1])).digest("hex"))' "$1" 2>/dev/null || printf ''
   else printf ''; fi
 }
 
@@ -2984,6 +2996,9 @@ copy_profile_tree() { # src dst mode(seed|refresh)
     fi
     case "$rel" in
       .git|.git/*|node_modules|node_modules/*|*/node_modules|*/node_modules/*) continue;;
+      # The release owns the worker bundle and its local dependencies. They
+      # must not enter the human profile's separate pnpm workspace.
+      packages/enpoi-jarvis-worker|packages/enpoi-jarvis-worker/*|packages/enpoi-job-guard|packages/enpoi-job-guard/*|packages/enpoi-worker-credentials|packages/enpoi-worker-credentials/*) continue;;
       .backup-*|.backup-*/*) continue;;
       settings.yaml|device-patches|device-patches/*) continue;;
       fresh-settings.yaml|presets|presets/*) continue;;
@@ -3764,12 +3779,9 @@ profile_link_target() {
   esac
 }
 
-# Snapshot every node_modules symlink (top level plus one @scope/name level)
-# whose resolved target lies outside the profile directory.
-# @param out_file - receives `name<TAB>raw-target` lines; emptied first.
-profile_foreign_links_snapshot() {
-  local out="$1" link name target resolved real
-  : > "$out" 2>/dev/null || return 0
+# List foreign dependency links as name and raw target.
+profile_foreign_links_list() {
+  local link name target resolved real
   [ -d "$PROFILE_DIR/node_modules" ] || return 0
   real="$(cd "$PROFILE_DIR" 2>/dev/null && pwd -P)" || real="$PROFILE_DIR"
   for link in "$PROFILE_DIR/node_modules"/* "$PROFILE_DIR/node_modules"/@*/*; do
@@ -3777,40 +3789,181 @@ profile_foreign_links_snapshot() {
     name="${link#"$PROFILE_DIR/node_modules"/}"
     target="$(readlink "$link" 2>/dev/null || true)"
     [ -n "$target" ] || continue
-    resolved="$(profile_link_target "$link")"
+    resolved="$(profile_link_target "$link")" || resolved=""
+    # Keep relative managed targets even when their old tree was pruned.
+    case "$name" in @deepseek-ai/*) [ -n "$resolved" ] || resolved="$target";; esac
     [ -n "$resolved" ] || continue
     case "$resolved" in
-      "$real"|"$real"/*) continue;;
+      "$real"|"$real"/*)
+        case "$name" in
+          @deepseek-ai/*) resolved="$(cd "$link" 2>/dev/null && pwd -P)" || continue;;
+          *) continue;;
+        esac
+        case "$resolved" in "$real"|"$real"/*) continue;; esac
+        ;;
     esac
-    printf '%s\t%s\n' "$name" "$target" >> "$out" || true
+    printf '%s\t%s\n' "$name" "$target"
   done
   return 0
 }
 
-# Re-create every snapshot entry that is now missing; log the count. A link
-# that still exists (pnpm kept or re-created it) is never touched.
-# @param snapshot_file - the `name<TAB>target` list from the snapshot.
+# Classify only names declared by the current tree's workspace manifests.
+# Rows carry the raw target, status, and candidate.
+profile_managed_link_targets() {
+  if [ ! -x "${NODE:-}" ]; then cat; return; fi
+  "$NODE" -e '
+const fs = require("node:fs");
+const path = require("node:path");
+const [current, modules] = process.argv.slice(1);
+function manifest(file) {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
+}
+function real(file) {
+  try { return fs.realpathSync(file); } catch {
+    const parent = path.dirname(file);
+    return parent === file ? file : path.join(real(parent), path.basename(file));
+  }
+}
+function below(root, file) {
+  const rel = path.relative(root, file);
+  return rel && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel) ? rel : "";
+}
+const rows = fs.readFileSync(0, "utf8").split("\n").filter(Boolean);
+if (!rows.some((row) => row.startsWith("@deepseek-ai/"))) {
+  if (rows.length) console.log(rows.join("\n"));
+  process.exit(0);
+}
+const root = manifest(path.join(current, "package.json"));
+const managed = new Map();
+for (const pattern of Array.isArray(root?.workspaces) ? root.workspaces : []) {
+  if (typeof pattern !== "string" || pattern.startsWith("!")) continue;
+  for (const file of fs.globSync(`${pattern}/package.json`, { cwd: current })) {
+    const name = manifest(path.join(current, file))?.name;
+    if (typeof name !== "string" || !name.startsWith("@deepseek-ai/")) continue;
+    if (!managed.has(name)) managed.set(name, []);
+    managed.get(name).push(path.dirname(file));
+  }
+}
+const harness = real(path.dirname(current));
+const active = real(current);
+const sourceRoots = new Map();
+function fromSource(file) {
+  for (let parent = path.dirname(file); parent !== path.dirname(parent); parent = path.dirname(parent)) {
+    if (!sourceRoots.has(parent)) {
+      const pkg = manifest(path.join(parent, "package.json"));
+      sourceRoots.set(parent, pkg?.name === root.name && Array.isArray(pkg?.workspaces));
+    }
+    if (sourceRoots.get(parent)) return below(parent, file);
+  }
+  return "";
+}
+for (const row of rows) {
+  const [name, target] = row.split("\t");
+  if (!managed.has(name) || !target) { console.log(row); continue; }
+  const absolute = path.resolve(real(path.dirname(path.join(modules, name))), target);
+  const resolved = real(absolute);
+  const throughCurrent = (below(current, absolute) || below(path.join(harness, "current"), absolute))
+    && below(active, resolved);
+  const inHarness = below(harness, resolved);
+  const firstSegment = inHarness.split(path.sep, 1)[0];
+  const tree = path.join(harness, firstSegment);
+  const versionTree = firstSegment && !firstSegment.startsWith(".")
+    && (tree === active || fs.existsSync(path.join(tree, ".dsh-install-complete"))
+      || /^[0-9]+(?:\.[0-9]+)*(?:[-+][0-9A-Za-z.-]+)?$/.test(firstSegment));
+  const relative = inHarness ? (versionTree ? below(tree, resolved) : "") : fromSource(resolved);
+  const suffix = throughCurrent || relative;
+  if (!suffix) { console.log(row); continue; }
+  const candidate = path.join(current, suffix);
+  const available = fs.existsSync(candidate) && Boolean(below(active, real(candidate)))
+    && managed.get(name).some((dir) => suffix === dir || suffix.startsWith(`${dir}${path.sep}`));
+  const kind = !available ? "absent" : throughCurrent ? "current" : "wrong-root";
+  console.log(`${row}\t${kind}\t${candidate}`);
+}
+' "$PREFIX/harness/current" "$PROFILE_DIR/node_modules"
+}
+
+profile_foreign_links_snapshot() { # out_file -> name<TAB>target
+  local name target kind candidate
+  while IFS=$'\t' read -r name target kind candidate; do
+    if [ "$kind" = wrong-root ]; then target="$candidate"; fi
+    printf '%s\t%s\n' "$name" "$target"
+  done < <(profile_foreign_links_list | profile_managed_link_targets) > "$1"
+}
+
+# Use the live symlink in preference to an older snapshot entry.
+profile_foreign_links_recorded() { # snapshot [missing-only]
+  local name target link
+  [ -s "$1" ] || return 0
+  while IFS=$'\t' read -r name target; do
+    case "$name" in ''|.|..|*..*|/*|*' '*|*/*/*|*/) continue;; esac
+    link="$PROFILE_DIR/node_modules/$name"
+    if [ -L "$link" ]; then
+      [ "${2:-}" != missing-only ] || continue
+      target="$(readlink "$link" 2>/dev/null || true)"
+    elif [ -e "$link" ]; then
+      continue
+    fi
+    [ -n "$target" ] && printf '%s\t%s\n' "$name" "$target"
+  done < "$1"
+  return 0
+}
+
+# Re-create missing snapshot entries and re-anchor stale managed symlinks.
 profile_foreign_links_restore() {
-  local snapshot="$1" name target restored=0
-  [ -s "$snapshot" ] || return 0
-  while IFS="$(printf '\t')" read -r name target; do
-    [ -n "$name" ] || continue
-    [ -n "$target" ] || continue
-    # The name reaches a path expression: refuse anything but a plain
-    # (optionally scoped) package segment, whatever the file claims.
-    case "$name" in
-      ''|.|..|*..*|/*|*' '*) continue;;
-    esac
-    if [ ! -e "$PROFILE_DIR/node_modules/$name" ] && [ ! -L "$PROFILE_DIR/node_modules/$name" ]; then
-      mkdir -p "$(dirname "$PROFILE_DIR/node_modules/$name")" 2>/dev/null || true
-      if ln -sfn "$target" "$PROFILE_DIR/node_modules/$name" 2>/dev/null; then
+  local snapshot="$1" name target kind candidate link restored=0
+  while IFS=$'\t' read -r name target kind candidate; do
+    link="$PROFILE_DIR/node_modules/$name"
+    if [ -L "$link" ] && [ "$kind" = wrong-root ]; then
+      if [ -e "$candidate" ] && [ "$(readlink "$link" 2>/dev/null)" = "$target" ]; then
+        ln -sfn "$candidate" "$link" || warn "could not re-anchor managed dependency link $name"
+      fi
+    elif [ ! -e "$link" ] && [ ! -L "$link" ]; then
+      if [ "$kind" = absent ] && [ "$target" = "$candidate" ]; then
+        warn "managed dependency link $name not restored; its target is absent: $candidate"
+        continue
+      fi
+      if [ "$kind" = wrong-root ] && [ -e "$candidate" ]; then target="$candidate"; fi
+      mkdir -p "$(dirname "$link")" 2>/dev/null || true
+      if ln -sn "$target" "$link" 2>/dev/null; then
         restored=$((restored + 1))
       fi
     fi
-  done < "$snapshot"
+  done < <(profile_foreign_links_recorded "$snapshot" | profile_managed_link_targets)
   if [ "$restored" -gt 0 ]; then
     log "profile deps: restored $restored foreign symlink(s) pruned by install"
   fi
+  return 0
+}
+
+profile_repair_foreign_links() {
+  local name target kind candidate link detail action
+  while IFS=$'\t' read -r name target kind candidate; do
+    link="$PROFILE_DIR/node_modules/$name"
+    if [ "$kind" = absent ]; then
+      repair_fail "managed dependency link $name: current target is absent: $candidate (recorded target: $target)" \
+        "restore the shipped target or correct the link after inspecting $link"
+    elif [ "$kind" = wrong-root ] || { [ "$kind" = current ] && [ ! -L "$link" ]; }; then
+      if [ -L "$link" ]; then
+        detail="points outside $PREFIX/harness/current (target: $target)"
+        action=-sfn
+      else
+        detail="is missing from $PROFILE_DIR/node_modules"
+        action=-sn
+      fi
+      if repair_fixable "managed dependency link $name $detail"; then
+        if [ -e "$candidate" ] && mkdir -p "$(dirname "$link")" \
+          && { [ "$action" = -sn ] || [ "$(readlink "$link" 2>/dev/null)" = "$target" ]; } \
+          && ln "$action" "$candidate" "$link"; then
+          repair_fixed "relinked $name to $candidate"
+        else
+          repair_fail "could not relink $name to $candidate" "inspect $link and $candidate, then re-run dsh repair"
+        fi
+      fi
+    elif [ ! -e "$link" ] && [ ! -L "$link" ]; then
+      repair_fail "foreign dependency link $name is missing from $PROFILE_DIR/node_modules (it pointed at $target)" \
+        "ln -sfn '$target' '$link'  # or: re-run dsh update (it restores recorded foreign links)"
+    fi
+  done < <({ profile_foreign_links_list; profile_foreign_links_recorded "$PROFILE_DIR/.dsh-foreign-links" missing-only; } | profile_managed_link_targets)
   return 0
 }
 
@@ -4397,7 +4550,7 @@ fire_detached_restart() { # unit
 # internal --service-guard mode outside the target unit's process tree. Linux
 # uses a transient user unit; macOS a transient submitted job; plain
 # setsid/nohup is the best-effort fallback when neither is available.
-spawn_service_guard() { # baseline expect_restart timeout
+spawn_service_guard() { # baseline expect_restart timeout [backfill_tree]
   local baseline="$1" expect="$2" timeout="$3" script token label guard_log guard_src guard_tmp
   local guard_args
   script="$PREFIX/logs/dsh-service-guard.sh"
@@ -4432,7 +4585,12 @@ spawn_service_guard() { # baseline expect_restart timeout
   guard_args=(--service-guard --service-unit "$SERVICE_UNIT" --prefix "$PREFIX" --dsh-home "$DSH_HOME" --guard-timeout "$timeout" --guard-home "${HOME:-}")
   [ -n "$baseline" ] && guard_args+=(--guard-baseline "$baseline")
   [ "$expect" = 1 ] && guard_args+=(--guard-expect-restart)
+  if [ -n "${4:-}" ]; then
+    guard_args+=(--guard-backfill-tree "$4" --guard-web-port "${DSH_WEB_PORT:-3080}")
+  fi
   token="$(digest_hex "$PREFIX" | cut -c1-12)"
+  # An existing restart-only verifier cannot run a staged apply's backfill.
+  if [ -n "${4:-}" ]; then token="$token-$$"; fi
   case "$OS" in
     linux)
       if command -v systemd-run >/dev/null 2>&1; then
@@ -4449,9 +4607,9 @@ spawn_service_guard() { # baseline expect_restart timeout
         log "service-guard: systemd-run could not schedule the verifier; falling back to a plain detached process"
       fi
       if command -v setsid >/dev/null 2>&1; then
-        setsid nohup env -u DSH_INSTALL_LIB_ONLY bash "$script" "${guard_args[@]}" >>"$guard_log" 2>&1 < /dev/null &
+        setsid nohup env -u DSH_INSTALL_LIB_ONLY bash "$script" "${guard_args[@]}" >>"$guard_log" 2>&1 < /dev/null 9>&- &
       else
-        nohup env -u DSH_INSTALL_LIB_ONLY bash "$script" "${guard_args[@]}" >>"$guard_log" 2>&1 < /dev/null &
+        nohup env -u DSH_INSTALL_LIB_ONLY bash "$script" "${guard_args[@]}" >>"$guard_log" 2>&1 < /dev/null 9>&- &
       fi
       log "service-guard: detached verifier started without systemd-run (best effort)"
       ;;
@@ -4470,7 +4628,7 @@ spawn_service_guard() { # baseline expect_restart timeout
         fi
         log "service-guard: launchctl submit could not schedule the verifier; falling back to a plain detached process"
       fi
-      nohup env -u DSH_INSTALL_LIB_ONLY bash "$script" "${guard_args[@]}" >>"$guard_log" 2>&1 < /dev/null &
+      nohup env -u DSH_INSTALL_LIB_ONLY bash "$script" "${guard_args[@]}" >>"$guard_log" 2>&1 < /dev/null 9>&- &
       log "service-guard: detached verifier started without launchd (best effort)"
       ;;
   esac
@@ -4483,8 +4641,8 @@ spawn_service_guard() { # baseline expect_restart timeout
 # the update still needs. Idempotent per call: the marker write is an atomic
 # overwrite, and a verifier already running for this delegation is reused
 # (Linux keys it to the prefix, macOS to the update process).
-delegate_service_restart() {
-  local baseline session
+delegate_service_restart() { # [backfill_tree]
+  local baseline session backfill_tree="${1:-}"
   if [ -z "$SERVICE_UNIT" ]; then
     log "service: no unit recorded for this install; nothing to delegate"
     return 0
@@ -4496,7 +4654,7 @@ delegate_service_restart() {
   # is inside a turn by definition, so only the after-turn marker is safe.
   session="${DSH_SESSION_ID:-}"
   if [ -n "$session" ] && [ -z "${DSH_PTY_SESSION_ID:-}" ]; then
-    spawn_service_guard "$baseline" 0 900
+    spawn_service_guard "$baseline" 0 900 "$backfill_tree"
     if write_restart_marker "$session"; then
       say "  ${C_CYAN}ℹ${C_RESET} Service restart scheduled for between turns (session ${session}): $SERVICE_UNIT"
     else
@@ -4504,7 +4662,7 @@ delegate_service_restart() {
     fi
     return 0
   fi
-  spawn_service_guard "$baseline" 1 180
+  spawn_service_guard "$baseline" 1 180 "$backfill_tree"
   if fire_detached_restart "$SERVICE_UNIT"; then
     say "  ${C_CYAN}ℹ${C_RESET} Service restart delegated to a detached process: $SERVICE_UNIT"
   else
@@ -4548,6 +4706,32 @@ do_service_guard() {
   return "$guard_rc"
 }
 
+guard_backfill() {
+  [ -n "$GUARD_BACKFILL_TREE" ] || return 0
+  local current saved_node state="$PREFIX/harness/install-state.json"
+  current="$(readlink "$PREFIX/harness/current" 2>/dev/null || true)"
+  if [ "${current##*/}" != "$GUARD_BACKFILL_TREE" ]; then
+    log "service-guard: skipping backfill; $GUARD_BACKFILL_TREE is no longer current"
+    return 0
+  fi
+  saved_node="$(json_field "$state" node 2>/dev/null || true)"
+  if [ -x "$saved_node" ] && node_at_least "$saved_node" "$DSH_MIN_NODE_MAJOR" "$DSH_MIN_NODE_MINOR"; then
+    NODE="$saved_node"
+  elif ! resolve_node 0; then
+    warn "service-guard: skipping backfill; no usable Node.js found"
+    return 0
+  fi
+  PROFILE="$(json_field "$state" profile 2>/dev/null || true)"
+  PROFILE="${PROFILE:-web}"
+  resolve_home
+  HARNESS="$PREFIX/harness/$GUARD_BACKFILL_TREE"
+  if [ -n "$GUARD_BASELINE" ]; then
+    run_backfill require-web "$GUARD_BASELINE"
+  else
+    run_backfill require-web
+  fi
+}
+
 # The verifier body behind do_service_guard.
 do_service_guard_run() {
   local unit="$SERVICE_UNIT" timeout interval recover kick baseline generation
@@ -4568,9 +4752,10 @@ do_service_guard_run() {
   while :; do
     if unit_is_active "$unit"; then
       generation="$(service_generation "$unit")"
-      if [ -z "$baseline" ] || [ "$saw_outage" = 1 ] \
-        || { [ -n "$generation" ] && [ "$generation" != "$baseline" ]; }; then
+      if { [ -z "$baseline" ] && [ -z "$GUARD_BACKFILL_TREE" ]; } || [ "$saw_outage" = 1 ] \
+        || { [ -n "$baseline" ] && [ -n "$generation" ] && [ "$generation" != "$baseline" ]; }; then
         log "service-guard: $unit verified active after the delegated restart"
+        guard_backfill
         return 0
       fi
       if [ "$GUARD_EXPECT_RESTART" = 1 ]; then
@@ -4604,6 +4789,7 @@ do_service_guard_run() {
     while :; do
       if unit_is_active "$unit"; then
         log "service-guard: recovered $unit after the failed restart"
+        guard_backfill
         return 0
       fi
       recover_now="$(date +%s)"
@@ -5070,9 +5256,13 @@ find_backfill() {
   return 0
 }
 
-wait_for_web() { # bounded wait for the local web instance; 0 = it answered
-  local i
+wait_for_web() { # [previous_generation] -> 0 when the expected Web instance answers
+  local i generation
   for i in 1 2 3 4 5 6 7 8 9 10; do
+    if [ "$#" -gt 0 ]; then
+      generation="$(service_generation "$SERVICE_UNIT")"
+      if [ -z "$generation" ] || [ "$generation" = "$1" ] || ! unit_is_active "$SERVICE_UNIT"; then sleep 2; continue; fi
+    fi
     if curl -fsS -o /dev/null --connect-timeout 2 --max-time 3 "http://127.0.0.1:${DSH_WEB_PORT:-3080}/" 2>/dev/null; then
       return 0
     fi
@@ -5081,7 +5271,7 @@ wait_for_web() { # bounded wait for the local web instance; 0 = it answered
   return 1
 }
 
-run_backfill() {
+run_backfill() { # [require-web [previous_generation]]
   local b
   b="$(find_backfill)"
   if [ -z "$b" ]; then
@@ -5094,7 +5284,14 @@ run_backfill() {
   # The backfill reads through the web API. The service was just (re)started,
   # so give it a bounded moment before reading; an immediate read reports a
   # failure that is only startup latency.
-  if [ -n "$SERVICE_UNIT" ]; then
+  if [ "${1:-}" = require-web ]; then
+    shift
+    if [ -z "$SERVICE_UNIT" ] || ! wait_for_web "$@"; then
+      BACKFILL="skipped (new runtime unavailable)"
+      log "projection backfill: skipped; no restarted web runtime answered"
+      return 0
+    fi
+  elif [ -n "$SERVICE_UNIT" ]; then
     wait_for_web || log "projection backfill: web did not answer within 20s; trying anyway"
   fi
   BACKFILL="ran status"
@@ -5112,7 +5309,7 @@ backup_user_files() { # dir
   for f in "$DSH_HOME/settings.yaml" "$DSH_HOME/cordis.patch.yml" "$DSH_HOME/sync-local.yaml" \
            "$DSH_HOME/heavy-server-overlay.json" "$DSH_HOME/pairings.yaml" \
            "$PROFILE_DIR/settings.yaml" "$PROFILE_DIR/cordis.patch.yml" "$PROFILE_DIR/package.json" \
-           "$PROFILE_DIR/pnpm-lock.yaml"; do
+           "$PROFILE_DIR/pnpm-lock.yaml" "$PROFILE_DIR/pnpm-workspace.yaml"; do
     [ -f "$f" ] || continue
     rel="${f#/}"
     mkdir -p "$b/root/$(dirname "$rel")" 2>/dev/null || continue
@@ -5148,7 +5345,7 @@ restore_user_files() { # dir
     rel="${f#"$b"/root/}"
     live="/$rel"
     case "$live" in
-      "${DSH_HOME:-}/settings.yaml"|"${PROFILE_DIR:-}/settings.yaml"|"${PROFILE_DIR:-}/cordis.patch.yml"|"${PROFILE_DIR:-}/package.json"|"${PROFILE_DIR:-}/pnpm-lock.yaml") : ;;
+      "${DSH_HOME:-}/settings.yaml"|"${PROFILE_DIR:-}/settings.yaml"|"${PROFILE_DIR:-}/cordis.patch.yml"|"${PROFILE_DIR:-}/package.json"|"${PROFILE_DIR:-}/pnpm-lock.yaml"|"${PROFILE_DIR:-}/pnpm-workspace.yaml") : ;;
       *)
         if [ -f "$live" ]; then
           if cmp -s "$f" "$live"; then continue; fi
@@ -6742,7 +6939,7 @@ sweep_experimental_residue() {
 # DSH_HEALTH_FORCE_FAIL=1 injects a failing check.
 HEALTH_JSON=""
 
-health_proof() { # 0 pass, 1 fail (sets HEALTH_JSON)
+health_proof() { # [defer_service] -> 0 pass, 1 fail (sets HEALTH_JSON)
   local failures="" identity=PASS service_state="skipped" service_ok=1 profile_state="skipped" profile_ok=1 shim_ok=1
   local marker_version="" state_version="" state_dir="" cli_version="" cli_version_raw="" cli_rc=1 link_dir=""
   installed_identity_resolve || true
@@ -6788,7 +6985,7 @@ health_proof() { # 0 pass, 1 fail (sets HEALTH_JSON)
   fi
   say "  health: identity $identity — current=$link_dir marker=$marker_version state=$state_version cli=$cli_version_raw"
   # Service: only when this install records one.
-  if [ "${SERVICE_INSTALL:-0}" = 1 ] && [ -n "$SERVICE_UNIT" ]; then
+  if [ "${1:-0}" != 1 ] && [ "${SERVICE_INSTALL:-0}" = 1 ] && [ -n "$SERVICE_UNIT" ]; then
     if command -v systemctl >/dev/null 2>&1; then
       if systemctl is-active --quiet "$SERVICE_UNIT" 2>/dev/null \
         || systemctl --user is-active --quiet "$SERVICE_UNIT" 2>/dev/null; then
@@ -6838,9 +7035,10 @@ health_proof() { # 0 pass, 1 fail (sets HEALTH_JSON)
 # failure is service-only, so call sites can skip destructive restores that
 # cannot fix a service.
 HEALTH_SERVICE_ONLY=0
-health_proof_robust() { # 0 pass, 1 fail
+health_proof_robust() { # [defer_service] -> 0 pass, 1 fail
   HEALTH_SERVICE_ONLY=0
-  health_proof && return 0
+  health_proof "$@" && return 0
+  [ "${1:-0}" != 1 ] || return 1
   case "$HEALTH_JSON" in
     *'"identity": "FAIL"'*|*'"profile": "FAIL"'*|*'"shim": false'*) return 1;;
   esac
@@ -7069,8 +7267,9 @@ restore_state_for_tree() { # tree_dir_name
   return 0
 }
 
-rollback() { # prev backup failed_version
-  local prev="$1" backup="$2" failed="$3" restore_rc=0 in_session=0
+rollback() { # prev backup failed_version [staged_backup_record]
+  local prev="$1" backup="$2" failed="$3" staged_backup="${4:-}" restore_rc=0 in_session=0
+  STAGED_ROLLBACK_BACKUP_DIR=""
   warn "rolling back to $prev"
   switch_current "$prev" || warn "could not repoint $PREFIX/harness/current"
   # The failed run wrote install-state.json for the tree it switched to; left
@@ -7088,11 +7287,13 @@ rollback() { # prev backup failed_version
   else
     restart_service
   fi
-  # An empty backup is legal (two-phase apply: prepare already owns the
-  # migrated home, and rolling the tree back also rolls the runtime back), and
-  # restore_user_files must never be handed a path it did not record.
+  # An empty backup is legal for legacy two-phase applies without a backup
+  # pointer; when a staged backup pointer is passed, restore only prepared
+  # profile files whose current hash still equals what prepare wrote.
   if [ -n "$backup" ]; then
     restore_user_files "$backup" || restore_rc=1
+  elif [ -n "$staged_backup" ] && [ -f "$staged_backup" ]; then
+    restore_staged_profile_backup "$staged_backup" || restore_rc=1
   fi
   # One more reload after the user-file restore (warn-only): the job may still
   # carry the failed tree's paths or a rewritten plist, and the service must be
@@ -7130,6 +7331,7 @@ rollback() { # prev backup failed_version
   # Terminal marker for the attach contract: a rolled-back run reports as
   # rolledback (with the reason available in the log), never as a plain fail.
   run_marker_phase rolledback
+  local backup_note="${backup:-$STAGED_ROLLBACK_BACKUP_DIR}"
   if [ "$restore_rc" != 0 ]; then
     write_diagnostics rolled-back-partial
     emit_json update 0
@@ -7137,7 +7339,7 @@ rollback() { # prev backup failed_version
     say "dsh update FAILED; rolled back to ${prev} (previous tree self-check: $([ "$prev_ok" = 0 ] && printf 'ok' || printf 'failed')), but the user-file restore did NOT complete."
     say "  active:  $PREFIX/harness/current -> $(readlink "$PREFIX/harness/current" 2>/dev/null || printf '?')"
     say "  failed:  $PREFIX/harness/$failed.failed-*"
-    say "  backups: $backup — restore the remaining files manually from $backup/root/ (paths there mirror /)"
+    say "  backups: $backup_note — restore the remaining files manually from ${backup_note}/root/ (paths there mirror /)"
     if [ "$in_session" = 1 ]; then delegate_service_restart; fi
     return 1
   fi
@@ -7147,7 +7349,7 @@ rollback() { # prev backup failed_version
   say "dsh update FAILED; rolled back to ${prev} (previous tree self-check: $([ "$prev_ok" = 0 ] && printf 'ok' || printf 'failed'))"
   say "  active:  $PREFIX/harness/current -> $(readlink "$PREFIX/harness/current" 2>/dev/null || printf '?')"
   say "  failed:  $PREFIX/harness/$failed.failed-*"
-  say "  backups: $backup"
+  say "  backups: $backup_note"
   if [ "$in_session" = 1 ]; then delegate_service_restart; fi
   return 0
 }
@@ -7849,18 +8051,31 @@ acquire_update_lock() {
 # releaseCommit, prebuilt, preparedAt. Do not add, rename, or drop fields
 # without updating both consumers.
 STAGED_APPLY_FILE_NAME=".staged-apply.json"
+STAGED_APPLY_BACKUP_FILE_NAME=".staged-apply-backup.json"
+STAGED_APPLY_PREPARED_AT=""
+STAGED_ROLLBACK_BACKUP_DIR=""
 
 staged_apply_path() {
   printf '%s' "$PREFIX/harness/$STAGED_APPLY_FILE_NAME"
 }
 
+staged_apply_backup_path() {
+  printf '%s' "$PREFIX/harness/$STAGED_APPLY_BACKUP_FILE_NAME"
+}
+
+read_staged_apply() {
+  [ -f "$1" ] && cat "$1" 2>/dev/null
+}
+
 # Atomic write (temp + rename); releaseCommit is null when the target's commit
 # could not be resolved (source builds without git metadata).
 write_staged_apply() { # version tree_dir channel release_commit prebuilt
-  local file tmp commit_json
+  local file tmp commit_json now
   file="$(staged_apply_path)"
   mkdir -p "$(dirname "$file")" || return 1
   tmp="$file.tmp.$$"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  STAGED_APPLY_PREPARED_AT="$now"
   if [ -n "$4" ]; then commit_json="\"$(json_escape "$4")\""; else commit_json="null"; fi
   {
     printf '{\n'
@@ -7869,11 +8084,263 @@ write_staged_apply() { # version tree_dir channel release_commit prebuilt
     printf '  "channel": "%s",\n' "$(json_escape "$3")"
     printf '  "releaseCommit": %s,\n' "$commit_json"
     printf '  "prebuilt": %s,\n' "$([ "$5" = 1 ] && printf 'true' || printf 'false')"
-    printf '  "preparedAt": "%s"\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '  "preparedAt": "%s"\n' "$now"
     printf '}\n'
   } > "$tmp" || { rm -f "$tmp"; return 1; }
   mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
   return 0
+}
+
+# Sibling pointer beside .staged-apply.json: records the pre-prepare backup
+# directory and the post-prepare SHA-256 of every backed-up file that prepare
+# changed (plus newly seeded profile files). Keeping this in a sibling file
+# preserves .staged-apply.json's 6-field UI/plugin contract. Atomic write.
+write_staged_apply_backup() { # version tree_dir prepared_at backup_dir
+  local version="$1" tree_dir="$2" prepared_at="$3" backup_dir="$4"
+  local file tmp
+  resolve_home
+  [ -n "${NODE:-}" ] && [ -x "$NODE" ] || return 1
+  file="$(staged_apply_backup_path)"
+  mkdir -p "$(dirname "$file")" || return 1
+  tmp="$file.tmp.$$"
+  if ! "$NODE" -e '
+const fs = require("node:fs");
+const path = require("node:path");
+const crypto = require("node:crypto");
+const [version, treeDirName, preparedAt, backupDirRaw, profileDirRaw, outFile] = process.argv.slice(1);
+const backupDir = path.resolve(backupDirRaw);
+const profileDir = path.resolve(profileDirRaw);
+function sha256(file) {
+  return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+}
+const files = [];
+const seen = new Set();
+const backupRoot = path.join(backupDir, "root");
+function walk(dir) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) { walk(full); continue; }
+    if (!entry.isFile()) continue;
+    const rel = path.relative(backupRoot, full);
+    const live = path.join("/", rel);
+    seen.add(live);
+    try {
+      if (!fs.statSync(live).isFile()) continue;
+    } catch { continue; }
+    const bakHash = sha256(full);
+    const liveHash = sha256(live);
+    if (liveHash !== bakHash) {
+      files.push({ path: live, sha256: liveHash });
+    }
+  }
+}
+if (fs.existsSync(backupRoot)) walk(backupRoot);
+for (const name of ["cordis.patch.yml", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "settings.yaml"]) {
+  const live = path.join(profileDir, name);
+  if (seen.has(live)) continue;
+  try {
+    if (fs.statSync(live).isFile()) {
+      files.push({ path: live, sha256: sha256(live), existed: false });
+    }
+  } catch { /* absent */ }
+}
+const payload = { version, treeDirName, preparedAt, backupDir, profileDir, files };
+fs.writeFileSync(outFile, `${JSON.stringify(payload, null, 2)}\n`);
+' "$version" "$tree_dir" "$prepared_at" "$backup_dir" "$PROFILE_DIR" "$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$file" || { rm -f "$tmp"; return 1; }
+  return 0
+}
+
+# Validate the sibling backup pointer JSON; when expected_version and
+# expected_tree are passed, enforce exact match against .staged-apply.json.
+# Outputs tab-separated lines on stdout when valid:
+#   META\t<backupDir>\t<profileDir>
+#   FILE\t<existed(1|0)>\t<sha256>\t<path>
+validate_staged_apply_backup() { # record_json [expected_version expected_tree]
+  local record="$1" exp_ver="${2:-}" exp_tree="${3:-}"
+  [ -n "${NODE:-}" ] && [ -x "$NODE" ] || return 1
+  "$NODE" -e '
+const fs = require("node:fs");
+const [expVer, expTree] = process.argv.slice(1);
+let r;
+try { r = JSON.parse(fs.readFileSync(0, "utf8")); } catch { process.exit(1); }
+if (!r || typeof r !== "object" || Array.isArray(r)) process.exit(1);
+const safeStr = (v) => typeof v === "string" && !/[\r\n\0\t]/.test(v);
+const safeAbs = (v) => safeStr(v) && v.startsWith("/") && !/(?:^|\/)\.\.(?:\/|$)/.test(v);
+if (!safeStr(r.version) || !r.version) process.exit(1);
+if (!safeStr(r.treeDirName) || !/^[A-Za-z0-9._-]+$/.test(r.treeDirName) || r.treeDirName === "." || r.treeDirName === ".." || r.treeDirName.includes("..")) process.exit(1);
+if (r.preparedAt !== undefined && !safeStr(r.preparedAt)) process.exit(1);
+if (!safeAbs(r.backupDir) || !safeAbs(r.profileDir)) process.exit(1);
+if (expVer && r.version !== expVer) process.exit(1);
+if (expTree && r.treeDirName !== expTree) process.exit(1);
+if (!Array.isArray(r.files)) process.exit(1);
+const lines = [`META\t${r.backupDir}\t${r.profileDir}`];
+for (const entry of r.files) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) process.exit(1);
+  if (!safeAbs(entry.path)) process.exit(1);
+  if (typeof entry.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(entry.sha256)) process.exit(1);
+  if (entry.existed !== undefined && typeof entry.existed !== "boolean") process.exit(1);
+  const existed = entry.existed === false ? "0" : "1";
+  lines.push(`FILE\t${existed}\t${entry.sha256}\t${entry.path}`);
+}
+process.stdout.write(`${lines.join("\n")}\n`);
+' "$exp_ver" "$exp_tree" 2>/dev/null <<< "$record"
+}
+
+# Selectively restore prepared profile files on post-switch apply failure.
+# Only files whose current SHA-256 still matches the hash prepare wrote are
+# restored from the pre-prepare backup; operator-modified files are left alone
+# and reported with a warning naming each file. node_modules and plugin bundles
+# are restored from the same backup if present, otherwise the exact manual
+# commands are printed. Requires UPDATE_LOCK_OWNED=1. Idempotent and safe when
+# the backup directory is missing.
+restore_staged_profile_backup() { # backup_record_path
+  local record_path="$1" raw parsed kind f1 f2 f3 backup_dir="" profile_dir=""
+  local backup_profile bfile cur_hash bak_hash failed=0 deps_restored=0
+  local -a recorded_entries=()
+  if [ "${UPDATE_LOCK_OWNED:-0}" != 1 ]; then
+    warn "rollback: refusing to restore staged profile backup without the update lock held"
+    return 1
+  fi
+  [ -f "$record_path" ] || return 0
+  raw="$(read_staged_apply "$record_path")" || {
+    warn "rollback: could not read staged backup record $record_path"
+    return 1
+  }
+  parsed="$(validate_staged_apply_backup "$raw")" || {
+    printf '%s: ERROR: staged backup record %s is malformed; refusing to restore\n' "$SCRIPT_NAME" "$record_path" >&2
+    return 1
+  }
+  while IFS=$'\t' read -r kind f1 f2 f3; do
+    case "$kind" in
+      META)
+        backup_dir="$f1"
+        profile_dir="$f2"
+        ;;
+      FILE)
+        recorded_entries+=("$f1"$'\t'"$f2"$'\t'"$f3")
+        ;;
+    esac
+  done <<< "$parsed"
+  [ -n "$backup_dir" ] && [ -n "$profile_dir" ] || {
+    printf '%s: ERROR: staged backup record %s is malformed; refusing to restore\n' "$SCRIPT_NAME" "$record_path" >&2
+    return 1
+  }
+  STAGED_ROLLBACK_BACKUP_DIR="$backup_dir"
+
+  if [ ! -d "$backup_dir" ]; then
+    warn "rollback: pre-prepare backup is missing at $backup_dir; cannot restore prepared profile changes automatically"
+    for entry in ${recorded_entries[@]+"${recorded_entries[@]}"}; do
+      IFS=$'\t' read -r _ _ f3 <<< "$entry"
+      warn "rollback: cannot restore $f3 (backup missing at $backup_dir)"
+    done
+    if [ -d "$profile_dir" ]; then
+      if [ -f "$profile_dir/package.json" ] || [ -d "$profile_dir/node_modules" ]; then
+        warn "rollback: to reconcile profile dependencies manually, run: (cd '$profile_dir' && pnpm install --prefer-offline --config.confirmModulesPurge=false)"
+      fi
+      if [ -f "$profile_dir/build-plugins.sh" ] || [ -d "$profile_dir/packages" ]; then
+        warn "rollback: to rebuild profile plugin bundles manually, run: (cd '$profile_dir' && bash '$profile_dir/build-plugins.sh' '$profile_dir')"
+      fi
+    fi
+    return 0
+  fi
+
+  for entry in ${recorded_entries[@]+"${recorded_entries[@]}"}; do
+    local existed expected_hash live_path
+    IFS=$'\t' read -r existed expected_hash live_path <<< "$entry"
+    if [ "$existed" = 0 ]; then
+      if [ ! -e "$live_path" ]; then
+        log "rollback: $live_path already absent (idempotent)"
+        continue
+      fi
+      if [ ! -f "$live_path" ]; then
+        warn "rollback: keeping operator-modified $live_path (no longer a regular file)"
+        continue
+      fi
+      cur_hash="$(sha256_of "$live_path" 2>/dev/null || true)"
+      if [ -n "$cur_hash" ] && [ "$cur_hash" = "$expected_hash" ]; then
+        if rm -f "$live_path"; then
+          log "rollback: removed prepare-seeded $live_path"
+          case "$live_path" in
+            */package.json|*/pnpm-lock.yaml|*/pnpm-workspace.yaml) deps_restored=1;;
+          esac
+        else
+          warn "rollback: could not remove prepare-seeded $live_path"
+          failed=$((failed + 1))
+        fi
+      else
+        warn "rollback: keeping operator-modified $live_path (content changed after prepare)"
+      fi
+      continue
+    fi
+
+    bfile="$backup_dir/root/${live_path#/}"
+    if [ ! -f "$bfile" ]; then
+      warn "rollback: backup copy missing for $live_path at $bfile; leaving untouched"
+      continue
+    fi
+    if [ ! -f "$live_path" ]; then
+      warn "rollback: keeping operator-modified $live_path absent (removed or changed after prepare)"
+      continue
+    fi
+    cur_hash="$(sha256_of "$live_path" 2>/dev/null || true)"
+    bak_hash="$(sha256_of "$bfile" 2>/dev/null || true)"
+    if [ -n "$cur_hash" ] && [ "$cur_hash" = "$expected_hash" ]; then
+      if mkdir -p "$(dirname "$live_path")" && cp -p "$bfile" "$live_path"; then
+        log "rollback: restored $live_path from pre-prepare backup $backup_dir"
+        case "$live_path" in
+          */package.json|*/pnpm-lock.yaml|*/pnpm-workspace.yaml) deps_restored=1;;
+        esac
+      else
+        warn "rollback: could not restore $live_path from $bfile"
+        failed=$((failed + 1))
+      fi
+    elif [ -n "$cur_hash" ] && [ -n "$bak_hash" ] && [ "$cur_hash" = "$bak_hash" ]; then
+      log "rollback: $live_path already matches pre-prepare backup (idempotent)"
+    else
+      warn "rollback: keeping operator-modified $live_path (content changed after prepare)"
+    fi
+  done
+
+  backup_profile="$backup_dir/root/${profile_dir#/}"
+  if [ -d "$backup_profile/node_modules" ] || [ -L "$backup_profile/node_modules" ]; then
+    if mkdir -p "$profile_dir" && ( cd "$backup_profile" && tar -cf - node_modules ) | ( cd "$profile_dir" && rm -rf node_modules && tar -xf - ); then
+      log "rollback: restored $profile_dir/node_modules from $backup_dir"
+      if [ -f "$backup_profile/.pnpm-deps.hash" ]; then
+        cp -p "$backup_profile/.pnpm-deps.hash" "$profile_dir/.pnpm-deps.hash" 2>/dev/null || true
+      else
+        rm -f "$profile_dir/.pnpm-deps.hash" 2>/dev/null || true
+      fi
+    else
+      warn "rollback: could not restore $profile_dir/node_modules from $backup_dir"
+      failed=$((failed + 1))
+    fi
+  elif [ -d "$profile_dir" ] && { [ -f "$profile_dir/package.json" ] || [ -d "$profile_dir/node_modules" ]; }; then
+    [ "$deps_restored" = 1 ] && rm -f "$profile_dir/.pnpm-deps.hash" 2>/dev/null || true
+    warn "rollback: node_modules was not included in $backup_dir; if dependencies changed during prepare, run: (cd '$profile_dir' && pnpm install --prefer-offline --config.confirmModulesPurge=false)"
+  fi
+
+  if [ -d "$backup_profile/packages" ]; then
+    if mkdir -p "$profile_dir" && ( cd "$backup_profile" && tar -cf - packages ) | ( cd "$profile_dir" && rm -rf packages && tar -xf - ); then
+      log "rollback: restored $profile_dir/packages plugin bundles from $backup_dir"
+      if [ -f "$backup_profile/.bundle-fingerprints.json" ]; then
+        cp -p "$backup_profile/.bundle-fingerprints.json" "$profile_dir/.bundle-fingerprints.json" 2>/dev/null || true
+      fi
+    else
+      warn "rollback: could not restore $profile_dir/packages from $backup_dir"
+      failed=$((failed + 1))
+    fi
+  elif [ -f "$profile_dir/build-plugins.sh" ] || [ -d "$profile_dir/packages" ]; then
+    warn "rollback: plugin bundles were not included in $backup_dir; if plugin bundles were rebuilt during prepare, run: (cd '$profile_dir' && bash '$profile_dir/build-plugins.sh' '$profile_dir')"
+  fi
+
+  [ "$failed" -eq 0 ]
 }
 
 # The version this invocation would target when that can be answered without
@@ -8117,6 +8584,7 @@ report_ignored_source() {
 
 do_update() {
   local state="$PREFIX/harness/install-state.json" current backup late_backup rc recorded_home recorded_bin installed_version deferred_restart transport_engine
+  local target_is_current=0 staged_file
   STEP_TOTAL=9
   [ -f "$state" ] || die "no install state at $state; run the installer first"
   acquire_update_lock
@@ -8292,7 +8760,7 @@ do_update() {
   # or incomplete staged tree — falls through to the full flow below, which
   # replaces the staged record.
   if [ "$UPDATE_PREPARE" = 1 ]; then
-    local staged_file staged_version staged_dir staged_channel probe
+    local staged_version staged_dir staged_channel probe
     staged_file="$(staged_apply_path)"
     if [ -f "$staged_file" ]; then
       staged_version="$(json_field "$staged_file" version 2>/dev/null || true)"
@@ -8321,14 +8789,6 @@ do_update() {
   # is held, the incoming staging is untouched).
   sweep_experimental_residue
   log "update: active $current on the $CHANNEL channel"
-  # A plain update reconciles the whole install itself, so a record staged by
-  # --prepare for an older target is discarded before any build work: a later
-  # --apply must never switch BACK to it. The no-op path above returns before
-  # this point and writes nothing, so it leaves the record alone.
-  if [ -f "$(staged_apply_path)" ]; then
-    rm -f "$(staged_apply_path)"
-    log "update: discarded the staged apply record (a plain update reconciles the install)"
-  fi
   # Ladder selection first: the read-only planner names the rung before any
   # artifact download (the apply path shares the dry-run planner's decision).
   delta_plan_init "$installed_version"
@@ -8387,8 +8847,11 @@ do_update() {
   # published. A source-archive target keeps the old rule: the base version can
   # repeat on a rolling channel, so the recorded commit decides. An
   # unresolvable target (no git, no network) keeps the version-only behavior.
-  if [ "$VERSION" = "$installed_version" ] && [ "$FORCE" != 1 ] \
+  if [ "$VERSION" = "$installed_version" ] \
     && { [ "${PREBUILT:-0}" = 1 ] || [ -z "$TARGET_COMMIT" ] || commit_same "$TARGET_COMMIT" "$INSTALLED_COMMIT"; }; then
+    target_is_current=1
+  fi
+  if [ "$target_is_current" = 1 ] && [ "$FORCE" != 1 ]; then
     # The no-op path self-checks the ACTIVE tree, whose directory may carry a
     # short-SHA suffix after an earlier rolling rebuild.
     HARNESS="$PREFIX/harness/$current"
@@ -8492,6 +8955,7 @@ do_update() {
   step "pnpm: corepack"
   ensure_update_pnpm
   backup="$PREFIX/harness/.backup-$(date +%Y%m%d-%H%M%S)"
+  [ -e "$backup" ] && backup="$backup-$$"
   mkdir -p "$backup" 2>/dev/null || warn "could not create backup dir $backup"
   backup_user_files "$backup"
   # Arming this makes the EXIT trap restore the pristine snapshot if a die()
@@ -8522,6 +8986,13 @@ do_update() {
   else
     step "dependencies and build (this takes a few minutes)"
     step "transport: source build install (legacy path; no release manifests)"
+  fi
+  if [ "$UPDATE_PREPARE" != 1 ] && [ "$target_is_current" != 1 ]; then
+    staged_file="$(staged_apply_path)"
+    if [ -f "$staged_file" ]; then
+      rm -f "$staged_file" "$(staged_apply_backup_path)" || die "could not discard the superseded staged apply record $staged_file"
+      log "update: discarded the staged apply record before installing $VERSION"
+    fi
   fi
   # Three ways to produce the new tree, in order of preference:
   #   1. delta rungs 1-2: the verified diff chain applied over a staging seed;
@@ -8626,6 +9097,8 @@ do_update() {
     RUN_MARKER_TARGET="$TREE_DIR_NAME"
     write_staged_apply "$VERSION" "$TREE_DIR_NAME" "$CHANNEL" "${RELEASE_COMMIT:-}" "${PREBUILT:-0}" \
       || die "could not write the staged apply record $(staged_apply_path)"
+    write_staged_apply_backup "$VERSION" "$TREE_DIR_NAME" "$STAGED_APPLY_PREPARED_AT" "$backup" \
+      || die "could not write the staged apply backup record $(staged_apply_backup_path)"
     PRE_SWITCH_RESTORE=""
     prune_update_artifacts
     log "prepare: staged $VERSION ($TREE_DIR_NAME) for a later --apply; current stays $current"
@@ -8735,35 +9208,44 @@ do_update() {
 # ── Two-phase apply ─────────────────────────────────────────────────────────
 # `dsh update --apply`: consume the record `--prepare` wrote. Nothing is
 # fetched, built, merged, or migrated here; prepare owns all of it. Sequence:
-# atomic switch -> service restart -> self-check -> health proof -> retention
-# prune -> delete the staged record. install-state.json is rewritten for the
-# new tree as part of the switch: health proof requires the recorded identity
-# to equal `current`, and the next update/repair resolves its identity from the
-# same sources.
+# atomic switch -> service restart/backfill (delegated together in-session) ->
+# self-check -> health proof -> retention prune -> consume the staged record.
+# install-state.json is rewritten before health proof, which compares the
+# recorded identity with `current`.
 #
 # Failure semantics. Pre-switch refusals (no record, malformed record, missing
-# or incomplete staged tree) change nothing and KEEP the record. A post-switch
-# failure (self-check or health proof) uses rollback(): previous tree restored,
-# service restarted onto it, state rewritten, and the failed staged tree
-# archived as <dir>.failed-<ts> by the existing failed-tree policy. The record
-# survives BOTH cases so the UI can retry; a retry is deterministic and safe —
+# or incomplete staged tree, malformed staged backup pointer) change nothing and
+# KEEP the records. A post-switch failure (self-check or health proof) uses
+# rollback() with the staged backup pointer: previous tree restored, service
+# restarted onto it, state rewritten, unchanged prepared profile files restored
+# (operator-modified files are kept with a warning), and the failed staged tree
+# archived as <dir>.failed-<ts> by the existing failed-tree policy. The records
+# survive BOTH cases so the UI can retry; a retry is deterministic and safe —
 # the same tree either keeps failing and rolling back, or, once it is fixed,
-# restored, or re-prepared, succeeds and consumes the record.
+# restored, or re-prepared, succeeds and consumes the records.
 do_apply_staged() { # prev_version
-  local prev="$1" staged version tree channel prepared_at deferred_restart=0
+  local prev="$1" staged staged_backup record backup_record="" fields version tree channel prepared_at deferred_restart=0 baseline=""
   staged="$(staged_apply_path)"
-  [ -f "$staged" ] || die "dsh update --apply: nothing staged at $staged (run 'dsh update --prepare' first)"
-
-  version="$(json_field "$staged" version 2>/dev/null || true)"
-  tree="$(json_field "$staged" treeDirName 2>/dev/null || true)"
-  channel="$(json_field "$staged" channel 2>/dev/null || true)"
-  prepared_at="$(json_field "$staged" preparedAt 2>/dev/null || true)"
+  staged_backup="$(staged_apply_backup_path)"
+  record="$(read_staged_apply "$staged")" || die "dsh update --apply: nothing staged at $staged (run 'dsh update --prepare' first)"
+  fields="$("$NODE" -e '
+const r = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+const fields = [r.version, r.treeDirName, r.channel ?? "", r.preparedAt ?? ""];
+if (!fields.every((v) => typeof v === "string" && !/[\r\n\0]/.test(v)) || !r.version) process.exit(1);
+process.stdout.write(fields.join("\n"));
+' 2>/dev/null <<< "$record")" || die "dsh update --apply: the staged record is malformed; re-run 'dsh update --prepare'"
+  { IFS= read -r version; IFS= read -r tree; IFS= read -r channel; IFS= read -r prepared_at || true; } <<< "$fields"
   # The record is a durable/file boundary: validate the directory name before
   # it ever reaches a path expression.
   case "$tree" in
     ''|.|..|*/|/*|*..*|*[!A-Za-z0-9._-]*)
       die "dsh update --apply: the staged record is malformed (treeDirName='$tree'); re-run 'dsh update --prepare'";;
   esac
+  if [ -f "$staged_backup" ]; then
+    backup_record="$(read_staged_apply "$staged_backup")" || die "dsh update --apply: could not read staged backup record at $staged_backup; re-run 'dsh update --prepare'"
+    validate_staged_apply_backup "$backup_record" "$version" "$tree" >/dev/null \
+      || die "dsh update --apply: the staged backup record ($staged_backup) is malformed; re-run 'dsh update --prepare'"
+  fi
   if [ ! -d "$PREFIX/harness/$tree" ] || [ ! -f "$PREFIX/harness/$tree/.dsh-install-complete" ]; then
     die "dsh update --apply: the staged tree $PREFIX/harness/$tree is missing or incomplete; nothing was switched and the staged record is kept ($staged). Re-run 'dsh update --prepare'"
   fi
@@ -8771,11 +9253,12 @@ do_apply_staged() { # prev_version
   RUN_MARKER_TARGET="$tree"
 
   acquire_update_lock
-  # Re-validate under the lock: a plain update that ran between the first
-  # check and the lock acquisition discards the record (and may have pruned the
-  # staged tree), so the switch must never run on the earlier read alone.
-  if [ ! -f "$staged" ] || [ ! -d "$PREFIX/harness/$tree" ] || [ ! -f "$PREFIX/harness/$tree/.dsh-install-complete" ]; then
+  # Compare the entire record, including fields apply does not otherwise use.
+  if [ "$(read_staged_apply "$staged")" != "$record" ] || [ ! -d "$PREFIX/harness/$tree" ] || [ ! -f "$PREFIX/harness/$tree/.dsh-install-complete" ]; then
     die "dsh update --apply: the staged record or its tree changed while waiting for the update lock; nothing was switched. Re-run 'dsh update --prepare'"
+  fi
+  if [ -n "$backup_record" ] && [ "$(read_staged_apply "$staged_backup")" != "$backup_record" ]; then
+    die "dsh update --apply: the staged backup record changed while waiting for the update lock; nothing was switched. Re-run 'dsh update --prepare'"
   fi
   init_log_file
   log "apply: consuming staged $version ($tree, prepared ${prepared_at:-unknown}); switching from $prev"
@@ -8798,17 +9281,21 @@ do_apply_staged() { # prev_version
   HARNESS="$PREFIX/harness/$tree"
   if running_under_service; then deferred_restart=1; fi
   if [ "$deferred_restart" = 0 ]; then
-    [ -n "$SERVICE_UNIT" ] && substep_info "service: restarting $SERVICE_UNIT"
+    if [ -n "$SERVICE_UNIT" ]; then
+      baseline="$(service_generation "$SERVICE_UNIT")"
+      substep_info "service: restarting $SERVICE_UNIT"
+    fi
     restart_service
+    run_backfill require-web "$baseline"
   else
-    substep_info "service: restart deferred to after the current turn"
+    substep_info "service: restart and projection backfill deferred to after the current turn"
   fi
 
   step "self-check"
   substep_info "self-check: CLI version/help, profile smoke, error audit"
   if ! selfcheck; then
     warn "apply: self-check failed after the switch; rolling back to $prev"
-    rollback "$prev" "" "$tree"
+    rollback "$prev" "" "$tree" "$staged_backup"
     write_diagnostics apply-failed
     say ""
     say "${C_RED}${C_BOLD}Update apply failed:${C_RESET} rolled back to $prev. The staged record is kept ($staged); after fixing the tree re-run 'dsh update --apply' (or re-run 'dsh update --prepare')."
@@ -8819,9 +9306,9 @@ do_apply_staged() { # prev_version
   # Durable bookkeeping for the switch (see the function comment).
   restore_state_for_tree "$tree" || warn "could not rewrite $PREFIX/harness/install-state.json for $tree"
   substep_info "health: post-update proof (identity, service, profile, shim)"
-  if ! health_proof_robust; then
+  if ! health_proof_robust "$deferred_restart"; then
     warn "apply: health proof failed; rolling back to $prev"
-    rollback "$prev" "" "$tree"
+    rollback "$prev" "" "$tree" "$staged_backup"
     write_diagnostics apply-failed
     say ""
     say "${C_RED}${C_BOLD}Update apply failed:${C_RESET} health proof failed; rolled back to $prev. The staged record is kept ($staged)."
@@ -8830,13 +9317,22 @@ do_apply_staged() { # prev_version
   fi
   prune_versions "$tree" "$prev"
   prune_update_artifacts
-  if ! rm -f "$staged"; then
+  if [ "$(read_staged_apply "$staged")" != "$record" ]; then
+    warn "apply: staged record changed after the switch; leaving $staged untouched"
+  elif ! rm -f "$staged"; then
     warn "apply: could not remove the staged record $staged (the tree is live now; the next update removes or rewrites it)"
+  fi
+  if [ -f "$staged_backup" ]; then
+    if [ -n "$backup_record" ] && [ "$(read_staged_apply "$staged_backup")" != "$backup_record" ]; then
+      warn "apply: staged backup record changed after the switch; leaving $staged_backup untouched"
+    elif ! rm -f "$staged_backup"; then
+      warn "apply: could not remove the staged backup record $staged_backup"
+    fi
   fi
   say ""
   say "${C_GREEN}${C_BOLD}Update applied:${C_RESET} $version (${CHANNEL} channel) — current → $tree"
   emit_json apply 1
-  if [ "$deferred_restart" = 1 ]; then delegate_service_restart; fi
+  if [ "$deferred_restart" = 1 ]; then delegate_service_restart "$tree"; fi
   return 0
 }
 
@@ -9185,7 +9681,7 @@ EOF
 do_repair() {
   local state="$PREFIX/harness/install-state.json" recorded_home recorded_version active
   local target cand d name v shim unit en st code port url p pid b l rc peer_cli
-  local perm complete_any=0 fish_dir fsrc fdst rel fl_name fl_target
+  local perm complete_any=0 fish_dir fsrc fdst rel
 
   if [ "$DRY_RUN" = 1 ]; then CHECK_ONLY=1; fi
   detect_os_arch
@@ -9353,6 +9849,7 @@ do_repair() {
     if [ -f "$PROFILE_DIR/package.json" ] && [ ! -d "$PROFILE_DIR/node_modules" ]; then
       repair_fail "profile dependencies are missing ($PROFILE_DIR/node_modules)" "(cd '$PROFILE_DIR' && pnpm install)"
     fi
+    profile_repair_foreign_links
     while IFS= read -r l; do
       [ -n "$l" ] || continue
       [ -L "$l" ] || continue
@@ -9362,24 +9859,6 @@ do_repair() {
     done <<EOF
 $(find "$PROFILE_DIR/node_modules" -maxdepth 2 -type l 2>/dev/null)
 EOF
-    # Foreign links recorded by the deps install: pnpm packages node_modules
-    # from the lockfile alone, so an undeclared manual link disappears at the
-    # next install — and the next profile reload then disables every plugin
-    # row, the web server included. Report-only: the arrangement is the
-    # operator's, so the remedy is the exact ln command, never an automatic
-    # one.
-    if [ -f "$PROFILE_DIR/.dsh-foreign-links" ]; then
-      while IFS="$(printf '\t')" read -r fl_name fl_target; do
-        [ -n "$fl_name" ] || continue
-        [ -n "$fl_target" ] || continue
-        case "$fl_name" in
-          ''|.|..|*..*|/*|*' '*) continue;;
-        esac
-        if [ ! -e "$PROFILE_DIR/node_modules/$fl_name" ] && [ ! -L "$PROFILE_DIR/node_modules/$fl_name" ]; then
-          repair_fail "foreign dependency link $fl_name is missing from $PROFILE_DIR/node_modules (it pointed at $fl_target)" "ln -sfn '$fl_target' '$PROFILE_DIR/node_modules/$fl_name'  # or: re-run dsh update (it restores recorded foreign links)"
-        fi
-      done < "$PROFILE_DIR/.dsh-foreign-links"
-    fi
     if [ ! -f "$PROFILE_DIR/cordis.patch.yml" ]; then
       repair_fail "$PROFILE_DIR/cordis.patch.yml is missing (the config-editor document)" "restore it from a backup under $PROFILE_DIR/.backup-*/ or re-run the installer"
     fi
@@ -9403,14 +9882,14 @@ EOF
   fi
 
   # ── settings + credentials ──
-  if [ ! -f "$DSH_HOME/settings.yaml" ]; then
-    if repair_fixable "$DSH_HOME/settings.yaml is missing"; then
+  if [ ! -f "$PROFILE_DIR/settings.yaml" ] && [ ! -f "$DSH_HOME/settings.yaml" ]; then
+    if repair_fixable "$DSH_HOME/settings.yaml is missing and $PROFILE_DIR/settings.yaml is absent"; then
       rc=1
       if [ -n "$NODE" ] && [ -n "$HARNESS" ] && [ -f "$HARNESS/apps/cli/lib/bin.js" ]; then
         seed_home || true
-        [ -f "$DSH_HOME/settings.yaml" ] && rc=0
+        if [ -f "$PROFILE_DIR/settings.yaml" ] || [ -f "$DSH_HOME/settings.yaml" ]; then rc=0; fi
       fi
-      if [ "$rc" = 0 ]; then repair_fixed "re-seeded $DSH_HOME/settings.yaml"; else repair_fail "could not re-seed $DSH_HOME/settings.yaml" "re-run the installer, or: DSH_HOME='$DSH_HOME' dsh update"; fi
+      if [ "$rc" = 0 ]; then repair_fixed "re-seeded settings.yaml"; else repair_fail "could not re-seed settings.yaml" "re-run the installer, or: DSH_HOME='$DSH_HOME' dsh update"; fi
     fi
   fi
   if [ -f "$DSH_HOME/.credentials.yaml" ]; then
@@ -9833,9 +10312,8 @@ case "$DSH_HOME" in /*) :;; *) die "\$DSH_HOME/--dsh-home must be an absolute pa
 export DSH_HOME
 
 # The internal --service-guard mode: the detached verifier spawned by
-# delegate_service_restart. Runs no install/update step; it waits for the
-# delegated restart, confirms the unit is up, starts or bootstraps it when it
-# is not, and records the outcome in <prefix>/logs/install.log.
+# delegate_service_restart. It verifies or recovers the unit and, for a
+# staged apply, backfills only after the restarted Web runtime answers.
 if [ "$GUARD_MODE" = 1 ]; then
   [ -n "$SERVICE_UNIT" ] || die "--service-guard needs --service-unit"
   [ -n "$GUARD_HOME" ] && export HOME="$GUARD_HOME"

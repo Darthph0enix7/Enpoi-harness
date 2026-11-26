@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -36,6 +36,11 @@ beforeAll(() => {
   // Removed: VCS and non-runtime trees.
   write('.git/config', '[core]\n')
   write('docs/architecture.md', '# doc\n')
+  write('docs/.draft', 'x\n')
+  write('docs/subsystems/index.md', '# subsystems\n')
+  write('docs/creator/00-index.md', '# Creator\n')
+  write('docs/creator/examples/nested.md', '# example\n')
+  write('docs/creator/examples/tests/snippet.spec.ts', 'example\n')
   write('snapshots/case/expected.txt', 'x\n')
   write('benchmarks/bench.ts', 'x\n')
   write('python/README.md', 'x\n')
@@ -124,9 +129,16 @@ afterAll(() => {
 
 describe('prune-release-tree.sh', () => {
   it('removes the VCS, documentation, build-output, and device-patch trees', () => {
-    for (const path of ['docs', 'snapshots', 'benchmarks', 'python', 'website', 'dist', 'coverage', '.git', '.agents/notes', 'profile/web/device-patches']) {
+    for (const path of ['snapshots', 'benchmarks', 'python', 'website', 'dist', 'coverage', '.git', '.agents/notes', 'profile/web/device-patches']) {
       expect(exists(path), path).toBe(false)
     }
+  })
+
+  it('keeps the entire Creator documentation subtree and removes its siblings', () => {
+    expect(exists('docs/creator/00-index.md')).toBe(true)
+    expect(exists('docs/creator/examples/nested.md')).toBe(true)
+    expect(exists('docs/creator/examples/tests/snippet.spec.ts')).toBe(true)
+    expect(readdirSync(join(tree, 'docs'))).toEqual(['creator'])
   })
 
   it('removes source maps and tsbuildinfo files everywhere, including node_modules', () => {

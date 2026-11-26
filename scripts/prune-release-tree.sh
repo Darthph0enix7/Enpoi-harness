@@ -6,8 +6,9 @@
 # pruned-tree smoke boot, so this script removes only weight no shipped runtime
 # path reads — VCS and non-runtime trees, source maps, incremental build
 # metadata, committed specs/tests, Agent Notes, and the README/CHANGELOG/HISTORY
-# docs of installed dependencies. `scripts/` (the updater) and `apps/desktop*`
-# (unresolved consumer) stay whole, and LICENSE files stay because third-party
+# docs of installed dependencies. `docs/creator/` ships with the Creator agent.
+# `scripts/` (the updater) and `apps/desktop*` (unresolved consumer) are exempt
+# from test removal, and LICENSE files stay because third-party
 # notices read them from node_modules. harness-release.yml boots the result
 # before packing, and scripts/prune-release-tree.spec.ts pins every category and
 # exclusion here.
@@ -26,8 +27,17 @@ if [ ! -d "$TREE" ]; then
 fi
 
 # VCS metadata and trees the smoke does not run.
-rm -rf "$TREE/.git" "$TREE/docs" "$TREE/snapshots" "$TREE/benchmarks" \
+rm -rf "$TREE/.git" "$TREE/snapshots" "$TREE/benchmarks" \
        "$TREE/python" "$TREE/website" "$TREE/dist" "$TREE/coverage"
+if [ -L "$TREE/docs" ]; then
+  rm -f "$TREE/docs"
+elif [ -d "$TREE/docs" ]; then
+  find "$TREE/docs" -mindepth 1 -maxdepth 1 ! -name creator -exec rm -rf {} +
+fi
+
+find_release_tree() {
+  find "$TREE" -path "$TREE/docs/creator" -prune -o "$@"
+}
 
 # Per-device settings patches are operator state (another machine's MCP
 # servers and capability flags); the live profile reads its own copy from the
@@ -37,7 +47,7 @@ rm -rf "$TREE/.git" "$TREE/docs" "$TREE/snapshots" "$TREE/benchmarks" \
 rm -rf "$TREE/profile/web/device-patches"
 
 # Source maps and incremental build metadata are never loaded by the runtime.
-find "$TREE" -type f \( -name '*.map' -o -name '*.tsbuildinfo' \) -delete
+find_release_tree -type f \( -name '*.map' -o -name '*.tsbuildinfo' \) -exec rm -f {} +
 
 # Agent Notes are repository documentation; only JSDoc comment links point at
 # them. `.agents/skills` stays: the harness loads skills.
@@ -46,12 +56,12 @@ rm -rf "$TREE/.agents/notes"
 # Committed specs and test trees serve repository development only. Both finds
 # skip installed dependencies and the two trees that stay whole: `scripts/`
 # (the updater) and `apps/desktop*` (unresolved consumer).
-find "$TREE" \
+find_release_tree \
   \( -path '*/node_modules' -o -path '*/node_modules/*' \) -prune -o \
   -path "$TREE/scripts" -prune -o \
   -path "$TREE/apps/desktop*" -prune -o \
   -type d \( -name tests -o -name __tests__ \) -prune -exec rm -rf {} +
-find "$TREE" \
+find_release_tree \
   \( -path '*/node_modules' -o -path '*/node_modules/*' \) -prune -o \
   -path "$TREE/scripts" -prune -o \
   -path "$TREE/apps/desktop*" -prune -o \
@@ -65,18 +75,18 @@ find "$TREE" \
 # Package documentation inside installed dependencies. LICENSE files stay:
 # third-party notice tooling reads them from node_modules. Only doc extensions
 # match, because runtime code ships `history.js`/`History.d.ts`-style modules.
-find "$TREE" -path '*/node_modules/*' -type f \( \
+find_release_tree -path '*/node_modules/*' -type f \( \
   -iname 'readme.md' -o -iname 'readme.markdown' -o \
   -iname 'changelog.md' -o -iname 'changelog.markdown' -o \
   -iname 'history.md' -o -iname 'history.markdown' -o \
   -iname 'changes.md' -o -iname 'changes.markdown' \
-  \) -delete
+  \) -exec rm -f {} +
 
 # Optional native vendor binaries for uninstalled/optional subagent providers.
 # Codex and Claude-Code are optional plugins with heavy platform CLIs; pruning
 # them from the prebuilt release asset frees ~526 MB of uncompressed binaries.
 # Users who explicitly install those bundles in a profile can install them on demand.
-find "$TREE" -path '*/node_modules/*' -type d \( \
+find_release_tree -path '*/node_modules/*' -type d \( \
   -name '@openai+codex*' -o \
   -name '@anthropic-ai+claude-agent-sdk*' -o \
   -name 'codex-linux-*' -o \
@@ -85,7 +95,7 @@ find "$TREE" -path '*/node_modules/*' -type d \( \
 \) -prune -exec rm -rf {} +
 
 # Documentation generation dependencies (Mermaid) not needed by the runtime (~117 MB).
-find "$TREE" -path '*/node_modules/*' -type d \( \
+find_release_tree -path '*/node_modules/*' -type d \( \
   -name 'mermaid*' -o \
   -name '@mermaid-js*' -o \
   -name 'vitepress-plugin-mermaid*' \
@@ -93,7 +103,7 @@ find "$TREE" -path '*/node_modules/*' -type d \( \
 
 # Optional LibreOffice kit wasm engine (~146 MB uncompressed).
 # Office-to-PDF conversion can be installed or downloaded on demand.
-find "$TREE" -path '*/node_modules/*' -type d \( \
+find_release_tree -path '*/node_modules/*' -type d \( \
   -name '@deepseek-ai+libreoffice-kit-wasm*' \
 \) -prune -exec rm -rf {} +
 
