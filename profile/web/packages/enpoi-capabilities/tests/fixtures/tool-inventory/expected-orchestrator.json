@@ -4,7 +4,7 @@
   "captureSource": "apps/web/tests/keyless-tool-inventory.e2e.ts",
   "captureReceipt": {
     "version": "0.1.7-enpoi.2",
-    "head": "45817ee7c66b5b4de007941818c3249defff57db",
+    "head": "44f53a2309c62c0bf72d322d0e3a7895a290104f",
     "profileFingerprints": {
       "dsh-enpoi-agent-switch": {
         "dir": "enpoi-agent-switch",
@@ -83,7 +83,7 @@
       },
       "dsh-enpoi-jarvis-worker": {
         "dir": "enpoi-jarvis-worker",
-        "sourceInputs": "5ef9f210b59f87314ee9f720924d9a4658a94673d16e9b5e93e22d545f060971",
+        "sourceInputs": "811cfc4909e458dfb480f39a3eee5018961f77685fb2a606fb1e6b28c671c06f",
         "outputSha": "3f3f3e18338fa67816f50d596dc4a1e44b4467b180fcbf6511da38290f7c4ac2"
       },
       "dsh-enpoi-job-guard": {
@@ -263,16 +263,16 @@
         "entry": "83b1e4e90a82ef3c0b15eb9ff49c630cf061f33dbf6f98854fa884ee7665c8a5"
       }
     },
-    "combinedDigest": "b58877c316f2351b95033e80e2bc8e09edbf9f1bedcd403c737884afe67cb62e"
+    "combinedDigest": "12e7d772761c55db28d9ec9d12c4dd63a27df91857571491cc7254e565602d80"
   },
   "captureClientBuild": {
     "artifacts": {
       "fileCount": 378,
-      "sha256": "3c337c47c47ebb86ff827073455023943a12cf3f556cdd0833f594585f6a9790"
+      "sha256": "99aaf047ac5df08a96f50f0f8289482fc799936cb8c39dabf80567f69a78e1b4"
     },
     "environment": {
       "DSH_CLIENT_BUILD_PROFILE": "official",
-      "DSH_CLIENT_COMMIT_HASH": "00ff2d6",
+      "DSH_CLIENT_COMMIT_HASH": "44f53a2",
       "DSH_CLIENT_TITLE": "DeepSeek Harness",
       "DSH_CLIENT_VERSION": "0.1.7-enpoi.2"
     }

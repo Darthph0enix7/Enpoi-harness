@@ -40,7 +40,7 @@
     "profile/web/packages/enpoi-jarvis-worker/lib/index.js": "3f3f3e18338fa67816f50d596dc4a1e44b4467b180fcbf6511da38290f7c4ac2",
     "profile/web/packages/enpoi-worker-credentials/lib/index.js": "3b4719045772d8159d4bc3d197ca2215cf6f1ceb640c15c3d565d351e4968d49",
     "profile/web/packages/enpoi-job-guard/lib/index.js": "3bbc63f81ea69f7ec41c8dc5706b298d875b12ef06d5b514cc7be6e3b84e9593",
-    "packages/api/peer/lib/index.js": "52996bd2750c45d36a3d84f74cfe9b6db6f9c3da39064c0c0a3c62c16b1cffff",
-    "packages/mcp/mcp-client/lib/index.js": "2eae9b4b249bf8eb0e8a2d6e0fb5b3d74530418162f1004fef86abf80961bcc5"
+    "packages/api/peer/lib/index.js": "045ee3d48ab46ef54d4cfc12fc0935f85e6753ef33d4d179ea22e8cc746ecb65",
+    "packages/mcp/mcp-client/lib/index.js": "753711b5221987d40a2873e49c70c3f3960e2ebdd06cf09da21e83665262e371"
   }
 }

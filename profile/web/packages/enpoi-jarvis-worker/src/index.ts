@@ -1,21 +1,42 @@
 /** Exact model routing and a loopback, peer-only HTTP carrier. */
 import { createRequire } from 'node:module'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { Readable } from 'node:stream'
+import { Readable, type Duplex } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-gateway'
 import type {} from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-tools'
 import { REMOTE_STREAM_MUX_PATH } from '@deepseek-ai/dsh-api-gateway/stream-protocol'
 import { PEER_WIRE_DESCRIPTORS, policyAllowsModel, withPeerAuth } from '@deepseek-ai/dsh-api-peer'
-import type { PeerModelInfo, PeerRoutingService } from '@deepseek-ai/dsh-api-peer/types'
+import type { PeerModelInfo, PeerRoutingService } from '@deepseek-ai/dsh-api-peer'
 import { remoteErrorOf } from '@deepseek-ai/dsh-typert-protocol'
 import Schema from '@deepseek-ai/schemastery'
-import type { WebSocket as WsSocket } from 'ws'
+/** The `ws` socket members this carrier uses. */
+interface WsSocket {
+  readonly readyState: number
+  readonly bufferedAmount: number
+  send(data: string): void
+  terminate(): void
+  close(): void
+  on(event: 'error', listener: () => void): void
+  on(event: 'message', listener: (data: { toString(): string }, isBinary: boolean) => void): void
+  once(event: 'close', listener: () => void): void
+}
+
+/** The `ws` server members this carrier uses. */
+interface WsServer {
+  readonly clients: Iterable<WsSocket>
+  handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, accept: (ws: WsSocket) => void): void
+  close(done: () => void): void
+}
 
 // `ws` is CommonJS. Bundling it into this ES module breaks its `require('events')` calls at load,
 // so it resolves at runtime through the release link `worker-release-links` creates beside this package.
-const { WebSocket, WebSocketServer } = createRequire(import.meta.url)('ws') as typeof import('ws')
+// The members above are declared here so type checking needs no `ws` package on a clean checkout.
+const { WebSocket, WebSocketServer } = createRequire(import.meta.url)('ws') as {
+  WebSocket: { readonly OPEN: number }
+  WebSocketServer: new (options: { noServer: true; maxPayload: number; perMessageDeflate: false }) => WsServer
+}
 
 const provider = 'jarvis-worker'
 const maxBody = 256 * 1024
