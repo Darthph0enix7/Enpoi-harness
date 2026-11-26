@@ -13,10 +13,10 @@
  * surface and deny everything else.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, Session, SessionId } from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import { getBriefService } from 'dsh-enpoi-context-keeper'
 import { configuredRoleToolDenies, readOrchestrationDocument, type SettingsDocumentReader } from 'dsh-enpoi-contracts'
 import * as fs from 'node:fs'
@@ -24,11 +24,19 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 
 const LOG_FILE = path.join(os.homedir(), '.dsh', 'logs', 'enpoi-council.log')
-export function councilDiag(msg: string) {
+/**
+ * Append to the council diagnostic log without affecting the run.
+ * @param msg - the diagnostic line to append.
+ * @returns whether the file write succeeded.
+ */
+export function councilDiag(msg: string): boolean {
   try {
     fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true })
     fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${msg}\n`)
-  } catch {}
+    return true
+  } catch (error) {
+    return false
+  }
 }
 
 /** Bounded wait for the demand-driven Living Brief before council start. */
@@ -334,8 +342,7 @@ export function applyPersonaModel(ctx: Context, childId: string, persona: string
 export interface SeatFiber {
   seatId: string
   label: string
-  childId: string
-  isOffline: boolean
+  childId: SessionId
   totalTokens: number
 }
 
@@ -395,16 +402,22 @@ export async function startSeatFiber(
     },
     signal,
   })
-  if (!started.childId || started.childId === 'null' || !String(started.childId).includes('-')) {
-    throw new Error(`council seat spawn returned an invalid child id for ${opts.seatId}: ${String(started.childId)}`)
-  }
   // Model routing happens at spawn via agentOptions — no extra request/header
   // is appended (a second header duplicated the "System prompt" chip in the
   // trajectory and wrote a reason value the session validator rejects).
-  return { seatId: opts.seatId, label: opts.label, childId: started.childId, isOffline: false, totalTokens: 0 }
+  return { seatId: opts.seatId, label: opts.label, childId: started.childId, totalTokens: 0 }
 }
 
-/** Follow-up turn on an existing seat fiber; bounded so a stuck lock fails loud. */
+/**
+ * Follow up on a seat, cancelling unaccepted delivery before a timeout can retire the seat.
+ * @param ctx - context providing the subagent service.
+ * @param parent - exact live parent that owns the seat.
+ * @param fiber - seat receiving the follow-up.
+ * @param promptText - text to queue for the next seat turn.
+ * @param signal - cancellation of the enclosing council run.
+ * @param timeoutMs - maximum wait for inbox acceptance, in milliseconds.
+ * @returns after inbox acceptance; rejects when admission fails, is cancelled, or times out.
+ */
 export async function followupSeatFiber(
   ctx: Context,
   parent: Agent,
@@ -413,29 +426,30 @@ export async function followupSeatFiber(
   signal: AbortSignal,
   timeoutMs = 30_000,
 ): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new AbortController()
+  const deliverySignal = AbortSignal.any([signal, deadline.signal])
+  deliverySignal.throwIfAborted()
+  const { promise: cancelled, reject } = Promise.withResolvers<never>()
+  const onAbort = () => reject(deliverySignal.reason)
+  deliverySignal.addEventListener('abort', onAbort, { once: true })
+  const timer = setTimeout(() => {
+    deadline.abort(new Error(`council followup to ${fiber.seatId} (${fiber.childId}) timed out after ${timeoutMs}ms — child activation lock stuck`))
+  }, timeoutMs)
   try {
     await Promise.race([
+      cancelled,
       queueHostSubagentPrompt(
         ctx.subagents,
         parent,
-        fiber.childId as SessionId,
+        fiber.childId,
         [{ type: 'text', text: promptText }],
         { kind: 'user' },
-        signal,
+        deliverySignal,
       ),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`council followup to ${fiber.seatId} (${fiber.childId}) timed out after ${timeoutMs}ms — child activation lock stuck`))
-        }, timeoutMs)
-        signal.addEventListener('abort', () => {
-          clearTimeout(timer)
-          reject(new Error('council followup aborted'))
-        }, { once: true })
-      }),
     ])
   } finally {
-    if (timer !== undefined) clearTimeout(timer)
+    clearTimeout(timer)
+    deliverySignal.removeEventListener('abort', onAbort)
   }
 }
 
@@ -608,17 +622,22 @@ export interface SeatTurn {
   error?: string
 }
 
-/** Dispose seat fibers (best-effort). */
-export async function disposeSeatFibers(ctx: Context, fibers: { childId: string }[]): Promise<void> {
-  for (const fiber of fibers) {
-    if (!fiber.childId) continue
-    try {
-      const sessionStore = ctx.get('sessions')
-      if (sessionStore !== undefined) {
-        await sessionStore.delete(fiber.childId as SessionId)
-      }
-    } catch {
-      /* best-effort disposal */
+/**
+ * Stop and release seat activations without deleting their session history.
+ * @param ctx - context providing the subagent service.
+ * @param parent - exact live parent that started these children.
+ * @param fibers - seats no longer owned by the council phase or run.
+ * @returns after release settles; failures are logged without replacing the run outcome.
+ */
+export async function disposeSeatFibers(ctx: Context, parent: Agent, fibers: readonly Pick<SeatFiber, 'childId'>[]): Promise<void> {
+  const childIds = fibers.map(fiber => fiber.childId)
+  if (childIds.length === 0) return
+  try {
+    await ctx.subagents.drainContinuableChildren(parent, childIds)
+  } catch (error) {
+    const message = `seat release failed for parent ${parent.session.id}, children ${childIds.join(', ')}: ${String(error)}`
+    if (!councilDiag(message)) {
+      try { ctx.logger.warn(message) } catch (logError) { /* A failing log exporter must not replace the run outcome. */ }
     }
   }
 }

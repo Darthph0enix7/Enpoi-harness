@@ -71,6 +71,7 @@ import {
   type WhiteboardTarget,
   type WhiteboardWriteRequest,
 } from './board'
+import { classifySessionAuthority, type SessionAuthorityHeader } from './session-authority'
 
 /** Cordis plugin name. */
 export const name = 'enpoi-whiteboard'
@@ -243,7 +244,7 @@ interface ToolExecLike {
   agent?: {
     session?: {
       id?: string
-      header?: { cwd?: string; parentSession?: string }
+      header?: SessionAuthorityHeader & { cwd?: string }
     }
   }
 }
@@ -455,10 +456,19 @@ function sessionFacts(exec: ToolExecLike | undefined): BoardScopeFacts {
 
 /** The refusal every board mutation returns to a delegated child session. */
 const CHILD_AUTHORING_REFUSAL = 'the whiteboard is authored by the main session; children read it'
+/** The refusal every board mutation returns when no session header is present. */
+const MISSING_HEADER_AUTHORING_REFUSAL = 'whiteboard authoring requires a trusted root session header'
 
-/** Whether one tool execution is a delegated child (a session with a durable parent). */
-function isChildSession(exec: ToolExecLike | undefined): boolean {
-  return sessionFacts(exec).parentSessionId !== undefined
+/**
+ * Authorize one board mutation using the shared session-authority classifier.
+ * @param exec - tool execution identity.
+ * @returns a refusal when the execution is delegated or lacks a session header; otherwise undefined.
+ */
+function authoringDenial(exec: ToolExecLike | undefined): WhiteboardRefusalValue | undefined {
+  const authority = classifySessionAuthority(exec?.agent?.session?.header)
+  if (authority.kind === 'root') return undefined
+  if (authority.kind === 'missing') return refusal(MISSING_HEADER_AUTHORING_REFUSAL)
+  return refusal(CHILD_AUTHORING_REFUSAL)
 }
 
 /** Resolve one parsed path against a cwd (absolute and home paths pass through resolved). */
@@ -913,7 +923,8 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
     },
     isConcurrencySafe: () => false,
     async execute(args: Record<string, unknown>, exec: ToolExecLike) {
-      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL)
+      const denied = authoringDenial(exec)
+      if (denied !== undefined) return denied
       const mode = args.mode === 'replace' ? 'replace' as const : 'append' as const
       const rawEntries: unknown = args.entries
       if (!Array.isArray(rawEntries) || rawEntries.length === 0) return refusal('entries must be a non-empty array')
@@ -990,7 +1001,8 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
     },
     isConcurrencySafe: () => false,
     async execute(args: Record<string, unknown>, exec: ToolExecLike) {
-      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL)
+      const denied = authoringDenial(exec)
+      if (denied !== undefined) return denied
       const id = typeof args.id === 'string' ? args.id : ''
       if (id.length === 0) return refusal('id is required')
       const facts = sessionFacts(exec)
@@ -1031,7 +1043,8 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
     },
     isConcurrencySafe: () => false,
     async execute(args: Record<string, unknown>, exec: ToolExecLike) {
-      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL)
+      const denied = authoringDenial(exec)
+      if (denied !== undefined) return denied
       const id = typeof args.id === 'string' ? args.id : ''
       if (id.length === 0) return refusal('id is required')
       const facts = sessionFacts(exec)
@@ -1083,7 +1096,8 @@ function registerTools(ctx: Context, config: ResolvedWhiteboardConfig): void {
     },
     isConcurrencySafe: () => false,
     async execute(args: Record<string, unknown>, exec: ToolExecLike) {
-      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL)
+      const denied = authoringDenial(exec)
+      if (denied !== undefined) return denied
       const id = typeof args.id === 'string' ? args.id : ''
       if (id.length === 0) return refusal('id is required')
       const facts = sessionFacts(exec)

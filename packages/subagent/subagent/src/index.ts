@@ -80,8 +80,12 @@ import { establishCatalogChild, subagentCatalogProjectionDefinition } from './ca
 import type { SubagentCatalogEntry } from './projection-types.ts'
 import { deliverSubagentPrompt } from './internal.ts'
 import {
+  DEFAULT_SETTLEMENT_REPORT_HARD_MAX_CHARS,
   DEFAULT_SETTLEMENT_REPORT_MAX_CHARS,
   DEFAULT_SETTLEMENT_REPORT_MAX_IMAGES,
+  DEFAULT_SETTLEMENT_REPORT_OUTLINE_MAX_CHARS,
+  DEFAULT_SETTLEMENT_SPILL_MAX_LINE_CHARS,
+  DEFAULT_SETTLEMENT_SPILL_TIMEOUT_MS,
 } from './continuation-messages.ts'
 
 export type {} from './catalog.ts'
@@ -97,6 +101,7 @@ export type {
   SubagentCapabilities,
   SubagentInterruptAuthority,
   SubagentProvider,
+  SubagentReportMode,
   SubagentResult,
   SubagentRun,
   SubagentSendMessageOptions,
@@ -178,6 +183,20 @@ declare module '@deepseek-ai/cordis' {
      * @mode emit
      */
     'subagent/end'(this: Scoped<SubagentRuntime>, info: SubagentRunEndInfo): void
+    /**
+     * Request Stop-all for an idle parent with no turn end to publish.
+     * @mode emit
+     * @param parent - exact live ordinary Agent addressed by the host.
+     */
+    'subagent/stop-idle-tree'(parent: Agent): void
+    /**
+     * A user Stop-all has opened the parent settlement park window. The active
+     * stop policy may now interrupt live continuable descendants.
+     * @mode emit
+     * @param parent - exact live Agent authorizing the cascade.
+     * @param window - process-local identity of this stop window, shared by repeat presses.
+     */
+    'subagent/stop-all'(parent: Agent, window: symbol): void
   }
 }
 
@@ -202,13 +221,24 @@ export interface Config {
   maxDepth: Volatile<number>
   /**
    * Maximum UTF-16 code units of a settled child's closing report copied into
-   * its parent's notice; defaults to 12000. The complete report always stays in
-   * the child's own durable session, and a shortened notice states the exact
-   * omission and how to read it there.
+   * its parent's notice; defaults to 12000. Oversized reports spill to
+   * `ctx.spillStore` when mounted; a shortened notice states what was omitted
+   * and how to find the original in the child session or the saved text copy.
    */
   settlementReportMaxChars: Volatile<number>
   /** Maximum image blocks of a settled child's closing report copied into its parent's notice; defaults to 4. */
   settlementReportMaxImages: Volatile<number>
+  /**
+   * Hard UTF-16 character ceiling used when `reportMode` is `'full-inline'` or
+   * when both spill storage and final session flush fail; defaults to 200000.
+   */
+  settlementReportHardMaxChars: Volatile<number>
+  /** Maximum UTF-16 characters of the Markdown heading outline emitted in a spilled notice; defaults to 1500. */
+  settlementReportOutlineMaxChars: Volatile<number>
+  /** Maximum UTF-16 characters per physical line in a spilled closing-report file before wrapping; defaults to 1800. */
+  settlementSpillMaxLineChars: Volatile<number>
+  /** Maximum milliseconds to wait for `ctx.spillStore.saveText()` before falling back to inline truncation; defaults to 5000. */
+  settlementSpillTimeoutMs: Volatile<number>
 }
 
 /** Named provider registry with one-shot runs, durable discovery, and continuable-child operations. */
@@ -220,6 +250,14 @@ export class SubagentRuntime extends TypertRemoteService {
       .default(DEFAULT_SETTLEMENT_REPORT_MAX_CHARS).volatile(),
     settlementReportMaxImages: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
       .default(DEFAULT_SETTLEMENT_REPORT_MAX_IMAGES).volatile(),
+    settlementReportHardMaxChars: z.number().step(1).min(256).max(Number.MAX_SAFE_INTEGER)
+      .default(DEFAULT_SETTLEMENT_REPORT_HARD_MAX_CHARS).volatile(),
+    settlementReportOutlineMaxChars: z.number().step(1).min(0).max(Number.MAX_SAFE_INTEGER)
+      .default(DEFAULT_SETTLEMENT_REPORT_OUTLINE_MAX_CHARS).volatile(),
+    settlementSpillMaxLineChars: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER)
+      .default(DEFAULT_SETTLEMENT_SPILL_MAX_LINE_CHARS).volatile(),
+    settlementSpillTimeoutMs: z.number().step(1).min(1).max(2 ** 31 - 1)
+      .default(DEFAULT_SETTLEMENT_SPILL_TIMEOUT_MS).volatile(),
   })
   private providers = new Map<string, SubagentProvider>()
   private continuations: SubagentContinuationManager | undefined
@@ -240,6 +278,10 @@ export class SubagentRuntime extends TypertRemoteService {
       }, () => this.config.maxActiveSubagents.get(), () => ({
         maxChars: this.config.settlementReportMaxChars.get(),
         maxImages: this.config.settlementReportMaxImages.get(),
+        hardMaxChars: this.config.settlementReportHardMaxChars.get(),
+        outlineMaxChars: this.config.settlementReportOutlineMaxChars.get(),
+        spillMaxLineChars: this.config.settlementSpillMaxLineChars.get(),
+        spillTimeoutMs: this.config.settlementSpillTimeoutMs.get(),
       }))
       this.continuations = manager
       childCtx.effect(() => () => {

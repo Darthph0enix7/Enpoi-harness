@@ -61,6 +61,8 @@ export interface SessionInputDeps {
   releaseAttachments?(ids: readonly DraftAttachmentId[]): void
   /** Localized notice for a send attempted while restored attachments are still being created. */
   restorePendingNotice(): string
+  /** Localized notice for a send attempted while adopted synced attachments are marked incomplete. */
+  incompleteAttachmentsNotice?(): string
   /** The plain-message sink (send choreography / materialize fork — the hub owns it). */
   defaultSink(
     text: string,
@@ -135,7 +137,7 @@ export class SessionInputShell implements SessionInput {
       return this.draftEditor.insertAsyncText(span, text)
     },
     setDraft: (text) => { this.setDraft(text) },
-    restoreDraft: (text, attachments) => { this.restoreDraft(text, attachments) },
+    restoreDraft: (text, attachments, options) => { this.restoreDraft(text, attachments, options) },
     addAttachments: ids => this.addAttachments(ids),
     removeAttachment: (id) => { this.removeAttachment(id) },
     pruneAttachments: (ids) => { this.pruneAttachments(ids) },
@@ -154,9 +156,11 @@ export class SessionInputShell implements SessionInput {
   private attachmentIds: readonly DraftAttachmentId[] = []
   private disposed = false
   /** Draft persistence mirror (Conversation store write; receives the clipboard projection plus durable refs). */
-  private mirrorFn: ((text: string, attachments: readonly RestoredDraftAttachment[]) => void) | undefined
+  private mirrorFn: ((text: string, attachments: readonly RestoredDraftAttachment[], incomplete?: boolean) => void) | undefined
   /** Durable references behind restored attachment ids; the only refs that reach the persisted draft. */
   private readonly durableRefs = new Map<DraftAttachmentId, RestoredDraftAttachment>()
+  /** Whether the current restored attachment set came from a truncated device-sync record. */
+  private incompleteDraftAttachments = false
   /** Rail epoch: every send, commit, and draft replacement invalidates an in-flight restored batch. */
   private railEpoch = 0
   /** Draft-replacement epoch; a failed send must not merge attachments into a replaced draft. */
@@ -165,6 +169,8 @@ export class SessionInputShell implements SessionInput {
   private pendingRestores = 0
   /** Attachment signature of the last persisted mirror write. */
   private lastMirroredAttachments = ''
+  /** Incomplete-attachments state of the last persisted mirror write. */
+  private lastMirroredIncomplete = false
   /** The mounted composer's file-picker opener (scoped pick-files event target). */
   private filePicker: Parameters<ComposerKeyboard['bindFilePicker']>[0] | undefined
   /** Default sends retained until admission settles or scope disposal releases their attachments. */
@@ -245,7 +251,11 @@ export class SessionInputShell implements SessionInput {
    * @param text - the reverted query text.
    * @param attachments - durable references in original message order.
    */
-  restoreDraft(text: string, attachments: readonly RestoredDraftAttachment[]): void {
+  restoreDraft(
+    text: string,
+    attachments: readonly RestoredDraftAttachment[],
+    options?: { readonly incompleteAttachments?: boolean },
+  ): void {
     if (this.snapshot.phase === 'adjudicating' || this.snapshot.phase === 'submitting') return
     this.setDraft(text)
     this.draftReplaceEpoch += 1
@@ -254,6 +264,7 @@ export class SessionInputShell implements SessionInput {
     const previous = this.attachmentIds
     this.attachmentIds = []
     this.durableRefs.clear()
+    this.incompleteDraftAttachments = options?.incompleteAttachments === true
     if (previous.length > 0) this.deps.releaseAttachments?.(previous)
     this.publish()
     if (attachments.length === 0) return
@@ -277,6 +288,13 @@ export class SessionInputShell implements SessionInput {
       // Creation failure leaves the text restored without media chips; the
       // operator can still edit and send.
     })
+  }
+
+  /** Clear the send block on an adopted incomplete restored attachment set after user review. */
+  acknowledgeIncompleteAttachments(): void {
+    if (!this.incompleteDraftAttachments) return
+    this.incompleteDraftAttachments = false
+    this.publish()
   }
 
   /** Append ordered attachment ids unless an admission transaction is locked. */
@@ -313,6 +331,9 @@ export class SessionInputShell implements SessionInput {
     if (next.length === this.attachmentIds.length) return false
     this.attachmentIds = next
     this.durableRefs.delete(id)
+    if (this.incompleteDraftAttachments && this.durableDraftAttachments().length === 0) {
+      this.incompleteDraftAttachments = false
+    }
     this.publish()
     return true
   }
@@ -328,6 +349,9 @@ export class SessionInputShell implements SessionInput {
     this.attachmentIds = next
     for (const id of this.durableRefs.keys()) {
       if (!keep.has(id)) this.durableRefs.delete(id)
+    }
+    if (this.incompleteDraftAttachments && this.durableDraftAttachments().length === 0) {
+      this.incompleteDraftAttachments = false
     }
     this.publish()
   }
@@ -365,6 +389,10 @@ export class SessionInputShell implements SessionInput {
   submit(mode: InputSubmitMode = 'queue'): void {
     if (this.pendingRestores > 0) {
       this.notify('error', this.deps.restorePendingNotice())
+      return
+    }
+    if (this.incompleteDraftAttachments) {
+      this.notify('error', this.deps.incompleteAttachmentsNotice?.() ?? this.deps.restorePendingNotice())
       return
     }
     if (this.snapshot.draft.trim() === '' && this.attachmentIds.length > 0) {
@@ -603,7 +631,9 @@ export class SessionInputShell implements SessionInput {
    * @param write - store draft write.
    * @returns the unbind disposer.
    */
-  bindMirror(write: (text: string, attachments: readonly RestoredDraftAttachment[]) => void): () => void {
+  bindMirror(
+    write: (text: string, attachments: readonly RestoredDraftAttachment[], incomplete?: boolean) => void,
+  ): () => void {
     this.mirrorFn = write
     return () => {
       if (this.mirrorFn === write) this.mirrorFn = undefined
@@ -910,6 +940,7 @@ export class SessionInputShell implements SessionInput {
     return {
       draft: this.projection.clipboardText,
       attachmentIds: this.attachmentIds,
+      ...(this.incompleteDraftAttachments ? { incompleteDraftAttachments: true } : {}),
       draftRev: this.rev,
       phase: core.phase,
       ...(core.claim !== undefined ? { claim: core.claim } : {}),
@@ -925,10 +956,15 @@ export class SessionInputShell implements SessionInput {
     const signature = attachments
       .map(reference => String(reference.attachment.attachmentId))
       .join('\n')
-    if (next.draft !== this.lastMirroredDraft || signature !== this.lastMirroredAttachments) {
+    const incomplete = this.incompleteDraftAttachments
+    if (next.draft !== this.lastMirroredDraft
+      || signature !== this.lastMirroredAttachments
+      || incomplete !== this.lastMirroredIncomplete) {
       this.lastMirroredDraft = next.draft
       this.lastMirroredAttachments = signature
-      this.mirrorFn?.(next.draft, attachments)
+      this.lastMirroredIncomplete = incomplete
+      if (incomplete) this.mirrorFn?.(next.draft, attachments, true)
+      else this.mirrorFn?.(next.draft, attachments)
     }
   }
 

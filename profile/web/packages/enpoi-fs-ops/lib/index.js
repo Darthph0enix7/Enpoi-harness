@@ -1,6 +1,5 @@
 // src/index.ts
 import Schema from "@deepseek-ai/schemastery";
-import { homedir } from "node:os";
 import { join, dirname, basename, resolve, isAbsolute, relative } from "node:path";
 import { mkdir, rename, stat, writeFile, rm, open, readFile, readdir } from "node:fs/promises";
 import { randomUUID, createHash } from "node:crypto";
@@ -8,9 +7,11 @@ import { dshHomePath } from "@deepseek-ai/dsh-home-paths";
 import { isSkillName } from "@deepseek-ai/dsh-skill";
 var name = "enpoi-fs-ops";
 var inject = ["webServer", "webRuntime", "sessions"];
-var TRASH_ROOT = join(homedir(), ".dsh", "trash", "sidebar");
+function trashRoot() {
+  return dshHomePath("trash", "sidebar");
+}
 function editorBackupPath(sha256) {
-  return join(homedir(), ".dsh", "file-history", "editor", sha256);
+  return dshHomePath("file-history", "editor", sha256);
 }
 var MAX_READ_BYTES = 4 * 1024 * 1024;
 var MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024;
@@ -613,7 +614,7 @@ function apply(ctx, config) {
       if (path === cwd || relative(cwd, path) === "") {
         throw new FsOpsError("fs-error", "cannot delete the workspace root", 400);
       }
-      const destDir = join(TRASH_ROOT, `${Date.now()}-${randomUUID()}-${basename(path)}`);
+      const destDir = join(trashRoot(), `${Date.now()}-${randomUUID()}-${basename(path)}`);
       try {
         await mkdir(dirname(destDir), { recursive: true });
         await rename(path, destDir);

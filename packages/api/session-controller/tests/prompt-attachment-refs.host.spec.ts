@@ -1,5 +1,8 @@
 /** Durable prompt-reference authorization and batch limits through the real command index and store. */
 
+import { mkdtemp, rm, unlink, writeFile, mkdir } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -353,5 +356,135 @@ describe('durable prompt references', () => {
       details: { reason: 'TOO_MANY_FILES' },
     })
     expect(h.followup).not.toHaveBeenCalled()
+  })
+
+  it('rejects deleted durable file and image refs via metadata stat before queueing, leaving the log untouched', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'dsh-prompt-ref-exists-'))
+    const ctx = new Context()
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(AgentRegistry)
+    const sessionId = SessionId('prompt-refs-disk-session')
+    const header: SessionHeader = {
+      version: SESSION_FORMAT_VERSION, id: sessionId, createdAt: 1, isSeeded: false, cwd: '/workspace',
+    }
+    ctx.provide('sessionPersistence', testSessionPersistence(ctx, {
+      list: () => Promise.resolve([header]),
+      inspect: () => Promise.resolve({ meta: header, events: [] }),
+    }) as never)
+    const readFileStream = vi.fn(async function* () {
+      throw new Error('admission must check metadata only without reading file bytes')
+    })
+    const readImage = vi.fn(async () => {
+      throw new Error('admission must check metadata only without reading image bytes')
+    })
+    class HostBackedStore extends AttachmentStore {
+      readonly imageLimits = LIMITS
+      validateImage = async () => {}
+      saveImage = async () => { throw new Error('no upload expected') }
+      override readImage = readImage
+      override readFileStream = readFileStream
+      override fileHostPath(ref: FileAttachmentRef): string {
+        return join(tempRoot, 'files', String(ref.attachmentId), ref.name)
+      }
+      override imageHostPath(ref: ImageAttachmentRef): string {
+        return join(tempRoot, 'images', String(ref.attachmentId))
+      }
+    }
+    const store = new HostBackedStore(ctx)
+    const controller = createSessionTestController(ctx, defaults)
+    const session = ctx.sessions.create(sessionId, { meta: header })
+    const followup = vi.fn()
+    const steer = vi.fn()
+    const agent = {} as Agent
+    Object.assign(agent, {
+      id: sessionId,
+      session,
+      status: 'running',
+      ctx,
+      inbox: { nextTurn: [], nextStep: [] },
+      followup,
+      steer,
+    })
+    await ctx.agents.register(agent)
+
+    try {
+      const file = { attachmentId: AttachmentId('sha256-' + '1'.repeat(64)), name: 'report.pdf', bytes: 4 }
+      const image = { attachmentId: AttachmentId('sha256-' + '2'.repeat(64)), mediaType: 'image/png' as const, bytes: 4, width: 1, height: 1, name: 'pic.png' }
+      await mkdir(dirname(store.fileHostPath(file)), { recursive: true })
+      await writeFile(store.fileHostPath(file), 'data')
+      await mkdir(dirname(store.imageHostPath(image)), { recursive: true })
+      await writeFile(store.imageHostPath(image), 'img!')
+      logUserMessage(session, [
+        { type: 'file', attachment: file },
+        { type: 'image', attachment: image },
+      ])
+      const seqBefore = session.seq
+
+      // Present file and image are accepted on both queue and steer paths without reading bytes.
+      await expect(controller.prompt({
+        requestId: 'present-queue' as never,
+        sessionId,
+        mode: 'queue',
+        content: [
+          { type: 'file-ref', attachment: file },
+          { type: 'image-ref', attachment: image },
+          { type: 'text', text: 'ok' },
+        ],
+      }, new AbortController().signal)).resolves.toEqual({ accepted: true })
+      expect(followup).toHaveBeenCalledTimes(1)
+      expect(readFileStream).not.toHaveBeenCalled()
+      expect(readImage).not.toHaveBeenCalled()
+
+      // Delete the file from disk, then attempt to queue and steer: both reject before delivery, log untouched.
+      await unlink(store.fileHostPath(file))
+      for (const [index, mode] of (['queue', 'steer'] as const).entries()) {
+        const rejection = await controller.prompt({
+          requestId: `missing-file-${index}` as never,
+          sessionId,
+          mode,
+          content: [
+            { type: 'file-ref', attachment: file },
+            { type: 'text', text: 'should reject' },
+          ],
+        }, new AbortController().signal).catch((error: unknown) => error)
+
+        expect(rejection).toMatchObject({
+          code: 'session/attachment-invalid',
+          details: {
+            reason: 'ATTACHMENT_NOT_FOUND',
+            attachmentId: file.attachmentId,
+            attachmentName: file.name,
+          },
+        })
+        expect((rejection as Error).message).toContain(file.name)
+        expect((rejection as Error).message).toContain(String(file.attachmentId))
+      }
+      expect(followup).toHaveBeenCalledTimes(1)
+      expect(steer).not.toHaveBeenCalled()
+      expect(session.seq).toBe(seqBefore)
+      expect(readFileStream).not.toHaveBeenCalled()
+
+      // Delete the image from disk: image ref is also rejected before queueing.
+      await unlink(store.imageHostPath(image))
+      await expect(controller.prompt({
+        requestId: 'missing-image' as never,
+        sessionId,
+        mode: 'queue',
+        content: [{ type: 'image-ref', attachment: image }],
+      }, new AbortController().signal)).rejects.toMatchObject({
+        code: 'session/attachment-invalid',
+        details: {
+          reason: 'ATTACHMENT_NOT_FOUND',
+          attachmentId: image.attachmentId,
+          attachmentName: image.name,
+        },
+      })
+      expect(followup).toHaveBeenCalledTimes(1)
+      expect(session.seq).toBe(seqBefore)
+      expect(readImage).not.toHaveBeenCalled()
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(tempRoot, { recursive: true, force: true })
+    }
   })
 })

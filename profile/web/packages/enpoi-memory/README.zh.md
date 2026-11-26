@@ -6,7 +6,7 @@ Enpoi Harness 的持久跨会话记忆，以四个模型工具暴露。记忆由
 
 ## 工具
 
-- `memory_save` 保存一条自包含事实（最多 400 个字符）。根会话以 `origin: orchestrator` 和 operator 信任标签写入；subagent 子会话以 `origin: worker:<role>`（没有 preset 时为 `worker`）落为暂定 `untrusted_external` claim。看起来像凭据或密钥的事实会被拒绝并返回 `saved: false`，绝不会被存储；相同的事实文本与类别只会存储一次。若保存内容的 token 与现有活跃事实高度接近，该事实仍会被保存，结果 note 会指出最接近的现有事实 id。
+- `memory_save` 保存一条自包含事实（最多 400 个字符）。已验证的根会话——包括用户创建的 fork（带 `parentSession`、`isSeeded: true`、无 `origin`、且 `delegationDepth` 缺失或为 0，与持久化 JSONL fork header 一致；该判定安全，因为真实 subagent 子会话总是写入 `origin: 'subagent'` 与 `delegationDepth >= 1`，而能伪造任意 header 的调用方本身已掌控伪造会话）——以 `origin: orchestrator` 和 operator 信任标签写入。subagent 子会话（`origin: 'subagent'` 或正的 `delegationDepth`）、缺少 `isSeeded: true` 且无 `origin` 的歧义 `parentSession`，或畸形血缘字段均归类为委派会话，以 `origin: worker:<role>`（没有 preset 时为 `worker`）落为暂定 `untrusted_external` claim；缺少会话或 header 的调用快速失败并返回 `saved: false`，不写入数据库。看起来像凭据或密钥的事实会被拒绝并返回 `saved: false`，绝不会被存储；相同的事实文本与类别只会存储一次。若保存内容的 token 与现有活跃事实高度接近，该事实仍会被保存，结果 note 会指出最接近的现有事实 id。
 - `memory_search` 返回匹配的已提交与暂定事实，包含 id、category、origin、保存日期、state 与 trust。命中首先按覆盖的查询内容词数量排序，其次按完整查询短语精确匹配排序；origin/category 权重、provenance 中记录的调用方项目 cwd 与有界新近度用于打破平局。AND 未命中时回退到 OR 召回；当查询包含三个或更多内容词时，仅保留至少匹配两个内容词的行。可选的 `limit` 为整数，并限制到配置的 top-K；事实按排名顺序整条纳入，直到累计事实字符数达到配置的字符预算。即使排名第一的事实本身超出预算，也始终返回它；任何事实都不会被截断，渲染结果会报告预算省略了多少条匹配。compaction 来源的行默认限定到调用方工作区；其他来源（包括 keeper claims）保持既有可见性。内容绝不会注入模型上下文。
 - `memory_rescind` 为一条事实建立墓碑。墓碑是吸收态：同一事实绝不会复活。仅根会话可调用；被委派的 subagent 会被拒绝，必须把事实报告给其父会话。
 - `memory_confirm` 以 operator 信任标签和新的提交时间提交一条暂定 claim，只作用于 tentative 行；已提交的 id 返回 `Already <state>`。仅根会话可调用；被委派的 subagent 会被拒绝。子会话的 `memory_save` 在根会话确认前保持暂定。

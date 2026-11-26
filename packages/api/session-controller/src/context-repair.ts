@@ -712,8 +712,28 @@ export async function createContextRepairBackupDirectory(root: string): Promise<
     info = await lstat(absoluteRoot)
   } catch (error: unknown) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    // Walk up to the deepest existing ancestor before mkdir so every newly
+    // created directory entry (including the existing parent's new child entry)
+    // is fsynced before the repair commits.
+    const created: string[] = [absoluteRoot]
+    let ancestor = dirname(absoluteRoot)
+    while (true) {
+      try {
+        await lstat(ancestor)
+        break
+      } catch (ancestorError: unknown) {
+        if ((ancestorError as NodeJS.ErrnoException).code !== 'ENOENT') throw ancestorError
+        created.push(ancestor)
+        const parent = dirname(ancestor)
+        /* v8 ignore next -- a filesystem root exists, so traversal stops before parent === ancestor. */
+        if (parent === ancestor) break
+        ancestor = parent
+      }
+    }
     await mkdir(absoluteRoot, { recursive: true, mode: 0o700 })
-    await syncDirectory(dirname(absoluteRoot))
+    for (const dir of created.reverse()) {
+      await syncDirectory(dirname(dir))
+    }
     info = await lstat(absoluteRoot)
   }
   if (!info.isDirectory() || info.isSymbolicLink()) {

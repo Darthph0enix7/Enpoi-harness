@@ -29,10 +29,12 @@ import {
   HOST_DEFAULTS_DIGEST,
   MIRROR_SOURCE_DIGEST,
   OPERATOR_SURFACE,
+  READ_ONLY_VETO_TOOLS,
   ROLE_CHILD_DENY,
   SHARED_CHILD_DENY,
   SHARED_CHILD_KEEP,
   SHIPPED_SEAT_TOOL_DENY,
+  SHIPPED_SEAT_TOOL_POLICY,
   SHIPPED_TOOL_DEFAULT_EXEMPTIONS,
   SHIPPED_TOOL_DEFAULTS,
   SHIPPED_TOOL_GROUP_CATALOG,
@@ -40,6 +42,7 @@ import {
 import {
   BUILT_ROLE_SURFACE,
   buildPermissionToolRows,
+  effectivePolicy,
   KEPT_BY_EVERY_ROLE,
   MAIN_AGENT_IDS,
   POLICY_FAMILIES,
@@ -92,8 +95,14 @@ describe('permissions mirror parity', () => {
     expect(MIRROR_SOURCE_DIGEST).toBe(mirrorSourceDigest)
     expect(SHIPPED_TOOL_DEFAULTS).toEqual(data.shippedToolDefaults)
     expect(SHIPPED_TOOL_DEFAULT_EXEMPTIONS).toEqual(data.shippedToolDefaultExemptions)
+    expect(READ_ONLY_VETO_TOOLS).toEqual(data.readOnlyVetoTools)
     expect(SHIPPED_TOOL_GROUP_CATALOG).toEqual(data.toolGroups)
     expect(SHIPPED_SEAT_TOOL_DENY).toEqual(data.seatToolDeny)
+    expect(SHIPPED_SEAT_TOOL_POLICY).toEqual(data.seatToolPolicy)
+    expect(READ_ONLY_VETO_TOOLS).toEqual(expect.arrayContaining(['peer_switch_model', 'peer_ask', 'peer_answer', 'peer_cancel']))
+    for (const readTool of ['peer_status', 'peer_sessions', 'peer_models', 'peer_asks']) {
+      expect(READ_ONLY_VETO_TOOLS).not.toContain(readTool)
+    }
   })
 
   it('keeps the exemption list documented and non-overlapping with explicit rows', () => {
@@ -132,6 +141,27 @@ describe('shipped defaults drive the client decision', () => {
       expect(Object.hasOwn(SHIPPED_TOOL_DEFAULTS, tool), `${tool} must not carry a hand row`).toBe(false)
       expect(shippedPolicyFor(tool), `${tool} falls through to the ask default`).toBeUndefined()
     }
+  })
+
+  it('mirrors SHIPPED_SEAT_TOOL_POLICY so orchestrator shows allow while other seats and global show ask (U-01)', () => {
+    for (const tool of PEER_TOOLS) {
+      expect(shippedPolicyFor(tool, 'orchestrator'), `orchestrator seat ${tool}`).toBe('allow')
+      expect(effectivePolicy({}, 'orchestrator', tool), `orchestrator effective ${tool}`).toBe('allow')
+      expect(effectivePolicy({}, undefined, tool), `global effective ${tool}`).toBe('ask')
+      for (const seat of MAIN_AGENT_IDS) {
+        if (seat === 'orchestrator') continue
+        expect(shippedPolicyFor(tool, seat), `${seat} seat ${tool}`).toBeUndefined()
+        expect(effectivePolicy({}, seat, tool), `${seat} effective ${tool}`).toBe('ask')
+      }
+      // Operator global or agent overrides still win over the seat policy.
+      expect(effectivePolicy({ tools: { [tool]: 'ask' } }, 'orchestrator', tool)).toBe('ask')
+      expect(effectivePolicy({ agents: { orchestrator: { tools: { [tool]: 'deny' } } } }, 'orchestrator', tool)).toBe('deny')
+    }
+    const peerFamily = POLICY_FAMILIES.find(family => family.id === 'peer_*')!
+    expect(peerFamily).toBeDefined()
+    expect(rowPolicyState({}, 'orchestrator', { id: peerFamily.id, name: peerFamily.name, kind: 'family', members: peerFamily.members }).effective).toBe('allow')
+    expect(rowPolicyState({}, 'creator', { id: peerFamily.id, name: peerFamily.name, kind: 'family', members: peerFamily.members }).effective).toBe('ask')
+    expect(rowPolicyState({}, undefined, { id: peerFamily.id, name: peerFamily.name, kind: 'family', members: peerFamily.members }).effective).toBe('ask')
   })
 
   it('shows the asking council register as its own row, not behind the allow-classified Councils family', () => {

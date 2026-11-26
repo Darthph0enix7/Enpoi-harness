@@ -9,7 +9,8 @@
  *     installed harness without the bundle falls back to
  *     `$DSH_HOME/profiles/web/packages/enpoi-capabilities/src/policy.ts`
  *     (`SHIPPED_TOOL_DEFAULTS`, `SHIPPED_TOOL_DEFAULT_EXEMPTIONS`,
- *     `SHIPPED_SEAT_TOOL_DENY`);
+ *     `SHIPPED_SEAT_TOOL_DENY`, `SHIPPED_SEAT_TOOL_POLICY`,
+ *     `READ_ONLY_VETO_TOOLS`);
  *   - tool-group catalog: `$DSH_TOOL_GROUPS_FILE` or
  *     `profile/web/packages/enpoi-tool-groups/src/catalog.ts` (same profile
  *     root fallback; `SHIPPED_TOOL_GROUPS`) — the Permissions page derives its
@@ -69,8 +70,10 @@ export interface MirrorToolGroup {
 export interface MirrorData {
   shippedToolDefaults: Record<string, string>
   shippedToolDefaultExemptions: Array<{ prefix: string; except?: string[]; reason: string }>
+  readOnlyVetoTools: string[]
   toolGroups: MirrorToolGroup[]
   seatToolDeny: Record<string, string[]>
+  seatToolPolicy: Record<string, Record<string, string>>
   sharedChildKeep: string[]
   sharedChildDeny: string[]
   roleChildDeny: Record<string, string[]>
@@ -199,6 +202,18 @@ function stringArrayRecord(node: ts.Expression, context: string): Record<string,
   const out: Record<string, string[]> = {}
   for (const member of record.properties) {
     out[propertyName(member, context)] = stringArray((member as ts.PropertyAssignment).initializer, context)
+  }
+  return out
+}
+
+/** Read a `Record<string, Record<string, string>>` object literal. */
+function nestedStringRecord(node: ts.Expression, context: string): Record<string, Record<string, string>> {
+  const record = unwrap(node)
+  if (!ts.isObjectLiteralExpression(record)) throw new Error(`${context}: expected an object literal`)
+  const out: Record<string, Record<string, string>> = {}
+  for (const member of record.properties) {
+    const key = propertyName(member, context)
+    out[key] = stringRecord((member as ts.PropertyAssignment).initializer, `${context}.${key}`)
   }
   return out
 }
@@ -338,6 +353,12 @@ export function buildMirrorData(paths: MirrorPaths = mirrorPaths()): {
   const seatToolDeny = canonical(stringArrayRecord(
     initializerOf(policy, 'SHIPPED_SEAT_TOOL_DENY') ?? fail('SHIPPED_SEAT_TOOL_DENY'), 'SHIPPED_SEAT_TOOL_DENY',
   ))
+  const seatToolPolicy = canonical(nestedStringRecord(
+    initializerOf(policy, 'SHIPPED_SEAT_TOOL_POLICY') ?? fail('SHIPPED_SEAT_TOOL_POLICY'), 'SHIPPED_SEAT_TOOL_POLICY',
+  ))
+  const readOnlyVetoTools = canonical(stringArray(
+    initializerOf(policy, 'READ_ONLY_VETO_TOOLS') ?? fail('READ_ONLY_VETO_TOOLS'), 'READ_ONLY_VETO_TOOLS',
+  ))
 
   const catalog = parse(paths.toolGroups)
   const toolGroups = canonical(toolGroupArray(
@@ -345,7 +366,13 @@ export function buildMirrorData(paths: MirrorPaths = mirrorPaths()): {
   ))
 
   const data: MirrorData = {
-    shippedToolDefaults, shippedToolDefaultExemptions, toolGroups, seatToolDeny, ...buildRepoMirrorData(paths),
+    shippedToolDefaults,
+    shippedToolDefaultExemptions,
+    readOnlyVetoTools,
+    toolGroups,
+    seatToolDeny,
+    seatToolPolicy,
+    ...buildRepoMirrorData(paths),
   }
   const hostDefaultsDigest = digest({ shippedToolDefaults, shippedToolDefaultExemptions })
   const mirrorSourceDigest = digest(data)
@@ -439,10 +466,24 @@ export function renderMirror(
   }
   lines.push('])')
   lines.push('')
+  lines.push('/** Tools blocked by the read-only session execution veto (`READ_ONLY_VETO_TOOLS`). */')
+  lines.push(`export const READ_ONLY_VETO_TOOLS: readonly string[] = Object.freeze(${jsonArray(data.readOnlyVetoTools)})`)
+  lines.push('')
   lines.push('/** Tools the shipped seat guard denies per seat (`SHIPPED_SEAT_TOOL_DENY`). */')
   lines.push('export const SHIPPED_SEAT_TOOL_DENY: Readonly<Record<string, readonly string[]>> = Object.freeze({')
   for (const seat of Object.keys(data.seatToolDeny)) {
     lines.push(`  ${quote(seat)}: Object.freeze(${jsonArray(data.seatToolDeny[seat] ?? [])}),`)
+  }
+  lines.push('})')
+  lines.push('')
+  lines.push('/** Shipped per-seat tool policies from the host policy resolver (`SHIPPED_SEAT_TOOL_POLICY`). */')
+  lines.push("export const SHIPPED_SEAT_TOOL_POLICY: Readonly<Record<string, Readonly<Record<string, 'allow' | 'ask' | 'deny'>>>> = Object.freeze({")
+  for (const seat of Object.keys(data.seatToolPolicy)) {
+    lines.push(`  ${quote(seat)}: Object.freeze({`)
+    for (const [tool, value] of Object.entries(data.seatToolPolicy[seat] ?? {})) {
+      lines.push(`    ${quote(tool)}: ${quote(value)},`)
+    }
+    lines.push('  }),')
   }
   lines.push('})')
   lines.push('')

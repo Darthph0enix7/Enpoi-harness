@@ -12,7 +12,8 @@ import { brandString } from '@deepseek-ai/dsh-brand'
 import { assertNever, deepFreeze, snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 import { scopeOf, scopeTarget } from '@deepseek-ai/dsh-scope'
 import type { Scoped } from '@deepseek-ai/dsh-scope'
-import type { Message } from '@deepseek-ai/dsh-llm'
+import type { FileBlock, ImageBlock, Message, ToolHistory } from '@deepseek-ai/dsh-llm'
+import { SessionAttachmentIndex } from './attachment-index.ts'
 import { SESSION_FORMAT_VERSION, SessionLogOffset, SessionSeq } from './types.ts'
 import type { TypertLookup } from '@deepseek-ai/dsh-typert-protocol'
 import type { CreateSessionOptions, EpochHeader, PrepareSessionOptions, RequestContext, SessionEvent, SessionEventMap, SessionEventType, SessionHeader, SessionId, SessionSeedEventState, SurfaceIntent, SurfaceEventType } from './types.ts'
@@ -20,7 +21,6 @@ import { SurfaceManager, validateSessionEventData, validateSurfaceMetadata } fro
 import type { SessionSurface, SessionMessageProjection } from './surface.ts'
 import { foldRequestHeader } from './request-header.ts'
 import { ToolHistoryProjection } from './tool-history.ts'
-import type { ToolHistory } from '@deepseek-ai/dsh-llm'
 
 import { buildForkSeed } from './fork.ts'
 import { forkOwnedEventType } from './fork-vocabulary.ts'
@@ -45,6 +45,7 @@ export type { ToolRecoveryOutcome } from './repair.ts'
 export type { SessionSurface, SurfaceFoldReplacement, SurfaceFoldResult, SessionMessageProjection, SessionMessageProjectionContext } from './surface.ts'
 export { deriveEventMessage, foldSurface, isAppendSurfaceEvent, isReplacementSurfaceEvent, isSurfaceEvent, isSurfaceEligibleType } from './surface.ts'
 export { canonicalHeader, foldRequestHeader, headerEquals } from './request-header.ts'
+export { SessionAttachmentIndex, referencedImageInEvents } from './attachment-index.ts'
 export { KNOWN_SESSION_EVENT_TYPES } from './known-event-types.ts'
 
 declare module '@deepseek-ai/cordis' {
@@ -851,6 +852,39 @@ export class Session {
     for (const event of this.log.slice(this.toolHistorySeq)) this.toolHistoryProjection.apply(event)
     this.toolHistorySeq = this.log.length
     return this.toolHistoryProjection.snapshot()
+  }
+
+  /** Cached attachment-reference index advanced incrementally over committed events. */
+  private readonly attachmentIndexFold = new SessionAttachmentIndex()
+  /** Index of the next committed event not yet consumed by the attachment index. */
+  private attachmentIndexSeq = 0
+
+  private syncAttachmentIndex(): SessionAttachmentIndex {
+    if (this.attachmentIndexSeq < this.log.length) {
+      for (const event of this.log.slice(this.attachmentIndexSeq)) {
+        this.attachmentIndexFold.ingest(event)
+      }
+      this.attachmentIndexSeq = this.log.length
+    }
+    return this.attachmentIndexFold
+  }
+
+  /**
+   * Resolve one image attachment id to the first log event in this Session referencing it.
+   * @param attachmentId - opaque attachment identity.
+   * @returns the logged image reference, or undefined when the Session log never cites it.
+   */
+  referencedImage(attachmentId: string): ImageBlock['attachment'] | undefined {
+    return this.syncAttachmentIndex().referencedImage(attachmentId)
+  }
+
+  /**
+   * Resolve one verbatim file attachment id to its first citing `user/message` in this Session.
+   * @param attachmentId - opaque file attachment identity.
+   * @returns the logged file reference, or undefined when no `user/message` cites it.
+   */
+  referencedFile(attachmentId: string): FileBlock['attachment'] | undefined {
+    return this.syncAttachmentIndex().referencedFile(attachmentId)
   }
 
   /** The derived-message cache: frozen projections, extended per unseen node. */

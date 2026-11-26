@@ -1,5 +1,13 @@
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import AttachmentStore, { admitEncodedFile, admitEncodedImages } from '@deepseek-ai/dsh-attachment'
+import AttachmentStore, {
+  admitEncodedFile,
+  admitEncodedImages,
+  canonicalDurablePromptParts,
+  verifyDurablePromptRefsExist,
+} from '@deepseek-ai/dsh-attachment'
 import type {
   FileAttachmentRef, ImageAttachmentRef, ImageAttachmentLimits, SaveImageAttachment,
 } from '@deepseek-ai/dsh-attachment/types'
@@ -224,5 +232,114 @@ describe('AttachmentStore.admitPromptContent', () => {
       { type: 'file-ref', attachment: { attachmentId: 'file-3' as FileAttachmentRef['attachmentId'], name: 'third', bytes: 1 } },
     ])).rejects.toMatchObject({ code: 'TOO_MANY_FILES' })
     expect(mocks.saveImages).not.toHaveBeenCalled()
+  })
+
+  it('rejects missing durable file and image objects via stat before saving inline images', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-attachment-stat-'))
+    try {
+      const filePath = join(root, 'present.txt')
+      const imagePath = join(root, 'present.png')
+      await writeFile(filePath, 'ok')
+      await writeFile(imagePath, 'png')
+      const { mocks } = storeOf()
+      const store = Object.setPrototypeOf({
+        ...mocks,
+        fileHostPath: (ref: FileAttachmentRef) => join(root, ref.name),
+        imageHostPath: (ref: ImageAttachmentRef) => join(root, ref.name ?? String(ref.attachmentId)),
+      }, AttachmentStore.prototype) as AttachmentStore
+
+      const presentFile: FileAttachmentRef = { ...FILE_REF, name: 'present.txt' }
+      const presentImage: ImageAttachmentRef = { ...IMAGE_REF, name: 'present.png' }
+      await expect(store.admitPromptContent([
+        { type: 'file-ref', attachment: presentFile },
+        { type: 'image-ref', attachment: presentImage },
+        { type: 'image', mediaType: 'image/png', data: PNG },
+      ])).resolves.toHaveLength(3)
+      expect(mocks.saveImages).toHaveBeenCalledTimes(1)
+
+      const missingFile: FileAttachmentRef = { ...FILE_REF, name: 'gone.txt' }
+      await expect(store.admitPromptContent([
+        { type: 'file-ref', attachment: missingFile },
+        { type: 'image', mediaType: 'image/png', data: PNG },
+      ])).rejects.toMatchObject({
+        code: 'ATTACHMENT_NOT_FOUND',
+        attachmentId: missingFile.attachmentId,
+        attachmentName: 'gone.txt',
+      })
+      expect(mocks.saveImages).toHaveBeenCalledTimes(1)
+
+      const dirInsteadOfFile = join(root, 'dir.txt')
+      await mkdir(dirInsteadOfFile)
+      await expect(store.admitPromptContent([
+        { type: 'file', attachment: { ...FILE_REF, name: 'dir.txt' } },
+      ])).rejects.toMatchObject({
+        code: 'ATTACHMENT_NOT_FOUND',
+        attachmentId: FILE_REF.attachmentId,
+        attachmentName: 'dir.txt',
+      })
+
+      const missingNamelessImage: ImageAttachmentRef = {
+        attachmentId: 'image-nameless' as ImageAttachmentRef['attachmentId'],
+        mediaType: 'image/png',
+        bytes: 3,
+        width: 1,
+        height: 1,
+      }
+      await expect(verifyDurablePromptRefsExist(store, [
+        { type: 'image-ref', attachment: missingNamelessImage },
+      ])).rejects.toMatchObject({
+        code: 'ATTACHMENT_NOT_FOUND',
+        attachmentId: 'image-nameless',
+      })
+
+      if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+        const lockedDir = join(root, 'locked')
+        await mkdir(lockedDir)
+        await chmod(lockedDir, 0o000)
+        try {
+          await expect(store.fileExists({ ...FILE_REF, name: 'locked/file.txt' }))
+            .rejects.toMatchObject({ code: 'ATTACHMENT_READ_FAILED' })
+        } finally {
+          await chmod(lockedDir, 0o700)
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('canonicalDurablePromptParts', () => {
+  it('authorizes own citations, canonicalizes metadata, and rejects foreign or malformed parts', () => {
+    const lookup = {
+      referencedImage: (id: string) => (id === String(IMAGE_REF.attachmentId) ? IMAGE_REF : undefined),
+      referencedFile: (id: string) => (id === String(FILE_REF.attachmentId) ? FILE_REF : undefined),
+    }
+
+    expect(canonicalDurablePromptParts(lookup, [
+      { type: 'text', text: 'keep' },
+      { type: 'image-ref', attachment: { ...IMAGE_REF, name: 'tampered.png', bytes: 999 } },
+      { type: 'file-ref', attachment: { ...FILE_REF, name: 'tampered.md', bytes: 999 } },
+    ])).toEqual([
+      { type: 'text', text: 'keep' },
+      { type: 'image-ref', attachment: IMAGE_REF },
+      { type: 'file-ref', attachment: FILE_REF },
+    ])
+
+    expect(() => canonicalDurablePromptParts(lookup, [
+      { type: 'image-ref', attachment: { ...IMAGE_REF, attachmentId: 'foreign-img' as never, name: undefined } },
+    ])).toThrow(expect.objectContaining({ code: 'ATTACHMENT_NOT_REFERENCED', attachmentId: 'foreign-img' }))
+
+    expect(() => canonicalDurablePromptParts(lookup, [
+      { type: 'file-ref', attachment: { ...FILE_REF, attachmentId: 'foreign-file' as never } },
+    ])).toThrow(expect.objectContaining({
+      code: 'ATTACHMENT_NOT_REFERENCED',
+      attachmentId: 'foreign-file',
+      attachmentName: FILE_REF.name,
+    }))
+
+    expect(() => canonicalDurablePromptParts(lookup, [
+      { type: 'image-ref', attachment: { ...IMAGE_REF, mediaType: 'image/tiff' as never } },
+    ])).toThrow(expect.objectContaining({ code: 'INVALID_ATTACHMENT_REF' }))
   })
 })

@@ -939,6 +939,103 @@ describe('sendSession submission echo', () => {
     expect(prompt).toHaveBeenCalledWith([{ type: 'text', text: '继续' }], 'queue', undefined)
     await b.runtime.dispose()
   })
+
+  it('releases draft attachment descriptors and revokes object URLs on successful subagent composer send, preserving on failure', async () => {
+    const b = await bench()
+    const created = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:subagent-img')
+    const revoked = vi.spyOn(URL, 'revokeObjectURL').mockReturnValue(undefined)
+    try {
+      const session = b.runtime.sessions.binding('s1')!.session
+      const snapshot = session.getSnapshot()
+      vi.spyOn(session, 'getSnapshot').mockReturnValue({
+        ...snapshot,
+        subagent: {
+          address: { parentSessionId: 'parent', childSessionId: 'child', mode: 'continuable' } as never,
+        },
+      })
+      const [img] = b.root.createDrafts(session.sessionId, [
+        new File([Uint8Array.of(1, 2, 3)], 'sub.png', { type: 'image/png' }),
+      ])
+      if (img === undefined) throw new Error('image draft missing')
+
+      // Failure preserves descriptors and does not revoke the preview URL.
+      const prompt = vi.spyOn(session, 'prompt')
+        .mockResolvedValueOnce({
+          ok: false,
+          error: new RemoteError('subagent/attachment-invalid', 'rejected', { reason: 'MODEL_DOES_NOT_SUPPORT_IMAGES' }),
+        })
+        .mockResolvedValueOnce({ ok: true, value: { accepted: true } })
+
+      b.shell.setDraft('check subagent')
+      b.shell.addAttachments([img.id])
+      b.shell.submit('queue')
+      await vi.waitFor(() => { expect(prompt).toHaveBeenCalledTimes(1) })
+      await vi.waitFor(() => { expect(b.shell.snapshot.attachmentIds).toEqual([img.id]) })
+      expect(b.root.resolveDraftAttachments([img.id])).toHaveLength(1)
+      expect(revoked).not.toHaveBeenCalled()
+
+      // Successful admission clears descriptors and revokes the browser preview URL.
+      b.shell.submit('queue')
+      await vi.waitFor(() => { expect(prompt).toHaveBeenCalledTimes(2) })
+      await vi.waitFor(() => { expect(b.root.resolveDraftAttachments([img.id])).toEqual([]) })
+      expect(b.shell.snapshot.attachmentIds).toEqual([])
+      expect(revoked).toHaveBeenCalledWith('blob:subagent-img')
+    } finally {
+      created.mockRestore()
+      revoked.mockRestore()
+      await b.runtime.dispose()
+    }
+  })
+
+  it('keeps draft and marks missing restored durable file refs unavailable when host rejects send', async () => {
+    const b = await echoBench()
+    try {
+      const scope = b.runtime.sessions.scope('s1')!
+      const input = b.runtime.ctx.conversation.input.for(scope)
+      const missingFile = { attachmentId: 'file-missing' as never, name: 'gone.txt', bytes: 42 }
+      const keptImage = {
+        attachmentId: 'img-ok' as never,
+        mediaType: 'image/png' as const,
+        bytes: 8,
+        width: 2,
+        height: 2,
+        name: 'ok.png',
+      }
+      input.restoreDraft('retry with missing file', [
+        { kind: 'image', attachment: keptImage },
+        { kind: 'file', attachment: missingFile },
+      ])
+      await vi.waitFor(() => { expect(input.state.getSnapshot().attachmentIds).toHaveLength(2) })
+      const [imageId, fileId] = input.state.getSnapshot().attachmentIds
+
+      b.prompt.mockResolvedValueOnce({
+        ok: false,
+        error: new RemoteError('session/attachment-invalid', 'File attachment object is missing.', {
+          reason: 'ATTACHMENT_NOT_FOUND',
+        }),
+      } as never)
+
+      input.submit('queue')
+      await vi.waitFor(() => { expect(b.prompt).toHaveBeenCalledOnce() })
+      await vi.waitFor(() => {
+        expect(input.state.getSnapshot().draft).toBe('retry with missing file')
+        expect(input.state.getSnapshot().attachmentIds).toEqual([imageId, fileId])
+      })
+
+      const resolved = b.root.resolveDraftAttachments(input.state.getSnapshot().attachmentIds)
+      expect(resolved[0]).toMatchObject({ kind: 'image', id: imageId, attachment: keptImage })
+      expect(resolved[1]).toMatchObject({ kind: 'unavailable', id: fileId, attachment: missingFile, name: 'gone.txt' })
+
+      // Removing the unavailable chip leaves the valid sibling chip sendable.
+      expect(input.removeAttachment(fileId!)).toBe(true)
+      b.root.releaseDraftAttachment(fileId!)
+      expect(input.state.getSnapshot().attachmentIds).toEqual([imageId])
+      expect(b.root.resolveDraftAttachments(input.state.getSnapshot().attachmentIds)).toHaveLength(1)
+    } finally {
+      b.restore()
+      await b.runtime.dispose()
+    }
+  })
 })
 
 describe('draft image dimension probe', () => {

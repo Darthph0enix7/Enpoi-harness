@@ -1,8 +1,10 @@
 /** Durable attachment storage seam (`ctx.attachments`). @module @deepseek-ai/dsh-attachment */
 
+import { stat } from 'node:fs/promises'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { admitEncodedFile as admitFileInput, admitEncodedImages } from './admission.ts'
 import { AttachmentError, isAttachmentError as matchesAttachmentError } from './error.ts'
+import type { DurablePromptRefPart } from './prompt-refs.ts'
 import type {
   AdmittedPromptContentPart,
   AttachmentAdmissionPart,
@@ -20,8 +22,10 @@ import type {
 
 export { AttachmentId, ImageVariantId } from './brand.ts'
 export { AttachmentError, isAttachmentError, isImageAdmissionError } from './error.ts'
-export type { AttachmentErrorCode, ImageAdmissionErrorCode } from './error.ts'
+export type { AttachmentErrorCode, AttachmentErrorOptions, ImageAdmissionErrorCode } from './error.ts'
 export { admitEncodedFile, admitEncodedImages } from './admission.ts'
+export { canonicalDurablePromptParts } from './prompt-refs.ts'
+export type { DurablePromptRefLookup, DurablePromptRefPart } from './prompt-refs.ts'
 export { longEdgeDimensions, requestImageDimensions } from './request-projection.ts'
 export type { ProjectedDimensions } from './request-projection.ts'
 export type {
@@ -60,6 +64,60 @@ export const DEFAULT_MAX_FILE_REFERENCES_PER_MESSAGE = 64
 function encodedBase64Bytes(data: string): number {
   const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0
   return Math.max(0, Math.floor(data.length / 4) * 3 - padding)
+}
+
+async function hostAttachmentExists(path: string): Promise<boolean> {
+  try {
+    const info = await stat(path)
+    return info.isFile()
+  } catch (error: unknown) {
+    const code = (error as NodeJS.ErrnoException | null)?.code
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false
+    throw new AttachmentError('Unable to inspect attachment object.', 'ATTACHMENT_READ_FAILED', { cause: error })
+  }
+}
+
+function missingAttachmentLabel(attachmentId: string, name?: string): string {
+  return name !== undefined && name !== '' ? `"${name}" (${attachmentId})` : attachmentId
+}
+
+/**
+ * Verify via metadata probes that every durable image or file reference in a
+ * prompt still has a backing stored object before the prompt is admitted.
+ * @param store - attachment store owning existence checks.
+ * @param parts - prompt parts containing durable references.
+ * @param signal - optional cancellation signal.
+ * @throws AttachmentError with `ATTACHMENT_NOT_FOUND` naming the missing attachment id and name.
+ */
+export async function verifyDurablePromptRefsExist(
+  store: Pick<AttachmentStore, 'imageExists' | 'fileExists'>,
+  parts: readonly (AttachmentAdmissionPart | DurablePromptRefPart)[],
+  signal?: AbortSignal,
+): Promise<void> {
+  for (const part of parts) {
+    signal?.throwIfAborted()
+    if (part.type === 'image-ref') {
+      if (!await store.imageExists(part.attachment, signal)) {
+        const id = String(part.attachment.attachmentId)
+        const name = part.attachment.name
+        throw new AttachmentError(
+          `Image attachment ${missingAttachmentLabel(id, name)} is missing.`,
+          'ATTACHMENT_NOT_FOUND',
+          { attachmentId: id, ...(name === undefined || name === '' ? {} : { attachmentName: name }) },
+        )
+      }
+    } else if (part.type === 'file-ref' || part.type === 'file') {
+      if (!await store.fileExists(part.attachment, signal)) {
+        const id = String(part.attachment.attachmentId)
+        const name = part.attachment.name
+        throw new AttachmentError(
+          `File attachment ${missingAttachmentLabel(id, name)} is missing.`,
+          'ATTACHMENT_NOT_FOUND',
+          { attachmentId: id, attachmentName: name },
+        )
+      }
+    }
+  }
 }
 
 /** Immutable binary attachment service. Implementations validate bytes before publishing a reference. */
@@ -140,6 +198,7 @@ export abstract class AttachmentStore extends Service {
     content: readonly AttachmentAdmissionPart[],
   ): Promise<AdmittedPromptContentPart[]> {
     this.validatePromptReferences(content)
+    await verifyDurablePromptRefsExist(this, content)
     const refs = content.some(part => part.type === 'image')
       ? await admitEncodedImages(this, content.filter(part => part.type === 'image'))
       : []
@@ -262,6 +321,36 @@ export abstract class AttachmentStore extends Service {
    * @throws the signal reason when aborted, or a storage error when verification fails.
    */
   abstract readImage(ref: ImageAttachmentRef, signal?: AbortSignal): Promise<StoredImageAttachment>
+
+  /**
+   * Check via metadata only (no full byte read) whether a stored normalized
+   * image object exists in this store. Backends without host-file paths return
+   * `true` unless they override this check.
+   * @param ref - durable normalized attachment reference.
+   * @param signal - optional cancellation signal.
+   * @returns whether the stored object exists.
+   */
+  async imageExists(ref: ImageAttachmentRef, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted()
+    const hostPath = this.imageHostPath(ref)
+    if (hostPath === undefined) return true
+    return hostAttachmentExists(hostPath)
+  }
+
+  /**
+   * Check via metadata only (no full byte read) whether a stored verbatim file
+   * object exists in this store. Backends without host-file paths return `true`
+   * unless they override this check.
+   * @param ref - durable file attachment reference.
+   * @param signal - optional cancellation signal.
+   * @returns whether the stored object exists.
+   */
+  async fileExists(ref: FileAttachmentRef, signal?: AbortSignal): Promise<boolean> {
+    signal?.throwIfAborted()
+    const hostPath = this.fileHostPath(ref)
+    if (hostPath === undefined) return true
+    return hostAttachmentExists(hostPath)
+  }
 
   /**
    * Locate the provider-owned normalized object in the harness host filesystem.

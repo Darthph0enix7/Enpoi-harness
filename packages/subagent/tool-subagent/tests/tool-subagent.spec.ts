@@ -1234,6 +1234,8 @@ describe('dsh-tool-subagent continuable background mode', () => {
     }).properties
     expect(properties.run_in_background?.description).toContain('Defaults to true')
     expect(properties.run_in_background?.description).toContain('cannot receive follow-up messages')
+    expect(properties.report_mode?.description).toContain('full-inline')
+    expect((schema.parameters as { required?: readonly string[] }).required).not.toContain('report_mode')
     const assembly = await ctx.systemPrompt.assemble(assembleContextFor(parent))
     const guidance = assembly.sections.find(section => section.name === 'tool:subagent')
     expect(guidance?.text).toContain('Start independent subagent delegations together')
@@ -1285,6 +1287,26 @@ describe('dsh-tool-subagent continuable background mode', () => {
     expect(result.value).toMatchObject({ kind: 'foreground' })
     expect(text(result)).toBe('continuable answer')
     expect(ctx.jobs.list(parent.id)).toEqual([])
+  })
+
+  it('forwards optional report_mode to startContinuable when specified', async () => {
+    const { ctx, parent } = await continuableSetup()
+    const spy = vi.spyOn(ctx.subagents, 'startContinuable')
+    const started = await callSubagent(
+      ctx,
+      { role: 'explorer', description: 'full report work', prompt: 'dig in', report_mode: 'full-inline' },
+      { agent: parent },
+    )
+    expect(started.isError).toBe(false)
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({
+      request: expect.objectContaining({ reportMode: 'full-inline' }),
+    }))
+    const childId = (/^started subagent (\S+)/.exec(text(started)))?.[1]
+    if (childId) {
+      await vi.waitFor(() => {
+        expect(ctx.agents.get(SessionId(childId))).toBeUndefined()
+      }, { timeout: 5_000 })
+    }
   })
 
   it('isolates a cancelled continuable preparation from a concurrent sibling', async () => {

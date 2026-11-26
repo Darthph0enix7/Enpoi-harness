@@ -201,6 +201,14 @@ describe('compaction facts subscriber — C2 trigger matrix', () => {
     expect(pipeline.list()).toHaveLength(3)
   })
 
+  it('skips parentSession without isSeeded true and without origin when the child option is off (C-02)', async () => {
+    register()
+    emit('session/event', session('ambig', '/work/ws', 'parent-1', true, { isSeeded: false, delegationDepth: 0 }), summaryEvent('c1'))
+    emit('session/event', session('ambig', '/work/ws', 'parent-1', true, { isSeeded: false, delegationDepth: 0 }), endEvent())
+    await settle()
+    expect(pipeline.list()).toHaveLength(0)
+  })
+
   it('skips a seeded session whose typed origin is subagent', async () => {
     register()
     emit('session/event', session('child', '/work/ws', 'parent-1', true, { isSeeded: true, origin: 'subagent', delegationDepth: 1 }), summaryEvent('c1'))

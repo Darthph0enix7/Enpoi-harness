@@ -473,4 +473,11 @@ describe('createSidebarRightStore — the editor record', () => {
     actions.clearEditor(SESSION)
     expect(surface()).toBe(before)
   })
+
+  it('allows opening a second resource copy when revealIfOpened is false', () => {
+    const { actions, layout } = harness()
+    actions.openContent(SESSION, { kind: 'text', contentId: 'file:dup', title: 'dup' }, () => {})
+    actions.openContent(SESSION, { kind: 'text', contentId: 'file:dup', title: 'dup', revealIfOpened: false }, () => {})
+    expect(Object.values(layout().tabs).filter(tab => tab.contentId === 'file:dup')).toHaveLength(2)
+  })
 })

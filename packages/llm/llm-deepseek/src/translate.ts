@@ -131,7 +131,7 @@ function stopReason(raw: unknown): FinishReason {
 /** Translate decoded SSE data into the Harness stream protocol.
  * @param events - framed, decoded provider events in arrival order.
  * @param model - requested model id stored in durable replay state.
- * @returns blocks, one final usage value, and exactly one terminal finish.
+ * @returns blocks and one final usage sample before a terminal finish or a thrown in-band provider failure.
  */
 export async function* translate(events: AsyncIterable<Record<string, unknown>>, model: string): AsyncGenerator<StreamChunk> {
   const blocks = new Map<number, Block>()
@@ -141,9 +141,14 @@ export async function* translate(events: AsyncIterable<Record<string, unknown>>,
   for await (const event of events) {
     if (event.type === 'error') {
       const failure = providerError(event, undefined)
+      let reported = { ...usage }
+      try { absorbUsage(reported, event) } catch (error) {
+        // Invalid usage on a non-refusal error must not replace the provider's failure code.
+        if (failure.code === POLICY_REFUSAL_CODE || !(error instanceof LlmError) || error.code !== 'MALFORMED_RESPONSE') throw error
+        reported = usage
+      }
+      yield usageChunk(reported)
       if (failure.code !== POLICY_REFUSAL_CODE) throw failure
-      absorbUsage(usage, event)
-      yield usageChunk(usage)
       yield { type: 'finish', reason: { kind: 'error', failure: failure.failure } }
       return
     }

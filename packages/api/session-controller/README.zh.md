@@ -110,7 +110,7 @@ compaction 检查点修复是有界修正，不是通用变更：它在轮次之
 
 `contextRepairApply` 只接受 Session、preview id 与指纹；替换文本来自已保存的计划。token 会在任何写入前被消费，每个 Session 同时最多一个 apply 在途，且 live 根 Agent 必须空闲、没有待处理 inbox 工作、审批或运行中的后代。subagent Session 会被拒绝。apply 在 `Agent.runMaintenance` 下运行，重新校验同一 head、目标块、目标 source 与活动 surface，并在修复前 flush 之后再次检查这些条件。
 
-追加之前，控制器解析规范持久化制品，核对提供方解码 head 的 seq 与 SHA-256 是否匹配预览，并把制品复制到仅所有者可访问的私有备份目录。备份根默认是 `$DSH_HOME/backups/context-repair`；它必须是绝对路径或 `~/` 前缀，不能是 harness home 本身，也不能与 Session 日志树重叠。复制使用不跟随符号链接的源描述符、默认 256 MiB 字节上限，以及前后 device、inode、size 与修改时间检查。`prepared` 回执在追加前记录旧行、替换行与制品身份。
+追加之前，控制器解析规范持久化制品，核对提供方解码 head 的 seq 与 SHA-256 是否匹配预览，并把制品复制到仅所有者可访问的私有备份目录，在提交前将所有新建祖先目录条目一直 fsync 到最深层的已存在祖先目录。备份根默认是 `$DSH_HOME/backups/context-repair`；它必须是绝对路径或 `~/` 前缀，不能是 harness home 本身，也不能与 Session 日志树重叠。复制使用不跟随符号链接的源描述符、默认 256 MiB 字节上限，以及前后 device、inode、size 与修改时间检查。`prepared` 回执在追加前记录旧行、替换行与制品身份。
 
 追加是一条 `user/message`，携带 `surfaceOp: { op: 'replace', startSeq: target, endSeq: target }`，因此只替换一个生成节点，被引用的 source 链保留在 `sourceEventSeqs`。追加后，控制器发出可选的进程内 `session/context-repair/committed` 通知。它不是 Session 事件，不新增日志记录；当前 keeper 不需要它，因为每次唤醒与缓存命中都会读取权威的 active keeper 消息。控制器随后验证模型 surface 未改变，执行追加后的持久化 flush，并写入 `applied` 回执。追加已提交但持久化屏障失败时，返回状态 `partial`、原因以及用于显式操作员回滚的 prepared 回执路径；`applied` 回执写入失败时返回 `applied` 并附带 warning。响应绝不断言追加、flush 与回执写入之间的原子性。
 

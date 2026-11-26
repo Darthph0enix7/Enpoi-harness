@@ -240,7 +240,7 @@ pi-ai events become harness reasoning, text, tool-call, usage, and finish chunks
 
 #### Token effect
 
-Generated content affects later inputs only after the loop records it. pi-ai folds reasoning tokens into output usage when the provider does not report them separately, and preserves its exact `totalTokens` value unchanged.
+Generated content affects later inputs only after the loop records it. pi-ai folds reasoning tokens into output usage when the provider does not report them separately, and preserves its exact `totalTokens` value unchanged. A credential pool reports usage only from the identity whose response is streamed or whose failure ends the request. Before a terminal provider throw, it emits that identity's buffered sample; if the pool is exhausted, it uses the last attempted identity. Internal rotations do not open a separate usage slot in the session log, so usage from rotated-away identities is not included. A pre-commit caller abort or idle timeout does not release buffered usage.
 
 #### KV Cache effect
 

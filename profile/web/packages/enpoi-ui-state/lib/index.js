@@ -19742,11 +19742,13 @@ var uiStateRecordSchema = external_exports.object({
       kind: external_exports.enum(["image", "file"]),
       attachment: external_exports.object({ attachmentId: external_exports.string() }).passthrough()
     }).passthrough()).max(MAX_DRAFT_ATTACHMENTS).optional(),
+    incompleteAttachments: external_exports.boolean().optional(),
     updatedAt: external_exports.number(),
     clientId: external_exports.string()
   }).optional(),
   surface: external_exports.unknown().optional(),
-  updatedAt: external_exports.number()
+  updatedAt: external_exports.number(),
+  revision: external_exports.number().int().nonnegative().optional()
 });
 var layoutRecordSchema = external_exports.object({
   sidebar: external_exports.number(),
@@ -19790,7 +19792,7 @@ function requireDraft(value) {
   if (!isRecord(value)) {
     throw new TypeError("enpoiUiState: patch.draft must be an object");
   }
-  const { text, updatedAt, clientId, attachments } = value;
+  const { text, updatedAt, clientId, attachments, incompleteAttachments } = value;
   if (typeof text !== "string") {
     throw new TypeError("enpoiUiState: patch.draft.text must be a string");
   }
@@ -19803,7 +19805,26 @@ function requireDraft(value) {
   if (typeof clientId !== "string" || clientId === "") {
     throw new TypeError("enpoiUiState: patch.draft.clientId must be a non-empty string");
   }
-  return { text, updatedAt, clientId, ...requireDraftAttachments(attachments) };
+  if (incompleteAttachments !== void 0 && typeof incompleteAttachments !== "boolean") {
+    throw new TypeError("enpoiUiState: patch.draft.incompleteAttachments must be a boolean");
+  }
+  return {
+    text,
+    updatedAt,
+    clientId,
+    ...requireDraftAttachments(attachments),
+    ...incompleteAttachments === true ? { incompleteAttachments: true } : {}
+  };
+}
+function requireExpectedRevision(value) {
+  if (value === void 0) return void 0;
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new TypeError("enpoiUiState: patch.expectedRevision must be an integer");
+  }
+  if (value < 0) {
+    throw new RangeError("enpoiUiState: patch.expectedRevision must be a non-negative integer");
+  }
+  return value;
 }
 function requireDraftAttachments(value) {
   if (value === void 0) return {};
@@ -19907,7 +19928,9 @@ var EnpoiUiStateService = class extends (_b = TypertRemoteService) {
   }
   async get(sessionId) {
     const key = requireSessionId(sessionId);
-    return this.requireTable(this.sessions).get(key) ?? { updatedAt: 0 };
+    const stored = this.requireTable(this.sessions).get(key);
+    if (stored === void 0) return { updatedAt: 0, revision: 0 };
+    return stored.revision === void 0 ? { ...stored, revision: 0 } : stored;
   }
   async put(sessionId, patch) {
     const key = requireSessionId(sessionId);
@@ -19918,15 +19941,39 @@ var EnpoiUiStateService = class extends (_b = TypertRemoteService) {
     const hasSurface = patch.surface !== void 0;
     const draft = hasDraft ? requireDraft(patch.draft) : void 0;
     const surface = hasSurface ? requireSurface(patch.surface) : void 0;
+    const expectedRevision = requireExpectedRevision(patch.expectedRevision);
     const updatedAt = Date.now();
-    await this.enqueue(async () => {
+    return this.enqueue(async () => {
       const table = this.requireTable(this.sessions);
-      const next = { ...table.get(key), updatedAt };
+      const current = table.get(key);
+      const currentRevision = current?.revision ?? 0;
+      if (expectedRevision !== void 0 && expectedRevision !== currentRevision) {
+        const record2 = current === void 0 ? { updatedAt: 0, revision: 0 } : current.revision === void 0 ? { ...current, revision: 0 } : current;
+        return {
+          ok: false,
+          conflict: true,
+          updatedAt: record2.updatedAt,
+          revision: currentRevision,
+          record: record2
+        };
+      }
+      if (expectedRevision === void 0 && draft !== void 0 && current?.draft !== void 0 && draft.updatedAt < current.draft.updatedAt) {
+        const record2 = current.revision === void 0 ? { ...current, revision: currentRevision } : current;
+        return {
+          ok: false,
+          conflict: true,
+          updatedAt: record2.updatedAt,
+          revision: currentRevision,
+          record: record2
+        };
+      }
+      const revision = currentRevision + 1;
+      const next = { ...current, updatedAt, revision };
       if (draft !== void 0) next.draft = draft;
       if (surface !== void 0) next.surface = surface;
       await table.put(key, next);
+      return { ok: true, updatedAt, revision };
     });
-    return { ok: true, updatedAt };
   }
   async getLayout() {
     return this.requireTable(this.layout).get(LAYOUT_KEY) ?? { sidebar: 0, updatedAt: 0 };

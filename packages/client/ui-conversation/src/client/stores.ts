@@ -13,6 +13,7 @@ type ConversationActions = {
     draft: ConversationStoreState,
     text: string,
     attachments?: readonly RestoredDraftAttachment[],
+    incomplete?: boolean,
   ) => void
   setView: (draft: ConversationStoreState, view: string) => void
   openView: (draft: ConversationStoreState, view: string, focus: string) => void
@@ -41,9 +42,11 @@ export function createConversationStore(
     init: (): ConversationStoreState => ({ draft: '', draftAttachments: [], view: null, viewRequest: null }),
     persist: CONVERSATION_STORE_KEY,
     actions: {
-      setDraft: (d, text: string, attachments: readonly RestoredDraftAttachment[] = []) => {
+      setDraft: (d, text: string, attachments: readonly RestoredDraftAttachment[] = [], incomplete = false) => {
         d.draft = text
         d.draftAttachments = [...attachments]
+        if (incomplete) d.draftAttachmentsIncomplete = true
+        else delete d.draftAttachmentsIncomplete
       },
       setView: (d, view: string) => { d.view = view },
       openView: (d, view: string, focus: string) => {

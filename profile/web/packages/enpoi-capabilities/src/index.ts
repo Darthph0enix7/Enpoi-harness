@@ -60,6 +60,16 @@ import {
   type RecommendationQuery, type RootAskQuery, type RootHandle, type RootMode,
 } from './forwarding'
 import { requestRecommendation, RECOMMENDATION_TIMEOUT_MS } from './recommendation'
+import { classifySessionAuthority, type SessionAuthorityHeader } from './session-authority'
+import {
+  COMPRESSOR_RETRIEVE_DENIAL,
+  COMPRESSOR_RETRIEVE_TOOL,
+  createCompressorOwnershipStore,
+  evaluateCompressorRetrieve,
+  installCompressorOwnership,
+  type CompressorSessionLike,
+  type LineageLookup,
+} from './compressor-ownership'
 
 /** Last published catalog entry names per session (dedupe of no-op updates). */
 const publishedCatalog = new Map<string, string>()
@@ -309,6 +319,23 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     }
   }).catch(() => {})
 
+  // 0c. Compressor locator ownership (C-01): dsh-compressor stores originals in a
+  //     shared content-addressed directory under $DSH_HOME/dsh-compressor/<hash>.
+  //     Record originating session lineage on every emitted locator and enforce
+  //     caller-lineage ownership at both pre-execute and the monotonic guard.
+  const compressorOwnership = createCompressorOwnershipStore()
+  const compressorLineageLookup: LineageLookup = {
+    sessionById: (sessionId: string) => {
+      const agents = ctx.get('agents') as { get?: (id: string) => { session?: CompressorSessionLike } | undefined } | undefined
+      const fromAgent = agents?.get?.(sessionId)?.session
+      if (fromAgent !== undefined) return fromAgent
+      const sessions = ctx.get('sessions') as { get?: (id: string) => CompressorSessionLike | undefined } | undefined
+      return sessions?.get?.(sessionId)
+    },
+  }
+  const disposeCompressorOwnership = installCompressorOwnership(ctx, compressorOwnership, compressorLineageLookup)
+  ctx.effect(() => disposeCompressorOwnership, 'enpoi-capabilities: compressor ownership')
+
   // 1. Invariant B1: Monotonic pre-dispatch tool execution guard. The session
   // level is authoritative (defaults ⊕ its overrides) and a server pulled into
   // that session's MCP world stays callable even when the master switch is off.
@@ -323,6 +350,10 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     )
     if (!decision.allowed) {
       return decision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.`
+    }
+    const compressorDenial = evaluateCompressorRetrieve(exec, compressorOwnership, compressorLineageLookup)
+    if (compressorDenial !== undefined) {
+      return compressorDenial
     }
     return undefined
   })
@@ -1366,14 +1397,15 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     for (let hop = 0; hop < 33; hop += 1) {
       if (current === undefined) return undefined
       const header = current.session?.header
-      const parentSession = header?.parentSession
-      if (parentSession === undefined || parentSession === '') {
+      const authority = classifySessionAuthority(header)
+      if (authority.kind === 'root' || authority.kind === 'missing') {
         const id = typeof header?.id === 'string' && header.id !== '' ? header.id : (current.id ?? '')
         if (id === '') return undefined
         const cwd = typeof header?.cwd === 'string' && header.cwd !== '' ? header.cwd : undefined
         return { id, agent: current, ...cwd !== undefined ? { cwd } : {} }
       }
-      current = agents.get(String(parentSession))
+      if (authority.parentSessionId === undefined) return undefined
+      current = agents.get(authority.parentSessionId)
     }
     return undefined
   }
@@ -1608,6 +1640,10 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       const mcpDenial = sessionMountsAccess.toolDenyReason(execSession as { id: string }, exec.name)
       if (mcpDenial !== '') return { kind: 'deny', reason: mcpDenial }
     }
+    const compressorDenial = evaluateCompressorRetrieve(exec, compressorOwnership, compressorLineageLookup)
+    if (compressorDenial !== undefined) {
+      return { kind: 'deny', reason: compressorDenial }
+    }
     const config = readPermissionConfig()
     const isBash = exec.name === 'bash'
     // Custom tools (enpoi-custom-tools): the rendered command enters the SAME
@@ -1641,11 +1677,13 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     // re-renders a custom command.
     const capturedCommand = customCommand
       ?? (isBash && typeof exec.arguments?.command === 'string' ? exec.arguments.command : undefined)
-    // A delegated child is identified once per call: its policy resolution
-    // must not consume a config standing grant, because the ask has to reach
-    // the parent-forwarding path (rails, parent policy, or card) rather than
-    // run silently on a grant the main session recorded.
+    // A delegated child is identified once per call: any child marker (even
+    // without a usable parentSession) blocks root standing grants, root seat
+    // defaults, and root Full-access consent so ambiguous lineage fails closed.
+    const approvalPolicy = readApprovalPolicy(exec.agent)
+    const authority = classifySessionAuthority((exec.agent as { session?: { header?: SessionAuthorityHeader } } | undefined)?.session?.header)
     const delegated = delegatedChildOf(exec.agent as ChildAgentLike | undefined)
+    const isDelegated = authority.kind === 'delegated' || approvalPolicy?.delegated === true
     const decision = resolvePolicy({
       toolName: exec.name,
       command: isBash && typeof exec.arguments?.command === 'string' ? exec.arguments.command : undefined,
@@ -1656,7 +1694,7 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       // Computed only for the gated tool: the descriptor scan is unnecessary
       // work for every other call.
       reviewer: exec.name === REVIEW_RUN_TOOL ? reviewerSeatOf(exec.agent, currentPresetOf) : false,
-      delegated: delegated !== undefined,
+      delegated: isDelegated,
       config,
       sandboxMode: readSandboxMode(exec.agent),
       mcpServerNames: readMcpServerNames() ?? [],
@@ -1668,16 +1706,18 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
     }
     // A session with approval prompts disabled (delegation pins 'never') cannot
     // answer this ask itself. A delegated child's ask is forwarded through the
-    // parent (below); any other such session denies here, naming the real actor
-    // (the session's approval policy) and the ask reason, so the model and the
-    // transcript show why the call could never run.
-    const approvalPolicy = readApprovalPolicy(exec.agent)
+    // parent (below); an orphan/ambiguous child without a usable parent fails
+    // closed instead of reaching root Full-access consent.
     if (approvalPolicy?.policy === 'never') {
-      // A delegated child is not dead-ended any more: forward the ask through
-      // the parent's existing machinery. The child suspends on this await and a
-      // rejection returns as its corrective tool error; rails and standing
-      // consent are decided in forwarding.ts, never here.
-      if (delegated !== undefined) {
+      if (isDelegated) {
+        if (delegated === undefined) {
+          discardCustomSnapshot()
+          const detail = authority.kind === 'delegated' ? authority.reason : 'delegated marker without usable parent session'
+          return {
+            kind: 'deny',
+            reason: `approval for ${exec.name} failed closed: delegated session has no usable parent session (${detail})`,
+          }
+        }
         const resolution = await approvalForwarding.forward({
           agent: exec.agent as ChildAgentLike | undefined,
           toolName: exec.name,
@@ -1736,6 +1776,14 @@ export function apply(ctx: Context, config: OrchestrationConfig = {} as Orchestr
       return {
         kind: 'deny',
         reason: `${exec.name} was denied automatically: this ${approvalPolicy.delegated ? 'delegated subagent' : 'session'} runs with approval prompts disabled, so the approval policy denied it without asking a user. It required approval because: ${decision.reason}.`,
+      }
+    }
+    if (isDelegated && delegated === undefined) {
+      discardCustomSnapshot()
+      const detail = authority.kind === 'delegated' ? authority.reason : 'delegated marker without usable parent session'
+      return {
+        kind: 'deny',
+        reason: `approval for ${exec.name} failed closed: delegated session has no usable parent session (${detail})`,
       }
     }
     // ask: stash the grant proposal for the host-side allow-always writer.
@@ -1886,3 +1934,9 @@ export type { CapabilitiesState, CapabilityDescriptor, CapabilityKind } from './
 export { KNOWN_CAPABILITIES, PROTECTED_CAPABILITIES } from './types'
 export { initialCapabilitiesState } from './state'
 export { evaluateToolCall } from './enforcement'
+export {
+  COMPRESSOR_RETRIEVE_DENIAL,
+  COMPRESSOR_RETRIEVE_TOOL,
+  createCompressorOwnershipStore,
+  evaluateCompressorRetrieve,
+} from './compressor-ownership'

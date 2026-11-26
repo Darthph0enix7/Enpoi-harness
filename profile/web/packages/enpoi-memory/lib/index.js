@@ -374,10 +374,59 @@ function containsSecret(text) {
 }
 
 // src/session-authority.ts
+function classifySessionAuthority(header) {
+  if (header === void 0 || header === null || typeof header !== "object" || Array.isArray(header)) {
+    return { kind: "missing" };
+  }
+  const rawParent = header.parentSession;
+  const hasParentField = rawParent !== void 0;
+  const usableParent = typeof rawParent === "string" && rawParent.trim() !== "" ? rawParent : void 0;
+  const rawOrigin = header.origin;
+  const isSubagentOrigin = rawOrigin === "subagent";
+  const hasUnexpectedOrigin = rawOrigin !== void 0 && !isSubagentOrigin;
+  const rawDepth = header.delegationDepth;
+  const isValidDepth = typeof rawDepth === "number" && Number.isSafeInteger(rawDepth) && rawDepth >= 0;
+  const hasInvalidDepth = rawDepth !== void 0 && !isValidDepth;
+  const hasPositiveDepth = isValidDepth && rawDepth > 0;
+  const rawSeeded = header.isSeeded;
+  const hasInvalidSeeded = rawSeeded !== void 0 && typeof rawSeeded !== "boolean";
+  const depth = hasPositiveDepth ? rawDepth : 1;
+  if (hasUnexpectedOrigin || hasInvalidDepth || hasInvalidSeeded) {
+    return {
+      kind: "delegated",
+      ...usableParent !== void 0 ? { parentSessionId: usableParent } : {},
+      depth,
+      reason: "ambiguous session lineage"
+    };
+  }
+  if (hasParentField && usableParent === void 0) {
+    return {
+      kind: "delegated",
+      depth,
+      reason: "unusable parentSession"
+    };
+  }
+  if (isSubagentOrigin || hasPositiveDepth) {
+    return {
+      kind: "delegated",
+      ...usableParent !== void 0 ? { parentSessionId: usableParent } : {},
+      depth,
+      reason: usableParent === void 0 ? isSubagentOrigin ? "subagent origin without usable parentSession" : "positive delegationDepth without usable parentSession" : isSubagentOrigin ? "subagent origin" : "positive delegationDepth"
+    };
+  }
+  if (usableParent !== void 0) {
+    if (rawSeeded === true) return { kind: "root" };
+    return {
+      kind: "delegated",
+      parentSessionId: usableParent,
+      depth,
+      reason: "parentSession without seed lineage"
+    };
+  }
+  return { kind: "root" };
+}
 function isDelegatedSession(header) {
-  if (header === void 0) return false;
-  if (header.origin === "subagent" || (header.delegationDepth ?? 0) > 0) return true;
-  return header.parentSession !== void 0 && header.isSeeded !== true;
+  return classifySessionAuthority(header).kind !== "root";
 }
 
 // src/compaction-facts.ts
@@ -759,18 +808,15 @@ function renderFact(fact) {
 }
 var DELEGATED_SESSION_DENIED = "delegated_session_denied";
 var ROOT_SESSION_REQUIRED = "root_session_required";
-function delegatedSession(exec) {
-  return isDelegatedSession(exec?.agent?.session.header);
-}
 function rootOnlyDenial(exec, action) {
-  const header = exec?.agent?.session.header;
-  if (header === void 0) {
+  const authority = classifySessionAuthority(exec?.agent?.session?.header);
+  if (authority.kind === "missing") {
     return {
       code: ROOT_SESSION_REQUIRED,
       note: `Memory ${action} requires a trusted root session context; no database write was made.`
     };
   }
-  if (!delegatedSession(exec)) return void 0;
+  if (authority.kind === "root") return void 0;
   return {
     code: DELEGATED_SESSION_DENIED,
     note: action === "confirmation" ? "Delegated sessions cannot confirm memory facts; the root session must accept the fact before it gains operator trust." : "Delegated sessions cannot rescind memory facts; the root session must decide whether to tombstone the fact."
@@ -782,20 +828,19 @@ function memorySearchLimit(value, max) {
   if (!Number.isFinite(requested) || requested < 1) return max;
   return Math.min(max, Math.floor(requested));
 }
-function memorySaveAuthority(exec) {
+function memorySaveAuthority(exec, authority) {
   const session = exec?.agent?.session;
   const header = session?.header;
-  const child = delegatedSession(exec);
   const role = header?.agentPreset?.trim();
   const provenance = {
     source: "memory_save",
     sessionId: session?.id ?? "",
     cwd: header?.cwd ?? ""
   };
-  if (!child) {
+  if (authority.kind === "root") {
     return { origin: "orchestrator", trust: "operator", provenance: JSON.stringify(provenance) };
   }
-  provenance.parentSessionId = header?.parentSession ?? "";
+  provenance.parentSessionId = authority.parentSessionId ?? "";
   const agentRole = role !== void 0 && role !== "" ? role : "worker";
   provenance.agentRole = agentRole;
   provenance.settled = true;
@@ -844,7 +889,11 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
     },
     isConcurrencySafe: () => true,
     async execute(args, exec) {
-      const authority = memorySaveAuthority(exec);
+      const sessionAuthority = classifySessionAuthority(exec?.agent?.session?.header);
+      if (sessionAuthority.kind === "missing") {
+        return { saved: false, note: "Memory save requires a trusted session context; no database write was made." };
+      }
+      const authority = memorySaveAuthority(exec, sessionAuthority);
       const fact = String(args.fact ?? "").trim();
       if (containsSecret(fact)) return { saved: false, note: "rejected: looks like a credential or secret" };
       const inserted = await pipeline.intake(
@@ -853,7 +902,7 @@ function registerMemoryTools(ctx, db, pipeline, config = resolveMemoryConfig(voi
       );
       if (inserted.length === 0) return { saved: false, note: "Duplicate or invalid fact (already known / empty / >400 chars / rejected)" };
       const c = inserted[0];
-      const scope = { cwd: exec?.agent?.session.header.cwd, scopeCompaction: config.scopeCompactionFactsToWorkspace };
+      const scope = { cwd: exec?.agent?.session?.header?.cwd, scopeCompaction: config.scopeCompactionFactsToWorkspace };
       const near = closestNearDuplicate(db, fact, scope, config.compactionFactsNearDuplicate, c.id);
       const note = near === void 0 ? `Saved as ${c.id} (${c.category})` : `Saved as ${c.id} (${c.category}); closest existing fact ${near.id} is a near-match (Jaccard ${near.similarity.toFixed(2)}) \u2014 confirm both should stay`;
       return { saved: true, id: c.id, state: c.state, note };

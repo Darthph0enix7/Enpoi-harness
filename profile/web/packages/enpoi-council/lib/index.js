@@ -69,7 +69,9 @@ function councilDiag(msg) {
     fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
     fs.appendFileSync(LOG_FILE, `[${(/* @__PURE__ */ new Date()).toISOString()}] ${msg}
 `);
-  } catch {
+    return true;
+  } catch (error62) {
+    return false;
   }
 }
 var BRIEF_WAIT_MS = 4e3;
@@ -289,35 +291,33 @@ async function startSeatFiber(ctx, parent, opts, signal) {
     },
     signal
   });
-  if (!started.childId || started.childId === "null" || !String(started.childId).includes("-")) {
-    throw new Error(`council seat spawn returned an invalid child id for ${opts.seatId}: ${String(started.childId)}`);
-  }
-  return { seatId: opts.seatId, label: opts.label, childId: started.childId, isOffline: false, totalTokens: 0 };
+  return { seatId: opts.seatId, label: opts.label, childId: started.childId, totalTokens: 0 };
 }
 async function followupSeatFiber(ctx, parent, fiber, promptText, signal, timeoutMs = 3e4) {
-  let timer;
+  const deadline = new AbortController();
+  const deliverySignal = AbortSignal.any([signal, deadline.signal]);
+  deliverySignal.throwIfAborted();
+  const { promise: cancelled, reject } = Promise.withResolvers();
+  const onAbort = () => reject(deliverySignal.reason);
+  deliverySignal.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(() => {
+    deadline.abort(new Error(`council followup to ${fiber.seatId} (${fiber.childId}) timed out after ${timeoutMs}ms \u2014 child activation lock stuck`));
+  }, timeoutMs);
   try {
     await Promise.race([
+      cancelled,
       queueHostSubagentPrompt(
         ctx.subagents,
         parent,
         fiber.childId,
         [{ type: "text", text: promptText }],
         { kind: "user" },
-        signal
-      ),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`council followup to ${fiber.seatId} (${fiber.childId}) timed out after ${timeoutMs}ms \u2014 child activation lock stuck`));
-        }, timeoutMs);
-        signal.addEventListener("abort", () => {
-          clearTimeout(timer);
-          reject(new Error("council followup aborted"));
-        }, { once: true });
-      })
+        deliverySignal
+      )
     ]);
   } finally {
-    if (timer !== void 0) clearTimeout(timer);
+    clearTimeout(timer);
+    deliverySignal.removeEventListener("abort", onAbort);
   }
 }
 async function waitForSeatTurn(ctx, childId, signal, timeoutMs = 9e4) {
@@ -422,15 +422,18 @@ async function waitForSeatTurnDetailed(ctx, childId, signal, timeoutMs = 9e4) {
     signal.removeEventListener("abort", onAbort);
   }
 }
-async function disposeSeatFibers(ctx, fibers) {
-  for (const fiber of fibers) {
-    if (!fiber.childId) continue;
-    try {
-      const sessionStore = ctx.get("sessions");
-      if (sessionStore !== void 0) {
-        await sessionStore.delete(fiber.childId);
+async function disposeSeatFibers(ctx, parent, fibers) {
+  const childIds = fibers.map((fiber) => fiber.childId);
+  if (childIds.length === 0) return;
+  try {
+    await ctx.subagents.drainContinuableChildren(parent, childIds);
+  } catch (error62) {
+    const message = `seat release failed for parent ${parent.session.id}, children ${childIds.join(", ")}: ${String(error62)}`;
+    if (!councilDiag(message)) {
+      try {
+        ctx.logger.warn(message);
+      } catch (logError) {
       }
-    } catch {
     }
   }
 }
@@ -20648,7 +20651,7 @@ async function serviceEvidenceQueue(ctx, parent, queue, vault, epoch, signal, ti
       // the shared whiteboard survives every tier (COUNCIL_KEPT_TOOLS).
       denyTools: COUNCIL_DENIED_TOOLS.filter((t) => !BROKER_KEPT_TOOLS.includes(t)).filter((t) => !COUNCIL_KEPT_TOOLS.includes(t))
     }, signal);
-    const text = await waitForSeatTurn(ctx, fiber.childId, signal, timeoutMs);
+    const text = await waitForSeatTurn(ctx, fiber.childId, signal, waitMs);
     const parsed = parseFactSheets(text);
     const excerpt = clip(text.replace(/\s+/g, " ").trim(), 140);
     let committed = 0;
@@ -20692,12 +20695,7 @@ CONFIDENCE: ${sheet.confidence}`,
     councilDiag(`[broker] batch FAILED: ${msg}`);
     return { sheets: 0, errors, missed, excess: [], retrievedBy };
   } finally {
-    if (fiber !== void 0) {
-      try {
-        await disposeSeatFibers(ctx, [fiber]);
-      } catch {
-      }
-    }
+    if (fiber !== void 0) await disposeSeatFibers(ctx, parent, [fiber]);
   }
 }
 function clip(text, max) {
@@ -21016,12 +21014,7 @@ ${input2.roundTranscript}`,
     const applied = applyRefereeOutput(output2, ledger, input2, input2.spec, input2.roundTranscript);
     return { output: output2, applied };
   } finally {
-    if (fiber !== void 0) {
-      try {
-        await disposeSeatFibers(ctx, [fiber]);
-      } catch {
-      }
-    }
+    if (fiber !== void 0) await disposeSeatFibers(ctx, parent, [fiber]);
   }
 }
 function parseRefereeOutput(text, spec) {
@@ -21401,10 +21394,10 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n"),
       const round = await generateParallel(ctx, parent, spec, {
         // Cumulative epistemic package per seat (amendment #4): a standby
         // re-entrant receives EVERY vault fact added since it was last active.
-        promptBuilder: (seat) => {
-          const seatVault = vault.since(lastActive.get(seat.id) ?? 0);
+        promptBuilder: (seatId) => {
+          const seatVault = vault.since(lastActive.get(seatId) ?? 0);
           return [
-            seatPersona(spec, seat),
+            seatPersona(spec, seatId),
             `EPOCH ${epoch}${isChallenge ? " \u2014 FINAL CHALLENGE" : ""}`,
             `QUERY: ${query}`,
             briefText ? `LIVING BRIEF:
@@ -21415,8 +21408,8 @@ ${spec.scopeContract}` : "",
 ${ledgerText}`,
             seatVault.length > 0 ? `EVIDENCE (new since you last sat):
 ${vault.render(seatVault)}` : "",
-            directives[seat.id] ? `REFEREE DIRECTIVE TO YOU:
-${directives[seat.id]}` : "",
+            directives[seatId] ? `REFEREE DIRECTIVE TO YOU:
+${directives[seatId]}` : "",
             isChallenge ? "The deliberation has stabilized. State your strongest UNADDRESSED fatal flaw \u2014 with evidence \u2014 or emit CONCUR [entry-id] WITH <seat> to concede. Nothing else." : buildEpochInstructions(spec),
             "NEED_EVIDENCE(target: <area>, question: <what to verify>) lines request facts for the next epoch boundary. bash/read/grep/glob are denied here. If run_code is present, it executes code under the configured sandbox; it is not a tool-only sandbox or a bypass for the council\u2019s evidence workflow. Request evidence with NEED_EVIDENCE.",
             "PROTOCOL LINE FORMATS (mechanically parsed \u2014 one line each, exactly): NEED_EVIDENCE(target: <area>, question: <what>) and PROPOSE_CRUX: <assertion>. Never reformat or decorate them \u2014 variants are dropped."
@@ -21618,10 +21611,7 @@ ${t.text.slice(0, MAX_SEAT_OUTPUT_CHARS)}`).join("\n\n");
       audit
     };
   } finally {
-    try {
-      await disposeSeatFibers(ctx, [...fibers.values()]);
-    } catch {
-    }
+    await disposeSeatFibers(ctx, parent, [...fibers.values()]);
   }
 }
 function seatPersona(spec, seatId) {
@@ -21667,10 +21657,9 @@ function seatDenyList(ctx) {
 }
 async function generateParallel(ctx, parent, spec, args) {
   const denyTools = seatDenyList(ctx);
-  const seats = (args.only ?? spec.seats.map((s) => s.id)).filter((id) => !args.deadSeats.has(id)).map((id) => spec.seats.find((s) => s.id === id)).filter((s) => s !== void 0);
+  const seats = [...new Set(args.only ?? spec.seats.map((s) => s.id))].filter((id) => !args.deadSeats.has(id)).map((id) => spec.seats.find((s) => s.id === id)).filter((s) => s !== void 0);
   const tasks = seats.map(async (seat) => {
     const prompt = args.promptBuilder(seat.id);
-    const existing = args.fibers.get(seat.id);
     let fiber;
     let attempt = 0;
     let lastError = null;
@@ -21680,11 +21669,8 @@ async function generateParallel(ctx, parent, spec, args) {
     while (attempt < maxAttempts) {
       attempt++;
       try {
-        if (existing !== void 0 && existing.isOffline && args.fibers.get(seat.id) === existing) {
-          args.fibers.delete(seat.id);
-        }
         const current = args.fibers.get(seat.id);
-        if (current === void 0 || attempt > 1) {
+        if (current === void 0) {
           const link = seatChain === void 0 ? void 0 : seatChain.links[Math.min(linkIndex, seatChain.links.length - 1)];
           fiber = await startSeatFiber(ctx, parent, {
             seatId: seat.id,
@@ -21726,23 +21712,22 @@ ${next.text}`, truncated: next.truncated };
         lastError = err instanceof Error ? err : new Error(String(err));
         councilDiag(`[epoch ${args.epoch}] seat ${seat.id} attempt ${attempt} failed: ${lastError.message}`);
         if (args.signal.aborted) throw lastError;
+        const abandoned = args.fibers.get(seat.id);
+        if (abandoned !== void 0) {
+          await disposeSeatFibers(ctx, parent, [abandoned]);
+          args.fibers.delete(seat.id);
+        }
         const nextLink = seatChain?.links[linkIndex + 1];
         if (seatChain !== void 0 && nextLink !== void 0) {
           const failed = seatChain.links[Math.min(linkIndex, seatChain.links.length - 1)];
           process.stderr.write(`[model-chain] ${seatChain.id}: link ${linkIndex + 1} (${failed.provider}/${failed.model}) FAILED \u2192 link ${linkIndex + 2} (${nextLink.provider}/${nextLink.model}): ${lastError.message}
 `);
           linkIndex += 1;
-          args.fibers.delete(seat.id);
-          if (attempt >= maxAttempts) break;
-          await new Promise((r) => setTimeout(r, 500));
-          continue;
         }
         if (attempt >= maxAttempts) break;
         await new Promise((r) => setTimeout(r, 500));
       }
     }
-    const fiberState = args.fibers.get(seat.id);
-    if (fiberState !== void 0) fiberState.isOffline = true;
     args.deadSeats.add(seat.id);
     return {
       seatId: seat.id,
@@ -21819,12 +21804,7 @@ ${input2.refereeRecord}` : "",
     }
     return { text: chairTurn.text, tokens: estimateTokens(chairTurn.text) };
   } finally {
-    if (fiber !== void 0) {
-      try {
-        await disposeSeatFibers(ctx, [fiber]);
-      } catch {
-      }
-    }
+    if (fiber !== void 0) await disposeSeatFibers(ctx, parent, [fiber]);
   }
 }
 function fillChairTemplate(template, vars) {

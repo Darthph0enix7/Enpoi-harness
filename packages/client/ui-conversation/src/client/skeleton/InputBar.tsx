@@ -45,8 +45,8 @@ import css from './InputBar.module.css'
 export type InputBarProps = ComposerBarProps
 
 export const InputBar = memo(function InputBar({
-  useSession, useInput, inputActions, keyboard, addFiles, removeAttachment, resolveDraftAttachments,
-  retryFileUpload, cycleAgentPreset,
+  useSession, useInput, inputActions, keyboard, addFiles, removeAttachment, acknowledgeIncompleteAttachments,
+  resolveDraftAttachments, retryFileUpload, cycleAgentPreset,
   toggleCommandMenu, stop, stopAll, t,
   renderSlot, useBusyEnter, useFileUploads, useNotices, useLexicon, useMenuLauncher, useStopShortcut,
   useProjection, useSessions, useSessionStatus, sessionId, variant, disabled: inert = false, blocked,
@@ -521,8 +521,11 @@ export const InputBar = memo(function InputBar({
   // state keeps plain Send. A continuable child keeps Send primary and
   // exposes Stop independently.
   const primaryStops = running && subagent === null && (empty || blocked !== undefined)
+  const incompleteAttachmentsBlocked = input?.incompleteDraftAttachments === true
   // Disabled native buttons may omit mouseleave; their tooltip must close from state.
-  const primaryDisabled = primaryStops ? stop === undefined : empty || disabled || machineBusy || uploadsPending
+  const primaryDisabled = primaryStops
+    ? stop === undefined
+    : empty || disabled || machineBusy || uploadsPending || incompleteAttachmentsBlocked
   const interruptible = running && continuable
   // The split stop control: the count badge and "Stop all agents" sit beside
   // the primary whenever live subagent descendants exist, whether or not the
@@ -536,7 +539,7 @@ export const InputBar = memo(function InputBar({
   const plainMessageDraft = !empty && input?.phase === 'plain' && !draft.trimStart().startsWith('/')
   const primaryLabel = primaryStops
     ? t('input.stop')
-    : running && steeringAvailable && !disabled && !uploadsPending && plainMessageDraft
+    : running && steeringAvailable && !disabled && !uploadsPending && !incompleteAttachmentsBlocked && plainMessageDraft
       ? t(primarySubmitMode === 'steer' ? 'input.send.steer' : 'input.send.queue')
       : t('input.send')
   const onPrimary = (): void => {
@@ -545,8 +548,8 @@ export const InputBar = memo(function InputBar({
       return
     }
     if (keyboard === undefined) return // absent machine: the button is disabled
-    /* v8 ignore next -- defensive: the primary button is disabled for empty, disabled, and pending-upload states. */
-    if (!empty && !disabled && !machineBusy && !uploadsPending) keyboard.submit(primarySubmitMode)
+    /* v8 ignore next -- defensive: the primary button is disabled for empty, disabled, pending-upload, and incomplete-attachment states. */
+    if (!empty && !disabled && !machineBusy && !uploadsPending && !incompleteAttachmentsBlocked) keyboard.submit(primarySubmitMode)
   }
 
   // Claim ghost hint: rendered by CSS as generated content after the last
@@ -603,6 +606,38 @@ export const InputBar = memo(function InputBar({
       {notice?.level === 'info' && (
         <div className={css.notice} role="status">
           {notice.text}
+        </div>
+      )}
+      {incompleteAttachmentsBlocked && (
+        <div className={css.notice} role="status" data-incomplete-attachments-notice="">
+          <span>{t('attachment.incompleteSynced')}</span>
+          <button
+            type="button"
+            className={css.retry}
+            onMouseDown={keepFocus}
+            onPointerDown={keepFocusTouch}
+            onClick={() => { acknowledgeIncompleteAttachments?.() }}
+          >
+            {t('attachment.incompleteKeep')}
+          </button>
+          {attachments.length > 0 && (
+            <button
+              type="button"
+              className={css.retry}
+              onMouseDown={keepFocus}
+              onPointerDown={keepFocusTouch}
+              onClick={() => {
+                for (const attachment of attachments) {
+                  if (attachment.kind === 'unavailable' || attachment.attachment !== undefined) {
+                    removeAttachment?.(attachment.id)
+                  }
+                }
+                acknowledgeIncompleteAttachments?.()
+              }}
+            >
+              {t('attachment.incompleteClear')}
+            </button>
+          )}
         </div>
       )}
       {/* Trigger clicks land on the card, not the editor: the toolbar row's

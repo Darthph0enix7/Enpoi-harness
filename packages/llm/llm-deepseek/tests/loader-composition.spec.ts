@@ -21,7 +21,7 @@ import * as DeepSeekPluginPackageInventory from '@deepseek-ai/dsh-plugin-package
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
 import { assemble } from './assemble.ts'
 import { closeMockServers, mockServer, textEvents } from './mock-server.ts'
-import { sourceModuleLoader } from './helpers.ts'
+import { sourceModuleLoader, start } from './helpers.ts'
 
 const NS = 'llm-deepseek'
 const KEY_REF = credentialRef('DEEPSEEK_API_KEY')
@@ -125,6 +125,22 @@ async function loadComposition(
 
 
 describe('llm-deepseek real dynamic composition', () => {
+  it('carries usage into the runtime finish for an in-band server failure', async () => {
+    vi.stubEnv('DEEPSEEK_API_KEY', 'entry-key')
+    const server = await mockServer([{ kind: 'sse', events: [
+      JSON.stringify({ ...start, message: { ...start.message, usage: { input_tokens: 100, output_tokens: 5 } } }),
+      ...textEvents.slice(1, 3),
+      JSON.stringify({ type: 'error', error: { type: 'overloaded_error', message: 'busy' } }),
+    ] }])
+    const { ctx } = await loadComposition({ withDynamic: false, baseURL: server.url })
+
+    const result = await assemble(ctx, { model: 'deepseek-v4-flash', messages: [] })
+
+    expect(result.usage).toEqual({ inputTokens: 100, outputTokens: 5, totalTokens: 105 })
+    expect(result.finish).toMatchObject({ kind: 'error', failure: { code: 'SERVER', message: 'busy' } })
+    expect(server.requests).toHaveLength(1)
+  })
+
   it('keeps package inventory on when the Loader composition disables session upload', async () => {
     vi.stubEnv('DEEPSEEK_API_KEY', 'entry-key')
     const server = await mockServer([{ kind: 'sse', events: textEvents }])

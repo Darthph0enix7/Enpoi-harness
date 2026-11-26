@@ -1,8 +1,22 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
+import type { RestoredDraftAttachment } from '../contract/input.ts'
 import type { ConversationSessionSlotProps } from '../contract/slots.ts'
 import { conversationPhase } from '../contract/snapshot.ts'
 import { resolveActiveView } from '../view-selection.ts'
 import css from './ConversationRoot.module.css'
+
+function sameRestoredAttachments(
+  left: readonly RestoredDraftAttachment[],
+  right: readonly RestoredDraftAttachment[],
+): boolean {
+  if (left.length !== right.length) return false
+  return left.every((entry, index) => {
+    const other = right[index]
+    return other !== undefined
+      && other.kind === entry.kind
+      && String(other.attachment.attachmentId) === String(entry.attachment.attachmentId)
+  })
+}
 
 /**
  * Renders the active Session view inside the resident scrollport and keeps
@@ -23,18 +37,52 @@ export function DefaultConversationViews({
   const inputState = useInput(s => s)
   const storedDraft = useStore(s => s.draft)
   const storedAttachments = useStore(s => s.draftAttachments ?? [])
+  const storedIncomplete = useStore(s => s.draftAttachmentsIncomplete === true)
   const viewRequest = useStore(s => s.viewRequest ?? null)
+  const lastSeeded = useRef<{
+    draft: string
+    attachments: readonly RestoredDraftAttachment[]
+    incomplete: boolean
+  } | null>(null)
 
   // The mount seed and a later server-side adoption (a draft synced from
-  // another device) both fill an empty composer — text and durable restored
-  // attachments — so a reverted message's media survives reload. A non-empty
-  // editor or rail is never overwritten, so in-progress work always wins.
+  // another device) both fill an empty or unedited seeded composer — text,
+  // durable restored attachments, and sync-incompleteness flag — so a
+  // reverted message's media survives reload. User-edited drafts are never
+  // overwritten, so in-progress work always wins.
   useEffect(() => {
-    if (inputState.draft === '' && inputState.attachmentIds.length === 0
-      && (storedDraft !== '' || storedAttachments.length > 0)) {
-      inputActions.restoreDraft(storedDraft, storedAttachments)
+    if (lastSeeded.current !== null && inputState.draft !== lastSeeded.current.draft) {
+      lastSeeded.current = null
     }
-  }, [storedDraft, storedAttachments, inputState.draft, inputState.attachmentIds.length, inputActions])
+    const emptyComposer = inputState.draft === ''
+      && inputState.attachmentIds.length === 0
+      && (storedDraft !== '' || storedAttachments.length > 0 || (storedIncomplete && inputState.incompleteDraftAttachments !== true))
+    const uneditedSeedUpdate = lastSeeded.current !== null
+      && inputState.draft === lastSeeded.current.draft
+      && (storedDraft !== lastSeeded.current.draft
+        || !sameRestoredAttachments(storedAttachments, lastSeeded.current.attachments)
+        || storedIncomplete !== lastSeeded.current.incomplete)
+    if (emptyComposer || uneditedSeedUpdate) {
+      lastSeeded.current = {
+        draft: storedDraft,
+        attachments: storedAttachments,
+        incomplete: storedIncomplete,
+      }
+      inputActions.restoreDraft(
+        storedDraft,
+        storedAttachments,
+        storedIncomplete ? { incompleteAttachments: true } : undefined,
+      )
+    }
+  }, [
+    storedDraft,
+    storedAttachments,
+    storedIncomplete,
+    inputState.draft,
+    inputState.attachmentIds.length,
+    inputState.incompleteDraftAttachments,
+    inputActions,
+  ])
 
   useEffect(() => {
     const unmirror = bindDraftMirror(actions.setDraft)

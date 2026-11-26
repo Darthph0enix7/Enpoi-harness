@@ -221,28 +221,101 @@ describe('enpoi-memory tools — memory_save provenance', () => {
     expect(row.source_trust).toBe('operator')
   })
 
-  it('saves without a calling session as root authority', async () => {
+  it('fails closed without a calling session or header instead of writing operator trust (C-02)', async () => {
     const pipeline = makePipeline(db)
     const save = captureTools().find(tool => tool.name === 'memory_save')!
 
-    const result = await save.execute({ fact: 'saved with no execution scope', category: 'PROJECT' })
+    const noExec = await save.execute({ fact: 'saved with no execution scope', category: 'PROJECT' })
+    const noHeader = await save.execute({ fact: 'saved with missing header', category: 'PROJECT' }, { agent: { session: {} } })
 
-    expect(result.saved).toBe(true)
-    expect(pipeline.get(String(result.id))).toMatchObject({ origin: 'orchestrator', source_trust: 'operator', state: 'committed' })
+    expect(noExec.saved).toBe(false)
+    expect(noHeader.saved).toBe(false)
+    expect(pipeline.list()).toHaveLength(0)
   })
 
-  it('keeps a fork with seed lineage at root authority', async () => {
+  it('keeps a fork with seed lineage at root authority (live and persisted delegationDepth 0)', async () => {
     const pipeline = makePipeline(db)
-    const save = captureTools().find(tool => tool.name === 'memory_save')!
+    const tools = captureTools()
+    const save = tools.find(tool => tool.name === 'memory_save')!
+    const confirm = tools.find(tool => tool.name === 'memory_confirm')!
+    const rescind = tools.find(tool => tool.name === 'memory_rescind')!
+
+    // Real fork header at creation (delegationDepth omitted) and after JSONL
+    // restore (delegationDepth: 0) — both are indistinguishable from the
+    // { parentSession, isSeeded: true, delegationDepth: 0, no origin } shape
+    // and intentionally keep root authority BY DESIGN.
     await save.execute(
       { fact: 'forked root session fact', category: 'PROJECT' },
       { agent: { session: { id: 'fork-1', header: { cwd: '/work/a', parentSession: 'origin-1', isSeeded: true } } } },
     )
+    const restoredFork = { agent: { session: { id: 'fork-2', header: { cwd: '/work/a', parentSession: 'origin-1', isSeeded: true, delegationDepth: 0 } } } }
+    const savedRestored = await save.execute({ fact: 'restored forked root session fact', category: 'PROJECT' }, restoredFork)
+    expect(savedRestored.saved).toBe(true)
 
-    const row = pipeline.list()[0]!
-    expect(row.origin).toBe('orchestrator')
-    expect(row.source_trust).toBe('operator')
-    expect(row.state).toBe('committed')
+    const rows = pipeline.list()
+    expect(rows).toHaveLength(2)
+    for (const row of rows) {
+      expect(row.origin).toBe('orchestrator')
+      expect(row.source_trust).toBe('operator')
+      expect(row.state).toBe('committed')
+    }
+
+    const tentative = await pipeline.intake(
+      [{ fact: 'tentative claim for restored fork confirm and rescind', category: 'PROJECT' }],
+      { origin: 'compaction', trust: 'untrusted_external' },
+    )
+    expect(await confirm.execute({ id: tentative[0]!.id }, restoredFork)).toMatchObject({ confirmed: true, state: 'committed' })
+    expect(await rescind.execute({ id: tentative[0]!.id }, restoredFork)).toMatchObject({ rescinded: true })
+  })
+
+  it('treats parentSession without isSeeded true and without origin as delegated/untrusted (C-02)', async () => {
+    const pipeline = makePipeline(db)
+    const tools = captureTools()
+    const save = tools.find(tool => tool.name === 'memory_save')!
+    const confirm = tools.find(tool => tool.name === 'memory_confirm')!
+    const rescind = tools.find(tool => tool.name === 'memory_rescind')!
+
+    const ambiguousHeader = { cwd: '/work/a', parentSession: 'parent-1', isSeeded: false, delegationDepth: 0 }
+    const saved = await save.execute(
+      { fact: 'ambiguous unseeded parent lineage fact', category: 'PROJECT' },
+      { agent: { session: { id: 'ambig-1', header: ambiguousHeader } } },
+    )
+    expect(saved.saved).toBe(true)
+    expect(pipeline.get(String(saved.id))).toMatchObject({
+      origin: 'worker',
+      source_trust: 'untrusted_external',
+      state: 'tentative',
+    })
+
+    expect(await confirm.execute({ id: String(saved.id) }, { agent: { session: { id: 'ambig-1', header: ambiguousHeader } } }))
+      .toMatchObject({ confirmed: false, code: 'delegated_session_denied' })
+    expect(await rescind.execute({ id: String(saved.id) }, { agent: { session: { id: 'ambig-1', header: ambiguousHeader } } }))
+      .toMatchObject({ rescinded: false, code: 'delegated_session_denied' })
+  })
+
+  it('treats orphan subagent origin and positive delegationDepth without parentSession as delegated/untrusted (C-02)', async () => {
+    const pipeline = makePipeline(db)
+    const tools = captureTools()
+    const save = tools.find(tool => tool.name === 'memory_save')!
+    const confirm = tools.find(tool => tool.name === 'memory_confirm')!
+    const rescind = tools.find(tool => tool.name === 'memory_rescind')!
+
+    for (const [idx, header] of [
+      { cwd: '/work/a', origin: 'subagent' },
+      { cwd: '/work/a', delegationDepth: 1 },
+      { cwd: '/work/a', delegationDepth: -1 },
+    ].entries()) {
+      const scope = { agent: { session: { id: `orphan-${idx}`, header } } }
+      const saved = await save.execute({ fact: `orphan child fact ${idx}`, category: 'PROJECT' }, scope)
+      expect(saved.saved).toBe(true)
+      expect(pipeline.get(String(saved.id))).toMatchObject({
+        origin: 'worker',
+        source_trust: 'untrusted_external',
+        state: 'tentative',
+      })
+      expect(await confirm.execute({ id: String(saved.id) }, scope)).toMatchObject({ confirmed: false, code: 'delegated_session_denied' })
+      expect(await rescind.execute({ id: String(saved.id) }, scope)).toMatchObject({ rescinded: false, code: 'delegated_session_denied' })
+    }
   })
 })
 

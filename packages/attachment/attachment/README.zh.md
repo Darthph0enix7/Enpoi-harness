@@ -83,6 +83,7 @@ kind: "package-reference"
 | [`src/index.ts`](src/index.ts) | 插件入口：抽象 `AttachmentStore` 服务与再导出 |
 | [`src/types.ts`](src/types.ts) | 持久词汇：引用、限额、上传与存储载荷 |
 | [`src/admission.ts`](src/admission.ts) | 对编码图片和文件上传强制执行规范 base64 并委托存储 |
+| [`src/prompt-refs.ts`](src/prompt-refs.ts) | 对持久提示词引用执行格式校验并依据目标会话日志规范化（`canonicalDurablePromptParts`） |
 | [`src/error.ts`](src/error.ts) | `AttachmentError` 类与 `isImageAdmissionError` 运行时子集 |
 | [`src/brand.ts`](src/brand.ts) | `AttachmentId` 带类型标记的不透明标识符 |
 | — | 不发布运行时不变式伴生入口；这个无状态 seam 承载类型，实现则负责强制执行不可变存储检查。 |

@@ -136,7 +136,7 @@ describe('Messages stream', () => {
 })
 
 describe('SSE framing and provider failures', () => {
-  async function read(text: string, bytewise = false) {
+  function decode(text: string, activity: () => void, bytewise = false) {
     const bytes = new TextEncoder().encode(text)
     let offset = 0
     const body = new ReadableStream<Uint8Array<ArrayBuffer>>({ pull(controller) {
@@ -144,8 +144,11 @@ describe('SSE framing and provider failures', () => {
       const end = bytewise ? offset + 1 : bytes.length
       controller.enqueue(bytes.slice(offset, end)); offset = end
     } })
+    return translate(parseSse(body, activity), MODEL)
+  }
+  async function read(text: string, bytewise = false) {
     let activity = 0
-    const result = await chunks(translate(parseSse(body, () => { activity++ }), MODEL))
+    const result = await chunks(decode(text, () => { activity++ }, bytewise))
     return { result, activity }
   }
   it('frames UTF-8 split at every byte and counts comments and ping as transport activity', async () => {
@@ -161,6 +164,28 @@ describe('SSE framing and provider failures', () => {
   })
   it('normalizes in-band overloads', async () => {
     await expect(read(sse([{ type: 'error', error: { type: 'overloaded_error', message: 'busy' } }]))).rejects.toMatchObject({ code: 'SERVER' })
+  })
+  it.each([
+    { type: 'overloaded_error', code: 'SERVER', output: 5, errorFields: {} },
+    { type: 'rate_limit_error', code: 'RATE_LIMIT', output: 1, errorFields: { usage: { output_tokens: 5 } } },
+    { type: 'overloaded_error', code: 'SERVER', output: 5, errorFields: { usage: { input_tokens: 101, output_tokens: -1 } } },
+  ])('emits one usage sample before throwing an in-band $type %#', async ({ type, code, output, errorFields }) => {
+    const stream = decode(sse([
+      { ...start, message: { ...start.message, usage: { input_tokens: 100, output_tokens: output } } },
+      ...textEvents.slice(1, 3),
+      { type: 'error', error: { type, message: 'provider failure', ...errorFields } },
+    ]), () => {})
+    const seen: string[] = []
+    const drain = async (): Promise<void> => {
+      for await (const chunk of stream) {
+        seen.push(chunk.type)
+        if (chunk.type === 'usage') {
+          expect(chunk.usage).toEqual({ inputTokens: 100, outputTokens: 5, totalTokens: 105 })
+        }
+      }
+    }
+    await expect(drain()).rejects.toMatchObject({ code, message: 'provider failure' })
+    expect(seen).toEqual(['block-start', 'text-delta', 'usage'])
   })
   it.each([
     [401, {}, 'AUTH'], [403, {}, 'AUTH'], [402, {}, 'QUOTA'], [429, {}, 'RATE_LIMIT'],

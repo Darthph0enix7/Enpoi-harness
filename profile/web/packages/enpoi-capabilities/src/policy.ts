@@ -71,8 +71,25 @@ export type PolicyDecision =
     broadAllow?: { label: string }
   }
 
+/**
+ * Shared read-only session execution veto list (consumed by policy resolution
+ * and the client permissions mirror). Covers local mutation tools plus the
+ * mutating peer controls; discovery and status reads (`peer_status`,
+ * `peer_sessions`, `peer_models`, `peer_asks`) remain allowed.
+ */
+export const READ_ONLY_VETO_TOOLS: readonly string[] = Object.freeze([
+  'bash',
+  'edit',
+  'write',
+  'str_replace_editor',
+  'peer_switch_model',
+  'peer_ask',
+  'peer_answer',
+  'peer_cancel',
+])
+
 /** Tools treated as mutations for the read-only session veto. */
-const MUTATION_TOOLS = new Set(['bash', 'edit', 'write', 'str_replace_editor'])
+const MUTATION_TOOLS = new Set(READ_ONLY_VETO_TOOLS)
 
 /**
  * Whether an asking session runs in Full access: approval prompts disabled AND

@@ -71,6 +71,7 @@ import {
   type GrantProposal,
   type PolicyDecision,
 } from './policy'
+import { classifySessionAuthority } from './session-authority'
 
 /** The closed approval vocabulary the card can return. */
 export type ApprovalOutcome =
@@ -434,11 +435,10 @@ export function delegatedChildOf(agent: ChildAgentLike | undefined): {
   cwd?: string
 } | undefined {
   const header = agent?.session?.header
+  const authority = classifySessionAuthority(header)
+  if (authority.kind !== 'delegated' || authority.parentSessionId === undefined) return undefined
   const childSessionId = typeof header?.id === 'string' && header.id !== '' ? header.id : undefined
-  const parentSessionId = typeof header?.parentSession === 'string' && header.parentSession !== '' ? header.parentSession : undefined
-  if (childSessionId === undefined || parentSessionId === undefined) return undefined
-  const rawDepth = header?.delegationDepth
-  const depth = typeof rawDepth === 'number' && Number.isSafeInteger(rawDepth) && rawDepth > 0 ? rawDepth : 1
+  if (childSessionId === undefined) return undefined
   let label: string | undefined
   for (const event of agent?.session?.ownEvents?.() ?? []) {
     if (event?.type !== 'subagent/descriptor') continue
@@ -448,8 +448,8 @@ export function delegatedChildOf(agent: ChildAgentLike | undefined): {
   const cwd = typeof header?.cwd === 'string' && header.cwd !== '' ? header.cwd : undefined
   return {
     childSessionId,
-    parentSessionId,
-    depth,
+    parentSessionId: authority.parentSessionId,
+    depth: authority.depth,
     label: label ?? `child ${shortId(childSessionId)}`,
     ...cwd !== undefined ? { cwd } : {},
   }
@@ -821,6 +821,14 @@ export class ChildApprovalForwarder {
   private async resolveAsk(input: ChildAskInput): Promise<ChildAskResolution> {
     const child = delegatedChildOf(input.agent)
     if (child === undefined) {
+      const authority = classifySessionAuthority(input.agent?.session?.header)
+      if (authority.kind === 'delegated') {
+        this.deps.report(`fail-closed: ${input.toolName} from delegated session without usable parent (${authority.reason})`)
+        return {
+          kind: 'deny',
+          reason: `approval for ${input.toolName} failed closed: delegated session has no usable parent session (${authority.reason})`,
+        }
+      }
       this.deps.report(`deny: non-child ask for ${input.toolName} reached the child forwarder`)
       return { kind: 'deny', reason: `child approval forwarding received a non-child ask for ${input.toolName}` }
     }

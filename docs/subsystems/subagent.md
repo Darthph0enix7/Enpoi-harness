@@ -123,6 +123,8 @@ interface ResolvedSubagentStartRequest extends SubagentStartRequest {
 
 ## Continuable children and activations
 
+`startContinuable` accepts an optional `request.reportMode` (`report_mode` on the continuable delegation tool). `bounded` is the default; `full-inline` applies to the initial Activation only and still honors the hard text ceiling and image limit. A shortened settlement notice names the child session for recall and includes a spill locator in the same logged user message when the text copy was saved. The [package README](../../packages/subagent/subagent/README.md) defines settlement limits, failure behavior, and retention.
+
 A **continuable background subagent** is one durable child Session with at most one process-local **Activation**, the period when a reconstructed child Agent is resident. An Activation is not a request, result, cancellation, or Task: it may execute many FIFO turns and stays resident while descendants it created are still running. The continuation manager owns activation admission, direct-parent authorization, the live ownership graph, cold resume, and child-first disposal; the Agent loop owns all turn ordering and execution. No continuable path creates a Task or an intermediate result-bearing wrapper.
 
 ```text
@@ -767,6 +769,46 @@ A provider established a published child. For in-process providers, `ctx.agents.
 ```
 
 Types: [Scoped](scope.md)
+
+Source: [`packages/subagent/subagent/src/index.ts`](../../packages/subagent/subagent/src/index.ts)
+
+<a id="subagentstop-all--emit"></a>
+
+#### `subagent/stop-all` — emit
+
+A user Stop-all has opened the parent settlement park window. The active stop policy may now interrupt live continuable descendants.
+
+```ts cordis-catalog
+/**
+ * A user Stop-all has opened the parent settlement park window. The active
+ * stop policy may now interrupt live continuable descendants.
+ * @mode emit
+ * @param parent - exact live Agent authorizing the cascade.
+ * @param window - process-local identity of this stop window, shared by repeat presses.
+ */
+'subagent/stop-all'(parent: Agent, window: symbol): void
+```
+
+Types: [Agent](core.md)
+
+Source: [`packages/subagent/subagent/src/index.ts`](../../packages/subagent/subagent/src/index.ts)
+
+<a id="subagentstop-idle-tree--emit"></a>
+
+#### `subagent/stop-idle-tree` — emit
+
+Request Stop-all for an idle parent with no turn end to publish.
+
+```ts cordis-catalog
+/**
+ * Request Stop-all for an idle parent with no turn end to publish.
+ * @mode emit
+ * @param parent - exact live ordinary Agent addressed by the host.
+ */
+'subagent/stop-idle-tree'(parent: Agent): void
+```
+
+Types: [Agent](core.md)
 
 Source: [`packages/subagent/subagent/src/index.ts`](../../packages/subagent/subagent/src/index.ts)
 <!-- END GENERATED cordis-surface -->

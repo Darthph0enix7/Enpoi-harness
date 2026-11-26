@@ -22,6 +22,7 @@ import {
   followupSeatFiber,
   startSeatFiber,
   waitForSeatTurn,
+  type SeatFiber,
 } from './fiber.ts'
 import type { EvidenceVault } from './vault.ts'
 
@@ -203,7 +204,7 @@ export async function serviceEvidenceQueue(
     'Produce the fact sheets now.',
   ].join('\n\n')
 
-  let fiber: { childId: string } | undefined
+  let fiber: SeatFiber | undefined
   try {
     fiber = await startSeatFiber(ctx, parent, {
       seatId: retrievedBy,
@@ -216,7 +217,7 @@ export async function serviceEvidenceQueue(
         .filter(t => !(BROKER_KEPT_TOOLS as readonly string[]).includes(t))
         .filter(t => !(COUNCIL_KEPT_TOOLS as readonly string[]).includes(t)),
     }, signal)
-    const text = await waitForSeatTurn(ctx, fiber.childId, signal, timeoutMs)
+    const text = await waitForSeatTurn(ctx, fiber.childId, signal, waitMs)
     const parsed = parseFactSheets(text)
     const excerpt = clip(text.replace(/\s+/g, ' ').trim(), 140)
     let committed = 0
@@ -264,9 +265,7 @@ export async function serviceEvidenceQueue(
     councilDiag(`[broker] batch FAILED: ${msg}`)
     return { sheets: 0, errors, missed, excess: [], retrievedBy }
   } finally {
-    if (fiber !== undefined) {
-      try { await disposeSeatFibers(ctx, [fiber]) } catch { /* best effort */ }
-    }
+    if (fiber !== undefined) await disposeSeatFibers(ctx, parent, [fiber])
   }
 }
 

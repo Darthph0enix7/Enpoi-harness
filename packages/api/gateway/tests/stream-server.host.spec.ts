@@ -1,5 +1,6 @@
 import { once } from 'node:events'
 import { createServer, type Server } from 'node:http'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { Context } from '@deepseek-ai/cordis'
 import { remoteErrorOf, type PeerId, type PeerScope } from '@deepseek-ai/dsh-typert-protocol'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -656,6 +657,50 @@ describe('Remote stream mux server uplink', () => {
     expect(frames).toHaveLength(2)
     client.close()
     await once(client, 'close')
+  })
+  it('propagates only the upgrade request Authorization header into opened streams', async () => {
+    const STREAM_AUTH_SYMBOL = Symbol.for('dsh.gateway.streamAuthorization')
+    const readAuth = (): string | undefined => {
+      const als = (globalThis as Record<PropertyKey, unknown>)[STREAM_AUTH_SYMBOL]
+      return als instanceof AsyncLocalStorage ? (als.getStore() as string | undefined) : undefined
+    }
+    const observed: Array<string | undefined> = []
+    const entry = await startMux(async () => {
+      observed.push(readAuth())
+      return (async function* () {
+        yield readAuth() ?? 'none'
+      })()
+    })
+
+    const authed = new WebSocket(entry.url, {
+      headers: {
+        authorization: 'Bearer upgrade-secret',
+        cookie: 'dsh_launch=must-not-leak',
+      },
+    })
+    const authedFrames = collectFrames(authed)
+    await once(authed, 'open')
+    authed.send(openFrame('s-auth'))
+    await vi.waitFor(() => { expect(authedFrames).toHaveLength(2) })
+    authed.close()
+    expect(authedFrames).toEqual([
+      { streamId: 's-auth', type: 'item', value: 'Bearer upgrade-secret' },
+      { streamId: 's-auth', type: 'end' },
+    ])
+
+    const unauthed = new WebSocket(entry.url, {
+      headers: { cookie: 'dsh_launch=must-not-leak' },
+    })
+    const unauthedFrames = collectFrames(unauthed)
+    await once(unauthed, 'open')
+    unauthed.send(openFrame('s-none'))
+    await vi.waitFor(() => { expect(unauthedFrames).toHaveLength(2) })
+    unauthed.close()
+    expect(unauthedFrames).toEqual([
+      { streamId: 's-none', type: 'item', value: 'none' },
+      { streamId: 's-none', type: 'end' },
+    ])
+    expect(observed).toEqual(['Bearer upgrade-secret', undefined])
   })
 })
 

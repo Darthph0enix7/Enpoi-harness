@@ -69,7 +69,12 @@ export interface UiStateDraft {
    * attachments; browser-picked files never appear here.
    */
   attachments?: readonly UiStateDraftAttachment[]
-  /** Client clock (milliseconds) of the last change; stored as given, never compared. */
+  /**
+   * True when the originating client truncated {@link attachments} to fit the
+   * server record cap. Absent or false means the stored list is complete.
+   */
+  incompleteAttachments?: boolean
+  /** Client clock (milliseconds) of the last change; stored as given. */
   updatedAt: number
   /** Client instance that typed the text. */
   clientId: string
@@ -83,6 +88,8 @@ export interface UiStateValue {
   surface?: unknown
   /** Server clock (milliseconds) of the last accepted write; 0 when nothing is stored. */
   updatedAt: number
+  /** Server-owned monotonic revision of this session record; 0 when nothing is stored. */
+  revision?: number
 }
 
 /** One `put` patch; each present key replaces its stored counterpart wholesale. */
@@ -91,7 +98,20 @@ export interface UiStatePatch {
   draft?: UiStateDraft
   /** Replacement surface; absent leaves the stored surface untouched. */
   surface?: unknown
+  /** Expected server revision for conditional writes; absent keeps legacy unversioned behavior. */
+  expectedRevision?: number
 }
+
+/** Result of one conditional or legacy `put` call. */
+export type UiStatePutResult =
+  | { readonly ok: true; readonly updatedAt: number; readonly revision: number }
+  | {
+    readonly ok: false
+    readonly conflict: true
+    readonly updatedAt: number
+    readonly revision: number
+    readonly record: UiStateValue
+  }
 
 /** The right panel's width as the client stores it: dragged px plus the frame ratio it was dragged at. */
 export interface LayoutRightbarWidths {
@@ -119,11 +139,13 @@ const uiStateRecordSchema = z.object({
       kind: z.enum(['image', 'file']),
       attachment: z.object({ attachmentId: z.string() }).passthrough(),
     }).passthrough()).max(MAX_DRAFT_ATTACHMENTS).optional(),
+    incompleteAttachments: z.boolean().optional(),
     updatedAt: z.number(),
     clientId: z.string(),
   }).optional(),
   surface: z.unknown().optional(),
   updatedAt: z.number(),
+  revision: z.number().int().nonnegative().optional(),
 })
 
 /** Durable record schema for the single layout document. */
@@ -192,7 +214,7 @@ export function requireDraft(value: unknown): UiStateDraft {
   if (!isRecord(value)) {
     throw new TypeError('enpoiUiState: patch.draft must be an object')
   }
-  const { text, updatedAt, clientId, attachments } = value
+  const { text, updatedAt, clientId, attachments, incompleteAttachments } = value
   if (typeof text !== 'string') {
     throw new TypeError('enpoiUiState: patch.draft.text must be a string')
   }
@@ -205,7 +227,33 @@ export function requireDraft(value: unknown): UiStateDraft {
   if (typeof clientId !== 'string' || clientId === '') {
     throw new TypeError('enpoiUiState: patch.draft.clientId must be a non-empty string')
   }
-  return { text, updatedAt, clientId, ...requireDraftAttachments(attachments) }
+  if (incompleteAttachments !== undefined && typeof incompleteAttachments !== 'boolean') {
+    throw new TypeError('enpoiUiState: patch.draft.incompleteAttachments must be a boolean')
+  }
+  return {
+    text,
+    updatedAt,
+    clientId,
+    ...requireDraftAttachments(attachments),
+    ...(incompleteAttachments === true ? { incompleteAttachments: true } : {}),
+  }
+}
+
+/**
+ * Validate the optional conditional-write revision carried by a patch.
+ * @param value - raw `patch.expectedRevision` argument.
+ * @returns the validated non-negative integer, or undefined when omitted.
+ * @throws TypeError for a non-integer; RangeError for a negative integer.
+ */
+function requireExpectedRevision(value: unknown): number | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    throw new TypeError('enpoiUiState: patch.expectedRevision must be an integer')
+  }
+  if (value < 0) {
+    throw new RangeError('enpoiUiState: patch.expectedRevision must be a non-negative integer')
+  }
+  return value
 }
 
 /**
@@ -358,24 +406,29 @@ export class EnpoiUiStateService extends TypertRemoteService {
   /**
    * The stored UI state for one session.
    * @param sessionId - session whose UI state is read.
-   * @returns the stored value, or `{ updatedAt: 0 }` when nothing is stored.
+   * @returns the stored value, or `{ updatedAt: 0, revision: 0 }` when nothing is stored.
    */
   @Remote
   async get(sessionId: string): Promise<UiStateValue> {
     const key = requireSessionId(sessionId)
-    return this.requireTable(this.sessions).get(key) ?? { updatedAt: 0 }
+    const stored = this.requireTable(this.sessions).get(key)
+    if (stored === undefined) return { updatedAt: 0, revision: 0 }
+    return stored.revision === undefined ? { ...stored, revision: 0 } : stored
   }
 
   /**
    * Shallow-merge one patch into a session's stored UI state and persist it.
-   * `draft` and `surface` merge independently; the server stamps `updatedAt`
-   * with its own clock and stores the caller's `draft.updatedAt` as given.
+   * `draft` and `surface` merge independently under a server-owned monotonic
+   * `revision`. Callers passing `expectedRevision` receive `{ ok: false,
+   * conflict: true, record }` instead of overwriting when the server revision
+   * moved; legacy callers omitting `expectedRevision` still write unless their
+   * `draft.updatedAt` would lower a stored newer draft.
    * @param sessionId - session whose UI state is patched.
    * @param patch - present `draft`/`surface` keys replace their stored counterparts.
-   * @returns the new server `updatedAt` after the write is durable.
+   * @returns accepted write stamps or conflict with the winning record.
    */
   @Remote
-  async put(sessionId: string, patch: UiStatePatch): Promise<{ ok: true; updatedAt: number }> {
+  async put(sessionId: string, patch: UiStatePatch): Promise<UiStatePutResult> {
     const key = requireSessionId(sessionId)
     if (!isRecord(patch)) {
       throw new TypeError('enpoiUiState: patch must be an object with a draft or surface key')
@@ -384,15 +437,44 @@ export class EnpoiUiStateService extends TypertRemoteService {
     const hasSurface = patch.surface !== undefined
     const draft = hasDraft ? requireDraft(patch.draft) : undefined
     const surface = hasSurface ? requireSurface(patch.surface) : undefined
+    const expectedRevision = requireExpectedRevision(patch.expectedRevision)
     const updatedAt = Date.now()
-    await this.enqueue(async () => {
+    return this.enqueue(async (): Promise<UiStatePutResult> => {
       const table = this.requireTable(this.sessions)
-      const next: UiStateValue = { ...table.get(key), updatedAt }
+      const current = table.get(key)
+      const currentRevision = current?.revision ?? 0
+      if (expectedRevision !== undefined && expectedRevision !== currentRevision) {
+        const record: UiStateValue = current === undefined
+          ? { updatedAt: 0, revision: 0 }
+          : current.revision === undefined ? { ...current, revision: 0 } : current
+        return {
+          ok: false,
+          conflict: true,
+          updatedAt: record.updatedAt,
+          revision: currentRevision,
+          record,
+        }
+      }
+      if (expectedRevision === undefined && draft !== undefined && current?.draft !== undefined
+        && draft.updatedAt < current.draft.updatedAt) {
+        const record: UiStateValue = current.revision === undefined
+          ? { ...current, revision: currentRevision }
+          : current
+        return {
+          ok: false,
+          conflict: true,
+          updatedAt: record.updatedAt,
+          revision: currentRevision,
+          record,
+        }
+      }
+      const revision = currentRevision + 1
+      const next: UiStateValue = { ...current, updatedAt, revision }
       if (draft !== undefined) next.draft = draft
       if (surface !== undefined) next.surface = surface
       await table.put(key, next)
+      return { ok: true, updatedAt, revision }
     })
-    return { ok: true, updatedAt }
   }
 
   /**

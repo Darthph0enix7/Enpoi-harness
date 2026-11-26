@@ -4,8 +4,8 @@
  * notice carries one bounded diagnostic line built from the child's own log —
  * ending code, known recoverability, last successful tool-result seq, and an
  * unverified public-text excerpt. The closing report copied from the child is
- * bounded by its own character and image limits; a truncated report states the
- * exact omission and names the child's durable session. Provider error text and
+ * bounded by its own character and image limits; a shortened report states the
+ * omission and names the child session and any saved spill. Provider error text and
  * reasoning never enter it; common credential forms are redacted best-effort,
  * not a security scanner.
  *
@@ -16,7 +16,9 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { SpillRef } from '@deepseek-ai/dsh-spill'
 import type { ActivationTerminal } from './lifecycle.ts'
+import type { SubagentReportMode } from './types.ts'
 
 /** Durable attribution for one model-authored message between adjacent Agents. */
 export interface AgentMessageSource {
@@ -138,18 +140,59 @@ const utf8Decoder = new TextDecoder()
 export const DEFAULT_SETTLEMENT_REPORT_MAX_CHARS = 12_000
 /** Default image-block ceiling for a settled child's closing report in a notice. */
 export const DEFAULT_SETTLEMENT_REPORT_MAX_IMAGES = 4
+/** Default hard character ceiling for full-inline overrides and stale-flush fallbacks. */
+export const DEFAULT_SETTLEMENT_REPORT_HARD_MAX_CHARS = 200_000
+/** Default character ceiling for the Markdown heading outline in a spilled notice. */
+export const DEFAULT_SETTLEMENT_REPORT_OUTLINE_MAX_CHARS = 1_500
+/** Default maximum UTF-16 code units per physical line in a spilled closing-report file. */
+export const DEFAULT_SETTLEMENT_SPILL_MAX_LINE_CHARS = 1_800
+/** Default timeout in milliseconds when saving a closing report through `ctx.spillStore`. */
+export const DEFAULT_SETTLEMENT_SPILL_TIMEOUT_MS = 5_000
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 
 /**
  * Bounds applied to the closing report a settlement notice copies into the
- * parent context. The complete report always remains in the child's own
- * durable session; these limits only decide how much of it rides the notice.
+ * parent context, including retrieval text. These limits also govern the
+ * formatting of a saved text copy, not the original report in the child log.
  */
 export interface SettlementReportLimits {
   /** Maximum UTF-16 code units of closing report text retained in the notice. */
   readonly maxChars: number
   /** Maximum image blocks retained in the notice, in report order. */
   readonly maxImages: number
+  /** Hard UTF-16 ceiling for `reportMode: 'full-inline'` and stale-flush fallback. Defaults to 200000. */
+  readonly hardMaxChars?: number
+  /** Maximum UTF-16 characters of the Markdown heading outline in a spilled notice. Defaults to 1500. */
+  readonly outlineMaxChars?: number
+  /** Maximum UTF-16 characters per line in a spilled file before wrapping. Defaults to 1800. */
+  readonly spillMaxLineChars?: number
+  /** Timeout in milliseconds for `spillStore.saveText`. Defaults to 5000. */
+  readonly spillTimeoutMs?: number
 }
+
+/** Fully resolved settlement report limits with all defaults materialized. */
+export interface ResolvedSettlementReportLimits {
+  readonly maxChars: number
+  readonly maxImages: number
+  readonly hardMaxChars: number
+  readonly outlineMaxChars: number
+  readonly spillMaxLineChars: number
+  readonly spillTimeoutMs: number
+}
+
+/** Result of attempting to spill an oversized closing report before building a notice. */
+export type SettlementSpillOutcome =
+  | {
+    readonly status: 'saved'
+    readonly ref: SpillRef
+    readonly savedLineNumbers?: readonly number[] | undefined
+    readonly lines: number
+    readonly wrappedLines: number
+  }
+  | {
+    readonly status: 'failed'
+    readonly reason: string
+  }
 
 /** Inputs for {@link createSettlementMessage}. */
 export interface SettlementMessageOptions {
@@ -157,72 +200,59 @@ export interface SettlementMessageOptions {
   readonly limits: SettlementReportLimits
   /** Whether the epoch's final session flush failed; the notice then states that persisted state may be stale. Defaults to false. */
   readonly flushFailed?: boolean
+  /** Per-spawn override controlling whether the report bypasses `maxChars` up to `hardMaxChars`. */
+  readonly reportMode?: SubagentReportMode
+  /** Result of spilling an oversized closing report, when attempted. */
+  readonly spill?: SettlementSpillOutcome
 }
 
 /**
- * Whether a UTF-16 code unit begins a surrogate pair.
- * @param code - one UTF-16 code unit.
- * @returns whether the unit is a high surrogate.
+ * Resolve optional fields on {@link SettlementReportLimits} to their canonical defaults.
+ * @param limits - caller-supplied limits.
+ * @returns resolved limits with every bound defined.
  */
-function isHighSurrogate(code: number): boolean {
-  return code >= 0xD800 && code <= 0xDBFF
+export function resolveSettlementReportLimits(limits: SettlementReportLimits): ResolvedSettlementReportLimits {
+  return {
+    maxChars: Math.max(0, limits.maxChars),
+    maxImages: Math.max(0, limits.maxImages),
+    hardMaxChars: Math.max(0, limits.hardMaxChars ?? DEFAULT_SETTLEMENT_REPORT_HARD_MAX_CHARS),
+    outlineMaxChars: Math.max(0, limits.outlineMaxChars ?? DEFAULT_SETTLEMENT_REPORT_OUTLINE_MAX_CHARS),
+    spillMaxLineChars: Math.max(1, limits.spillMaxLineChars ?? DEFAULT_SETTLEMENT_SPILL_MAX_LINE_CHARS),
+    spillTimeoutMs: Math.max(1, limits.spillTimeoutMs ?? DEFAULT_SETTLEMENT_SPILL_TIMEOUT_MS),
+  }
 }
 
 /**
- * Whether a UTF-16 code unit ends a surrogate pair.
- * @param code - one UTF-16 code unit.
- * @returns whether the unit is a low surrogate.
- */
-function isLowSurrogate(code: number): boolean {
-  return code >= 0xDC00 && code <= 0xDFFF
-}
-
-/**
- * Move a prefix end left when it would split a surrogate pair.
- * @param text - text being cut.
- * @param end - proposed exclusive prefix end.
- * @returns a prefix end that does not split a pair.
- */
-function headCutIndex(text: string, end: number): number {
-  if (end <= 0 || end >= text.length) return Math.max(0, Math.min(end, text.length))
-  return isHighSurrogate(text.charCodeAt(end - 1)) && isLowSurrogate(text.charCodeAt(end))
-    ? end - 1
-    : end
-}
-
-/**
- * Move a suffix start right when it would split a surrogate pair.
- * @param text - text being cut.
- * @param start - proposed inclusive suffix start.
- * @returns a suffix start that does not split a pair.
- */
-function tailCutIndex(text: string, start: number): number {
-  if (start <= 0 || start >= text.length) return Math.max(0, Math.min(start, text.length))
-  return isLowSurrogate(text.charCodeAt(start)) && isHighSurrogate(text.charCodeAt(start - 1))
-    ? start + 1
-    : start
-}
-
-/**
- * Keep a bounded prefix, preferring the last whole line inside the budget.
+ * Keep a bounded prefix, preferring the last whole line inside the budget and
+ * never splitting a surrogate pair or grapheme cluster.
  * @param text - the complete closing report.
  * @param budget - maximum retained UTF-16 code units.
- * @returns the retained prefix, never splitting a surrogate pair.
+ * @returns the retained prefix, never splitting a grapheme cluster.
  */
 function headBound(text: string, budget: number): string {
-  const end = headCutIndex(text, budget)
+  if (budget <= 0) return ''
+  const end = graphemeSegmenter.segment(text).containing(budget)?.index ?? text.length
+  if (end <= 0) return ''
   const newline = text.lastIndexOf('\n', end - 1)
   return text.slice(0, newline > 0 ? newline + 1 : end)
 }
 
 /**
- * Keep a bounded suffix, preferring the first whole line inside the budget.
+ * Keep a bounded suffix, preferring the first whole line inside the budget and
+ * never splitting a surrogate pair or grapheme cluster.
  * @param text - the complete closing report.
  * @param budget - maximum retained UTF-16 code units.
- * @returns the retained suffix, never splitting a surrogate pair.
+ * @returns the retained suffix, never splitting a grapheme cluster.
  */
 function tailBound(text: string, budget: number): string {
-  const start = tailCutIndex(text, text.length - budget)
+  if (budget <= 0) return ''
+  const minStart = text.length - budget
+  if (minStart <= 0) return text
+  const segment = graphemeSegmenter.segment(text).containing(minStart)
+  const start = segment === undefined ? text.length : segment.index === minStart
+    ? minStart
+    : segment.index + segment.segment.length
+  if (start >= text.length) return ''
   const newline = text.indexOf('\n', start)
   return newline !== -1 && newline + 1 < text.length
     ? text.slice(newline + 1)
@@ -230,63 +260,311 @@ function tailBound(text: string, budget: number): string {
 }
 
 /**
+ * Wrap one single line into pieces at most `maxChars` UTF-16 code units long,
+ * preferring a space boundary and never splitting a surrogate pair or grapheme
+ * cluster or removing any characters.
+ */
+function wrapLineGraphemeSafe(line: string, maxChars: number): string[] {
+  const out: string[] = []
+  let start = 0
+  let lastSpace = 0
+  for (const { index, segment } of graphemeSegmenter.segment(line)) {
+    const end = index + segment.length
+    if (end - start > maxChars && index > start) {
+      if (lastSpace > start) {
+        out.push(line.slice(start, lastSpace))
+        start = lastSpace
+      }
+      if (end - start > maxChars && index > start) {
+        out.push(line.slice(start, index))
+        start = index
+      }
+    }
+    if (segment === ' ') lastSpace = end
+  }
+  out.push(line.slice(start))
+  return out
+}
+
+/** Count physical lines using the same EOF semantics as `tool-fs`'s `read` renderer. */
+function countFileLines(text: string): number {
+  if (text.length === 0) return 0
+  let count = 0
+  let pos = 0
+  while ((pos = text.indexOf('\n', pos)) !== -1) {
+    count += 1
+    pos += 1
+  }
+  return text.endsWith('\n') ? count : count + 1
+}
+
+/**
+ * Line-wrap long lines in a closing report for safe `read` inspection without
+ * removing characters, returning the wrapped text, physical line count, and
+ * count of original lines that were wrapped.
+ * @param report - the complete unwrapped closing report text.
+ * @param maxLineChars - maximum UTF-16 characters per physical line before wrapping.
+ * @returns wrapped content and counts, with original-to-saved line positions when wrapping occurred.
+ */
+export function prepareSpillText(
+  report: string,
+  maxLineChars: number,
+): { readonly content: string; readonly lines: number; readonly wrappedLines: number; readonly savedLineNumbers?: readonly number[] } {
+  const sourceLines = report.split('\n')
+  const outLines: string[] = []
+  const savedLineNumbers: number[] = []
+  let wrappedLines = 0
+  for (const line of sourceLines) {
+    savedLineNumbers.push(outLines.length + 1)
+    if (line.length > maxLineChars && maxLineChars > 0) {
+      const wrapped = wrapLineGraphemeSafe(line, maxLineChars)
+      if (wrapped.length > 1) wrappedLines += 1
+      for (const piece of wrapped) outLines.push(piece)
+    } else {
+      outLines.push(line)
+    }
+  }
+  const content = outLines.join('\n')
+  return { content, lines: countFileLines(content), wrappedLines, ...wrappedLines > 0 ? { savedLineNumbers } : {} }
+}
+
+/** Clip a heading at a grapheme boundary so one label leaves room for other entries. */
+function clipHeadingLabel(text: string, budget: number): string {
+  if (text.length <= budget) return text
+  const prefix = headBound(text, budget - 1)
+  return `${prefix.trimEnd()}…`
+}
+
+/**
+ * Extract a deterministic outline of Markdown ATX headings with 1-based line
+ * numbers from the original report, capped at `maxChars` UTF-16 code units. Headings
+ * inside fenced code blocks (` ``` ` / `~~~`) are ignored.
+ * @param text - original text before wrapping.
+ * @param maxChars - maximum UTF-16 code units for the complete rendered outline.
+ * @param savedLineNumbers - saved-file positions by original line, when wrapping shifted them.
+ * @returns the formatted outline, or `''` when no headings exist or none fit.
+ */
+export function buildMarkdownOutline(text: string, maxChars: number, savedLineNumbers?: readonly number[]): string {
+  if (maxChars <= 0 || text.length === 0) return ''
+  const labelBudget = Math.max(1, Math.floor(maxChars / 2))
+  const entries: string[] = []
+  let fence: { char: string; length: number } | undefined
+  for (const [index, rawLine] of text.split('\n').entries()) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+    const [, marker, rest = ''] = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line) ?? []
+    if (marker !== undefined) {
+      const char = marker.charAt(0)
+      if (fence === undefined) {
+        if (char !== '`' || !rest.includes('`')) {
+          fence = { char, length: marker.length }
+        }
+        continue
+      }
+      if (char === fence.char && marker.length >= fence.length && rest.trim() === '') {
+        fence = undefined
+      }
+      continue
+    }
+    if (fence !== undefined) continue
+    const [, hashes, label] = /^ {0,3}(#{1,6})[ \t]+(.+)$/.exec(line) ?? []
+    if (hashes === undefined || label === undefined) continue
+    const title = label.replace(/[ \t]+#+\s*$/, '').trim()
+    if (title.length === 0) continue
+    const saved = savedLineNumbers?.[index] ?? index + 1
+    const original = saved === index + 1 ? '' : ` (original L${String(index + 1)})`
+    entries.push(`L${String(saved)}${original}: ${hashes} ${clipHeadingLabel(title, labelBudget)}`)
+  }
+  if (entries.length === 0) return ''
+
+  const header = 'Outline (1-based line numbers in saved file):'
+  const full = `${header}\n${entries.join('\n')}`
+  if (full.length <= maxChars) return full
+
+  const kept: string[] = []
+  let usedChars = header.length
+  for (const [i, entry] of entries.entries()) {
+    const remaining = entries.length - (i + 1)
+    const trailer = remaining === 0
+      ? ''
+      : `\n... (${String(remaining)} more heading${remaining === 1 ? '' : 's'})`
+    const candidateLen = usedChars + 1 + entry.length + trailer.length
+    if (candidateLen > maxChars) break
+    kept.push(entry)
+    usedChars += 1 + entry.length
+  }
+  const omittedCount = entries.length - kept.length
+  const trailer = `... (${String(omittedCount)} more heading${omittedCount === 1 ? '' : 's'})`
+  if (kept.length === 0) return trailer.length <= maxChars ? trailer : ''
+  return `${header}\n${kept.join('\n')}\n${trailer}`
+}
+
+/**
+ * Determine whether a child's closing output exceeds the effective report bounds
+ * and therefore needs a spill write before building the settlement notice.
+ * @param output - the child's final assistant content blocks.
+ * @param limits - settlement report limits.
+ * @param reportMode - per-spawn report mode (`'bounded'` by default).
+ * @returns the joined closing text and whether a spill write is required.
+ */
+export function closingReportNeedsSpill(
+  output: readonly ContentBlock[],
+  limits: SettlementReportLimits,
+  reportMode?: SubagentReportMode,
+): { readonly text: string; readonly needsSpill: boolean } {
+  const resolved = resolveSettlementReportLimits(limits)
+  const texts = output.flatMap(block => block.type === 'text' && block.text.length > 0 ? [block.text] : [])
+  const text = texts.join('\n')
+  const imageCount = output.reduce((count, block) => count + (block.type === 'image' ? 1 : 0), 0)
+  const effectiveMaxChars = reportMode === 'full-inline' ? resolved.hardMaxChars : resolved.maxChars
+  const needsSpill = text.length > effectiveMaxChars || imageCount > resolved.maxImages
+  return { text, needsSpill }
+}
+
+/**
  * The closing report blocks a notice carries after applying its bounds, plus
  * the one model-facing line that states what was left out.
  */
 interface BoundedClosingReport {
-  /** Retained report content in notice order: head text, tail text, images. */
+  /** Retained report content in notice order: head text, tail text, optional outline, images. */
   readonly content: readonly ContentBlock[]
-  /** Omission line, absent when every report block fits. */
+  /** Pointer / omission line, absent when every report block fits. */
   readonly truncation: string | undefined
+}
+
+/** Format the lossless pointer and omission summary for a shortened closing report. */
+function formatShortenedPointer(
+  childId: SessionId,
+  omittedChars: number,
+  totalChars: number,
+  omittedImages: number,
+  totalImages: number,
+  spill: SettlementSpillOutcome | undefined,
+  spillMaxLineChars: number,
+  flushFailed: boolean,
+): string {
+  const parts: string[] = []
+  if (omittedChars > 0) parts.push(`${String(omittedChars)} of ${String(totalChars)} characters omitted`)
+  if (omittedImages > 0) parts.push(`${String(omittedImages)} of ${String(totalImages)} images omitted`)
+  const child = JSON.stringify(childId)
+  const childPointer = formatChildReportPointer(child, spill?.status === 'saved', flushFailed)
+  if (spill?.status === 'saved') {
+    const encodedLocator = JSON.stringify(spill.ref.locator)
+    const wrappedNote = spill.wrappedLines > 0
+      ? ` Long lines (> ${String(spillMaxLineChars)} chars) were wrapped in the saved file with no characters removed.`
+      : ''
+    const imageNote = omittedImages > 0
+      ? ` Omitted images are not in this text file; look for them in child session ${child}.`
+      : ''
+    return `The closing report was shortened for this notice: ${parts.join(' and ')}. `
+      + `Full report text saved at ${encodedLocator} (${String(spill.ref.bytes)} bytes, ${String(spill.lines)} lines).${wrappedNote}${imageNote} `
+      + `Read a section with read({ file_path: ${encodedLocator}, offset: <line>, limit: <n> }) `
+      + `or search it with grep({ pattern: "<phrase>", path: ${encodedLocator} }). `
+      + childPointer
+  }
+  const reason = spill?.status === 'failed' ? spill.reason : 'spill storage unavailable'
+  return `The closing report was shortened for this notice: ${parts.join(' and ')}. `
+    + `No file copy was saved (${reason}). `
+    + childPointer
+}
+
+/** Name the original report location without promising a copy after a failed flush. */
+function formatChildReportPointer(child: string, spilled: boolean, flushFailed: boolean): string {
+  const intro = flushFailed
+    ? `The original report may be incomplete in child session ${child}; `
+    : `The child's complete report is ${spilled ? 'also ' : ''}durable in its session ${child}; `
+  return intro + `read it with session_event_search({ session_id: ${child}, query: "<distinctive phrase>" }) and open a hit with `
+    + `session_event_read({ session_id: ${child}, seq: <hit event seq> }).`
 }
 
 /**
  * Apply the notice bounds to one closing report. Untouched reports keep their
  * original blocks and order; a bounded report keeps a head and tail excerpt of
- * the joined text and the first images, and states the exact omission.
+ * the joined text, an optional Markdown outline, the first images, and states
+ * the exact omission plus the spill locator (when saved) and child-session pointer.
  * @param childId - durable child session named by the omission line.
  * @param output - the child's final assistant content blocks.
- * @param limits - character and image ceilings for the notice.
- * @returns retained content and the omission line when anything was left out.
+ * @param options - closing-report bounds, mode, flush status, and spill outcome.
+ * @returns retained content and the pointer line when anything was left out.
  */
 function boundClosingReport(
   childId: SessionId,
   output: readonly ContentBlock[],
-  limits: SettlementReportLimits,
+  options: SettlementMessageOptions,
 ): BoundedClosingReport {
+  const resolved = resolveSettlementReportLimits(options.limits)
   const texts = output.flatMap(block => block.type === 'text' && block.text.length > 0 ? [block.text] : [])
   const images = output.flatMap(block => block.type === 'image' ? [block] : [])
-  const retainedImages = images.slice(0, Math.max(0, limits.maxImages))
+  const retainedImages = images.slice(0, resolved.maxImages)
   const omittedImages = images.length - retainedImages.length
   const report = texts.join('\n')
-  if (report.length <= limits.maxChars && omittedImages === 0) {
+
+  let effectiveMaxChars = options.reportMode === 'full-inline' ? resolved.hardMaxChars : resolved.maxChars
+  if (options.flushFailed && options.spill?.status === 'failed') {
+    effectiveMaxChars = resolved.hardMaxChars
+  }
+
+  if (report.length <= effectiveMaxChars && omittedImages === 0) {
     return {
       content: output.filter(
         (block): block is Extract<ContentBlock, { type: 'text' | 'image' }> =>
           block.type === 'text' || block.type === 'image',
       ),
-      truncation: undefined,
+      truncation: options.spill?.status === 'failed'
+        ? `No file copy was saved (${options.spill.reason}). `
+          + formatChildReportPointer(JSON.stringify(childId), false, options.flushFailed ?? false)
+        : undefined,
     }
   }
-  const headBudget = Math.ceil(limits.maxChars / 2)
-  const tailBudget = limits.maxChars - headBudget
-  const head = report.length <= limits.maxChars ? report : headBound(report, headBudget)
-  const tail = report.length <= limits.maxChars ? '' : tailBound(report, tailBudget)
+
+  const worstPointer = formatShortenedPointer(
+    childId,
+    report.length,
+    report.length,
+    omittedImages,
+    images.length,
+    options.spill,
+    resolved.spillMaxLineChars,
+    options.flushFailed ?? false,
+  )
+  const remainingForContent = Math.max(0, effectiveMaxChars - worstPointer.length)
+  let head = ''
+  let tail = ''
+  const outlineBudget = Math.min(resolved.outlineMaxChars, Math.floor(remainingForContent / 2))
+  const outline = options.spill?.status === 'saved'
+    ? buildMarkdownOutline(report, outlineBudget, options.spill.savedLineNumbers)
+    : ''
+  // Account for the newlines between nonempty text blocks and the pointer.
+  const remainingWithOutline = remainingForContent - (outline === '' ? 0 : outline.length + 1)
+  if (omittedImages > 0 && report.length + 1 <= remainingWithOutline) {
+    head = report
+  } else {
+    const excerptBudget = Math.max(0, remainingWithOutline - 2)
+    const headBudget = Math.ceil(excerptBudget / 2)
+    const tailBudget = excerptBudget - headBudget
+    head = headBound(report, headBudget)
+    tail = tailBound(report, tailBudget)
+  }
+
   const omittedChars = report.length - head.length - tail.length
-  const parts: string[] = []
-  if (omittedChars > 0) parts.push(`${String(omittedChars)} of ${String(report.length)} characters omitted`)
-  if (omittedImages > 0) parts.push(`${String(omittedImages)} of ${String(images.length)} images omitted`)
-  const child = JSON.stringify(childId)
+  const pointer = formatShortenedPointer(
+    childId,
+    omittedChars,
+    report.length,
+    omittedImages,
+    images.length,
+    options.spill,
+    resolved.spillMaxLineChars,
+    options.flushFailed ?? false,
+  )
+
   return {
     content: [
       ...head.length === 0 ? [] : [{ type: 'text' as const, text: head }],
       ...tail.length === 0 ? [] : [{ type: 'text' as const, text: tail }],
+      ...outline.length === 0 ? [] : [{ type: 'text' as const, text: outline }],
       ...retainedImages,
     ],
-    truncation: `The closing report was shortened for this notice: ${parts.join(' and ')}. `
-      + `The child's complete report is durable in its session ${child}; read it with `
-      + `session_event_search({ session_id: ${child}, query: "<distinctive phrase>" }) and open a hit with `
-      + `session_event_read({ session_id: ${child}, seq: <hit event seq> }).`,
+    truncation: pointer,
   }
 }
 
@@ -294,15 +572,15 @@ function boundClosingReport(
  * Build the `Its closing message:` section for a report that has nonempty text.
  * @param childId - durable child session named by a shortened report's line.
  * @param output - the child's final assistant content blocks.
- * @param limits - character and image ceilings for the notice.
+ * @param options - closing-report bounds, mode, flush status, and spill outcome.
  * @returns the section heading, retained report content, and any omission line.
  */
 function closingReportBlocks(
   childId: SessionId,
   output: readonly ContentBlock[],
-  limits: SettlementReportLimits,
+  options: SettlementMessageOptions,
 ): ContentBlock[] {
-  const report = boundClosingReport(childId, output, limits)
+  const report = boundClosingReport(childId, output, options)
   return [
     { type: 'text', text: 'Its closing message:' },
     ...report.content,
@@ -466,7 +744,7 @@ export function createSettlementMessage(
   // blocks (its thinking and intermediate actions) are stripped, mirroring the
   // foreground path. Images ride along: they are legitimate report content,
   // bounded by the notice limits.
-  const closing: ContentBlock[] = closingText.length === 0
+  const closing: ContentBlock[] = closingText.length === 0 && options.spill === undefined
     ? [
       ...excerpt === ''
         ? []
@@ -476,7 +754,7 @@ export function createSettlementMessage(
         ],
       { type: 'text' as const, text: 'It left no closing message.' },
     ]
-    : closingReportBlocks(childId, output, options.limits)
+    : closingReportBlocks(childId, output, options)
   return createUserMessage({
     content: [
       { type: 'text' as const, text: summary },

@@ -57,6 +57,9 @@
       "path": "../../session-query/session-query"
     },
     {
+      "path": "../../spill/spill"
+    },
+    {
       "path": "../../workspace/workspace"
     },
     {

@@ -113,6 +113,7 @@ export class InputHub implements SessionInputResolver {
         for (const attachmentId of ids) conversation?.releaseDraftAttachment(attachmentId)
       },
       restorePendingNotice: () => this.t('attachment.restorePending'),
+      incompleteAttachmentsNotice: () => this.t('attachment.incompleteBlockedSend'),
       steerQueue: () => { void this.steerQueue(session, shell) },
       commandAttachments: {
         serialize: async (ids) => {

@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { deliverSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 
 import { runCouncil } from '../src/core/engine.ts'
-import { parseFactSheets } from '../src/core/broker.ts'
+import { parseFactSheets, serviceEvidenceQueue } from '../src/core/broker.ts'
+import { EvidenceVault } from '../src/core/vault.ts'
 import { ROUNDTABLE_SPEC } from '../src/profiles/roundtable.ts'
 import type { CouncilParams } from '../src/core/spec.ts'
 
@@ -80,7 +81,6 @@ function makeCtx(script: string[]) {
           }),
         }
       }
-      if (ns === 'sessions') return { get: () => ({ append: vi.fn() }), delete: async () => undefined }
       return undefined
     },
     tools: { get: () => undefined },
@@ -92,6 +92,7 @@ function makeCtx(script: string[]) {
         return { childId: `child-${String(spawnSeq).padStart(4, '0')}-aaaa-bbbb-cccc-dddddddddddd` }
       },
       [deliverSubagentPrompt]: async () => undefined,
+      drainContinuableChildren: vi.fn(async () => undefined),
     },
     logger: { warn: vi.fn(), info: vi.fn() },
   }
@@ -322,5 +323,67 @@ describe('broker miss is named and recoverable', () => {
     expect(excessEvent!.broker!.excessReasons?.[0]).toMatch(/SHEET 2 exceeds the requested batch of 1/)
     expect(excessEvent!.broker!.excessReasons?.[0]).toContain('unsolicited second sheet')
     expect(result.audit.join(' ')).toMatch(/1 excess sheet\(s\) beyond the batch/)
+  })
+
+  it('passes the scaled batch wait budget rather than the raw single-item timeout to waitForSeatTurn', async () => {
+    const startedAt = Date.now()
+    const batchText = [
+      'SHEET 1',
+      'CITATION: src/a.ts:1',
+      'FACTS: first answer.',
+      'CONFIDENCE: high',
+      'SHEET 2',
+      'CITATION: src/b.ts:2',
+      'FACTS: second answer.',
+      'CONFIDENCE: high',
+    ].join('\n')
+    const ctx = {
+      get: (ns: string) => {
+        if (ns === 'settings') return { get: () => ({ personas: {} }) }
+        if (ns === 'agents') return { get: () => undefined }
+        if (ns === 'sessionPersistence') {
+          return {
+            open: async () => ({
+              read: async () => ({
+                events: Date.now() - startedAt < 150
+                  ? []
+                  : [
+                      { type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'text', text: batchText }] } } },
+                      { type: 'turn/end', seq: 2, data: { reason: { kind: 'completed' } } },
+                    ],
+              }),
+              close: async () => undefined,
+            }),
+          }
+        }
+        return undefined
+      },
+      agents: { get: () => undefined },
+      subagents: {
+        startContinuable: async () => ({ childId: 'child-broker-scaled-timeout' }),
+        drainContinuableChildren: vi.fn(async () => undefined),
+      },
+      logger: { warn: vi.fn(), info: vi.fn() },
+    }
+    const parent = {
+      session: { id: 'broker-timeout-parent', seq: 1, append: vi.fn() },
+      options: { provider: 'p', model: 'm' },
+    }
+    const vault = new EvidenceVault()
+    const res = await serviceEvidenceQueue(
+      ctx as never,
+      parent as never,
+      [
+        { ticket: 'EV-1', seatId: 'skeptic', target: 'a', question: 'q1', epoch: 2 },
+        { ticket: 'EV-2', seatId: 'architect', target: 'b', question: 'q2', epoch: 2 },
+      ],
+      vault,
+      2,
+      new AbortController().signal,
+      50,
+    )
+    expect(res.missed).toEqual([])
+    expect(res.sheets).toBe(2)
+    expect(vault.all()).toHaveLength(2)
   })
 })

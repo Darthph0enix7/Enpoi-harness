@@ -332,7 +332,12 @@ export class ConversationController extends Service implements IConversation {
       const uploaded = await serializeAttachments()
       const content = [...uploaded, ...(text === '' ? [] : [{ type: 'text' as const, text }])]
       const result = await session.prompt(content, mode, signal)
-      return result.ok ? { kind: 'success' } : { kind: 'error' }
+      if (result.ok) {
+        this.releaseDraftAttachments(attachments)
+        return { kind: 'success' }
+      }
+      this.markUnavailableOnSendError(attachments, result.error)
+      return { kind: 'error' }
     }
     let finishRetirement: ((retirement: PendingSubmissionRetirement) => void) | undefined
     const retirement = attachments.length === 0
@@ -357,7 +362,10 @@ export class ConversationController extends Service implements IConversation {
       throw error
     }
     const result = await session.prompt(content, mode, signal, submission.requestId)
-    if (!result.ok) return { kind: 'error' }
+    if (!result.ok) {
+      this.markUnavailableOnSendError(attachments, result.error)
+      return { kind: 'error' }
+    }
     if (retirement !== undefined && (await retirement).reason !== 'observed') return { kind: 'error' }
     return { kind: 'success' }
   }
@@ -763,6 +771,31 @@ export class ConversationController extends Service implements IConversation {
     }
   }
 
+  /** Mark missing restored durable attachments unavailable so the restored draft renders removable chips. */
+  private markUnavailableOnSendError(attachments: readonly ComposerAttachment[], error: unknown): void {
+    if (!isUnavailableSendError(error)) return
+    const explicitIds = missingAttachmentIds(error)
+    const hasRestoredFile = attachments.some(
+      attachment => attachment.kind === 'file' && attachment.attachment !== undefined,
+    )
+    for (const attachment of attachments) {
+      if (attachment.kind === 'unavailable' || attachment.attachment === undefined) continue
+      if (!this.draftAttachments.has(attachment.id)) continue
+      if (explicitIds !== undefined) {
+        if (!explicitIds.has(String(attachment.attachment.attachmentId))) continue
+      } else if (hasRestoredFile && attachment.kind !== 'file') {
+        continue
+      }
+      const ref = attachment.attachment
+      this.draftAttachments.set(attachment.id, {
+        kind: 'unavailable',
+        id: attachment.id,
+        attachment: ref,
+        ...(ref.name === undefined || ref.name === '' ? {} : { name: ref.name }),
+      })
+    }
+  }
+
   /** Canonical base64 wire form of one browser image file. */
   private async encodeImage(file: File): Promise<Omit<Extract<SubmitAttachment, { type: 'image' }>, 'type'>> {
     return {
@@ -792,6 +825,32 @@ function imageMediaType(value: string): ImageMediaType {
  */
 export function isImageMediaType(value: string): boolean {
   return value === 'image/png' || value === 'image/jpeg' || value === 'image/webp' || value === 'image/gif'
+}
+
+function isUnavailableSendError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const code = 'code' in error ? error.code : undefined
+  if (code !== 'session/attachment-invalid' && code !== 'subagent/attachment-invalid') return false
+  const details = 'details' in error ? error.details : undefined
+  if (typeof details !== 'object' || details === null || !('reason' in details)) return false
+  const reason = details.reason
+  return reason === 'ATTACHMENT_NOT_FOUND' || reason === 'ATTACHMENT_NOT_REFERENCED'
+}
+
+function missingAttachmentIds(error: unknown): ReadonlySet<string> | undefined {
+  if (typeof error !== 'object' || error === null || !('details' in error)) return undefined
+  const details = error.details
+  if (typeof details !== 'object' || details === null) return undefined
+  const ids = new Set<string>()
+  if ('attachmentId' in details && typeof details.attachmentId === 'string' && details.attachmentId !== '') {
+    ids.add(details.attachmentId)
+  }
+  if ('attachmentIds' in details && Array.isArray(details.attachmentIds)) {
+    for (const id of details.attachmentIds) {
+      if (typeof id === 'string' && id !== '') ids.add(id)
+    }
+  }
+  return ids.size > 0 ? ids : undefined
 }
 
 function revokePreview(url: string): void {

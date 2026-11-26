@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { SessionId } from '@deepseek-ai/dsh-session'
+import { deliverSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
 import {
   BROKER_KEPT_TOOLS,
   COUNCIL_DENIED_TOOLS,
@@ -7,12 +9,33 @@ import {
   RETRIEVAL_TOOLS,
   councilDenyList,
   estimateTokens,
+  followupSeatFiber,
   textOfContent,
   waitForSeatTurnDetailed,
 } from '../src/core/fiber.ts'
 import { extractEvidenceRequests, parseFactSheet } from '../src/core/broker.ts'
 import { extractProposals, parseRefereeOutput } from '../src/core/referee.ts'
 import { ROUNDTABLE_SPEC } from '../src/profiles/roundtable.ts'
+
+it('cancels an unaccepted seat follow-up on timeout without aborting the council', async () => {
+  const signal = new AbortController().signal
+  const observed = Promise.withResolvers<AbortSignal>()
+  const ctx = {
+    subagents: {
+      [deliverSubagentPrompt]: async (_parent: object, _id: SessionId, _content: object[], _source: object, deliverySignal: AbortSignal) => {
+        observed.resolve(deliverySignal)
+        await new Promise<void>(resolve => deliverySignal.addEventListener('abort', () => resolve(), { once: true }))
+        deliverySignal.throwIfAborted()
+      },
+    },
+  }
+  const pending = followupSeatFiber(ctx as never, {} as never, {
+    seatId: 'skeptic', label: 'skeptic', childId: SessionId('seat'), totalTokens: 0,
+  }, 'Continue the debate', signal, 10)
+  await expect(pending).rejects.toThrow(/followup .* timed out/)
+  expect((await observed.promise).aborted).toBe(true)
+  expect(signal.aborted).toBe(false)
+})
 
 describe('evidence fencing (doc 54 §6, Oracle amendment #2)', () => {
   it('debaters lose ALL retrieval tools — the broker is the only ingress', () => {

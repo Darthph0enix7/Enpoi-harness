@@ -14,7 +14,7 @@ import { CATEGORIES } from './db'
 import type { Pipeline } from './pipeline'
 import { closestNearDuplicate, fitToCharBudget, getMemoryParams, searchMemory } from './retriever'
 import { containsSecret } from './secret-guard'
-import { isDelegatedSession } from './session-authority'
+import { classifySessionAuthority, type SessionAuthority } from './session-authority'
 
 /** `YYYY-MM-DD` in UTC from one epoch-millisecond stamp. */
 function savedAt(claim: { committed_at: number | null; created_at: number }): string {
@@ -37,33 +37,21 @@ const DELEGATED_SESSION_DENIED = 'delegated_session_denied'
 const ROOT_SESSION_REQUIRED = 'root_session_required'
 
 /**
- * Whether the calling session is a delegated subagent. A seeded root fork also
- * records `parentSession`; the typed subagent origin or positive delegation
- * depth is what distinguishes a child from that fork. A bare `parentSession`
- * without seed lineage is still delegated.
- * @param exec - the tool execution scope.
- * @returns true when root-only memory actions must be denied.
- */
-function delegatedSession(exec?: ToolRunContext): boolean {
-  return isDelegatedSession(exec?.agent?.session.header)
-}
-
-/**
- * Authorize one root-only memory mutation. Missing execution context fails
- * closed even though root `memory_save` keeps its legacy operator behavior.
+ * Authorize one root-only memory mutation. Missing or non-root execution
+ * context fails closed without touching the database.
  * @param exec - the tool execution scope.
  * @param action - the mutation named in the denial.
  * @returns the denial payload, or undefined for a trusted root session.
  */
 function rootOnlyDenial(exec: ToolRunContext | undefined, action: 'confirmation' | 'rescission'): { code: string; note: string } | undefined {
-  const header = exec?.agent?.session.header
-  if (header === undefined) {
+  const authority = classifySessionAuthority(exec?.agent?.session?.header)
+  if (authority.kind === 'missing') {
     return {
       code: ROOT_SESSION_REQUIRED,
       note: `Memory ${action} requires a trusted root session context; no database write was made.`,
     }
   }
-  if (!delegatedSession(exec)) return undefined
+  if (authority.kind === 'root') return undefined
   return {
     code: DELEGATED_SESSION_DENIED,
     note: action === 'confirmation'
@@ -88,25 +76,27 @@ interface MemorySaveAuthority {
 }
 
 /**
- * Resolve who is saving: a root session keeps the operator label (the model is
- * acting for the operator), while a subagent child writes a tentative
- * `worker:<role>` claim. Fork lineage alone is not a child: a forked root also
- * records `parentSession`.
+ * Resolve who is saving: only a verified root session writes with operator
+ * trust (`orchestrator`), while a delegated or ambiguous-lineage session writes
+ * a tentative `worker[:<role>]` claim. Missing execution/header fails closed in
+ * `memory_save` before this helper runs.
  */
-function memorySaveAuthority(exec?: ToolRunContext): MemorySaveAuthority {
+function memorySaveAuthority(
+  exec: ToolRunContext | undefined,
+  authority: Exclude<SessionAuthority, { kind: 'missing' }>,
+): MemorySaveAuthority {
   const session = exec?.agent?.session
   const header = session?.header
-  const child = delegatedSession(exec)
   const role = header?.agentPreset?.trim()
   const provenance: Record<string, unknown> = {
     source: 'memory_save',
     sessionId: session?.id ?? '',
     cwd: header?.cwd ?? '',
   }
-  if (!child) {
+  if (authority.kind === 'root') {
     return { origin: 'orchestrator', trust: 'operator', provenance: JSON.stringify(provenance) }
   }
-  provenance.parentSessionId = header?.parentSession ?? ''
+  provenance.parentSessionId = authority.parentSessionId ?? ''
   const agentRole = role !== undefined && role !== '' ? role : 'worker'
   provenance.agentRole = agentRole
   provenance.settled = true
@@ -171,9 +161,13 @@ export function registerMemoryTools(
     },
     isConcurrencySafe: () => true,
     async execute(args: Record<string, unknown>, exec?: ToolRunContext) {
-      // The source record scopes child saves and ranks same-project hits; a
-      // root save stays authoritative operator memory.
-      const authority = memorySaveAuthority(exec)
+      // Missing session/header context fails closed with no database write so
+      // an unverified caller can never record operator trust.
+      const sessionAuthority = classifySessionAuthority(exec?.agent?.session?.header)
+      if (sessionAuthority.kind === 'missing') {
+        return { saved: false, note: 'Memory save requires a trusted session context; no database write was made.' }
+      }
+      const authority = memorySaveAuthority(exec, sessionAuthority)
       const fact = String(args.fact ?? '').trim()
       // The pipeline rejects the same shape for every origin; naming the reason
       // here is what lets the model correct the save instead of guessing.
@@ -187,7 +181,7 @@ export function registerMemoryTools(
       // A near-match is a note, not a merge: facts that differ in one number
       // must both survive. The scan reuses the compaction threshold and its
       // bounded FTS window, and ignores the row this save just produced.
-      const scope = { cwd: exec?.agent?.session.header.cwd, scopeCompaction: config.scopeCompactionFactsToWorkspace }
+      const scope = { cwd: exec?.agent?.session?.header?.cwd, scopeCompaction: config.scopeCompactionFactsToWorkspace }
       const near = closestNearDuplicate(db, fact, scope, config.compactionFactsNearDuplicate, c.id)
       const note = near === undefined
         ? `Saved as ${c.id} (${c.category})`

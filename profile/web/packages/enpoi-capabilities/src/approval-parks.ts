@@ -11,12 +11,19 @@
  */
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname } from 'node:path'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { PARK_JOURNAL_SETTLED_KEEP, type ParkedAskRecord, type ParkJournal } from './forwarding'
 
-/** Default journal location: `$HOME/.dsh/cache/approval-parks.json`. */
-export const DEFAULT_APPROVAL_PARK_JOURNAL_PATH = join(homedir(), '.dsh', 'cache', 'approval-parks.json')
+/**
+ * Resolve the default journal location (`$DSH_HOME/cache/approval-parks.json`
+ * or `~/.dsh/cache/approval-parks.json`) lazily so post-import `DSH_HOME`
+ * overrides are honored.
+ * @returns the resolved default approval-park journal path.
+ */
+export function defaultApprovalParkJournalPath(): string {
+  return dshHomePath('cache', 'approval-parks.json')
+}
 
 /** The one on-disk document form; `version` gates future migrations. */
 interface ApprovalParkDocument {
@@ -68,10 +75,10 @@ function prune(records: ParkedAskRecord[]): void {
 /**
  * Open one journal over a JSON file. `load()` caches the parsed records;
  * `append()` upserts and rewrites the document atomically (temp + rename).
- * @param path - the journal file; defaults to {@link DEFAULT_APPROVAL_PARK_JOURNAL_PATH}.
+ * @param path - the journal file; defaults to {@link defaultApprovalParkJournalPath}.
  * @returns the journal seam the forwarder consumes.
  */
-export function createApprovalParkJournal(path: string = DEFAULT_APPROVAL_PARK_JOURNAL_PATH): ParkJournal {
+export function createApprovalParkJournal(path: string = defaultApprovalParkJournalPath()): ParkJournal {
   let records: ParkedAskRecord[] | undefined
   const current = (): ParkedAskRecord[] => records ??= readDocument(path)
   return {

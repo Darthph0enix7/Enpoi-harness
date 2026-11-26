@@ -40,7 +40,6 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
-import { homedir } from 'node:os'
 import { join, dirname, basename, resolve, isAbsolute, relative } from 'node:path'
 import { mkdir, rename, stat, writeFile, rm, open, readFile, readdir } from 'node:fs/promises'
 import type { FileHandle } from 'node:fs/promises'
@@ -52,11 +51,14 @@ import type { IncomingHttpHeaders } from 'node:http'
 export const name = 'enpoi-fs-ops'
 export const inject = ['webServer', 'webRuntime', 'sessions']
 
-const TRASH_ROOT = join(homedir(), '.dsh', 'trash', 'sidebar')
+/** Sidebar trash root resolved lazily against `$DSH_HOME` / `~/.dsh`. */
+function trashRoot(): string {
+  return dshHomePath('trash', 'sidebar')
+}
 
-/** Editor pre-overwrite backups are content-addressed under the user's home. */
+/** Editor pre-overwrite backups are content-addressed under the resolved harness home. */
 function editorBackupPath(sha256: string): string {
-  return join(homedir(), '.dsh', 'file-history', 'editor', sha256)
+  return dshHomePath('file-history', 'editor', sha256)
 }
 
 /** fs.read returns at most this many content bytes (sha/size stay full-file). */
@@ -831,10 +833,10 @@ export function apply(ctx: Context, config: FsOpsConfig): void {
       if (path === cwd || relative(cwd, path) === '') {
         throw new FsOpsError('fs-error', 'cannot delete the workspace root', 400)
       }
-      // Trash staging: never rm — recoverable by hand from ~/.dsh/trash/sidebar.
+      // Trash staging: never rm — recoverable by hand from $DSH_HOME/trash/sidebar.
       // UUID suffix prevents same-millisecond same-basename collisions
       // (Oracle fix-soon #4).
-      const destDir = join(TRASH_ROOT, `${Date.now()}-${randomUUID()}-${basename(path)}`)
+      const destDir = join(trashRoot(), `${Date.now()}-${randomUUID()}-${basename(path)}`)
       try {
         await mkdir(dirname(destDir), { recursive: true })
         await rename(path, destDir)

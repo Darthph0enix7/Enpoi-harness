@@ -38,7 +38,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-dockkit'
 import type { SidebarRightTabNavigation } from './contract/slots.ts'
 import { GUIDE_KIND, pageAddress, type SidebarRightSeed } from './contract/seed.ts'
-import type { SurfaceEnvelope, SurfacePersistence } from './surface-storage.ts'
+import type { SurfaceEnvelope, SurfacePersistence, StoredSurface } from './surface-storage.ts'
 
 /** One session's docking surface: the layout, its sequence, and the id counter. */
 export interface SurfaceState {
@@ -519,6 +519,47 @@ function isWireRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** Non-negative integer revision from a server record or response, when present. */
+function readRevision(value: unknown): number | undefined {
+  if (!isWireRecord(value)) return undefined
+  const rev = value.revision
+  return typeof rev === 'number' && Number.isInteger(rev) && rev >= 0 ? rev : undefined
+}
+
+/** Conflict fields returned by `enpoiUiState.put` when a conditional write lost a revision race. */
+function parsePutConflict(value: unknown): {
+  readonly revision: number | undefined
+  readonly record: Record<string, unknown> | undefined
+} | undefined {
+  if (!isWireRecord(value) || value.ok !== false || value.conflict !== true) return undefined
+  return {
+    revision: readRevision(value),
+    record: isWireRecord(value.record) ? value.record : undefined,
+  }
+}
+
+/** The `enpoiUiState.get` or winning conflict surface, or `undefined` when the record holds none. */
+function remoteSurface(value: unknown, persistence: SurfacePersistence): StoredSurface | undefined {
+  if (!isWireRecord(value)) return undefined
+  const fallback = typeof value.updatedAt === 'number' && Number.isFinite(value.updatedAt)
+    ? Math.max(0, Math.floor(value.updatedAt))
+    : 0
+  return persistence.readRemote(value.surface, fallback)
+}
+
+/** Canonical JSON of a surface and its navigation (matching `SurfaceEnvelope.value`). */
+function surfaceContentJson(
+  surface: SurfaceState,
+  navigation: Readonly<Record<string, SidebarRightTabNavigation>>,
+): string {
+  return JSON.stringify({
+    layout: surface.layout,
+    minted: surface.minted,
+    ...surface.editorTabId === undefined ? {} : { editorTabId: surface.editorTabId },
+    navigation,
+  })
+}
+
 let uiStateSeq = 0
 
 /**
@@ -567,14 +608,12 @@ interface SurfaceSync {
  * Keep one session's column on the server: fetch the server's record once at
  * attach and adopt it when it is newer, then mirror every local write.
  *
- * The local record stays the rendering source — the column draws from storage
- * before any response — and last-write-wins orders the two by the record's own
- * revision time. Two cases need care. The seat materializes a default column
- * for its first paint when the session has none, and that is not an operator
- * edit: a device that had stored nothing before this attach adopts the server's
- * record regardless, or cross-device adoption could never happen. And a local
- * change whose write landed while the fetch was in flight is compared by its
- * stored revision time, so a stale fetched record cannot undo it.
+ * Pushes serialize per binding (at most one `enpoiUiState.put` in flight) and
+ * send `expectedRevision` when the server carries revisions. On conflict, the
+ * binding adopts a newer remote winner only when local state has no unsaved
+ * edit in flight; otherwise it rebases onto the winner's revision and retries
+ * once without dropping local changes. Older servers without `revision` keep
+ * timestamp-ordered behavior.
  *
  * A failed read leaves the session local-only, silently: without the server's
  * record there is no honest ordering, so a blind push could overwrite a newer
@@ -596,23 +635,61 @@ function bindSurfaceSync(
   if (typeof localStorage === 'undefined' || typeof fetch !== 'function') return noop
   const localAt = persistence.read(sessionId)?.updatedAt ?? 0
   let stopped = false
+  let adopting = false
   let readFailed = false
   let readComplete = false
   let failureLogged = false
-  let lastPushedUpdatedAt = -1
-  /** Serialized surface of the last successful push; identical content never rewrites on the server. */
+  let inFlight = false
+  let knownRevision: number | undefined
+  let syncedSurfaceJson: string | undefined
+  let localSeq = 0
+  let rebaseRetrySeq: number | undefined
+  /** Serialized surface value of the last successful push; identical content never rewrites on the server. */
   let lastPushedJson = ''
   let pushTimer: ReturnType<typeof setTimeout> | undefined
   let pending: SurfaceEnvelope | undefined
+  let lastSeenSurface = instance.getSnapshot().bySession[sessionId]
+
+  const unsubscribeStore = instance.store.subscribe(() => {
+    if (stopped || adopting) return
+    const current = instance.getSnapshot().bySession[sessionId]
+    if (current === lastSeenSurface) return
+    lastSeenSurface = current
+    if (readComplete) localSeq += 1
+  })
+
+  const adopt = (remote: StoredSurface, rev: number | undefined): void => {
+    adopting = true
+    pending = undefined
+    if (pushTimer !== undefined) clearTimeout(pushTimer)
+    pushTimer = undefined
+    if (rev !== undefined) knownRevision = rev
+    const json = surfaceContentJson(remote.surface, remote.navigation)
+    syncedSurfaceJson = json
+    lastPushedJson = json
+    persistence.cache(sessionId, remote)
+    instance.store.update((draft) => { draft.bySession[sessionId] = remote.surface })
+    lastSeenSurface = instance.getSnapshot().bySession[sessionId]
+    adopting = false
+  }
 
   const push = (): void => {
+    if (stopped || readFailed || !readComplete || inFlight) return
     const next = pending
+    if (next === undefined) return
+    const targetSeq = localSeq
+    const json = JSON.stringify(next.value)
     pending = undefined
-    if (stopped || next === undefined || next.updatedAt <= lastPushedUpdatedAt) return
-    const json = JSON.stringify(next)
     if (json === lastPushedJson) return
-    void uiStateRpc<unknown>('enpoiUiState.put', { sessionId, patch: { surface: next } })
+    const expectedRevision = knownRevision
+    const baseJson = syncedSurfaceJson
+    inFlight = true
+    const patch: Record<string, unknown> = { surface: next }
+    if (expectedRevision !== undefined) patch.expectedRevision = expectedRevision
+
+    void uiStateRpc<unknown>('enpoiUiState.put', { sessionId, patch })
       .then((result) => {
+        inFlight = false
         if (stopped) return
         if (!result.ok) {
           if (!failureLogged) {
@@ -622,14 +699,56 @@ function bindSurfaceSync(
           return
         }
         failureLogged = false
-        // A response may settle out of order; the highest revision stays pushed.
-        lastPushedUpdatedAt = Math.max(lastPushedUpdatedAt, next.updatedAt)
+
+        const conflict = parsePutConflict(result.value)
+        if (conflict !== undefined) {
+          const winnerRev = conflict.revision
+          const winner = conflict.record === undefined ? undefined : remoteSurface(conflict.record, persistence)
+          const winnerJson = winner === undefined ? undefined : surfaceContentJson(winner.surface, winner.navigation)
+          const serverRevNewer = winnerRev !== undefined && winnerRev > (expectedRevision ?? -1)
+          const unchangedRemoteSurface = winnerJson === undefined || (baseJson !== undefined && winnerJson === baseJson)
+          if (serverRevNewer) {
+            knownRevision = winnerRev
+            if (winnerJson !== undefined) syncedSurfaceJson = winnerJson
+          }
+
+          // Never drop a newer local edit made while this push was in flight.
+          if (localSeq > targetSeq || pending !== undefined || pushTimer !== undefined) {
+            if (pending !== undefined && pushTimer === undefined) push()
+            return
+          }
+
+          if (winnerJson !== undefined && winnerJson === json) {
+            lastPushedJson = json
+            return
+          }
+
+          if (serverRevNewer && unchangedRemoteSurface) {
+            if (rebaseRetrySeq !== targetSeq) {
+              rebaseRetrySeq = targetSeq
+              pending = next
+              push()
+            }
+            return
+          }
+
+          if (winner !== undefined && serverRevNewer) {
+            adopt(winner, winnerRev)
+          }
+          return
+        }
+
+        const newRev = readRevision(result.value)
+        if (newRev !== undefined) knownRevision = newRev
+        syncedSurfaceJson = json
         lastPushedJson = json
+        if (pending !== undefined && pushTimer === undefined) push()
       })
   }
 
   const mirror = (envelope: SurfaceEnvelope): void => {
     if (readFailed) return
+    localSeq += 1
     pending = envelope
     if (pushTimer !== undefined) clearTimeout(pushTimer)
     pushTimer = setTimeout(() => {
@@ -647,11 +766,10 @@ function bindSurfaceSync(
       return
     }
     readComplete = true
-    const wire = isWireRecord(result.value) ? result.value : {}
-    const fallback = typeof wire.updatedAt === 'number' && Number.isFinite(wire.updatedAt)
-      ? Math.max(0, Math.floor(wire.updatedAt))
-      : 0
-    const remote = persistence.readRemote(wire.surface, fallback)
+    const remoteRev = readRevision(result.value)
+    if (remoteRev !== undefined) knownRevision = remoteRev
+    const remote = remoteSurface(result.value, persistence)
+    if (remote !== undefined) syncedSurfaceJson = surfaceContentJson(remote.surface, remote.navigation)
     const stored = persistence.read(sessionId)
     let localNow = Math.max(localAt, stored?.updatedAt ?? 0)
     if (remote === undefined && stored !== undefined && localNow === 0) {
@@ -664,10 +782,7 @@ function bindSurfaceSync(
     if (remote !== undefined && (localAt === 0 || remote.updatedAt > localNow)) {
       // The server's record supersedes everything local; a column the seat
       // materialized for the first paint is not the operator's work.
-      pending = undefined
-      persistence.cache(sessionId, remote)
-      lastPushedUpdatedAt = Math.max(lastPushedUpdatedAt, remote.updatedAt)
-      instance.store.update((draft) => { draft.bySession[sessionId] = remote.surface })
+      adopt(remote, remoteRev)
       return
     }
     // Local is newer (or the server has nothing): seed the server from here.
@@ -681,6 +796,7 @@ function bindSurfaceSync(
     mirror,
     stop: () => {
       stopped = true
+      unsubscribeStore()
       if (pushTimer !== undefined) clearTimeout(pushTimer)
       pushTimer = undefined
       pending = undefined

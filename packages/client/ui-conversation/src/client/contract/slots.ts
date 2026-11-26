@@ -406,7 +406,9 @@ export interface ConversationSessionInjected {
     readonly inspectCall: ObservableSnapshot<ConvViewOwnerProps['inspectCall']>
   }
   /** Bind input draft persistence (text plus durable restored attachments) to the Session-owned store instance. */
-  bindDraftMirror: (write: (text: string, attachments: readonly RestoredDraftAttachment[]) => void) => () => void
+  bindDraftMirror: (
+    write: (text: string, attachments: readonly RestoredDraftAttachment[], incomplete?: boolean) => void,
+  ) => () => void
   /** Select and activate one View while addressing an opaque focus request to it. */
   openView: (view: string, focus: string) => void
 }
@@ -456,6 +458,8 @@ export interface ComposerBarInjected {
    */
   addFiles: ((files: readonly File[], directories?: ReadonlySet<File>) => string | null) | undefined
   removeAttachment: ((id: DraftAttachmentId) => void) | undefined
+  /** Clear the send block after reviewing an adopted incomplete attachment set. */
+  acknowledgeIncompleteAttachments?: (() => void) | undefined
   resolveDraftAttachments: ((ids: readonly DraftAttachmentId[]) => readonly ComposerAttachment[]) | undefined
   /** Restart one failed file upload; absent without a session. */
   retryFileUpload: ((id: DraftAttachmentId) => void) | undefined

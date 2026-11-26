@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
+import { SpillLocator, SpillStore } from '@deepseek-ai/dsh-spill'
+import type { SaveTextSpill, SpillRef } from '@deepseek-ai/dsh-spill'
+import LocalSpillStore from '../../../spill/spill-local/src/index.ts'
+import { buildWindow } from '../../../fs/tool-fs/src/read-render.ts'
 import { liveConfig } from '../../../settings/settings/tests/live-config.ts'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -109,8 +113,13 @@ async function setupWith(
     persistence?: boolean
     schedule?: boolean
     sessionQuery?: boolean
+    spillStore?: boolean | ((ctx: Context) => Promise<void>)
     maxActiveSubagents?: number
     settlementReportMaxChars?: number
+    settlementReportHardMaxChars?: number
+    settlementReportOutlineMaxChars?: number
+    settlementSpillMaxLineChars?: number
+    settlementSpillTimeoutMs?: number
   } = {},
 ) {
   const ctx = new Context()
@@ -130,9 +139,24 @@ async function setupWith(
   await ctx.plugin(AgentLoop, { agents: [] })
   if (options.schedule) await mountScheduleForOwnership(ctx)
   if (options.sessionQuery !== false) await ctx.plugin(TestSessionQuery)
+  if (options.spillStore === true) {
+    const spillRoot = mkdtempSync(join(tmpdir(), 'dsh-subagent-spill-'))
+    const spillFiber = await ctx.plugin(LocalSpillStore, { root: spillRoot, cleanupPeriodDays: 0 })
+    cleanups.push(async () => {
+      await spillFiber.dispose()
+      rmSync(spillRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+    })
+  } else if (typeof options.spillStore === 'function') {
+    await options.spillStore(ctx)
+  }
   subagentConfigs.set(ctx, await liveConfig(ctx, SubagentRuntime, {
     ...options.maxActiveSubagents === undefined ? {} : { maxActiveSubagents: options.maxActiveSubagents },
     ...options.settlementReportMaxChars === undefined ? {} : { settlementReportMaxChars: options.settlementReportMaxChars },
+    ...options.settlementReportHardMaxChars === undefined ? {} : { settlementReportHardMaxChars: options.settlementReportHardMaxChars },
+    ...options.settlementReportOutlineMaxChars === undefined
+      ? {} : { settlementReportOutlineMaxChars: options.settlementReportOutlineMaxChars },
+    ...options.settlementSpillMaxLineChars === undefined ? {} : { settlementSpillMaxLineChars: options.settlementSpillMaxLineChars },
+    ...options.settlementSpillTimeoutMs === undefined ? {} : { settlementSpillTimeoutMs: options.settlementSpillTimeoutMs },
   }))
   await ctx.plugin(SubagentSpawn, { providerName: 'spawn' })
   await ctx.plugin(SubagentFork, { providerName: 'fork' })
@@ -3523,11 +3547,13 @@ describe('continuable settlement delivery', () => {
     })
   })
 
-  it('bounds a large closing report and names the durable child session', async () => {
+  it('bounds a large closing report without a spill backend, logs a warning, and names the durable child session', async () => {
     const report = `HEAD${'x'.repeat(2_000)}TAIL`
     const { ctx, parent } = await setupWith(new MockAdapter([textResponse(report), textResponse('parent ack')]), {
       settlementReportMaxChars: 1_000,
     })
+    const warnings: string[] = []
+    ctx.logger.warn = (text: string) => { warnings.push(text) }
     const started = await ctx.subagents.startContinuable(startSpec(parent))
     await waitNoActivation(ctx, started.childId)
     await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
@@ -3535,13 +3561,14 @@ describe('continuable settlement delivery', () => {
     const notice = settlementNotices(parent)[0]!
     expect(notice.text).toContain('HEAD')
     expect(notice.text).toContain('TAIL')
-    expect(notice.text).toContain('1008 of 2008 characters omitted')
+    expect(notice.text).toContain('of 2008 characters omitted')
+    expect(notice.text).toContain('No file copy was saved')
     expect(notice.text).not.toContain('x'.repeat(501))
-    expect(notice.text.length).toBeLessThan(1_000 + 1_000)
     // The model learns exactly where the complete report lives and how to read it.
     expect(notice.text).toContain(`durable in its session "${started.childId}"`)
     expect(notice.text).toContain('session_event_search({ session_id:')
     expect(notice.text).toContain('session_event_read({ session_id:')
+    expect(warnings.some(warning => warning.includes('[SETTLEMENT_SPILL_UNAVAILABLE]'))).toBe(true)
   })
 
   it('logs a rejected notice instead of failing the child\'s teardown', async () => {
@@ -4353,6 +4380,26 @@ describe('continuable tree work', () => {
 })
 
 describe('continuable stops under a user Stop-all', () => {
+  it('refuses an idle Stop-all request from a replacement handle with the same session id', async () => {
+    const childGate = Promise.withResolvers<undefined>()
+    const adapter = new GatedAdapter([
+      { chunks: textResponse('child done'), gate: childGate.promise },
+      { chunks: textResponse('parent wake') },
+    ])
+    const { ctx, parent } = await setupWith(adapter)
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(1) })
+    const published = vi.fn()
+    ctx.on('subagent/stop-all', published)
+
+    ctx.emit('subagent/stop-idle-tree', new Proxy(parent, {}))
+    expect(published).not.toHaveBeenCalled()
+    childGate.resolve(undefined)
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(adapter.requests).toHaveLength(2) })
+    await parent.whenIdle()
+  })
+
   it('parks a natural completion that races the stop and delivers it once on the next human turn', async () => {
     const childGate = Promise.withResolvers<undefined>()
     const parentGate = Promise.withResolvers<undefined>()
@@ -4455,5 +4502,405 @@ describe('continuable stops under a user Stop-all', () => {
     await parent.whenIdle()
     expect(parent.session.snapshotEvents().filter(event =>
       event.type === 'user/message' && event.data.source.kind === 'subagent-settled')).toHaveLength(2)
+  })
+})
+
+describe('lossless spilled settlement reports', () => {
+  it('spills an oversized markdown report to LocalSpillStore with matching outline line numbers, wrapped long lines, and exact unwrapped child log', async () => {
+    const longParagraph = `${'word '.repeat(500)}END_LONG`
+    const report = [
+      '# Section One',
+      longParagraph,
+      '## Section Two',
+      'Body '.repeat(200),
+      '### Section Three',
+      'TAIL_MARKER',
+    ].join('\n')
+    const { ctx, parent } = await setupWith(new MockAdapter([textResponse(report), textResponse('parent ack')]), {
+      spillStore: true,
+      settlementReportMaxChars: 1_400,
+      settlementReportOutlineMaxChars: 400,
+      settlementSpillMaxLineChars: 1_800,
+    })
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+
+    const notice = settlementNotices(parent)[0]!
+    expect(notice.text).toContain('# Section One')
+    expect(notice.text).toContain('TAIL_MARKER')
+    expect(notice.text).toContain('Long lines (> 1800 chars) were wrapped in the saved file with no characters removed')
+    expect(notice.text).toContain('read({ file_path: ')
+    expect(notice.text).toContain('grep({ pattern: "<phrase>", path: ')
+    expect(notice.text).toContain(`session_event_search({ session_id: ${JSON.stringify(started.childId)}`)
+
+    const match = /Full report text saved at ("[^"]+") \((\d+) bytes, (\d+) lines\)\./.exec(notice.text)
+    expect(match).not.toBeNull()
+    const locator = JSON.parse(match![1]!) as string
+    const bytes = Number(match![2]!)
+    const lines = Number(match![3]!)
+
+    const saved = readFileSync(locator, 'utf8')
+    expect(Buffer.byteLength(saved, 'utf8')).toBe(bytes)
+    const fileLines = saved.split('\n')
+    expect(fileLines).toHaveLength(lines)
+    for (const fileLine of fileLines) {
+      expect(fileLine.length).toBeLessThanOrEqual(1_800)
+    }
+
+    // Verify every outline line number matches the exact line in the saved file and via tool-fs read window.
+    const outlineLines = [...notice.text.matchAll(/^L(\d+)(?: \(original L(\d+)\))?: (.+)$/gm)]
+    expect(outlineLines.length).toBe(3)
+    expect(outlineLines.map(match => Number(match[2] ?? match[1]))).toEqual([1, 3, 5])
+    for (const [, lineNumStr, , heading] of outlineLines) {
+      const lineNum = Number(lineNumStr)
+      expect(fileLines[lineNum - 1]).toBe(heading)
+      const readRes = await buildWindow([saved], {
+        offset: lineNum,
+        limit: 1,
+        maxLineLength: 2_000,
+        maxBytes: 50 * 1024,
+      }, locator)
+      expect(readRes.lines[0]?.text).toBe(heading)
+    }
+
+    // Concatenating wrapped lines of the long paragraph restores the exact original.
+    const sectionTwoLine = Number(outlineLines[1]![1]!)
+    expect(fileLines.slice(1, sectionTwoLine - 1).join('')).toBe(longParagraph)
+
+    // Child's session log retains the byte-exact unwrapped original report.
+    const childStored = await loadStoredSession(ctx.sessionPersistence, started.childId)
+    const assistant = childStored.events.find(event => event.type === 'assistant/message')
+    expect(assistant?.type === 'assistant/message' && assistant.data.message.content[0]).toEqual({
+      type: 'text',
+      text: report,
+    })
+  })
+
+  it('keeps under-limit reports unchanged byte-for-byte without touching spillStore', async () => {
+    const saveSpy = vi.fn(async (input: SaveTextSpill): Promise<SpillRef> => ({
+      locator: SpillLocator('/tmp/unused'),
+      bytes: Buffer.byteLength(input.content, 'utf8'),
+      retrievalHint: 'unused',
+    }))
+    class SpySpillStore extends SpillStore {
+      saveText(input: SaveTextSpill): Promise<SpillRef> { return saveSpy(input) }
+    }
+    const { ctx, parent } = await setupWith(new MockAdapter([textResponse('exact short reply'), textResponse('ack')]), {
+      spillStore: async (c) => { await c.plugin(SpySpillStore) },
+      settlementReportMaxChars: 12_000,
+    })
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(saveSpy).not.toHaveBeenCalled()
+    expect(settlementNotices(parent)[0]!.text).toBe(
+      `Background subagent ${started.childId} finished.\nIts closing message:\nexact short reply`,
+    )
+  })
+
+  it('falls back with honest wording and warning when spillStore rejects, times out, or returns missing locator', async () => {
+    const report = 'X'.repeat(1_500)
+    for (const mode of ['reject', 'timeout', 'empty-locator'] as const) {
+      const { ctx, parent } = await setupWith(new MockAdapter([textResponse(report), textResponse('ack')]), {
+        settlementReportMaxChars: 600,
+        settlementSpillTimeoutMs: 30,
+        spillStore: async (c) => {
+          class FaultySpillStore extends SpillStore {
+            saveText(): Promise<SpillRef> {
+              if (mode === 'reject') return Promise.reject(new Error('disk full'))
+              if (mode === 'empty-locator') return Promise.resolve({ locator: SpillLocator(''), bytes: 10, retrievalHint: '' })
+              return new Promise<SpillRef>(() => {})
+            }
+          }
+          await c.plugin(FaultySpillStore)
+        },
+      })
+      const warnings: string[] = []
+      ctx.logger.warn = (text: string) => { warnings.push(text) }
+
+      const started = await ctx.subagents.startContinuable(startSpec(parent))
+      await waitNoActivation(ctx, started.childId)
+      await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+
+      const notice = settlementNotices(parent)[0]!
+      expect(notice.text).toContain('No file copy was saved')
+      expect(notice.text).not.toContain('Full report text saved at')
+      expect(notice.text).toContain(`session_event_search({ session_id: ${JSON.stringify(started.childId)}`)
+      expect(warnings.some(w => w.includes('[SETTLEMENT_SPILL_FAILED]'))).toBe(true)
+    }
+  })
+
+  it('prefers inline full up to hardMaxChars when both final flush and spill fail', async () => {
+    const report = `STALE_FLUSH_REPORT_${'y'.repeat(1_200)}_END`
+    const { ctx, parent } = await setupWith(new MockAdapter([textResponse(report), textResponse('ack')]), {
+      settlementReportMaxChars: 500,
+      settlementReportHardMaxChars: 5_000,
+      spillStore: async (c) => {
+        class RejectSpillStore extends SpillStore {
+          saveText(): Promise<SpillRef> { return Promise.reject(new Error('spill down')) }
+        }
+        await c.plugin(RejectSpillStore)
+      },
+    })
+    ctx.on('session/flush', (session) => {
+      if (session.header.parentSession !== undefined) throw new Error('flush failed')
+    })
+
+    const started = await ctx.subagents.startContinuable(startSpec(parent))
+    await waitNoActivation(ctx, started.childId)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+
+    const notice = settlementNotices(parent)[0]!
+    expect(notice.text).toContain('Its final session flush failed, so its persisted state may be stale.')
+    expect(notice.text).toContain('No file copy was saved')
+    expect(notice.text).toContain('session_event_read(')
+    expect(notice.text).toContain(report)
+    expect(notice.text).not.toContain('characters omitted')
+  })
+
+  it('supports reportMode full-inline up to hardMaxChars and spills beyond it', async () => {
+    const medium = `FULL_INLINE_${'a'.repeat(800)}_END`
+    const huge = `OVER_HARD_${'b'.repeat(2_000)}_END`
+    const savedInputs: SaveTextSpill[] = []
+    const { ctx, parent } = await setupWith(new MockAdapter([
+      textResponse(medium),
+      textResponse('ack1'),
+      textResponse(huge),
+      textResponse('ack2'),
+    ]), {
+      settlementReportMaxChars: 500,
+      settlementReportHardMaxChars: 1_200,
+      spillStore: async (c) => {
+        class RecordingSpillStore extends SpillStore {
+          async saveText(input: SaveTextSpill): Promise<SpillRef> {
+            savedInputs.push(input)
+            return {
+              locator: SpillLocator(`/tmp/spill/${savedInputs.length}.md`),
+              bytes: Buffer.byteLength(input.content, 'utf8'),
+              retrievalHint: 'use read',
+            }
+          }
+        }
+        await c.plugin(RecordingSpillStore)
+      },
+    })
+
+    const first = await ctx.subagents.startContinuable({
+      provider: 'spawn',
+      label: 'full inline child',
+      request: { parent, prompt: [{ type: 'text', text: 'run' }], reportMode: 'full-inline' },
+      signal: testSignal,
+    })
+    await waitNoActivation(ctx, first.childId)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(1) })
+    expect(settlementNotices(parent)[0]!.text).toContain(medium)
+    expect(savedInputs).toHaveLength(0)
+
+    const second = await ctx.subagents.startContinuable({
+      provider: 'spawn',
+      label: 'over hard ceiling child',
+      request: { parent, prompt: [{ type: 'text', text: 'run' }], reportMode: 'full-inline' },
+      signal: testSignal,
+    })
+    await waitNoActivation(ctx, second.childId)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(2) })
+    expect(savedInputs).toHaveLength(1)
+    expect(savedInputs[0]!.content.replace(/\n/g, '')).toBe(huge)
+    expect(settlementNotices(parent)[1]!.text).toContain('Full report text saved at "/tmp/spill/1.md"')
+  })
+
+  it('preserves per-parent settlement order when two children spill at different speeds, without delaying another parent', async () => {
+    const c1Gate = Promise.withResolvers<undefined>()
+    const c2Gate = Promise.withResolvers<undefined>()
+    const slowSpillGate = Promise.withResolvers<undefined>()
+    const childOneText = `FIRST_CHILD_${'1'.repeat(1_000)}`
+    const childTwoText = `SECOND_CHILD_${'2'.repeat(1_000)}`
+    const otherParentText = `OTHER_PARENT_${'3'.repeat(1_000)}`
+
+    class PerChildSpillAdapter extends LlmAdapter {
+      async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        const prompt = options.messages
+          .flatMap(m => m.content)
+          .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
+          .map(b => b.text)
+          .join('\n')
+        const reply = prompt.includes('TASK_ONE')
+          ? childOneText
+          : prompt.includes('TASK_TWO')
+            ? childTwoText
+            : prompt.includes('TASK_OTHER')
+              ? otherParentText
+              : 'parent ack'
+        if (prompt.includes('TASK_ONE')) await c1Gate.promise
+        if (prompt.includes('TASK_TWO')) await c2Gate.promise
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: reply }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: reply } }
+        yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+
+    const spillStarted: string[] = []
+    const spillFinished: string[] = []
+    let counter = 0
+    const { ctx, parent } = await setupWith(new PerChildSpillAdapter(), {
+      settlementReportMaxChars: 900,
+      spillStore: async (c) => {
+        class OrderedSpillStore extends SpillStore {
+          async saveText(input: SaveTextSpill): Promise<SpillRef> {
+            const cid = input.source.kind === 'session-reference' ? input.source.sessionId : 'unknown'
+            spillStarted.push(cid)
+            if (input.content.includes('FIRST_CHILD_')) {
+              await slowSpillGate.promise
+            }
+            const id = ++counter
+            spillFinished.push(cid)
+            return {
+              locator: SpillLocator(`/tmp/spill/child-${id}.md`),
+              bytes: Buffer.byteLength(input.content, 'utf8'),
+              retrievalHint: 'use read',
+            }
+          }
+        }
+        await c.plugin(OrderedSpillStore)
+      },
+    })
+    const otherParent = await ctx.agentLoop.create(SessionId('other-parent'), { provider: 'mock', model: 'mock' })
+
+    const c1 = await ctx.subagents.startContinuable({
+      provider: 'spawn',
+      label: 'c1',
+      request: { parent, prompt: [{ type: 'text', text: 'TASK_ONE' }] },
+      signal: testSignal,
+    })
+    const c2 = await ctx.subagents.startContinuable({
+      provider: 'spawn',
+      label: 'c2',
+      request: { parent, prompt: [{ type: 'text', text: 'TASK_TWO' }] },
+      signal: testSignal,
+    })
+    // Enter the spill queue in a controlled order, then keep the first save pending.
+    c1Gate.resolve(undefined)
+    await vi.waitFor(() => { expect(spillStarted).toContain(c1.childId) })
+    expect(spillFinished).not.toContain(c1.childId)
+    expect(ctx.agents.get(c1.childId)).toBeUndefined()
+    await expect(ctx.subagents.drainContinuableChildren(parent, [c1.childId])).resolves.toBeUndefined()
+
+    const cOther = await ctx.subagents.startContinuable({
+      provider: 'spawn',
+      label: 'cOther',
+      request: { parent: otherParent, prompt: [{ type: 'text', text: 'TASK_OTHER' }] },
+      signal: testSignal,
+    })
+
+    // An unrelated parent receives its own report while the first save is still pending.
+    await waitNoActivation(ctx, cOther.childId)
+    await vi.waitFor(() => { expect(settlementNotices(otherParent)).toHaveLength(1) })
+    expect(settlementNotices(otherParent)[0]!.text).toContain('OTHER_PARENT_')
+
+    // Now c2 settles and finishes its fast saveText BEFORE c1's slow saveText finishes.
+    c2Gate.resolve(undefined)
+    await vi.waitFor(() => { expect(spillFinished).toContain(c2.childId) })
+    expect(settlementNotices(parent)).toHaveLength(0)
+
+    // Releasing c1 delivers c1 BEFORE c2, and each gets its own spill locator.
+    slowSpillGate.resolve(undefined)
+    await waitNoActivation(ctx, c1.childId)
+    await waitNoActivation(ctx, c2.childId)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(2) })
+
+    const notices = settlementNotices(parent)
+    expect(notices[0]!.sender).toBe(c1.childId)
+    expect(notices[1]!.sender).toBe(c2.childId)
+    expect(notices[0]!.text).toContain('FIRST_CHILD_')
+    expect(notices[1]!.text).toContain('SECOND_CHILD_')
+    const loc1 = /Full report text saved at ("[^"]+")/.exec(notices[0]!.text)?.[1]
+    const loc2 = /Full report text saved at ("[^"]+")/.exec(notices[1]!.text)?.[1]
+    expect(loc1).toBeDefined()
+    expect(loc2).toBeDefined()
+    expect(loc1).not.toBe(loc2)
+  })
+
+  it('keeps per-parent order when an under-limit child settles behind an in-flight spill, and unblocks on plugin unload', async () => {
+    const c1Gate = Promise.withResolvers<undefined>()
+    const slowSpillGate = Promise.withResolvers<undefined>()
+    const spillStarted: string[] = []
+    class OrderMixedAdapter extends LlmAdapter {
+      async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+        const prompt = options.messages
+          .flatMap(m => m.content)
+          .filter((b): b is Extract<ContentBlock, { type: 'text' }> => b.type === 'text')
+          .map(b => b.text)
+          .join('\n')
+        const reply = prompt.includes('BIG_ONE')
+          ? `BIG_${'x'.repeat(1_000)}`
+          : prompt.includes('SMALL_TWO')
+            ? 'SMALL_OK'
+            : 'ack'
+        if (prompt.includes('BIG_ONE')) await c1Gate.promise
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: reply }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: reply } }
+        yield { type: 'usage', usage: { inputTokens: 1, outputTokens: 1 } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+    let blockSpillForever = false
+    const { ctx, parent } = await setupWith(new OrderMixedAdapter(), {
+      settlementReportMaxChars: 900,
+      settlementSpillTimeoutMs: 5_000,
+      spillStore: async (c) => {
+        class GatedSpillStore extends SpillStore {
+          async saveText(input: SaveTextSpill): Promise<SpillRef> {
+            spillStarted.push(input.source.kind === 'session-reference' ? input.source.sessionId : 'unknown')
+            if (blockSpillForever) await new Promise<void>(() => {})
+            else await slowSpillGate.promise
+            return { locator: SpillLocator('/tmp/spill/slow.md'), bytes: 1_000, retrievalHint: 'read' }
+          }
+        }
+        await c.plugin(GatedSpillStore)
+      },
+    })
+
+    const c1 = await ctx.subagents.startContinuable({
+      provider: 'spawn',
+      label: 'big',
+      request: { parent, prompt: [{ type: 'text', text: 'BIG_ONE' }] },
+      signal: testSignal,
+    })
+    c1Gate.resolve(undefined)
+    await vi.waitFor(() => { expect(spillStarted).toContain(c1.childId) })
+
+    const c2 = await ctx.subagents.startContinuable({
+      provider: 'spawn',
+      label: 'small',
+      request: { parent, prompt: [{ type: 'text', text: 'SMALL_TWO' }] },
+      signal: testSignal,
+    })
+    // Wait until c2's agent is disposed (it finished fast, under limit), yet its notice waits behind c1!
+    await vi.waitFor(() => { expect(ctx.agents.get(c2.childId)).toBeUndefined() })
+    expect(settlementNotices(parent)).toHaveLength(0)
+
+    slowSpillGate.resolve(undefined)
+    await waitNoActivation(ctx, c1.childId)
+    await vi.waitFor(() => { expect(settlementNotices(parent)).toHaveLength(2) })
+    expect(settlementNotices(parent).map(n => n.sender)).toEqual([c1.childId, c2.childId])
+
+    // Unloading the plugin while a third child's spill save is wedged aborts the wait immediately.
+    blockSpillForever = true
+    const c3 = await ctx.subagents.startContinuable({
+      provider: 'spawn',
+      label: 'hung-on-unload',
+      request: { parent, prompt: [{ type: 'text', text: 'BIG_ONE' }] },
+      signal: testSignal,
+    })
+    await vi.waitFor(() => { expect(spillStarted).toContain(c3.childId) })
+    const startDispose = Date.now()
+    await ctx.fiber.dispose()
+    expect(Date.now() - startDispose).toBeLessThan(2_000)
   })
 })

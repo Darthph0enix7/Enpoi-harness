@@ -123,6 +123,8 @@ interface ResolvedSubagentStartRequest extends SubagentStartRequest {
 
 ## 可继续子 agent 与激活
 
+`startContinuable` 接受可选的 `request.reportMode`（可继续委派工具的参数名为 `report_mode`）。默认为 `bounded`；`full-inline` 仅作用于初次 Activation，仍遵守文本硬上限与图片上限。缩短后的结算通知会指明供检索的子级会话；如果成功保存了文本副本，文件定位符也会写入同一条用户消息。[包 README](../../packages/subagent/subagent/README.zh.md)说明结算上限、失败行为与保留期限。
+
 **可继续后台 subagent** 是一份持久化子 agent 会话（Session），至多关联一个进程内的 **Activation（激活）**，即被重建的子 Agent 处于驻留状态的时段。Activation 不是请求、结果、取消或 Task：它可以执行多个 FIFO 轮次，并在其创建的后代仍在运行期间保持驻留。继续执行管理器负责 activation 准入、直接父级鉴权、实时所有权图、冷恢复（cold resume）与子级优先释放；agent loop 负责一切轮次排序与执行。任何可继续路径都不会创建 Task，也不会创建承载中间结果的包装层。
 
 ```text
@@ -771,6 +773,46 @@ A provider established a published child. For in-process providers, `ctx.agents.
 ```
 
 Types: [Scoped](scope.zh.md)
+
+Source: [`packages/subagent/subagent/src/index.ts`](../../packages/subagent/subagent/src/index.ts)
+
+<a id="subagentstop-all--emit"></a>
+
+#### `subagent/stop-all` — emit
+
+A user Stop-all has opened the parent settlement park window. The active stop policy may now interrupt live continuable descendants.
+
+```ts cordis-catalog
+/**
+ * A user Stop-all has opened the parent settlement park window. The active
+ * stop policy may now interrupt live continuable descendants.
+ * @mode emit
+ * @param parent - exact live Agent authorizing the cascade.
+ * @param window - process-local identity of this stop window, shared by repeat presses.
+ */
+'subagent/stop-all'(parent: Agent, window: symbol): void
+```
+
+Types: [Agent](core.zh.md)
+
+Source: [`packages/subagent/subagent/src/index.ts`](../../packages/subagent/subagent/src/index.ts)
+
+<a id="subagentstop-idle-tree--emit"></a>
+
+#### `subagent/stop-idle-tree` — emit
+
+Request Stop-all for an idle parent with no turn end to publish.
+
+```ts cordis-catalog
+/**
+ * Request Stop-all for an idle parent with no turn end to publish.
+ * @mode emit
+ * @param parent - exact live ordinary Agent addressed by the host.
+ */
+'subagent/stop-idle-tree'(parent: Agent): void
+```
+
+Types: [Agent](core.zh.md)
 
 Source: [`packages/subagent/subagent/src/index.ts`](../../packages/subagent/subagent/src/index.ts)
 <!-- END GENERATED cordis-surface -->

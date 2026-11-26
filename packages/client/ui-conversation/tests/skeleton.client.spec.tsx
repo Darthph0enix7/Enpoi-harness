@@ -917,4 +917,18 @@ describe('ConversationRoot resident composer', () => {
     const b = mount(sessionSnapshotOf({ blank: true }))
     expect(b.view.container.querySelector('[data-width-handle]')).toBeNull()
   })
+
+  it('propagates adopted incomplete attachment state from store to input and updates unedited seeds', async () => {
+    const b = mount(sessionSnapshotOf())
+    // Simulate remote adoption updating the store while the seeded draft was unedited.
+    const ref = { kind: 'file' as const, attachment: { attachmentId: 'f1' as never, name: 'doc.txt', bytes: 1 } }
+    act(() => { b.store.actions.setDraft('remote partial', [ref], true) })
+    await vi.waitFor(() => {
+      expect(b.wiring.snapshot.draft).toBe('remote partial')
+      expect(b.wiring.snapshot.incompleteDraftAttachments).toBe(true)
+    })
+    // User edits the draft; a subsequent store update must not overwrite user work.
+    act(() => { b.wiring.setDraft('user edited') })
+    expect(b.wiring.snapshot.draft).toBe('user edited')
+  })
 })

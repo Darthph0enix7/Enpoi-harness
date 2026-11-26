@@ -25,7 +25,7 @@ import {
   settleRun,
   withChildBudgetGuidance,
 } from '@deepseek-ai/dsh-subagent'
-import type { SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
+import type { SubagentProvider, SubagentReportMode, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
 import type { JobOutcome } from '@deepseek-ai/dsh-jobs'
 import {
   assertAllowedModelSelection,
@@ -311,10 +311,12 @@ function providerWording(inheritsConversation: boolean): { description: string; 
 
 interface DelegationRunRequest {
   readonly run_in_background?: boolean
+  readonly report_mode?: SubagentReportMode
 }
 
 interface DelegationRunSpec {
   readonly runInBackground: boolean
+  readonly reportMode?: SubagentReportMode
 }
 
 
@@ -1185,11 +1187,16 @@ function resolveDelegationRun(
     }
     return { runInBackground: false }
   }
+  const runInBackground = request.run_in_background ?? options.continuable
+  const reportMode = options.continuable && runInBackground && (request.report_mode === 'bounded' || request.report_mode === 'full-inline')
+    ? request.report_mode
+    : undefined
   return {
     // Continuable work is independently scheduled unless the caller explicitly
     // needs the result before its next action. One-shot policy keeps its existing
     // foreground default because its background result requires Task collection.
-    runInBackground: request.run_in_background ?? options.continuable,
+    runInBackground,
+    ...reportMode === undefined ? {} : { reportMode },
   }
 }
 
@@ -1327,6 +1334,13 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
                 ? 'Defaults to true. Set false only when your next action depends on the result; a foreground call is one-shot and cannot receive follow-up messages.'
                 : 'Run as a background job and return its id (collect with job_output, stop with job_kill). Defaults to false.',
             },
+            ...continuable ? {
+              report_mode: {
+                type: 'string' as const,
+                enum: ['bounded', 'full-inline'] as const,
+                description: 'Closing report mode for a continuable background child. "bounded" (default) excerpts large reports and gives retrieval references. "full-inline" raises the inline text ceiling for this spawn; the image limit still applies.',
+              },
+            } : {},
           } : {},
         },
         output: {
@@ -1461,6 +1475,7 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
           const formattedLabel = !new RegExp(`\\b${escapeRegExp(role)}\\b`, 'i').test(args.description)
             ? `${role.charAt(0).toUpperCase() + role.slice(1)}: ${args.description}`
             : args.description
+          const runSpec = resolveDelegationRun(args, { backgroundEnabled, continuable })
           const request = {
             label: formattedLabel,
             prompt: [{ type: 'text', text: args.prompt }] as ContentBlock[],
@@ -1475,9 +1490,8 @@ export function apply(ctx: Context, config: Config, session?: Session): void {
               warn: (message) => { runtimeCtx.logger.warn(message) },
             }),
             ...maxDepth !== undefined ? { maxDepth } : {},
+            ...runSpec.reportMode !== undefined ? { reportMode: runSpec.reportMode } : {},
           }
-
-          const runSpec = resolveDelegationRun(args, { backgroundEnabled, continuable })
           if (runSpec.runInBackground) {
             if (continuable) {
               // Resolves at inbox acceptance: the child owns its own turns from

@@ -117,6 +117,8 @@ Non-2xx responses fail with stable codes: `AUTH` (401/403), `QUOTA`, `RATE_LIMIT
 
 A structured `POLICY_REFUSAL` is the provider's terminal answer to the request. Only named provider fields select it — `finish_reason`, `stop_reason`, `code`, `type`, `content_filter`, or `refusal` — and they win before HTTP status or wording, so a 401 or 500 body that mentions auth or quota stays a refusal; the failure keeps the provider's explanation, status, and request id. A refusal never spends the Files recovery request and never reaches the credential layer's auth classifier. An in-band refusal ends the stream with `usage` then the terminal `finish`, retaining usage the provider already reported.
 
+Other in-band SSE `error` events emit one cumulative `usage` sample before throwing the classified provider failure. If the error frame has invalid usage, the sample retains the usage accumulated before that frame.
+
 Provider plugins own catalog availability; only the account route requires a stored grant for discovery. Their catalogs are configured independently; the transport supplies shared default model metadata and capability resolution.
 
 -----

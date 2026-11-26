@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { LLM_ATTEMPT_FAILED_EVENT, LlmError, POLICY_REFUSAL_CODE } from '@deepseek-ai/dsh-llm'
-import type { AttemptRecordSink } from '@deepseek-ai/dsh-llm'
+import type { AttemptRecordSink, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import { resolveProfiles } from '../src/config.ts'
 import { PoolEngine } from '../src/pool.ts'
@@ -66,6 +66,21 @@ const anthropicError = (message: string, retryAfterMs: number): string[] => [
   })}\n\n`,
 ]
 
+const anthropicStart = (input_tokens: number, output_tokens: number): string =>
+  `event: message_start\ndata: ${JSON.stringify({
+    type: 'message_start',
+    message: {
+      id: 'msg_1', type: 'message', role: 'assistant', model: 'deepseek-v4-flash', content: [],
+      stop_reason: null, stop_sequence: null, usage: { input_tokens, output_tokens },
+    },
+  })}\n\n`
+
+const anthropicText = [
+  'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n',
+  'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+]
+
 const POOLED_PROVIDERS = (baseURL: string) => ({
   deepseek: {
     baseURL,
@@ -95,8 +110,8 @@ function pooledAdapter(
   })
 }
 
-async function collect(adapter: PiAiAdapter, baseURL: string, sessionId?: string): Promise<{ chunks: unknown[] }> {
-  const chunks: unknown[] = []
+async function collect(adapter: PiAiAdapter, baseURL: string, sessionId?: string): Promise<{ chunks: StreamChunk[] }> {
+  const chunks: StreamChunk[] = []
   const stream = adapter.stream({
     provider: 'deepseek',
     model: 'deepseek-v4-flash',
@@ -418,6 +433,70 @@ describe('PiAiAdapter credential pools', () => {
     expect(chunks[0]).toMatchObject({ type: 'usage', usage: { inputTokens: 37, outputTokens: 11 } })
     expect(server.requests).toHaveLength(1)
     expect(engine.snapshot('deepseek')).toEqual({})
+  })
+
+  it.each([
+    { name: 'a non-rotating rejection', failures: [100], message: 'invalid argument: bad schema', code: 'INVALID_REQUEST' },
+    { name: 'a keyless auth failure', failures: [100], message: '401 authentication failed', code: 'AUTH', keyless: true },
+    { name: 'pool exhaustion', failures: [200, 100], message: 'rate limit exceeded, retry later', code: 'PROVIDER_POOL_EXHAUSTED' },
+  ])('reports usage only from the terminal identity on $name', async ({ failures, message, code, keyless = false }) => {
+    const server = await mockServer(failures.map(input => ({
+      rawEvents: [anthropicStart(input, 5), ...anthropicError(message, 2_500)],
+    })))
+    const engine = await engineOf()
+    const route = POOLED_ANTHROPIC(server.url).deepseek
+    const adapter = pooledAdapter({ deepseek: { ...route, keyless } }, engine, {
+      POOL_KEY_A: 'key-a', POOL_KEY_B: 'key-b',
+    })
+    const chunks: StreamChunk[] = []
+
+    await expect((async (): Promise<void> => {
+      for await (const chunk of adapter.stream({
+        provider: 'deepseek', model: 'deepseek-v4-flash', messages: [],
+      })) chunks.push(chunk)
+    })()).rejects.toMatchObject({ code, failure: { providerRetryAfterMs: 2_500 } })
+    expect(chunks).toEqual([{ type: 'usage', usage: expect.objectContaining({ inputTokens: 100, outputTokens: 5, totalTokens: 105 }) }])
+    expect(server.requests).toHaveLength(failures.length)
+  })
+
+  it('reports usage only from the answering identity after a billed identity failure rotates', async () => {
+    const server = await mockServer([
+      { rawEvents: [anthropicStart(100, 5), ...anthropicError('rate limit exceeded, retry later', 2_500)] },
+      { rawEvents: [
+        anthropicStart(3, 0),
+        ...anthropicText,
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+      ] },
+    ])
+    const engine = await engineOf()
+    const adapter = pooledAdapter(POOLED_ANTHROPIC(server.url), engine, {
+      POOL_KEY_A: 'key-a', POOL_KEY_B: 'key-b',
+    })
+    const { chunks } = await collect(adapter, server.url)
+
+    expect(chunks.filter(chunk => chunk.type === 'usage')).toEqual([
+      { type: 'usage', usage: expect.objectContaining({ inputTokens: 3, outputTokens: 1, totalTokens: 4 }) },
+    ])
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(server.headers.map(headers => headers['x-api-key'])).toEqual(['key-a', 'key-b'])
+  })
+
+  it('keeps usage and the error finish after a pooled answer has committed', async () => {
+    const server = await mockServer([{
+      rawEvents: [anthropicStart(100, 5), ...anthropicText, ...anthropicError('rate limit exceeded, retry later', 2_500)],
+    }])
+    const engine = await engineOf()
+    const adapter = pooledAdapter(POOLED_ANTHROPIC(server.url), engine, {
+      POOL_KEY_A: 'key-a', POOL_KEY_B: 'key-b',
+    })
+
+    const { chunks } = await collect(adapter, server.url)
+
+    expect(chunks.map(chunk => chunk.type)).toEqual(['block-start', 'text-delta', 'block-end', 'usage', 'finish'])
+    expect(chunks.at(-2)).toMatchObject({ type: 'usage', usage: { inputTokens: 100, outputTokens: 5, totalTokens: 105 } })
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error', failure: { code: 'RATE_LIMIT' } } })
+    expect(server.requests).toHaveLength(1)
   })
 
   it('does not mark a pre-commit caller abort as a successful identity', async () => {

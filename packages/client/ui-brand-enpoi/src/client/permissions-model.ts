@@ -20,6 +20,7 @@ import {
   OPERATOR_SURFACE,
   SHARED_CHILD_KEEP,
   SHIPPED_SEAT_TOOL_DENY,
+  SHIPPED_SEAT_TOOL_POLICY,
   SHIPPED_TOOL_DEFAULTS,
   SHIPPED_TOOL_GROUP_CATALOG,
 } from './permissions-defaults.generated.ts'
@@ -574,7 +575,7 @@ export const KEPT_BY_EVERY_ROLE: readonly string[] = SHARED_CHILD_KEEP
  * @param perms - the live permissions section.
  * @param agent - the selected agent, or undefined for the Global subject.
  * @param tool - the tools-map key.
- * @returns true when an allow-always grant covers this tool.
+ * @returns the effective policy.
  */
 export function toolGrantApplies(perms: PermissionsConfig, agent: string | undefined, tool: string): boolean {
   for (const grant of Object.values(perms.grants ?? {})) {
@@ -720,23 +721,30 @@ export function provenanceFor(perms: PermissionsConfig, agent: string | undefine
 }
 
 /**
- * The shipped code-default policy for one tool, or undefined when the tool
- * falls back to `defaults.unknownTools`.
+ * The shipped code-default policy for one tool (checking per-seat policy when
+ * `agent` is provided, then global defaults), or undefined when the tool falls
+ * back to `defaults.unknownTools`.
  * @param tool - the tools-map key.
+ * @param agent - optional seat/agent id for per-seat shipped defaults.
  * @returns the shipped policy from the generated host mirror, when the host
  *   policy resolver defines one for this key.
  */
-export function shippedPolicyFor(tool: string): PolicyValue | undefined {
+export function shippedPolicyFor(tool: string, agent?: string): PolicyValue | undefined {
   if (tool.startsWith('mcp__')) return 'allow'
+  if (agent !== undefined) {
+    const seatPolicy = SHIPPED_SEAT_TOOL_POLICY[agent]?.[tool]
+    if (seatPolicy !== undefined) return seatPolicy
+  }
   return SHIPPED_TOOL_DEFAULTS[tool]
 }
 
 /**
  * The effective policy a subject receives for one tool: agent rule, then
- * global rule, then the shipped default, then `defaults.unknownTools`, then
- * the shipped unknown-tools answer (ask). An answer of `ask` is absorbed by a
- * matching tool-level standing grant — exactly what the host resolver does —
- * so a granted tool reads `allow · standing grant` instead of a bare ask.
+ * global rule, then the shipped seat/global default, then
+ * `defaults.unknownTools`, then the shipped unknown-tools answer (ask). An
+ * answer of `ask` is absorbed by a matching tool-level standing grant —
+ * exactly what the host resolver does — so a granted tool reads
+ * `allow · standing grant` instead of a bare ask.
  * @param perms - the live permissions section.
  * @param agent - the selected agent, or undefined for the Global subject.
  * @param tool - the tools-map key.
@@ -749,7 +757,7 @@ export function effectivePolicy(perms: PermissionsConfig, agent: string | undefi
   const globalPolicy = perms.tools?.[tool]
   if (globalPolicy !== undefined) return globalPolicy
   if (tool.startsWith('mcp__')) return 'allow'
-  const fallback = shippedPolicyFor(tool) ?? perms.defaults?.unknownTools ?? 'ask'
+  const fallback = shippedPolicyFor(tool, agent) ?? perms.defaults?.unknownTools ?? 'ask'
   if (fallback === 'ask' && toolGrantApplies(perms, agent, tool)) return 'allow'
   return fallback
 }

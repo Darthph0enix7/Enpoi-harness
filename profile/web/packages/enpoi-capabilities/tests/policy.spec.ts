@@ -1149,6 +1149,27 @@ describe('shipped seat tool policy (peer family, battery fix-36)', () => {
     expect(agentRow).toMatchObject({ kind: 'deny', source: 'agent:orchestrator' })
   })
 
+  it('blocks mutating peer controls in read-only sandbox while keeping discovery/status reads allowed (P-02)', () => {
+    const mutating = ['peer_switch_model', 'peer_ask', 'peer_answer', 'peer_cancel'] as const
+    const readOnly = ['peer_status', 'peer_sessions', 'peer_models', 'peer_asks'] as const
+    for (const toolName of mutating) {
+      const decision = resolvePolicy({
+        toolName,
+        agent: 'orchestrator',
+        sandboxMode: 'read-only',
+        config: { tools: { [toolName]: 'allow' } },
+      })
+      expect(decision, `${toolName} must be vetoed in read-only`).toMatchObject({ kind: 'deny', source: 'session:read-only' })
+      expect(resolvePolicy({ toolName, agent: 'orchestrator', sandboxMode: 'read-only', config: EMPTY }).kind).toBe('deny')
+    }
+    for (const toolName of readOnly) {
+      expect(resolvePolicy({ toolName, agent: 'orchestrator', sandboxMode: 'read-only', config: EMPTY }))
+        .toMatchObject({ kind: 'allow', source: 'seat:orchestrator' })
+    }
+    expect(advertisedToolNames([...readOnly, ...mutating], 'ask', { agent: 'orchestrator', sandboxMode: 'read-only', config: EMPTY }))
+      .toEqual([...readOnly])
+  })
+
   it('still absorbs a seat-default ask with a same-granularity standing grant (mechanism check)', () => {
     // No ask ships for the orchestrator seat today; this pins the shared
     // grant short-circuit on the seat tier should a future seat row ask.

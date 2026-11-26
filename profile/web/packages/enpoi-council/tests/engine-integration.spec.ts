@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from 'vitest'
 import { deliverSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
+import { appendFileSync } from 'node:fs'
 
 import { runCouncil, CouncilHandoffError } from '../src/core/engine.ts'
 import { ROUNDTABLE_SPEC } from '../src/profiles/roundtable.ts'
 import { CHORUS_SPEC } from '../src/profiles/chorus.ts'
 import type { CouncilParams } from '../src/core/spec.ts'
+
+vi.mock('node:fs', async (importOriginal) => ({
+  ...await importOriginal<typeof import('node:fs')>(),
+  appendFileSync: vi.fn(),
+}))
 
 /**
  * Council engine integration tests — the REAL engine loop runs against a
@@ -40,6 +46,7 @@ function makeCtx(script: string[], opts: { failSeats?: boolean; failSeatIds?: st
   const appends: Array<{ type: string; data: unknown }> = []
   const spawnedLabels: string[] = []
   const spawnedPrompts: Array<{ label: string; persona?: string; prompt: string }> = []
+  const deliveredPrompts: Array<{ label: string; prompt: string }> = []
 
   const nextText = (): string => {
     const t = script[readSeq] ?? 'generic scripted turn'
@@ -86,7 +93,6 @@ function makeCtx(script: string[], opts: { failSeats?: boolean; failSeatIds?: st
           }),
         }
       }
-      if (ns === 'sessions') return { get: () => ({ append: vi.fn() }), delete: async () => undefined }
       return undefined
     },
     tools: { get: () => undefined },
@@ -104,7 +110,13 @@ function makeCtx(script: string[], opts: { failSeats?: boolean; failSeatIds?: st
         childLabel.set(childId, spec.label)
         return { childId }
       },
-      [deliverSubagentPrompt]: async () => undefined,
+      [deliverSubagentPrompt]: async (_parent: object, childId: string, content: Array<{ text?: string }>) => {
+        deliveredPrompts.push({
+          label: childLabel.get(childId) ?? '',
+          prompt: content.map(part => part.text ?? '').join(''),
+        })
+      },
+      drainContinuableChildren: vi.fn(async (_parent: object, _childIds: string[]) => undefined),
     },
     logger: { warn: vi.fn(), info: vi.fn() },
   }
@@ -116,7 +128,7 @@ function makeCtx(script: string[], opts: { failSeats?: boolean; failSeatIds?: st
     },
     options: { provider: 'p', model: 'm' },
   }
-  return { ctx, parent, appends, spawnedLabels, spawnedPrompts, reads: () => readSeq }
+  return { ctx, parent, appends, spawnedLabels, spawnedPrompts, deliveredPrompts, childLabel, reads: () => readSeq }
 }
 
 // ── Script helpers ──────────────────────────────────────────────────────────
@@ -168,7 +180,7 @@ describe('council engine — scripted full runs', () => {
       refereeJson({}),                                       // referee challenge (silent → terminate)
       CHAIR,                                                 // chair
     ]
-    const { ctx, parent, appends } = makeCtx(script)
+    const { ctx, parent, appends, childLabel } = makeCtx(script)
     const result = await runCouncil(ctx, parent, {
       spec: ROUNDTABLE_SPEC,
       query: 'Session-state storage: SQLite vs Redis',
@@ -182,6 +194,9 @@ describe('council engine — scripted full runs', () => {
     expect(result.ledgerState.entries.length).toBe(2)
     expect(result.ledgerState.entries[0].status).toBe('contested')   // C-1 flipped once
     expect(result.vaultAdditions).toBe(1)
+    const releases = ctx.subagents.drainContinuableChildren.mock.calls
+    expect(releases.every(([owner]) => owner === parent)).toBe(true)
+    expect(releases.flatMap(([, childIds]) => childIds).sort()).toEqual([...childLabel.keys()].sort())
 
     // Quality proxies from the ledger. This script ends via the challenge
     // (not convergence), so nothing reached a terminal status: ratio 0.
@@ -234,6 +249,54 @@ describe('council engine — scripted full runs', () => {
       params: BASE_PARAMS,
       signal: new AbortController().signal,
     })).rejects.toThrow(/failed quorum/i)
+  })
+
+  it.each([false, true])('logs release failure without replacing the run outcome (quorum failure: %s)', async (failSeats) => {
+    const { ctx, parent } = makeCtx([
+      BLIND, BLIND, BLIND,
+      refereeJson({ admissions: [{ kind: 'crux', assertion: 'Keep leases bounded.', author: 'skeptic' }] }),
+      CHAIR,
+    ], { failSeats })
+    vi.mocked(appendFileSync).mockClear()
+    ctx.subagents.drainContinuableChildren.mockRejectedValue(new Error('test drain rejected'))
+    const pending = runCouncil(ctx as never, parent as never, {
+      spec: ROUNDTABLE_SPEC, query: 'q', params: { ...BASE_PARAMS, runDeadlineMs: 0 },
+      signal: new AbortController().signal,
+    })
+    if (failSeats) await expect(pending).rejects.toThrow(/failed quorum.*provider exploded/i)
+    else await expect(pending).resolves.toMatchObject({ deliverable: CHAIR })
+    expect(appendFileSync).toHaveBeenCalledWith(expect.any(String),
+      expect.stringMatching(/seat release failed for parent parent-session, children child-.*test drain rejected/))
+  })
+
+  it('uses the host logger when the council diagnostic file cannot be written', async () => {
+    const { ctx, parent } = makeCtx([], { failSeats: true })
+    ctx.subagents.drainContinuableChildren.mockRejectedValue(new Error('test drain rejected'))
+    await vi.mocked(appendFileSync).withImplementation(() => { throw new Error('unwritable log') }, async () => {
+      await expect(runCouncil(ctx as never, parent as never, {
+        spec: ROUNDTABLE_SPEC, query: 'q', params: BASE_PARAMS, signal: new AbortController().signal,
+      })).rejects.toThrow(/failed quorum/i)
+    })
+    expect(ctx.logger.warn).toHaveBeenCalledWith(expect.stringMatching(/seat release failed .*test drain rejected/))
+  })
+
+  it('runs one turn per active seat even when the referee repeats a seat id', async () => {
+    const { ctx, parent } = makeCtx([
+      BLIND, BLIND, BLIND,
+      refereeJson({
+        admissions: [{ kind: 'crux', assertion: 'Keep leases bounded.', author: 'skeptic' }],
+        floor: { active: ['skeptic', 'skeptic', 'architect', 'pragmatist'], standby: [] },
+      }),
+      ARGUE, ARGUE, ARGUE,
+      refereeJson({}),
+      CHAIR,
+    ])
+    const followup = vi.spyOn(ctx.subagents, deliverSubagentPrompt)
+    expect(await runCouncil(ctx as never, parent as never, {
+      spec: ROUNDTABLE_SPEC, query: 'q', params: BASE_PARAMS, maxRoundsOverride: 1,
+      signal: new AbortController().signal,
+    })).toMatchObject({ deliverable: CHAIR })
+    expect(followup).toHaveBeenCalledTimes(3)
   })
 
   it('maxRoundsOverride bounds the run as a safety net', async () => {
@@ -577,5 +640,56 @@ describe('degraded-mode fallbacks (never lose a finished debate)', () => {
     expect(result.stopReason).toBe('run deadline reached')
     expect(result.deliverable).toContain('Decision')
     expect(result.ledgerState.entries.length).toBe(1)
+  })
+})
+
+describe('epoch prompt assembly (per-seat directives and evidence catch-up)', () => {
+  it('delivers per-seat referee directives and cumulative evidence since each seat last sat', async () => {
+    const blindWithNeed = 'PROPOSE_CRUX: The claim format needs a lease TTL.\nNEED_EVIDENCE(target: queue scheduler, question: does claim_next use a lock or a row update?)'
+    const needSecond = 'NEED_EVIDENCE(target: lease cleaner, question: does cleanup run on a timer?)'
+    const sheetSecond = 'CITATION: src/core/cleaner.py:18\nFACTS: cleanup runs every 30s.\nCONFIDENCE: high'
+    const script = [
+      BLIND, BLIND, blindWithNeed,
+      SHEET,
+      refereeJson({
+        admissions: [{ kind: 'crux', assertion: 'The claim format needs a lease TTL.', author: 'skeptic' }],
+        directives: { skeptic: 'DIR-SKEPTIC-2', architect: 'DIR-ARCHITECT-2', pragmatist: 'DIR-PRAGMATIST-2' },
+        floor: { active: ['skeptic', 'architect'], standby: ['pragmatist'] },
+      }),
+      needSecond, ARGUE,
+      sheetSecond,
+      refereeJson({
+        flips: [{ id: 'C-1', to: 'contested', reason: 'open dispute' }],
+        directives: { skeptic: 'DIR-SKEPTIC-3', architect: 'DIR-ARCHITECT-3', pragmatist: 'DIR-PRAGMATIST-3' },
+        floor: { active: ['skeptic', 'architect', 'pragmatist'], standby: [] },
+      }),
+      ARGUE, ARGUE, ARGUE,
+      refereeJson({}),
+      CHAIR,
+    ]
+    const { ctx, parent, deliveredPrompts } = makeCtx(script)
+    await runCouncil(ctx as never, parent as never, {
+      spec: ROUNDTABLE_SPEC,
+      query: 'q',
+      params: BASE_PARAMS,
+      maxRoundsOverride: 3,
+      signal: new AbortController().signal,
+    })
+
+    const epoch2Skeptic = deliveredPrompts.find(p => p.label.includes('seat: skeptic') && p.prompt.includes('EPOCH 2'))
+    const epoch2Architect = deliveredPrompts.find(p => p.label.includes('seat: architect') && p.prompt.includes('EPOCH 2'))
+    expect(epoch2Skeptic?.prompt).toContain('REFEREE DIRECTIVE TO YOU:\nDIR-SKEPTIC-2')
+    expect(epoch2Skeptic?.prompt).not.toContain('DIR-ARCHITECT-2')
+    expect(epoch2Architect?.prompt).toContain('REFEREE DIRECTIVE TO YOU:\nDIR-ARCHITECT-2')
+    expect(epoch2Skeptic?.prompt).toContain('[F-1]')
+
+    const epoch3Skeptic = deliveredPrompts.find(p => p.label.includes('seat: skeptic') && p.prompt.includes('EPOCH 3'))
+    const epoch3Pragmatist = deliveredPrompts.find(p => p.label.includes('seat: pragmatist') && p.prompt.includes('EPOCH 3'))
+    expect(epoch3Skeptic?.prompt).toContain('REFEREE DIRECTIVE TO YOU:\nDIR-SKEPTIC-3')
+    expect(epoch3Pragmatist?.prompt).toContain('REFEREE DIRECTIVE TO YOU:\nDIR-PRAGMATIST-3')
+    expect(epoch3Skeptic?.prompt).toContain('[F-2]')
+    expect(epoch3Skeptic?.prompt).not.toContain('[F-1]')
+    expect(epoch3Pragmatist?.prompt).toContain('[F-1]')
+    expect(epoch3Pragmatist?.prompt).toContain('[F-2]')
   })
 })

@@ -32,10 +32,10 @@ function revertSpan(entries, sessionId, fromSeq) {
   }
   return entries.filter((entry) => entry.kind === "child" && selected.has(entry.id));
 }
-async function interruptDescendants(ctx, sessionId, scope) {
+async function interruptDescendants(ctx, agent, scope) {
   const subagents = ctx.get("subagents");
-  const agent = ctx.get("agents")?.get(sessionId);
-  if (subagents === void 0 || agent === void 0) return;
+  const sessionId = agent.id;
+  if (subagents === void 0 || ctx.get("agents")?.get(sessionId) !== agent) return;
   let entries;
   try {
     entries = await subagents.listDescendants(sessionId);
@@ -59,28 +59,42 @@ async function interruptDescendants(ctx, sessionId, scope) {
   );
 }
 function apply(ctx) {
+  const pending = /* @__PURE__ */ new Set();
+  function deferInterrupt(agent, scope) {
+    if (scope.kind === "all") {
+      if (pending.has(scope.window)) return;
+      pending.add(scope.window);
+    }
+    setTimeout(() => {
+      diag(`user stop detected for session ${agent.id} \u2014 interrupting continuable descendants (${scope.kind})`);
+      void interruptDescendants(ctx, agent, scope).catch((error) => {
+        ctx.logger.warn(`[enpoi-cascade] descendant interrupt failed: ${String(error)}`);
+      }).finally(() => {
+        if (scope.kind === "all") pending.delete(scope.window);
+      });
+    }, 0);
+  }
+  ctx.on("subagent/stop-all", (agent, window) => {
+    deferInterrupt(agent, { kind: "all", window });
+  });
   ctx.on("session/event", (session, event) => {
     if (event.type !== "turn/end") return;
     const reason = event.data.reason;
     if (reason.kind !== "aborted") return;
     const cancelCause = reason.reason;
     if (cancelCause === void 0 || cancelCause.kind !== "user") return;
-    const intent = cancelCause.intent ?? "stop-all";
-    if (intent === "detach") {
+    if (cancelCause.intent === "detach") {
       diag(`detach stop for ${session.id} \u2014 continuable descendants keep running`);
       return;
     }
-    if (intent === "revert" && cancelCause.revertFromSeq === void 0) {
+    if (cancelCause.intent !== "revert") return;
+    const fromSeq = cancelCause.revertFromSeq;
+    if (fromSeq === void 0) {
       diag(`revert stop for ${session.id} carried no revertFromSeq \u2014 no descendants interrupted`);
       return;
     }
-    const scope = intent === "revert" ? { kind: "revert", fromSeq: cancelCause.revertFromSeq } : { kind: "all" };
-    setTimeout(() => {
-      diag(`user stop detected for session ${session.id} \u2014 interrupting continuable descendants (${scope.kind})`);
-      void interruptDescendants(ctx, session.id, scope).catch((error) => {
-        ctx.logger.warn(`[enpoi-cascade] descendant interrupt failed: ${String(error)}`);
-      });
-    }, 0);
+    const agent = ctx.get("agents")?.get(session.id);
+    if (agent?.session === session) deferInterrupt(agent, { kind: "revert", fromSeq });
   });
 }
 export {

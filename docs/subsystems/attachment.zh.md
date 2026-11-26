@@ -258,6 +258,26 @@ abstract saveImage(input: SaveImageAttachment): Promise<ImageAttachmentRef>
 abstract readImage(ref: ImageAttachmentRef, signal?: AbortSignal): Promise<StoredImageAttachment>
 
 /**
+ * Check via metadata only (no full byte read) whether a stored normalized
+ * image object exists in this store. Backends without host-file paths return
+ * `true` unless they override this check.
+ * @param ref - durable normalized attachment reference.
+ * @param signal - optional cancellation signal.
+ * @returns whether the stored object exists.
+ */
+async imageExists(ref: ImageAttachmentRef, signal?: AbortSignal): Promise<boolean>
+
+/**
+ * Check via metadata only (no full byte read) whether a stored verbatim file
+ * object exists in this store. Backends without host-file paths return `true`
+ * unless they override this check.
+ * @param ref - durable file attachment reference.
+ * @param signal - optional cancellation signal.
+ * @returns whether the stored object exists.
+ */
+async fileExists(ref: FileAttachmentRef, signal?: AbortSignal): Promise<boolean>
+
+/**
  * Locate the provider-owned normalized object in the harness host filesystem.
  * @param ref - durable normalized attachment reference.
  * @returns an absolute host path, or undefined when this backend is not host-file-backed.

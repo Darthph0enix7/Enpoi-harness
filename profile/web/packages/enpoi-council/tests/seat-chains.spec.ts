@@ -74,6 +74,7 @@ const FULL_SCRIPT = [
 ]
 
 interface SpawnRecord {
+  childId: string
   label: string
   persona?: string
   provider?: string
@@ -92,6 +93,7 @@ function makeCtx(script: string[], opts: {
   const childLabel = new Map<string, string>()
   const failedSpawns = new Set<string>()
   const spawns: SpawnRecord[] = []
+  const lifecycle: string[] = []
 
   const nextText = (): string => {
     const t = script[readSeq] ?? 'generic scripted turn'
@@ -127,7 +129,6 @@ function makeCtx(script: string[], opts: {
           }),
         }
       }
-      if (ns === 'sessions') return { get: () => ({ append: vi.fn() }), delete: async () => undefined }
       return undefined
     },
     tools: { get: () => undefined },
@@ -140,7 +141,9 @@ function makeCtx(script: string[], opts: {
         spawnSeq += 1
         const childId = `child-${String(spawnSeq).padStart(4, '0')}-aaaa-bbbb-cccc-dddddddddddd`
         childLabel.set(childId, spec.label)
+        lifecycle.push(`spawn ${childId}`)
         spawns.push({
+          childId,
           label: spec.label,
           persona: spec.request?.persona,
           provider: spec.request?.agentOptions?.provider,
@@ -150,6 +153,9 @@ function makeCtx(script: string[], opts: {
         return { childId }
       },
       [deliverSubagentPrompt]: async () => undefined,
+      drainContinuableChildren: async (_parent: object, childIds: string[]) => {
+        for (const childId of childIds) lifecycle.push(`release ${childId}`)
+      },
     },
     logger: { warn: vi.fn(), info: vi.fn() },
   }
@@ -161,12 +167,12 @@ function makeCtx(script: string[], opts: {
     },
     options: { provider: 'p', model: 'm' },
   }
-  return { ctx, parent, spawns }
+  return { ctx, parent, spawns, lifecycle }
 }
 
 describe('council seat chain link advance', () => {
   it('spawns a chained seat on link 1 and advances to link 2 when its turn errors', async () => {
-    const { ctx, parent, spawns } = makeCtx(FULL_SCRIPT, {
+    const { ctx, parent, spawns, lifecycle } = makeCtx(FULL_SCRIPT, {
       personas: { skeptic: { chain: 'stable' } },
       failFirstSpawnFor: 'table seat: skeptic',
     })
@@ -187,6 +193,11 @@ describe('council seat chain link advance', () => {
     // the advanced link carries it too (its own named link is in the chain).
     expect(skepticSpawns[0]).toMatchObject({ provider: 'p1', model: 'm1', chain: 'stable' })
     expect(skepticSpawns[1]).toMatchObject({ provider: 'p2', model: 'm2', chain: 'stable' })
+    const rotation = lifecycle.filter(entry => skepticSpawns.some(spawn => entry.endsWith(spawn.childId)))
+    expect(rotation).toEqual([
+      `spawn ${skepticSpawns[0]!.childId}`, `release ${skepticSpawns[0]!.childId}`,
+      `spawn ${skepticSpawns[1]!.childId}`, `release ${skepticSpawns[1]!.childId}`,
+    ])
     // The seat's chain never leaks onto other seats (no chain assignment).
     const otherSeats = spawns.filter(s => s.label.includes('seat:') && !s.label.includes('seat: skeptic'))
     expect(otherSeats.every(s => s.provider === undefined)).toBe(true)

@@ -230,6 +230,7 @@ function bench(over?: BenchOptions) {
     useFileUploads: bindSnapshotSelector(createSnapshotStore<DraftFileUploads>(over?.fileUploads ?? {})),
     retryFileUpload: undefined,
     removeAttachment,
+    acknowledgeIncompleteAttachments: () => { shell.acknowledgeIncompleteAttachments() },
     resolveDraftAttachments: ids => ids.flatMap((id) => {
       const attachment = over?.attachments?.find(candidate => candidate.id === id)
       return attachment === undefined ? [] : [attachment]
@@ -746,6 +747,15 @@ describe('image draft rail', () => {
     cleanup()
     const unavailable = bench({ promptError: attachmentError('ATTACHMENT_NOT_REFERENCED') })
     expect(unavailable.view.getByRole('alert').textContent).toContain('部分附件已不可用，请移除后再发送')
+    cleanup()
+    const notFoundZh = bench({ promptError: attachmentError('ATTACHMENT_NOT_FOUND') })
+    expect(notFoundZh.view.getByRole('alert').textContent).toContain('部分附件已不可用，请移除后再发送')
+    cleanup()
+    const notFoundEn = bench({
+      promptError: attachmentError('ATTACHMENT_NOT_FOUND'),
+      t: makeTranslate(en, commonZh),
+    })
+    expect(notFoundEn.view.getByRole('alert').textContent).toContain('Some attachments are no longer available. Remove them to send.')
     cleanup()
     const unknown = bench({ promptError: attachmentError('ATTACHMENT_UNKNOWN_REASON') })
     expect(unknown.view.getByRole('alert').textContent).toContain('图片发送失败（ATTACHMENT_UNKNOWN_REASON）')
@@ -2160,4 +2170,138 @@ it('places context usage below the composer and hides it until the activity clos
   fireEvent.click(view.getByRole('button', { name: '上下文已用 25%' }))
   expect(view.getByRole('dialog', { name: '上下文已用' })).toBeTruthy()
   expect(view.getByRole('button', { name: '发送消息' })).toBeTruthy()
+})
+
+it('shows localized notice and blocks send (not editing) for adopted incomplete attachments until reviewed or removed', async () => {
+  const restored = [{ kind: 'file' as const, attachment: { attachmentId: 'f1' as never, name: 'doc.txt', bytes: 10 } }]
+  const ids = ['restored-1' as DraftAttachmentId]
+  const attachments = [{ kind: 'file' as const, id: ids[0]!, attachment: restored[0]!.attachment }]
+  const sink = vi.fn(() => Promise.resolve({ kind: 'success' as const }))
+  const shell = new SessionInputShell({
+    restorePendingNotice: () => 'attachments are still restoring',
+    incompleteAttachmentsNotice: () => zh['attachment.incompleteBlockedSend'],
+    actx: SCTX,
+    defaultSink: sink,
+    restoreAttachments: async () => ids,
+    commandAttachments: { serialize: () => Promise.resolve([]), release: () => {}, unsupportedNotice: (token: string) => `${token.trim()} attachments-unsupported` },
+  })
+  shell.restoreDraft('synced text', restored, { incompleteAttachments: true })
+  await vi.waitFor(() => { expect(shell.snapshot.attachmentIds).toEqual(ids) })
+
+  const session = createSnapshotStore<SessionSnapshot>(snapshotOf())
+  const props: InputBarProps = {
+    usePanelInfo: selector => selector({ activePanelId: null }),
+    sessionId: SID,
+    SessionProvider: ({ children }) => children,
+    useSession: bindSnapshotSelector(session),
+    useConversation: bindSnapshotSelector(createSnapshotStore(conversationFixture())),
+    useSessionStatus: bindSnapshotSelector(createSnapshotStore(new Map())),
+    useSessionRetainInfo: () => undefined,
+    useResource,
+    useSessions: bindSnapshotSelector(createSnapshotStore<SessionListState>({ ids: [], byId: {}, phase: 'ready', projectionsBySession: {} })),
+    useWorkspaces: bindSnapshotSelector(createSnapshotStore({ items: [], archivedSessionIds: [], pinnedSessionIds: [], state: 'idle', phase: 'ready', error: null })),
+    useProjection: () => undefined,
+    useInput: bindSnapshotSelector(shell.state),
+    inputActions: shell.actions,
+    keyboard: shell,
+    addFiles: () => null,
+    useFileUploads: bindSnapshotSelector(createSnapshotStore({})),
+    retryFileUpload: undefined,
+    removeAttachment: (id) => { shell.removeAttachment(id) },
+    acknowledgeIncompleteAttachments: () => { shell.acknowledgeIncompleteAttachments() },
+    resolveDraftAttachments: currentIds => currentIds.flatMap(id => id === ids[0] ? [attachments[0]!] : []),
+    toggleCommandMenu: vi.fn(),
+    useBusyEnter: bindSnapshotSelector(createSnapshotStore<'queue' | 'steer'>('queue')),
+    useStopShortcut: bindSnapshotSelector(createSnapshotStore<readonly string[]>([])),
+    useNotices: bindSnapshotSelector(shell.notices),
+    useLexicon: bindSnapshotSelector(shell.lexicon),
+    useMenuLauncher: bindSnapshotSelector(createSnapshotStore<string | null>(null)),
+    stop: vi.fn(),
+    stopAll: vi.fn(),
+    t: makeTranslate(zh, commonZh),
+    renderSlot: (() => null) as never,
+    variant: 'composer',
+  }
+  const view = render(<InputBar {...props} />)
+  const textarea = view.container.querySelector<HTMLDivElement>('[data-composer-input]')!
+  const sendBtn = view.getByRole('button', { name: '发送消息' }) as HTMLButtonElement
+
+  // Notice visible, SEND disabled, Enter blocked, editing remains enabled.
+  expect(view.getByRole('status').textContent).toContain(zh['attachment.incompleteSynced'])
+  expect(sendBtn.disabled).toBe(true)
+  expect(textarea.getAttribute('aria-disabled')).not.toBe('true')
+  act(() => { shell.setDraft('synced text edited') })
+  expect(shell.snapshot.draft).toBe('synced text edited')
+  expect(sendBtn.disabled).toBe(true)
+  fireEvent.keyDown(textarea, { key: 'Enter' })
+  expect(sink).not.toHaveBeenCalled()
+  expect(view.getByRole('alert').textContent).toContain(zh['attachment.incompleteBlockedSend'])
+
+  // Clicking "keep restored" reviews the partial set and unblocks send.
+  fireEvent.click(view.getByRole('button', { name: zh['attachment.incompleteKeep'] }))
+  expect(view.queryByRole('status')).toBeNull()
+  expect(sendBtn.disabled).toBe(false)
+  fireEvent.keyDown(textarea, { key: 'Enter' })
+  expect(sink).toHaveBeenCalledWith('synced text edited', ids, 'queue', expect.any(AbortSignal))
+})
+
+it('unblocks send when removing the incomplete restored attachment set', async () => {
+  const restored = [{ kind: 'file' as const, attachment: { attachmentId: 'f1' as never, name: 'doc.txt', bytes: 10 } }]
+  const ids = ['restored-1' as DraftAttachmentId]
+  const attachments = [{ kind: 'file' as const, id: ids[0]!, attachment: restored[0]!.attachment }]
+  const sink = vi.fn<() => Promise<SubmitOutcome>>(() => Promise.resolve({ kind: 'success' }))
+  const shell = new SessionInputShell({
+    restorePendingNotice: () => 'attachments are still restoring',
+    incompleteAttachmentsNotice: () => en['attachment.incompleteBlockedSend'],
+    actx: SCTX,
+    defaultSink: sink,
+    restoreAttachments: async () => ids,
+    commandAttachments: { serialize: () => Promise.resolve([]), release: () => {}, unsupportedNotice: (token: string) => `${token.trim()} attachments-unsupported` },
+  })
+  shell.restoreDraft('synced text', restored, { incompleteAttachments: true })
+  await vi.waitFor(() => { expect(shell.snapshot.attachmentIds).toEqual(ids) })
+
+  const session = createSnapshotStore<SessionSnapshot>(snapshotOf())
+  const props: InputBarProps = {
+    usePanelInfo: selector => selector({ activePanelId: null }),
+    sessionId: SID,
+    SessionProvider: ({ children }) => children,
+    useSession: bindSnapshotSelector(session),
+    useConversation: bindSnapshotSelector(createSnapshotStore(conversationFixture())),
+    useSessionStatus: bindSnapshotSelector(createSnapshotStore(new Map())),
+    useSessionRetainInfo: () => undefined,
+    useResource,
+    useSessions: bindSnapshotSelector(createSnapshotStore<SessionListState>({ ids: [], byId: {}, phase: 'ready', projectionsBySession: {} })),
+    useWorkspaces: bindSnapshotSelector(createSnapshotStore({ items: [], archivedSessionIds: [], pinnedSessionIds: [], state: 'idle', phase: 'ready', error: null })),
+    useProjection: () => undefined,
+    useInput: bindSnapshotSelector(shell.state),
+    inputActions: shell.actions,
+    keyboard: shell,
+    addFiles: () => null,
+    useFileUploads: bindSnapshotSelector(createSnapshotStore({})),
+    retryFileUpload: undefined,
+    removeAttachment: (id) => { shell.removeAttachment(id) },
+    acknowledgeIncompleteAttachments: () => { shell.acknowledgeIncompleteAttachments() },
+    resolveDraftAttachments: currentIds => currentIds.flatMap(id => id === ids[0] ? [attachments[0]!] : []),
+    toggleCommandMenu: vi.fn(),
+    useBusyEnter: bindSnapshotSelector(createSnapshotStore<'queue' | 'steer'>('queue')),
+    useStopShortcut: bindSnapshotSelector(createSnapshotStore<readonly string[]>([])),
+    useNotices: bindSnapshotSelector(shell.notices),
+    useLexicon: bindSnapshotSelector(shell.lexicon),
+    useMenuLauncher: bindSnapshotSelector(createSnapshotStore<string | null>(null)),
+    stop: vi.fn(),
+    stopAll: vi.fn(),
+    t: makeTranslate(en, commonZh),
+    renderSlot: (() => null) as never,
+    variant: 'composer',
+  }
+  const view = render(<InputBar {...props} />)
+  expect(view.getByRole('status').textContent).toContain(en['attachment.incompleteSynced'])
+  expect((view.getByRole('button', { name: en['input.send'] }) as HTMLButtonElement).disabled).toBe(true)
+
+  fireEvent.click(view.getByRole('button', { name: en['attachment.incompleteClear'] }))
+  expect(shell.snapshot.attachmentIds).toEqual([])
+  expect(shell.snapshot.incompleteDraftAttachments).toBeUndefined()
+  expect(view.queryByRole('status')).toBeNull()
+  expect((view.getByRole('button', { name: en['input.send'] }) as HTMLButtonElement).disabled).toBe(false)
 })

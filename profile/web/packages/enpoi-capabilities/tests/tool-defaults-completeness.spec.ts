@@ -30,7 +30,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { resolvePolicy, SHIPPED_TOOL_DEFAULTS, SHIPPED_TOOL_DEFAULT_EXEMPTIONS } from '../src/policy'
+import { READ_ONLY_VETO_TOOLS, resolvePolicy, SHIPPED_TOOL_DEFAULTS, SHIPPED_TOOL_DEFAULT_EXEMPTIONS } from '../src/policy'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LOCAL_FIXTURE_DIR = join(HERE, 'fixtures', 'tool-inventory')
@@ -153,6 +153,10 @@ describe('tool-defaults completeness guard', () => {
         expect(decision.kind, `${tool} must ask on ${seat} until the operator sets a row`).toBe('ask')
         expect(decision.source, `${tool} must fall through to the unknown-tools ask on ${seat}`).toBe('defaults')
       }
+    }
+    const mutatingPeer = new Set(['peer_switch_model', 'peer_ask', 'peer_answer', 'peer_cancel'])
+    for (const tool of peerTools) {
+      expect(READ_ONLY_VETO_TOOLS.includes(tool), `${tool} read-only veto membership`).toBe(mutatingPeer.has(tool))
     }
   })
 

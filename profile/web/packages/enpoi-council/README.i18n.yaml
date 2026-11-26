@@ -1,0 +1,28 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write profile/web/packages/enpoi-council/README.md
+/enpoi-council:
+  en: 9ce350c40e05c719
+  zh: 3548c02e53466efa
+/enpoi-council/seat-lifecycle:
+  en: b233cc022a6e9655
+  zh: d4cd8a42c5634e85
+/enpoi-council/model-experience:
+  en: 215e7ba838619b7b
+  zh: a311da3843709f90
+/enpoi-council/model-experience/deliberation-and-tool-result:
+  en: 97b42ad94ffbcdbe
+  zh: 05534cf8f27ca7da
+/enpoi-council/model-experience/deliberation-and-tool-result/what-the-model-sees:
+  en: 1dc5f687cd52038e
+  zh: 219d44bd1bccb1c6
+/enpoi-council/model-experience/deliberation-and-tool-result/token-effect:
+  en: 1840718815b1fdf7
+  zh: 7c5519c3833f06c4
+/enpoi-council/model-experience/deliberation-and-tool-result/kv-cache-effect:
+  en: 4b2fbdad6bb7e7c3
+  zh: b6d9d07febf8f94c
+/enpoi-council/known-limitations-and-deferred-work:
+  en: 9e6bfe8b86e21333
+  zh: 664c3c7b0ab528dc

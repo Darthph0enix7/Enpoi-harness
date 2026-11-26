@@ -78,6 +78,8 @@ let root: string
 let home: string
 let ws: string
 let harness: Harness
+let savedHome: string | undefined
+let savedDshHome: string | undefined
 
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'fsops-'))
@@ -85,11 +87,18 @@ beforeEach(async () => {
   ws = join(root, 'ws')
   await mkdir(home, { recursive: true })
   await mkdir(ws, { recursive: true })
+  savedHome = process.env.HOME
+  savedDshHome = process.env.DSH_HOME
   process.env.HOME = home
+  delete process.env.DSH_HOME
   harness = makeHarness()
 })
 
 afterEach(async () => {
+  if (savedHome === undefined) delete process.env.HOME
+  else process.env.HOME = savedHome
+  if (savedDshHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = savedDshHome
   await rm(root, { recursive: true, force: true })
 })
 
@@ -344,5 +353,28 @@ describe('fs.write', () => {
     )
     expect(badHost.status).toBe(403)
     await expect(stat(file)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+})
+
+describe('DSH_HOME routing for trash and editor backups', () => {
+  it('routes fs.delete trash and fs.write backups under DSH_HOME set after import without writing HOME/.dsh', async () => {
+    const customDshHome = join(root, 'custom-dsh-home')
+    process.env.DSH_HOME = customDshHome
+
+    const edited = join(ws, 'tracked.txt')
+    await writeFile(edited, 'before-edit')
+    const writeRes = await harness.call('fs.write', { cwd: ws, path: edited, content: 'after-edit' })
+    expect(writeRes.status).toBe(200)
+    expect(writeRes.body.value.backup).toBe(join(customDshHome, 'file-history', 'editor', sha('before-edit')))
+    expect(await readFile(writeRes.body.value.backup, 'utf8')).toBe('before-edit')
+
+    const victim = join(ws, 'trash-me.txt')
+    await writeFile(victim, 'bye')
+    const deleteRes = await harness.call('fs.delete', { cwd: ws, path: victim })
+    expect(deleteRes.status).toBe(200)
+    expect(deleteRes.body.value.dest).toMatch(new RegExp(`^${join(customDshHome, 'trash', 'sidebar').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[/\\\\]`))
+    expect(await readFile(deleteRes.body.value.dest, 'utf8')).toBe('bye')
+
+    await expect(stat(join(home, '.dsh'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })

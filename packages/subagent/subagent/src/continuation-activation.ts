@@ -30,8 +30,16 @@ import {
   applyChildComposition,
 } from './child-agent.ts'
 import type { DelegatedPolicyOverrides } from './child-agent.ts'
-import { createSettlementMessage } from './continuation-messages.ts'
-import type { SettlementReportLimits } from './continuation-messages.ts'
+import {
+  closingReportNeedsSpill,
+  createSettlementMessage,
+  prepareSpillText,
+  resolveSettlementReportLimits,
+} from './continuation-messages.ts'
+import type {
+  SettlementReportLimits,
+  SettlementSpillOutcome,
+} from './continuation-messages.ts'
 import type { SubagentDescriptorData } from './descriptor.ts'
 import { SubagentError } from './error.ts'
 import { SubagentInbox } from './inbox.ts'
@@ -40,7 +48,7 @@ import type { ActivationObserver, ActivationTerminal } from './lifecycle.ts'
 import { SettlementNoticeOutbox } from './settlement-outbox.ts'
 import type { NoticePlacement } from './settlement-outbox.ts'
 import { TRUNCATION_CONTINUATION, TRUNCATION_CONTINUATIONS } from './truncation.ts'
-import type { SubagentResult } from './types.ts'
+import type { SubagentReportMode, SubagentResult } from './types.ts'
 
 /** Process-local slots shared through uninterrupted continuable parent links. */
 class ActivationPool {
@@ -138,6 +146,8 @@ export interface Activation {
    * a cold resume restores it.
    */
   readonly quiet: boolean
+  /** Per-spawn override for settlement report delivery mode. */
+  readonly reportMode: SubagentReportMode
   /** Renewed whenever a settlement watcher must re-check residency state. */
   poke: PromiseWithResolvers<void>
 }
@@ -166,6 +176,8 @@ export interface MaterializeInputs {
   composition: { persona?: string | undefined; toolFilter?: ToolRestriction | undefined }
   /** Suppress parent-visible settlement/report traffic for quiet fibers. */
   quiet?: boolean
+  /** Per-spawn override for settlement report delivery mode. */
+  reportMode?: SubagentReportMode
   signal: AbortSignal
 }
 
@@ -249,15 +261,18 @@ export class ContinuableActivationRegistry {
    */
   private readonly closingScopes = new Map<Agent, Set<Agent>>()
   /**
-   * Parent sessions whose latest durable turn boundary is a user Stop-all, so
-   * settlements that land before the operator's next turn queue without
-   * waking. Process-local on purpose: after a restart no entry exists and the
-   * first notice wakes as usual, which costs one turn, never a dropped report.
+   * Live parents stopped by the user whose next turn has not begun. Settlements
+   * landing in this window queue without waking. After a restart no entry exists
+   * and the first notice wakes as usual, which costs one turn, never a dropped report.
    */
-  private readonly stoppedAllSessions = new Set<SessionId>()
+  private readonly stopAllWindows = new WeakMap<Agent, symbol>()
   private draining = false
   /** Retained settlement notices that still owe a parent a wake. */
   private readonly notices: SettlementNoticeOutbox
+  /** Per-parent delivery tails preserving settlement notice order across async spills. */
+  private readonly parentDeliveryQueues = new Map<SessionId, Promise<void>>()
+  /** Aborted when the plugin fiber unloads so hung spill saves cannot block disposal. */
+  private readonly disposeAbort = new AbortController()
   /**
    * Child ids whose final session flush failed and whose persisted state is
    * therefore stale. The settlement notice carries that fact durably to the
@@ -293,22 +308,23 @@ export class ContinuableActivationRegistry {
     this.ownerCtx = scope.ctx
     ctx.on('agent/disposed', ({ agent }) => {
       this.closingScopes.delete(agent)
-      this.stoppedAllSessions.delete(agent.id)
     })
-    // The exact turn boundary is the authority for the stop window: a turn
-    // start closes it, and only a user Stop-all ending opens it.
+    ctx.on('subagent/stop-idle-tree', (parent) => { this.stopIdleTree(parent) })
     ctx.on('session/event', (session, event) => {
+      if (event.type !== 'turn/start' && event.type !== 'turn/end') return
+      const parent = this.ctx.agents.get(session.id)
+      if (parent?.session !== session) return
       if (event.type === 'turn/start') {
-        this.stoppedAllSessions.delete(session.id)
+        this.stopAllWindows.delete(parent)
         return
       }
-      if (event.type !== 'turn/end') return
       const reason = event.data.reason
-      if (reason.kind === 'aborted' && reason.reason.kind === 'user' && reason.reason.intent === 'stop-all') {
-        this.stoppedAllSessions.add(session.id)
+      if (reason.kind === 'aborted' && reason.reason.kind === 'user'
+        && (reason.reason.intent ?? 'stop-all') === 'stop-all') {
+        this.stopAll(parent)
         return
       }
-      this.stoppedAllSessions.delete(session.id)
+      this.stopAllWindows.delete(parent)
     })
     this.notices = new SettlementNoticeOutbox(
       ctx,
@@ -325,8 +341,33 @@ export class ContinuableActivationRegistry {
     ctx.effect(function* (this: ContinuableActivationRegistry) {
       yield scope.dispose
       yield () => this.drain()
-      yield () => this.notices.dispose()
+      yield () => {
+        this.disposeAbort.abort()
+        this.notices.dispose()
+      }
     }.bind(this), 'subagents.continuations()')
+  }
+
+  /** Open the window only for an exact idle root with resident descendants. */
+  private stopIdleTree(parent: Agent): void {
+    if (this.ctx.agents.get(parent.id) !== parent || parent.status !== 'idle') return
+    const ancestorId = parent.session.header.parentSession
+    const ancestor = ancestorId === undefined ? undefined : this.ctx.agents.get(ancestorId)
+    if (parent.session.header.origin === 'subagent'
+      || (ancestor !== undefined && this.ctx.agents.isOwnedBy(parent.id, ancestor))) return
+    for (const activation of this.resident.values()) {
+      if (activation.handle.agent !== parent && activation.ancestry.has(parent)) {
+        this.stopAll(parent)
+        return
+      }
+    }
+  }
+
+  /** Park later settlements synchronously, before the cascade can interrupt work. */
+  private stopAll(parent: Agent): void {
+    const window = this.stopAllWindows.get(parent) ?? Symbol()
+    this.stopAllWindows.set(parent, window)
+    this.ctx.emit('subagent/stop-all', parent, window)
   }
 
   /**
@@ -675,11 +716,17 @@ export class ContinuableActivationRegistry {
     const admissions = [...this.materializations]
       .filter(materialization => materialization.lineage.includes(root))
       .map(materialization => materialization.settled)
-    const running = [...this.resident.values()]
+    const descendants = [...this.resident.values()]
       .filter(activation => activation.handle.agent !== root && activation.ancestry.has(root))
+    const running = descendants
       .filter(activation => activation.handle.agent.status !== 'idle')
       .map(activation => activation.handle.agent.whenIdle())
-    return [...admissions, ...running]
+    const reports = [root.id, ...descendants.map(activation => activation.childId)]
+      .flatMap((id) => {
+        const tail = this.parentDeliveryQueues.get(id)
+        return tail === undefined ? [] : [tail]
+      })
+    return [...admissions, ...running, ...reports]
   }
 
   /**
@@ -814,6 +861,7 @@ export class ContinuableActivationRegistry {
       cancelled: false,
       continuations: 0,
       quiet: inputs.quiet ?? false,
+      reportMode: inputs.reportMode ?? 'bounded',
       poke: Promise.withResolvers<void>(),
     }
     this.resident.set(childId, activation)
@@ -949,7 +997,8 @@ export class ContinuableActivationRegistry {
   ): SettlementState {
     if (activation.inbox.closing !== undefined) return 'closed'
     if (activation.poke !== observation) return 'retry'
-    if (activation.inbox.hasPending || activation.ownedChildren.size > 0) return 'wait'
+    if (activation.inbox.hasPending || activation.ownedChildren.size > 0
+      || this.parentDeliveryQueues.has(activation.childId)) return 'wait'
     return 'ready'
   }
 
@@ -1069,9 +1118,12 @@ export class ContinuableActivationRegistry {
     }
     this.resident.delete(childId)
     activation.releaseSlot()
-    this.notifySettlement(activation, activation.observer.terminal(failure))
-    this.releaseOwnership(childId)
-    activation.observer.settle(failure)
+    try {
+      this.notifySettlement(activation, activation.observer.terminal(failure))
+    } finally {
+      this.releaseOwnership(childId)
+      activation.observer.settle(failure)
+    }
     if (failure !== undefined) throw failure
   }
 
@@ -1081,23 +1133,145 @@ export class ContinuableActivationRegistry {
    * bounded backoff, a parent that is gone or closing keeps a held record that
    * its next activation or idle transition drains with a wake, and a park
    * keeps its record until the operator's next turn claims it.
+   *
+   * When the closing report exceeds its bounds, the spill write completes
+   * before the notice message is built, while per-parent delivery order is
+   * preserved without delaying unrelated parents or concurrent child saves.
    */
-  private notifySettlement(activation: Activation, terminal: ActivationTerminal): void {
+  private notifySettlement(
+    activation: Activation,
+    terminal: ActivationTerminal,
+  ): void {
     if (!activation.announced) return
     // Quiet fibers deliver nothing to the parent: the orchestrating tool
     // (council/oracle) reads the final synthesis from the child session itself.
     if (activation.quiet) return
-    const message = createSettlementMessage(activation.childId, terminal, {
-      limits: this.settlementReportLimits(),
-      flushFailed: activation.finalFlushFailed,
+
+    const limits = this.settlementReportLimits()
+    const output = terminal.output ?? []
+    const check = closingReportNeedsSpill(output, limits, activation.reportMode)
+    const previousTail = this.parentDeliveryQueues.get(activation.parentSession)
+
+    if (!check.needsSpill && previousTail === undefined) {
+      const message = createSettlementMessage(activation.childId, terminal, {
+        limits,
+        flushFailed: activation.finalFlushFailed,
+        reportMode: activation.reportMode,
+      })
+      this.notices.notify(
+        activation.parentSession,
+        activation.childId,
+        activation.noticeId,
+        message,
+        terminal.stopReason,
+      )
+      return
+    }
+
+    const spillPromise = check.needsSpill
+      ? this.spillClosingReport(activation, check.text, limits)
+      : Promise.resolve(undefined)
+
+    const delivery = (previousTail ?? Promise.resolve()).then(async () => {
+      const spill = await spillPromise
+      const message = createSettlementMessage(activation.childId, terminal, {
+        limits,
+        flushFailed: activation.finalFlushFailed,
+        reportMode: activation.reportMode,
+        ...(spill === undefined ? {} : { spill }),
+      })
+      this.notices.notify(
+        activation.parentSession,
+        activation.childId,
+        activation.noticeId,
+        message,
+        terminal.stopReason,
+      )
+    }).catch((error: unknown) => {
+      this.ctx.logger.warn(`subagent "${activation.childId}" could not prepare its settlement notice: ${errorChain(error)}`)
+    }).finally(() => {
+      if (this.parentDeliveryQueues.get(activation.parentSession) === delivery) {
+        this.parentDeliveryQueues.delete(activation.parentSession)
+        const parent = this.resident.get(activation.parentSession)
+        if (parent !== undefined) this.wake(parent)
+      }
     })
-    this.notices.notify(
-      activation.parentSession,
-      activation.childId,
-      activation.noticeId,
-      message,
-      terminal.stopReason,
-    )
+    this.parentDeliveryQueues.set(activation.parentSession, delivery)
+  }
+
+  /**
+   * Persist an oversized closing report to `ctx.spillStore` with line wrapping
+   * and a bounded timeout so a missing or wedged backend cannot block wakeup.
+   */
+  private async spillClosingReport(
+    activation: Activation,
+    text: string,
+    limits: SettlementReportLimits,
+  ): Promise<SettlementSpillOutcome> {
+    const spillStore = this.ctx.get('spillStore')
+    if (spillStore === undefined) {
+      this.ctx.logger.warn(
+        `subagent "${activation.childId}" closing report spill unavailable `
+        + `[SETTLEMENT_SPILL_UNAVAILABLE] parent="${activation.parentSession}": `
+        + 'no ctx.spillStore backend mounted; falling back to inline truncation',
+      )
+      return { status: 'failed', reason: 'spill storage unavailable' }
+    }
+    const resolved = resolveSettlementReportLimits(limits)
+    let timer: NodeJS.Timeout | undefined
+    let onAbort: (() => void) | undefined
+    try {
+      this.disposeAbort.signal.throwIfAborted()
+      const prepared = prepareSpillText(text, resolved.spillMaxLineChars)
+      const savePromise = spillStore.saveText({
+        owner: { sessionId: activation.parentSession },
+        source: { kind: 'session-reference', sessionId: activation.childId, label: 'closing report' },
+        suggestedName: 'subagent-closing-report.md',
+        content: prepared.content,
+      })
+      // Absorb late rejections if timeout or unload wins the race first.
+      void savePromise.catch(() => undefined)
+      const guardPromise = new Promise<never>((_resolve, reject) => {
+        if (this.disposeAbort.signal.aborted) {
+          reject(new Error('subagent runtime unloading'))
+          return
+        }
+        timer = setTimeout(() => {
+          reject(new Error(`timed out after ${String(resolved.spillTimeoutMs)}ms`))
+        }, resolved.spillTimeoutMs)
+        onAbort = () => { reject(new Error('subagent runtime unloading')) }
+        this.disposeAbort.signal.addEventListener('abort', onAbort, { once: true })
+      })
+      const ref = await Promise.race([savePromise, guardPromise])
+      if (typeof ref.locator !== 'string' || ref.locator.trim().length === 0) {
+        this.ctx.logger.warn(
+          `subagent "${activation.childId}" closing report spill failed `
+          + `[SETTLEMENT_SPILL_FAILED] parent="${activation.parentSession}": `
+          + 'spill backend returned an empty or missing locator',
+        )
+        return { status: 'failed', reason: 'spill locator missing' }
+      }
+      return {
+        status: 'saved',
+        ref,
+        savedLineNumbers: prepared.savedLineNumbers,
+        lines: prepared.lines,
+        wrappedLines: prepared.wrappedLines,
+      }
+    } catch (error: unknown) {
+      const detail = errorChain(error)
+      this.ctx.logger.warn(
+        `subagent "${activation.childId}" closing report spill failed `
+        + `[SETTLEMENT_SPILL_FAILED] parent="${activation.parentSession}": ${detail}`,
+      )
+      return {
+        status: 'failed',
+        reason: detail.includes('timed out') ? 'spill save timed out' : 'spill save failed',
+      }
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      if (onAbort !== undefined) this.disposeAbort.signal.removeEventListener('abort', onAbort)
+    }
   }
 
   /**
@@ -1127,7 +1301,7 @@ export class ContinuableActivationRegistry {
     // one: a child that finished naturally while its interrupt was in flight is
     // an observation for the operator's next turn, so it queues there without
     // opening one. The window closes as soon as that turn begins.
-    if (rootParent && this.stoppedAllSinceLastTurn(parent)) {
+    if (rootParent && this.stopAllWindows.has(parent)) {
       if (!alreadyQueued) parent.send(message, 'next-turn', false)
       return 'parked'
     }
@@ -1147,16 +1321,6 @@ export class ContinuableActivationRegistry {
     if (alreadyQueued) parent.inbox.remove(message.id)
     this.sendWaking(parent, message, parent.status === 'idle' ? 'queue' : 'steer')
     return 'waking'
-  }
-
-  /**
-   * Whether this parent's latest turn boundary is a user Stop-all, i.e. the
-   * operator refused further turns and has not started another one since.
-   * @param parent - live parent whose observed turn boundaries are consulted.
-   * @returns whether the newest turn boundary is the stop-all turn ending.
-   */
-  private stoppedAllSinceLastTurn(parent: Agent): boolean {
-    return this.stoppedAllSessions.has(parent.id)
   }
 
   /**

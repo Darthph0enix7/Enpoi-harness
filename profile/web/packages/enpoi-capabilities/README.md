@@ -102,6 +102,23 @@ DEFAULT world; the agent's pulls are session-scoped and durable.
 - The resolver runs fresh per dispatch. `allow` executes immediately; `ask`
   goes to the session's card, a delegated child's parent ask, or the root's
   Full-access standing consent; `deny` refuses.
+- In a `read-only` sandbox session, the early veto (`READ_ONLY_VETO_TOOLS`)
+  blocks local mutation tools (`bash`, `edit`, `write`, `str_replace_editor`)
+  and mutating peer controls (`peer_switch_model`, `peer_ask`, `peer_answer`,
+  `peer_cancel`), while peer discovery and status reads (`peer_status`,
+  `peer_sessions`, `peer_models`, `peer_asks`) remain allowed.
+- Session authority uses `classifySessionAuthority`: user-created forks
+  (`parentSession` with `isSeeded: true`, no `origin`, and `delegationDepth`
+  absent or 0, matching persisted JSONL fork headers) stay root sessions so
+  they retain grants, seat defaults, Full-access standing consent, and act as
+  the live root in `liveRootOf` for their own children (because real subagent
+  children always stamp `origin: 'subagent'` and `delegationDepth >= 1`, and a
+  caller able to forge arbitrary headers already controls a forged session).
+  `origin: 'subagent'`, positive `delegationDepth`, an unseeded `parentSession`
+  without `origin`, or malformed lineage classifies as delegated and blocks
+  root standing grants, root seat defaults, and Full-access consent; an ask from
+  a delegated marker without a usable `parentSession` fails closed instead of
+  falling through to root authority.
 - **Rails are a forwarded-ask ceiling, not a global execution boundary.** They
   run only after a child's call resolves `ask`. A call resolved `allow` never
   enters the forwarder, so the credentials, recursive-delete, exfiltration,
@@ -134,3 +151,8 @@ DEFAULT world; the agent's pulls are session-scoped and durable.
   otherwise the root's Full-access standing consent allows the ask. Normal
   interactive cards keep their advisory recommendation, but that recommendation
   never resolves the ask.
+
+## Compressor locator ownership
+
+- `dsh-compressor` stores crushed tool outputs under `$DSH_HOME/dsh-compressor/<sha256>` keyed solely by content hash. `enpoi-capabilities` observes `contextCompression/after` and `tools/post-execute` (excluding `read`/`glob`/`grep`/`write`/`edit`/`web_*`/`compressor_retrieve` and pre-existing locators) to record the originating session and its ancestor chain whenever the compressor emits a locator, and enforces ownership at both `tools/pre-execute` and `ctx.tools.guard` so only the emitting session, its ancestors, and its descendants may retrieve it; unauthorized, unknown, and malformed locators receive the same uniform refusal without revealing whether a hash exists elsewhere.
+- The ownership map (`2,048` hashes, `16` owners per hash, `1,024` parent links) persists atomically to `$DSH_HOME/enpoi-capabilities/compressor-ownership.json` so legitimate retrievals and multi-hop parent/child lineage survive restarts without adding a new `SessionEventMap` type or bumping `SESSION_FORMAT_VERSION`, while preserving `spill-policy` bounding and re-spilling.

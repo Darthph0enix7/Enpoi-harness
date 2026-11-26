@@ -261,3 +261,139 @@ describe('delegated child under a Full-access root matches the parent', () => {
     expect(decision.kind === 'deny' && decision.reason).toContain('read-only')
   })
 })
+
+describe('P-02 & C-03 pre-execute authority enforcement', () => {
+  it('blocks mutating peer tools in a read-only orchestrator session at tools/pre-execute while allowing peer reads', async () => {
+    const { call } = harness()
+    const readOnlyEvents: FakeEvent[] = [
+      { type: 'sandbox/mode', data: { mode: 'read-only' } },
+      { type: 'approval/policy', data: { policy: 'never', source: 'user' } },
+    ]
+    for (const toolName of ['peer_switch_model', 'peer_ask', 'peer_answer', 'peer_cancel']) {
+      const next = vi.fn(async () => ({ kind: 'allow' }))
+      const decision = await call(
+        { name: toolName, arguments: {}, agent: agentWith(readOnlyEvents, { id: 'root-ro', agentPreset: 'orchestrator' }), callId: `ro-${toolName}` },
+        next,
+      )
+      expect(decision.kind, toolName).toBe('deny')
+      expect(next).not.toHaveBeenCalled()
+    }
+    for (const toolName of ['peer_status', 'peer_sessions', 'peer_models', 'peer_asks']) {
+      const next = vi.fn(async () => ({ kind: 'allow' }))
+      const decision = await call(
+        { name: toolName, arguments: {}, agent: agentWith(readOnlyEvents, { id: 'root-ro', agentPreset: 'orchestrator' }), callId: `ro-${toolName}` },
+        next,
+      )
+      expect(decision.kind, toolName).toBe('allow')
+      expect(next).toHaveBeenCalledTimes(1)
+    }
+  })
+
+  it('fails closed when a delegated marker has no parentSession instead of falling back to Full access or root grants (C-03)', async () => {
+    const config = {
+      permissions: {
+        get: () => ({
+          grants: { g1: { id: 'g1', tool: 'some_unknown_mutation', global: true } },
+        }),
+      },
+    }
+    const { call } = harness({ config })
+    const orphanHeaders: Array<Record<string, unknown>> = [
+      { id: 'orphan-origin', origin: 'subagent' },
+      { id: 'orphan-depth', delegationDepth: 1 },
+      { id: 'orphan-empty-parent', parentSession: '', origin: 'subagent', delegationDepth: 1 },
+      { id: 'ambiguous-unseeded', parentSession: 'root-1', isSeeded: false, delegationDepth: 0 },
+    ]
+    for (const header of orphanHeaders) {
+      // Full-access session events must NEVER grant root standing consent to an ambiguous/orphan child.
+      const askDecision = await call(
+        { name: 'bash', arguments: { command: `python3 -c 'print(1)'` }, agent: agentWith(FULL_ACCESS_EVENTS, header), callId: 'c-bash' },
+        async () => ({ kind: 'allow' }),
+      )
+      expect(askDecision.kind, JSON.stringify(header)).toBe('deny')
+      expect(askDecision).not.toEqual({ kind: 'allow', reason: FULL_ACCESS_ASK_REASON })
+
+      // Root standing grants must NOT absorb asks for a child marker without usable parent.
+      const grantDecision = await call(
+        { name: 'some_unknown_mutation', arguments: {}, agent: agentWith(FULL_ACCESS_EVENTS, header), callId: 'c-grant' },
+        async () => ({ kind: 'allow' }),
+      )
+      expect(grantDecision.kind, `grant ${JSON.stringify(header)}`).toBe('deny')
+
+      // Root seat policy (orchestrator peer allow) must NOT extend to an orphan/ambiguous child.
+      const seatDecision = await call(
+        { name: 'peer_status', arguments: {}, agent: agentWith(FULL_ACCESS_EVENTS, { ...header, agentPreset: 'orchestrator' }), callId: 'c-seat' },
+        async () => ({ kind: 'allow' }),
+      )
+      expect(seatDecision.kind, `seat ${JSON.stringify(header)}`).toBe('deny')
+    }
+  })
+
+  it('keeps real-shaped fork headers at root authority (grants, seat defaults, Full access, and liveRootOf stop)', async () => {
+    const config = {
+      permissions: {
+        get: () => ({
+          grants: { g1: { id: 'g1', tool: 'some_unknown_mutation', global: true } },
+        }),
+      },
+    }
+    const forkHeaders: Array<Record<string, unknown>> = [
+      { id: 'fork-live', cwd: '/ws', parentSession: 'origin-1', isSeeded: true, agentPreset: 'orchestrator' },
+      { id: 'fork-restored', cwd: '/ws', parentSession: 'origin-1', isSeeded: true, delegationDepth: 0, agentPreset: 'orchestrator' },
+    ]
+    const forkAgents = new Map(forkHeaders.map(header => [
+      String(header.id),
+      agentWith(FULL_ACCESS_LIVE_EVENTS, header),
+    ]))
+    const childEvents: FakeEvent[] = [
+      { type: 'approval/policy', data: { policy: 'never', source: 'delegation' } },
+      { type: 'sandbox/mode', data: { mode: 'danger-full-access', source: 'delegation' } },
+    ]
+    const childOfFork = agentWith(childEvents, {
+      id: 'child-of-fork',
+      parentSession: 'fork-live',
+      isSeeded: false,
+      origin: 'subagent',
+      delegationDepth: 1,
+      cwd: '/ws',
+      agentPreset: 'orchestrator',
+    }, 'Fixer: fork-child')
+    forkAgents.set('child-of-fork', childOfFork)
+
+    // Intentionally omit 'origin-1' from agents so if liveRootOf walked past the
+    // fork root into the source session it would return undefined and fail closed.
+    const { call } = harness({ config, services: { agents: { get: (id: string) => forkAgents.get(id) } } })
+
+    for (const header of forkHeaders) {
+      const forkAgent = forkAgents.get(String(header.id))!
+      // Full-access standing consent applies directly (not forwarded to origin-1).
+      const askDecision = await call(
+        { name: 'bash', arguments: { command: `python3 -c 'print(1)'` }, agent: forkAgent, callId: `fork-bash-${String(header.id)}` },
+        async () => ({ kind: 'allow' }),
+      )
+      expect(askDecision, String(header.id)).toEqual({ kind: 'allow', reason: FULL_ACCESS_ASK_REASON })
+
+      // Standing grants apply directly.
+      const grantDecision = await call(
+        { name: 'some_unknown_mutation', arguments: {}, agent: forkAgent, callId: `fork-grant-${String(header.id)}` },
+        async () => ({ kind: 'allow' }),
+      )
+      expect(grantDecision.kind, String(header.id)).toBe('allow')
+
+      // Seat defaults (orchestrator peer allow) apply directly.
+      const seatDecision = await call(
+        { name: 'peer_status', arguments: {}, agent: forkAgent, callId: `fork-seat-${String(header.id)}` },
+        async () => ({ kind: 'allow' }),
+      )
+      expect(seatDecision.kind, String(header.id)).toBe('allow')
+    }
+
+    // A subagent spawned by the fork stops at fork-live in liveRootOf and
+    // inherits fork-live's Full-access decision without needing origin-1 live.
+    const childDecision = await call(
+      { name: 'bash', arguments: { command: `python3 -c 'print(1)'` }, agent: childOfFork, callId: 'child-of-fork-bash' },
+      async () => ({ kind: 'allow' }),
+    )
+    expect(childDecision.kind).toBe('allow')
+  })
+})

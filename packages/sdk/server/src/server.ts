@@ -9,7 +9,16 @@ import type { Context } from '@deepseek-ai/cordis'
 import { resolve } from 'node:path'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
-import { admitEncodedImages, type EncodedImageAttachment, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import {
+  admitEncodedImages,
+  canonicalDurablePromptParts,
+  verifyDurablePromptRefsExist,
+  type DurablePromptRefLookup,
+  type DurablePromptRefPart,
+  type EncodedImageAttachment,
+  type FileAttachmentRef,
+  type ImageAttachmentRef,
+} from '@deepseek-ai/dsh-attachment'
 import { createUserMessage, ReasoningEffortId, type ContentBlock, type LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { carrierKeyOf, type Scoped } from '@deepseek-ai/dsh-scope'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -32,23 +41,86 @@ interface SessionRecord {
   handle: AgentHandle
 }
 
-function encodedImage(block: SessionPromptParams['contentBlocks'][number]): block is SdkEncodedImageBlock {
+type SdkPromptBlock = SessionPromptParams['contentBlocks'][number]
+
+const EMPTY_REF_LOOKUP: DurablePromptRefLookup = {
+  referencedImage: () => undefined,
+  referencedFile: () => undefined,
+}
+
+function encodedImage(block: SdkPromptBlock | DurablePromptRefPart): block is SdkEncodedImageBlock {
   return block.type === 'image' && 'data' in block
 }
 
-async function durablePromptContent(ctx: Context, blocks: SessionPromptParams['contentBlocks']): Promise<ContentBlock[]> {
-  const images = blocks.filter(encodedImage)
-  if (images.length === 0) return blocks as ContentBlock[]
-  const attachments = ctx.get('attachments')
-  if (attachments === undefined) throw new Error('SDK image prompt requires an attachment store')
-  const refs = await admitEncodedImages(attachments, images.map((image): EncodedImageAttachment => ({
-    data: image.data,
-    mediaType: image.mimeType,
-  })))
+function durableRefCandidate(block: SdkPromptBlock): boolean {
+  if (encodedImage(block)) return false
+  const type: string = block.type
+  return type === 'image' || type === 'file' || type === 'image-ref' || type === 'file-ref'
+}
+
+function refLookupForSession(session: Agent['session'] | undefined): DurablePromptRefLookup {
+  if (
+    session !== undefined
+    && typeof session.referencedImage === 'function'
+    && typeof session.referencedFile === 'function'
+  ) {
+    return session
+  }
+  return EMPTY_REF_LOOKUP
+}
+
+async function durablePromptContent(
+  ctx: Context,
+  session: Agent['session'] | undefined,
+  blocks: SessionPromptParams['contentBlocks'],
+): Promise<ContentBlock[]> {
+  let normalized: (SdkPromptBlock | DurablePromptRefPart)[] = blocks
+  if (blocks.some(durableRefCandidate)) {
+    const candidateParts = blocks.map((block): SdkPromptBlock | DurablePromptRefPart => {
+      if (!durableRefCandidate(block)) return block
+      const raw = block as { readonly type: string; readonly attachment?: unknown }
+      if (raw.type === 'image' || raw.type === 'image-ref') {
+        return { type: 'image-ref', attachment: raw.attachment as ImageAttachmentRef }
+      }
+      return { type: 'file-ref', attachment: raw.attachment as FileAttachmentRef }
+    })
+    normalized = canonicalDurablePromptParts(refLookupForSession(session), candidateParts)
+    const attachments = ctx.get('attachments')
+    if (
+      attachments !== undefined
+      && typeof attachments.imageExists === 'function'
+      && typeof attachments.fileExists === 'function'
+    ) {
+      await verifyDurablePromptRefsExist(
+        attachments,
+        normalized.filter((part): part is DurablePromptRefPart =>
+          part.type === 'image-ref' || part.type === 'file-ref'),
+      )
+    }
+  }
+  const images = normalized.filter(encodedImage)
+  let admittedRefs: readonly ImageAttachmentRef[] = []
+  if (images.length > 0) {
+    const attachments = ctx.get('attachments')
+    if (attachments === undefined) throw new Error('SDK image prompt requires an attachment store')
+    admittedRefs = await admitEncodedImages(attachments, images.map((image): EncodedImageAttachment => ({
+      data: image.data,
+      mediaType: image.mimeType,
+    })))
+  }
   let next = 0
-  return blocks.map(block => encodedImage(block)
-    ? { type: 'image', attachment: refs[next++] as ImageAttachmentRef }
-    : block)
+  return normalized.map((part): ContentBlock => {
+    if (encodedImage(part)) {
+      return { type: 'image', attachment: admittedRefs[next++] as ImageAttachmentRef }
+    }
+    if (part.type === 'image-ref') {
+      return { type: 'image', attachment: part.attachment }
+    }
+    if (part.type === 'file-ref') {
+      return { type: 'file', attachment: part.attachment }
+    }
+    return part
+  })
 }
 
 /** Recover the delegating parent from the service-owned scoped carrier. */
@@ -182,7 +254,7 @@ export class HarnessSdkJsonRpcServer {
     // survives; a retained agent accepts followup() silently, so validate the
     // record against the live registry before delivery.
     this.assertLiveAgent(rec, params.sessionId)
-    const content = await durablePromptContent(this.ctx, params.contentBlocks)
+    const content = await durablePromptContent(this.ctx, rec.handle.agent.session, params.contentBlocks)
     // Attachment admission crosses an async boundary where shutdown or an
     // agent-loop reload may detach the retained handle.
     this.assertLiveAgent(rec, params.sessionId)

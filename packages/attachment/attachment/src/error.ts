@@ -21,6 +21,7 @@ const ATTACHMENT_ERROR_CODES = [
   'DUPLICATE_ATTACHMENT_REF',
   'TOO_MANY_FILES',
   'INVALID_ATTACHMENT_REF',
+  'ATTACHMENT_NOT_REFERENCED',
   'ATTACHMENT_CORRUPT',
   'ATTACHMENT_WRITE_FAILED',
   'ATTACHMENT_NOT_FOUND',
@@ -36,6 +37,14 @@ export type AttachmentErrorCode = typeof ATTACHMENT_ERROR_CODES[number]
 const IMAGE_ADMISSION_ERROR_CODE_SET: ReadonlySet<string> = new Set(IMAGE_ADMISSION_ERROR_CODES)
 const ATTACHMENT_ERROR_CODE_SET: ReadonlySet<string> = new Set(ATTACHMENT_ERROR_CODES)
 
+/** Optional structured identity metadata attached to an {@link AttachmentError}. */
+export interface AttachmentErrorOptions extends ErrorOptions {
+  /** Missing or offending attachment identifier when known. */
+  readonly attachmentId?: string
+  /** Missing or offending attachment display name when known. */
+  readonly attachmentName?: string
+}
+
 /**
  * Stable failures suitable for host RPC error mapping.
  *
@@ -48,16 +57,22 @@ const ATTACHMENT_ERROR_CODE_SET: ReadonlySet<string> = new Set(ATTACHMENT_ERROR_
 export class AttachmentError extends Error {
   /** Stable machine-routing failure code. */
   readonly code: AttachmentErrorCode
+  /** Offending or missing attachment identifier when known. */
+  readonly attachmentId?: string
+  /** Offending or missing attachment display name when known. */
+  readonly attachmentName?: string
 
   /**
    * @param message - human-readable failure description without raw bytes or host paths.
    * @param code - stable machine-routing code.
-   * @param options - optional chained cause.
+   * @param options - optional chained cause and attachment identity metadata.
    */
-  constructor(message: string, code: AttachmentErrorCode, options?: ErrorOptions) {
-    super(message, options)
+  constructor(message: string, code: AttachmentErrorCode, options?: AttachmentErrorOptions) {
+    super(message, options?.cause === undefined ? undefined : { cause: options.cause })
     this.name = 'AttachmentError'
     this.code = code
+    if (options?.attachmentId !== undefined) this.attachmentId = options.attachmentId
+    if (options?.attachmentName !== undefined) this.attachmentName = options.attachmentName
   }
 }
 

@@ -25,6 +25,11 @@ export interface ConversationStoreState {
    * Browser-picked attachments stay local and are never persisted here.
    */
   draftAttachments?: readonly RestoredDraftAttachment[]
+  /**
+   * True when {@link draftAttachments} came from a cross-device sync record
+   * truncated at the server cap and awaits operator review or removal.
+   */
+  draftAttachmentsIncomplete?: boolean
   /** Preferred `conversation.view` entry id; null resolves to Chat when registered. */
   view: string | null
   /** Focus request consumed and acknowledged by the addressed View. */

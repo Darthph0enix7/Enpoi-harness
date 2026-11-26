@@ -1264,11 +1264,21 @@ function standingGrantRecord(id, proposal, createdAt) {
     createdAt
   };
 }
-var MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_SEAT_TOOL_DENY, SHIPPED_SEAT_TOOL_POLICY, SHIPPED_TOOL_DEFAULTS, SHIPPED_TOOL_DEFAULT_EXEMPTIONS, SHIPPED_BASH_PATTERNS, HEREDOC_WORD_END, SAFE_ENV_TEMPLATE, CREDENTIAL_PATH, DATA_COMMANDS, FILE_ARG_COMMANDS, FILE_VALUE_FLAGS, PATTERN_FIRST_COMMANDS, HIDDEN_SURFACE, DANGER_VERB_SET, SHELL_INTERPRETERS, INLINE_INTERPRETERS, SOURCE_BUILTINS, OPAQUE_EXECUTORS, VERSION_HELP_FLAGS, MAX_WRAPPER_DEPTH, MAX_ANALYSIS_CHARS, MAX_SUBSTITUTION_DEPTH, WRAPPER_VALUE_FLAGS, COMMAND_WRAPPERS;
+var READ_ONLY_VETO_TOOLS, MUTATION_TOOLS, FULL_ACCESS_ASK_REASON, REVIEW_RUN_TOOL, REVIEW_ROLES, REVIEW_CHILD_LABEL_PREFIXES, REVIEW_CHILD_PERSONA, SHIPPED_SEAT_TOOL_DENY, SHIPPED_SEAT_TOOL_POLICY, SHIPPED_TOOL_DEFAULTS, SHIPPED_TOOL_DEFAULT_EXEMPTIONS, SHIPPED_BASH_PATTERNS, HEREDOC_WORD_END, SAFE_ENV_TEMPLATE, CREDENTIAL_PATH, DATA_COMMANDS, FILE_ARG_COMMANDS, FILE_VALUE_FLAGS, PATTERN_FIRST_COMMANDS, HIDDEN_SURFACE, DANGER_VERB_SET, SHELL_INTERPRETERS, INLINE_INTERPRETERS, SOURCE_BUILTINS, OPAQUE_EXECUTORS, VERSION_HELP_FLAGS, MAX_WRAPPER_DEPTH, MAX_ANALYSIS_CHARS, MAX_SUBSTITUTION_DEPTH, WRAPPER_VALUE_FLAGS, COMMAND_WRAPPERS;
 var init_policy = __esm({
   "src/policy.ts"() {
     "use strict";
-    MUTATION_TOOLS = /* @__PURE__ */ new Set(["bash", "edit", "write", "str_replace_editor"]);
+    READ_ONLY_VETO_TOOLS = Object.freeze([
+      "bash",
+      "edit",
+      "write",
+      "str_replace_editor",
+      "peer_switch_model",
+      "peer_ask",
+      "peer_answer",
+      "peer_cancel"
+    ]);
+    MUTATION_TOOLS = new Set(READ_ONLY_VETO_TOOLS);
     FULL_ACCESS_ASK_REASON = "approved by the session's Full access mode";
     REVIEW_RUN_TOOL = "review_run";
     REVIEW_ROLES = /* @__PURE__ */ new Set([
@@ -22119,12 +22129,67 @@ function installReviewRunTool(ctx) {
 
 // src/approval-parks.ts
 import { mkdirSync, readFileSync as readFileSync2, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join as join2 } from "node:path";
+import { dirname } from "node:path";
+import { dshHomePath } from "@deepseek-ai/dsh-home-paths";
 
 // src/forwarding.ts
 init_policy();
 import { isAbsolute as isAbsolute2, relative, resolve as resolvePath } from "node:path";
+
+// src/session-authority.ts
+function classifySessionAuthority(header) {
+  if (header === void 0 || header === null || typeof header !== "object" || Array.isArray(header)) {
+    return { kind: "missing" };
+  }
+  const rawParent = header.parentSession;
+  const hasParentField = rawParent !== void 0;
+  const usableParent = typeof rawParent === "string" && rawParent.trim() !== "" ? rawParent : void 0;
+  const rawOrigin = header.origin;
+  const isSubagentOrigin = rawOrigin === "subagent";
+  const hasUnexpectedOrigin = rawOrigin !== void 0 && !isSubagentOrigin;
+  const rawDepth = header.delegationDepth;
+  const isValidDepth = typeof rawDepth === "number" && Number.isSafeInteger(rawDepth) && rawDepth >= 0;
+  const hasInvalidDepth = rawDepth !== void 0 && !isValidDepth;
+  const hasPositiveDepth = isValidDepth && rawDepth > 0;
+  const rawSeeded = header.isSeeded;
+  const hasInvalidSeeded = rawSeeded !== void 0 && typeof rawSeeded !== "boolean";
+  const depth = hasPositiveDepth ? rawDepth : 1;
+  if (hasUnexpectedOrigin || hasInvalidDepth || hasInvalidSeeded) {
+    return {
+      kind: "delegated",
+      ...usableParent !== void 0 ? { parentSessionId: usableParent } : {},
+      depth,
+      reason: "ambiguous session lineage"
+    };
+  }
+  if (hasParentField && usableParent === void 0) {
+    return {
+      kind: "delegated",
+      depth,
+      reason: "unusable parentSession"
+    };
+  }
+  if (isSubagentOrigin || hasPositiveDepth) {
+    return {
+      kind: "delegated",
+      ...usableParent !== void 0 ? { parentSessionId: usableParent } : {},
+      depth,
+      reason: usableParent === void 0 ? isSubagentOrigin ? "subagent origin without usable parentSession" : "positive delegationDepth without usable parentSession" : isSubagentOrigin ? "subagent origin" : "positive delegationDepth"
+    };
+  }
+  if (usableParent !== void 0) {
+    if (rawSeeded === true) return { kind: "root" };
+    return {
+      kind: "delegated",
+      parentSessionId: usableParent,
+      depth,
+      reason: "parentSession without seed lineage"
+    };
+  }
+  return { kind: "root" };
+}
+
+// src/forwarding.ts
 var REPARK = Symbol("approval-repark");
 var FORWARDED_ASK_MARKER = "[forwarded child ask]";
 var DEFAULT_PARK_TTL_MS = 10 * 60 * 1e3;
@@ -22164,11 +22229,10 @@ function windowText(ms) {
 }
 function delegatedChildOf(agent) {
   const header = agent?.session?.header;
+  const authority = classifySessionAuthority(header);
+  if (authority.kind !== "delegated" || authority.parentSessionId === void 0) return void 0;
   const childSessionId = typeof header?.id === "string" && header.id !== "" ? header.id : void 0;
-  const parentSessionId = typeof header?.parentSession === "string" && header.parentSession !== "" ? header.parentSession : void 0;
-  if (childSessionId === void 0 || parentSessionId === void 0) return void 0;
-  const rawDepth = header?.delegationDepth;
-  const depth = typeof rawDepth === "number" && Number.isSafeInteger(rawDepth) && rawDepth > 0 ? rawDepth : 1;
+  if (childSessionId === void 0) return void 0;
   let label;
   for (const event of agent?.session?.ownEvents?.() ?? []) {
     if (event?.type !== "subagent/descriptor") continue;
@@ -22178,8 +22242,8 @@ function delegatedChildOf(agent) {
   const cwd = typeof header?.cwd === "string" && header.cwd !== "" ? header.cwd : void 0;
   return {
     childSessionId,
-    parentSessionId,
-    depth,
+    parentSessionId: authority.parentSessionId,
+    depth: authority.depth,
     label: label ?? `child ${shortId(childSessionId)}`,
     ...cwd !== void 0 ? { cwd } : {}
   };
@@ -22416,6 +22480,14 @@ var ChildApprovalForwarder = class {
   async resolveAsk(input2) {
     const child = delegatedChildOf(input2.agent);
     if (child === void 0) {
+      const authority = classifySessionAuthority(input2.agent?.session?.header);
+      if (authority.kind === "delegated") {
+        this.deps.report(`fail-closed: ${input2.toolName} from delegated session without usable parent (${authority.reason})`);
+        return {
+          kind: "deny",
+          reason: `approval for ${input2.toolName} failed closed: delegated session has no usable parent session (${authority.reason})`
+        };
+      }
       this.deps.report(`deny: non-child ask for ${input2.toolName} reached the child forwarder`);
       return { kind: "deny", reason: `child approval forwarding received a non-child ask for ${input2.toolName}` };
     }
@@ -22945,7 +23017,9 @@ function stableJson(value) {
 }
 
 // src/approval-parks.ts
-var DEFAULT_APPROVAL_PARK_JOURNAL_PATH = join2(homedir(), ".dsh", "cache", "approval-parks.json");
+function defaultApprovalParkJournalPath() {
+  return dshHomePath("cache", "approval-parks.json");
+}
 function readDocument(path) {
   let raw;
   try {
@@ -22975,7 +23049,7 @@ function prune(records) {
     if (id !== void 0 && dropped.has(id)) records.splice(index, 1);
   }
 }
-function createApprovalParkJournal(path = DEFAULT_APPROVAL_PARK_JOURNAL_PATH) {
+function createApprovalParkJournal(path = defaultApprovalParkJournalPath()) {
   let records;
   const current = () => records ??= readDocument(path);
   return {
@@ -23129,6 +23203,363 @@ async function requestRecommendation(ask, call) {
   }
 }
 
+// src/compressor-ownership.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync3, renameSync as renameSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { homedir } from "node:os";
+import { dirname as dirname2, join as join2 } from "node:path";
+var COMPRESSOR_RETRIEVE_TOOL = "compressor_retrieve";
+var COMPRESSOR_RETRIEVE_DENIAL = "compressor_retrieve: locator is unavailable to this session (unknown or not emitted in this session lineage).";
+var CONTEXT_COMPRESSION_AFTER = "contextCompression/after";
+var LOCATOR_PATTERN = /<<compressor:([0-9a-fA-F]{64})>>/;
+var LOCATOR_GLOBAL_PATTERN = /<<compressor:([0-9a-fA-F]{64})>>/g;
+var BARE_HASH_PATTERN = /^[0-9a-fA-F]{64}$/;
+var CANONICAL_HASH_PATTERN = /^[0-9a-f]{64}$/;
+var SPILL_STORED_AT = "Full formatted result stored at:";
+var SPILL_RETRIEVE_HINT = /use read with offset\/limit, or grep this path/i;
+var MAX_LINEAGE_DEPTH = 32;
+var MAX_COMPRESSOR_OWNERSHIP_HASHES = 2048;
+var MAX_COMPRESSOR_OWNERS_PER_HASH = 16;
+var MAX_COMPRESSOR_SESSION_PARENTS = 1024;
+var COMPRESSOR_EXCLUDED_TOOLS = /* @__PURE__ */ new Set([
+  "read",
+  "glob",
+  "grep",
+  "write",
+  "edit",
+  "websearch",
+  "web_search",
+  "webfetch",
+  "web_fetch",
+  "compressor_retrieve",
+  "headroom_retrieve"
+]);
+function defaultCompressorOwnershipPath() {
+  const envHome = process.env.DSH_HOME?.trim();
+  const root = envHome !== void 0 && envHome.length > 0 ? envHome : join2(homedir(), ".dsh");
+  return join2(root, "enpoi-capabilities", "compressor-ownership.json");
+}
+function extractCompressorHash(locatorOrHash) {
+  if (typeof locatorOrHash !== "string" || locatorOrHash.length === 0) return void 0;
+  const locatorMatch = locatorOrHash.match(LOCATOR_PATTERN);
+  const extracted = locatorMatch?.[1] ?? (BARE_HASH_PATTERN.test(locatorOrHash) ? locatorOrHash : void 0);
+  return extracted?.toLowerCase();
+}
+function extractCompressorHashesFromText(text) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  LOCATOR_GLOBAL_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = LOCATOR_GLOBAL_PATTERN.exec(text)) !== null) {
+    const hash2 = match[1]?.toLowerCase();
+    if (hash2 !== void 0 && !seen.has(hash2)) {
+      seen.add(hash2);
+      out.push(hash2);
+    }
+  }
+  return out;
+}
+function flattenContentText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return void 0;
+  const parts = [];
+  for (const block of content) {
+    if (block === null || typeof block !== "object") continue;
+    const candidate = block;
+    if (candidate.type === "text" && typeof candidate.text === "string") {
+      parts.push(candidate.text);
+    }
+  }
+  return parts.length > 0 ? parts.join("") : void 0;
+}
+function isExcludedCompressorTool(toolName) {
+  return toolName !== void 0 && COMPRESSOR_EXCLUDED_TOOLS.has(toolName.toLowerCase());
+}
+function isOfficialSpillNoticeText(text) {
+  return text.includes(SPILL_STORED_AT) && SPILL_RETRIEVE_HINT.test(text);
+}
+function sessionIdOf3(session) {
+  if (session === void 0 || session === null || typeof session !== "object") return void 0;
+  if (typeof session.header?.id === "string" && session.header.id !== "") return session.header.id;
+  if (typeof session.id === "string" && session.id !== "") return session.id;
+  return void 0;
+}
+function parentSessionOf(session) {
+  if (session === void 0 || session === null || typeof session !== "object") return void 0;
+  const parent = session.header?.parentSession;
+  return typeof parent === "string" && parent !== "" ? parent : void 0;
+}
+function isValidOwner(value) {
+  if (value === null || typeof value !== "object") return false;
+  const record2 = value;
+  if (typeof record2["sessionId"] !== "string" || record2["sessionId"] === "") return false;
+  if (!Array.isArray(record2["lineage"]) || record2["lineage"].length === 0) return false;
+  if (!record2["lineage"].every((item) => typeof item === "string" && item !== "")) return false;
+  if (typeof record2["recordedAt"] !== "number" || !Number.isFinite(record2["recordedAt"])) return false;
+  return true;
+}
+function readPersistedState(storePath, maxHashes, maxOwnersPerHash, maxSessionParents) {
+  const hashes = /* @__PURE__ */ new Map();
+  const sessionParents = /* @__PURE__ */ new Map();
+  let raw;
+  try {
+    raw = readFileSync3(storePath, "utf8");
+  } catch {
+    return { hashes, sessionParents };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { hashes, sessionParents };
+  }
+  if (parsed === null || typeof parsed !== "object" || parsed.version !== 1) {
+    return { hashes, sessionParents };
+  }
+  if (Array.isArray(parsed.entries)) {
+    for (const entry of parsed.entries) {
+      if (entry === null || typeof entry !== "object") continue;
+      const candidate = entry;
+      if (typeof candidate.hash !== "string") continue;
+      const hash2 = candidate.hash.toLowerCase();
+      if (!CANONICAL_HASH_PATTERN.test(hash2) || !Array.isArray(candidate.owners)) continue;
+      const validOwners = [];
+      const seenOwners = /* @__PURE__ */ new Set();
+      for (const owner of candidate.owners) {
+        if (!isValidOwner(owner) || seenOwners.has(owner.sessionId)) continue;
+        seenOwners.add(owner.sessionId);
+        validOwners.push({
+          sessionId: owner.sessionId,
+          lineage: [...owner.lineage],
+          recordedAt: owner.recordedAt
+        });
+      }
+      if (validOwners.length > 0) {
+        const trimmed = validOwners.slice(-maxOwnersPerHash);
+        hashes.delete(hash2);
+        hashes.set(hash2, trimmed);
+      }
+    }
+    while (hashes.size > maxHashes) {
+      const oldest = hashes.keys().next().value;
+      if (oldest === void 0) break;
+      hashes.delete(oldest);
+    }
+  }
+  if (Array.isArray(parsed.sessionParents)) {
+    for (const pair of parsed.sessionParents) {
+      if (!Array.isArray(pair) || pair.length !== 2) continue;
+      const [child, parent] = pair;
+      if (typeof child !== "string" || child === "" || typeof parent !== "string" || parent === "" || child === parent) {
+        continue;
+      }
+      sessionParents.delete(child);
+      sessionParents.set(child, parent);
+    }
+    while (sessionParents.size > maxSessionParents) {
+      const oldest = sessionParents.keys().next().value;
+      if (oldest === void 0) break;
+      sessionParents.delete(oldest);
+    }
+  }
+  return { hashes, sessionParents };
+}
+function createCompressorOwnershipStore(options = {}) {
+  const storePath = options.storePath ?? defaultCompressorOwnershipPath();
+  const maxHashes = Math.max(1, options.maxHashes ?? MAX_COMPRESSOR_OWNERSHIP_HASHES);
+  const maxOwnersPerHash = Math.max(1, options.maxOwnersPerHash ?? MAX_COMPRESSOR_OWNERS_PER_HASH);
+  const maxSessionParents = Math.max(1, options.maxSessionParents ?? MAX_COMPRESSOR_SESSION_PARENTS);
+  const now = options.now ?? (() => Date.now());
+  let loaded;
+  let writeSeq = 0;
+  function state() {
+    loaded ??= readPersistedState(storePath, maxHashes, maxOwnersPerHash, maxSessionParents);
+    return loaded;
+  }
+  function persist(current) {
+    const doc = {
+      version: 1,
+      entries: Array.from(current.hashes.entries(), ([hash2, owners]) => ({ hash: hash2, owners })),
+      sessionParents: Array.from(current.sessionParents.entries())
+    };
+    const temporary = `${storePath}.tmp.${process.pid}.${++writeSeq}`;
+    try {
+      mkdirSync2(dirname2(storePath), { recursive: true, mode: 448 });
+      writeFileSync2(temporary, `${JSON.stringify(doc)}
+`, { encoding: "utf8", mode: 384 });
+      renameSync2(temporary, storePath);
+    } catch {
+      try {
+        rmSync2(temporary, { force: true });
+      } catch {
+      }
+    }
+  }
+  function setParentLink(current, childId, parentId) {
+    if (childId === "" || parentId === "" || childId === parentId) return false;
+    const existing = current.sessionParents.get(childId);
+    if (existing === parentId) {
+      current.sessionParents.delete(childId);
+      current.sessionParents.set(childId, parentId);
+      return false;
+    }
+    current.sessionParents.delete(childId);
+    current.sessionParents.set(childId, parentId);
+    while (current.sessionParents.size > maxSessionParents) {
+      const oldest = current.sessionParents.keys().next().value;
+      if (oldest === void 0) break;
+      current.sessionParents.delete(oldest);
+    }
+    return true;
+  }
+  function resolveLineage(current, session, lookup) {
+    const startId = sessionIdOf3(session);
+    if (startId === void 0) return { lineage: [], parentChanged: false };
+    const seen = /* @__PURE__ */ new Set();
+    const lineage = [];
+    let parentChanged = false;
+    let currentId = startId;
+    let currentSession = session;
+    for (let hop = 0; hop <= MAX_LINEAGE_DEPTH && currentId !== void 0; hop += 1) {
+      if (seen.has(currentId)) break;
+      seen.add(currentId);
+      lineage.push(currentId);
+      const directParent = parentSessionOf(currentSession);
+      const lookedUpParent = directParent ?? parentSessionOf(lookup?.sessionById?.(currentId));
+      const parentId = lookedUpParent ?? current.sessionParents.get(currentId);
+      if (parentId !== void 0 && parentId !== currentId) {
+        if (lookedUpParent !== void 0 && setParentLink(current, currentId, lookedUpParent)) {
+          parentChanged = true;
+        }
+        currentId = parentId;
+        currentSession = lookup?.sessionById?.(parentId);
+      } else {
+        currentId = void 0;
+        currentSession = void 0;
+      }
+    }
+    return { lineage, parentChanged };
+  }
+  return {
+    observeSession(session) {
+      const sid = sessionIdOf3(session);
+      const parent = parentSessionOf(session);
+      if (sid === void 0 || parent === void 0 || sid === parent) return;
+      const current = state();
+      if (setParentLink(current, sid, parent)) {
+        persist(current);
+      }
+    },
+    record(rawHash, session, lookup) {
+      const hash2 = rawHash.toLowerCase();
+      if (!CANONICAL_HASH_PATTERN.test(hash2)) return false;
+      const current = state();
+      const { lineage } = resolveLineage(current, session, lookup);
+      if (lineage.length === 0) return false;
+      const ownerId = lineage[0];
+      const existingOwners = current.hashes.get(hash2) ?? [];
+      const nextOwners = existingOwners.filter((entry) => entry.sessionId !== ownerId);
+      nextOwners.push({
+        sessionId: ownerId,
+        lineage,
+        recordedAt: now()
+      });
+      while (nextOwners.length > maxOwnersPerHash) {
+        nextOwners.shift();
+      }
+      current.hashes.delete(hash2);
+      current.hashes.set(hash2, nextOwners);
+      while (current.hashes.size > maxHashes) {
+        const oldest = current.hashes.keys().next().value;
+        if (oldest === void 0) break;
+        current.hashes.delete(oldest);
+      }
+      persist(current);
+      return true;
+    },
+    isAllowed(locatorOrHash, callerSession, lookup) {
+      const hash2 = extractCompressorHash(locatorOrHash);
+      if (hash2 === void 0) return false;
+      const current = state();
+      const { lineage: callerLineage, parentChanged } = resolveLineage(current, callerSession, lookup);
+      if (parentChanged) persist(current);
+      if (callerLineage.length === 0) return false;
+      const callerId = callerLineage[0];
+      const callerAncestors = new Set(callerLineage);
+      const owners = current.hashes.get(hash2);
+      if (owners === void 0) return false;
+      return owners.some(
+        (owner) => owner.sessionId === callerId || callerAncestors.has(owner.sessionId) || owner.lineage.includes(callerId)
+      );
+    }
+  };
+}
+function evaluateCompressorRetrieve(exec, store, lookup) {
+  if (exec.name !== COMPRESSOR_RETRIEVE_TOOL) return void 0;
+  const args = exec.arguments;
+  const locator = args !== null && typeof args === "object" && !Array.isArray(args) ? args.locator : void 0;
+  return store.isAllowed(locator, sessionOfExec(exec), lookup) ? void 0 : COMPRESSOR_RETRIEVE_DENIAL;
+}
+function sessionOfExec(exec) {
+  if (exec === null || typeof exec !== "object") return void 0;
+  const agent = exec.agent;
+  if (agent === null || typeof agent !== "object") return void 0;
+  const session = agent.session;
+  return session !== null && typeof session === "object" ? session : void 0;
+}
+function installCompressorOwnership(ctx, store, lookup) {
+  if (typeof ctx.on !== "function") return () => {
+  };
+  const activeScope = new AsyncLocalStorage();
+  const disposeCreated = ctx.on("session/created", ((session) => {
+    store.observeSession(session);
+  }));
+  const disposeAfter = ctx.on(CONTEXT_COMPRESSION_AFTER, ((payload) => {
+    const scope = activeScope.getStore();
+    if (scope === void 0 || payload === null || typeof payload !== "object") return;
+    const record2 = payload;
+    if (record2.source !== "tools/post-execute" || !Array.isArray(record2.messages)) return;
+    for (const msg of record2.messages) {
+      if (msg === null || typeof msg !== "object") continue;
+      const content = msg.content;
+      if (typeof content !== "string") continue;
+      for (const hash2 of extractCompressorHashesFromText(content)) {
+        if (!scope.recordedHashes.has(hash2)) {
+          scope.recordedHashes.add(hash2);
+          store.record(hash2, scope.session, lookup);
+        }
+      }
+    }
+  }));
+  const disposePost = ctx.on("tools/post-execute", (async (exec, result, next) => {
+    const execSession = sessionOfExec(exec);
+    store.observeSession(execSession);
+    const beforeText = flattenContentText(result?.content) ?? "";
+    const beforeHashes = new Set(extractCompressorHashesFromText(beforeText));
+    const excluded = isExcludedCompressorTool(exec?.name);
+    const beforeWasSpill = isOfficialSpillNoticeText(beforeText);
+    const scope = execSession !== void 0 ? { session: execSession, recordedHashes: /* @__PURE__ */ new Set() } : void 0;
+    const decision = scope !== void 0 ? await activeScope.run(scope, next) : await next();
+    if (scope !== void 0 && !excluded && !beforeWasSpill && decision !== null && typeof decision === "object" && decision.kind === "accept" && decision.content !== void 0) {
+      const afterText = flattenContentText(decision.content);
+      if (afterText !== void 0) {
+        for (const hash2 of extractCompressorHashesFromText(afterText)) {
+          if (!beforeHashes.has(hash2) && !scope.recordedHashes.has(hash2)) {
+            scope.recordedHashes.add(hash2);
+            store.record(hash2, scope.session, lookup);
+          }
+        }
+      }
+    }
+    return decision;
+  }), { prepend: true });
+  return () => {
+    disposePost();
+    disposeAfter();
+    disposeCreated();
+  };
+}
+
 // src/index.ts
 var publishedCatalog = /* @__PURE__ */ new Map();
 var lastOnDemandSurfaceSignature;
@@ -23246,6 +23677,18 @@ function apply(ctx, config2 = {}) {
     }
   }).catch(() => {
   });
+  const compressorOwnership = createCompressorOwnershipStore();
+  const compressorLineageLookup = {
+    sessionById: (sessionId) => {
+      const agents = ctx.get("agents");
+      const fromAgent = agents?.get?.(sessionId)?.session;
+      if (fromAgent !== void 0) return fromAgent;
+      const sessions = ctx.get("sessions");
+      return sessions?.get?.(sessionId);
+    }
+  };
+  const disposeCompressorOwnership = installCompressorOwnership(ctx, compressorOwnership, compressorLineageLookup);
+  ctx.effect(() => disposeCompressorOwnership, "enpoi-capabilities: compressor ownership");
   const disposeGuard = ctx.tools.guard((exec) => {
     const guardSession = exec.agent?.session;
     const decision = evaluateToolCall(
@@ -23257,6 +23700,10 @@ function apply(ctx, config2 = {}) {
     );
     if (!decision.allowed) {
       return decision.syntheticResult ?? `[CAPABILITY_DISABLED] Tool '${exec.name}' is disabled by operator preference.`;
+    }
+    const compressorDenial = evaluateCompressorRetrieve(exec, compressorOwnership, compressorLineageLookup);
+    if (compressorDenial !== void 0) {
+      return compressorDenial;
     }
     return void 0;
   });
@@ -23963,14 +24410,15 @@ ${rows.map(renderMountRow).join("\n")}`;
     for (let hop = 0; hop < 33; hop += 1) {
       if (current === void 0) return void 0;
       const header = current.session?.header;
-      const parentSession = header?.parentSession;
-      if (parentSession === void 0 || parentSession === "") {
+      const authority = classifySessionAuthority(header);
+      if (authority.kind === "root" || authority.kind === "missing") {
         const id = typeof header?.id === "string" && header.id !== "" ? header.id : current.id ?? "";
         if (id === "") return void 0;
         const cwd = typeof header?.cwd === "string" && header.cwd !== "" ? header.cwd : void 0;
         return { id, agent: current, ...cwd !== void 0 ? { cwd } : {} };
       }
-      current = agents.get(String(parentSession));
+      if (authority.parentSessionId === void 0) return void 0;
+      current = agents.get(authority.parentSessionId);
     }
     return void 0;
   }
@@ -24124,6 +24572,10 @@ ${rows.map(renderMountRow).join("\n")}`;
       const mcpDenial = sessionMountsAccess.toolDenyReason(execSession, exec.name);
       if (mcpDenial !== "") return { kind: "deny", reason: mcpDenial };
     }
+    const compressorDenial = evaluateCompressorRetrieve(exec, compressorOwnership, compressorLineageLookup);
+    if (compressorDenial !== void 0) {
+      return { kind: "deny", reason: compressorDenial };
+    }
     const config3 = readPermissionConfig();
     const isBash = exec.name === "bash";
     const customSeam = !isBash && exec.name.startsWith("custom_") ? ctx.get("customToolCommands") : void 0;
@@ -24138,7 +24590,10 @@ ${rows.map(renderMountRow).join("\n")}`;
       if (customSeam !== void 0) customSeam.discard?.(exec.name, customIdentity);
     };
     const capturedCommand = customCommand ?? (isBash && typeof exec.arguments?.command === "string" ? exec.arguments.command : void 0);
+    const approvalPolicy = readApprovalPolicy(exec.agent);
+    const authority = classifySessionAuthority(exec.agent?.session?.header);
     const delegated = delegatedChildOf(exec.agent);
+    const isDelegated = authority.kind === "delegated" || approvalPolicy?.delegated === true;
     const decision = resolvePolicy({
       toolName: exec.name,
       command: isBash && typeof exec.arguments?.command === "string" ? exec.arguments.command : void 0,
@@ -24149,7 +24604,7 @@ ${rows.map(renderMountRow).join("\n")}`;
       // Computed only for the gated tool: the descriptor scan is unnecessary
       // work for every other call.
       reviewer: exec.name === REVIEW_RUN_TOOL ? reviewerSeatOf(exec.agent, currentPresetOf) : false,
-      delegated: delegated !== void 0,
+      delegated: isDelegated,
       config: config3,
       sandboxMode: readSandboxMode(exec.agent),
       mcpServerNames: readMcpServerNames() ?? []
@@ -24159,9 +24614,16 @@ ${rows.map(renderMountRow).join("\n")}`;
       discardCustomSnapshot();
       return { kind: "deny", reason: decision.reason };
     }
-    const approvalPolicy = readApprovalPolicy(exec.agent);
     if (approvalPolicy?.policy === "never") {
-      if (delegated !== void 0) {
+      if (isDelegated) {
+        if (delegated === void 0) {
+          discardCustomSnapshot();
+          const detail = authority.kind === "delegated" ? authority.reason : "delegated marker without usable parent session";
+          return {
+            kind: "deny",
+            reason: `approval for ${exec.name} failed closed: delegated session has no usable parent session (${detail})`
+          };
+        }
         const resolution = await approvalForwarding.forward({
           agent: exec.agent,
           toolName: exec.name,
@@ -24202,6 +24664,14 @@ ${rows.map(renderMountRow).join("\n")}`;
       return {
         kind: "deny",
         reason: `${exec.name} was denied automatically: this ${approvalPolicy.delegated ? "delegated subagent" : "session"} runs with approval prompts disabled, so the approval policy denied it without asking a user. It required approval because: ${decision.reason}.`
+      };
+    }
+    if (isDelegated && delegated === void 0) {
+      discardCustomSnapshot();
+      const detail = authority.kind === "delegated" ? authority.reason : "delegated marker without usable parent session";
+      return {
+        kind: "deny",
+        reason: `approval for ${exec.name} failed closed: delegated session has no usable parent session (${detail})`
       };
     }
     if (typeof exec.callId === "string" && pendingGrants.size < 128) {
@@ -24311,12 +24781,16 @@ ${rows.map(renderMountRow).join("\n")}`;
   ctx.effect(() => disposeGrantWatch, "enpoi-capabilities: allow-always grant writer");
 }
 export {
+  COMPRESSOR_RETRIEVE_DENIAL,
+  COMPRESSOR_RETRIEVE_TOOL,
   CapabilitiesSchema,
   Config,
   KNOWN_CAPABILITIES,
   OrchestrationSettingsSchema,
   PROTECTED_CAPABILITIES,
   apply,
+  createCompressorOwnershipStore,
+  evaluateCompressorRetrieve,
   evaluateToolCall,
   initialCapabilitiesState,
   inject,

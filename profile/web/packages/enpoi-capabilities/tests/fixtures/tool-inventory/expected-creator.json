@@ -4,7 +4,7 @@
   "captureSource": "apps/web/tests/keyless-tool-inventory.e2e.ts",
   "captureReceipt": {
     "version": "0.1.7-enpoi.2",
-    "head": "72d7f94ad2f7186d1e0f4dfc7600391eaeb7112c",
+    "head": "00ff2d64a46e4a044bc1d59f6c24eff8e52c1523",
     "profileFingerprints": {
       "dsh-enpoi-agent-switch": {
         "dir": "enpoi-agent-switch",
@@ -13,13 +13,13 @@
       },
       "dsh-enpoi-capabilities": {
         "dir": "enpoi-capabilities",
-        "sourceInputs": "c24dce09ce18e8a4e2f68056ddb20c3bd03027e49943a0209dccc17853eff9bc",
-        "outputSha": "d31349876a108272656b8fb83279dccaf428117e85171c9ffdfaf15a75c069c4"
+        "sourceInputs": "7d63d5c1e4ce32d70994391bf828301c1985c653669cc079b8efe8b5482053ec",
+        "outputSha": "fdf43f39f70c69304021659fc986895b4ccb81d7a685d8d2e5a7786dc5edb6de"
       },
       "dsh-enpoi-cascade": {
         "dir": "enpoi-cascade",
-        "sourceInputs": "fd4adec53f228748dceaddaa2bddb7390e382f06cd6697b7d37f1aa8a2238af5",
-        "outputSha": "10790e5463a14011153561c059964818a6bb6cb8395556a6e5d4a4f3ad839e04"
+        "sourceInputs": "efeba53b5fc504639932d07455f75e97fb31bed62c9f4faa550ec3f527cb8871",
+        "outputSha": "693bed2f221567bae59ecfb8f89837990bcd1c93512a670748cb7364f04772c4"
       },
       "dsh-enpoi-catalog-rules": {
         "dir": "enpoi-catalog-rules",
@@ -43,8 +43,8 @@
       },
       "dsh-enpoi-council": {
         "dir": "enpoi-council",
-        "sourceInputs": "40653c26fa9431175c712f49525784be51475e6101af623ab55a0565f21aedf6",
-        "outputSha": "2507fd0f76bf9db382c2aa9bb9c4219978db889c082bf4b4b78170165e893458"
+        "sourceInputs": "146ff1fe9a72b7512fc2924e4d6902f3061823908ebadce2316ef5390db39fa9",
+        "outputSha": "a9d62427d04b073bdf494b69f5a5956e1df60ff0c3b5260ac22ab28778e8fa41"
       },
       "dsh-enpoi-custom-tools": {
         "dir": "enpoi-custom-tools",
@@ -68,8 +68,8 @@
       },
       "dsh-enpoi-fs-ops": {
         "dir": "enpoi-fs-ops",
-        "sourceInputs": "c287e833e224f67d99b99d159f1fa952d03e91da3f452c54514d7b01354b9e06",
-        "outputSha": "6b6a03de535b501cff481ba95d5a49b960f87d11f01072d2c81b7522554c9202"
+        "sourceInputs": "7a07cd306b27dadd0ed619a2296eae6a66d2c03a061a72f13a6263aa197fbfa6",
+        "outputSha": "e8e8c9b50a9dd0f7828bf5d4ad6560d5f43472993eb20acf57d8559ae5f07fd6"
       },
       "dsh-enpoi-git": {
         "dir": "enpoi-git",
@@ -81,6 +81,16 @@
         "sourceInputs": "9f421e3e77d91789d3b842d8e203285f014108a0fb2b253ca50d7b3cd3d43998",
         "outputSha": "2356cf3f9b0f3fbde084fe16fa79ee72075f6322e4556497c9d2e0835017ff39"
       },
+      "dsh-enpoi-jarvis-worker": {
+        "dir": "enpoi-jarvis-worker",
+        "sourceInputs": "370c3e8aca7f9a9d9c8966f5911ac586918145f02c9a5d2a62db9e0b49e8f824",
+        "outputSha": "3f3f3e18338fa67816f50d596dc4a1e44b4467b180fcbf6511da38290f7c4ac2"
+      },
+      "dsh-enpoi-job-guard": {
+        "dir": "enpoi-job-guard",
+        "sourceInputs": "e052239a436c50ad67aa8d5b782fd06fafba3d8f4fd5a1a8b093a970e664e0a6",
+        "outputSha": "3bbc63f81ea69f7ec41c8dc5706b298d875b12ef06d5b514cc7be6e3b84e9593"
+      },
       "dsh-enpoi-living-brief": {
         "dir": "enpoi-living-brief",
         "sourceInputs": "bf007df44ed7e18f249efd7ba3e9ff013e5f1f2116dee6b3012a90093bb196e2",
@@ -88,8 +98,8 @@
       },
       "dsh-enpoi-memory": {
         "dir": "enpoi-memory",
-        "sourceInputs": "3b2110d210f21e3e742b28a1e5554fa5a23206d5a54a364f22ff7a20e7b5e8f7",
-        "outputSha": "15bb10dada1879d1add172c411ccbc20bfef86b3563d5df5433b6db8d7f1f91f"
+        "sourceInputs": "b4954a19a646d43e737b8d692e88f6394b13f1f7976a29b1238b68e1ca3a4d65",
+        "outputSha": "5e18d46b3db28ee4e5927d48172eed93fdd61756d8ac03f0f1d55e98a4b3a74c"
       },
       "dsh-enpoi-model-chains": {
         "dir": "enpoi-model-chains",
@@ -103,8 +113,8 @@
       },
       "dsh-enpoi-peer-bridge": {
         "dir": "enpoi-peer-bridge",
-        "sourceInputs": "0c16b2e9869f9fede86c1e91225e5be785f20ae91fbf24c4faa1185c3636e547",
-        "outputSha": "f0e5baa2c665ca023ae02019c18f1082f188c0f45de205ad81ad24a789c488b1"
+        "sourceInputs": "a6b93918e879d8640234f91f2d4ecbc478e29fb0c5241a8069ae7c5c1905aa9a",
+        "outputSha": "8bf8bcb723a741d79fdcd4dffb0e2305eec7ec158958e342e16ad965159eb344"
       },
       "dsh-enpoi-peer-routing": {
         "dir": "enpoi-peer-routing",
@@ -143,8 +153,8 @@
       },
       "dsh-enpoi-ui-state": {
         "dir": "enpoi-ui-state",
-        "sourceInputs": "2cd53ab1c52bd69605db38419d1303bdaee81b50008095bec10274047fecbd96",
-        "outputSha": "9da3e518dbf583eb90817302353cb8d9993c72c71deb85adec7bf4111d8a3c06"
+        "sourceInputs": "e815cd37d5d20d9274db1a7f7567ee7a6c787d0ca3fd0d22eac4ac350f1d9b35",
+        "outputSha": "1d161699dd6b9b10d3d098b99144aced209309b1aace22b0edd1999bc49d8881"
       },
       "dsh-enpoi-update-check": {
         "dir": "enpoi-update-check",
@@ -158,8 +168,13 @@
       },
       "dsh-enpoi-whiteboard": {
         "dir": "enpoi-whiteboard",
-        "sourceInputs": "3a67b035801c9aa17046ff264835367b5b06faa1c441dd69f700b3d5ca5a9c67",
-        "outputSha": "4b1c55bfab7d242a8c3a353ebde75721331f29f30f48817e69fde3bf84990a64"
+        "sourceInputs": "cae010a4b8f4ad2b7bb6dab49b17de45072c78590e8b70bff75048582629845b",
+        "outputSha": "4b2dd79d27f8d4fb895e3fc5096b3babe34398dc26b2e1ca718c72fcb9c4d225"
+      },
+      "dsh-enpoi-worker-credentials": {
+        "dir": "enpoi-worker-credentials",
+        "sourceInputs": "ef68b9bb0246bc9419b19f4f097ebf2f85b60943ccb60c24f4bfcb9a2d31d9d2",
+        "outputSha": "3b4719045772d8159d4bc3d197ca2215cf6f1ceb640c15c3d565d351e4968d49"
       }
     },
     "externalBundles": {
@@ -248,16 +263,16 @@
         "entry": "83b1e4e90a82ef3c0b15eb9ff49c630cf061f33dbf6f98854fa884ee7665c8a5"
       }
     },
-    "combinedDigest": "607c5b026fa11cb706fea20a4e63aae5cc666e894ae278fbc91c04c994248faa"
+    "combinedDigest": "ec0796a4e0539bfe80337fcb281868c6529e595c5ce65ee3b4b60066f844695d"
   },
   "captureClientBuild": {
     "artifacts": {
       "fileCount": 378,
-      "sha256": "9321e329b12ce4960f4db9e4fe81167f9d1ab6c21cbdaa82a282e57abbfd8787"
+      "sha256": "3c337c47c47ebb86ff827073455023943a12cf3f556cdd0833f594585f6a9790"
     },
     "environment": {
       "DSH_CLIENT_BUILD_PROFILE": "official",
-      "DSH_CLIENT_COMMIT_HASH": "72d7f94",
+      "DSH_CLIENT_COMMIT_HASH": "00ff2d6",
       "DSH_CLIENT_TITLE": "DeepSeek Harness",
       "DSH_CLIENT_VERSION": "0.1.7-enpoi.2"
     }

@@ -143,6 +143,13 @@ export interface SubagentCapabilities {
 }
 
 /**
+ * How a settled continuable child's closing report enters the parent's notice:
+ * `'bounded'` (default) caps the inline excerpt and spills oversized text;
+ * `'full-inline'` bypasses the ordinary cap up to the hard ceiling before spilling.
+ */
+export type SubagentReportMode = 'bounded' | 'full-inline'
+
+/**
  * What a caller asks for when starting a ONE-SHOT subagent. The tool layer
  * builds this from the model's `{ description, prompt }` plus its own config;
  * the service validates {@link SubagentCapabilities} against the named provider
@@ -211,6 +218,13 @@ export interface SubagentStartRequest {
    * synthesis is returned directly by the orchestrating tool.
    */
   readonly quiet?: boolean
+  /**
+   * Per-spawn override for the child's settlement report delivery mode.
+   * `'bounded'` (default) caps the inline excerpt at `settlementReportMaxChars`
+   * and spills oversized text; `'full-inline'` delivers the report inline in
+   * full up to `settlementReportHardMaxChars` before spilling.
+   */
+  readonly reportMode?: SubagentReportMode
 }
 
 /**

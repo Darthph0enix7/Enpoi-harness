@@ -1503,14 +1503,113 @@ describe('enpoi-whiteboard tools', () => {
     expect((settings.board as WhiteboardStore).docs.sessions['sess-1']?.entries.some((entry) => entry.id === 'm')).toBe(true)
   })
 
-  it('refuses a session write when the execution carries no session id', async () => {
+  it('refuses a session write when a root execution carries no session id', async () => {
     const settings = makeSettings()
     const { ctx, definitions } = makeCtx(settings)
     applyWhiteboard(ctx as never, {})
-    const result = await definitions.get('whiteboard_write')!.execute({ entries: [{ id: 'a', kind: 'rule', text: 'x' }] }, {})
+    const result = await definitions.get('whiteboard_write')!.execute(
+      { entries: [{ id: 'a', kind: 'rule', text: 'x' }] },
+      { agent: { session: { header: { cwd: '/tmp/opencode/heart-home' } } } },
+    )
     expect(result.ok).toBe(false)
     expect(String(result.message)).toContain('requires a session id')
     expect(settings.board).toBeUndefined()
+  })
+
+  it('allows a user fork to author, blocks subagent and orphan subagent headers, and fails closed when headerless', async () => {
+    const settings = makeSettings(layeredStore())
+    const { ctx, definitions } = makeCtx(settings)
+    applyWhiteboard(ctx as never, {})
+
+    // User fork (parentSession + isSeeded: true, no origin, delegationDepth absent or 0) may author.
+    for (const forkExec of [
+      { agent: { session: { id: 'fork-live', header: { cwd: '/p', parentSession: 'sess-1', isSeeded: true } } } },
+      { agent: { session: { id: 'fork-restored', header: { cwd: '/p', parentSession: 'sess-1', isSeeded: true, delegationDepth: 0 } } } },
+    ]) {
+      const read = await definitions.get('whiteboard_read')!.execute({}, forkExec)
+      expect(read.ok).toBe(true)
+      expect((read.entries as Array<Record<string, unknown>>).map((entry) => entry.id)).toContain('s1')
+
+      const written = await definitions.get('whiteboard_write')!.execute({
+        entries: [{ id: 'fork-note', kind: 'fact', text: 'fork authored' }],
+      }, forkExec)
+      expect(written.ok).toBe(true)
+      expect((await definitions.get('whiteboard_pin')!.execute({ id: 'fork-note' }, forkExec)).ok).toBe(true)
+      expect((await definitions.get('whiteboard_unpin')!.execute({ id: 'fork-note' }, forkExec)).ok).toBe(true)
+      expect((await definitions.get('whiteboard_forget')!.execute({ id: 'fork-note' }, forkExec)).ok).toBe(true)
+    }
+
+    // Subagents (with parent) and orphan subagents (origin 'subagent' or delegationDepth > 0 without parent) are blocked.
+    const beforeBlocked = JSON.stringify(settings.board)
+    for (const blockedExec of [
+      { agent: { session: { id: 'sub-1', header: { cwd: '/p', parentSession: 'sess-1', origin: 'subagent', delegationDepth: 1 } } } },
+      { agent: { session: { id: 'sub-seeded', header: { cwd: '/p', parentSession: 'sess-1', isSeeded: true, origin: 'subagent', delegationDepth: 1 } } } },
+      { agent: { session: { id: 'orphan-origin', header: { cwd: '/p', origin: 'subagent' } } } },
+      { agent: { session: { id: 'orphan-depth', header: { cwd: '/p', delegationDepth: 1 } } } },
+      { agent: { session: { id: 'orphan-empty-parent', header: { cwd: '/p', parentSession: '', origin: 'subagent', delegationDepth: 1 } } } },
+    ]) {
+      for (const [tool, args] of [
+        ['whiteboard_write', { scope: 'global', entries: [{ id: 'x', kind: 'rule', text: 'blocked' }] }],
+        ['whiteboard_pin', { id: 'g1' }],
+        ['whiteboard_unpin', { id: 'g1' }],
+        ['whiteboard_forget', { id: 'g1' }],
+      ] as const) {
+        const result = await definitions.get(tool)!.execute(args, blockedExec)
+        expect(result.ok, `${tool} ${JSON.stringify(blockedExec)}`).toBe(false)
+        expect(result.reason, tool).toBe('refused')
+        expect(String(result.message), tool).toContain('the whiteboard is authored by the main session; children read it')
+      }
+    }
+
+    // Headerless executions fail closed across all mutating tools (including global scope).
+    for (const headerlessExec of [
+      {},
+      { agent: { session: { id: 'sess-1' } } },
+    ]) {
+      for (const [tool, args] of [
+        ['whiteboard_write', { entries: [{ id: 'x', kind: 'rule', text: 'no header' }] }],
+        ['whiteboard_write', { scope: 'global', entries: [{ id: 'x', kind: 'rule', text: 'no header global' }] }],
+        ['whiteboard_pin', { id: 'g1' }],
+        ['whiteboard_unpin', { id: 'g1' }],
+        ['whiteboard_forget', { id: 'g1' }],
+      ] as const) {
+        const result = await definitions.get(tool)!.execute(args, headerlessExec)
+        expect(result.ok, `${tool} ${JSON.stringify(headerlessExec)}`).toBe(false)
+        expect(result.reason, tool).toBe('refused')
+      }
+    }
+    expect(JSON.stringify(settings.board)).toBe(beforeBlocked)
+  })
+
+  it('matches enpoi-memory classifySessionAuthority across every header shape (parity)', async () => {
+    const { classifySessionAuthority: wbClassify } = await import('../src/session-authority')
+    const { classifySessionAuthority: memClassify, isDelegatedSession } = await import('../../enpoi-memory/src/session-authority')
+    const cases: Array<{ header: Record<string, unknown> | undefined; expectedKind: 'missing' | 'root' | 'delegated' }> = [
+      { header: undefined, expectedKind: 'missing' },
+      { header: { id: 'root-1', isSeeded: false }, expectedKind: 'root' },
+      { header: { id: 'root-2', isSeeded: false, delegationDepth: 0 }, expectedKind: 'root' },
+      { header: { id: 'seeded-root', isSeeded: true }, expectedKind: 'root' },
+      { header: { id: 'fork-live', parentSession: 'origin-1', isSeeded: true }, expectedKind: 'root' },
+      { header: { id: 'fork-restored', parentSession: 'origin-1', isSeeded: true, delegationDepth: 0 }, expectedKind: 'root' },
+      { header: { id: 'child-1', parentSession: 'root-1', origin: 'subagent', delegationDepth: 1 }, expectedKind: 'delegated' },
+      { header: { id: 'child-seeded', parentSession: 'root-1', isSeeded: true, origin: 'subagent', delegationDepth: 1 }, expectedKind: 'delegated' },
+      { header: { id: 'ambig-unseeded', parentSession: 'root-1', isSeeded: false, delegationDepth: 0 }, expectedKind: 'delegated' },
+      { header: { id: 'bare-parent', parentSession: 'root-1' }, expectedKind: 'delegated' },
+      { header: { id: 'orphan-origin', origin: 'subagent' }, expectedKind: 'delegated' },
+      { header: { id: 'orphan-depth', delegationDepth: 2 }, expectedKind: 'delegated' },
+      { header: { id: 'empty-parent', parentSession: '' }, expectedKind: 'delegated' },
+      { header: { id: 'fork-empty-parent', parentSession: '', isSeeded: true }, expectedKind: 'delegated' },
+      { header: { id: 'bad-depth', delegationDepth: -1 }, expectedKind: 'delegated' },
+      { header: { id: 'bad-origin', origin: 'external' }, expectedKind: 'delegated' },
+      { header: { id: 'bad-seeded', isSeeded: 'yes' }, expectedKind: 'delegated' },
+    ]
+    for (const { header, expectedKind } of cases) {
+      const wb = wbClassify(header)
+      const mem = memClassify(header)
+      expect(wb).toEqual(mem)
+      expect(wb.kind, JSON.stringify(header)).toBe(expectedKind)
+      expect(isDelegatedSession(header), JSON.stringify(header)).toBe(expectedKind !== 'root')
+    }
   })
 
   it('replays the write across a settings revision conflict (no silent clobber)', async () => {

@@ -51,20 +51,23 @@ function child(
 }
 
 interface Bench {
-  ctx: Context
   interrupt: ReturnType<typeof vi.fn>
   listDescendants: ReturnType<typeof vi.fn>
   stop: (cause: Record<string, unknown>) => Promise<void>
+  stopAll: (window?: symbol) => void
 }
 
 function bench(entries: SubagentDescendantListEntry[]): Bench {
-  const listeners: Array<(session: { id: SessionId }, event: SessionEvent) => void> = []
   const interrupt = vi.fn()
   const listDescendants = vi.fn(async () => entries)
-  const agent = { id: PARENT }
+  const session = { id: PARENT }
+  const agent = { id: PARENT, session }
+  const sessionListeners: Array<(session: { id: SessionId }, event: SessionEvent) => void> = []
+  const stopAllListeners: Array<(parent: typeof agent, window: symbol) => void> = []
   const ctx = {
-    on: (name: string, listener: (session: { id: SessionId }, event: SessionEvent) => void) => {
-      if (name === 'session/event') listeners.push(listener)
+    on: (...args: ['session/event', typeof sessionListeners[number]] | ['subagent/stop-all', typeof stopAllListeners[number]]) => {
+      if (args[0] === 'session/event') sessionListeners.push(args[1])
+      else stopAllListeners.push(args[1])
     },
     get: (name: string) => name === 'subagents'
       ? { listDescendants, interrupt }
@@ -77,10 +80,13 @@ function bench(entries: SubagentDescendantListEntry[]): Bench {
       type: 'turn/end',
       data: { reason: { kind: 'aborted', reason: { kind: 'user', ...cause } } },
     } as unknown as SessionEvent
-    for (const listener of listeners) listener({ id: PARENT }, event)
+    for (const listener of sessionListeners) listener(session, event)
     await vi.runAllTimersAsync()
   }
-  return { ctx, interrupt, listDescendants, stop }
+  const stopAll = (window = Symbol()): void => {
+    for (const listener of stopAllListeners) listener(agent, window)
+  }
+  return { interrupt, listDescendants, stop, stopAll }
 }
 
 describe('enpoi-cascade stop intents', () => {
@@ -104,21 +110,48 @@ describe('enpoi-cascade stop intents', () => {
         child('once', PARENT, 1, 11, 'one-shot'),
         { kind: 'diagnostic', id: 'broken' as SessionId, parentId: PARENT, depth: 1, reason: 'unavailable' },
       ])
-      await b.stop({ intent: 'stop-all' })
+      b.stopAll()
+      await vi.runAllTimersAsync()
       expect(b.interrupt).toHaveBeenCalledTimes(1)
-      expect(b.interrupt).toHaveBeenCalledWith('a', { kind: 'ancestor', agent: { id: PARENT } })
+      expect(b.interrupt).toHaveBeenCalledWith('a', { kind: 'ancestor', agent: expect.objectContaining({ id: PARENT }) })
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('keeps the pre-intent stop-all behaviour when no intent is carried', async () => {
+  it('does not cascade directly from a durable Stop-all in addition to the runtime signal', async () => {
     vi.useFakeTimers()
     try {
       const b = bench([child('a', PARENT, 1, 10), child('b', PARENT, 1, 11)])
+      b.stopAll()
+      await b.stop({ intent: 'stop-all' })
       await b.stop({})
+      expect(b.listDescendants).toHaveBeenCalledTimes(1)
       expect(b.interrupt).toHaveBeenCalledTimes(2)
     } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('coalesces repeat presses without dropping a Stop-all after a new turn', async () => {
+    vi.useFakeTimers()
+    const firstRead = Promise.withResolvers<SubagentDescendantListEntry[]>()
+    try {
+      const b = bench([child('a', PARENT, 1, 10)])
+      b.listDescendants.mockReturnValueOnce(firstRead.promise)
+      const window = Symbol()
+      b.stopAll(window)
+      b.stopAll(window)
+      await vi.runAllTimersAsync()
+      expect(b.listDescendants).toHaveBeenCalledTimes(1)
+
+      b.stopAll()
+      await vi.runAllTimersAsync()
+      expect(b.listDescendants).toHaveBeenCalledTimes(2)
+      expect(b.interrupt).toHaveBeenCalledTimes(1)
+    } finally {
+      firstRead.resolve([])
+      await vi.runAllTimersAsync()
       vi.useRealTimers()
     }
   })

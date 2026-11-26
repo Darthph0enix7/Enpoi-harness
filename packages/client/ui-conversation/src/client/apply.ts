@@ -558,6 +558,7 @@ export function apply(ctx: Context, config: Config = Config({})): void {
         removeAttachment: (id) => {
           if (shell.removeAttachment(id)) conversation.releaseDraftAttachment(id)
         },
+        acknowledgeIncompleteAttachments: () => { shell.acknowledgeIncompleteAttachments() },
         resolveDraftAttachments: ids => conversation.resolveDraftAttachments(ids),
         retryFileUpload: (id) => {
           if (sessions.binding(sessionId) !== undefined) conversation.retryFileUpload(sessionId, id)

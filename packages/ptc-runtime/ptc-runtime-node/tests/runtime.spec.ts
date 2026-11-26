@@ -1,3 +1,4 @@
+import { existsSync, realpathSync } from 'node:fs'
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { createServer, type Socket } from 'node:net'
@@ -279,13 +280,35 @@ describe('Node program process', () => {
     }
   })
 
+  /** Pick a writable base outside `/tmp` on Linux so `bwrap --tmpfs /tmp` does not mask the target into ENOENT. */
+  function outsideTmpBase(fallback: string): string {
+    if (process.platform !== 'linux') return fallback
+    const tmp = realpathSync('/tmp')
+    const isInsideTmp = (path: string): boolean => {
+      try {
+        const resolved = realpathSync(path)
+        return resolved === tmp || resolved.startsWith(`${tmp}/`)
+      } catch {
+        return false
+      }
+    }
+    if (!isInsideTmp(fallback)) return fallback
+    if (existsSync('/var/tmp') && !isInsideTmp('/var/tmp')) return '/var/tmp'
+    return fallback
+  }
+
   it.skipIf(!sandboxUsable)('permits workspace writes and denies a symlink to a sibling outside it', async () => {
     const { run, cwd, root } = await setup({}, 'workspace-write')
     const target = join(cwd, 'allowed.txt')
     expect((await run({ program: `await (await import('node:fs/promises')).writeFile(${JSON.stringify(target)}, 'allowed'); return true`, bindings: [] })).value).toBe(true)
     expect(await readFile(target, 'utf8')).toBe('allowed')
-    const outside = join(root, 'outside')
-    await mkdir(outside)
+    // When HOME sits under /tmp, bwrap's `--tmpfs /tmp` masks a /tmp sibling into ENOENT instead of EROFS.
+    const outsideBase = outsideTmpBase(root)
+    const outside = outsideBase === root
+      ? join(root, 'outside')
+      : await mkdtemp(join(outsideBase, '.dsh-node-runtime-outside-'))
+    if (outsideBase === root) await mkdir(outside)
+    else onTestFinished(async () => { await rm(outside, { recursive: true, force: true }) })
     await symlink(outside, join(cwd, 'escape'), process.platform === 'win32' ? 'junction' : 'dir')
     const result = await run({ program: `await (await import('node:fs/promises')).writeFile(${JSON.stringify(join(cwd, 'escape', 'denied.txt'))}, 'denied')`, bindings: [] })
     expect(result.error?.kind).toBe('exception')

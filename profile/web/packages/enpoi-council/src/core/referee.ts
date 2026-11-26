@@ -19,6 +19,7 @@ import {
   disposeSeatFibers,
   startSeatFiber,
   waitForSeatTurn,
+  type SeatFiber,
 } from './fiber.ts'
 import type { Ledger, LedgerStatus } from './ledger.ts'
 import type { CouncilSpec } from './spec.ts'
@@ -137,7 +138,7 @@ export async function runRefereePass(
     'Produce the referee JSON now as your reply text — never through a tool call. Admit proposed entries verbatim (dedupe against the ledger); flip statuses only where the burden of proof was met; issue at most 3 numbered directives per active seat; allocate the floor for the next epoch.',
   ].filter(Boolean).join('\n\n')
 
-  let fiber: { childId: string } | undefined
+  let fiber: SeatFiber | undefined
   try {
     fiber = await startSeatFiber(ctx, parent, {
       seatId: 'referee',
@@ -151,9 +152,7 @@ export async function runRefereePass(
     const applied = applyRefereeOutput(output, ledger, input, input.spec, input.roundTranscript)
     return { output, applied }
   } finally {
-    if (fiber !== undefined) {
-      try { await disposeSeatFibers(ctx, [fiber]) } catch { /* best effort */ }
-    }
+    if (fiber !== undefined) await disposeSeatFibers(ctx, parent, [fiber])
   }
 }
 

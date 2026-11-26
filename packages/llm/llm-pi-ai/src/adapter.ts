@@ -751,11 +751,9 @@ export class PiAiAdapter extends LlmAdapter {
         }), model.contextWindow, signal, model.id, capture.facts)[Symbol.asyncIterator]()
       }
 
-      // Pooled route: rotate across identities until one commits. The
-      // committal barrier is the first NON-usage chunk — pi-ai delivers
-      // failures as terminal events that toStreamChunks renders as
-      // `usage` + error `finish`, so a bare "first chunk" peek would commit
-      // on the usage chunk of a failed attempt.
+      // Pool rotation is internal to one stream settlement. Only the identity
+      // that commits or determines the terminal provider failure reports usage.
+      // The SDK's usage sample alone does not commit a response.
       if (profile.pool !== undefined && this.config.pool !== undefined && profile.pool.identities.length > 0) {
         const engine = this.config.pool
         const resolveCredential = this.config.resolveCredential
@@ -814,6 +812,7 @@ export class PiAiAdapter extends LlmAdapter {
         let attempts = 0
         let lastFailure = 'no identity was attempted'
         let lastFailureFacts: LlmFailure | undefined
+        let lastFailedUsage: Extract<StreamChunk, { type: 'usage' }> | undefined
         /** Failure class of every completed attempt, for the exhaustion summary. */
         const attemptedFailureClasses: PoolFailureClass[] = []
         for (const candidate of resolvableOrder) {
@@ -835,7 +834,7 @@ export class PiAiAdapter extends LlmAdapter {
           const attemptController = new AbortController()
           const attemptSignal = AbortSignal.any([watchdog.signal, attemptController.signal])
           const iterator = makeAttempt(keylessAttempt ? undefined : key, attemptSignal, identity.id)
-          const buffered: StreamChunk[] = []
+          let bufferedUsage: typeof lastFailedUsage
           let committed = false
           let abortedFinish: StreamChunk | undefined
           let failure: LlmFailure | undefined
@@ -848,7 +847,7 @@ export class PiAiAdapter extends LlmAdapter {
               const chunk = result.value
               if (!committed) {
                 if (chunk.type === 'usage') {
-                  buffered.push(chunk)
+                  bufferedUsage = chunk
                   continue
                 }
                 if (chunk.type === 'finish' && chunk.reason.kind === 'error') {
@@ -863,8 +862,7 @@ export class PiAiAdapter extends LlmAdapter {
                   break
                 }
                 committed = true
-                for (const held of buffered) yield held
-                buffered.length = 0
+                if (bufferedUsage !== undefined) yield bufferedUsage
                 engine.recordSuccess(options.provider, identity.id, options.model)
               }
               if (chunk.type === 'finish') {
@@ -913,9 +911,7 @@ export class PiAiAdapter extends LlmAdapter {
           // rotation, no cooldown, and no identity counters change. Keep the
           // provider's original message, code, status, and request id.
           if (failureClass === 'REFUSAL') {
-            // A refused request can still consume billed tokens. Report the
-            // provider's usage without committing the attempt or its identity.
-            for (const held of buffered) yield held
+            if (bufferedUsage !== undefined) yield bufferedUsage
             throwAttemptFailure(
               failure?.message ?? 'provider refused the request under its content or usage policy',
               failure?.code ?? POLICY_REFUSAL_CODE,
@@ -928,6 +924,7 @@ export class PiAiAdapter extends LlmAdapter {
           // key), so it ends the request terminally instead of burning pool
           // identities.
           if (keylessAttempt && failureClass === 'AUTH') {
+            if (bufferedUsage !== undefined) yield bufferedUsage
             throwAttemptFailure(
               `llm-pi-ai: keyless provider "${options.provider}" answered an auth failure (AUTH):`
               + ` ${failure?.message ?? 'unknown failure'}`,
@@ -945,6 +942,7 @@ export class PiAiAdapter extends LlmAdapter {
             // is a property of the route itself and keeps its terminal code and
             // explanation. Entitlement gates are identity-specific and rotate,
             // so they never reach this branch.
+            if (bufferedUsage !== undefined) yield bufferedUsage
             throwAttemptFailure(
               `llm-pi-ai: provider "${options.provider}" request failed without failover (${failureClass}): ${lastFailure}`
               + (failureClass === 'POLICY' ? ` — ${FREE_TIER_GATED_EXPLANATION}` : ''),
@@ -954,6 +952,7 @@ export class PiAiAdapter extends LlmAdapter {
               failure,
             )
           }
+          lastFailedUsage = bufferedUsage
           // A rotation the pool will actually make: another resolvable identity
           // remains and the attempt budget has not elapsed. The record is
           // durable before the next identity starts, so a caller sees the
@@ -1053,6 +1052,7 @@ export class PiAiAdapter extends LlmAdapter {
               ? ` — ${ENTITLEMENT_GATED_EXPLANATION}`
               : ` — ${entitlementAttempts} of ${attemptedFailureClasses.length} attempts were entitlement-gated`
           }
+          if (lastFailedUsage !== undefined) yield lastFailedUsage
           throwAttemptFailure(enriched, 'PROVIDER_POOL_EXHAUSTED', lastFailureFacts)
         }
       }

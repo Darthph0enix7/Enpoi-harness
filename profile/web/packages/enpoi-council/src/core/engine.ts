@@ -88,6 +88,13 @@ export class CouncilHandoffError extends Error {
   }
 }
 
+/**
+ * Run a council and await release of its remaining child activations before settling.
+ * @param ctx - context providing the council's host services.
+ * @param parent - exact live agent that owns the council children.
+ * @param opts - council definition, run limits, and caller cancellation.
+ * @returns the synthesis and deliberation record.
+ */
 export async function runCouncil(
   ctx: Context,
   parent: Agent,
@@ -351,17 +358,17 @@ export async function runCouncil(
       const round = await generateParallel(ctx, parent, spec, {
         // Cumulative epistemic package per seat (amendment #4): a standby
         // re-entrant receives EVERY vault fact added since it was last active.
-        promptBuilder: (seat) => {
-          const seatVault = vault.since(lastActive.get(seat.id) ?? 0)
+        promptBuilder: (seatId) => {
+          const seatVault = vault.since(lastActive.get(seatId) ?? 0)
           return [
-          seatPersona(spec, seat),
+          seatPersona(spec, seatId),
           `EPOCH ${epoch}${isChallenge ? ' — FINAL CHALLENGE' : ''}`,
           `QUERY: ${query}`,
           briefText ? `LIVING BRIEF:\n${briefText}` : '',
           spec.scopeContract ? `SCOPE CONTRACT:\n${spec.scopeContract}` : '',
           `DISPUTE LEDGER:\n${ledgerText}`,
           seatVault.length > 0 ? `EVIDENCE (new since you last sat):\n${vault.render(seatVault)}` : '',
-          directives[seat.id] ? `REFEREE DIRECTIVE TO YOU:\n${directives[seat.id]}` : '',
+          directives[seatId] ? `REFEREE DIRECTIVE TO YOU:\n${directives[seatId]}` : '',
           isChallenge
             ? 'The deliberation has stabilized. State your strongest UNADDRESSED fatal flaw — with evidence — or emit CONCUR [entry-id] WITH <seat> to concede. Nothing else.'
             : buildEpochInstructions(spec),
@@ -586,9 +593,7 @@ export async function runCouncil(
       audit,
     }
   } finally {
-    // Fibers park (cascade interrupt handles user stops); explicit dispose is
-    // best-effort for clean runs.
-    try { await disposeSeatFibers(ctx, [...fibers.values()]) } catch { /* best effort */ }
+    await disposeSeatFibers(ctx, parent, [...fibers.values()])
   }
 }
 
@@ -669,14 +674,13 @@ async function generateParallel(
   args: GenerateArgs,
 ): Promise<{ turns: SeatTurn[]; tokens: number }> {
   const denyTools = seatDenyList(ctx)
-  const seats = (args.only ?? spec.seats.map(s => s.id))
+  const seats = [...new Set(args.only ?? spec.seats.map(s => s.id))]
     .filter(id => !args.deadSeats.has(id))
     .map(id => spec.seats.find(s => s.id === id))
     .filter((s): s is NonNullable<typeof s> => s !== undefined)
 
   const tasks = seats.map(async (seat): Promise<SeatTurn> => {
     const prompt = args.promptBuilder(seat.id)
-    const existing = args.fibers.get(seat.id)
     let fiber: SeatFiber
     let attempt = 0
     let lastError: Error | null = null
@@ -689,13 +693,8 @@ async function generateParallel(
     while (attempt < maxAttempts) {
       attempt++
       try {
-        // A known-offline fiber is replaced immediately (Oracle gate #3):
-        // following up on a dead child burns a 30s activation-lock wait.
-        if (existing !== undefined && existing.isOffline && args.fibers.get(seat.id) === existing) {
-          args.fibers.delete(seat.id)
-        }
         const current = args.fibers.get(seat.id)
-        if (current === undefined || attempt > 1) {
+        if (current === undefined) {
           // fresh fiber (first turn, retry after a dead fiber, or chain advance)
           const link = seatChain === undefined
             ? undefined
@@ -742,25 +741,22 @@ async function generateParallel(
         lastError = err instanceof Error ? err : new Error(String(err))
         councilDiag(`[epoch ${args.epoch}] seat ${seat.id} attempt ${attempt} failed: ${lastError.message}`)
         if (args.signal.aborted) throw lastError
-        // Chain failover: this failure (timeout/error/cut) advances the seat to
-        // the NEXT link from the start-of-seat snapshot. The dead fiber is
-        // dropped so the next attempt spawns fresh on that link.
+        const abandoned = args.fibers.get(seat.id)
+        if (abandoned !== undefined) {
+          await disposeSeatFibers(ctx, parent, [abandoned])
+          args.fibers.delete(seat.id)
+        }
+        // Chain failover advances the route for the next fresh spawn.
         const nextLink = seatChain?.links[linkIndex + 1]
         if (seatChain !== undefined && nextLink !== undefined) {
           const failed = seatChain.links[Math.min(linkIndex, seatChain.links.length - 1)]!
           process.stderr.write(`[model-chain] ${seatChain.id}: link ${linkIndex + 1} (${failed.provider}/${failed.model}) FAILED → link ${linkIndex + 2} (${nextLink.provider}/${nextLink.model}): ${lastError.message}\n`)
           linkIndex += 1
-          args.fibers.delete(seat.id)
-          if (attempt >= maxAttempts) break
-          await new Promise(r => setTimeout(r, 500))
-          continue
         }
         if (attempt >= maxAttempts) break
         await new Promise(r => setTimeout(r, 500))
       }
     }
-    const fiberState = args.fibers.get(seat.id)
-    if (fiberState !== undefined) fiberState.isOffline = true
     // Retire the seat for the rest of the run: even the fresh respawn died,
     // so re-spawning every epoch would only churn sessions (the operator-
     // observed 6× skeptic). Quorum rules decide whether the run continues.
@@ -847,7 +843,7 @@ async function runChair(
     })
 
   const denyTools = seatDenyList(ctx)
-  let fiber: { childId: string } | undefined
+  let fiber: SeatFiber | undefined
   try {
     fiber = await startSeatFiber(ctx, parent, {
       seatId: 'chair',
@@ -867,9 +863,7 @@ async function runChair(
     }
     return { text: chairTurn.text, tokens: estimateTokens(chairTurn.text) }
   } finally {
-    if (fiber !== undefined) {
-      try { await disposeSeatFibers(ctx, [fiber]) } catch { /* best effort */ }
-    }
+    if (fiber !== undefined) await disposeSeatFibers(ctx, parent, [fiber])
   }
 }
 

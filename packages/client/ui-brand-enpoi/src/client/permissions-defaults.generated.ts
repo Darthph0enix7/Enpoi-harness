@@ -20,7 +20,7 @@
 
 export const HOST_DEFAULTS_DIGEST = '48ea9fa9c1ea41b0380a2cd3b3213adc7df7fe59a3a228c997d8c9ee624bb8e6'
 
-export const MIRROR_SOURCE_DIGEST = '3edf8e472b7e11fc3a37beb6d9308d17df5aee2214cff740e9f6b348d2b9a44e'
+export const MIRROR_SOURCE_DIGEST = 'bcaa85688038dc891044179b534f598ffe37921b22c4a4fea7e0814c3882fb53'
 
 /** Shipped per-tool defaults from the host policy resolver. */
 export const SHIPPED_TOOL_DEFAULTS: Readonly<Record<string, 'allow' | 'ask' | 'deny'>> = Object.freeze({
@@ -227,10 +227,27 @@ export const SHIPPED_TOOL_GROUP_CATALOG: readonly ShippedToolGroupMirror[] = Obj
   }),
 ])
 
+/** Tools blocked by the read-only session execution veto (`READ_ONLY_VETO_TOOLS`). */
+export const READ_ONLY_VETO_TOOLS: readonly string[] = Object.freeze(['bash', 'edit', 'write', 'str_replace_editor', 'peer_switch_model', 'peer_ask', 'peer_answer', 'peer_cancel'])
+
 /** Tools the shipped seat guard denies per seat (`SHIPPED_SEAT_TOOL_DENY`). */
 export const SHIPPED_SEAT_TOOL_DENY: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'orchestrator': Object.freeze(['plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query']),
   'sysadmin': Object.freeze(['plugin_manager', 'cordis_inspect_list', 'cordis_inspect_query']),
+})
+
+/** Shipped per-seat tool policies from the host policy resolver (`SHIPPED_SEAT_TOOL_POLICY`). */
+export const SHIPPED_SEAT_TOOL_POLICY: Readonly<Record<string, Readonly<Record<string, 'allow' | 'ask' | 'deny'>>>> = Object.freeze({
+  'orchestrator': Object.freeze({
+    'peer_answer': 'allow',
+    'peer_ask': 'allow',
+    'peer_asks': 'allow',
+    'peer_cancel': 'allow',
+    'peer_models': 'allow',
+    'peer_sessions': 'allow',
+    'peer_status': 'allow',
+    'peer_switch_model': 'allow',
+  }),
 })
 
 /** Tools every child keeps regardless of role surface (host keep list). */

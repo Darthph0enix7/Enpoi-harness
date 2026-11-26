@@ -180,6 +180,7 @@ export class SubagentContinuationManager {
           agentOptions,
           composition: { persona: request.persona, toolFilter: request.toolFilter },
           quiet: quiet ?? false,
+          ...request.reportMode === undefined ? {} : { reportMode: request.reportMode },
           signal: spec.signal,
         })
         const childHeader = activation.handle.agent.session.header

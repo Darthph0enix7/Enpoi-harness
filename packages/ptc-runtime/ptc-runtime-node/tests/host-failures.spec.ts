@@ -6,6 +6,8 @@ import type { PtcBindingFunction, PtcRunRequest } from '@deepseek-ai/dsh-ptc-run
 import type { SubprocessHandle, SubprocessOutcome } from '@deepseek-ai/dsh-subprocess'
 import { SandboxUnavailableError } from '@deepseek-ai/dsh-sandbox'
 import type { ConfinedArgv } from '@deepseek-ai/dsh-sandbox'
+import { LocalSandboxProvider } from '@deepseek-ai/dsh-sandbox-local'
+import type { SandboxInternals } from '@deepseek-ai/dsh-sandbox-local'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
 import type { Config } from '../src/index.ts'
 import { JsonChannel } from '../src/channel.ts'
@@ -157,6 +159,24 @@ describe('Node runtime host failures', () => {
     const result = await h.start()
     expect(result.error).toEqual({ kind: 'exception', message })
     expect(result.sandbox).toEqual({ mode: 'read-only', denied, enforcement: 'partial' })
+  })
+
+  it.each<[string, SandboxInternals, string, boolean, 'full' | 'partial']>([
+    ['bwrap EROFS', { platform: 'linux', probeBwrap: () => true }, "Error: EROFS: read-only file system, open '/ws/outside/denied.txt'", true, 'full'],
+    ['bwrap ENOENT (missing path)', { platform: 'linux', probeBwrap: () => true }, "Error: ENOENT: no such file or directory, open '/ws/escape/denied.txt'", false, 'full'],
+    ['bwrap EACCES (non-EROFS)', { platform: 'linux', probeBwrap: () => true }, "Error: EACCES: permission denied, open '/ws/file.txt'", false, 'full'],
+    ['landlock EACCES', { platform: 'linux', probeBwrap: () => false, probeLandlock: () => 'full' }, "Error: EACCES: permission denied, open '/ws/outside/denied.txt'", true, 'full'],
+    ['landlock partial EACCES', { platform: 'linux', probeBwrap: () => false, probeLandlock: () => 'partial' }, "Error: EACCES: permission denied, open '/ws/outside/denied.txt'", true, 'partial'],
+    ['seatbelt EPERM', { platform: 'darwin' }, "Error: EPERM: operation not permitted, open '/ws/outside/denied.txt'", true, 'full'],
+    ['windows-acl EPERM', { platform: 'win32', windowsAclRunnerArgs: ['node', 'runner.js'] }, "Error: EPERM: operation not permitted, open 'C:\\outside\\denied.txt'", true, 'partial'],
+    ['windows-acl EACCES', { platform: 'win32', windowsAclRunnerArgs: ['node', 'runner.js'] }, "Error: EACCES: permission denied, open 'C:\\outside\\denied.txt'", true, 'partial'],
+  ])('classifies real kernel denial messages for %s', async (_label, internals, message, denied, enforcement) => {
+    const h = await setup({}, 'read-only')
+    ;(h.ctx.sandbox as LocalSandboxProvider).internals = internals
+    h.onBoot(() => { h.emit({ type: 'done', error: { kind: 'exception', message } }) })
+    const result = await h.start()
+    expect(result.error).toEqual({ kind: 'exception', message })
+    expect(result.sandbox).toEqual({ mode: 'read-only', denied, enforcement })
   })
 
   it('distinguishes fatal sandbox startup output from a program denial', async () => {

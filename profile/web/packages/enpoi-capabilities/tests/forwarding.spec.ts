@@ -973,4 +973,102 @@ describe('park journal document', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('honors DSH_HOME lazily after module import even when HOME differs', async () => {
+    const { mkdtempSync, existsSync, rmSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { createApprovalParkJournal, defaultApprovalParkJournalPath } = await import('../src/approval-parks')
+    const root = mkdtempSync(join(tmpdir(), 'approval-parks-env-'))
+    const homeDir = join(root, 'home')
+    const dshDir = join(root, 'custom-dsh')
+    const prevHome = process.env['HOME']
+    const prevDshHome = process.env['DSH_HOME']
+    try {
+      process.env['HOME'] = homeDir
+      process.env['DSH_HOME'] = dshDir
+      expect(defaultApprovalParkJournalPath()).toBe(join(dshDir, 'cache', 'approval-parks.json'))
+
+      const journal = createApprovalParkJournal()
+      journal.append({
+        id: 'park-env', seq: 1, childSessionId: 'child-1', childLabel: 'fixer', depth: 1,
+        rootSessionId: 'root-1', toolName: 'bash', command: 'ls', reason: 'test',
+        parkedAt: 1_000, expiresAt: 601_000, state: 'parked',
+      })
+      expect(existsSync(join(dshDir, 'cache', 'approval-parks.json'))).toBe(true)
+      expect(existsSync(join(homeDir, '.dsh', 'cache', 'approval-parks.json'))).toBe(false)
+    } finally {
+      if (prevHome === undefined) delete process.env['HOME']
+      else process.env['HOME'] = prevHome
+      if (prevDshHome === undefined) delete process.env['DSH_HOME']
+      else process.env['DSH_HOME'] = prevDshHome
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('child-authority classifier and fail-closed orphan handling (C-03)', () => {
+  it('fails closed when forward() receives a child marker without a usable parentSession', async () => {
+    const f = fakeDeps({ mode: 'full-access', parentAllowsAsk: true })
+    for (const header of [
+      { id: 'orphan-origin', origin: 'subagent' },
+      { id: 'orphan-depth', delegationDepth: 1 },
+      { id: 'orphan-empty-parent', parentSession: '', origin: 'subagent', delegationDepth: 1 },
+    ]) {
+      const result = await f.forwarder.forward({
+        agent: { session: { header } },
+        toolName: 'bash',
+        args: { command: 'rm plain' },
+        decision: bashAsk('rm plain'),
+      })
+      expect(result.kind).toBe('deny')
+      if (result.kind === 'deny') expect(result.reason).toContain('no usable parent session')
+    }
+  })
+
+  it('treats real-shaped fork headers as root (undefined) while subagent headers stay delegated', () => {
+    expect(delegatedChildOf({ session: { header: { id: 'fork-1', parentSession: 'origin-1', isSeeded: true } } })).toBeUndefined()
+    expect(delegatedChildOf({ session: { header: { id: 'fork-2', parentSession: 'origin-1', isSeeded: true, delegationDepth: 0 } } })).toBeUndefined()
+    expect(delegatedChildOf({
+      session: {
+        header: { id: 'child-fork', parentSession: 'fork-1', isSeeded: true, origin: 'subagent', delegationDepth: 1 },
+      },
+    })).toEqual({
+      childSessionId: 'child-fork',
+      parentSessionId: 'fork-1',
+      depth: 1,
+      label: 'child child-fo',
+    })
+  })
+
+  it('matches enpoi-memory classifySessionAuthority across every header shape (parity)', async () => {
+    const { classifySessionAuthority: capClassify } = await import('../src/session-authority')
+    const { classifySessionAuthority: memClassify, isDelegatedSession } = await import('../../enpoi-memory/src/session-authority')
+    const cases: Array<{ header: Record<string, unknown> | undefined; expectedKind: 'missing' | 'root' | 'delegated' }> = [
+      { header: undefined, expectedKind: 'missing' },
+      { header: { id: 'root-1', isSeeded: false }, expectedKind: 'root' },
+      { header: { id: 'root-2', isSeeded: false, delegationDepth: 0 }, expectedKind: 'root' },
+      { header: { id: 'seeded-root', isSeeded: true }, expectedKind: 'root' },
+      { header: { id: 'fork-live', parentSession: 'origin-1', isSeeded: true }, expectedKind: 'root' },
+      { header: { id: 'fork-restored', parentSession: 'origin-1', isSeeded: true, delegationDepth: 0 }, expectedKind: 'root' },
+      { header: { id: 'child-1', parentSession: 'root-1', origin: 'subagent', delegationDepth: 1 }, expectedKind: 'delegated' },
+      { header: { id: 'child-seeded', parentSession: 'root-1', isSeeded: true, origin: 'subagent', delegationDepth: 1 }, expectedKind: 'delegated' },
+      { header: { id: 'ambig-unseeded', parentSession: 'root-1', isSeeded: false, delegationDepth: 0 }, expectedKind: 'delegated' },
+      { header: { id: 'bare-parent', parentSession: 'root-1' }, expectedKind: 'delegated' },
+      { header: { id: 'orphan-origin', origin: 'subagent' }, expectedKind: 'delegated' },
+      { header: { id: 'orphan-depth', delegationDepth: 2 }, expectedKind: 'delegated' },
+      { header: { id: 'empty-parent', parentSession: '' }, expectedKind: 'delegated' },
+      { header: { id: 'fork-empty-parent', parentSession: '', isSeeded: true }, expectedKind: 'delegated' },
+      { header: { id: 'bad-depth', delegationDepth: -1 }, expectedKind: 'delegated' },
+      { header: { id: 'bad-origin', origin: 'external' }, expectedKind: 'delegated' },
+      { header: { id: 'bad-seeded', isSeeded: 'yes' }, expectedKind: 'delegated' },
+    ]
+    for (const { header, expectedKind } of cases) {
+      const cap = capClassify(header)
+      const mem = memClassify(header)
+      expect(cap).toEqual(mem)
+      expect(cap.kind, JSON.stringify(header)).toBe(expectedKind)
+      expect(isDelegatedSession(header), JSON.stringify(header)).toBe(expectedKind !== 'root')
+    }
+  })
 })

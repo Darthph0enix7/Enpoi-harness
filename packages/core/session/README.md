@@ -98,6 +98,7 @@ The package is built on event sourcing: a `Session` is an append-only log of typ
 | [`src/index.ts`](src/index.ts) | Plugin entry: `SessionStore` service, store lifecycle, `fork`, `flush` |
 | [`src/types.ts`](src/types.ts) | `SessionEventMap`, `SessionEvent`, `UserMessage`, `SessionHeader`, `TurnEndReasonMap` |
 | [`src/surface.ts`](src/surface.ts) | Ordered surface projection, replacement validation, `deriveEventMessage` |
+| [`src/attachment-index.ts`](src/attachment-index.ts) | Incremental per-session image and file attachment reference lookup (`SessionAttachmentIndex`) |
 | [`src/request-header.ts`](src/request-header.ts) | `request/header` folding and reconstruction |
 | [`dsh-util-values`](../../util/values/README.md) | Shared lossless JSON validation and detached snapshots |
 | [`src/repair.ts`](src/repair.ts) | Crash-tail closers and the live unanswered-call close |

@@ -436,6 +436,59 @@ function versionLine(doc) {
   return `${WHITEBOARD_HEADER} v${doc.version} (${doc.scope}${doc.updatedAt > 0 ? ` \xB7 updated ${new Date(doc.updatedAt).toISOString()}` : ""})`;
 }
 
+// src/session-authority.ts
+function classifySessionAuthority(header) {
+  if (header === void 0 || header === null || typeof header !== "object" || Array.isArray(header)) {
+    return { kind: "missing" };
+  }
+  const rawParent = header.parentSession;
+  const hasParentField = rawParent !== void 0;
+  const usableParent = typeof rawParent === "string" && rawParent.trim() !== "" ? rawParent : void 0;
+  const rawOrigin = header.origin;
+  const isSubagentOrigin = rawOrigin === "subagent";
+  const hasUnexpectedOrigin = rawOrigin !== void 0 && !isSubagentOrigin;
+  const rawDepth = header.delegationDepth;
+  const isValidDepth = typeof rawDepth === "number" && Number.isSafeInteger(rawDepth) && rawDepth >= 0;
+  const hasInvalidDepth = rawDepth !== void 0 && !isValidDepth;
+  const hasPositiveDepth = isValidDepth && rawDepth > 0;
+  const rawSeeded = header.isSeeded;
+  const hasInvalidSeeded = rawSeeded !== void 0 && typeof rawSeeded !== "boolean";
+  const depth = hasPositiveDepth ? rawDepth : 1;
+  if (hasUnexpectedOrigin || hasInvalidDepth || hasInvalidSeeded) {
+    return {
+      kind: "delegated",
+      ...usableParent !== void 0 ? { parentSessionId: usableParent } : {},
+      depth,
+      reason: "ambiguous session lineage"
+    };
+  }
+  if (hasParentField && usableParent === void 0) {
+    return {
+      kind: "delegated",
+      depth,
+      reason: "unusable parentSession"
+    };
+  }
+  if (isSubagentOrigin || hasPositiveDepth) {
+    return {
+      kind: "delegated",
+      ...usableParent !== void 0 ? { parentSessionId: usableParent } : {},
+      depth,
+      reason: usableParent === void 0 ? isSubagentOrigin ? "subagent origin without usable parentSession" : "positive delegationDepth without usable parentSession" : isSubagentOrigin ? "subagent origin" : "positive delegationDepth"
+    };
+  }
+  if (usableParent !== void 0) {
+    if (rawSeeded === true) return { kind: "root" };
+    return {
+      kind: "delegated",
+      parentSessionId: usableParent,
+      depth,
+      reason: "parentSession without seed lineage"
+    };
+  }
+  return { kind: "root" };
+}
+
 // src/index.ts
 var name = "enpoi-whiteboard";
 var inject = ["tools"];
@@ -600,8 +653,12 @@ function sessionFacts(exec) {
   return agentFacts(exec?.agent);
 }
 var CHILD_AUTHORING_REFUSAL = "the whiteboard is authored by the main session; children read it";
-function isChildSession(exec) {
-  return sessionFacts(exec).parentSessionId !== void 0;
+var MISSING_HEADER_AUTHORING_REFUSAL = "whiteboard authoring requires a trusted root session header";
+function authoringDenial(exec) {
+  const authority = classifySessionAuthority(exec?.agent?.session?.header);
+  if (authority.kind === "root") return void 0;
+  if (authority.kind === "missing") return refusal(MISSING_HEADER_AUTHORING_REFUSAL);
+  return refusal(CHILD_AUTHORING_REFUSAL);
 }
 function resolveEntryPath(pathText, cwd) {
   if (pathText === "~") return homedir();
@@ -904,7 +961,8 @@ function registerTools(ctx, config) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL);
+      const denied = authoringDenial(exec);
+      if (denied !== void 0) return denied;
       const mode = args.mode === "replace" ? "replace" : "append";
       const rawEntries = args.entries;
       if (!Array.isArray(rawEntries) || rawEntries.length === 0) return refusal("entries must be a non-empty array");
@@ -979,7 +1037,8 @@ function registerTools(ctx, config) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL);
+      const denied = authoringDenial(exec);
+      if (denied !== void 0) return denied;
       const id = typeof args.id === "string" ? args.id : "";
       if (id.length === 0) return refusal("id is required");
       const facts = sessionFacts(exec);
@@ -1020,7 +1079,8 @@ function registerTools(ctx, config) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL);
+      const denied = authoringDenial(exec);
+      if (denied !== void 0) return denied;
       const id = typeof args.id === "string" ? args.id : "";
       if (id.length === 0) return refusal("id is required");
       const facts = sessionFacts(exec);
@@ -1076,7 +1136,8 @@ function registerTools(ctx, config) {
     },
     isConcurrencySafe: () => false,
     async execute(args, exec) {
-      if (isChildSession(exec)) return refusal(CHILD_AUTHORING_REFUSAL);
+      const denied = authoringDenial(exec);
+      if (denied !== void 0) return denied;
       const id = typeof args.id === "string" ? args.id : "";
       if (id.length === 0) return refusal("id is required");
       const facts = sessionFacts(exec);

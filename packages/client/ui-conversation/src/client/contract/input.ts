@@ -195,8 +195,15 @@ export interface SessionInput extends InputTarget {
    * a localized notice instead of snapshotting an empty rail.
    * @param text - the reverted query text.
    * @param attachments - durable references in original message order.
+   * @param options - optional sync-completeness metadata.
    */
-  restoreDraft(text: string, attachments: readonly RestoredDraftAttachment[]): void
+  restoreDraft(
+    text: string,
+    attachments: readonly RestoredDraftAttachment[],
+    options?: { readonly incompleteAttachments?: boolean },
+  ): void
+  /** Clear the send block on an adopted incomplete restored attachment set. */
+  acknowledgeIncompleteAttachments?(): void
   /** Append ordered browser-owned attachment ids; busy admission phases refuse. */
   addAttachments(ids: readonly DraftAttachmentId[]): boolean
   /** Remove one browser-owned attachment id; busy admission phases refuse. @returns whether the id was removed. */
@@ -259,8 +266,13 @@ export interface InputActions {
    * refuses with a localized notice.
    * @param text - the reverted query text.
    * @param attachments - durable references in original message order.
+   * @param options - optional sync-completeness metadata.
    */
-  restoreDraft(text: string, attachments: readonly RestoredDraftAttachment[]): void
+  restoreDraft(
+    text: string,
+    attachments: readonly RestoredDraftAttachment[],
+    options?: { readonly incompleteAttachments?: boolean },
+  ): void
   /** Append ordered browser-owned attachment ids; busy admission phases refuse. */
   addAttachments(ids: readonly DraftAttachmentId[]): boolean
   /** Remove one browser-owned attachment id; busy admission phases refuse. */
@@ -287,6 +299,8 @@ export interface InputState {
   readonly draft: string
   /** Ordered runtime-only attachment ids; browser objects stay in ConversationController. */
   readonly attachmentIds: readonly DraftAttachmentId[]
+  /** True when restored draft attachments came from a truncated device-sync record, blocking send until reviewed or cleared. */
+  readonly incompleteDraftAttachments?: boolean
   /** Monotonic editor revision (span CAS compares against this). */
   readonly draftRev: number
   readonly phase: 'plain' | 'adjudicating' | 'claimed' | 'submitting'

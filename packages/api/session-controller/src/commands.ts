@@ -6,7 +6,7 @@ import { dirname } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { Agent, ModelSelection as AgentModelSelection } from '@deepseek-ai/dsh-agent'
-import { AttachmentError } from '@deepseek-ai/dsh-attachment'
+import { AttachmentError, canonicalDurablePromptParts } from '@deepseek-ai/dsh-attachment'
 import type {
   AttachmentAdmissionPart, FileAttachmentRef, ImageAttachmentRef,
 } from '@deepseek-ai/dsh-attachment'
@@ -539,9 +539,15 @@ export class SessionCommandController {
       ...(request.participant === undefined ? {} : { participant: request.participant }),
     }
     const durablePromptParts = request.content.some(part => part.type === 'image-ref' || part.type === 'file-ref')
-    const admitted = durablePromptParts
-      ? canonicalDurablePromptParts(await this.indexFor(agent.session.id), request.content)
-      : request.content
+    let admitted: SessionPromptRequest['content']
+    try {
+      admitted = durablePromptParts
+        ? canonicalDurablePromptParts(await this.indexFor(agent.session.id), request.content)
+        : request.content
+    } catch (error) {
+      if (error instanceof AttachmentError) throw attachmentRemoteError(error)
+      throw error
+    }
     const hasImage = admitted.some(part => part.type === 'image' || part.type === 'image-ref')
     const admit = async (): Promise<SessionPromptValue> => {
       try {
@@ -639,7 +645,7 @@ export class SessionCommandController {
       } catch (error) {
         if (remoteErrorOf(error) !== undefined) throw error
         if (error instanceof AttachmentError) {
-          throw new RemoteError('session/attachment-invalid', error.message, { reason: error.code })
+          throw attachmentRemoteError(error)
         }
         throw new RemoteError('session/agent-busy', 'prompt rejected', { reason: String(error) })
       }
@@ -697,7 +703,7 @@ export class SessionCommandController {
       }
     } catch (error) {
       if (error instanceof AttachmentError) {
-        throw new RemoteError('session/attachment-invalid', error.message, { reason: error.code })
+        throw attachmentRemoteError(error)
       }
       throw new RemoteError('gateway/internal', 'Unable to read image attachment.', {})
     }
@@ -788,8 +794,9 @@ export class SessionCommandController {
   }
 
   /**
-   * Cancel one live ordinary Agent while retaining pending inbox work.
-   * @param request - Session whose active Agent turn is cancelled.
+   * Cancel one live ordinary Agent while retaining pending inbox work. Stop-all
+   * also requests the descendant cascade when no parent turn is running.
+   * @param request - Session and cancellation intent.
    * @returns acknowledgement that cancellation was requested.
    */
   cancel(request: SessionCancelRequest): SessionCancelValue {
@@ -804,15 +811,18 @@ export class SessionCommandController {
     if (hasApiSessionSubagentOwner(this.ctx, agent.session, agent)) {
       throw apiSessionSubagentOwnershipError(request.sessionId)
     }
+    // Absent intent keeps the pre-intent wire behaviour: stop everything.
+    const intent = request.intent ?? 'stop-all'
+    const stopIdleTree = intent === 'stop-all' && agent.status === 'idle'
     agent.cancel(
       {
         kind: 'user',
         ...(request.participant === undefined ? {} : { participant: request.participant }),
-        // Absent intent keeps the pre-intent wire behaviour: stop everything.
-        intent: request.intent ?? 'stop-all',
+        intent,
       },
       { keepInbox: true },
     )
+    if (stopIdleTree) this.ctx.emit('subagent/stop-idle-tree', agent)
     return { accepted: true }
   }
 
@@ -2058,88 +2068,14 @@ export class SessionCommandController {
   }
 }
 
-/** Durable image media types accepted from the wire (mirrors the attachment vocabulary). */
-const WIRE_IMAGE_MEDIA_TYPES: ReadonlySet<string> = new Set([
-  'image/png', 'image/jpeg', 'image/webp', 'image/gif',
-])
-
-/** Whether a wire value is a plain object rather than an array or primitive. */
-function isWireRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-/**
- * Reject one malformed durable wire reference before authorization. The typed
- * request face cannot stop a JSON caller from omitting or mistyping the
- * citation fields.
- * @param part - durable `image-ref` or `file-ref` prompt part.
- * @throws RemoteError with `INVALID_ATTACHMENT_REF` for a malformed reference.
- */
-function assertDurablePromptRef(
-  part: Extract<SessionPromptRequest['content'][number], { type: 'image-ref' | 'file-ref' }>,
-): void {
-  const malformed = (): never => {
-    throw new RemoteError(
-      'session/attachment-invalid',
-      'Durable attachment reference is malformed.',
-      { reason: 'INVALID_ATTACHMENT_REF' },
-    )
+/** Map an AttachmentError onto `session/attachment-invalid`, preserving missing attachment identity. */
+function attachmentRemoteError(error: AttachmentError): RemoteError<'session/attachment-invalid'> {
+  const details = {
+    reason: error.code,
+    ...(error.attachmentId === undefined ? {} : { attachmentId: error.attachmentId }),
+    ...(error.attachmentName === undefined ? {} : { attachmentName: error.attachmentName }),
   }
-  const attachment: unknown = part.attachment
-  if (!isWireRecord(attachment)) malformed()
-  const record = attachment as Record<string, unknown>
-  if (typeof record.attachmentId !== 'string' || record.attachmentId === '') malformed()
-  if (typeof record.bytes !== 'number' || !Number.isFinite(record.bytes) || record.bytes < 0) malformed()
-  if (part.type === 'image-ref') {
-    if (typeof record.mediaType !== 'string' || !WIRE_IMAGE_MEDIA_TYPES.has(record.mediaType)) malformed()
-    for (const field of ['width', 'height'] as const) {
-      const value = record[field]
-      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) malformed()
-    }
-    if (record.name !== undefined && typeof record.name !== 'string') malformed()
-    return
-  }
-  if (typeof record.name !== 'string' || record.name === '') malformed()
-}
-
-/**
- * Authorize restored-draft attachment references and replace each with the
- * reference the Session log actually recorded. A client may cite an existing
- * image or file only through its own Session's log, mirroring the read
- * authorization on the attachment endpoint; the log copy also prevents a
- * caller from rewriting an attachment's display metadata. Malformed wire
- * references are rejected before the log lookup, and the returned references
- * are charged against the attachment batch limits during prompt admission.
- * @param index - the target Session's command index, holding its logged references.
- * @param content - prompt parts after receipt resolution.
- * @returns the same parts with durable references canonicalized.
- * @throws RemoteError with `INVALID_ATTACHMENT_REF` or `ATTACHMENT_NOT_REFERENCED`
- *   for a malformed or foreign reference.
- */
-function canonicalDurablePromptParts(
-  index: SessionCommandIndex,
-  content: SessionPromptRequest['content'],
-): SessionPromptRequest['content'] {
-  for (const part of content) {
-    if (part.type === 'image-ref' || part.type === 'file-ref') assertDurablePromptRef(part)
-  }
-  return content.map((part): SessionPromptRequest['content'][number] => {
-    if (part.type !== 'image-ref' && part.type !== 'file-ref') return part
-    const id = String(part.attachment.attachmentId)
-    const referenced = part.type === 'image-ref'
-      ? index.referencedImage(id)
-      : index.referencedFile(id)
-    if (referenced === undefined) {
-      throw new RemoteError(
-        'session/attachment-invalid',
-        'Attachment is not referenced by this session.',
-        { reason: 'ATTACHMENT_NOT_REFERENCED' },
-      )
-    }
-    return part.type === 'image-ref'
-      ? { type: 'image-ref', attachment: referenced as ImageAttachmentRef }
-      : { type: 'file-ref', attachment: referenced as FileAttachmentRef }
-  })
+  return new RemoteError('session/attachment-invalid', error.message, details)
 }
 
 /** Durable text and attachment blocks of one user message, in original order. */

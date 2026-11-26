@@ -105,7 +105,7 @@ Read these pages when the plugin contract is not enough. They move from the wire
 
 #### What the model sees
 
-For each accepted `session/prompt`, text and durable content references enter one user message verbatim. Inline `SdkEncodedImageBlock` values are validated and committed through the composition's attachment store first, so the session log retains content-addressed image references rather than base64 bytes. This package adds no system-prompt prose or tool schema; those come from the other plugins in the composition.
+For each accepted `session/prompt`, text and authorized durable content references enter one user message with logged attachment metadata. Inline `SdkEncodedImageBlock` values are validated and committed through the composition's attachment store first, so the session log retains content-addressed image references rather than base64 bytes; durable image and file references are validated and canonicalized against the target session's log before queueing, refusing foreign, unknown, or missing attachments. This package adds no system-prompt prose or tool schema; those come from the other plugins in the composition.
 
 #### Token effect
 

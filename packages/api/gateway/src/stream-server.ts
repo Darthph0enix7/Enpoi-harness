@@ -1,5 +1,6 @@
 /** Host WebSocket owner for multiplexed Typert Remote streams. */
 
+import { AsyncLocalStorage } from 'node:async_hooks'
 import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { Deque } from '@deepseek-ai/dsh-deque'
@@ -37,6 +38,17 @@ type BoundStreamOpener = (
 
 /** Convert an invocation or carrier failure to a stable wire value. */
 export type RemoteStreamFailureMapper = (error: unknown) => RemoteStreamFailure
+
+const STREAM_AUTHORIZATION_SYMBOL = Symbol.for('dsh.gateway.streamAuthorization')
+
+function streamAuthorizationStorage(): AsyncLocalStorage<string | undefined> {
+  const host = globalThis as Record<PropertyKey, unknown>
+  const existing = host[STREAM_AUTHORIZATION_SYMBOL]
+  if (existing instanceof AsyncLocalStorage) return existing as AsyncLocalStorage<string | undefined>
+  const created = new AsyncLocalStorage<string | undefined>()
+  host[STREAM_AUTHORIZATION_SYMBOL] = created
+  return created
+}
 
 /** Own the no-server WebSocket acceptor and every active logical stream. */
 export class RemoteStreamMuxServer {
@@ -82,6 +94,9 @@ export class RemoteStreamMuxServer {
    * @param peer - Peer the upgrade was admitted as.
    */
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer, peer: PeerScope): void {
+    const authorization = typeof req.headers.authorization === 'string'
+      ? req.headers.authorization
+      : undefined
     this.server.handleUpgrade(req, socket, head, (websocket) => {
       const release = bindPeer(websocket, peer)
       if (release === undefined) return
@@ -98,6 +113,7 @@ export class RemoteStreamMuxServer {
         this.failure,
         this.streamInboxBytes,
         this.maxBufferedBytes,
+        authorization,
       )
       const done = connection.run()
       this.connections.add(done)
@@ -171,6 +187,7 @@ class RemoteStreamMuxConnection {
     private readonly failure: RemoteStreamFailureMapper,
     private readonly streamInboxBytes: number,
     private readonly maxBufferedBytes: number,
+    private readonly authorization: string | undefined,
   ) {}
 
   async run(): Promise<void> {
@@ -260,10 +277,12 @@ class RemoteStreamMuxConnection {
   ): Promise<void> {
     let outcome: { readonly failed: false } | { readonly failed: true; readonly error: unknown }
     try {
-      const source = await this.open(endpoint, payload, active.inbox, active.abort)
-      for await (const value of source) {
-        await this.send({ type: 'item', streamId, value })
-      }
+      await streamAuthorizationStorage().run(this.authorization, async () => {
+        const source = await this.open(endpoint, payload, active.inbox, active.abort)
+        for await (const value of source) {
+          await this.send({ type: 'item', streamId, value })
+        }
+      })
       outcome = { failed: false }
     } catch (error) {
       outcome = { failed: true, error }

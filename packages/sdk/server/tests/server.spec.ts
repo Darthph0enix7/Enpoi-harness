@@ -12,6 +12,7 @@ import AgentRegistry, { type Agent, type AgentHandle } from '@deepseek-ai/dsh-ag
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 
+import { AttachmentId, type FileAttachmentRef, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import * as LlmDeepSeek from '@deepseek-ai/dsh-llm-deepseek-api-key'
@@ -1200,5 +1201,140 @@ describe('HarnessSdkJsonRpcServer', () => {
 
     await expect(server.shutdown()).rejects.toBe(listenerFailure)
     expect(on).toHaveBeenCalledTimes(4)
+  })
+
+  it('authorizes and canonicalizes durable attachment refs against the target session', async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-refs-'))
+    const ctx = await makeHarness(storageDir)
+    class NoopAdapter extends LlmAdapter {
+      override resolveModel(provider: string, id: string): Promise<LlmResolvedModelInfo> {
+        return Promise.resolve({ provider, id, name: id })
+      }
+      async * stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+    const disposeAdapter = ctx.llm.registerAdapter(['mock'], new NoopAdapter())
+    const inlineSaved: ImageAttachmentRef = {
+      attachmentId: AttachmentId('sha256:' + 'e'.repeat(64)),
+      mediaType: 'image/png',
+      bytes: 1,
+      width: 1,
+      height: 1,
+    }
+    const saveImages = vi.fn(async () => [inlineSaved])
+    ctx.provide('attachments', { saveImages } as never)
+    const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+
+    try {
+      await server.initialize({ cwd: storageDir, provider: 'mock', model: 'mock-model' })
+      // Create the target session with a first prompt, then inspect its real Session.
+      await server.prompt({
+        sessionId: 'sdk-target',
+        contentBlocks: [{ type: 'text', text: 'seed' }],
+      })
+      const targetAgent = ctx.agents.get(SessionId('sdk-target'))
+      if (targetAgent === undefined) throw new Error('target agent missing')
+      await targetAgent.whenIdle()
+
+      const ownImage: ImageAttachmentRef = {
+        attachmentId: AttachmentId('sha256:' + 'a'.repeat(64)),
+        mediaType: 'image/png',
+        bytes: 12,
+        width: 2,
+        height: 2,
+        name: 'own.png',
+      }
+      const ownFile: FileAttachmentRef = {
+        attachmentId: AttachmentId('sha256:' + 'b'.repeat(64)),
+        name: 'own.txt',
+        bytes: 7,
+      }
+      const foreignImage: ImageAttachmentRef = {
+        attachmentId: AttachmentId('sha256:' + 'c'.repeat(64)),
+        mediaType: 'image/png',
+        bytes: 8,
+        width: 1,
+        height: 1,
+      }
+      const foreignFile: FileAttachmentRef = {
+        attachmentId: AttachmentId('sha256:' + 'd'.repeat(64)),
+        name: 'foreign.txt',
+        bytes: 9,
+      }
+
+      targetAgent.session.append('user/message', createUserMessage({
+        content: [
+          { type: 'image', attachment: ownImage },
+          { type: 'file', attachment: ownFile },
+        ],
+        source: { kind: 'user' },
+      }), { surfaceOp: 'append' })
+
+      const foreignSession = ctx.sessions.create(SessionId('sdk-foreign'), { meta: { cwd: storageDir } })
+      foreignSession.append('user/message', createUserMessage({
+        content: [
+          { type: 'image', attachment: foreignImage },
+          { type: 'file', attachment: foreignFile },
+        ],
+        source: { kind: 'user' },
+      }), { surfaceOp: 'append' })
+
+      const followupSpy = vi.spyOn(targetAgent, 'followup')
+
+      // Foreign image block, foreign file block, foreign *-ref blocks, and unknown refs are refused.
+      for (const badBlock of [
+        { type: 'image', attachment: foreignImage },
+        { type: 'file', attachment: foreignFile },
+        { type: 'image-ref', attachment: foreignImage },
+        { type: 'file-ref', attachment: foreignFile },
+        { type: 'file', attachment: { attachmentId: AttachmentId('sha256:' + 'f'.repeat(64)), name: 'missing.txt', bytes: 1 } },
+      ]) {
+        await expect(server.prompt({
+          sessionId: 'sdk-target',
+          contentBlocks: [
+            { type: 'text', text: 'bad' },
+            badBlock as never,
+            { type: 'image', data: 'AQ==', mimeType: 'image/png' },
+          ],
+        })).rejects.toThrow(/not referenced/i)
+      }
+      expect(followupSpy).not.toHaveBeenCalled()
+      expect(saveImages).not.toHaveBeenCalled()
+
+      // Malformed durable block is also refused before admitting inline images.
+      await expect(server.prompt({
+        sessionId: 'sdk-target',
+        contentBlocks: [{ type: 'file', attachment: { attachmentId: '', name: '', bytes: -1 } } as never],
+      })).rejects.toThrow(/malformed/i)
+      expect(followupSpy).not.toHaveBeenCalled()
+
+      // Own-session refs are accepted and canonicalized to logged metadata, mixed with inline images.
+      await server.prompt({
+        sessionId: 'sdk-target',
+        contentBlocks: [
+          { type: 'text', text: 'mixed' },
+          { type: 'image', attachment: { ...ownImage, name: 'spoofed.png', bytes: 999 } },
+          { type: 'file-ref', attachment: { ...ownFile, name: 'spoofed.txt', bytes: 999 } } as never,
+          { type: 'image', data: 'AQ==', mimeType: 'image/png' },
+        ],
+      })
+      await targetAgent.whenIdle()
+
+      expect(saveImages).toHaveBeenCalledOnce()
+      expect(followupSpy).toHaveBeenCalledOnce()
+      expect(followupSpy.mock.calls[0]?.[0].content).toEqual([
+        { type: 'text', text: 'mixed' },
+        { type: 'image', attachment: ownImage },
+        { type: 'file', attachment: ownFile },
+        { type: 'image', attachment: inlineSaved },
+      ])
+
+      await server.shutdown()
+    } finally {
+      disposeAdapter()
+      await ctx.fiber.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
   })
 })

@@ -117,6 +117,8 @@ Files 模式通过 `maxRequestFilesBytes` 与 `maxImagesPerRequest` 限制保留
 
 结构化的 `POLICY_REFUSAL` 是提供方对该请求的终止性答复。只有具名字段会选择它——`finish_reason`、`stop_reason`、`code`、`type`、`content_filter` 或 `refusal`——并且先于 HTTP 状态或措辞，因此正文同时提到认证或额度的 401、500 响应仍是拒绝；失败保留提供方的解释、状态与 request id。拒绝绝不会消耗 Files 恢复请求，也不会进入凭据层的认证分类器。带内拒绝以 `usage` 后接终止 `finish` 结束流，保留提供方已经上报的用量。
 
+其他带内 SSE `error` 事件在抛出已分类的提供方失败之前发出一条累计 `usage` 样本。如果错误帧携带无效用量，样本保留该帧之前累计的用量。
+
 提供方插件负责目录可用性；仅账号路由要求存有凭据才能发现模型。两者的目录独立配置；传输层提供共享的默认模型元数据和能力解析。
 
 -----

@@ -6,7 +6,7 @@
  * - `detach` (the composer's ✕): only the aborted turn stops; every live
  *   continuable descendant keeps running.
  * - `stop-all` (the composer's "Stop all agents"): every live continuable
- *   descendant of the aborted session is interrupted via
+ *   descendant of the parent session is interrupted via
  *   `subagents.interrupt(...)` under ancestor authority. Interrupt is per-turn
  *   and PARK-semantic: the child's current turn is cancelled, but its
  *   Activation, unclaimed inbox work, and published descendants stay resident,
@@ -21,10 +21,8 @@
  * - The context keeper is EXEMPT (I9) — it is not a subagent, so the walk
  *   never touches it.
  *
- * The hook: `agent/turn-stopping` is BYPASSED on abort (verified in source —
- * user cancel aborts the turn signal and jumps past the natural-end hook), so
- * we subscribe to the durable `session/event` `turn/end` record with
- * `reason.kind === 'aborted'` + `reason.reason.kind === 'user'`.
+ * The subagent runtime publishes Stop-all for either an idle parent or a
+ * durable user-aborted turn. Revert uses its own durable turn-end anchor.
  *
  * Drain (`drainContinuableDescendants`) is NOT used here: that API is host
  * teardown semantics — it closes continuable admission below the exact parent
@@ -32,6 +30,7 @@
  * delegation in a session whose Agent stays live across turns.
  */
 import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import type { SubagentDescendantListEntry } from '@deepseek-ai/dsh-subagent'
 
@@ -51,7 +50,7 @@ function diag(line: string): void {
 
 /** Which descendants one user stop parks. */
 type StopScope =
-  | { readonly kind: 'all' }
+  | { readonly kind: 'all'; readonly window: symbol }
   | { readonly kind: 'revert'; readonly fromSeq: number }
 
 /**
@@ -89,18 +88,18 @@ function revertSpan(
 }
 
 /**
- * Interrupt the live continuable descendants of `sessionId` selected by
+ * Interrupt the live continuable descendants of `agent` selected by
  * `scope`, under the live root Agent's ancestor authority. Enumeration covers
  * the complete session tree, so continuable grandchildren below ordinary or
  * one-shot children are reached as well.
  * @param ctx - plugin context carrying the Agent registry and subagent runtime.
- * @param sessionId - durable id of the session whose turn the user aborted.
+ * @param agent - exact live Agent whose descendants the user stopped.
  * @param scope - which descendants this stop parks.
  */
-async function interruptDescendants(ctx: Context, sessionId: SessionId, scope: StopScope): Promise<void> {
+async function interruptDescendants(ctx: Context, agent: Agent, scope: StopScope): Promise<void> {
   const subagents = ctx.get('subagents')
-  const agent = ctx.get('agents')?.get(sessionId)
-  if (subagents === undefined || agent === undefined) return
+  const sessionId = agent.id
+  if (subagents === undefined || ctx.get('agents')?.get(sessionId) !== agent) return
   let entries
   try {
     entries = await subagents.listDescendants(sessionId)
@@ -126,6 +125,25 @@ async function interruptDescendants(ctx: Context, sessionId: SessionId, scope: S
 }
 
 export function apply(ctx: Context): void {
+  const pending = new Set<symbol>()
+  function deferInterrupt(agent: Agent, scope: StopScope): void {
+    if (scope.kind === 'all') {
+      if (pending.has(scope.window)) return
+      pending.add(scope.window)
+    }
+    // Interrupt handlers must not re-enter synchronous Session append publication.
+    setTimeout(() => {
+      diag(`user stop detected for session ${agent.id} — interrupting continuable descendants (${scope.kind})`)
+      void interruptDescendants(ctx, agent, scope).catch((error: unknown) => {
+        ctx.logger.warn(`[enpoi-cascade] descendant interrupt failed: ${String(error)}`)
+      }).finally(() => {
+        if (scope.kind === 'all') pending.delete(scope.window)
+      })
+    }, 0)
+  }
+
+  ctx.on('subagent/stop-all', (agent, window) => { deferInterrupt(agent, { kind: 'all', window }) })
+
   // Listen on OUR ctx (proven to receive session events — the root does not).
   ctx.on('session/event', (session, event: SessionEvent) => {
     if (event.type !== 'turn/end') return
@@ -134,27 +152,17 @@ export function apply(ctx: Context): void {
     const cancelCause = reason.reason
     if (cancelCause === undefined || cancelCause.kind !== 'user') return
 
-    // Absent intent keeps the pre-intent behaviour for callers that never send one.
-    const intent = cancelCause.intent ?? 'stop-all'
-    if (intent === 'detach') {
+    if (cancelCause.intent === 'detach') {
       diag(`detach stop for ${session.id} — continuable descendants keep running`)
       return
     }
-    if (intent === 'revert' && cancelCause.revertFromSeq === undefined) {
+    if (cancelCause.intent !== 'revert') return
+    const fromSeq = cancelCause.revertFromSeq
+    if (fromSeq === undefined) {
       diag(`revert stop for ${session.id} carried no revertFromSeq — no descendants interrupted`)
       return
     }
-    const scope: StopScope = intent === 'revert'
-      ? { kind: 'revert', fromSeq: cancelCause.revertFromSeq as number }
-      : { kind: 'all' }
-
-    // Defer out of append publication: enumeration reads session logs and the
-    // interrupt path must never re-enter the synchronous append guard.
-    setTimeout(() => {
-      diag(`user stop detected for session ${session.id} — interrupting continuable descendants (${scope.kind})`)
-      void interruptDescendants(ctx, session.id, scope).catch((error: unknown) => {
-        ctx.logger.warn(`[enpoi-cascade] descendant interrupt failed: ${String(error)}`)
-      })
-    }, 0)
+    const agent = ctx.get('agents')?.get(session.id)
+    if (agent?.session === session) deferInterrupt(agent, { kind: 'revert', fromSeq })
   })
 }
